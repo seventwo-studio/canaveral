@@ -172,7 +172,7 @@ The other errors:
 `resource-domains.ts` is a generic primitive: `reserve(db, {id, domain, kind, owner,
 resources})` holds an amount only if it fits within the domain capacity. `release(db,
 id, owner)` requires the recorded owner. Both run inside the caller's transaction.
-Model assignments are its only claimant today; VM placement does not reserve here yet.
+Model assignments and [Linux lease admission](linux-lease-controller.md#reservations-and-limits) reserve here.
 These domains are separate from the legacy `hosts`/`resource_budgets`/`inference_jobs`
 ledger. Do not offer the same physical capacity to both.
 

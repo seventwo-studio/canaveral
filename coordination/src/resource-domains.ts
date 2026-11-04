@@ -36,8 +36,8 @@ function stored(value: unknown): Resources {
 
 /** Operator-defined physical resource domains and a generic held/released reservation ledger.
  * Every method composes inside the caller's BEGIN IMMEDIATE transaction. Defining a domain
- * activates nothing: only explicitly approved claimants reserve from it. Model jobs are the
- * only claimant in this slice; VM placement does not yet reserve here.
+ * activates nothing: only explicitly approved claimants reserve from it. Model-job claims and
+ * Linux lease admission are its claimants; both see every held reservation in a domain.
  */
 export class ResourceDomains {
   static schema(db: DatabaseSync): void {

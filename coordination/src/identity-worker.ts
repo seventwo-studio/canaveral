@@ -5,6 +5,7 @@ import { Accounts } from "./accounts.ts";
 import { ConsumerIdentities } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { mutates } from "./identity-protocol.ts";
+import { LinuxLeases } from "./linux-leases.ts";
 import { ModelJobs } from "./model-jobs.ts";
 import type { IdentityCommand, IdentityReply } from "./identity-protocol.ts";
 import { SqliteStore } from "./sqlite.ts";
@@ -17,6 +18,7 @@ const store = new SqliteStore(workerData.path as string);
 const accounts = new Accounts(store), applications = new ConsumerIdentities(store);
 const runners = workerData.controllerId === undefined ? undefined : new RunnerEnrollment(store, workerData.controllerId as string);
 const jobs = new ModelJobs(store, applications, runners);
+const leases = new LinuxLeases(store, applications, runners);
 function reply(value: IdentityReply): void { port.postMessage(value); }
 function operator(token: string): boolean {
   try { secret(token); } catch { return false; }
@@ -36,6 +38,7 @@ async function dispatch(command: IdentityCommand): Promise<unknown> {
     }
   }
   if (isModel(command)) return model(command);
+  if (isLease(command)) return lease(command);
   switch (command.type) {
     case "runner.issue": return runners!.issue(command.body);
     case "runner.consume": return runners!.consume(command.token, command.body);
@@ -88,6 +91,34 @@ function model(command: Extract<IdentityCommand, { type: `models.${string}` }>):
     case "models.grantRevoke": return jobs.revokeGrant(command.body);
     case "models.approve": return jobs.approve(command.body);
     case "models.approvalRevoke": return jobs.revokeApproval(command.body);
+    default: throw new ServiceError("Unknown endpoint.", 404);
+  }
+}
+
+function isLease(command: IdentityCommand): command is Extract<IdentityCommand, { type: `leases.${string}` }> {
+  return command.type.startsWith("leases.");
+}
+function lease(command: Extract<IdentityCommand, { type: `leases.${string}` }>): unknown {
+  switch (command.type) {
+    case "leases.catalogue": return leases.catalogue(command.token);
+    case "leases.list": return leases.list(command.token, command.after);
+    case "leases.inspect": return leases.inspect(command.token, command.id);
+    case "leases.acquire": return leases.acquire(command.token, command.body);
+    case "leases.credential": return leases.credential(command.token, command.id, command.body);
+    case "leases.renew": return leases.mutate(command.token, command.id, "renew", command.body);
+    case "leases.release": return leases.mutate(command.token, command.id, "release", command.body);
+    case "leases.claim": return leases.claim(command.token, command.body);
+    case "leases.assignments": return leases.assignments(command.token, command.body);
+    case "leases.report": return leases.report(command.token, command.body);
+    default: break;
+  }
+  requireAdministrator(command.token);
+  switch (command.type) {
+    case "leases.image": return leases.image(command.body);
+    case "leases.grant": return leases.grant(command.body);
+    case "leases.grantRevoke": return leases.grant(command.body, true);
+    case "leases.approve": return leases.approve(command.body);
+    case "leases.approvalRevoke": return leases.revokeApproval(command.body);
     default: throw new ServiceError("Unknown endpoint.", 404);
   }
 }
