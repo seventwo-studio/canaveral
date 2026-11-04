@@ -47,3 +47,5 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [windows guest display](windows-guest-display.md)
 - [windows guest files](windows-guest-files.md)
 - [windows guest terminals](windows-guest-terminals.md)
+
+- [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
