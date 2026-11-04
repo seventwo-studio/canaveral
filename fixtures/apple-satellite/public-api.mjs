@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import {spawn, execFile} from 'node:child_process';
 import {once} from 'node:events';
-import {randomUUID, randomBytes, createHash} from 'node:crypto';
+import {randomUUID, randomBytes, createHash, X509Certificate} from 'node:crypto';
 import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSync, symlinkSync} from 'node:fs';
 import https from 'node:https';
 import {tmpdir} from 'node:os';
@@ -33,12 +33,17 @@ let controller, proxy;
 try {
   // Disposable CA and localhost leaf.
   const pem = name => join(dir, name);
-  await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('ca-key.pem'), '-out', pem('ca.pem'), '-days', '1', '-subj', '/CN=Fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE']);
+  await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('ca-key.pem'), '-out', pem('ca.pem'), '-days', '1', '-subj', '/CN=Fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash']);
   await exec('openssl', ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('key.pem'), '-out', pem('leaf.csr'), '-subj', '/CN=localhost']);
-  writeFileSync(pem('ext.cnf'), 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n');
+  writeFileSync(pem('ext.cnf'), 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n');
   await exec('openssl', ['x509', '-req', '-in', pem('leaf.csr'), '-CA', pem('ca.pem'), '-CAkey', pem('ca-key.pem'), '-CAcreateserial', '-out', pem('cert.pem'), '-days', '1', '-extfile', pem('ext.cnf')]);
   await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('other-key.pem'), '-out', pem('other-ca.pem'), '-days', '1', '-subj', '/CN=Unrelated Fixture CA']);
   const ca = readFileSync(pem('ca.pem'));
+  // Validate the generated chain independently before any controller request. No system trust.
+  await exec('openssl', ['verify', '-CAfile', pem('ca.pem'), '-purpose', 'sslserver', pem('cert.pem')]);
+  const root = new X509Certificate(ca), leaf = new X509Certificate(readFileSync(pem('cert.pem')));
+  assert(root.ca && leaf.checkIssued(root) && leaf.verify(root.publicKey), 'invalid fixture certificate chain');
+  assert.equal(leaf.checkHost('localhost'), 'localhost');
 
   // Real controller process with TLS. Its wall clock is a fixture file so expiry is exact.
   const admin = key(), controllerId = randomUUID(), clockFile = join(dir, 'clock');
@@ -61,7 +66,7 @@ try {
       const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
       const r = https.request(direct + route, {ca, method, agent: false, headers: {Authorization: 'Bearer ' + token, ...(bytes ? {'Content-Type': 'application/json', 'Content-Length': bytes.length} : {})}}, res => {
         let data = ''; res.on('data', b => data += b); res.on('end', () => resolve({status: res.statusCode, body: JSON.parse(data)}));
-      }); r.on('error', reject); r.end(bytes);
+      }); r.on('error', error => reject(new Error(`fixture API ${method} ${route}: ${error.message}`, {cause: error}))); r.end(bytes);
     });
   }
   const ok = async (method, route, body, token) => { const r = await api(method, route, body, token); assert(r.status < 300, `${route}: ${r.status} ${JSON.stringify(r.body)}`); return r.body; };
