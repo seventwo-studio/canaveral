@@ -186,6 +186,9 @@ fields are refused.
 - The lease becomes `ready` only from a `running` receipt with every
   `requiredCapabilities` entry explicitly true, while still `provisioning` and before
   expiry/provisioning deadline in the same transaction. No receipt implies readiness.
+  Lifecycle stays separate: consumer `members[].ready` requires the latest report to
+  confirm every required capability, and becomes false when that evidence is withdrawn
+  or runtime/binding becomes unknown. A later valid report can restore member readiness.
 - `failure` on an active lease ends it as `failed`. `runtimeState: stopped` on an active
   lease requires `failure`. Cleanup fields other than `pending`/false are refused
   while the lease is active.

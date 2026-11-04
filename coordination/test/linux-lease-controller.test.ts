@@ -222,6 +222,21 @@ test("catalog, grants and approvals pin headless Linux images per backend and de
   await f.ok(f.report(kube, assignment.id, 2, f.receipt(assignment, f.running)));
   const ready = await a.client().inspectLease(kubeLease.lease.id);
   assert.deepEqual([ready.state, ready.runtimeState, ready.revision, ready.members[0]!.ready], ["ready", "running", 2, true]);
+  // Lifecycle stays ready, but the current member signal follows fresh capability evidence.
+  const unready = { command: false, pty: false, files: false };
+  for (const [sequence, runtimeState, capabilityReady, expectedReady] of [
+    [3, "running", unready, false],
+    [4, "running", f.running.ready, true],
+    [5, "unknown", unready, false],
+    [6, "running", unready, false],
+    [7, "running", f.running.ready, true],
+  ] as const) {
+    await f.ok(f.report(kube, assignment.id, sequence, f.receipt(assignment, { runtimeState, ready: capabilityReady })));
+    const current = await a.client().inspectLease(kubeLease.lease.id);
+    assert.deepEqual([current.state, current.runtimeState, current.revision, current.members[0]!.ready],
+      ["ready", runtimeState, 2, expectedReady]);
+  }
+
 });
 
 test("application/lease roles, ownership and opaque lease credentials through the public SDK", async t => {

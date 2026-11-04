@@ -528,9 +528,13 @@ export class LinuxLeases {
     const stale = !!assignment && !assignment.closed && !this.runners?.current(db, bindingOf(assignment));
     const runtime = stale ? "unknown" : lease.runtime;
     const capabilities = this.capabilities(lease.capabilities);
+    // Reports use the fixed canonical tuple above; readiness occupies slots 6–8.
+    const latest: unknown = assignment?.report ? JSON.parse(assignment.report) : null;
+    const required = JSON.parse(lease.required) as typeof HEADLESS[number][];
+    const ready = lease.state === "ready" && runtime === "running" && Array.isArray(latest) && latest.length === 14 && required.every(c => latest[6 + HEADLESS.indexOf(c)] === true);
     const terminal = !ACTIVE.includes(lease.state);
     const member: Record<string, unknown> = {
-      name: "primary", machineId: lease.member, state: runtime, ready: lease.state === "ready" && runtime === "running",
+      name: "primary", machineId: lease.member, state: runtime, ready,
       capabilities, resources: JSON.parse(lease.resources) as unknown,
     };
     if (terminal && lease.cleanup_id) {
