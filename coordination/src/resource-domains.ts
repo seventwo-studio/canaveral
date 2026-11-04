@@ -84,10 +84,12 @@ export class ResourceDomains {
 
   /** Hold `amount` only if it fits beside every held reservation in the domain. */
   reserve(db: DatabaseSync, request: { id: string; domain: string; kind: string; owner: string; resources: Resources }, now: number): boolean {
+    requireTransaction(db);
+    const amount = resources(request.resources);
     const domain = this.view(db, request.domain);
-    if (keys.some(key => request.resources[key] > domain.available[key])) return false;
+    if (keys.some(key => amount[key] > domain.available[key])) return false;
     db.prepare("INSERT INTO resource_reservations VALUES (?,?,?,?,?,'held',?,NULL)")
-      .run(request.id, request.domain, request.kind, request.owner, JSON.stringify(request.resources), now);
+      .run(request.id, request.domain, request.kind, request.owner, JSON.stringify(amount), now);
     return true;
   }
 
