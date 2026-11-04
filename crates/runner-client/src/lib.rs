@@ -339,6 +339,43 @@ impl Identity {
         self.save()?;
         self.authenticate(t)
     }
+    /// Narrow lease protocol API. Credentials remain inside the locked identity.
+    /// A failed/lost reply is uncertain: callers persist and replay identical bodies.
+    pub fn linux_lease_request(
+        &self,
+        t: &Transport,
+        route: LeaseRoute,
+        mut body: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.transport(t)?;
+        if !matches!(self.record.phase, Phase::Authenticated) || !body.is_object() {
+            return Err(Error("authenticated identity and object required"));
+        }
+        body["binding"] =
+            serde_json::to_value(self.record.approval.binding()).map_err(|_| invalid())?;
+        let bytes = serde_json::to_vec(&body).map_err(|_| invalid())?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(invalid());
+        }
+        let response = t
+            .client
+            .post(format!("{}{}", t.origin, route.path()))
+            .bearer_auth(&self.record.credential)
+            .header("Content-Type", "application/json")
+            .body(bytes)
+            .send()
+            .map_err(|_| Error("lease request outcome unknown"))?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(Error("lease request rejected or uncertain; retain intent"));
+        }
+        let mut bytes = Vec::new();
+        io(response.take(1024 * 1024 + 1).read_to_end(&mut bytes))?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(invalid());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| invalid())
+    }
+
     /// Always contacts the controller; saved receipts never grant offline authority.
     pub fn authenticate(&mut self, t: &Transport) -> Result<()> {
         self.transport(t)?;
@@ -523,6 +560,23 @@ mod ca_tests {
             b"-----BEGIN PRIVATE KEY-----\naaaa\n-----END PRIVATE KEY-----\n".as_slice(),
         ] {
             assert!(Transport::new("https://localhost", Some(pem)).is_err());
+        }
+    }
+}
+
+/// Only the Linux lease protocol is exposed, never arbitrary authenticated URLs.
+#[derive(Clone, Copy)]
+pub enum LeaseRoute {
+    Claim,
+    Assignments,
+    Report,
+}
+impl LeaseRoute {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Claim => "/v1/runners/linux-leases/claim",
+            Self::Assignments => "/v1/runners/linux-leases/assignments",
+            Self::Report => "/v1/runners/linux-leases/report",
         }
     }
 }

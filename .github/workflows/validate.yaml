@@ -157,10 +157,35 @@ jobs:
             target
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-runner-conformance
       - run: rustup show
-      - run: cargo build -p canaveral-runner-client --locked
+      - run: cargo build -p canaveral-runner-client --bins --examples --locked
       - run: npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
       - name: TypeScript and Rust loopback TLS fixtures
         run: node crates/runner-client/tests/tls-conformance.mjs
+  apple-satellite-conformance:
+    # Fixture only: fake native helper, ad-hoc signed; no VM, secrets or privileges.
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-apple-satellite
+      - run: rustup show
+      - run: cargo build -p canaveral-apple-satellite -p canaveral-runner-client --bins --examples --locked
+      - run: npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
+      - name: Public API TypeScript controller and Rust Apple satellite fixture
+        run: node fixtures/apple-satellite/public-api.mjs coordination target/debug/canaveral-apple-satellite target/debug/canaveral-runner-client target/debug/examples/fixture-helper
   native-compile:
     strategy:
       fail-fast: false
@@ -201,7 +226,7 @@ jobs:
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=""
   ci-required:
     if: ${{ always() }}
-    needs: [migration-coordination, migration-execution, validate, dashboard, native-compile, workflow-lint, runner-conformance, model-conformance]
+    needs: [migration-coordination, migration-execution, validate, dashboard, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
