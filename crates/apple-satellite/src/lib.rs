@@ -167,6 +167,9 @@ impl Controller for Authenticated<'_> {
     }
 }
 fn hash_file(path: &Path) -> Result<String> {
+    artifact_hash(path, false)
+}
+fn artifact_hash(path: &Path, raw: bool) -> Result<String> {
     let parent = private::walk(path.parent().ok_or("absolute file required")?)?;
     drop(parent);
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -183,6 +186,15 @@ fn hash_file(path: &Path) -> Result<String> {
         return Err("installed artifact must be immutable regular file");
     }
     let mut hash = Sha256::new();
+    if raw {
+        let mut magic = [0; 4];
+        io(f.read_exact(&mut magic))?;
+        // Swift detects QCOW2 by magic, regardless of the source filename.
+        if magic == *b"QFI\xfb" {
+            return Err("installed image must be raw, not QCOW2");
+        }
+        hash.update(magic);
+    }
     let mut buf = [0; 65536];
     loop {
         let n = io(f.read(&mut buf))?;
@@ -238,6 +250,10 @@ fn command(helper: &Path, args: &[&str], input: Option<&Value>, limit: Duration)
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+/// Load the operator's CA through the same pinned trust-file boundary as configuration.
+pub fn read_ca(path: &Path) -> Result<Vec<u8>> {
+    private::trust_file(path, false)
+}
 pub fn read_config(path: &Path) -> Result<Config> {
     decode(&private::trust_file(path, true)?)
 }
@@ -269,7 +285,7 @@ fn validate_local(c: &Config) -> Result<()> {
             || item.image.backend != "appleVirtualization"
             || item.image.arch != host_arch()
             || item.path.extension().and_then(|s| s.to_str()) != Some("raw")
-            || hash_file(&item.path)? != item.image.digest
+            || artifact_hash(&item.path, true)? != item.image.digest
         {
             return Err("installed image mismatch");
         }
@@ -542,6 +558,9 @@ impl Satellite {
     fn sync(&mut self, controller: &mut impl Controller) -> Result<()> {
         if self.state.pending.is_some() {
             self.report(controller)?;
+            if self.state.released {
+                return Ok(());
+            }
         }
         self.report(controller)
     }

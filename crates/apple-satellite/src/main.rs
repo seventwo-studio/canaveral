@@ -12,9 +12,9 @@ fn run() -> Result<(), &'static str> {
     let ca = config
         .ca
         .as_ref()
-        .map(std::fs::read)
+        .map(|path| canaveral_apple_satellite::read_ca(path))
         .transpose()
-        .map_err(|_| "cannot read CA")?;
+        .map_err(|_| "invalid CA trust file")?;
     let transport =
         Transport::new(&config.origin, ca.as_deref()).map_err(|_| "invalid HTTPS transport")?;
     let mut identity = Identity::open(&config.identity, &config.origin, &config.binding)

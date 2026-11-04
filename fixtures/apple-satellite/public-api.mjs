@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {spawn, execFile} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSync, symlinkSync} from 'node:fs';
 import https from 'node:https';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -69,7 +69,7 @@ try {
   // TLS-terminating loopback proxy in front of the controller: records runner traffic, can drop a
   // reply after the controller committed it, or partition the satellite from the controller:
   // 'stall' accepts and never answers (blocking the satellite's request), 'drop' resets.
-  const log = [], drops = new Set(), held = []; let partition = false;
+  const log = [], drops = new Set(), held = []; let partition = false, dropCleanup = false;
   proxy = https.createServer({key: readFileSync(pem('key.pem')), cert: readFileSync(pem('cert.pem'))}, (req, res) => {
     const chunks = []; req.on('data', b => chunks.push(b));
     req.on('end', () => {
@@ -80,7 +80,7 @@ try {
       const upstream = https.request({host: '127.0.0.1', servername: 'localhost', port, ca, method: req.method, path: req.url, headers: req.headers, agent: false}, reply => {
         const out = []; reply.on('data', b => out.push(b));
         reply.on('end', () => {
-          if (drops.delete(req.url)) { entry.dropped = true; res.socket.destroy(); return; }
+          if (drops.delete(req.url) || (dropCleanup && entry.body?.receipt?.cleanup === 'complete' && (dropCleanup = false, true))) { entry.dropped = true; res.socket.destroy(); return; }
           res.writeHead(reply.statusCode, reply.headers); res.end(Buffer.concat(out));
         });
       });
@@ -157,6 +157,11 @@ try {
     assert.notEqual(view.state, 'ready'); assert.equal(view.members[0].ready, false);
   }
 
+  // A QCOW2 container renamed .raw must be rejected before native preparation can expand it.
+  const disguised = join(dir, 'images', 'container.raw');
+  const qcow = Buffer.alloc(4096); qcow.writeUInt32BE(0x514649fb); qcow.writeUInt32BE(3, 4);
+  qcow.writeBigUInt64BE(16n * 1024n ** 3n, 24);
+  writeFileSync(disguised, qcow, {mode: 0o400});
   // 1. Every local pin fails before the satellite contacts the controller at all.
   log.length = 0; // enrollment traffic above also used the proxy
   const first = (await acquire()).lease;
@@ -165,6 +170,7 @@ try {
     [{signingRequirement: 'identifier "dev.canaveral.other"'}, 'helper signature requirement failed'],
     [{inventory: [{credentialFree: true, image: {...image, digest: 'sha256:' + '1'.repeat(64)}, path: imagePath}]}, 'installed image mismatch'],
     [{inventory: [{credentialFree: false, image, path: imagePath}]}, 'installed image mismatch'],
+    [{inventory: [{credentialFree: true, image: {...image, digest: sha(disguised)}, path: disguised}]}, 'must be raw'],
   ]) {
     const result = await run(configure(overrides));
     assert.equal(result.code, 1); assert.match(result.errors, new RegExp(expected));
@@ -173,6 +179,16 @@ try {
   assert.match((await run()).errors, /must be immutable/); chmodSync(imagePath, 0o400);
   assert.equal(log.length, 0, 'preflight failure reached the controller');
   assert(!existsSync(join(dir, 'state')), 'preflight failure created satellite state');
+  // Exercise the actual CLI trust-file boundary, not only its private unit helper.
+  const unsafeCa = join(dir, 'unsafe-ca.pem'); copyFileSync(pem('ca.pem'), unsafeCa); chmodSync(unsafeCa, 0o666);
+  const linkedCa = join(dir, 'linked-ca.pem'); symlinkSync(pem('ca.pem'), linkedCa);
+  const unsafeParent = join(dir, 'unsafe-parent'); mkdirSync(unsafeParent, {mode: 0o777}); chmodSync(unsafeParent, 0o777);
+  copyFileSync(pem('ca.pem'), join(unsafeParent, 'ca.pem'));
+  for (const [index, ca] of [unsafeCa, linkedCa, join(unsafeParent, 'ca.pem')].entries()) {
+    const result = await run(configure({ca, state: join(dir, `state-unsafe-ca-${index}`)}, `unsafe-ca-${index}.json`));
+    assert.equal(result.code, 1); assert.match(result.errors, /invalid CA trust file/);
+    assert.equal(log.length, 0, 'unsafe CA contacted the controller');
+  }
   // An unrelated CA fails TLS verification before any request is delivered.
   const badTrust = await run(configure({ca: pem('other-ca.pem'), state: join(dir, 'state-untrusted')}, 'untrusted.json'));
   assert.equal(badTrust.code, 1); assert.match(badTrust.errors, /authentication failed/); assert.equal(log.length, 0);
@@ -200,9 +216,15 @@ try {
   await until(() => reports().some(e => !e.dropped && e.body.sequence === lost.body.sequence), 'report replay');
   assert.deepEqual(reports().find(e => !e.dropped && e.body.sequence === lost.body.sequence).body, lost.body);
   // Consumer release is intent; the reservation stays held until positive cleanup evidence.
+  dropCleanup = true;
   await sdk.releaseLease(first.id, {id: randomUUID()});
-  const released = await running.done;
+  const lostCleanup = await running.done;
+  assert.equal(lostCleanup.code, 1, 'final committed cleanup reply was not lost');
+  const finalLost = reports().find(e => e.dropped && e.body.receipt.cleanup === 'complete');
+  assert(finalLost, 'cleanup reply was not dropped after commit');
+  const released = await run();
   assert.equal(released.code, 0, released.errors);
+  assert.deepEqual(reports().at(-1).body, finalLost.body, 'recovery must replay the final receipt without an extra sequence');
   view = await inspect(first.id);
   assert.equal(view.state, 'released'); assert.equal(view.runtimeState, 'stopped'); assert.equal(view.cleanup.state, 'complete'); neverReady(view);
   assert(!existsSync(join(dir, 'state', 'workspace')), 'owned workspace (disk, guest credential) not removed');
