@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { parentPort, workerData } from "node:worker_threads";
+import { RunnerEnrollment } from "./enrollment.ts";
 import { Accounts } from "./accounts.ts";
 import { ConsumerIdentities } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
@@ -13,6 +14,7 @@ const administrator = secret(workerData.adminToken);
 const expected = createHash("sha256").update(administrator, "ascii").digest();
 const store = new SqliteStore(workerData.path as string);
 const accounts = new Accounts(store), applications = new ConsumerIdentities(store);
+const runners = workerData.controllerId === undefined ? undefined : new RunnerEnrollment(store, workerData.controllerId as string);
 function reply(value: IdentityReply): void { port.postMessage(value); }
 function operator(token: string): boolean {
   try { secret(token); } catch { return false; }
@@ -23,7 +25,22 @@ function requireAdministrator(token: string): void {
 }
 
 async function dispatch(command: IdentityCommand): Promise<unknown> {
+  if (command.type.startsWith("runner.")) {
+    const runnerProof = command.type === "runner.consume" || command.type === "runner.authenticate";
+    if (!runnerProof && "token" in command) requireAdministrator(command.token);
+    if (!runners) {
+      if (runnerProof) throw new ServiceError("Runner credential or enrollment rejected.", 401);
+      throw new ServiceError("Runner enrollment requires a configured controller identity.", 503, { retryable: false });
+    }
+  }
   switch (command.type) {
+    case "runner.issue": return runners!.issue(command.body);
+    case "runner.consume": return runners!.consume(command.token, command.body);
+    case "runner.authenticate": return runners!.authenticate(command.token, command.body);
+    case "runner.rotate": return runners!.manage(command.body, false);
+    case "runner.revoke": return runners!.manage(command.body, true);
+    case "runner.inspect": return runners!.inspect(command.id);
+    case "runner.revokeEnrollment": return runners!.revokeEnrollment(command.id);
     case "status": return accounts.status();
     case "authorize":
       if (command.setup) {

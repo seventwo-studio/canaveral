@@ -24,7 +24,7 @@ export class IdentityClient extends EventEmitter {
   private rejectReady!: (error: ServiceError) => void;
   private startup: NodeJS.Timeout;
 
-  constructor(options: { path: string; adminToken: string; requestTimeoutMs?: number }) {
+  constructor(options: { path: string; adminToken: string; controllerId?: string; requestTimeoutMs?: number }) {
     super();
     secret(options.adminToken);
     this.timeout = options.requestTimeoutMs ?? 20_000;
@@ -32,7 +32,7 @@ export class IdentityClient extends EventEmitter {
     this.ready = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
     void this.ready.catch(() => {});
     this.worker = new Worker(new URL("./identity-worker.js", import.meta.url), {
-      workerData: { path: options.path, adminToken: options.adminToken },
+      workerData: { path: options.path, adminToken: options.adminToken, controllerId: options.controllerId },
     });
     this.startup = setTimeout(() => { this.fail(); void this.close(); }, 20_000);
     this.startup.unref();

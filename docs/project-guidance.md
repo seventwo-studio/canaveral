@@ -30,6 +30,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [orchestration](orchestration.md)
 - [power and recovery](power-and-recovery.md)
 - [running](running.md)
+- [runner enrollment](runner-enrollment.md)
 - [scoped accessibility](scoped-accessibility.md)
 - [self hosting](self-hosting.md)
 - [session protocol](session-protocol.md)
