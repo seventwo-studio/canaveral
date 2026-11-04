@@ -16,6 +16,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [image registry](image-registry.md)
 - [images](images.md)
 - [inference](inference.md)
+- [Rust model execution](rust-model-execution.md)
 - [experimental model-job contract](model-job-contract.md)
 - [TypeScript model-job controller slice](model-controller.md)
 - [infrastructure](infrastructure.md)

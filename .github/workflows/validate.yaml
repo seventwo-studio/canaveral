@@ -102,6 +102,41 @@ jobs:
           path: dashboard/test-results
           retention-days: 7
           if-no-files-found: ignore
+  model-conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-model-conformance
+      - run: cargo build -p canaveral-model-execution --locked
+      - name: Build disposable runtime fixture and locate compiler artifact
+        env:
+          MODEL_ARTIFACTS: ${{ runner.temp }}/model-artifacts.jsonl
+        run: |
+          cargo test -p canaveral-model-execution --test owned --no-run --locked --message-format=json > "$MODEL_ARTIFACTS"
+          node --input-type=module <<'JSCODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const artifacts = readFileSync(process.env.MODEL_ARTIFACTS, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+          const fixture = artifacts.find(a => a.reason === 'compiler-artifact' && a.target.name === 'owned' && a.executable);
+          if (!fixture) throw new Error('Missing owned runtime fixture artifact');
+          appendFileSync(process.env.GITHUB_ENV, `MODEL_RUNTIME_FIXTURE=${fixture.executable}\n`);
+          JSCODE
+      - run: npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
+      - name: Public API TypeScript controller and Rust execution fixtures
+        run: node fixtures/model-execution/public-api.mjs coordination/dist/src/main.js target/debug/canaveral-model-execution "$MODEL_RUNTIME_FIXTURE"
   runner-conformance:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -166,7 +201,7 @@ jobs:
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=""
   ci-required:
     if: ${{ always() }}
-    needs: [migration-coordination, migration-execution, validate, dashboard, native-compile, workflow-lint, runner-conformance]
+    needs: [migration-coordination, migration-execution, validate, dashboard, native-compile, workflow-lint, runner-conformance, model-conformance]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
