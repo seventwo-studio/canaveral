@@ -36,6 +36,11 @@ public struct CachedMacOSRestore: Sendable, Identifiable {
     }
     public static func latestSupported() async throws -> MacOSRestoreDescriptor {
         guard supported else { throw CanaveralError.unavailable("macOS guests require an Apple silicon Mac with hardware virtualization.") }
+        return try await fetchLatestDescriptor()
+    }
+    // Keep the framework object on the nonisolated executor; only its Sendable
+    // value descriptor crosses back to callers on the main actor.
+    private nonisolated static func fetchLatestDescriptor() async throws -> MacOSRestoreDescriptor {
         #if arch(arm64)
         let image = try await VZMacOSRestoreImage.latestSupported
         guard let requirements = image.mostFeaturefulSupportedConfiguration else { throw CanaveralError.unavailable("Apple has no compatible macOS restore image for this Mac.") }
@@ -56,7 +61,7 @@ public protocol RestoreImageValidating: Sendable {
     func validate(_ url: URL, descriptor: MacOSRestoreDescriptor) async throws
 }
 struct NativeRestoreImageValidator: RestoreImageValidating {
-    @MainActor func validate(_ url: URL, descriptor: MacOSRestoreDescriptor) async throws {
+    func validate(_ url: URL, descriptor: MacOSRestoreDescriptor) async throws {
         #if arch(arm64)
         let image = try await VZMacOSRestoreImage.image(from: url)
         guard image.mostFeaturefulSupportedConfiguration != nil, image.buildVersion == descriptor.build else {
