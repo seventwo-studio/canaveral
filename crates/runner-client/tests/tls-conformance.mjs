@@ -20,7 +20,8 @@ const admin = key(), controllerId = randomUUID();
 const identities = new IdentityClient({ path: join(dir, 'identity.sqlite'), adminToken: admin, controllerId });
 const http = createIdentityServer(identities);
 let lose = false, mode = '', calls = 0;
-let server;
+let server, leaseCredential, leaseBinding, leaseLoss = false;
+const leaseRequests = [];
 try {
   await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'ca-key.pem'), '-out', join(dir, 'ca.pem'), '-days', '1', '-subj', '/CN=Fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE']);
   await exec('openssl', ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'leaf.csr'), '-subj', '/CN=localhost']);
@@ -29,6 +30,19 @@ try {
   const ca = readFileSync(join(dir, 'ca.pem'));
   server = createServer({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, (req, res) => {
     calls++;
+    if (req.url.startsWith('/v1/runners/linux-leases/')) {
+      assert.equal(req.headers.authorization, `Bearer ${leaseCredential}`);
+      assert.equal(req.headers.origin, undefined);
+      let bytes = ''; req.on('data', b => bytes += b);
+      req.on('end', () => {
+        const body = JSON.parse(bytes); assert.deepEqual(body.binding, leaseBinding);
+        assert.equal(Number(req.headers['content-length']), Buffer.byteLength(bytes));
+        leaseRequests.push({route:req.url, body});
+        if (leaseLoss) { leaseLoss = false; res.destroy(); return; }
+        res.end(JSON.stringify(req.url.endsWith('/claim') ? {assignment:null} :
+          req.url.endsWith('/assignments') ? {assignments:[]} : {assignmentId:body.assignmentId,sequence:body.sequence}));
+      }); return;
+    }
     if (mode === 'redirect') { mode = ''; res.writeHead(307, { Location: `https://localhost:${server.address().port}/v1/runners/authenticate` }); res.end(); return; }
     if (mode === 'timeout') return;
     if (mode === 'wrong-binding') { res.end(JSON.stringify({ controllerId, runnerId: randomUUID(), generation: 1, incarnationId: randomUUID(), credentialRevision: 1 })); return; }
@@ -68,6 +82,27 @@ try {
   assert.equal(saved().phase, 'Uncertain'); assert.equal(saved().credential, credential);
   await cli('authenticate', b); await cli('consume', b); // restart + exact durable receipt
   assert.equal(saved().credential, credential);
+  leaseCredential = credential; leaseBinding = b;
+  const leaseBin = resolve('target/debug/examples/lease-route');
+  async function lease(route, body, binding=b, ok=true) {
+    return new Promise((resolve,reject) => {
+      const child=spawn(leaseBin,[join(dir,'runner'),origin,join(dir,'ca.pem'),route],{stdio:['pipe','pipe','pipe']});
+      let output=''; child.stdout.on('data',b=>output+=b); child.stderr.on('data',()=>{});
+      child.on('error',reject); child.on('close',code=>{
+        try {assert.equal(code===0,ok); resolve(ok?JSON.parse(output):null)} catch(e){reject(e)}
+      });
+      child.stdin.end(JSON.stringify({binding,body}));
+    });
+  }
+  const claimId=randomUUID();
+  leaseLoss=true; await lease('claim',{claimId},b,false);
+  assert.deepEqual(await lease('claim',{claimId}),{assignment:null});
+  assert.deepEqual(leaseRequests[0],leaseRequests[1]);
+  assert.deepEqual(await lease('assignments',{}),{assignments:[]});
+  assert.equal((await lease('report',{assignmentId:randomUUID(),sequence:1,receipt:{}})).sequence,1);
+  const leaseCount=leaseRequests.length;
+  await lease('claim',{claimId},{...b,generation:2},false);
+  assert.equal(leaseRequests.length,leaseCount);
   const before = calls;
   await cli('authenticate', { ...b, controllerId: randomUUID() }, { ok: false });
   assert.equal(calls, before);

@@ -36,6 +36,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [running](running.md)
 - [runner enrollment](runner-enrollment.md)
 - [Rust runner identity client](../crates/runner-client/README.md)
+- [Rust Apple satellite](../crates/apple-satellite/README.md)
 - [scoped accessibility](scoped-accessibility.md)
 - [self hosting](self-hosting.md)
 - [session protocol](session-protocol.md)
