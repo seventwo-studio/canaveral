@@ -15,6 +15,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [image registry](image-registry.md)
 - [images](images.md)
 - [inference](inference.md)
+- [experimental model-job contract](model-job-contract.md)
 - [infrastructure](infrastructure.md)
 - [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
