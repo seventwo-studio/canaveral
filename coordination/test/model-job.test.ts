@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parseModelJob, modelJobCanRelease, ownsModelJob, sameModelSubmission, modelReceiptMatches } from "../src/model-job.ts";
 const corpus = JSON.parse(readFileSync(new URL("../../../fixtures/migration/model-job.json", import.meta.url), "utf8")) as {
+  numberSpellings: Array<{ wire: string; valid: boolean }>;
   cases: Array<{ name: string; value: unknown; valid: boolean; canRelease: boolean }>;
   bindings: Array<{ name: string; submission: unknown; receipt: unknown; matches: boolean }>;
   comparisons: Array<{ name: string; left: unknown; right: unknown; same: boolean }>;
@@ -48,4 +49,34 @@ test("result UTF-8 limit and nested receipt immutability", () => {
   if (job.message.type === "receipt") assert.equal(job.message.result!.usage.inputTokens, 0);
   input.message.result.text += "x";
   assert.throws(() => parseModelJob(input), TypeError);
+});
+
+test("helpers deny malformed records without trusting structural types", () => {
+  const submission = parseModelJob(corpus.cases[0]!.value);
+  for (const c of corpus.cases.filter(c => !c.valid)) {
+    assert.equal(modelJobCanRelease(c.value), false, c.name);
+    assert.equal(ownsModelJob(c.value, submission.applicationId), false, c.name);
+    assert.equal(sameModelSubmission(c.value, submission), false, c.name);
+    assert.equal(sameModelSubmission(submission, c.value), false, c.name);
+    assert.equal(modelReceiptMatches(submission, c.value), false, c.name);
+    assert.equal(modelReceiptMatches(c.value, submission), false, c.name);
+  }
+});
+test("parser never invokes getters or prototype serialization hooks", () => {
+  const data = structuredClone(corpus.cases[0]!.value) as Record<string, unknown>;
+  let invoked = false;
+  const hostile = Object.assign(Object.create({ toJSON() { invoked = true; return {}; } }), data);
+  assert.throws(() => parseModelJob(hostile), TypeError);
+  assert.equal(invoked, false);
+  Object.defineProperty(data, "message", { get() { invoked = true; return { type: "cancel" }; }, enumerable: true });
+  assert.throws(() => parseModelJob(data), TypeError);
+  assert.equal(invoked, false);
+});
+
+for (const c of corpus.numberSpellings) test(`JSON numeric spelling ${c.wire}`, () => {
+  const value = structuredClone(corpus.cases[0]!.value) as { message: { maxTokens: unknown } };
+  value.message.maxTokens = "NUMBER";
+  const encoded = JSON.stringify(value).replace('"NUMBER"', c.wire);
+  if (c.valid) assert.doesNotThrow(() => parseModelJob(JSON.parse(encoded)));
+  else assert.throws(() => parseModelJob(JSON.parse(encoded)), TypeError);
 });

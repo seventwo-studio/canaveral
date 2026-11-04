@@ -4,6 +4,9 @@
 `coordination/src/model-job.ts` and `crates/execution-core/src/model_job.rs`.
 The shared acceptance corpus is `fixtures/migration/model-job.json`.
 It implements no HTTP route, scheduler, authorization service or native adapter.
+TypeScript accepts plain data objects without accessors or serialization hooks; helpers
+revalidate their inputs and deny malformed records. Rust also revalidates before
+ownership, replay, receipt binding or release eligibility checks.
 Parsing a record grants no execution authority or evidence of native support.
 
 ## Envelope and identity
