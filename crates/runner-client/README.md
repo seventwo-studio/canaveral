@@ -19,7 +19,7 @@ Use a new absolute state path under a trusted parent on a local Unix filesystem
 with working advisory locks, atomic rename and file/directory fsync. All path
 components must be real directories, without symlinks. Non-Unix secure storage is
 explicitly unsupported. Other Unix systems and filesystem implementations still
-need qualification; the verified fixture platform is macOS. Filesystem mount
+need qualification; fixture checks run on macOS and Linux, with loopback TLS conformance on Linux. Filesystem mount
 semantics cannot be established merely by the presence of Unix APIs.
 
 The administrator first approves an exact controller/runner/generation/incarnation
@@ -73,9 +73,12 @@ both data and checksum. Do not copy this identity to another runner.
 Each atomic journal includes the full identity and latest phase/receipt, written
 through an exclusive temporary file, file fsync, rename and directory fsync.
 A failed publication poisons the open instance. Missing/corrupt files are errors,
-never empty history. A leftover `identity.pending` prevents further publication;
-retain both files and reconcile with an operator, without discarding the original
-credential. Automatic torn-state repair and deletion/retention policy are absent.
+never empty history. After acquiring exclusive ownership and validating the directory/lock, reopening
+removes a leftover unpublished `identity.pending` and fsyncs the directory. No
+request could have been sent based on that unpublished candidate. The committed
+identity and original credential remain authoritative; the failed open instance
+stays poisoned. Missing committed state is not regenerated. General torn-state
+repair and deletion/retention policy are absent.
 A crash during first preparation may leave unusable partial state; because prepare
 never sends, it cannot have consumed approval, but recovery remains an operator gate.
 

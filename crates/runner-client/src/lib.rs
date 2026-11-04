@@ -193,9 +193,14 @@ impl Transport {
             if pem.len() as u64 > LIMIT {
                 return Err(invalid());
             }
-            let ca =
-                reqwest::Certificate::from_pem(pem).map_err(|_| Error("invalid trusted CA"))?;
-            builder = builder.add_root_certificate(ca);
+            let certificates = reqwest::Certificate::from_pem_bundle(pem)
+                .map_err(|_| Error("invalid trusted CA"))?;
+            if certificates.is_empty() {
+                return Err(Error("invalid trusted CA"));
+            }
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
         }
         Ok(Self {
             client: builder
@@ -460,7 +465,10 @@ mod tests {
         assert!(id.check().is_err());
         drop(id);
         // The prior complete identity remains usable for explicit reconciliation, never regenerated.
-        assert!(Identity::open(&p, "https://localhost", &b).is_ok());
+        let mut reopened = Identity::open(&p, "https://localhost", &b).unwrap();
+        assert!(!p.join("identity.pending").exists());
+        reopened.save().unwrap();
+        drop(reopened);
         fs::remove_file(p.join("identity.json")).unwrap();
         assert!(Identity::open(&p, "https://localhost", &b).is_err());
     }
@@ -501,5 +509,20 @@ mod tests {
         b.generation = MAX + 1;
         assert!(b.validate().is_err());
         assert!(json::<Binding>(br#"{"controllerId":"bad"}"#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ca_tests {
+    use super::*;
+    #[test]
+    fn empty_and_noncertificate_ca_bundles_are_rejected() {
+        for pem in [
+            b"".as_slice(),
+            b"not a certificate".as_slice(),
+            b"-----BEGIN PRIVATE KEY-----\naaaa\n-----END PRIVATE KEY-----\n".as_slice(),
+        ] {
+            assert!(Transport::new("https://localhost", Some(pem)).is_err());
+        }
     }
 }

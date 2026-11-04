@@ -29,10 +29,10 @@ try {
   const ca = readFileSync(join(dir, 'ca.pem'));
   server = createServer({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, (req, res) => {
     calls++;
-    if (mode === 'redirect') { res.writeHead(307, { Location: 'https://localhost:1/secret' }); res.end(); return; }
+    if (mode === 'redirect') { mode = ''; res.writeHead(307, { Location: `https://localhost:${server.address().port}/v1/runners/authenticate` }); res.end(); return; }
     if (mode === 'timeout') return;
     if (mode === 'wrong-binding') { res.end(JSON.stringify({ controllerId, runnerId: randomUUID(), generation: 1, incarnationId: randomUUID(), credentialRevision: 1 })); return; }
-    if (mode === 'oversize') { res.end('x'.repeat(17000)); return; }
+    if (mode === 'oversize') { res.end(JSON.stringify({ ...b, credentialRevision: 1 }) + ' '.repeat(17000)); return; }
     if (lose && req.url === '/v1/runner-enrollments/consume') {
       lose = false;
       // Identity handler calls end only after the worker's durable consume receipt.
@@ -50,9 +50,9 @@ try {
       }); r.on('error', reject); r.end(bytes);
     });
   }
-  function cli(command, binding, { trust = true, url = origin, ok = true, state = 'runner' } = {}) {
+  function cli(command, binding, { trust = true, caFile = join(dir, 'ca.pem'), url = origin, ok = true, state = 'runner' } = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn(bin, [command, join(dir, state), url, ...(trust ? [join(dir, 'ca.pem')] : [])], { env: { ...process.env, HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1', ALL_PROXY: 'http://127.0.0.1:1', NO_PROXY: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(bin, [command, join(dir, state), url, ...(trust ? [caFile] : [])], { env: { ...process.env, HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1', ALL_PROXY: 'http://127.0.0.1:1', NO_PROXY: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
       let text = ''; child.stdout.on('data', b => text += b); child.stderr.on('data', b => text += b);
       child.on('error', reject); child.on('close', code => { try { assert.equal(code === 0, ok, `${command}, server calls ${calls}: ${text}`); assert(!text.includes(approval?.enrollmentToken)); resolve(text); } catch (e) { reject(e); } });
       child.stdin.end(JSON.stringify(binding));
@@ -73,6 +73,15 @@ try {
   assert.equal(calls, before);
   await cli('authenticate', b, { trust: false, ok: false }); // unrelated public roots
   assert.equal(calls, before);
+  writeFileSync(join(dir, 'empty.pem'), '');
+  writeFileSync(join(dir, 'not-ca.pem'), readFileSync(join(dir, 'key.pem')));
+  for (const file of ['empty.pem', 'not-ca.pem']) {
+    await cli('authenticate', b, { caFile: join(dir, file), ok: false });
+    assert.equal(calls, before);
+  }
+  await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'other-key.pem'), '-out', join(dir, 'other-ca.pem'), '-days', '1', '-subj', '/CN=Unrelated Fixture CA']);
+  await cli('authenticate', b, { caFile: join(dir, 'other-ca.pem'), ok: false });
+  assert.equal(calls, before);
   // Rust must reject a trusted chain whose SAN does not cover the origin IP.
   const ip = `https://127.0.0.1:${port}`;
   await cli('prepare', approval, { url: ip, state: 'runner-ip' });
@@ -80,9 +89,9 @@ try {
   assert.equal(calls, before);
   mode = 'timeout';
   const start = Date.now(); await cli('authenticate', b, { ok: false });
-  assert(Date.now() - start < 19000); assert.equal(saved().phase, 'Uncertain');
+  assert(Date.now() - start >= 14000 && Date.now() - start < 19000); assert.equal(saved().phase, 'Uncertain');
   mode = 'wrong-binding'; await cli('authenticate', b, { ok: false });
-  mode = 'redirect'; await cli('authenticate', b, { ok: false });
+  mode = 'redirect'; const redirectCalls = calls; await cli('authenticate', b, { ok: false }); assert.equal(calls, redirectCalls + 1);
   mode = 'oversize'; await cli('authenticate', b, { ok: false }); mode = '';
   for (const changed of [{ generation: 2 }, { incarnationId: randomUUID() }, { runnerId: randomUUID() }]) {
     assert.equal((await api('/v1/runners/authenticate', credential, { ...b, ...changed })).status, 401);

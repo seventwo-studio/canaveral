@@ -101,6 +101,10 @@ impl Directory {
             lock,
         };
         result.check()?;
+        // The exclusive owner can discard only an unpublished journal candidate.
+        // Network requests are sent only after publication and directory fsync.
+        result.clear_pending()?;
+        result.check()?;
         Ok(result)
     }
     pub fn check(&self) -> Result<()> {
@@ -123,6 +127,16 @@ impl Directory {
         private(&file, false)?;
         super::bounded(file)
     }
+    fn clear_pending(&self) -> Result<()> {
+        let n = name("identity.pending".as_ref())?;
+        if unsafe { libc::unlinkat(self.dir.as_raw_fd(), n.as_ptr(), 0) } != 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                return Ok(());
+            }
+            return Err(invalid());
+        }
+        io(self.dir.sync_all())
+    }
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         self.check()?;
         let temp = name("identity.pending".as_ref())?;
@@ -131,22 +145,29 @@ impl Directory {
             &temp,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
-        private(&file, false)?;
-        io(file.write_all(bytes))?;
-        io(file.sync_all())?;
-        self.check()?;
-        if unsafe {
-            libc::renameat(
-                self.dir.as_raw_fd(),
-                temp.as_ptr(),
-                self.dir.as_raw_fd(),
-                name("identity.json".as_ref())?.as_ptr(),
-            )
-        } != 0
-        {
-            return Err(invalid());
+        let result = (|| {
+            private(&file, false)?;
+            io(file.write_all(bytes))?;
+            io(file.sync_all())?;
+            self.check()?;
+            if unsafe {
+                libc::renameat(
+                    self.dir.as_raw_fd(),
+                    temp.as_ptr(),
+                    self.dir.as_raw_fd(),
+                    name("identity.json".as_ref())?.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(invalid());
+            }
+            io(self.dir.sync_all())?;
+            self.check()
+        })();
+        if result.is_err() {
+            // Leave the open identity poisoned; reopening retains the committed record.
+            let _ = self.clear_pending();
         }
-        io(self.dir.sync_all())?;
-        self.check()
+        result
     }
 }

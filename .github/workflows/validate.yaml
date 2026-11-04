@@ -120,7 +120,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-runner-conformance
       - run: rustup show
       - run: cargo build -p canaveral-runner-client --locked
       - run: npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
