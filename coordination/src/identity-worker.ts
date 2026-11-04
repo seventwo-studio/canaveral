@@ -5,6 +5,7 @@ import { Accounts } from "./accounts.ts";
 import { ConsumerIdentities } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { mutates } from "./identity-protocol.ts";
+import { ModelJobs } from "./model-jobs.ts";
 import type { IdentityCommand, IdentityReply } from "./identity-protocol.ts";
 import { SqliteStore } from "./sqlite.ts";
 
@@ -15,6 +16,7 @@ const expected = createHash("sha256").update(administrator, "ascii").digest();
 const store = new SqliteStore(workerData.path as string);
 const accounts = new Accounts(store), applications = new ConsumerIdentities(store);
 const runners = workerData.controllerId === undefined ? undefined : new RunnerEnrollment(store, workerData.controllerId as string);
+const jobs = new ModelJobs(store, applications, runners);
 function reply(value: IdentityReply): void { port.postMessage(value); }
 function operator(token: string): boolean {
   try { secret(token); } catch { return false; }
@@ -33,6 +35,7 @@ async function dispatch(command: IdentityCommand): Promise<unknown> {
       throw new ServiceError("Runner enrollment requires a configured controller identity.", 503, { retryable: false });
     }
   }
+  if (isModel(command)) return model(command);
   switch (command.type) {
     case "runner.issue": return runners!.issue(command.body);
     case "runner.consume": return runners!.consume(command.token, command.body);
@@ -60,6 +63,32 @@ async function dispatch(command: IdentityCommand): Promise<unknown> {
       requireAdministrator(command.token);
       if (Object.keys(object(command.body)).length) throw new ServiceError("Credential rotation/revocation expects an empty object.", 400);
       return command.type === "applications.rotate" ? applications.rotate(command.id) : applications.revoke(command.id);
+  }
+}
+
+function isModel(command: IdentityCommand): command is Extract<IdentityCommand, { type: `models.${string}` }> {
+  return command.type.startsWith("models.");
+}
+function model(command: Extract<IdentityCommand, { type: `models.${string}` }>): unknown {
+  switch (command.type) {
+    case "models.submit": return jobs.submit(command.token, command.body);
+    case "models.inspect": return jobs.inspect(command.token, command.id);
+    case "models.cancel": return jobs.cancel(command.token, command.id, command.body);
+    case "models.claim": return jobs.claim(command.token, command.body);
+    case "models.assignments": return jobs.assignments(command.token, command.body);
+    case "models.report": return jobs.report(command.token, command.body);
+    default: break;
+  }
+  requireAdministrator(command.token);
+  switch (command.type) {
+    case "models.catalog": return jobs.catalog(command.body);
+    case "models.domain": return jobs.defineDomain(command.body);
+    case "models.domainInspect": return jobs.inspectDomain(command.id);
+    case "models.grant": return jobs.grant(command.body);
+    case "models.grantRevoke": return jobs.revokeGrant(command.body);
+    case "models.approve": return jobs.approve(command.body);
+    case "models.approvalRevoke": return jobs.revokeApproval(command.body);
+    default: throw new ServiceError("Unknown endpoint.", 404);
   }
 }
 

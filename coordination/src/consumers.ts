@@ -146,13 +146,20 @@ export class ConsumerIdentities {
   }
 
   authenticate(value: unknown): Application {
+    return this.store.transaction(db => this.verify(db, value));
+  }
+
+  /** Application proof inside the caller's transaction. */
+  verify(db: DatabaseSync, value: unknown): Application {
     let token: string;
     try { token = secret(value); } catch { throw new ServiceError("Application credential rejected.", 401); }
-    return this.store.transaction(db => {
-      const row = db.prepare("SELECT * FROM consumers WHERE credential=? AND revoked=0").get(credentialHash(token)) as Row | undefined;
-      if (!row) throw new ServiceError("Application credential rejected.", 401);
-      return this.public(row);
-    });
+    const row = db.prepare("SELECT * FROM consumers WHERE credential=? AND revoked=0").get(credentialHash(token)) as Row | undefined;
+    if (!row) throw new ServiceError("Application credential rejected.", 401);
+    return this.public(row);
+  }
+
+  active(db: DatabaseSync, id: string): boolean {
+    return !!db.prepare("SELECT 1 FROM consumers WHERE id=? AND revoked=0").get(id);
   }
 
   private row(db: DatabaseSync, id: string): Row {

@@ -17,6 +17,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [images](images.md)
 - [inference](inference.md)
 - [experimental model-job contract](model-job-contract.md)
+- [TypeScript model-job controller slice](model-controller.md)
 - [infrastructure](infrastructure.md)
 - [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
