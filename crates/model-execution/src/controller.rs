@@ -15,6 +15,7 @@ struct Claim {
     binding: Binding,
     id: uuid::Uuid,
 }
+#[derive(Clone)]
 struct Controller {
     client: Client,
     origin: String,
@@ -68,13 +69,8 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
     if config.binding.generation == 0 || config.binding.generation > 9_007_199_254_740_991 {
         return Err("invalid binding generation");
     }
-    let secret_meta =
-        fs::symlink_metadata(&config.credential_file).map_err(|_| "credential unavailable")?;
-    if !secret_meta.is_file() || secret_meta.permissions().mode() & 0o077 != 0 {
-        return Err("private credential file required");
-    }
-    let secret = fs::read_to_string(&config.credential_file)
-        .map_err(|_| "credential unavailable")?
+    let secret = String::from_utf8(private::trust_file(&config.credential_file, true)?)
+        .map_err(|_| "invalid credential")?
         .trim()
         .to_owned();
     if !(43..=128).contains(&secret.len())
@@ -91,8 +87,12 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout);
     if let Some(path) = config.ca_file {
-        let bytes = fs::read(path).map_err(|_| "CA unavailable")?;
-        for cert in reqwest::Certificate::from_pem_bundle(&bytes).map_err(|_| "invalid CA")? {
+        let bytes = private::trust_file(&path, false)?;
+        let certs = reqwest::Certificate::from_pem_bundle(&bytes).map_err(|_| "invalid CA")?;
+        if certs.is_empty() {
+            return Err("invalid CA");
+        }
+        for cert in certs {
             builder = builder.add_root_certificate(cert);
         }
     }
@@ -115,12 +115,10 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
             return Err("unknown execution requires reconciliation; reservations retained");
         }
     }
-    let path = config.execution.state_dir.join("claim.json");
-    let mut claim: Claim = if path.exists() {
-        serde_json::from_reader(File::open(&path).map_err(|_| "claim unavailable")?)
-            .map_err(|_| "corrupt claim")?
-    } else {
-        new_claim(config.binding.clone())?
+    executor.prepare(); // Staging is complete before any claim request.
+    let mut claim: Claim = match executor.directory.read_optional("claim.json")? {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt claim")?,
+        None => new_claim(config.binding.clone())?,
     };
     if claim.binding != config.binding {
         return Err("claim binding changed");
@@ -131,19 +129,12 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
     {
         claim = new_claim(config.binding.clone())?;
     }
-    let temp = config.execution.state_dir.join("claim.next");
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|_| "claim staging failed")?;
-    f.write_all(&serde_json::to_vec(&claim).map_err(|_| "claim encoding failed")?)
-        .and_then(|_| f.sync_all())
-        .map_err(|_| "claim sync failed")?;
-    fs::rename(temp, &path)
-        .and_then(|_| File::open(&config.execution.state_dir)?.sync_all())
-        .map_err(|_| "claim publication failed")?;
+    executor.directory.write(
+        "claim.json",
+        "claim.next",
+        &serde_json::to_vec(&claim).map_err(|_| "claim encoding failed")?,
+    )?;
+    let claim_started = clock::Clock::now();
     let response = controller.post(
         "/v1/runners/model-jobs/claim",
         serde_json::json!({"binding":config.binding,"claimId":claim.id}),
@@ -158,21 +149,43 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
         return Err("claim identity mismatch");
     }
     let expected = assignment.clone();
-    let mut last_contact = clock::Clock::now();
+    let mut last_contact = claim_started;
     let mut last_poll = clock::Clock::now();
+    let mut poll: Option<(
+        clock::Clock,
+        std::sync::mpsc::Receiver<Result<serde_json::Value>>,
+    )> = None;
     let j = executor.execute(config.binding.clone(), assignment, || {
         if last_contact.elapsed() >= timeout {
             return Control::Fence;
         }
-        if last_poll.elapsed() < Duration::from_millis(100) {
-            return Control::Continue;
+        if poll.is_none() && last_poll.elapsed() >= Duration::from_millis(100) {
+            let started = clock::Clock::now();
+            last_poll = started;
+            let c = controller.clone();
+            let body = serde_json::json!({"binding":config.binding});
+            let remaining = timeout.saturating_sub(last_contact.elapsed());
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let _ = tx.send(c.post_with_timeout(
+                    "/v1/runners/model-jobs/assignments",
+                    body,
+                    remaining,
+                ));
+            });
+            poll = Some((started, rx));
         }
-        last_poll = clock::Clock::now();
-        match controller.post_with_timeout(
-            "/v1/runners/model-jobs/assignments",
-            serde_json::json!({"binding":config.binding}),
-            timeout.saturating_sub(last_contact.elapsed()),
-        ) {
+        let Some((started, rx)) = &poll else {
+            return Control::Continue;
+        };
+        let started = *started;
+        let response = match rx.try_recv() {
+            Ok(v) => v,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return Control::Continue,
+            Err(_) => return Control::Fence,
+        };
+        poll = None;
+        match response {
             Ok(v) => {
                 if last_contact.elapsed() >= timeout {
                     return Control::Fence;
@@ -196,7 +209,7 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
                 {
                     return Control::Fence;
                 }
-                last_contact = clock::Clock::now();
+                last_contact = started;
                 if current.cancel_requested {
                     Control::Cancel
                 } else {

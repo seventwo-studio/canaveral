@@ -30,11 +30,23 @@ pub fn owned(pid: u32, port: u16) -> bool {
         std::fs::read_link(fd.path()).ok().is_some_and(|path| {
             inodes
                 .iter()
-                .any(|inode| path == std::path::PathBuf::from(format!("socket:[{inode}]")))
+                .any(|inode| path.as_os_str() == std::ffi::OsStr::new(&format!("socket:[{inode}]")))
         })
     })
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn owned(_: u32, _: u16) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rejects_another_process_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(super::owned(std::process::id(), port));
+        assert!(!super::owned(1, port));
+        assert!(!super::owned(u32::MAX, port));
+    }
 }

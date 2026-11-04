@@ -18,8 +18,13 @@ completed assignment, or an acknowledged unknown receipt. Inspect the controller
 job state to distinguish them. An unresolved assignment blocks new claims.
 
 The operator supplies every field in this configuration. Paths are absolute;
-the state directory must be private and have an existing parent. The credential
-file must be private. `binding` comes from completed runner enrollment and needs
+the state directory must be owned by the effective user with mode 0700 and have an existing parent. The credential
+file must be owned by that user, private, regular and single-linked. Credential,
+CA and state paths reject symlinks in every component. Ancestors must be owned
+by root or the effective user and reject group/other writes except root-owned
+sticky temporary directories. Use physical paths (for example `/private/tmp`,
+not macOS's `/tmp` alias). CA files must be regular, single-linked, owned by root
+or the effective user, and not writable by group/others; empty CA bundles fail. `binding` comes from completed runner enrollment and needs
 an explicit model/domain approval on the controller. The controller reserves the
 catalogued resources; this executable never invents a host budget. Execution
 budgets below are explicit operator limits, not capacity measurements.
@@ -49,17 +54,27 @@ budgets below are explicit operator limits, not capacity measurements.
 `caFile` may be omitted or null to use system roots. Plain HTTP is accepted only
 for an IP-literal loopback origin. Redirects, proxy inheritance and automatic
 HTTP retries are disabled. The executable takes no consumer-supplied command,
-runtime endpoint, path or download source. Its bytes are copied into a private
-per-job workspace while hashing, then executed only if the operator's SHA-256
-matches. It must be a self-contained executable that supports `serve`, remains
+runtime endpoint, path or download source. Its bytes are copied into the private executor state while hashing and fsynced
+before the HTTP claim request. Staging errors become prelaunch failures without
+runtime effects. The verified artifact is reused only within that invocation;
+restart never restages while reconciling an unresolved assignment. Execution
+requires the operator's SHA-256 to match. It must be a self-contained executable that supports `serve`, remains
 in the owned process group and keeps its generation listener in the leader.
-Runtime distributions needing adjacent executable assets are unsupported.
+Native distribution compatibility is unproven on both Linux and macOS.
+Distributions needing adjacent executable assets are unsupported; copying one
+binary has not qualified any packaged Ollama release.
 
 Each child has a cleared environment, private HOME/TMPDIR, one model/parallel
-request, cloud disabled and a fresh IPv4 loopback port. Kernel socket ownership
+request, cloud disabled, `OLLAMA_NOPRUNE=1` and a fresh IPv4 loopback port.
+The no-prune switch disables startup blob pruning in [upstream Ollama](https://github.com/ollama/ollama/blob/main/envconfig/config.go).
+The adapter never deletes operator model inventory. Before claim, the model tree
+must contain only regular single-linked files and directories, owned by root or
+the effective user, with no symlinks or group/other write permission. The operator
+must keep that trusted inventory stable throughout execution. Kernel socket ownership
 is checked before inventory and generation requests. The exact submitted tag
-and digest must match both operator inventory and `/api/tags`; no pull endpoint
-is called. Generation uses `stream: false`, explicit `num_predict` and `num_ctx`,
+and manifest digest must match both operator inventory and `/api/tags`; no pull endpoint
+is called. This pins reported manifest identity only. Blob bytes are not hashed
+and content integrity of the installed weights is not established. Generation uses `stream: false`, explicit `num_predict` and `num_ctx`,
 and no warm retention. Results require `done`, matching model identity, text
 within the canonical contract, and measured input/output token counts. Output
 tokens cannot exceed the submitted limit. Context does not promise preservation
@@ -76,8 +91,11 @@ One lifetime advisory lock protects the private executor state. `claim.json`
 contains a UUID claim intent and its complete binding before the HTTP claim.
 A lost claim reply reuses that ID. `receipt.json` stores every assignment/job,
 submission, binding, sequence and exact receipt. Atomic replacement synchronizes
-the file and directory. Failed publication poisons the instance. Stale staging
-files and malformed state fail closed. These files contain prompts and results;
+the file and directory. Failed publication poisons the instance. Under an exclusive validated lock,
+reopening discards only unpublished `receipt.next` and `claim.next` entries and
+fsyncs the directory, retaining committed claim/receipt identity. Malformed
+committed state fails closed. State and lock inode identity are revalidated
+before descriptor-relative reads and atomic publications. These files contain prompts and results;
 protect them and their backups. No automatic retention deletion is implemented.
 
 Launch intent is durable before workspace creation or process launch. The first
@@ -89,14 +107,37 @@ retained across fresh jobs, so earlier execution cannot be replayed locally.
 Cancellation is read from the claimed assignment and subsequent authenticated
 assignment listings. Changed/missing assignments or failed controller contact
 fence execution. Mac deadlines use continuous Mach time; Linux uses BOOTTIME.
+Contact age is measured from the start of the last validated claim/list request,
+not its reply. The contact budget is `min(contactMs, 20000)` milliseconds.
+Assignment polling starts at 100 ms intervals with at most one outstanding request;
+its timeout is the remaining contact budget. Both controller listings and runtime
+HTTP requests run off the supervision loop. Startup starts at process spawn;
+generation starts immediately before dispatch. The loop checks cancellation and
+suspend-aware deadlines about every 20 ms without waiting for listing completion.
+Staging and model-tree validation happen before claim and consume no claimed
+contact budget. Filesystem/kernel scheduling stalls are not hard realtime bounds.
+
 Cancellation, generation/startup deadlines and controller fencing stop the owned
-process group before deleting the workspace or publishing a stop receipt.
+process group before deleting the workspace or publishing a stop receipt. Stop
+sends TERM, permits up to `min(stopMs / 4, 50)` ms for descendant reaping, then
+sends KILL while the leader is still unreaped. Startup observes exit with
+`waitid(WNOWAIT)`. No group signal is sent after leader reaping; subsequent group
+probes can conservatively retain a reservation if a group identity is reused.
+The whole stop phase uses `stopMs`, checked about every 10 ms.
 Positive group disappearance is required, including descendants that remain in
 that group. An escaped/daemonized descendant is outside this adapter's supported
 runtime contract; arbitrary subprocess orchestration is unsupported.
 
 If stop cannot be established, the receipt is unknown with pending cleanup. A
-lost runtime generation response also remains unknown. Restart with launch
+lost runtime generation response or body also remains unknown; transport failure
+is never generally converted to terminal failure. The journal's `stopConfirmed`
+and `cleanupConfirmed` independently preserve positive evidence even when the
+public unknown receipt must retain `stopped: false` and pending cleanup.
+A generation request timeout/deadline means the bounded operation failed; it may
+be terminal `failed` only after positive process-group fencing and workspace
+cleanup. It cannot be mistaken for successful generation and is never retried.
+A prelaunch executable read failure has no runtime effect and may be terminal
+failed after workspace cleanup. Restart with launch
 intent and no durable terminal receipt reports unknown and never adopts a PID,
 reruns work, cleans the uncertain workspace or releases its reservation. Exact
 terminal result/cleanup receipts survive restart. Unknown and failed-cleanup
@@ -124,7 +165,11 @@ controller/executor state, credentials and owned test processes. It covers
 application submission, transactional reservation, generation, measured usage,
 cancellation, cleanup, fresh jobs, shared-domain contention, lost claim/report replay and a crashed
 execution's unknown reservation retention. Rust cases additionally cover pin and
-inventory rejection, output bounds, deadlines and durable no-replay behavior.
+inventory rejection, `/api/tags` digest mismatch, foreign socket ownership,
+output bounds, deadlines, private-file/link rejection, lock replacement,
+unpublished-candidate recovery and durable no-replay behavior. A stalled
+assignment-list response cannot postpone the public fixture's generation deadline;
+cancellation checks both PID disappearance and workspace removal.
 
 Fixture results establish no native model quality, model/runtime installation,
 hardware fit, Linux/macOS distribution qualification, escaped-process containment,
