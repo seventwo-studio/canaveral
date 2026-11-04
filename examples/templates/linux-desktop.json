@@ -1,0 +1,16 @@
+{
+  "id": "linux-desktop",
+  "revision": "1",
+  "os": "linux",
+  "arch": "amd64",
+  "mode": "desktop",
+  "minimum": {"cpu": 2, "memoryMiB": 4096, "diskGiB": 32},
+  "defaults": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 40},
+  "prepare": {
+    "driver": "cloud-init",
+    "user": "desktop",
+    "packages": ["xfce4", "xrdp", "python3"],
+    "files": [{"path": "/home/desktop/.xsession", "content": "startxfce4\n", "mode": "0644"}],
+    "commands": ["chown desktop: /home/desktop/.xsession", "systemctl enable --now xrdp"]
+  }
+}

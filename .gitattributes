@@ -1,0 +1,4 @@
+# Built assets are reviewed alongside their readable source in dashboard/.
+canaveral/web/* linguist-generated=true
+# Minified library template strings can contain intentional trailing spaces.
+canaveral/web/app.js whitespace=-blank-at-eol

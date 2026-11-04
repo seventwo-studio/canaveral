@@ -1,0 +1,250 @@
+[
+  {
+    "name": "valid scoped authority",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": true
+  },
+  {
+    "name": "fenced record is valid data but grants no execution",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": true
+    },
+    "valid": true
+  },
+  {
+    "name": "uppercase UUIDs normalize",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": true
+  },
+  {
+    "name": "maximum interoperable revision",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 9007199254740991,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": true
+  },
+  {
+    "name": "unsupported version",
+    "value": {
+      "version": 2,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "boolean version",
+    "value": {
+      "version": true,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "fractional revision",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1.5,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "zero revision",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 0,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "unsafe revision",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 9007199254740992,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "negative launch",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": -1,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "negative deadline",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": -1,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "numeric fence",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": 1
+    },
+    "valid": false
+  },
+  {
+    "name": "string deadline",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": "508.75",
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid owner",
+    "value": {
+      "version": 1,
+      "machineID": "other",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "compact UUID",
+    "value": {
+      "version": 1,
+      "machineID": "11111111222243338444555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown fields",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "bootSessionID": "01234567-89ab-4cde-8fab-0123456789ab",
+      "deadline": 508.75,
+      "fenced": false,
+      "extra": "refuse"
+    },
+    "valid": false
+  },
+  {
+    "name": "missing field",
+    "value": {
+      "version": 1,
+      "machineID": "11111111-2222-4333-8444-555555555555",
+      "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "revision": 1,
+      "boot": 1000,
+      "deadline": 508.75,
+      "fenced": false
+    },
+    "valid": false
+  },
+  {
+    "name": "array instead of record",
+    "value": [],
+    "valid": false
+  },
+  {
+    "name": "null instead of record",
+    "value": null,
+    "valid": false
+  }
+]

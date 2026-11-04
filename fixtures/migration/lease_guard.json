@@ -1,0 +1,59 @@
+{
+  "machine": {
+    "id": "11111111-2222-4333-8444-555555555555", "desired": "running",
+    "metadata": { "preserve": ["platform", "guest", "scope"] },
+    "lease": { "id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "revision": 1, "state": "ready", "authorizationDeadline": 1060.0, "controllerNow": 1000.0 },
+    "leaseCleanup": { "id": "12345678-1234-4234-8234-123456789abc", "leaseId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }
+  },
+  "initialRecord": { "receivedAt": 1000.0, "fenced": false, "executionStarted": false },
+  "cases": [
+    { "name": "persisted record format preserves complete assignments", "wire": true, "steps": [{ "op": "observe" }] },
+    { "name": "replayed absolute deadline cannot extend monotonic authority", "steps": [
+      { "op": "observe" }, { "op": "observe", "mono": 20.0 },
+      { "op": "authorization", "mono": 20.0, "expected": { "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "revision": 1, "remainingSeconds": 50.0, "fenced": false } }
+    ] },
+    { "name": "expiry is sticky across late renewal", "steps": [
+      { "op": "observe", "rtt": 2.0 },
+      { "op": "allowed", "mono": 67.0, "expected": true },
+      { "op": "allowed", "mono": 68.0, "expected": false },
+      { "op": "observe", "wall": 1010.0, "mono": 69.0, "lease": { "revision": 2, "controllerNow": 1010.0, "authorizationDeadline": 1200.0 } },
+      { "op": "allowed", "wall": 1010.0, "mono": 69.0, "expected": false }
+    ] },
+    { "name": "restart uses conservative wall-time margin and persisted expiry", "steps": [
+      { "op": "observe" }, { "op": "reopen", "wall": 1020.0, "mono": 1.0 },
+      { "op": "authorization", "wall": 1020.0, "mono": 1.0, "expected": { "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "revision": 1, "remainingSeconds": 35.0, "fenced": false } },
+      { "op": "allowed", "wall": 1020.0, "mono": 36.0, "expected": false },
+      { "op": "reopen", "wall": 1020.0, "mono": 1.0 },
+      { "op": "allowed", "wall": 1020.0, "mono": 1.0, "expected": false }
+    ] },
+    { "name": "missing legacy history cannot claim never started", "identity": true, "steps": [
+      { "op": "observe" }, { "op": "never_started", "expected": false }
+    ] },
+    { "name": "authenticated empty history and execution marker survive restart", "identity": true, "steps": [
+      { "op": "empty" }, { "op": "observe" }, { "op": "never_started", "expected": true },
+      { "op": "begin" }, { "op": "never_started", "expected": false },
+      { "op": "reopen", "wall": 1001.0, "mono": 1.0 }, { "op": "never_started", "expected": false }
+    ] },
+    { "name": "missing assignment fences only tracked leases", "steps": [
+      { "op": "observe" }, { "op": "empty" }, { "op": "allowed", "expected": false },
+      { "op": "fenced", "expected": ["11111111-2222-4333-8444-555555555555"] }
+    ] },
+    { "name": "changed lease identity persists fencing", "steps": [
+      { "op": "observe" }, { "op": "observe", "lease": { "id": "99999999-8888-4777-8666-555555555555" }, "error": true },
+      { "op": "allowed", "expected": false }
+    ] },
+    { "name": "retired assignments cannot reappear", "steps": [
+      { "op": "observe" }, { "op": "retire" }, { "op": "observe" },
+      { "op": "assignments", "expected": [] }, { "op": "allowed", "expected": false }
+    ] },
+    { "name": "revision rollback cannot shorten or renew newer authority", "steps": [
+      { "op": "observe", "lease": { "revision": 2, "authorizationDeadline": 1100.0 } },
+      { "op": "observe", "mono": 20.0 },
+      { "op": "authorization", "mono": 20.0, "expected": { "leaseID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "revision": 2, "remainingSeconds": 90.0, "fenced": false } },
+      { "op": "allowed", "mono": 110.0, "expected": false }
+    ] },
+    { "name": "wall rollback at restart fences", "steps": [
+      { "op": "observe" }, { "op": "reopen", "wall": 990.0 }, { "op": "allowed", "wall": 990.0, "expected": false }
+    ] }
+  ]
+}

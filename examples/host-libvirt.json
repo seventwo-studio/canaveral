@@ -1,0 +1,11 @@
+{
+  "name": "linux-host",
+  "provider": "libvirt",
+  "uri": "qemu:///system",
+  "storage": "/var/lib/libvirt/images/canaveral",
+  "capacity": {"cpu": 8, "memoryMiB": 16384, "diskGiB": 200},
+  "templates": [
+    {"id": "linux-server", "revision": "1", "os": "linux", "arch": "amd64", "mode": "headless", "image": "/var/lib/canaveral/templates/linux-server.qcow2", "minimum": {"cpu": 1, "memoryMiB": 1024, "diskGiB": 10}},
+    {"id": "linux-desktop", "revision": "1", "os": "linux", "arch": "amd64", "mode": "desktop", "image": "/var/lib/canaveral/templates/linux-desktop.qcow2", "minimum": {"cpu": 2, "memoryMiB": 4096, "diskGiB": 32}}
+  ]
+}

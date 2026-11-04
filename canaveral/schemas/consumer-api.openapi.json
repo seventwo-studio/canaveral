@@ -1,0 +1,2927 @@
+{
+  "openapi": "3.1.1",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Canaveral consumer lease API",
+    "version": "0.2.2",
+    "description": "Implemented controller consumer subset. Independently usable execution; ordinary runners remain gated for consumer lease execution. No administrator, enrollment, model, registry or host API is implied. POST bodies are JSON objects of at most 1 MiB with a single Content-Length. Browser Origin requests are rejected. Remote use requires HTTPS; the embedded server uses HTTP behind operator TLS termination. Credentials are opaque bearer secrets, never URL parameters."
+  },
+  "paths": {
+    "/v1/environments/templates": {
+      "get": {
+        "operationId": "consumerCatalogue",
+        "summary": "List pinned images and application limits",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalogue"
+                }
+              }
+            }
+          }
+        },
+        "description": "Availability requires a fresh, healthy, accepting offer of lease protocol 1; catalogue capabilities do not prove native readiness."
+      }
+    },
+    "/v1/leases": {
+      "post": {
+        "operationId": "acquireLease",
+        "summary": "Acquire a pinned image revision",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Lease"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Lease"
+                }
+              }
+            }
+          }
+        },
+        "description": "Persist the UUID and normalized body before dispatch. Retry only that identity and body after uncertainty. Server policy enforces image permissions, resource minima/granularity, TTL, lifetime, quotas and capacity. Current acquisition creates a primary member; paired phone/watch acquisition is not implemented.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcquireLease"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listLeases",
+        "summary": "List this application\u2019s leases",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeasePage"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Exclusive UUID cursor. Page size is 100; duplicate or unknown query parameters are rejected."
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}": {
+      "get": {
+        "operationId": "inspectLease",
+        "summary": "Inspect one owned lease",
+        "security": [
+          {
+            "ApplicationBearer": []
+          },
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Lease"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/credential": {
+      "post": {
+        "operationId": "rotateLeaseCredential",
+        "summary": "Rotate the lease-scoped credential",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeaseCredential"
+                }
+              }
+            }
+          }
+        },
+        "description": "Not an idempotent credential lookup. Rotation invalidates the previous lease key and its sessions; do not automatically retry or log the returned secret. Ended leases cannot rotate keys.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/renew": {
+      "post": {
+        "operationId": "renewLease",
+        "summary": "Renew within the application lifetime",
+        "security": [
+          {
+            "ApplicationBearer": []
+          },
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            }
+          }
+        },
+        "description": "Use a stable mutation UUID and exact body. Expected revision prevents lost updates. Expiry wins; renewal never shortens the deadline. Replay returns the stored mutation and current lease view.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenewLease"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/release": {
+      "post": {
+        "operationId": "releaseLease",
+        "summary": "Release a lease and request owned cleanup",
+        "security": [
+          {
+            "ApplicationBearer": []
+          },
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            }
+          }
+        },
+        "description": "Use a stable mutation UUID. Terminal state is not positive cleanup completion: reservations persist until owned reclamation is confirmed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseLease"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/sessions": {
+      "post": {
+        "operationId": "createSession",
+        "summary": "Create a scoped member access session",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires the current lease key and a ready, capability-compatible member. Application credentials do not authorize sessions. Persist the request UUID; replays return current metadata and never restart a stream.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSession"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/sessions/{sessionId}": {
+      "get": {
+        "operationId": "inspectSession",
+        "summary": "Inspect scoped session metadata",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/sessions/{sessionId}/close": {
+      "post": {
+        "operationId": "closeSession",
+        "summary": "Close a session idempotently",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/sessions/{sessionId}/{generation}": {
+      "get": {
+        "operationId": "attachConsumerSession",
+        "summary": "Attach the consumer WebSocket peer",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "101": {
+            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
+            "headers": {
+              "Sec-WebSocket-Protocol": {
+                "schema": {
+                  "const": "canaveral-session-v1"
+                }
+              }
+            }
+          }
+        },
+        "description": "HTTP handshake only. Requires Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Version: 13, a valid WebSocket key and Sec-WebSocket-Protocol: canaveral-session-v1. No Origin, body, credentials in URLs or query fields. Exactly one current consumer peer may attach. The worker connects outbound separately; readiness requires both peers. Frame/control/RFB contracts are documented separately. No automatic replay after disconnect.",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/operations": {
+      "post": {
+        "operationId": "createOperation",
+        "summary": "Submit a durable operation for an explicit member",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires the current lease key and a ready eligible member. Persist the request UUID and inspect it after an unconfirmed response. Identical replay returns the current receipt and never issues a second effect. Dispatch without a completed receipt becomes unknown when authorization ends. A queued command has a 120-second start deadline bounded by lease expiry; renewals do not restart it. At most 32 pending discrete commands per host; streaming files and PTYs have separate contracts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOperation"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/operations/{operationId}": {
+      "get": {
+        "operationId": "inspectOperation",
+        "summary": "Recover the durable receipt for a scoped operation",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "The current scoped lease key can inspect retained receipts after lease termination or credential rotation. Other lease operations remain hidden. Unknown effects must be inspected before submitting another command."
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApplicationBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "Operator-created application identity, limited to its pinned catalogue and owned lifecycle."
+      },
+      "LeaseBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "Current scoped key for exactly one lease; expiry, revocation, readiness and session generation still apply."
+      }
+    },
+    "schemas": {
+      "Empty": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "Resources": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "memoryMiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "diskGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          }
+        },
+        "required": [
+          "cpu",
+          "memoryMiB",
+          "diskGiB"
+        ],
+        "additionalProperties": false
+      },
+      "ResourceOverrides": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "memoryMiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "diskGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "boolean"
+          },
+          "pty": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "boolean"
+          },
+          "screenshot": {
+            "type": "boolean"
+          },
+          "displayStream": {
+            "type": "boolean"
+          },
+          "input": {
+            "type": "boolean"
+          },
+          "hierarchy": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command",
+          "pty",
+          "files",
+          "screenshot",
+          "displayStream",
+          "input",
+          "hierarchy"
+        ],
+        "additionalProperties": false
+      },
+      "Limits": {
+        "type": "object",
+        "properties": {
+          "resources": {
+            "$ref": "#/components/schemas/Resources"
+          },
+          "activeLeases": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "defaultTTLSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "maxTTLSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "maxLifetimeSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "provisioningTimeoutSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          }
+        },
+        "required": [
+          "resources",
+          "activeLeases",
+          "defaultTTLSeconds",
+          "maxTTLSeconds",
+          "maxLifetimeSeconds",
+          "provisioningTimeoutSeconds"
+        ],
+        "additionalProperties": false
+      },
+      "CatalogueImage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "os": {
+            "type": "string",
+            "enum": [
+              "linux",
+              "macos",
+              "windows",
+              "android",
+              "ios"
+            ]
+          },
+          "arch": {
+            "type": "string",
+            "enum": [
+              "arm64",
+              "amd64"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "headless",
+              "desktop",
+              "device"
+            ]
+          },
+          "minimum": {
+            "$ref": "#/components/schemas/Resources"
+          },
+          "defaults": {
+            "$ref": "#/components/schemas/Resources"
+          },
+          "memoryStepMiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "catalogueImageId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "artifactSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "recipeDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "preparationDriver": {
+            "type": "string",
+            "enum": [
+              "none",
+              "cloud-init",
+              "cloudbase-init",
+              "ssh"
+            ]
+          },
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "apple",
+              "libvirt",
+              "hyperv",
+              "android",
+              "ios",
+              "kubevirt"
+            ]
+          },
+          "guestAccess": {
+            "const": true
+          },
+          "mediaType": {
+            "type": "string",
+            "enum": [
+              "disk",
+              "installer"
+            ]
+          },
+          "cloneIdentity": {
+            "const": "linux-cloud-init"
+          },
+          "imageKind": {
+            "type": "string",
+            "enum": [
+              "base",
+              "derived"
+            ]
+          },
+          "device": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "systemImage": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "profile": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "systemImage",
+                  "profile"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "deviceType": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "runtime",
+                  "deviceType"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "os",
+          "arch",
+          "mode",
+          "minimum",
+          "defaults",
+          "memoryStepMiB",
+          "available",
+          "capabilities"
+        ],
+        "additionalProperties": false
+      },
+      "Catalogue": {
+        "type": "object",
+        "properties": {
+          "templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueImage"
+            }
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits"
+          }
+        },
+        "required": [
+          "templates",
+          "limits"
+        ],
+        "additionalProperties": false
+      },
+      "AcquireLease": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "templateId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "templateRevision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "arch": {
+            "type": "string",
+            "enum": [
+              "arm64",
+              "amd64"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceOverrides"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "requiredCapabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "command",
+                "pty",
+                "files",
+                "screenshot",
+                "displayStream",
+                "input",
+                "hierarchy"
+              ]
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "templateId",
+          "templateRevision",
+          "arch"
+        ],
+        "additionalProperties": false
+      },
+      "MemberCleanup": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "blocked",
+              "complete"
+            ]
+          },
+          "reason": {
+            "enum": [
+              null,
+              "execution_pending",
+              "operations_pending",
+              "sessions_pending",
+              "ownership",
+              "storage_removal",
+              "credential_erasure",
+              "unsupported",
+              "recovery"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retryAt": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "reason",
+          "attempts",
+          "retryAt"
+        ],
+        "additionalProperties": false
+      },
+      "LeaseMember": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "machineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "starting",
+              "running",
+              "stopping",
+              "stopped",
+              "error",
+              "unknown"
+            ]
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/Resources"
+          },
+          "cleanup": {
+            "$ref": "#/components/schemas/MemberCleanup"
+          }
+        },
+        "required": [
+          "name",
+          "machineId",
+          "state",
+          "ready",
+          "capabilities",
+          "resources"
+        ],
+        "additionalProperties": false
+      },
+      "Lease": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "provisioning",
+              "ready",
+              "failed",
+              "released",
+              "expired"
+            ]
+          },
+          "runtimeState": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "starting",
+              "running",
+              "stopping",
+              "stopped",
+              "error",
+              "unknown"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cleanup": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "notRequested",
+                  "pending",
+                  "running",
+                  "blocked",
+                  "complete"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeaseMember"
+            }
+          },
+          "capabilities": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Capabilities"
+              },
+              {
+                "$ref": "#/components/schemas/Empty"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "runtimeState",
+          "revision",
+          "createdAt",
+          "expiresAt",
+          "cleanup",
+          "members",
+          "capabilities"
+        ],
+        "additionalProperties": false
+      },
+      "LeasePage": {
+        "type": "object",
+        "properties": {
+          "leases": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Lease"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "leases",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "LeaseCredential": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "credential": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43,128}$",
+            "writeOnly": false,
+            "description": "Returned only by explicit lease-key rotation. Store privately; never log this response."
+          }
+        },
+        "required": [
+          "id",
+          "credential"
+        ],
+        "additionalProperties": false
+      },
+      "RenewLease": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740992
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          }
+        },
+        "required": [
+          "id",
+          "expectedRevision",
+          "ttlSeconds"
+        ],
+        "additionalProperties": false
+      },
+      "ReleaseLease": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "Mutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "provisioning",
+              "ready",
+              "failed",
+              "released",
+              "expired"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "revision",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "MutationResult": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/Mutation"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/Lease"
+          }
+        },
+        "required": [
+          "mutation",
+          "lease"
+        ],
+        "additionalProperties": false,
+        "description": "A replay returns the original mutation result and a fresh lease view; their revisions and states may differ."
+      },
+      "CreateSession": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "capability": {
+            "type": "string",
+            "enum": [
+              "pty",
+              "display",
+              "upload",
+              "download",
+              "accessibility"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "member",
+          "capability"
+        ],
+        "additionalProperties": false
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "capability": {
+            "type": "string",
+            "enum": [
+              "pty",
+              "display",
+              "upload",
+              "download",
+              "accessibility"
+            ]
+          },
+          "generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "protocol": {
+            "const": "canaveral-session-v1"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "attaching",
+              "ready",
+              "closed",
+              "expired",
+              "revoked",
+              "disconnected"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "attachBefore": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authorizationDeadline": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "leaseId",
+          "member",
+          "capability",
+          "generation",
+          "protocol",
+          "state",
+          "createdAt",
+          "attachBefore",
+          "authorizationDeadline"
+        ],
+        "additionalProperties": false
+      },
+      "StructuredError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "error",
+          "message",
+          "code",
+          "requestId",
+          "retryable"
+        ],
+        "additionalProperties": false
+      },
+      "ServiceFailure": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "const": "Orchestrator storage or service unavailable."
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "Error": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/StructuredError"
+          },
+          {
+            "$ref": "#/components/schemas/ServiceFailure"
+          }
+        ],
+        "description": "Normal errors carry correlation and retry fields; unexpected service failures retain the legacy error-only 503 response."
+      },
+      "CreateOperation": {
+        "description": "Durable common guest operation with a caller-owned UUID. Native capability and argument validation also apply. App/installer management is not part of this subset.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "screenshot"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "hierarchy"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "accessibility"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "accessibility-action"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "snapshotId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  },
+                  "nodeId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  },
+                  "nativeAction": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  }
+                },
+                "required": [
+                  "snapshotId",
+                  "nodeId",
+                  "nativeAction"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "tap"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32768
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32768
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "swipe"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32768
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32768
+                  },
+                  "toX": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32768
+                  },
+                  "toY": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32768
+                  },
+                  "durationMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "toX",
+                  "toY",
+                  "durationMs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "text"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "maxLength": 16000,
+                    "pattern": "^[^\\u0000]*$"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "key"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "list-files"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  },
+                  "app": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.]*(?:/[A-Za-z0-9_.$]+)?$"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "push"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  },
+                  "data": {
+                    "type": "string",
+                    "maxLength": 700000,
+                    "contentEncoding": "base64",
+                    "description": "Runtime decoding enforces 512 KiB. Use upload sessions for unbounded total file size."
+                  },
+                  "app": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.]*(?:/[A-Za-z0-9_.$]+)?$"
+                  }
+                },
+                "required": [
+                  "path",
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "pull"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!-)[^\\u0000]+$"
+                  },
+                  "app": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.]*(?:/[A-Za-z0-9_.$]+)?$"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "shell"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "argv": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "pattern": "^[^\\u0000]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "argv"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "shell-open"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "session": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "session"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "shell-read"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "session": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740992
+                  }
+                },
+                "required": [
+                  "session",
+                  "offset"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "shell-write"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "session": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 16000,
+                    "pattern": "^[^\\u0000]*$"
+                  }
+                },
+                "required": [
+                  "session",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "shell-close"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "session": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "session"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "\\S"
+              },
+              "action": {
+                "const": "shell-resize"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "session": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                  },
+                  "cols": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                  }
+                },
+                "required": [
+                  "session",
+                  "rows",
+                  "cols"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "action",
+              "arguments"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "Operation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "result": {}
+        },
+        "required": [
+          "id",
+          "leaseId",
+          "member",
+          "state",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

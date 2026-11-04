@@ -1,0 +1,108 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "orchestrator"
+  },
+  "spec": {
+    "replicas": 1,
+    "strategy": {
+      "type": "Recreate"
+    },
+    "selector": {
+      "matchLabels": {
+        "app": "canaveral-orchestrator"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "canaveral-orchestrator"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "runAsGroup": 10001,
+          "fsGroup": 10001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "containers": [
+          {
+            "name": "orchestrator",
+            "image": "canaveral:local",
+            "imagePullPolicy": "IfNotPresent",
+            "ports": [
+              {
+                "containerPort": 8765
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              },
+              "limits": {
+                "cpu": "1",
+                "memory": "512Mi"
+              }
+            },
+            "readinessProbe": {
+              "httpGet": {
+                "path": "/healthz",
+                "port": 8765
+              },
+              "initialDelaySeconds": 2
+            },
+            "livenessProbe": {
+              "httpGet": {
+                "path": "/healthz",
+                "port": 8765
+              },
+              "initialDelaySeconds": 10
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "state",
+                "mountPath": "/data"
+              },
+              {
+                "name": "credentials",
+                "mountPath": "/run/credentials",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "state",
+            "persistentVolumeClaim": {
+              "claimName": "orchestrator-state"
+            }
+          },
+          {
+            "name": "credentials",
+            "secret": {
+              "secretName": "canaveral-credentials",
+              "defaultMode": 288
+            }
+          }
+        ]
+      }
+    }
+  }
+}

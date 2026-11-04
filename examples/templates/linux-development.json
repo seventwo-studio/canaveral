@@ -1,0 +1,16 @@
+{
+  "id": "linux-development",
+  "revision": "1",
+  "os": "linux",
+  "arch": "amd64",
+  "mode": "headless",
+  "minimum": {"cpu": 2, "memoryMiB": 2048, "diskGiB": 20},
+  "defaults": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 40},
+  "prepare": {
+    "driver": "cloud-init",
+    "user": "developer",
+    "packages": ["git", "curl", "build-essential", "python3"],
+    "files": [{"path": "/etc/canaveral-purpose", "content": "General-purpose development computer\n", "mode": "0644"}],
+    "commands": ["mkdir -p /opt/workspace", "chown developer: /opt/workspace"]
+  }
+}

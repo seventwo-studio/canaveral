@@ -1,0 +1,55 @@
+{
+  "name": "mac-host",
+  "provider": "apple",
+  "runner": "/absolute/path/to/canaveral/dist/CanaveralVMRunner",
+  "storage": "/absolute/path/to/canaveral-disks",
+  "capacity": {
+    "cpu": 8,
+    "memoryMiB": 16384,
+    "diskGiB": 200
+  },
+  "templates": [
+    {
+      "id": "linux-server",
+      "revision": "1",
+      "os": "linux",
+      "arch": "arm64",
+      "mode": "headless",
+      "image": "/absolute/path/to/linux-arm64.raw",
+      "minimum": {
+        "cpu": 2,
+        "memoryMiB": 1024,
+        "diskGiB": 10
+      },
+      "memoryStepMiB": 1024
+    },
+    {
+      "id": "linux-desktop",
+      "revision": "1",
+      "os": "linux",
+      "arch": "arm64",
+      "mode": "desktop",
+      "image": "/absolute/path/to/linux-desktop-arm64.raw",
+      "minimum": {
+        "cpu": 2,
+        "memoryMiB": 4096,
+        "diskGiB": 32
+      },
+      "memoryStepMiB": 1024
+    },
+    {
+      "id": "macos-desktop",
+      "revision": "1",
+      "os": "macos",
+      "arch": "arm64",
+      "mode": "desktop",
+      "image": "/absolute/path/to/restore.ipsw",
+      "minimum": {
+        "cpu": 4,
+        "memoryMiB": 8192,
+        "diskGiB": 64
+      },
+      "memoryStepMiB": 1024
+    }
+  ]
+}

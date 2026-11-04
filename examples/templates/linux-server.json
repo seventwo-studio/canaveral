@@ -1,0 +1,15 @@
+{
+  "id": "linux-server",
+  "revision": "1",
+  "os": "linux",
+  "arch": "amd64",
+  "mode": "headless",
+  "minimum": {"cpu": 1, "memoryMiB": 1024, "diskGiB": 4},
+  "prepare": {
+    "driver": "cloud-init",
+    "user": "operator",
+    "sshAuthorizedKeys": ["REPLACE_WITH_YOUR_SSH_PUBLIC_KEY"],
+    "files": [{"path": "/etc/canaveral-purpose", "content": "General-purpose server\n", "mode": "0644"}],
+    "commands": ["sync"]
+  }
+}

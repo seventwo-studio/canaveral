@@ -1,0 +1,19 @@
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "name": "dashboard"
+  },
+  "spec": {
+    "selector": {
+      "app": "canaveral-dashboard"
+    },
+    "ports": [
+      {
+        "name": "http",
+        "port": 8766,
+        "targetPort": "http"
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+.build/
+dist/
+.DS_Store
+.swiftpm/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+.venv/
+state/
+secrets/
+host.json
+node_modules/
+/target/
+/coordination/dist/
+dashboard/test-results/
+dashboard/playwright-report/

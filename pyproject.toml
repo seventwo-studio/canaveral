@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canaveral-machines"
+version = "0.2.2"
+description = "A central VM orchestrator and self-registering machine agents"
+requires-python = ">=3.9"
+dependencies = ["wsproto>=1.2,<2", "psutil>=6,<8"]
+
+[project.optional-dependencies]
+visual = ["Pillow>=11.3,<14"]
+test = ["jsonschema>=4.23,<5", "openapi-spec-validator>=0.7.2,<0.8"]
+windows-guest = ["comtypes>=1.4,<2; sys_platform == 'win32'"]
+
+[project.scripts]
+canaveral = "canaveral.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["canaveral*"]
+
+[tool.setuptools.package-data]
+canaveral = ["web/*", "schemas/*.json", "native/*.c"]

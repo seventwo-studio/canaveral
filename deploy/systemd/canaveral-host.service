@@ -1,0 +1,17 @@
+[Unit]
+Description=Canaveral VM host agent
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/canaveral
+Environment=CANAVERAL_URL=https://canaveral.example.internal
+Environment=CANAVERAL_ENROLLMENT_TOKEN_FILE=/etc/canaveral/enrollment.token
+ExecStart=/usr/bin/python3 -m canaveral host --config /etc/canaveral/host.json --state /var/lib/canaveral/agent
+Restart=on-failure
+RestartSec=10
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+{
+  "name": "ios-devices",
+  "provider": "ios",
+  "capacity": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 40},
+  "storage": "/Users/operator/Library/Application Support/Canaveral/ios",
+  "idb": "/opt/homebrew/bin/idb",
+  "artifacts": {"development": "/Users/operator/Builds/Development.app"},
+  "templates": [{"templateFile": "templates/ios-phone.json"}]
+}

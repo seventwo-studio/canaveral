@@ -1,0 +1,9 @@
+{
+  "name": "android-devices",
+  "provider": "android",
+  "capacity": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 40},
+  "storage": "/var/lib/canaveral/android",
+  "androidSDK": "/opt/android-sdk",
+  "artifacts": {"development": "/srv/canaveral/apps/development.apk"},
+  "templates": [{"templateFile": "templates/android-phone.json"}]
+}

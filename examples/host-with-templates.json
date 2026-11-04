@@ -1,0 +1,12 @@
+{
+  "name": "linux-template-host",
+  "provider": "libvirt",
+  "storage": "/var/lib/libvirt/images/canaveral",
+  "imageCache": "/var/lib/libvirt/images/canaveral-base",
+  "guestOrchestratorURL": "https://canaveral.example.internal",
+  "capacity": {"cpu": 16, "memoryMiB": 32768, "diskGiB": 300},
+  "templates": [
+    {"templateFile": "templates/linux-development.json", "bindings": {"image": "/var/lib/canaveral/base/linux-amd64.qcow2"}},
+    {"templateFile": "templates/linux-desktop.json", "bindings": {"image": "/var/lib/canaveral/base/linux-amd64.qcow2"}}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "ios-phone",
+  "revision": "1",
+  "os": "ios",
+  "arch": "arm64",
+  "mode": "device",
+  "minimum": {"cpu": 2, "memoryMiB": 4096, "diskGiB": 12},
+  "device": {
+    "runtime": "com.apple.CoreSimulator.SimRuntime.iOS-27-0",
+    "deviceType": "com.apple.CoreSimulator.SimDeviceType.iPhone-17"
+  }
+}

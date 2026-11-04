@@ -1,0 +1,14 @@
+{
+  "id": "windows-development",
+  "revision": "1",
+  "os": "windows",
+  "arch": "amd64",
+  "mode": "desktop",
+  "minimum": {"cpu": 2, "memoryMiB": 4096, "diskGiB": 64},
+  "defaults": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 80},
+  "prepare": {
+    "driver": "cloudbase-init",
+    "files": [{"path": "C:\\Canaveral\\purpose.txt", "content": "General-purpose Windows development computer\r\n"}],
+    "commands": ["New-Item -ItemType Directory -Force -Path C:\\Workspace | Out-Null"]
+  }
+}

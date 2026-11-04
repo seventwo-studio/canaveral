@@ -1,0 +1,4 @@
+*
+!canaveral/
+!canaveral/**
+canaveral/**/__pycache__/

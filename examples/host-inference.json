@@ -1,0 +1,19 @@
+{
+  "name": "local-inference",
+  "provider": "native",
+  "capacity": {"cpu": 4, "memoryMiB": 16384, "diskGiB": 10},
+  "templates": [],
+  "inference": {
+    "runtime": "ollama",
+    "executable": "/absolute/path/to/ollama",
+    "modelsDirectory": "/absolute/path/to/installed/ollama/models",
+    "models": [
+      {
+        "id": "your-model:latest",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "capability": "generation",
+        "resources": {"cpu": 2, "memoryMiB": 12288, "diskGiB": 1}
+      }
+    ]
+  }
+}

@@ -1,0 +1,174 @@
+@import "tailwindcss";
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2")
+    format("woff2");
+}
+@custom-variant dark (&:is(.dark *));
+@theme inline {
+  --font-sans: "Geist Mono", monospace;
+  --font-mono: "Geist Mono", monospace;
+  --font-display: Arial, Helvetica, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 2px);
+}
+:root {
+  color-scheme: dark;
+  --radius: 0.125rem;
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #111111;
+  --card-foreground: #fafafa;
+  --popover: #161616;
+  --popover-foreground: #fafafa;
+  --primary: #ff7a1a;
+  --primary-foreground: #171717;
+  --secondary: #262626;
+  --secondary-foreground: #e5e5e5;
+  --muted: #161616;
+  --muted-foreground: #a3a3a3;
+  --accent: #1a1a1a;
+  --accent-foreground: #fafafa;
+  --destructive: #ef9e8b;
+  --border: #ffffff14;
+  --input: #ffffff29;
+  --ring: #ff7a1a;
+  --sidebar: #111111;
+  --sidebar-foreground: #e5e5e5;
+  --sidebar-primary: #ff7a1a;
+  --sidebar-primary-foreground: #171717;
+  --sidebar-accent: #1f1710;
+  --sidebar-accent-foreground: #ff9b52;
+  --sidebar-border: #ffffff14;
+  --sidebar-ring: #ff7a1a;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}
+/* Product artwork stays separate from the shadcn component system. */
+.launch-poster .rocket-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.rocket-art {
+  position: relative;
+  overflow: hidden;
+}
+.rocket-art img,
+.rocket-art canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 42%;
+  display: block;
+}
+.rocket-art img {
+  filter: grayscale(1);
+}
+.rocket-art canvas {
+  position: absolute;
+  inset: 0;
+  image-rendering: pixelated;
+  opacity: 0;
+}
+.rocket-art[data-rendered="true"] canvas {
+  opacity: 1;
+}
+.rocket-art[data-rendered="true"] img {
+  opacity: 0;
+}
+/* Domain states extend Badge without overriding shared component anatomy. */
+.status {
+  gap: 0.4rem;
+}
+.status-dot {
+  width: 0.3rem;
+  height: 0.3rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status-ready,
+.status-online {
+  color: #a7d5bc;
+  border-color: #345043;
+  background: #182820;
+}
+.status-error,
+.status-setup-failed {
+  color: #f3b39e;
+  border-color: #795246;
+  background: #3a2821;
+}
+.status-preparing,
+.status-pending,
+.status-draining {
+  color: #e3c38c;
+  border-color: #645438;
+  background: #342c1c;
+}
+/* Native meter semantics describe reservations, not task completion. */
+meter {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  border-radius: 0.25rem;
+  background: var(--muted);
+}
+meter::-webkit-meter-bar {
+  background: var(--muted);
+  border: 0;
+}
+meter::-webkit-meter-optimum-value {
+  background: #a3a3a3;
+}
+meter::-moz-meter-bar {
+  background: #a3a3a3;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

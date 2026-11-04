@@ -1,0 +1,15 @@
+{
+  "id": "macos-development",
+  "revision": "1",
+  "os": "macos",
+  "arch": "arm64",
+  "mode": "desktop",
+  "memoryStepMiB": 1024,
+  "minimum": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 64},
+  "defaults": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 80},
+  "prepare": {
+    "driver": "ssh",
+    "files": [{"path": "/Users/Shared/canaveral-purpose", "content": "General-purpose Mac development computer\n", "mode": "0644"}],
+    "commands": ["mkdir -p /Users/Shared/Workspace"]
+  }
+}

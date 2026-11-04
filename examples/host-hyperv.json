@@ -1,0 +1,11 @@
+{
+  "name": "windows-host",
+  "provider": "hyperv",
+  "switch": "Default Switch",
+  "storage": "C:\\Canaveral\\disks",
+  "capacity": {"cpu": 8, "memoryMiB": 16384, "diskGiB": 200},
+  "templates": [
+    {"id": "windows-desktop", "revision": "1", "os": "windows", "arch": "amd64", "mode": "desktop", "image": "C:\\Canaveral\\templates\\windows.vhdx", "minimum": {"cpu": 2, "memoryMiB": 4096, "diskGiB": 64}},
+    {"id": "linux-server", "revision": "1", "os": "linux", "arch": "amd64", "mode": "headless", "image": "C:\\Canaveral\\templates\\linux.vhdx", "minimum": {"cpu": 1, "memoryMiB": 1024, "diskGiB": 10}}
+  ]
+}

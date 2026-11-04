@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:canaveral:accessibility-snapshot:v1",
+  "title": "Canaveral native accessibility snapshot",
+  "type": "object",
+  "required": ["snapshotId", "capturedAt", "source", "coordinateSpace", "nodes", "truncated", "coverage"],
+  "properties": {
+    "snapshotId": {"type": "string", "format": "uuid"},
+    "capturedAt": {"type": "number", "minimum": 0},
+    "source": {"type": "string", "minLength": 1},
+    "coordinateSpace": {"enum": ["screen-pixels", "screen-points"]},
+    "nodes": {"type": "array", "maxItems": 2000, "items": {"$ref": "#/$defs/node"}},
+    "truncated": {"type": "boolean"},
+    "coverage": {"type": "string", "minLength": 1},
+    "unavailableNodes": {"type": "integer", "minimum": 0},
+    "frame": false
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "bounds": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number"}, "y": {"type": "number"},
+        "width": {"type": "number", "minimum": 0}, "height": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "parentId", "depth", "role", "name", "identifier", "states", "actions", "bounds", "properties"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "parentId": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1}]},
+        "depth": {"type": "integer", "minimum": 0, "maximum": 30},
+        "role": {"type": "string"}, "name": {"type": "string"}, "identifier": {"type": "string"},
+        "states": {"anyOf": [{"type": "object"}, {"type": "array", "items": {"type": "string"}}]},
+        "actions": {"type": "array", "items": {"type": "string"}},
+        "bounds": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/bounds"}]},
+        "properties": {"type": "object"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

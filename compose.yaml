@@ -1,0 +1,36 @@
+services:
+  init:
+    profiles: [setup]
+    build:
+      context: .
+      target: orchestrator
+    command: [init, /run/credentials]
+    volumes:
+      - canaveral-credentials:/run/credentials
+  orchestrator:
+    build:
+      context: .
+      target: orchestrator
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - canaveral-state:/data
+      - canaveral-credentials:/run/credentials:ro
+    restart: unless-stopped
+  dashboard:
+    profiles: [dashboard]
+    build:
+      context: .
+      target: dashboard
+    command: [--url, "http://orchestrator:8765", --allow-http, dashboard, --bind, "0.0.0.0"]
+    ports:
+      - "127.0.0.1:8766:8766"
+    depends_on:
+      - orchestrator
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  canaveral-state:
+  canaveral-credentials:
