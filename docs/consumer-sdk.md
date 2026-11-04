@@ -6,12 +6,14 @@ is a small Node 24 client for the application/lease subset of the
 
 | Class | Credential | Operations |
 | --- | --- | --- |
-| `ConsumerClient` | Application key | `catalogue`, `listLeases`, `acquireLease`, `inspectLease`, `renewLease`, `releaseLease` |
+| `ConsumerClient` | Application key | `catalogue`, `listLeases`, `acquireLease`, `inspectLease`, `renewLease`, `releaseLease`, `rotateLeaseCredential` |
 | `LeaseClient` | One lease's current key | `inspect`, `renew`, `release` for its bound lease |
 
 `LeaseClient` has no catalogue, listing, acquisition or credential-rotation method, and each
-client sends only its own bearer. Sessions, durable operations, WebSocket and binary workers,
-credential rotation, and administrative, host or model endpoints are not implemented.
+client sends only its own bearer. `rotateLeaseCredential` is the explicit owner-only exchange:
+it is not idempotent, is never retried, revokes the previous lease key, and its result must not
+be logged. After an unknown outcome, call it again deliberately. Sessions, durable operations,
+WebSocket and binary workers, and administrative, host or model endpoints are not implemented.
 
 ```ts
 const client = new ConsumerClient({ baseUrl: "https://compute.example", applicationKey, caFile });
@@ -66,7 +68,9 @@ Success replies are checked for the fields the SDK relies on; extra fields are p
 operation and scoped bearer, byte-identical replay, local rejection, service/protocol errors,
 dropped, truncated and stalled replies with exactly one request, redirects, and TLS with a
 generated CA (default trust, unrelated CA and hostname mismatch refused). The TLS test needs
-`openssl` on `PATH`. These are fixtures against the documented contract, not a live controller,
+`openssl` on `PATH`. `coordination/test/linux-lease-controller.test.ts` also drives the SDK against real loopback
+[TypeScript Linux lease controller](linux-lease-controller.md) processes. These are fixtures
+against the documented contract, not
 separate-network TLS or native acceptance. Catalogue availability and lease readiness do not
 establish native execution: ordinary runners remain gated for consumer lease execution.
 

@@ -45,7 +45,18 @@ function respond(response: ServerResponse, value: unknown, status = 200): void {
 const selfAuthenticated = [
   "/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate",
   "/v1/model-jobs", "/v1/runners/model-jobs/claim", "/v1/runners/model-jobs/assignments", "/v1/runners/model-jobs/report",
+  "/v1/leases", "/v1/runners/linux-leases/claim", "/v1/runners/linux-leases/assignments", "/v1/runners/linux-leases/report",
 ];
+const leaseAdministration: Record<string, IdentityCommand["type"]> = {
+  "/v1/linux-lease-images": "leases.image", "/v1/linux-lease-grants": "leases.grant", "/v1/linux-lease-grants/revoke": "leases.grantRevoke",
+  "/v1/linux-lease-runner-approvals": "leases.approve", "/v1/linux-lease-runner-approvals/revoke": "leases.approvalRevoke",
+};
+const leaseBody: Record<string, IdentityCommand["type"]> = {
+  "/v1/leases": "leases.acquire", "/v1/runners/linux-leases/claim": "leases.claim",
+  "/v1/runners/linux-leases/assignments": "leases.assignments", "/v1/runners/linux-leases/report": "leases.report",
+};
+const leaseMutation: Record<string, IdentityCommand["type"]> = { credential: "leases.credential", renew: "leases.renew", release: "leases.release" };
+const LEASE_ID = "[0-9A-Fa-f-]{36}";
 const modelAdministration: Record<string, IdentityCommand["type"]> = {
   "/v1/model-catalog": "models.catalog", "/v1/resource-domains": "models.domain",
   "/v1/model-grants": "models.grant", "/v1/model-grants/revoke": "models.grantRevoke",
@@ -90,6 +101,7 @@ export function createIdentityHandler(identities: IdentityClient): (request: Inc
       const authorization = request.headers.authorization ?? "";
       const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
       const path = "/" + (request.url ?? "").split(/[?#]/, 1)[0]!.replace(/^\/+|\/+$/g, "");
+      const query = new URLSearchParams((request.url ?? "").split("#", 1)[0]!.split("?").slice(1).join("?"));
       if (request.method === "GET" && path === "/healthz") { respond(response, { ok: true }); return; }
       let command: IdentityCommand;
       if (request.method === "GET" && path === "/v1/auth/status") command = { type: "status" };
@@ -98,15 +110,25 @@ export function createIdentityHandler(identities: IdentityClient): (request: Inc
       else if (request.method === "GET" && /^\/v1\/runner-enrollments\/[^/]+$/.test(path)) command = { type: "runner.inspect", id: path.split("/")[3]!, token };
       else if (request.method === "GET" && /^\/v1\/model-jobs\/[^/]+$/.test(path)) command = { type: "models.inspect", id: path.split("/")[3]!, token };
       else if (request.method === "GET" && /^\/v1\/resource-domains\/[^/]+$/.test(path)) command = { type: "models.domainInspect", id: path.split("/")[3]!, token };
+      else if (request.method === "GET" && path === "/v1/environments/templates") command = { type: "leases.catalogue", token };
+      else if (request.method === "GET" && path === "/v1/leases") {
+        const keys = [...query.keys()];
+        if (keys.some(k => k !== "after") || query.getAll("after").length > 1) throw new ServiceError("Only an after cursor is supported.", 400);
+        const after = query.get("after");
+        command = after === null ? { type: "leases.list", token } : { type: "leases.list", token, after };
+      }
+      else if (request.method === "GET" && new RegExp(`^/v1/leases/${LEASE_ID}$`).test(path)) command = { type: "leases.inspect", id: path.split("/")[3]!, token };
       else if (request.method === "POST") {
         const modelCancel = /^\/v1\/model-jobs\/([^/]+)\/cancel$/.exec(path);
-        if (!selfAuthenticated.includes(path) && !modelCancel) {
+        const leaseAction = new RegExp(`^/v1/leases/(${LEASE_ID})/(credential|renew|release)$`).exec(path);
+        if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
         const value = await body(request);
-        const modelType = modelAdministration[path] ?? modelRunner[path];
+        const modelType = modelAdministration[path] ?? modelRunner[path] ?? leaseAdministration[path] ?? leaseBody[path];
         const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);
         if (modelCancel) command = { type: "models.cancel", id: modelCancel[1]!, token, body: value };
+        else if (leaseAction) command = { type: leaseMutation[leaseAction[2]!], id: leaseAction[1]!, token, body: value } as IdentityCommand;
         else if (modelType) command = { type: modelType, token, body: value } as IdentityCommand;
         else if (enrollmentRevoke) {
           if (Object.keys(value).length) throw new ServiceError("Expected an empty object.", 400);
@@ -129,7 +151,11 @@ export function createIdentityHandler(identities: IdentityClient): (request: Inc
       } else throw new ServiceError("Unknown endpoint.", 404);
       if (response.destroyed) return;
       const value = await identities.request(command);
-      // A new durable model job is 201; an exact replay of the same submission is 200.
+      // A new durable model job or lease is 201; an exact replay of the same submission is 200.
+      if (command.type === "leases.acquire") {
+        const acquired = value as { created: boolean; lease: unknown };
+        respond(response, acquired.lease, acquired.created ? 201 : 200); return;
+      }
       respond(response, value, command.type === "models.submit" && (value as { created?: unknown }).created === true ? 201 : 200);
     })().catch(error => {
       request.resume();

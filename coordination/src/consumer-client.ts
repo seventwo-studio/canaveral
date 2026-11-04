@@ -36,6 +36,8 @@ export interface AcquireRequest {
 export interface AcquireResult { /** True for 201 (new intent); false for an idempotent 200 replay. */ created: boolean; lease: Lease }
 export interface RenewRequest { id: string; expectedRevision: number; ttlSeconds: number }
 export interface ReleaseRequest { id: string }
+/** Fresh lease-scoped key. Store privately and never log it. */
+export interface LeaseCredential { id: string; credential: string }
 
 export type ErrorOutcome = "unknown" | undefined;
 /** Base for all SDK errors. `outcome === "unknown"` means a mutation may or may not have taken effect. */
@@ -416,6 +418,16 @@ export class ConsumerClient extends LeaseOperations {
       return reply;
     });
     return { created: status === 201, lease: value };
+  }
+  /** Owner-only explicit exchange. Not idempotent and never retried: each success revokes the
+   * previous lease key. After an unknown outcome, deliberately call again to obtain a fresh key. */
+  async rotateLeaseCredential(leaseId: string): Promise<LeaseCredential> {
+    const id = uuid(leaseId, "leaseId");
+    return (await parsed(this.#transport, "POST", `/v1/leases/${id}/credential`, {}, [200], true, undefined, value => {
+      if (!isRecord(value) || typeof value["id"] !== "string" || !sameId(value["id"], id) || typeof value["credential"] !== "string"
+        || !TOKEN.test(value["credential"])) throw new TypeError("credential");
+      return { id: value["id"], credential: value["credential"] };
+    })).value;
   }
   inspectLease(leaseId: string): Promise<Lease> { return this.inspectById(leaseId); }
   renewLease(leaseId: string, request: RenewRequest): Promise<MutationResult> { return this.renewById(leaseId, request); }

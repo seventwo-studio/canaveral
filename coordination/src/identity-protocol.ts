@@ -13,11 +13,18 @@ export type IdentityCommand =
   | { type: "models.catalog" | "models.domain" | "models.grant" | "models.grantRevoke" | "models.approve" | "models.approvalRevoke"; token: string; body: unknown }
   | { type: "models.domainInspect" | "models.inspect"; token: string; id: string }
   | { type: "models.submit" | "models.claim" | "models.assignments" | "models.report"; token: string; body: unknown }
-  | { type: "models.cancel"; token: string; id: string; body: unknown };
+  | { type: "models.cancel"; token: string; id: string; body: unknown }
+  | { type: "leases.image" | "leases.grant" | "leases.grantRevoke" | "leases.approve" | "leases.approvalRevoke"; token: string; body: unknown }
+  | { type: "leases.catalogue"; token: string }
+  | { type: "leases.list"; token: string; after?: string }
+  | { type: "leases.inspect"; token: string; id: string }
+  | { type: "leases.acquire" | "leases.claim" | "leases.assignments" | "leases.report"; token: string; body: unknown }
+  | { type: "leases.credential" | "leases.renew" | "leases.release"; token: string; id: string; body: unknown };
 
 export function mutates(command: IdentityCommand): boolean {
   return !["status", "authorize", "session", "applications.list", "runner.inspect", "runner.authenticate",
-    "models.domainInspect", "models.inspect", "models.assignments"].includes(command.type);
+    "models.domainInspect", "models.inspect", "models.assignments",
+    "leases.catalogue", "leases.list", "leases.inspect", "leases.assignments"].includes(command.type);
 }
 
 export type IdentityReply =
