@@ -76,6 +76,24 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
 }
 
 @main struct CanaveralVMRunner {
+    // The native restore object stays on the nonisolated executor.
+    private nonisolated static func printRestoreImage() async throws {
+        #if arch(arm64)
+        let restore = try await VZMacOSRestoreImage.latestSupported
+        guard restore.isSupported, let requirements = restore.mostFeaturefulSupportedConfiguration else {
+            throw CanaveralError.unavailable("No supported macOS restore image is available for this Mac.")
+        }
+        let version = restore.operatingSystemVersion
+        let result: [String: Any] = ["url": restore.url.absoluteString,
+            "version": "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)",
+            "build": restore.buildVersion, "cpu": requirements.minimumSupportedCPUCount,
+            "memoryMiB": requirements.minimumSupportedMemorySize / 1048576]
+        let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+        #else
+        throw CanaveralError.unavailable("macOS restore images require an Apple silicon host.")
+        #endif
+    }
     @MainActor static func main() async {
         do {
             let arguments = Array(CommandLine.arguments.dropFirst())
@@ -89,21 +107,7 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
                 guard VZVirtualMachine.isSupported else { throw CanaveralError.unavailable("Hardware virtualization is unavailable.") }
                 print("Apple virtualization available")
             case "restore-image":
-                #if arch(arm64)
-                let restore = try await VZMacOSRestoreImage.latestSupported
-                guard restore.isSupported, let requirements = restore.mostFeaturefulSupportedConfiguration else {
-                    throw CanaveralError.unavailable("No supported macOS restore image is available for this Mac.")
-                }
-                let version = restore.operatingSystemVersion
-                let result: [String: Any] = ["url": restore.url.absoluteString,
-                    "version": "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)",
-                    "build": restore.buildVersion, "cpu": requirements.minimumSupportedCPUCount,
-                    "memoryMiB": requirements.minimumSupportedMemorySize / 1048576]
-                let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
-                print(String(decoding: data, as: UTF8.self))
-                #else
-                throw CanaveralError.unavailable("macOS restore images require an Apple silicon host.")
-                #endif
+                try await printRestoreImage()
             case "prepare":
                 let input = FileHandle.standardInput.readDataToEndOfFile()
                 guard input.count <= 65536 else { throw CanaveralError.invalid("Preparation request too large.") }
