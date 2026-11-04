@@ -1,4 +1,6 @@
 export type IdentityCommand =
+  | { type: "runner.issue" | "runner.consume" | "runner.authenticate" | "runner.rotate" | "runner.revoke"; token: string; body: unknown }
+  | { type: "runner.inspect" | "runner.revokeEnrollment"; token: string; id: string }
   | { type: "status" }
   | { type: "authorize"; token: string; setup: boolean }
   | { type: "setup"; token: string; body: unknown }
@@ -10,7 +12,7 @@ export type IdentityCommand =
   | { type: "applications.rotate" | "applications.revoke"; token: string; id: string; body: unknown };
 
 export function mutates(command: IdentityCommand): boolean {
-  return !["status", "authorize", "session", "applications.list"].includes(command.type);
+  return !["status", "authorize", "session", "applications.list", "runner.inspect", "runner.authenticate"].includes(command.type);
 }
 
 export type IdentityReply =

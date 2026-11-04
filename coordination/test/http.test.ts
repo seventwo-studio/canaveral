@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
@@ -18,7 +18,8 @@ async function fixture(t: { after: (callback: () => Promise<void>) => void }, ti
   const directory = mkdtempSync(join(tmpdir(), "canaveral-coordinator-http-"));
   const path = join(directory, "controller.sqlite");
   const admin = randomBytes(32).toString("base64url");
-  const client = new IdentityClient({ path, adminToken: admin, requestTimeoutMs: timeout });
+  const controllerId = randomUUID();
+  const client = new IdentityClient({ path, adminToken: admin, controllerId, requestTimeoutMs: timeout });
   const server = createIdentityServer(client);
   t.after(async () => {
     await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
@@ -48,7 +49,7 @@ async function fixture(t: { after: (callback: () => Promise<void>) => void }, ti
       request.end(data);
     });
   }
-  return { client, server, path, admin, request, raw };
+  return { client, server, path, admin, controllerId, request, raw };
 }
 
 test("controller first-run, login, session and logout keep administrator proof separate", async t => {
@@ -178,4 +179,48 @@ test("uncloneable commands are pre-effect refusals and do not poison the owned w
   await assert.rejects(client.request({ type: "setup", token: admin, body: { username: "admin", password: () => "invalid" } }),
     error => error instanceof ServiceError && error.status === 400 && error.outcome === undefined);
   assert.deepEqual(await client.request({ type: "status" }), { setupRequired: true });
+});
+
+
+test("runner HTTP routes separate administrator, enrollment and consumer proofs", async t => {
+  const { request, admin, controllerId } = await fixture(t);
+  const account = await request("/v1/auth/setup", { username: "admin", password }, admin);
+  const session = account.body.token as string;
+  const consumer = await request("/v1/consumers", { id: randomUUID(), name: "fixture", templates: [], limits: { resources: { cpu: 1, memoryMiB: 1, diskGiB: 1 }, activeLeases: 1 } }, session);
+  const b = { controllerId, runnerId: randomUUID(), generation: 1, incarnationId: randomUUID() };
+  const spec = { id: randomUUID(), ...b, ttlSeconds: 60 };
+  const credential = randomBytes(32).toString("base64url"), consume = { id: spec.id, ...b, credential };
+  for (const token of [undefined, consumer.body.credential as string]) {
+    assert.equal((await request("/v1/runner-enrollments", spec, token)).status, 401);
+    assert.equal((await request("/v1/runner-enrollments/consume", consume, token)).status, 401);
+    assert.equal((await request("/v1/runners/revoke", b, token)).status, 401);
+  }
+  const issued = await request("/v1/runner-enrollments", spec, session);
+  assert.equal(issued.status, 200);
+  const enrollment = issued.body.enrollmentToken as string;
+  for (const token of [consumer.body.credential as string, enrollment, credential]) {
+    assert.equal((await request(`/v1/runner-enrollments/${spec.id}`, undefined, token)).status, 401);
+    assert.equal((await request("/v1/runner-enrollments", { ...spec, id: randomUUID() }, token)).status, 401);
+  }
+  assert.equal((await request("/v1/runner-enrollments/consume", { ...consume, runnerId: randomUUID() }, enrollment)).status, 401);
+  assert.equal((await request("/v1/runner-enrollments/consume", { ...consume, controllerId: randomUUID() }, enrollment)).status, 403);
+  assert.equal((await request("/v1/runner-enrollments/consume", consume, admin)).status, 401);
+  assert.equal((await request("/v1/runner-enrollments/consume", consume, enrollment)).status, 200);
+  assert.equal((await request("/v1/runner-enrollments/consume", consume, enrollment)).status, 200);
+  assert.equal((await request("/v1/runners/authenticate", b, credential)).status, 200);
+  assert.equal((await request("/v1/runners/authenticate", b, enrollment)).status, 401);
+  assert.equal((await request("/v1/runners/credential", { ...b, credentialRevision: 2, credential }, credential)).status, 401);
+  const rotated = randomBytes(32).toString("base64url"), rotation = { ...b, credentialRevision: 2, credential: rotated };
+  assert.equal((await request("/v1/runners/credential", rotation, session)).status, 200);
+  assert.equal((await request("/v1/runners/credential", rotation, session)).status, 200);
+  assert.equal((await request("/v1/runners/authenticate", b, credential)).status, 401);
+  assert.equal((await request("/v1/runners/authenticate", b, rotated)).status, 200);
+  const inspected = await request(`/v1/runner-enrollments/${spec.id}`, undefined, session);
+  assert.equal(inspected.body.state, "consumed");
+  assert.equal(JSON.stringify(inspected).includes(enrollment), false);
+  assert.equal((await request(`/v1/runner-enrollments/${spec.id}/revoke`, {}, session)).status, 200);
+  assert.equal((await request("/v1/runners/authenticate", b, rotated)).status, 200);
+  assert.equal((await request("/v1/runners/revoke", b, session)).status, 200);
+  assert.equal((await request("/v1/runners/revoke", b, session)).status, 200);
+  assert.equal((await request("/v1/runners/authenticate", b, rotated)).status, 401);
 });

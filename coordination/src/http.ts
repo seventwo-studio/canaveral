@@ -41,7 +41,7 @@ function respond(response: ServerResponse, value: unknown, status = 200): void {
   response.end(encoded);
 }
 
-/** Controller identity HTTP subset. Does not listen, enroll hosts or select state.
+/** Controller identity HTTP subset. Does not listen or select state.
  * Browser cookies/assets and the remaining controller routes are separate ports.
  */
 export function createIdentityServer(identities: IdentityClient) {
@@ -67,12 +67,23 @@ export function createIdentityServer(identities: IdentityClient) {
       if (request.method === "GET" && path === "/v1/auth/status") command = { type: "status" };
       else if (request.method === "GET" && path === "/v1/auth/session") command = { type: "session", token };
       else if (request.method === "GET" && path === "/v1/consumers") command = { type: "applications.list", token };
+      else if (request.method === "GET" && /^\/v1\/runner-enrollments\/[^/]+$/.test(path)) command = { type: "runner.inspect", id: path.split("/")[3]!, token };
       else if (request.method === "POST") {
-        if (path !== "/v1/auth/login") {
+        if (!["/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate"].includes(path)) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
         const value = await body(request);
-        if (path === "/v1/auth/setup") command = { type: "setup", token, body: value };
+        const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);
+        if (enrollmentRevoke) {
+          if (Object.keys(value).length) throw new ServiceError("Expected an empty object.", 400);
+          command = { type: "runner.revokeEnrollment", id: enrollmentRevoke[1]!, token };
+        }
+        else if (path === "/v1/runner-enrollments") command = { type: "runner.issue", token, body: value };
+        else if (path === "/v1/runner-enrollments/consume") command = { type: "runner.consume", token, body: value };
+        else if (path === "/v1/runners/authenticate") command = { type: "runner.authenticate", token, body: value };
+        else if (path === "/v1/runners/credential") command = { type: "runner.rotate", token, body: value };
+        else if (path === "/v1/runners/revoke") command = { type: "runner.revoke", token, body: value };
+        else if (path === "/v1/auth/setup") command = { type: "setup", token, body: value };
         else if (path === "/v1/auth/login") command = { type: "login", body: value };
         else if (path === "/v1/auth/logout") command = { type: "logout", token };
         else if (path === "/v1/consumers") command = { type: "applications.create", token, body: value };
