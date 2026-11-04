@@ -280,31 +280,40 @@ fn remove_tree(parent: &File, n: &CString) -> Result<()> {
     }
     let result = (|| {
         loop {
-            let entry = unsafe { libc::readdir(entries) };
-            if entry.is_null() {
+            unsafe { libc::rewinddir(entries) };
+            let mut removed = false;
+            loop {
+                let entry = unsafe { libc::readdir(entries) };
+                if entry.is_null() {
+                    break;
+                }
+                let child = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+                if child.to_bytes() == b"." || child.to_bytes() == b".." {
+                    continue;
+                }
+                let child = child.to_owned();
+                let mut m: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    libc::fstatat(
+                        dir.as_raw_fd(),
+                        child.as_ptr(),
+                        &mut m,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    return Err(invalid());
+                }
+                if m.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                    remove_tree(&dir, &child)?;
+                } else if unsafe { libc::unlinkat(dir.as_raw_fd(), child.as_ptr(), 0) } != 0 {
+                    return Err(invalid());
+                }
+                removed = true;
+            }
+            // Rewind after removals: directory offsets need not remain stable.
+            if !removed {
                 break;
-            }
-            let child = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
-            if child.to_bytes() == b"." || child.to_bytes() == b".." {
-                continue;
-            }
-            let child = child.to_owned();
-            let mut m: libc::stat = unsafe { std::mem::zeroed() };
-            if unsafe {
-                libc::fstatat(
-                    dir.as_raw_fd(),
-                    child.as_ptr(),
-                    &mut m,
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            } != 0
-            {
-                return Err(invalid());
-            }
-            if m.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                remove_tree(&dir, &child)?;
-            } else if unsafe { libc::unlinkat(dir.as_raw_fd(), child.as_ptr(), 0) } != 0 {
-                return Err(invalid());
             }
         }
         io(dir.sync_all())?;
@@ -322,6 +331,27 @@ fn remove_tree(parent: &File, n: &CString) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cleanup_rechecks_directory_after_many_removals() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp =
+            tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+        let root = temp.path().join("state");
+        let directory = Directory::open(&root).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for i in 0..16 {
+            let nested = workspace.join(format!("directory-{i}"));
+            std::fs::create_dir(&nested).unwrap();
+            for j in 0..64 {
+                std::fs::write(nested.join(format!("file-{j}")), b"fixture").unwrap();
+            }
+        }
+        directory.cleanup_workspace().unwrap();
+        assert!(!workspace.exists());
+        directory.check().unwrap();
+    }
     #[test]
     fn credential_and_ca_reject_links_and_unsafe_modes() {
         use std::os::unix::fs::{symlink, PermissionsExt};

@@ -116,6 +116,7 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
         }
     }
     executor.prepare(); // Staging is complete before any claim request.
+    executor.staged.as_ref().map_err(|error| *error)?;
     let mut claim: Claim = match executor.directory.read_optional("claim.json")? {
         Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt claim")?,
         None => new_claim(config.binding.clone())?,

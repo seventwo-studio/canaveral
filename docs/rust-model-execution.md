@@ -55,8 +55,8 @@ budgets below are explicit operator limits, not capacity measurements.
 for an IP-literal loopback origin. Redirects, proxy inheritance and automatic
 HTTP retries are disabled. The executable takes no consumer-supplied command,
 runtime endpoint, path or download source. Its bytes are copied into the private executor state while hashing and fsynced
-before the HTTP claim request. Staging errors become prelaunch failures without
-runtime effects. The verified artifact is reused only within that invocation;
+before the HTTP claim request. Staging errors abort before claiming: queued
+application jobs and reservations remain unchanged. The verified artifact is reused only within that invocation;
 restart never restages while reconciling an unresolved assignment. Execution
 requires the operator's SHA-256 to match. It must be a self-contained executable that supports `serve`, remains
 in the owned process group and keeps its generation listener in the leader.
@@ -177,3 +177,16 @@ suspend timing under real sleep, shared VM admission or production cutover.
 Streaming, warm models, embeddings and non-text modes are explicitly unsupported.
 Windows and other platforms lack this adapter's socket ownership/clock support.
 Native execution remains a separately authorized evidence gate.
+
+## Native isolation gate
+
+The Ollama loopback API has no authentication. Other local principals can reach its
+mutation and generation endpoints; socket ownership checks do not prevent this.
+`OLLAMA_NOPRUNE` prevents startup pruning but is not a read-only model-store or
+network-isolation boundary. A local caller could replace a manifest or request
+additional work between inventory verification and generation. This adapter is
+not qualified for native operation with untrusted local callers or concurrently
+writable inventory. Native acceptance must prove an isolated ingress boundary and
+immutable/read-only model inventory (including installed blob integrity), in
+addition to runtime distribution and resource fit. Those enforcement mechanisms
+are not implemented here; loopback fixtures do not close this gate.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {mkdtempSync,mkdirSync,realpathSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,chmodSync,realpathSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import http from 'node:http';
@@ -37,7 +37,17 @@ try {
  async function run(file=path){const c=await start(runner,[file]);let errors='';c.stderr.on('data',b=>errors+=b);const [code]=await once(c,'exit');return {code,errors};}
  const submit=async(prompt)=>{const id=randomUUID();await call('/v1/model-jobs',{version:1,applicationId:appId,id,message:{type:'submit',adapter:'ollama',model,digest,prompt,maxTokens:64}},app.credential);return id;};
  const inspect=id=>call('/v1/model-jobs/'+id,undefined,app.credential,'GET');
- const first=await submit('success');const firstRun=await run();assert.equal(firstRun.code,0,firstRun.errors);let view=await inspect(first);assert.equal(view.state,'succeeded',firstRun.errors);assert.equal(view.result.text,'fixture output');assert.deepEqual(view.result.usage,{inputTokens:5,outputTokens:2});assert.equal(view.reservationHeld,false);assert(!existsSync(join(dir,'state','workspace')));
+ const first=await submit('success');
+ // A local preflight error must not consume or fail a queued application job.
+ const goodPin=config.execution.executableSha256;
+ config.execution.executableSha256='00'.repeat(32);save();
+ const badPin=await run();assert.equal(badPin.code,1,badPin.errors);
+ assert.equal((await inspect(first)).state,'queued');assert.equal((await inspect(first)).assignment,'none');assert.equal((await inspect(first)).reservationHeld,false);assert(!existsSync(join(dir,'state','claim.json')));
+ config.execution.executableSha256=goodPin;save();
+ chmodSync(config.execution.modelsDir,0o777);
+ const unsafeModels=await run();assert.equal(unsafeModels.code,1,unsafeModels.errors);assert.equal((await inspect(first)).state,'queued');assert.equal((await inspect(first)).reservationHeld,false);
+ chmodSync(config.execution.modelsDir,0o700);
+ const firstRun=await run();assert.equal(firstRun.code,0,firstRun.errors);let view=await inspect(first);assert.equal(view.state,'succeeded',firstRun.errors);assert.equal(view.result.text,'fixture output');assert.deepEqual(view.result.usage,{inputTokens:5,outputTokens:2});assert.equal(view.reservationHeld,false);assert(!existsSync(join(dir,'state','workspace')));
  const second=await submit('hang');const c=await start(runner,[path]);let errors='';c.stderr.on('data',b=>errors+=b);for(let i=0;i<200;i++){if((await inspect(second)).assignment==='current')break;await new Promise(r=>setTimeout(r,10));}
  for(let i=0;i<500&&!existsSync(join(dir,'state','workspace','generation.started'));i++)await new Promise(r=>setTimeout(r,10));assert(existsSync(join(dir,'state','workspace','generation.started')));
  const cancelledPid=Number(readFileSync(join(dir,'state','workspace','runtime.pid'),'utf8'));
