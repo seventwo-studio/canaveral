@@ -26,8 +26,12 @@ function requireAdministrator(token: string): void {
 
 async function dispatch(command: IdentityCommand): Promise<unknown> {
   if (command.type.startsWith("runner.")) {
-    if (!runners) throw new ServiceError("Runner enrollment requires a configured controller identity.", 503, { retryable: false });
-    if (command.type !== "runner.consume" && command.type !== "runner.authenticate" && "token" in command) requireAdministrator(command.token);
+    const runnerProof = command.type === "runner.consume" || command.type === "runner.authenticate";
+    if (!runnerProof && "token" in command) requireAdministrator(command.token);
+    if (!runners) {
+      if (runnerProof) throw new ServiceError("Runner credential or enrollment rejected.", 401);
+      throw new ServiceError("Runner enrollment requires a configured controller identity.", 503, { retryable: false });
+    }
   }
   switch (command.type) {
     case "runner.issue": return runners!.issue(command.body);

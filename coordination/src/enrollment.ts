@@ -57,6 +57,11 @@ export class RunnerEnrollment {
     // Retained Python identities require a separate, explicit migration; never adopt them.
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts'").get() && db.prepare("SELECT 1 FROM hosts WHERE id=?").get(b.runnerId)) throw new ServiceError("Legacy host identity requires explicit migration.", 409);
   }
+  private rejectEnrollmentSecret(db: DatabaseSync, credential: unknown): void {
+    if (db.prepare("SELECT 1 FROM runner_enrollments WHERE token=?").get(hash(credential, "enrollment"))) {
+      throw new ServiceError("Runner and enrollment credentials must differ.", 400);
+    }
+  }
   private remember(db: DatabaseSync, b: Binding, credential: string, revision: number): void {
     if (db.prepare("SELECT 1 FROM runner_credential_history WHERE credential=?").get(credential)) throw new ServiceError("Runner credential was already used; generate a fresh secret.", 409);
     db.prepare("INSERT INTO runner_credential_history VALUES (?,?,?,?,?)").run(credential, b.controllerId, b.runnerId, b.generation, revision);
@@ -95,7 +100,7 @@ export class RunnerEnrollment {
       if (!r) denied();
       if (!equal(r.token, tokenHash) || r.revoked) denied();
       if (r.controller !== b.controllerId || r.runner !== b.runnerId || r.generation !== b.generation || r.incarnation !== b.incarnationId) denied();
-      if (equal(hash(token, "runner"), credential)) throw new ServiceError("Runner and enrollment credentials must differ.", 400);
+      this.rejectEnrollmentSecret(db, input.credential);
       if (r.consumed) {
         const row = this.latest(db, b);
         if (!row || row.revoked || !this.matches(row, b) || row.revision !== 1 || !equal(r.consumed, credential) || !equal(row.credential, credential)) denied();
@@ -128,6 +133,7 @@ export class RunnerEnrollment {
         return { ...b, revoked: true };
       }
       if (row.revoked) throw new ServiceError("Revoked runner cannot rotate credentials.", 409);
+      this.rejectEnrollmentSecret(db, input.credential);
       if (revision === row.revision && equal(row.credential, credential)) return { ...b, credentialRevision: revision };
       if (equal(row.credential, credential)) throw new ServiceError("Rotation requires a fresh credential.", 409);
       if (revision !== row.revision + 1) throw new ServiceError("Credential revision must advance exactly once.", 409);

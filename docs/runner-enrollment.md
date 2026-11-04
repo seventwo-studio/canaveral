@@ -20,7 +20,7 @@ A **binding** is the exact object `{controllerId, runnerId, generation, incarnat
 | `POST /v1/runners/credential` | Administrator | `{...binding, credentialRevision, credential}`; caller securely generates and saves a fresh replacement credential. Revision must advance by exactly one. Returns binding and revision. |
 | `POST /v1/runners/revoke` | Administrator | Binding; idempotently revokes that binding. Returns binding and `revoked: true`. |
 
-Secrets follow the existing 43–128 URL-safe ASCII character syntax. Generate at least 32 random bytes, encoded as base64url. Enrollment tokens are generated with 32 random bytes. Runner secrets cannot equal their enrollment token or reuse any previously enrolled or rotated runner credential in this database. A hash history preserves this check across revocation and generations. Stored hashes use SHA-256 with separate enrollment and runner domains. Administrator secrets remain governed by the existing account/session implementation. Runner credentials cannot authorize administrative routes or enrollment consumption.
+Secrets follow the existing 43–128 URL-safe ASCII character syntax. Generate at least 32 random bytes, encoded as base64url. Enrollment tokens are generated with 32 random bytes. Runner secrets cannot equal any recorded enrollment token, even after its expiry or revocation, or reuse any previously enrolled or rotated runner credential in this database. A hash history preserves this check across revocation and generations. Stored hashes use SHA-256 with separate enrollment and runner domains. Administrator secrets remain governed by the existing account/session implementation. Runner credentials cannot authorize administrative routes or enrollment consumption.
 
 ## Transactions and uncertain replies
 
@@ -30,7 +30,11 @@ An exact consume retry is a receipt lookup after the first durable consumption, 
 
 After a lost issue reply, inspect the supplied approval ID and revoke it before issuing a replacement with a fresh ID. Reissuing the same ID returns conflict and never another token. After a lost consume reply, retry the saved exact request or authenticate with the saved runner credential. After a lost rotation reply, retry the exact revision and replacement credential: a matching current revision is an idempotent receipt; a different secret or stale revision conflicts. The old credential stops authenticating immediately on commit. Administrator-assisted delivery and durable runner-side application of rotations remain integration work. Rotation cannot reactivate a revoked binding.
 
-Replacement enrollment requires explicit new administrator approval, revocation of the prior binding, a strictly higher generation and an incarnation UUID never used for that runner. Every consume rechecks these requirements. An old generation cannot authenticate, rotate or revoke the current binding. This is identity fencing only: revoking a disconnected or unknown runner does not prove execution stopped, erase storage or free workload reservations. Workload stop fencing and conservative reconciliation remain required before capacity reuse.
+Replacement enrollment requires explicit new administrator approval, revocation of the prior binding, a strictly higher generation and an incarnation UUID never used for that runner. Every consume rechecks these requirements. An old generation cannot authenticate, rotate or revoke the current binding. Revoking a binding does not revoke separately issued pending approvals for that runner.
+An operator responding to compromise must inspect and revoke those approvals too
+before approving a replacement.
+
+This is identity fencing only: revoking a disconnected or unknown runner does not prove execution stopped, erase storage or free workload reservations. Workload stop fencing and conservative reconciliation remain required before capacity reuse.
 
 ## Compatibility and remaining gates
 
@@ -39,3 +43,8 @@ Only the new `runner_controller_identity`, `runner_enrollments`, `runner_binding
 Fixtures cover role and pair rejection, expiry boundaries, transaction races through independent workers, exact lost-response retries, rotation/revocation, restart persistence, generation regression, immutable incarnation history and retained legacy rows. These establish source behavior on disposable databases and loopback HTTP only. They do not establish native runner integration, secure credential delivery, TLS/proxy deployment, cloned-state detection, workload fencing or release acceptance. Database retention/backup policy for approval receipts and historical bindings is also future work; do not prune them without preserving replay and generation fencing.
 
 The next slice must wire Rust runner identity storage, authenticated outbound transport and bounded session ownership to these bindings. A clone carrying the same credential, generation and incarnation is cryptographically indistinguishable here; detecting concurrent claims needs transport/session fencing and operator reconciliation. No inventory, scheduling, networking or model ledger is included in this foundation.
+
+Do not run legacy Python and TypeScript enrollment against the same database concurrently.
+The legacy Python endpoint does not check new runner bindings; sharing writable state
+would permit a colliding legacy UUID. Cutover requires a separate compatibility and
+authority-fencing procedure before either path becomes production authority.

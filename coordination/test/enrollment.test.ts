@@ -126,6 +126,10 @@ test("runner commands require explicit controller configuration without breaking
   t.after(() => client.close());
   assert.deepEqual(await client.request({ type: "status" }), { setupRequired: true });
   await assert.rejects(client.request({ type: "runner.issue", token: admin, body: f.spec }), status(503));
+  await assert.rejects(client.request({ type: "runner.inspect", token: key(), id: f.spec.id }), status(401));
+  await assert.rejects(client.request({ type: "runner.issue", token: key(), body: f.spec }), status(401));
+  await assert.rejects(client.request({ type: "runner.consume", token: key(), body: f.consume }), status(401));
+  await assert.rejects(client.request({ type: "runner.authenticate", token: key(), body: f.b }), status(401));
 });
 
 
@@ -140,4 +144,20 @@ test("credential history rejects cross-runner sharing and old-secret reuse atomi
   assert.throws(() => f.service.consume(another.enrollmentToken, { id, ...b2, credential: f.credential }), status(409));
   assert.equal((f.service.inspect(id) as { state: string }).state, "pending");
   f.service.consume(another.enrollmentToken, { id, ...b2, credential: key() });
+});
+
+test("consumption and rotation never promote enrollment tokens into runner credentials", t => {
+  const f = fixture(t), issued = f.issue();
+  const other = { ...f.spec, id: randomUUID(), runnerId: randomUUID(), incarnationId: randomUUID() };
+  const pending = f.service.issue(other) as { enrollmentToken: string };
+  assert.throws(() => f.service.consume(issued.enrollmentToken, { ...f.consume, credential: pending.enrollmentToken }), status(400));
+  f.service.consume(issued.enrollmentToken, f.consume);
+  for (const token of [issued.enrollmentToken, pending.enrollmentToken]) {
+    assert.throws(() => f.service.manage({ ...f.b, credentialRevision: 2, credential: token }, false), status(400));
+    assert.throws(() => f.service.authenticate(token, f.b), status(401));
+  }
+  assert.deepEqual(f.service.authenticate(f.credential, f.b), { ...f.b, credentialRevision: 1 });
+  f.service.revokeEnrollment(other.id);
+  assert.throws(() => f.service.manage({ ...f.b, credentialRevision: 2, credential: pending.enrollmentToken }, false), status(400));
+  assert.deepEqual(f.service.manage({ ...f.b, credentialRevision: 2, credential: key() }, false), { ...f.b, credentialRevision: 2 });
 });
