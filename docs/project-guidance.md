@@ -8,6 +8,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [applications](applications.md)
 - [client recovery](client-recovery.md)
 - [consumer api](consumer-api.md)
+- [TypeScript consumer SDK](consumer-sdk.md)
 - [consumer operations](consumer-operations.md)
 - [dashboard](dashboard.md)
 - [devices](devices.md)
