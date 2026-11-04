@@ -27,23 +27,77 @@ async function until(check, what, ms = 15000) {
   const end = Date.now() + ms;
   for (;;) { const value = await check(); if (value) return value; if (Date.now() > end) throw new Error('timed out: ' + what); await sleep(50); }
 }
+// Extension OIDs (hex of the OID body) of a DER X.509 certificate, in order and with repeats.
+function extensionOids(der) {
+  const tlv = offset => {
+    let length = der[offset + 1], header = 2;
+    if (length & 0x80) { const n = length & 0x7f; length = 0; for (let i = 0; i < n; i++) length = length * 256 + der[offset + 2 + i]; header += n; }
+    assert(offset + header + length <= der.length, 'truncated certificate DER');
+    return {tag: der[offset], start: offset + header, end: offset + header + length};
+  };
+  const children = node => { const out = []; for (let o = node.start; o < node.end; o = out.at(-1).end) out.push(tlv(o)); return out; };
+  const [tbs] = children(tlv(0));
+  const explicit = children(tbs).find(c => c.tag === 0xa3);
+  if (!explicit) return [];
+  return children(children(explicit)[0]).map(extension => { const oid = children(extension)[0]; return der.subarray(oid.start, oid.end).toString('hex'); });
+}
 // Ambient proxies are poisoned: every client must reach the loopback controller directly.
 const env = {...process.env, HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1', ALL_PROXY: 'http://127.0.0.1:1', NO_PROXY: ''};
 let controller, proxy;
 try {
-  // Disposable CA and localhost leaf.
+  // Disposable CA and localhost leaf, generated from an explicit OpenSSL configuration. Ambient
+  // configuration is not portable: OpenSSL 1.1.1w (the macos-15 runner image's openssl) merges
+  // `req -x509 -addext` with the default [v3_ca] section and writes duplicate extensions, which
+  // OpenSSL, Node and rustls all refuse as an issuer. So: no -addext, no default sections, one
+  // named extension section per certificate, and OPENSSL_CONF pinned to this file.
   const pem = name => join(dir, name);
-  await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('ca-key.pem'), '-out', pem('ca.pem'), '-days', '1', '-subj', '/CN=Fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash']);
-  await exec('openssl', ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('key.pem'), '-out', pem('leaf.csr'), '-subj', '/CN=localhost']);
-  writeFileSync(pem('ext.cnf'), 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n');
-  await exec('openssl', ['x509', '-req', '-in', pem('leaf.csr'), '-CA', pem('ca.pem'), '-CAkey', pem('ca-key.pem'), '-CAcreateserial', '-out', pem('cert.pem'), '-days', '1', '-extfile', pem('ext.cnf')]);
-  await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('other-key.pem'), '-out', pem('other-ca.pem'), '-days', '1', '-subj', '/CN=Unrelated Fixture CA']);
+  const opensslConf = pem('openssl.cnf');
+  writeFileSync(opensslConf, [
+    '[req]', 'distinguished_name = dn', 'string_mask = utf8only', '[dn]', 'commonName = Common Name (set by -subj)',
+    '[ca_ext]', 'basicConstraints = critical,CA:TRUE', 'keyUsage = critical,keyCertSign,cRLSign', 'subjectKeyIdentifier = hash',
+    '[leaf_ext]', 'subjectAltName = DNS:localhost', 'basicConstraints = critical,CA:FALSE', 'keyUsage = critical,digitalSignature,keyEncipherment',
+    'extendedKeyUsage = serverAuth', 'subjectKeyIdentifier = hash', 'authorityKeyIdentifier = keyid,issuer', ''].join('\n'));
+  const opensslEnv = {...process.env, OPENSSL_CONF: opensslConf};
+  for (const name of ['SSL_CERT_FILE', 'SSL_CERT_DIR', 'OPENSSL_ENGINES', 'OPENSSL_MODULES']) delete opensslEnv[name];
+  const openssl = args => exec('openssl', args, {env: opensslEnv});
+  const selfSigned = (keyName, certName, subject) => openssl(['req', '-config', opensslConf, '-x509', '-extensions', 'ca_ext', '-sha256',
+    '-newkey', 'rsa:2048', '-nodes', '-keyout', pem(keyName), '-out', pem(certName), '-days', '1', '-subj', subject]);
+  await selfSigned('ca-key.pem', 'ca.pem', '/CN=Fixture CA');
+  await openssl(['req', '-config', opensslConf, '-new', '-sha256', '-newkey', 'rsa:2048', '-nodes', '-keyout', pem('key.pem'), '-out', pem('leaf.csr'), '-subj', '/CN=localhost']);
+  await openssl(['x509', '-req', '-sha256', '-in', pem('leaf.csr'), '-CA', pem('ca.pem'), '-CAkey', pem('ca-key.pem'), '-CAcreateserial', '-out', pem('cert.pem'),
+    '-days', '1', '-extfile', opensslConf, '-extensions', 'leaf_ext']);
+  await selfSigned('other-key.pem', 'other-ca.pem', '/CN=Unrelated Fixture CA');
   const ca = readFileSync(pem('ca.pem'));
-  // Validate the generated chain independently before any controller request. No system trust.
-  await exec('openssl', ['verify', '-CAfile', pem('ca.pem'), '-purpose', 'sslserver', pem('cert.pem')]);
-  const root = new X509Certificate(ca), leaf = new X509Certificate(readFileSync(pem('cert.pem')));
-  assert(root.ca && leaf.checkIssued(root) && leaf.verify(root.publicKey), 'invalid fixture certificate chain');
-  assert.equal(leaf.checkHost('localhost'), 'localhost');
+  // Public certificate diagnostics only (never key material): tool, subject/issuer, fingerprint and
+  // the DER extension list, where a duplicate would show up as a repeated OID.
+  const {stdout: opensslVersion} = await openssl(['version']);
+  const EXT = {'551d13': 'basicConstraints', '551d0f': 'keyUsage', '551d0e': 'subjectKeyIdentifier', '551d23': 'authorityKeyIdentifier', '551d11': 'subjectAltName', '551d25': 'extendedKeyUsage'};
+  const certificates = Object.fromEntries(['ca.pem', 'cert.pem', 'other-ca.pem'].map(name => [name, new X509Certificate(readFileSync(pem(name)))]));
+  const summary = Object.entries(certificates).map(([name, c]) => `${name}: subject=${JSON.stringify(c.subject)} issuer=${JSON.stringify(c.issuer)} ca=${c.ca} sha256=${c.fingerprint256} extensions=${extensionOids(c.raw).map(o => EXT[o] ?? o).join(',')}`);
+  console.error(`fixture certificates (${opensslVersion.trim()}, OPENSSL_CONF=fixture):\n  ${summary.join('\n  ')}`);
+  try {
+    for (const [name, c] of Object.entries(certificates)) {
+      const oids = extensionOids(c.raw);
+      assert.equal(new Set(oids).size, oids.length, `${name} repeats an X.509 extension`);
+      assert(['551d13', '551d0f', '551d0e'].every(o => oids.includes(o)), `${name} lacks basicConstraints, keyUsage or subjectKeyIdentifier`);
+    }
+    // Validate the generated chain independently before any controller request. No system trust.
+    await openssl(['verify', '-x509_strict', '-CAfile', pem('ca.pem'), '-purpose', 'sslserver', pem('cert.pem')]);
+    const root = certificates['ca.pem'], leaf = certificates['cert.pem'];
+    assert.deepEqual(Object.values(certificates).map(c => [c.subject, c.issuer]),
+      [['CN=Fixture CA', 'CN=Fixture CA'], ['CN=localhost', 'CN=Fixture CA'], ['CN=Unrelated Fixture CA', 'CN=Unrelated Fixture CA']], 'unexpected fixture certificate names');
+    assert(root.ca && !leaf.ca && root.checkIssued(root) && root.verify(root.publicKey), 'invalid fixture root certificate');
+    assert(leaf.checkIssued(root) && leaf.verify(root.publicKey), 'invalid fixture certificate chain');
+    assert(!leaf.checkIssued(certificates['other-ca.pem']), 'unrelated fixture CA issued the leaf');
+    assert.equal(leaf.checkHost('localhost'), 'localhost');
+  } catch (error) {
+    // Public certificate text only: no keys, no public-key or signature dumps.
+    for (const name of Object.keys(certificates)) {
+      const {stdout} = await openssl(['x509', '-in', pem(name), '-noout', '-text', '-certopt', 'no_pubkey,no_sigdump']).catch(e => ({stdout: String(e)}));
+      console.error(`--- ${name}\n${stdout}`);
+    }
+    throw error;
+  }
 
   // Real controller process with TLS. Its wall clock is a fixture file so expiry is exact.
   const admin = key(), controllerId = randomUUID(), clockFile = join(dir, 'clock');
