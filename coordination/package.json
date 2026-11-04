@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=24" },
+  "exports": {
+    "./consumer-client": {
+      "types": "./dist/src/consumer-client.d.ts",
+      "default": "./dist/src/consumer-client.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
