@@ -4,7 +4,7 @@ import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import type { SqliteStore } from "./sqlite.ts";
 
-interface Binding { controllerId: string; runnerId: string; generation: number; incarnationId: string }
+export interface Binding { controllerId: string; runnerId: string; generation: number; incarnationId: string }
 interface RunnerRow { controller: string; runner: string; generation: number; incarnation: string; credential: string; revision: number; revoked: number }
 interface EnrollmentRow { id: string; controller: string; runner: string; generation: number; incarnation: string; token: string; expires: number; consumed: string | null; revoked: number }
 const bindingFields = ["controllerId", "runnerId", "generation", "incarnationId"];
@@ -115,12 +115,19 @@ export class RunnerEnrollment {
     });
   }
   authenticate(token: string, value: unknown): unknown {
+    return this.store.transaction(db => this.verify(db, token, value));
+  }
+  /** Runner proof inside the caller's transaction, so workload effects cannot outlive revocation. */
+  verify(db: DatabaseSync, token: string, value: unknown): Binding & { credentialRevision: number } {
     const b = this.binding(fields(value, bindingFields)), credential = proof(token, "runner");
-    return this.store.transaction(db => {
-      const row = this.latest(db, b);
-      if (!row || row.revoked || !this.matches(row, b) || !equal(row.credential, credential)) denied();
-      return { ...b, credentialRevision: row.revision };
-    });
+    const row = this.latest(db, b);
+    if (!row || row.revoked || !this.matches(row, b) || !equal(row.credential, credential)) denied();
+    return { ...b, credentialRevision: row.revision };
+  }
+  /** The normalized binding only if it is the latest unrevoked binding with this exact generation and incarnation. */
+  current(db: DatabaseSync, value: unknown): Binding | undefined {
+    const b = this.binding(fields(value, bindingFields)), row = this.latest(db, b);
+    return row && !row.revoked && this.matches(row, b) ? b : undefined;
   }
   manage(value: unknown, revoke: boolean): unknown {
     const input = fields(value, [...bindingFields, ...(revoke ? [] : ["credentialRevision", "credential"])]), b = this.binding(input);

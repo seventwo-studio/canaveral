@@ -3,7 +3,8 @@
 `model-job/1` is a portable text-generation data contract validated by
 `coordination/src/model-job.ts` and `crates/execution-core/src/model_job.rs`.
 The shared acceptance corpus is `fixtures/migration/model-job.json`.
-It implements no HTTP route, scheduler, authorization service or native adapter.
+The validators implement no route or adapter themselves; the TypeScript
+[model-job controller slice](model-controller.md) uses them for its ledger and HTTP routes.
 TypeScript accepts plain data objects without accessors or serialization hooks; helpers
 revalidate their inputs and deny malformed records. Rust also revalidates before
 ownership, replay, receipt binding or release eligibility checks.
@@ -115,4 +116,4 @@ cargo test --workspace
 ```
 
 These are portable contract fixtures. They establish no native inference,
-hardware qualification, controller integration or release acceptance.
+hardware qualification or release acceptance; controller fixtures are described separately.

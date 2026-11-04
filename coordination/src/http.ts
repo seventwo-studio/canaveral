@@ -41,12 +41,40 @@ function respond(response: ServerResponse, value: unknown, status = 200): void {
   response.end(encoded);
 }
 
+// POST routes whose proof is checked by the worker rather than the administrator pre-check.
+const selfAuthenticated = [
+  "/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate",
+  "/v1/model-jobs", "/v1/runners/model-jobs/claim", "/v1/runners/model-jobs/assignments", "/v1/runners/model-jobs/report",
+];
+const modelAdministration: Record<string, IdentityCommand["type"]> = {
+  "/v1/model-catalog": "models.catalog", "/v1/resource-domains": "models.domain",
+  "/v1/model-grants": "models.grant", "/v1/model-grants/revoke": "models.grantRevoke",
+  "/v1/model-runner-approvals": "models.approve", "/v1/model-runner-approvals/revoke": "models.approvalRevoke",
+};
+const modelRunner: Record<string, IdentityCommand["type"]> = {
+  "/v1/model-jobs": "models.submit", "/v1/runners/model-jobs/claim": "models.claim",
+  "/v1/runners/model-jobs/assignments": "models.assignments", "/v1/runners/model-jobs/report": "models.report",
+};
+
+/** Same bounded deadlines for plain loopback and TLS listeners. */
+export function limitServer<T extends { requestTimeout: number; headersTimeout: number; setTimeout: (ms: number, callback: (socket: import("node:net").Socket) => void) => unknown }>(server: T): T {
+  server.requestTimeout = 20_000;
+  server.headersTimeout = 20_000;
+  server.setTimeout(20_000, socket => socket.destroy());
+  return server;
+}
+
 /** Controller identity HTTP subset. Does not listen or select state.
  * Browser cookies/assets and the remaining controller routes are separate ports.
  */
 export function createIdentityServer(identities: IdentityClient) {
+  return limitServer(createServer(createIdentityHandler(identities)));
+}
+
+/** Request handler shared by the plain loopback server and an explicitly configured TLS listener. */
+export function createIdentityHandler(identities: IdentityClient): (request: IncomingMessage, response: ServerResponse) => void {
   let inFlight = 0;
-  const server = createServer((request, response) => {
+  return (request, response) => {
     const requestId = randomUUID();
     if (inFlight >= 64) {
       respond(response, { error: "Identity service is busy.", code: "limit_exceeded", requestId, retryable: false }, 429);
@@ -68,13 +96,19 @@ export function createIdentityServer(identities: IdentityClient) {
       else if (request.method === "GET" && path === "/v1/auth/session") command = { type: "session", token };
       else if (request.method === "GET" && path === "/v1/consumers") command = { type: "applications.list", token };
       else if (request.method === "GET" && /^\/v1\/runner-enrollments\/[^/]+$/.test(path)) command = { type: "runner.inspect", id: path.split("/")[3]!, token };
+      else if (request.method === "GET" && /^\/v1\/model-jobs\/[^/]+$/.test(path)) command = { type: "models.inspect", id: path.split("/")[3]!, token };
+      else if (request.method === "GET" && /^\/v1\/resource-domains\/[^/]+$/.test(path)) command = { type: "models.domainInspect", id: path.split("/")[3]!, token };
       else if (request.method === "POST") {
-        if (!["/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate"].includes(path)) {
+        const modelCancel = /^\/v1\/model-jobs\/([^/]+)\/cancel$/.exec(path);
+        if (!selfAuthenticated.includes(path) && !modelCancel) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
         const value = await body(request);
+        const modelType = modelAdministration[path] ?? modelRunner[path];
         const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);
-        if (enrollmentRevoke) {
+        if (modelCancel) command = { type: "models.cancel", id: modelCancel[1]!, token, body: value };
+        else if (modelType) command = { type: modelType, token, body: value } as IdentityCommand;
+        else if (enrollmentRevoke) {
           if (Object.keys(value).length) throw new ServiceError("Expected an empty object.", 400);
           command = { type: "runner.revokeEnrollment", id: enrollmentRevoke[1]!, token };
         }
@@ -94,16 +128,14 @@ export function createIdentityServer(identities: IdentityClient) {
         }
       } else throw new ServiceError("Unknown endpoint.", 404);
       if (response.destroyed) return;
-      respond(response, await identities.request(command));
+      const value = await identities.request(command);
+      // A new durable model job is 201; an exact replay of the same submission is 200.
+      respond(response, value, command.type === "models.submit" && (value as { created?: unknown }).created === true ? 201 : 200);
     })().catch(error => {
       request.resume();
       const known = error instanceof ServiceError ? error : new ServiceError("Orchestrator storage or service unavailable.", 503, { retryable: false });
       respond(response, { error: known.message, message: known.message, code: known.code, requestId, retryable: known.retryable,
         ...(known.outcome ? { outcome: known.outcome } : {}) }, known.status);
     });
-  });
-  server.requestTimeout = 20_000;
-  server.headersTimeout = 20_000;
-  server.setTimeout(20_000, socket => socket.destroy());
-  return server;
+  };
 }

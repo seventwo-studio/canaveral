@@ -46,6 +46,10 @@ function text(value: unknown, maxBytes: number, nonblank = false): value is stri
 function model(value: unknown): value is string {
   return typeof value === "string" && value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?![\s\S])/.test(value) && !value.toLowerCase().includes("cloud");
 }
+/** Operator inventory identity: the same label and digest rules as a submission. */
+export function modelIdentity(label: unknown, digest: unknown): boolean {
+  return model(label) && typeof digest === "string" && /^sha256:[a-f0-9]{64}(?![\s\S])/.test(digest);
+}
 export function parseModelJob(input: unknown): ModelJob {
   const job = record(input);
   keys(job, ["version", "applicationId", "id", "message"]);
