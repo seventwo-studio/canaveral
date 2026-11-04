@@ -1469,7 +1469,8 @@ mod https_tests {
                 ))
                 .arg(&path)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                // The fixture prints public certificate diagnostics only if it rejects its chain.
+                .stderr(Stdio::inherit())
                 .spawn()
                 .expect("fixture needs node and openssl"),
         );
