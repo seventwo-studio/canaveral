@@ -91,13 +91,20 @@ seconds and applies a 15-second request deadline. HTTP parsing additionally uses
 Hyper's bounded header parser. Errors omit remote bodies, URLs and secret values.
 Input stdin is bounded in bytes; it has no interactive input timer.
 
+`Identity::linux_lease_request` is the only authenticated route API beyond
+identity: it posts to the three fixed Linux lease runner routes with the
+identity's own binding and credential, bounds request and response bodies to
+1 MiB and never exposes the credential or arbitrary URLs. Any non-200 or lost
+reply is reported as rejected or uncertain; callers persist and replay the exact
+body. `examples/lease-route.rs` is the fixture driver for that API.
+
 ## Verification
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo build -p canaveral-runner-client --locked
+cargo build -p canaveral-runner-client --bins --examples --locked
 (cd coordination && npm ci --ignore-scripts && npm run build)
 node crates/runner-client/tests/tls-conformance.mjs
 ```

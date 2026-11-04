@@ -211,6 +211,11 @@ Image ingestion/installed-inventory verification, VM boot, PTY, command and file
 execution, guest credential erasure and native stop evidence belong to the runner
 adapter and require separate fixture and native acceptance.
 
+The [Rust Apple satellite](../crates/apple-satellite/README.md) implements this wire
+for `appleVirtualization`. `fixtures/apple-satellite/public-api.mjs` drives it
+against this controller over TLS with a fake native helper; that is fixture
+evidence, not VM or native acceptance. KubeVirt has no runner adapter yet.
+
 ## Reservations and limits
 
 Leases reserve in the same `resource_domains`/`resource_reservations` ledger as model
