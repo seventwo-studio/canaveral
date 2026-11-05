@@ -83,7 +83,7 @@ import CanaveralVMCore
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: directory.appendingPathComponent("direct-started.json").path)
             }
             phase = "Running"; writeStatus()
-        } catch { directRelay?.stop(); directRelay = nil; if let vm = virtualMachine, vm.canStop { try? await vm.stop() }; phase = "Unavailable"; detail = error.localizedDescription; serialConsole?.close(); writeStatus() }
+        } catch { directRelay?.stop(); directRelay = nil; if machine?.directBoot != nil, let vm = virtualMachine, vm.canStop { try? await vm.stop() }; phase = "Unavailable"; detail = error.localizedDescription; serialConsole?.close(); writeStatus() }
     }
     public func pauseOrResume() async {
         guard let vm = virtualMachine, !busy else { return }; busy = true; defer { busy = false }
