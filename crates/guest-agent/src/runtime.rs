@@ -544,6 +544,182 @@ pub(crate) fn probes(launch: &Launch) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
+    fn control_pair(
+        jammed: bool,
+    ) -> (
+        UnixStream,
+        canaveral_guest_protocol::Binding,
+        std::thread::JoinHandle<String>,
+    ) {
+        let manifest: canaveral_guest_protocol::bundle::Manifest = serde_json::from_slice(
+            include_bytes!("../../guest-protocol/fixtures/canonical.json"),
+        )
+        .unwrap();
+        let binding = canaveral_guest_protocol::Binding {
+            lease_id: Uuid::from_u128(1),
+            member_id: Uuid::from_u128(2),
+            revision: 1,
+            boot_attempt: Uuid::from_u128(3),
+            bundle_digest: manifest.digest().unwrap(),
+        };
+        let launch = Launch {
+            binding: binding.clone(),
+            workspace_bytes: 16777216,
+            manifest,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let (host, guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let fd: std::os::fd::OwnedFd = guest.into();
+        let mut guest = File::from(fd);
+        if jammed {
+            nonblock(guest.as_raw_fd()).unwrap();
+            loop {
+                match guest.write(&[0; 8192]) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    other => panic!("cannot fill transport: {other:?}"),
+                }
+            }
+        }
+        let worker = std::thread::spawn(move || {
+            reactor(guest, &launch, root.path())
+                .unwrap_err()
+                .to_string()
+        });
+        (host, binding, worker)
+    }
+    fn send(host: &mut UnixStream, frame: Host) {
+        host.write_all(&encode(&frame).unwrap()).unwrap();
+    }
+    fn receive(host: &mut UnixStream) -> Guest {
+        let mut size = [0; 4];
+        host.read_exact(&mut size).unwrap();
+        let n = u32::from_be_bytes(size) as usize;
+        assert!(n <= MAX_FRAME);
+        let mut body = vec![0; n];
+        host.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+    fn hello(host: &mut UnixStream, binding: canaveral_guest_protocol::Binding, remaining_ms: u64) {
+        send(
+            host,
+            Host::Hello {
+                version: 1,
+                binding: binding.clone(),
+                remaining_ms,
+            },
+        );
+        assert!(matches!(receive(host), Guest::Ready {binding: actual, ..} if actual == binding));
+    }
+    #[test]
+    fn reactor_hello_ready_and_disconnect_without_execution() {
+        let (mut host, binding, worker) = control_pair(false);
+        hello(&mut host, binding, 1000);
+        drop(host);
+        assert!(worker.join().unwrap().contains("disconnected"));
+    }
+    #[test]
+    fn reactor_binding_mismatch_without_execution() {
+        let (mut host, mut binding, worker) = control_pair(false);
+        binding.member_id = Uuid::from_u128(9);
+        send(
+            &mut host,
+            Host::Hello {
+                version: 1,
+                binding,
+                remaining_ms: 1000,
+            },
+        );
+        assert!(worker.join().unwrap().contains("binding mismatch"));
+    }
+    #[test]
+    fn reactor_stale_renew_fences_without_execution() {
+        let (mut host, binding, worker) = control_pair(false);
+        hello(&mut host, binding.clone(), 1000);
+        send(
+            &mut host,
+            Host::Renew {
+                version: 1,
+                binding,
+                remaining_ms: 1000,
+            },
+        );
+        assert!(!worker.join().unwrap().is_empty());
+    }
+    #[test]
+    fn reactor_partial_frame_does_not_delay_expiry() {
+        let (mut host, binding, worker) = control_pair(false);
+        hello(&mut host, binding, 40);
+        host.write_all(&[0, 0]).unwrap();
+        assert!(worker.join().unwrap().contains("expired"));
+    }
+    #[test]
+    fn reactor_unknown_cancel_rejects_and_preserves_session() {
+        let (mut host, binding, worker) = control_pair(false);
+        hello(&mut host, binding.clone(), 1000);
+        let id = Uuid::from_u128(10);
+        send(&mut host, Host::Cancel { version: 1, id });
+        assert!(
+            matches!(receive(&mut host), Guest::Rejected {id: actual, reason, ..} if actual == id && reason == "unknownCommand")
+        );
+        let mut renewed = binding;
+        renewed.revision += 1;
+        send(
+            &mut host,
+            Host::Renew {
+                version: 1,
+                binding: renewed,
+                remaining_ms: 1000,
+            },
+        );
+        send(&mut host, Host::Cancel { version: 1, id });
+        assert!(matches!(receive(&mut host), Guest::Rejected {id: actual, ..} if actual == id));
+        drop(host);
+        assert!(worker.join().unwrap().contains("disconnected"));
+    }
+    #[test]
+    fn reactor_second_queued_rejection_fences_under_backpressure() {
+        let (mut host, binding, worker) = control_pair(true);
+        send(
+            &mut host,
+            Host::Hello {
+                version: 1,
+                binding,
+                remaining_ms: 1000,
+            },
+        );
+        for n in [10, 11] {
+            send(
+                &mut host,
+                Host::Cancel {
+                    version: 1,
+                    id: Uuid::from_u128(n),
+                },
+            );
+        }
+        assert!(worker.join().unwrap().contains("pending rejections"));
+    }
+    #[test]
+    fn reactor_exec_before_hello_never_starts_a_process() {
+        let (mut host, _, worker) = control_pair(false);
+        send(
+            &mut host,
+            Host::Exec {
+                version: 1,
+                id: Uuid::from_u128(10),
+                argv: vec!["/must-not-execute".into()],
+                cwd: "/workspace".into(),
+                env: Default::default(),
+                timeout_ms: 1000,
+            },
+        );
+        assert!(worker
+            .join()
+            .unwrap()
+            .contains("invalid session transition"));
+    }
     #[test]
     fn partial_frame_offsets_survive_backpressure() {
         struct Partial {

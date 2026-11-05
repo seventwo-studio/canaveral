@@ -119,6 +119,9 @@ impl Manifest {
                 return Err("invalid exact probe line".into());
             }
         }
+        if self.tool_versions["shell"] != "canaveral-shell-v1" {
+            return Err("unexpected shell probe pin".into());
+        }
         if self.tool_versions["node"] != "v24.11.0" {
             return Err("unexpected Node pin".into());
         }
@@ -193,6 +196,11 @@ mod tests {
             .unwrap()
             .validate()
             .is_err());
+        let mut wrong_shell = m.clone();
+        wrong_shell
+            .tool_versions
+            .insert("shell".into(), "arbitrary".into());
+        assert!(wrong_shell.validate().is_err());
         for bad in ["unicode-é", "line\n", "tab\t"] {
             let mut m = m.clone();
             m.command_line = bad.into();
