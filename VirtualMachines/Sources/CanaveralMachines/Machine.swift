@@ -29,6 +29,7 @@ public struct Machine: Codable, Identifiable, Sendable, Equatable {
     public var installerPath: String?
     public var installation: InstallationState = .pending
     public var macAddress: String
+    public var directBoot: DirectBoot?
     public var executionLeaseID: UUID?
     public init(name: String, os: GuestOS, cpuCount: Int? = nil, memoryGiB: Int? = nil, diskGiB: Int? = nil, installerPath: String? = nil, mode: MachineMode = .desktop) {
         self.name = name; self.os = os; self.mode = mode
@@ -38,7 +39,7 @@ public struct Machine: Codable, Identifiable, Sendable, Equatable {
         let bytes = Array(id.uuidString.replacingOccurrences(of: "-", with: "").prefix(10))
         macAddress = "02:" + stride(from: 0, to: 10, by: 2).map { String(bytes[$0...$0+1]) }.joined(separator: ":")
     }
-    private enum CodingKeys: String, CodingKey { case id, name, os, mode, cpuCount, memoryGiB, diskGiB, installerPath, installation, macAddress, executionLeaseID }
+    private enum CodingKeys: String, CodingKey { case id, name, os, mode, cpuCount, memoryGiB, diskGiB, installerPath, installation, macAddress, executionLeaseID, directBoot }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); name = try c.decode(String.self, forKey: .name)
@@ -46,6 +47,7 @@ public struct Machine: Codable, Identifiable, Sendable, Equatable {
         cpuCount = try c.decode(Int.self, forKey: .cpuCount); memoryGiB = try c.decode(Int.self, forKey: .memoryGiB)
         diskGiB = try c.decode(Int.self, forKey: .diskGiB); installerPath = try c.decodeIfPresent(String.self, forKey: .installerPath)
         installation = try c.decode(InstallationState.self, forKey: .installation); macAddress = try c.decode(String.self, forKey: .macAddress)
+        directBoot = try c.decodeIfPresent(DirectBoot.self, forKey: .directBoot)
         executionLeaseID = try c.decodeIfPresent(UUID.self, forKey: .executionLeaseID)
     }
     public func validate() throws {
@@ -55,7 +57,8 @@ public struct Machine: Codable, Identifiable, Sendable, Equatable {
               ((small ? 1 : 2)...64).contains(cpuCount), ((small ? 1 : 4)...128).contains(memoryGiB), ((small ? 4 : 32)...1024).contains(diskGiB) else {
             throw CanaveralError.invalid(small ? "Choose a name, 1–64 CPUs, 1–128 GB memory, and 4–1024 GB storage." : "Choose a name, 2–64 CPUs, 4–128 GB memory, and 32–1024 GB storage.")
         }
-        if let installerPath {
+        if let directBoot { try directBoot.validateShape(machine: self) }
+        if directBoot == nil, let installerPath {
             let ext = URL(fileURLWithPath: installerPath).pathExtension.lowercased()
             let formats = os == .linux ? ["iso", "img", "raw", "qcow2"] : ["ipsw"]
             guard formats.contains(ext) else { throw CanaveralError.invalid(small ? "Choose a Linux server ISO or a standalone IMG, RAW, or QCOW2 disk." : "Choose a macOS IPSW or a Linux ISO for this machine.") }
@@ -89,6 +92,16 @@ public struct MachineStore: Sendable {
     }
     public func prepare(_ machine: Machine) throws -> URL {
         try machine.validate()
+        if let boot = machine.directBoot {
+            try boot.validate(machine: machine)
+            let folder = directory(machine.id)
+            guard !FileManager.default.fileExists(atPath: folder.path) else { throw CanaveralError.invalid("This machine already exists.") }
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            do {
+                var prepared = machine; prepared.installation = .ready; prepared.installerPath = nil
+                try Self.save(prepared, directory: folder); return folder
+            } catch { try? FileManager.default.removeItem(at: folder); throw error }
+        }
         guard let image = machine.installerPath, FileManager.default.isReadableFile(atPath: image) else { throw CanaveralError.invalid("Choose a readable installation image.") }
         let folder = directory(machine.id)
         guard !FileManager.default.fileExists(atPath: folder.path) else { throw CanaveralError.invalid("This machine already exists.") }

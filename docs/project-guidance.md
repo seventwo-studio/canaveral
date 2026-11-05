@@ -52,3 +52,5 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
 
 - [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core; host routing, trusted bootstrap provisioning and native acceptance remain outstanding)
+
+- [Native direct Linux boot](../VirtualMachines/Documentation/DirectBoot.md) (direct-kernel helper and relay fixtures; bootstrap, satellite integration and native acceptance remain open)

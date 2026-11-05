@@ -20,7 +20,7 @@ import CanaveralVMCore
             throw CanaveralError.unavailable("macOS guests require Apple silicon.")
             #endif
         } else {
-            _ = try VZEFIVariableStore(creatingVariableStoreAt: directory.appendingPathComponent("efi.bin"))
+            if machine.directBoot == nil { _ = try VZEFIVariableStore(creatingVariableStoreAt: directory.appendingPathComponent("efi.bin")) }
             try VZGenericMachineIdentifier().dataRepresentation.write(to: directory.appendingPathComponent("identity.bin"), options: .atomic)
         }
         try MachineStore.save(machine, directory: directory)
@@ -28,14 +28,23 @@ import CanaveralVMCore
     }
     public static func build(machine: Machine, directory: URL, serialAttachment: VZSerialPortAttachment? = nil) throws -> VZVirtualMachineConfiguration {
         try machine.validate()
+        try machine.directBoot?.validate(machine: machine)
         let c = VZVirtualMachineConfiguration()
         guard (VZVirtualMachineConfiguration.minimumAllowedCPUCount...VZVirtualMachineConfiguration.maximumAllowedCPUCount).contains(machine.cpuCount) else { throw CanaveralError.invalid("The CPU count exceeds this host's virtualization limits.") }
         c.cpuCount = machine.cpuCount; c.memorySize = UInt64(machine.memoryGiB) * 1073741824
+        if let boot = machine.directBoot {
+            let root = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: boot.rootfs.path), readOnly: true))
+            let launch = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: boot.launchMedium.path), readOnly: true))
+            launch.blockDeviceIdentifier = boot.serial
+            c.storageDevices = [root, launch]
+            c.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        } else {
         let disk = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: directory.appendingPathComponent("disk.img"), readOnly: false, cachingMode: .uncached, synchronizationMode: .full))
         c.storageDevices = [disk]
         let seed = directory.appendingPathComponent("cloud-init.iso")
         if machine.os == .linux, FileManager.default.fileExists(atPath: seed.path) {
             c.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: seed, readOnly: true)))
+        }
         }
         let network = VZVirtioNetworkDeviceConfiguration(); network.attachment = VZNATNetworkDeviceAttachment()
         guard let address = VZMACAddress(string: machine.macAddress) else { throw CanaveralError.invalid("Invalid guest network identity.") }
@@ -68,6 +77,11 @@ import CanaveralVMCore
             let platform = VZGenericPlatformConfiguration()
             guard let identity = VZGenericMachineIdentifier(dataRepresentation: try Data(contentsOf: directory.appendingPathComponent("identity.bin"))) else { throw CanaveralError.invalid("Linux guest identity is missing.") }
             platform.machineIdentifier = identity; c.platform = platform
+            if let boot = machine.directBoot {
+                let loader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: boot.kernel.path))
+                loader.initialRamdiskURL = boot.initrd.map { URL(fileURLWithPath: $0.path) }
+                loader.commandLine = boot.effectiveCommandLine; c.bootLoader = loader
+            } else {
             let loader = VZEFIBootLoader(); loader.variableStore = VZEFIVariableStore(url: directory.appendingPathComponent("efi.bin")); c.bootLoader = loader
             if machine.installation != .ready, let path = machine.installerPath {
                 c.storageDevices.append(VZUSBMassStorageDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: path), readOnly: true)))
@@ -76,6 +90,7 @@ import CanaveralVMCore
             // EFI still needs a boot framebuffer; server mode never renders it.
             graphics.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: machine.mode == .server ? 1024 : 1440, heightInPixels: machine.mode == .server ? 768 : 900)]
             c.graphicsDevices = [graphics]
+            }
         }
         try c.validate(); return c
     }

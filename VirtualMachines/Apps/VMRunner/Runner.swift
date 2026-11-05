@@ -12,8 +12,9 @@ private struct Preparation: Decodable {
     var cpu: Int
     var memoryMiB: Int
     var diskGiB: Int
-    var image: String
+    var image: String?
     var directory: String
+    var directBoot: DirectBoot?
     var seedISO: String?
     var baseDisk: String?
     var auxiliaryStorage: String?
@@ -117,6 +118,7 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
                       request.mode == "headless" || request.mode == "desktop" else {
                     throw CanaveralError.invalid("Use whole GiB memory and a supported guest system/mode.")
                 }
+                guard request.directBoot != nil || request.image != nil else { throw CanaveralError.invalid("Installation image required for EFI preparation.") }
                 let store = MachineStore(root: URL(fileURLWithPath: request.directory))
                 var machine = Machine(name: request.name, os: request.os == "macos" ? .macOS : .linux,
                                       cpuCount: request.cpu, memoryGiB: request.memoryMiB / 1024,
@@ -124,6 +126,8 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
                                       mode: request.mode == "headless" ? .server : .desktop)
                 machine.id = request.id
                 machine.executionLeaseID = request.leaseID
+                machine.directBoot = request.directBoot
+                guard request.directBoot == nil || (request.seedISO == nil && request.baseDisk == nil && request.auxiliaryStorage == nil && request.hardwareModel == nil) else { throw CanaveralError.invalid("Direct boot cannot import legacy media.") }
                 // Generate the interface identity from the assigned UUID, not the initializer's UUID.
                 let hex = request.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                 machine.macAddress = "02:" + stride(from: 0, to: 10, by: 2).map { offset in
