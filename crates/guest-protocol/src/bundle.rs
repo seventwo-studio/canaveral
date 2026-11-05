@@ -96,6 +96,10 @@ impl Manifest {
             || self.agent_vsock_port != 1024
             || self.protocol != 1
             || self.command_line.is_empty()
+            // ARM64 COMMAND_LINE_SIZE=2048 includes the 54-byte launch suffix and NUL.
+            || self.command_line.len() > 1993
+            || self.command_line.contains(['"', '\''])
+            || self.command_line.split(' ').any(|p| p == "--")
             || self
                 .command_line
                 .split_whitespace()
@@ -232,6 +236,23 @@ mod tests {
             .unwrap()
             .replace("\"toolVersions\":{", "\"toolVersions\":{\"node\":\"bad\",");
         assert!(serde_json::from_str::<Manifest>(&duplicate).is_err());
+    }
+    #[test]
+    fn command_line_parser_and_arm64_bound() {
+        let mut m: Manifest =
+            serde_json::from_slice(include_bytes!("../fixtures/canonical.json")).unwrap();
+        for bad in ["ro -- rw", "ro \"rw\"", "ro 'rw'", "ro canaveral.launch=x"] {
+            m.command_line = bad.into();
+            assert!(m.validate().is_err());
+        }
+        m.command_line = "a".repeat(1993);
+        assert!(m.validate().is_ok());
+        assert_eq!(
+            m.command_line.len() + " canaveral.launch=".len() + 36 + 1,
+            2048
+        );
+        m.command_line.push('a');
+        assert!(m.validate().is_err());
     }
     #[test]
     fn required_inputs_and_no_path_escape() {

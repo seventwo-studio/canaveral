@@ -19,6 +19,7 @@ import CanaveralVMCore
     private var ownsLock = false
     private var heartbeat: Task<Void, Never>?
     private var shutdownRequested = false
+    private var directRelay: DirectBootRelay?
     private var stopReason: String?
     @ObservationIgnored private var installer: VZMacOSInstaller?
     public init(directory: URL, storage: StorageLocation? = nil) { self.directory = directory; self.storage = storage; super.init(); machine = try? MachineStore.load(directory: directory) }
@@ -68,8 +69,21 @@ import CanaveralVMCore
             guard m.executionLeaseID == nil || leaseAuthorized?() == true else {
                 throw CanaveralError.unavailable("Lease authorization ended before VM start.")
             }
-            phase = "Starting"; try await vm.start(); phase = "Running"; writeStatus()
-        } catch { phase = "Unavailable"; detail = error.localizedDescription; serialConsole?.close(); writeStatus() }
+            if let boot = m.directBoot {
+                try DirectBootAttempt.consume(directory: directory, attempt: boot.bootAttempt)
+                // Media flush can block; recheck authority after persisting intent.
+                guard leaseAuthorized?() == true else { throw CanaveralError.unavailable("Lease authorization ended while persisting direct attempt.") }
+            }
+            phase = "Starting"; try await vm.start()
+            if let boot = m.directBoot {
+                directRelay = try DirectBootRelay(vm: vm)
+                let event: [String: Any] = ["event": "started", "version": 1, "continuous": NativeLeaseClock.now(), "memberID": m.id.uuidString, "leaseID": boot.leaseID.uuidString, "bootSessionID": boot.bootSessionID.uuidString, "bootAttempt": boot.bootAttempt.uuidString, "agentSocket": directRelay!.socketPath]
+                let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+                try data.write(to: directory.appendingPathComponent("direct-started.json"), options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: directory.appendingPathComponent("direct-started.json").path)
+            }
+            phase = "Running"; writeStatus()
+        } catch { directRelay?.stop(); directRelay = nil; if let vm = virtualMachine, vm.canStop { try? await vm.stop() }; phase = "Unavailable"; detail = error.localizedDescription; serialConsole?.close(); writeStatus() }
     }
     public func pauseOrResume() async {
         guard let vm = virtualMachine, !busy else { return }; busy = true; defer { busy = false }
@@ -97,10 +111,11 @@ import CanaveralVMCore
         guard let vm = virtualMachine, vm.canStop else { throw CanaveralError.unavailable("Native VM cannot be powered off in its current state.") }
         stopReason = "forced"
         try await vm.stop()
+        directRelay?.stop(); directRelay = nil
         phase = "Stopped"; detail = "Explicit power-off completed; disk state is crash-consistent."; writeStatus()
     }
-    public func guestDidStop(_ virtualMachine: VZVirtualMachine) { phase = "Stopped"; stopReason = stopReason ?? "guest"; serialConsole?.close(); writeStatus() }
-    public func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) { phase = "Stopped"; stopReason = "error"; detail = error.localizedDescription; serialConsole?.close(); writeStatus() }
+    public func guestDidStop(_ virtualMachine: VZVirtualMachine) { directRelay?.stop(); directRelay = nil; phase = "Stopped"; stopReason = stopReason ?? "guest"; serialConsole?.close(); writeStatus() }
+    public func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) { directRelay?.stop(); directRelay = nil; phase = "Stopped"; stopReason = "error"; detail = error.localizedDescription; serialConsole?.close(); writeStatus() }
     public func finishLinuxInstallation() throws {
         try storage?.checkAvailable()
         guard let vm = virtualMachine, vm.state == .stopped, var m = machine, m.os == .linux else { throw CanaveralError.invalid("Shut down the installed Linux guest first.") }
@@ -128,6 +143,7 @@ import CanaveralVMCore
     public func releaseWhenStopped() -> Bool {
         guard !busy else { detail = "Wait for the current machine operation to finish."; return false }
         guard virtualMachine == nil || virtualMachine?.state == .stopped || virtualMachine?.state == .error else { detail = "Shut down the guest before quitting its machine process."; return false }
+        directRelay?.stop(); directRelay = nil
         phase = "Stopped"; stopReason = stopReason ?? (virtualMachine?.state == .error ? "error" : "guest"); writeStatus()
         heartbeat?.cancel(); heartbeat = nil
         serialConsole?.close()

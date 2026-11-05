@@ -213,6 +213,7 @@ jobs:
           xcodebuild -version
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 26
           swift build --package-path VirtualMachines
+          swift test --package-path VirtualMachines --filter DirectBoot
       - if: runner.os == 'Linux'
         run: |
           python script/build_linux_lease_deadline.py --output "$RUNNER_TEMP/deadline.so"
