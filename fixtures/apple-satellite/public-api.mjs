@@ -1,8 +1,9 @@
 // Disposable integration fixture: the public TypeScript controller over verified TLS, the public
 // consumer SDK, the Rust runner identity and the Rust Apple satellite, driving a fake native
 // helper that starts no VM. This is fixture evidence only; it is not native VM acceptance.
-// Usage (macOS, Node >= 24, openssl, codesign):
-//   node fixtures/apple-satellite/public-api.mjs COORDINATION_DIR SATELLITE RUNNER_CLIENT FIXTURE_HELPER
+// Usage (macOS on arm64, Node >= 24, openssl, codesign, chflags):
+//   node fixtures/apple-satellite/public-api.mjs COORDINATION_DIR SATELLITE RUNNER_CLIENT FIXTURE_HELPER FIXTURE_BUILDER
+// FIXTURE_BUILDER writes a SIMULATED EROFS medium (magic, label, launch.json); nothing is mounted.
 import assert from 'node:assert/strict';
 import {spawn, execFile} from 'node:child_process';
 import {once} from 'node:events';
@@ -15,11 +16,11 @@ import {pathToFileURL} from 'node:url';
 import {promisify} from 'node:util';
 const exec = promisify(execFile);
 assert.equal(process.platform, 'darwin', 'the Apple satellite fixture requires a macOS host (no VM is started)');
-const [coordination, satelliteBin, runnerBin, helperBin] = process.argv.slice(2).map(p => p && resolve(p));
-assert(coordination && satelliteBin && runnerBin && helperBin, 'COORDINATION_DIR SATELLITE RUNNER_CLIENT FIXTURE_HELPER required');
+const [coordination, satelliteBin, runnerBin, helperBin, builderBin] = process.argv.slice(2).map(p => p && resolve(p));
+assert(coordination && satelliteBin && runnerBin && helperBin && builderBin, 'COORDINATION_DIR SATELLITE RUNNER_CLIENT FIXTURE_HELPER FIXTURE_BUILDER required');
 const {ConsumerClient, ConsumerServiceError} = await import(pathToFileURL(join(coordination, 'dist/src/consumer-client.js')));
 const dir = realpathSync(mkdtempSync(join(tmpdir(), 'canaveral-apple-satellite-')));
-const children = [], orphans = [];
+const children = [], orphans = [], relays = [];
 const key = () => randomBytes(32).toString('base64url');
 const sha = file => 'sha256:' + createHash('sha256').update(readFileSync(file)).digest('hex');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -369,10 +370,149 @@ try {
   assert.equal(adopted.code, 1); assert.match(adopted.errors, /saved binding\/config differs/);
   view = await inspect(fourth.id); assert.equal(view.runtimeState, 'unknown'); await noCapacity();
   assert.equal(calls('prepare'), 4);
-  console.log('PASS Apple satellite public API fixture (fake helper, no VM): preflight before claim, TLS trust, SDK acquire/release, lost claim and report replay, never-ready receipts, cleanup-gated reservation, controller expiry, native local deadline under a stalled controller with durable-stop recovery, crash unknown retention without relaunch, stale binding');
+  // 7. Direct boot from an operator-installed guest bundle, on the fresh binding and its own
+  //    one-VM domain. The kernel/initrd/rootfs are byte fixtures, the builder writes a SIMULATED
+  //    EROFS medium and the helper's guest is protocol-faithful but fake: no VM, mount or exec.
+  assert.equal(process.arch, 'arm64', 'direct boot bundles are arm64-only');
+  const bundleDir = join(dir, 'bundle'); mkdirSync(bundleDir, {mode: 0o700});
+  const kernel = Buffer.alloc(64); kernel.write('ARMd', 56, 'latin1');
+  const rootfs = Buffer.alloc(4096); Buffer.from([0xe2, 0xe1, 0xf5, 0xe0]).copy(rootfs, 1024);
+  const pins = {}, artifacts = [];
+  for (const [role, name, bytes] of [['kernel', 'Image', kernel], ['initrd', 'initrd.img', Buffer.from('fixture audited initrd')], ['rootfs', 'root.erofs', rootfs]]) {
+    const path = join(bundleDir, name); writeFileSync(path, bytes, {mode: 0o400}); artifacts.push(path);
+    pins[role] = {path: name, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length};
+  }
+  await exec('/usr/bin/chflags', ['uchg', ...artifacts]);
+  const manifest = {version: 1, id: 'fixture-coding', revision: 1, arch: 'arm64', kernel: pins.kernel, initrd: pins.initrd, rootfs: pins.rootfs,
+    commandLine: 'console=hvc0 root=/dev/vda rootfstype=erofs ro', agentVsockPort: 1024, protocol: 1,
+    toolVersions: {shell: 'canaveral-shell-v1', git: 'git version 2.47', node: 'v24.11.0', python: 'Python 3.13'}};
+  // Independent canonical bytes (sorted keys, no whitespace; these ASCII values need no other escaping).
+  const canonical = v => v === null ? 'null' : typeof v === 'object' ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}' : JSON.stringify(v);
+  const bundleDigest = createHash('sha256').update(canonical(manifest)).digest('hex');
+  const manifestPath = join(bundleDir, 'manifest.json');
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), {mode: 0o400});
+  const bootImage = {id: 'linux-apple-direct', revision: '1', arch, backend: 'appleVirtualization', digest: 'sha256:' + bundleDigest};
+  await ok('POST', '/v1/linux-lease-images', {...bootImage, os: 'linux', mode: 'headless', resources: VM, capabilities: ['command', 'files']});
+  await ok('POST', '/v1/linux-lease-grants', {applicationId: app.id, imageId: bootImage.id, revision: bootImage.revision, arch, digest: bootImage.digest});
+  const directDomain = randomUUID();
+  await ok('POST', '/v1/resource-domains', {id: directDomain, name: 'fixture: one direct-boot VM', capacity: VM});
+  await ok('POST', '/v1/linux-lease-runner-approvals', {binding: fresh, domainId: directDomain, backend: 'appleVirtualization', images: [{id: bootImage.id, revision: bootImage.revision, arch, digest: bootImage.digest}]});
+  mkdirSync(join(dir, 'builder'), {mode: 0o700});
+  const builder = join(dir, 'builder', 'mkfs.erofs');
+  copyFileSync(builderBin, builder); chmodSync(builder, 0o500);
+  const directState = join(dir, 'state-direct');
+  const directOverrides = {binding: fresh, identity: join(dir, 'identity-2'), state: directState,
+    inventory: [{credentialFree: true, format: 'bootBundle', image: bootImage, path: manifestPath}],
+    bootstrapBuilder: {path: builder, sha256: sha(builder)}};
+  const directConfig = configure(directOverrides, 'direct.json');
+  const guestMode = mode => writeFileSync(join(dir, 'helper', 'guest-mode'), mode);
+  const acquireDirect = (ttlSeconds = 300) => sdk.acquireLease({id: randomUUID(), templateId: bootImage.id, templateRevision: bootImage.revision, arch, ttlSeconds, requiredCapabilities: ['command']});
+  const directJournal = () => JSON.parse(readFileSync(join(directState, 'state.json'), 'utf8'));
+  const directMachine = lease => join(directState, 'workspace', lease.members[0].machineId.toUpperCase());
+  const assignmentReports = id => reports().filter(e => e.body.receipt.leaseId === id);
+  async function noDirectCapacity() {
+    await assert.rejects(acquireDirect(), e => e instanceof ConsumerServiceError && e.status === 503 && e.code === 'capacity_unavailable');
+  }
+  // 7a. Preflight: builder, bundle digest and immutable artifacts fail before any claim.
+  const preflightLog = log.length;
+  for (const [overrides, expected] of [
+    [{bootstrapBuilder: undefined}, 'requires a pinned bootstrap builder'],
+    [{bootstrapBuilder: {path: builder, sha256: 'sha256:' + '0'.repeat(64)}}, 'bootstrap builder pin mismatch'],
+    [{inventory: [{...directOverrides.inventory[0], image: {...bootImage, digest: 'sha256:' + '1'.repeat(64)}}]}, 'boot bundle digest differs'],
+  ]) {
+    const result = await run(configure({...directOverrides, ...overrides}, 'direct-bad.json'));
+    assert.equal(result.code, 1); assert.match(result.errors, new RegExp(expected));
+  }
+  await exec('/usr/bin/chflags', ['nouchg', artifacts[2]]);
+  assert.match((await run(directConfig)).errors, /must be private, immutable/);
+  await exec('/usr/bin/chflags', ['uchg', artifacts[2]]);
+  assert.equal(log.length, preflightLog, 'direct preflight failure reached the controller');
+  assert(!existsSync(directState), 'direct preflight failure created satellite state');
+
+  // 7b. Ready only after the bound guest ready; renewal reaches the guest; release cleans owned state.
+  guestMode('ready');
+  const callsBefore = {prepare: calls('prepare'), run: calls('run')};
+  const d1 = (await acquireDirect()).lease;
+  const readySatellite = satellite(directConfig);
+  view = await until(async () => { const v = await inspect(d1.id); return v.state === 'ready' && v; }, 'direct guest ready');
+  assert.equal(view.runtimeState, 'running'); assert.equal(view.members[0].ready, true);
+  const d1Reports = assignmentReports(d1.id);
+  assert(d1Reports.every(e => ['starting', 'running'].includes(e.body.receipt.runtimeState)), 'no unknown runtime before release');
+  for (const e of d1Reports) if (e.body.receipt.ready.command) assert.equal(e.body.receipt.runtimeState, 'running');
+  assert.equal(calls('guest-ready'), 1);
+  await until(() => calls('guest-renew') > 0, 'renewed revision forwarded to the guest');
+  const d1Machine = directMachine(d1);
+  const prepared = JSON.parse(readFileSync(join(dir, 'helper', `prepare-${d1.members[0].machineId.toUpperCase()}.json`), 'utf8'));
+  const boot = prepared.directBoot;
+  assert.equal(prepared.image, undefined); assert.equal(boot.bundleDigest, bundleDigest);
+  assert.equal(boot.commandLine, manifest.commandLine); assert.equal(boot.launchFilesystemUUID, boot.bootAttempt);
+  assert.equal(boot.leaseID, d1.id); assert.equal(boot.memberID, d1.members[0].machineId);
+  for (const role of ['kernel', 'initrd', 'rootfs']) assert.deepEqual(boot[role], {...pins[role], path: join(bundleDir, pins[role].path)});
+  assert.equal(boot.launchMedium.path, join(directState, 'workspace', 'bootstrap', 'launch.erofs'));
+  assert.equal(directJournal().direct.bootAttempt, boot.bootAttempt);
+  const started = JSON.parse(readFileSync(join(d1Machine, 'direct-started.json'), 'utf8'));
+  assert.equal(started.bootAttempt, boot.bootAttempt.toUpperCase()); assert.equal(started.leaseID, d1.id.toUpperCase());
+  assert.match(started.agentSocket, /^\/private\/tmp\/canaveral-[0-9a-f-]{36}\/agent\.sock$/); relays.push(started.agentSocket);
+  await noDirectCapacity();
+  await sdk.releaseLease(d1.id, {id: randomUUID()});
+  const readyDone = await readySatellite.done;
+  assert.equal(readyDone.code, 0, readyDone.errors);
+  view = await inspect(d1.id);
+  assert.equal(view.state, 'released'); assert.equal(view.runtimeState, 'stopped'); assert.equal(view.cleanup.state, 'complete');
+  assert(!existsSync(join(directState, 'workspace')), 'owned launch medium and workspace not removed');
+  assert(!existsSync(join(started.agentSocket, '..')), 'published relay not removed');
+  for (const path of artifacts) assert(existsSync(path), 'operator boot artifact removed');
+  assert.equal(createHash('sha256').update(readFileSync(artifacts[2])).digest('hex'), pins.rootfs.sha256);
+  assert.equal(calls('prepare'), callsBefore.prepare + 1); assert.equal(calls('run'), callsBefore.run + 1);
+
+  // 7c. Wrong guest identity: never ready, fenced as a runtime failure, cleaned.
+  guestMode('wrong-identity');
+  const d2 = (await acquireDirect()).lease;
+  const wrong = await run(directConfig);
+  assert.equal(wrong.code, 0, wrong.errors);
+  view = await inspect(d2.id);
+  assert.equal(view.state, 'failed'); assert.equal(view.cleanup.state, 'complete'); neverReady(view);
+  for (const e of assignmentReports(d2.id)) assert.equal(e.body.receipt.ready.command, false);
+
+  // 7d. Stalled guest handshake: controller expiry fences without blocking the satellite.
+  guestMode('stall');
+  const d3 = (await acquireDirect()).lease;
+  const stalled = satellite(directConfig);
+  await until(() => existsSync(join(directMachine(d3), 'direct-started.json')), 'stalled guest start');
+  setClock(controllerNow + 301);
+  const stallDone = await stalled.done;
+  assert.equal(stallDone.code, 0, stallDone.errors);
+  view = await inspect(d3.id);
+  assert.equal(view.state, 'expired'); assert.equal(view.cleanup.state, 'complete'); neverReady(view);
+
+  // 7e. Crash after ready with a lost report: recovery replays it, never relaunches or executes,
+  //     withdraws readiness and keeps the reservation until stop is proven.
+  guestMode('ready');
+  const d4 = (await acquireDirect()).lease;
+  const crash = satellite(directConfig);
+  await until(async () => (await inspect(d4.id)).state === 'ready', 'second direct guest ready');
+  const d4Machine = directMachine(d4);
+  orphans.push(Number(readFileSync(join(d4Machine, 'fixture-running'), 'utf8')));
+  relays.push(JSON.parse(readFileSync(join(d4Machine, 'direct-started.json'), 'utf8')).agentSocket);
+  drops.add('/v1/runners/linux-leases/report');
+  await until(() => assignmentReports(d4.id).some(e => e.dropped), 'dropped direct report');
+  crash.kill('SIGKILL'); await crash.done;
+  const runs = calls('run'), prepares = calls('prepare');
+  const recovered = await run(directConfig);
+  assert.equal(recovered.code, 1); assert.match(recovered.errors, /no relaunch/);
+  const lostDirect = assignmentReports(d4.id).find(e => e.dropped);
+  assert.deepEqual(assignmentReports(d4.id).find(e => !e.dropped && e.body.sequence === lostDirect.body.sequence).body, lostDirect.body);
+  view = await inspect(d4.id);
+  assert.equal(view.state, 'failed'); assert.equal(view.runtimeState, 'unknown'); assert.equal(view.members[0].ready, false);
+  assert.notEqual(view.cleanup.state, 'complete'); await noDirectCapacity();
+  assert.equal(assignmentReports(d4.id).at(-1).body.receipt.ready.command, false);
+  assert.equal(calls('run'), runs); assert.equal(calls('prepare'), prepares); assert.equal(calls('exec'), 0, 'no guest command was executed');
+  console.log('PASS Apple satellite public API fixture (fake helper, no VM): preflight before claim, TLS trust, SDK acquire/release, lost claim and report replay, never-ready receipts, cleanup-gated reservation, controller expiry, native local deadline under a stalled controller with durable-stop recovery, crash unknown retention without relaunch, stale binding; direct boot (simulated EROFS medium, fake guest): preflight before claim, ready only after bound guest ready, renewal forwarding, wrong identity, stalled handshake expiry, owned cleanup, crash recovery without relaunch or exec');
 } finally {
   for (const c of children) if (c.exitCode === null && c.signalCode === null) { c.kill('SIGKILL'); await once(c, 'exit'); }
   for (const pid of orphans) { try { process.kill(pid, 'SIGKILL'); } catch {} }
   if (proxy) { proxy.closeAllConnections(); await new Promise(r => proxy.close(r)); }
+  for (const socket of relays) rmSync(join(socket, '..'), {recursive: true, force: true});
+  await exec('/usr/bin/chflags', ['-R', 'nouchg', dir]).catch(() => {});
   rmSync(dir, {recursive: true, force: true});
 }

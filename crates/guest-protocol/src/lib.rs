@@ -207,6 +207,38 @@ pub enum Guest {
         termination_confirmed: bool,
     },
 }
+impl Guest {
+    /// Version and field checks; binding equality is the receiver's launch decision.
+    pub fn validate(&self) -> Result<()> {
+        let version = match self {
+            Self::SpawnFailed { version, .. } | Self::Exit { version, .. } => *version,
+            Self::Rejected {
+                version, reason, ..
+            } => {
+                if reason.is_empty() || reason.len() > 64 {
+                    return Err("invalid rejection".into());
+                }
+                *version
+            }
+            Self::Ready { version, binding } => {
+                binding.validate()?;
+                *version
+            }
+            Self::Output {
+                version, stream, ..
+            } => {
+                if stream != "stdout" && stream != "stderr" {
+                    return Err("invalid output stream".into());
+                }
+                *version
+            }
+        };
+        if version != 1 {
+            return Err("unsupported protocol".into());
+        }
+        Ok(())
+    }
+}
 pub fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
     let json = serde_json::to_vec(value)?;
     if json.is_empty() || json.len() > MAX_FRAME {
@@ -216,17 +248,18 @@ pub fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
     frame.extend(json);
     Ok(frame)
 }
-/// Incremental decoder: caller feeds at most `needed()` bytes, so memory is bounded.
+/// Incremental frame reader: caller feeds at most `needed()` bytes, so memory is bounded.
 #[derive(Default)]
-pub struct Decoder {
+pub struct Frames {
     bytes: Vec<u8>,
     length: Option<usize>,
 }
-impl Decoder {
+impl Frames {
     pub fn needed(&self) -> usize {
         self.length.unwrap_or(4) - self.bytes.len()
     }
-    pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<Host>> {
+    /// Returns one complete JSON body once its length-prefixed frame is complete.
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<Vec<u8>>> {
         if bytes.len() > self.needed() {
             return Err("decoder overfeed".into());
         }
@@ -245,10 +278,39 @@ impl Decoder {
             self.length = Some(n);
             return Ok(None);
         }
-        let value: Host = serde_json::from_slice(&self.bytes)?;
-        value.validate()?;
-        self.bytes.clear();
         self.length = None;
+        Ok(Some(std::mem::take(&mut self.bytes)))
+    }
+}
+/// Guest-side decoder of host frames.
+#[derive(Default)]
+pub struct Decoder(Frames);
+impl Decoder {
+    pub fn needed(&self) -> usize {
+        self.0.needed()
+    }
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<Host>> {
+        let Some(body) = self.0.feed(bytes)? else {
+            return Ok(None);
+        };
+        let value: Host = serde_json::from_slice(&body)?;
+        value.validate()?;
+        Ok(Some(value))
+    }
+}
+/// Host-side decoder of guest frames, with the same bounds and strict schema.
+#[derive(Default)]
+pub struct GuestDecoder(Frames);
+impl GuestDecoder {
+    pub fn needed(&self) -> usize {
+        self.0.needed()
+    }
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<Guest>> {
+        let Some(body) = self.0.feed(bytes)? else {
+            return Ok(None);
+        };
+        let value: Guest = serde_json::from_slice(&body)?;
+        value.validate()?;
         Ok(Some(value))
     }
 }
@@ -352,6 +414,25 @@ mod tests {
         assert_eq!(count, 1);
         for n in [0, MAX_FRAME as u32 + 1] {
             assert!(Decoder::default().feed(&n.to_be_bytes()).is_err());
+        }
+        let ready = encode(&Guest::Ready {
+            version: 1,
+            binding: binding(),
+        })
+        .unwrap();
+        let mut g = GuestDecoder::default();
+        let mut seen = None;
+        for b in ready {
+            seen = g.feed(&[b]).unwrap().or(seen);
+        }
+        assert!(matches!(seen, Some(Guest::Ready { binding: b, .. }) if b == binding()));
+        for s in [
+            r#"{"type":"ready","version":2,"binding":{"leaseId":"00000000-0000-0000-0000-000000000001","memberId":"00000000-0000-0000-0000-000000000002","revision":1,"bootAttempt":"00000000-0000-0000-0000-000000000003","bundleDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+            r#"{"type":"output","version":1,"id":"00000000-0000-0000-0000-000000000001","stream":"tty","seq":0,"data":""}"#,
+        ] {
+            let mut g = GuestDecoder::default();
+            g.feed(&(s.len() as u32).to_be_bytes()).unwrap();
+            assert!(g.feed(s.as_bytes()).is_err());
         }
         for s in [
             r#"{"type":"credit","version":2,"bytes":1}"#,

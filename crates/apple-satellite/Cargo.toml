@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 canaveral-runner-client = { path = "../runner-client" }
+canaveral-guest-protocol = { path = "../guest-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

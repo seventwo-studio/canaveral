@@ -166,7 +166,7 @@ jobs:
         run: node crates/runner-client/tests/tls-conformance.mjs
   apple-satellite-conformance:
     # Fixture only: fake native helper, ad-hoc signed; no VM, secrets or privileges.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -188,7 +188,7 @@ jobs:
       - run: cargo build -p canaveral-apple-satellite -p canaveral-runner-client --bins --examples --locked
       - run: npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
       - name: Public API TypeScript controller and Rust Apple satellite fixture
-        run: node fixtures/apple-satellite/public-api.mjs coordination target/debug/canaveral-apple-satellite target/debug/canaveral-runner-client target/debug/examples/fixture-helper
+        run: node fixtures/apple-satellite/public-api.mjs coordination target/debug/canaveral-apple-satellite target/debug/canaveral-runner-client target/debug/examples/fixture-helper target/debug/examples/fixture-bootstrap-builder
   native-compile:
     strategy:
       fail-fast: false

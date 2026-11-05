@@ -63,7 +63,8 @@ Example config (replace placeholders and UUIDs):
 }
 ```
 
-Inventory is operator-installed, standalone EFI-bootable raw Linux disk media,
+Inventory `format` is optional: `efiRaw` (default, omitted from retained journal
+fingerprints) or `bootBundle` (below). EFI raw inventory is operator-installed, standalone EFI-bootable raw Linux disk media,
 with host-matching architecture (arm64 or amd64). No installer ISO, backing file,
 external credential file or network image is accepted. The credentialFree field
 is an operator attestation about this exact digest: the reusable image contains
@@ -75,6 +76,49 @@ helper file, not its bundle or unsigned build. `signingRequirement` is
 requirement-language text (passed to `codesign -R` as `=TEXT`); preflight rehashes
 the helper after verification and runs `check`, all before any controller contact. Config/binding/inventory changes
 on an existing state directory fail closed. Do not delete state to bypass a hold.
+
+### Direct boot bundles
+
+A `bootBundle` entry's `path` is an operator-installed guest bundle v1 `manifest.json`;
+`image.digest` is `sha256:` plus its canonical digest, computed by the Rust
+guest-protocol canonicalizer (never a Foundation encoding). The kernel, initrd and
+rootfs are the manifest's relative paths beside it. They are shared, read-only and never
+copied, and cleanup never deletes them. v1 requires arm64, an initrd, and
+`root=/dev/vda rootfstype=erofs ro`. These also need a pinned bootstrap builder:
+
+```json
+"inventory": [{"credentialFree": true, "format": "bootBundle", "path": "/ABS/bundle/manifest.json",
+  "image": {"id": "linux-coding", "revision": "1", "arch": "arm64",
+            "backend": "appleVirtualization", "digest": "sha256:REPLACE_WITH_MANIFEST_DIGEST"}}],
+"bootstrapBuilder": {"path": "/ABS/bin/mkfs.erofs", "sha256": "sha256:REPLACE_WITH_64_HEX"}
+```
+
+Artifact proof runs each `run-once` before any claim. It walks every component without
+following symlinks, and requires owner root or this uid, no unsafe ancestors, one link,
+mode 0400, the exact pinned size, the Darwin immutable flag and file magic (ARM64 Image,
+EROFS). This idle check is metadata only, not a content proof. Admission hashes every
+artifact once and journals its identity (device, inode, size, ctime, flags, mode, owner).
+The identity is rechecked before prepare, and any change fails closed. Contents cannot
+change while the immutable flag is set, and clearing it changes ctime and flags. Within
+that boundary, the trusted operator must not swap directory entries. The helper re-hashes
+at prepare and at start.
+
+Each launch consumes a fresh boot attempt UUID with launch intent. It then builds
+`workspace/bootstrap/launch.erofs` containing only `launch.json` (binding, workspace bytes,
+manifest). The staging root is one 0700 directory holding one 0400 file. The builder is
+the operator-installed erofs-utils `mkfs.erofs` (or an equivalent with the same CLI),
+pinned by hash, run without a shell or environment, with fixed argv
+`--quiet --all-root -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`, a 1 MiB file-size rlimit and
+a 30 s bound. `--all-root` records uid/gid 0 for the guest's ownership checks. The
+filesystem UUID is the boot attempt, matching the helper's serial and nonce. The output
+must be an owned single-link file of at most 1 MiB with the EROFS magic. It is then made
+mode 0400, flushed with F_FULLFSYNC, set user-immutable, hashed, and pinned as Swift's
+`launchMedium`. Missing or mismatched builder pins fail before any claim. No image,
+kernel, initrd or filesystem tool is built, downloaded or installed here.
+
+The prepare request uses the helper's `directBoot` shape: pins for kernel, initrd, rootfs
+and launchMedium, plus the lease revision, filesystem UUID, bundle digest, base command
+line, lease, member, host boot session, boot attempt and workspace bytes.
 
 The controller owns domain-wide VM/model admission. Local maxima only reject
 oversized assignments; they do not advertise or reserve additional capacity.
@@ -127,11 +171,39 @@ reservation, the next `run-once` starts a new journal with a new claim ID.
 Deletion does not promise forensic erasure of physical media; encrypted host
 storage and snapshot/backup policy remain operator concerns.
 
-Command, PTY and files readiness remain false and runtime is reported `unknown`
-until stop is proven: this slice supplies no actual guest probe or guest-access
-transport. Boot alone cannot make a lease ready, even with no required
-capability. Provisioning timeout, cancellation and controller expiry therefore
-remain expected outcomes until guest access is integrated.
+EFI raw leases report readiness false and runtime `unknown` until stop is proven. Boot
+alone cannot make a lease ready, even with no required capability.
+
+For boot bundles, after the helper publishes `direct-started.json` (VMM started), the
+satellite accepts only a record bound to this lease, member, host boot session and boot
+attempt. The record must name the exact private `/private/tmp/canaveral-UUID/agent.sock`
+form. Directory and socket ownership and modes, then the peer uid, are verified before
+hello. The published path is journaled. Hello carries the exact launch binding with
+`remainingMs` taken from the same continuous lease deadline, minus a 2 s margin. Queued
+bytes must drain within 1 s, and ready must arrive within 30 s. Relay delivery beyond
+the margin (the helper retries the guest connect while the agent boots) can leave the
+guest's own deadline later than the host's. The guest deadline is still at most
+ready-arrival time plus `remainingMs`, and the native lease guard independently ends the
+VM at the host deadline. Ready must echo the binding
+exactly; the guest sends it only after its separate, manifest-bound tool probes. The
+receipt then reports `running` with `ready.command` true, only for images that catalogue
+`command`. Before ready it reports `starting`. Each newer lease revision is forwarded as
+`renew`. Guest I/O is nonblocking with bounded buffers, so a stalled relay never delays
+fencing, renewal or reporting. A disconnect, protocol violation, identity or version
+mismatch, stalled write, handshake timeout, renewal that cannot be delivered, or lapsed
+guest authority withdraws readiness permanently: runtime becomes `unknown` and the VM is
+fenced. A restart never reconnects; recovered launches report `unknown` and never relaunch.
+After positive stop, the satellite removes the exact journaled relay directory if it is
+still owned and contains only `agent.sock`. Our stream is closed before stop proof, so the
+helper's relay never waits on it. The owned workspace (including the immutable medium) is
+deleted after terminal acknowledgment.
+
+The satellite never sends exec. `guest::Session` offers an owned command client for the
+next slice's consumer route: strictly increasing time-ordered command UUIDs, one active
+command, every earlier control frame read and nothing queued before exec, plus bounded
+credit and cancel. Consumer command execution, PTY and files are **not** implemented.
+Journal timings (claimed, admitted, medium built, prepared, VMM started, guest ready) are
+continuous-clock milestones; fixture values are not performance claims.
 
 ## Verification and native gates
 
@@ -143,7 +215,8 @@ cargo build -p canaveral-apple-satellite -p canaveral-runner-client --bins --exa
 npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
 # macOS, Node 24, openssl and codesign; disposable loopback TLS and identities only.
 node fixtures/apple-satellite/public-api.mjs coordination target/debug/canaveral-apple-satellite \
-  target/debug/canaveral-runner-client target/debug/examples/fixture-helper
+  target/debug/canaveral-runner-client target/debug/examples/fixture-helper \
+  target/debug/examples/fixture-bootstrap-builder
 ```
 
 Rust unit tests use fake helper subprocesses and disposable directories.
@@ -159,10 +232,24 @@ trust, lost claim and report replies after commit, never-ready receipts, the
 reservation held until cleanup evidence, controller expiry, local deadline
 enforcement by the helper's guard while a stalled controller blocks the satellite,
 with durable-stop recovery, crash recovery that
-never relaunches and keeps `unknown` reservations, and stale-binding refusal.
+never relaunches and keeps `unknown` reservations, and stale-binding refusal. Its
+direct-boot section uses a fresh binding and domain with byte-fixture artifacts set
+immutable. `fixture-bootstrap-builder` writes a **simulated** EROFS medium (magic, a
+not-mountable label and launch.json); it is never mountable. The helper's protocol-faithful
+fake guest validates hello against that launch.json. Covered: builder, digest and
+immutability failures before any claim; DirectBoot pins and bindings; ready only after
+the bound guest ready; renewal forwarding; wrong guest identity; stalled handshake with
+controller expiry; release that cleans only owned state; and crash with a lost report
+that replays without relaunch or exec while the reservation is held. Rust unit tests add a
+wrong guest protocol version, local expiry during a stalled handshake while the controller
+is unreachable, and start-record and relay binding checks.
 
 This is fixture evidence only. Real Linux boot on each advertised
 Mac/architecture, the signed production helper's requirement and behavior,
 suspend/partition beyond expiry on real hardware, positive native disk-handle
 release, guest credential hygiene/cleanup, real guest probes, shared domain
-contention and prepare duration on real images remain unaccepted native gates.
+contention and prepare duration on real images remain unaccepted native gates. Direct
+boot adds these: real `mkfs.erofs` output mounted by the audited initrd, filesystem UUID
+selection, virtio serial delivery, the real helper relay and vsock, foreign-uid relay
+rejection, and the timings on real images. Initrd and image building are not implemented
+here; they remain required operator-installed, pinned inputs.

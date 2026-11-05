@@ -182,6 +182,38 @@ impl Manifest {
         Ok(())
     }
 }
+/// Trusted per-launch configuration carried on the fresh launch medium as `launch.json`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Launch {
+    pub binding: crate::Binding,
+    pub workspace_bytes: u64,
+    /// Canonical manifest supplied on the trusted per-launch medium.
+    pub manifest: Manifest,
+}
+/// The guest reads at most this many bytes of `launch.json`.
+pub const MAX_LAUNCH_BYTES: usize = 16384;
+impl Launch {
+    pub fn validate(&self) -> Result<()> {
+        self.binding.validate()?;
+        if !(16 * 1024 * 1024..=1024 * 1024 * 1024).contains(&self.workspace_bytes) {
+            return Err("workspace capacity must be 16MiB..1GiB".into());
+        }
+        if self.manifest.digest()? != self.binding.bundle_digest {
+            return Err("manifest binding mismatch".into());
+        }
+        Ok(())
+    }
+    /// Validated, size-bounded bytes for the launch medium.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self)?;
+        if bytes.len() > MAX_LAUNCH_BYTES {
+            return Err("launch config too large".into());
+        }
+        Ok(bytes)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

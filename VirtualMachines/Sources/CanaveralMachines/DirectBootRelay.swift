@@ -36,17 +36,7 @@ import CanaveralVMCore
                         guard Self.authorizedPeer(fd) else { close(fd); continue }
                         close(self.listener); self.listener = -1
                         let pump = DirectBootPump(local: fd); self.channel = pump
-                        device.connect(toPort: 1024) { [weak self] result in
-                            guard let self, !self.stopped else { if case .success(let c) = result { c.close() }; pump.stop(); return }
-                            switch result {
-                            case .success(let c):
-                                self.connection = c
-                                pump.start(remote: c.fileDescriptor) { [weak self] in
-                                    Task { @MainActor in self?.connection?.close(); self?.connection = nil }
-                                }
-                            case .failure: pump.stop()
-                            }
-                        }
+                        self.connectGuest(device, pump: pump, until: ContinuousClock.now + Self.guestConnectWindow)
                         return
                     }
                     if errno != EAGAIN && errno != EINTR { self.stop(); return }
@@ -54,6 +44,28 @@ import CanaveralVMCore
                 }
             }
         } catch { stop(); throw error }
+    }
+    /// The guest agent listens only after PID1 boot and its tool probes. Bytes from the
+    /// accepted local stream wait in its socket buffer; the window bounds that wait.
+    static let guestConnectWindow: Duration = .seconds(60)
+    private func connectGuest(_ device: VZVirtioSocketDevice, pump: DirectBootPump, until deadline: ContinuousClock.Instant) {
+        device.connect(toPort: 1024) { [weak self] result in
+            guard let self, !self.stopped else { if case .success(let c) = result { c.close() }; pump.stop(); return }
+            switch result {
+            case .success(let c):
+                self.connection = c
+                pump.start(remote: c.fileDescriptor) { [weak self] in
+                    Task { @MainActor in self?.connection?.close(); self?.connection = nil }
+                }
+            case .failure:
+                guard ContinuousClock.now < deadline else { pump.stop(); return }
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard let self, !self.stopped else { pump.stop(); return }
+                    self.connectGuest(device, pump: pump, until: deadline)
+                }
+            }
+        }
     }
     static func authorizedPeer(_ fd: Int32) -> Bool {
         var uid: uid_t = 0, gid: gid_t = 0
