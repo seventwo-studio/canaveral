@@ -4,7 +4,10 @@ use std::{
     ffi::CString,
     fs::{self, File},
     io::Read,
-    os::fd::FromRawFd,
+    os::{
+        fd::FromRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
 };
 fn mount(source: &str, target: &str, kind: &str, flags: libc::c_ulong, data: &str) -> Result<()> {
     fs::create_dir_all(target)?;
@@ -51,15 +54,7 @@ pub(crate) fn run() -> Result<()> {
     {
         return Err("root must be read-only".into());
     }
-    let mut bytes = Vec::new();
-    File::open("/etc/canaveral/launch.json")?
-        .take(16385)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 16384 {
-        return Err("launch config too large".into());
-    }
-    let launch: Launch = serde_json::from_slice(&bytes)?;
-    launch.validate()?;
+    let launch = read_launch()?;
     mount(
         "tmpfs",
         "/tmp",
@@ -136,5 +131,120 @@ pub(crate) fn run() -> Result<()> {
             libc::waitpid(-1, &mut status, libc::WNOHANG);
         };
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Kernel mountinfo and sysfs are mounted by PID1 above, never supplied by rootfs.
+fn read_launch() -> Result<Launch> {
+    let device = launch_mount(&fs::read_to_string("/proc/self/mountinfo")?)?;
+    let nonce = fs::read_to_string("/proc/cmdline")?
+        .split_whitespace()
+        .filter_map(|p| p.strip_prefix("canaveral.launch="))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if nonce.len() != 1 {
+        return Err("trusted boot launch nonce required".into());
+    }
+    let serial = fs::read_to_string(format!("/sys/dev/block/{}/serial", device))?;
+    let boot_attempt = uuid::Uuid::parse_str(&nonce[0])?;
+    let expected_serial = boot_attempt.simple().to_string()[..20].to_owned();
+    if serial.trim() != expected_serial {
+        return Err("launch medium provenance mismatch".into());
+    }
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/etc/canaveral")?;
+    let d = directory.metadata()?;
+    if d.uid() != 0 || d.mode() & 0o777 != 0o700 {
+        return Err("unsafe launch directory".into());
+    }
+    use std::os::fd::AsRawFd;
+    let name = CString::new("launch.json")?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let m = file.metadata()?;
+    if !m.is_file()
+        || m.uid() != 0
+        || m.mode() & 0o777 != 0o400
+        || m.dev() != d.dev()
+        || format!("{}:{}", libc::major(d.dev()), libc::minor(d.dev())) != device
+        || m.len() > 16384
+    {
+        return Err("unsafe launch file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(16385).read_to_end(&mut bytes)?;
+    if bytes.len() > 16384 {
+        return Err("launch config too large".into());
+    }
+    let launch: Launch = serde_json::from_slice(&bytes)?;
+    launch.validate()?;
+    if launch.binding.boot_attempt.to_string() != nonce[0] {
+        return Err("boot nonce mismatch".into());
+    }
+    Ok(launch)
+}
+
+fn launch_mount(info: &str) -> Result<String> {
+    let mut mounts = info.lines().filter_map(|line| {
+        let (left, right) = line.split_once(" - ")?;
+        Some((
+            left.split_whitespace().collect::<Vec<_>>(),
+            right.split_whitespace().collect::<Vec<_>>(),
+        ))
+    });
+    let (entry, fsinfo) = mounts
+        .find(|(v, _)| v.get(4) == Some(&"/etc/canaveral"))
+        .ok_or("separate launch mount required")?;
+    let root = info
+        .lines()
+        .find_map(|line| {
+            let v: Vec<_> = line.split_whitespace().collect();
+            (v.get(4) == Some(&"/")).then(|| v[2].to_owned())
+        })
+        .ok_or("missing root mount")?;
+    if entry.len() < 6
+        || fsinfo.len() < 3
+        || entry[2] == root
+        || entry[3] != "/"
+        || fsinfo[0] != "erofs"
+        || !["ro", "nosuid", "nodev", "noexec"]
+            .iter()
+            .all(|flag| entry[5].split(',').any(|f| f == *flag))
+        || !fsinfo[2].split(',').any(|f| f == "ro")
+    {
+        return Err("invalid launch mount".into());
+    }
+    Ok(entry[2].to_owned())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn baked_and_untrusted_mounts_rejected() {
+        let root = "1 0 253:0 / / ro - erofs /dev/vda ro\n";
+        assert!(launch_mount(root).is_err());
+        let good = format!(
+            "{root}2 1 253:1 / /etc/canaveral ro,nosuid,nodev,noexec - erofs /dev/vdb ro\n"
+        );
+        assert_eq!(launch_mount(&good).unwrap(), "253:1");
+        for bad in [
+            good.replace("253:1", "253:0"),
+            good.replace("noexec", "exec"),
+            good.replace(" - erofs /dev/vdb", " - tmpfs tmpfs"),
+            good.replace("253:1 / /etc", "253:1 /subdir /etc"),
+        ] {
+            assert!(launch_mount(&bad).is_err());
+        }
     }
 }

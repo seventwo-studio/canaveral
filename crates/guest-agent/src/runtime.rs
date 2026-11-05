@@ -22,6 +22,17 @@ fn nonblock(fd: RawFd) -> Result<()> {
     }
     Ok(())
 }
+fn write_pending(writer: &mut impl Write, pending: &[u8], sent: &mut usize) -> Result<()> {
+    match writer.write(&pending[*sent..]) {
+        Ok(0) => Err("disconnected".into()),
+        Ok(n) => {
+            *sent += n;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
 pub(crate) fn now() -> u64 {
     let mut t = libc::timespec {
         tv_sec: 0,
@@ -36,7 +47,7 @@ pub(crate) fn now() -> u64 {
     }
     (t.tv_sec as u64).saturating_mul(1000) + t.tv_nsec as u64 / 1_000_000
 }
-struct Running {
+pub(crate) struct Running {
     child: Child,
     id: Uuid,
     start: u64,
@@ -48,7 +59,7 @@ struct Running {
     killed: bool,
 }
 impl Running {
-    fn start(
+    pub(crate) fn start(
         id: Uuid,
         argv: Vec<String>,
         cwd: String,
@@ -56,38 +67,42 @@ impl Running {
         timeout: u64,
         root: &std::path::Path,
     ) -> Result<Self> {
-        let root = std::fs::canonicalize(root)?;
-        let relative = std::path::Path::new(&cwd).strip_prefix("/workspace")?;
-        let path = std::fs::canonicalize(root.join(relative))?;
-        if !path.starts_with(&root) {
-            return Err("cwd outside workspace".into());
-        }
-        let mut command = Command::new(&argv[0]);
-        command
-            .args(&argv[1..])
-            .current_dir(path)
-            .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .envs(env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        // Guest commands cannot replace PID1 or its trusted launch configuration.
-        #[cfg(all(target_os = "linux", not(test)))]
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                    || libc::setgroups(0, std::ptr::null()) != 0
-                    || libc::setgid(1000) != 0
-                    || libc::setuid(1000) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = command.spawn()?;
+        require_pid1()?;
+        let child = (|| -> Result<Child> {
+            let root = std::fs::canonicalize(root)?;
+            let relative = std::path::Path::new(&cwd).strip_prefix("/workspace")?;
+            let path = std::fs::canonicalize(root.join(relative))?;
+            if !path.starts_with(&root) {
+                return Err("cwd outside workspace".into());
+            }
+            let mut command = Command::new(&argv[0]);
+            command
+                .args(&argv[1..])
+                .current_dir(path)
+                .env_clear()
+                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .envs(env)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            // Guest commands cannot replace PID1 or its trusted launch configuration.
+            #[cfg(target_os = "linux")]
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                        || libc::setgroups(0, std::ptr::null()) != 0
+                        || libc::setgid(1000) != 0
+                        || libc::setuid(1000) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            Ok(command.spawn()?)
+        })()
+        .map_err(|_| Box::new(SpawnFailed) as Box<dyn std::error::Error + Send + Sync>)?;
         let mut running = Self {
             child,
             id,
@@ -107,22 +122,22 @@ impl Running {
         }
         Ok(running)
     }
-    fn kill(&mut self) {
+    pub(crate) fn kill(&mut self) {
         if !self.killed {
+            require_pid1().expect("namespace-wide kill requires PID1");
             // Leader has not been reaped: its PID/PGID cannot be reused.
             unsafe {
                 libc::kill(-(self.child.id() as i32), libc::SIGKILL);
             }
             // Production PID1 owns the entire guest process namespace. This also
             // fences descendants that escaped their original process group.
-            #[cfg(not(test))]
             unsafe {
                 libc::kill(-1, libc::SIGKILL);
             }
             self.killed = true;
         }
     }
-    fn exited(&self) -> Result<bool> {
+    pub(crate) fn exited(&self) -> Result<bool> {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         if unsafe {
             libc::waitid(
@@ -137,7 +152,20 @@ impl Running {
         }
         Ok(unsafe { info.si_pid() } != 0)
     }
-    fn finish(&mut self) -> Result<Guest> {
+    fn reap_orphans(&self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        for pid in std::fs::read_to_string("/proc/self/task/1/children")?.split_whitespace() {
+            let pid: i32 = pid.parse()?;
+            if pid != self.child.id() as i32 {
+                // Reap only this adopted direct child; never reap the retained leader.
+                unsafe {
+                    libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn finish(&mut self) -> Result<Guest> {
         self.kill();
         // Bound cleanup, retaining leader ownership until it is waitable.
         let deadline = now() + 1000;
@@ -151,21 +179,10 @@ impl Running {
         let mut confirmed = false;
         loop {
             let mut status = 0;
-            let n = unsafe {
-                libc::waitpid(
-                    if cfg!(test) {
-                        -(self.child.id() as i32)
-                    } else {
-                        -1
-                    },
-                    &mut status,
-                    libc::WNOHANG,
-                )
-            };
+            let n = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
             if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
                 // No further signals after reaping leader: never kill a reused PGID.
-                confirmed = unsafe { libc::kill(-(self.child.id() as i32), 0) } < 0
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                confirmed = true;
                 break;
             }
             if now() >= deadline {
@@ -194,12 +211,33 @@ impl Drop for Running {
         self.kill(); /* Never release or replay an unconfirmed child. */
     }
 }
+#[derive(Debug)]
+struct SpawnFailed;
+impl std::fmt::Display for SpawnFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("spawn failed before exec")
+    }
+}
+impl std::error::Error for SpawnFailed {}
+fn require_pid1() -> Result<()> {
+    if !cfg!(target_os = "linux") || std::process::id() != 1 {
+        return Err("production supervision requires Linux PID1".into());
+    }
+    Ok(())
+}
+fn probe_matches(success: bool, output: &str, pin: &str) -> bool {
+    success && output.lines().next().is_some_and(|line| line.trim() == pin)
+}
 fn probe_tools(launch: &Launch) -> Result<()> {
     for (name, path, args) in [
-        ("sh", "/bin/sh", vec!["-c", "exit 0"]),
+        (
+            "shell",
+            "/bin/sh",
+            vec!["-c", "printf 'canaveral-shell-v1\\n'"],
+        ),
         ("git", "/usr/bin/git", vec!["--version"]),
         ("node", "/usr/local/bin/node", vec!["--version"]),
-        ("python3", "/usr/bin/python3", vec!["--version"]),
+        ("python", "/usr/bin/python3", vec!["--version"]),
     ] {
         let mut child = Command::new(path)
             .args(args)
@@ -221,7 +259,11 @@ fn probe_tools(launch: &Launch) -> Result<()> {
                     .unwrap()
                     .take(4096)
                     .read_to_string(&mut output)?;
-                if name != "sh" && !output.contains(&launch.tool_versions[name]) {
+                if !probe_matches(
+                    status.success(),
+                    &output,
+                    &launch.manifest.tool_versions[name],
+                ) {
                     return Err("tool version mismatch".into());
                 }
                 break;
@@ -243,16 +285,19 @@ pub(crate) fn session(transport: File, launch: &Launch) -> Result<()> {
     }
     reactor(transport, launch, std::path::Path::new("/workspace"))
 }
-fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Result<()> {
+pub(crate) fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Result<()> {
     launch.validate()?;
     nonblock(transport.as_raw_fd())?;
     let mut decoder = Decoder::default();
     let mut authority: Option<Authority> = None;
     let mut running: Option<Running> = None;
     let mut last_id = Uuid::nil();
+    let mut completed_id = Uuid::nil();
     let mut credit = 0u64;
     let mut pending = Vec::new();
     let mut sent = 0;
+    let mut rejection = None;
+    let mut close_after_frame = false;
     let connected = now();
     let result = (|| -> Result<()> {
         loop {
@@ -265,6 +310,7 @@ fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Resu
             if let Some(r) = running.as_mut() {
                 // Transport drain time does not turn an already completed or
                 // cancelled process into a timed-out execution.
+                r.reap_orphans()?;
                 if r.exited()? {
                     r.kill();
                 }
@@ -275,16 +321,21 @@ fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Resu
             }
             // One bounded write frame; all writes are nonblocking.
             if sent < pending.len() {
-                match transport.write(&pending[sent..]) {
-                    Ok(0) => return Err("disconnected".into()),
-                    Ok(n) => sent += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(e) => return Err(e.into()),
-                }
+                write_pending(&mut transport, &pending, &mut sent)?;
             }
             if sent == pending.len() {
                 pending.clear();
                 sent = 0;
+                if close_after_frame {
+                    return Err("termination unknown; native fence required".into());
+                }
+                if let Some(id) = rejection.take() {
+                    pending = encode(&Guest::Rejected {
+                        version: 1,
+                        id,
+                        reason: "unknownCommand".into(),
+                    })?;
+                }
             }
             // Read bounded work each tick so a hostile sender cannot starve deadlines.
             let mut buffer = [0u8; CHUNK];
@@ -340,13 +391,26 @@ fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Resu
                                     return Err("exec replay or unordered UUID".into());
                                 }
                                 last_id = id;
-                                running =
-                                    Some(Running::start(id, argv, cwd, env, timeout_ms, root)?);
+                                match Running::start(id, argv, cwd, env, timeout_ms, root) {
+                                    Ok(r) => running = Some(r),
+                                    Err(e) if e.is::<SpawnFailed>() => {
+                                        completed_id = id;
+                                        pending = encode(&Guest::SpawnFailed { version: 1, id })?
+                                    }
+                                    Err(e) => return Err(e),
+                                }
                             }
                             Host::Cancel { id, .. }
                                 if running.as_ref().is_some_and(|r| r.id == id) =>
                             {
                                 running.as_mut().unwrap().kill();
+                            }
+                            Host::Cancel { id, .. }
+                                if authority.is_some() && id == completed_id => {}
+                            Host::Cancel { id, .. } if authority.is_some() => {
+                                if rejection.replace(id).is_some() {
+                                    return Err("too many pending rejections".into());
+                                }
                             }
                             _ => return Err("invalid session transition".into()),
                         }
@@ -358,7 +422,28 @@ fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Resu
             if pending.is_empty() {
                 if let Some(r) = running.as_mut() {
                     for stream in 0..2 {
-                        if credit == 0 || r.eof[stream] {
+                        if r.eof[stream] {
+                            continue;
+                        }
+                        if credit == 0 {
+                            let fd = if stream == 0 {
+                                r.child.stdout.as_ref().unwrap().as_raw_fd()
+                            } else {
+                                r.child.stderr.as_ref().unwrap().as_raw_fd()
+                            };
+                            let mut p = libc::pollfd {
+                                fd,
+                                events: libc::POLLIN,
+                                revents: 0,
+                            };
+                            let mut available: libc::c_int = 0;
+                            unsafe {
+                                libc::poll(&mut p, 1, 0);
+                                libc::ioctl(fd, libc::FIONREAD, &mut available);
+                            }
+                            if p.revents & libc::POLLHUP != 0 && available == 0 {
+                                r.eof[stream] = true;
+                            }
                             continue;
                         }
                         let wanted = (credit as usize).min(CHUNK);
@@ -395,16 +480,52 @@ fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Resu
                                 ..
                             }
                         );
+                        completed_id = r.id;
                         pending = encode(&receipt)?;
                         running = None;
                         if !confirmed {
-                            let _ = transport.write(&pending);
-                            return Err("termination unknown; native fence required".into());
+                            close_after_frame = true;
                         }
                     }
                 }
             }
-            std::thread::sleep(Duration::from_millis(2));
+            let time = now();
+            let mut deadline = authority
+                .as_ref()
+                .map_or(connected + 5000, Authority::deadline);
+            if let Some(r) = &running {
+                if !r.killed {
+                    deadline = deadline.min(r.start.saturating_add(r.timeout));
+                }
+            }
+            // Child exit/adoption has no pipe event if a descendant retains the pipe.
+            // A bounded 25ms supervision tick handles it while IO wakes immediately.
+            let timeout = deadline.saturating_sub(time).min(25) as i32;
+            let mut fds = vec![libc::pollfd {
+                fd: transport.as_raw_fd(),
+                events: libc::POLLIN | if pending.is_empty() { 0 } else { libc::POLLOUT },
+                revents: 0,
+            }];
+            if pending.is_empty() && credit > 0 {
+                if let Some(r) = &running {
+                    for (fd, eof) in [
+                        (r.child.stdout.as_ref().unwrap().as_raw_fd(), r.eof[0]),
+                        (r.child.stderr.as_ref().unwrap().as_raw_fd(), r.eof[1]),
+                    ] {
+                        if !eof {
+                            fds.push(libc::pollfd {
+                                fd,
+                                events: libc::POLLIN,
+                                revents: 0,
+                            });
+                        }
+                    }
+                }
+            }
+            // Already buffered frames can be written on the next iteration immediately.
+            unsafe {
+                libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout);
+            }
         }
     })();
     if let Some(a) = authority.as_mut() {
@@ -423,283 +544,52 @@ pub(crate) fn probes(launch: &Launch) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canaveral_guest_protocol::Binding;
-    use std::{collections::BTreeMap, os::unix::net::UnixStream, thread};
-    fn launch() -> Launch {
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
-            0
-        );
-        Launch {
-            binding: Binding {
-                lease_id: Uuid::from_u128(1),
-                member_id: Uuid::from_u128(2),
-                boot_attempt: Uuid::from_u128(3),
-                revision: 1,
-                bundle_digest: "a".repeat(64),
-            },
-            workspace_bytes: 16 * 1024 * 1024,
-            tool_versions: BTreeMap::from([
-                ("git".into(), "1".into()),
-                ("node".into(), "1".into()),
-                ("python3".into(), "1".into()),
-            ]),
+    #[test]
+    fn partial_frame_offsets_survive_backpressure() {
+        struct Partial {
+            bytes: Vec<u8>,
+            blocked: bool,
         }
-    }
-    fn send(s: &mut UnixStream, h: Host) {
-        s.write_all(&encode(&h).unwrap()).unwrap();
-    }
-    fn read(s: &mut UnixStream) -> Guest {
-        let mut n = [0; 4];
-        s.read_exact(&mut n).unwrap();
-        let mut b = vec![0; u32::from_be_bytes(n) as usize];
-        s.read_exact(&mut b).unwrap();
-        serde_json::from_slice(&b).unwrap()
-    }
-    fn start(remaining: u64) -> (UnixStream, thread::JoinHandle<Result<()>>) {
-        let (mut host, guest) = UnixStream::pair().unwrap();
-        host.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
-        let config = launch();
-        let binding = config.binding.clone();
-        let handle = thread::spawn(move || {
-            let root = tempfile::tempdir()?;
-            let fd: std::os::fd::OwnedFd = guest.into();
-            reactor(File::from(fd), &config, root.path())
-        });
-        send(
-            &mut host,
-            Host::Hello {
-                version: 1,
-                binding,
-                remaining_ms: remaining,
-            },
-        );
-        assert!(matches!(read(&mut host), Guest::Ready { .. }));
-        (host, handle)
-    }
-    fn exec(host: &mut UnixStream, cwd: &str, script: &str, timeout: u64) {
-        send(
-            host,
-            Host::Exec {
-                version: 1,
-                id: Uuid::from_u128(10),
-                argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
-                cwd: cwd.into(),
-                env: BTreeMap::new(),
-                timeout_ms: timeout,
-            },
-        );
-    }
-    #[test]
-    fn invalid_cwd_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut host, h) = start(3000);
-        // Protocol requires /workspace even in fixtures; create path-independent command
-        // by testing the process component directly below. Session rejects invalid cwd.
-        exec(
-            &mut host,
-            dir.path().to_str().unwrap(),
-            "printf hello",
-            1000,
-        );
-        assert!(h.join().unwrap().is_err());
-    }
-    #[test]
-    fn disposable_process_output_and_group_reap() {
-        let _ = launch();
-        let dir = tempfile::tempdir().unwrap();
-        let mut r = Running::start(
-            Uuid::from_u128(1),
-            vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "printf hello; printf error >&2; exit 7".into(),
-            ],
-            "/workspace".into(),
-            BTreeMap::new(),
-            1000,
-            dir.path(),
-        )
+        impl Write for Partial {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.blocked = !self.blocked;
+                if self.blocked {
+                    return Err(std::io::ErrorKind::WouldBlock.into());
+                }
+                self.bytes.push(b[0]);
+                Ok(1)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let frame = encode(&Guest::Rejected {
+            version: 1,
+            id: Uuid::from_u128(1),
+            reason: "unknownCommand".into(),
+        })
         .unwrap();
-        let end = now() + 2000;
-        while !r.exited().unwrap() && now() < end {
-            thread::sleep(Duration::from_millis(5));
+        let mut writer = Partial {
+            bytes: vec![],
+            blocked: false,
+        };
+        let mut sent = 0;
+        while sent < frame.len() {
+            write_pending(&mut writer, &frame, &mut sent).unwrap();
         }
-        let mut out = String::new();
-        r.child
-            .stdout
-            .as_mut()
-            .unwrap()
-            .read_to_string(&mut out)
-            .unwrap();
-        assert_eq!(out, "hello");
-        assert!(matches!(
-            r.finish().unwrap(),
-            Guest::Exit {
-                status: Some(7),
-                termination_confirmed: true,
-                ..
-            }
-        ));
+        assert_eq!(writer.bytes, frame);
+        assert!(write_pending(&mut std::io::sink(), &[], &mut 0).is_err());
     }
     #[test]
-    fn stalled_partial_frame_and_disconnect_are_bounded() {
-        let (mut host, h) = start(80);
-        host.write_all(&[0, 0]).unwrap();
-        assert!(h.join().unwrap().is_err());
-        let (host, h) = start(3000);
-        drop(host);
-        assert!(h.join().unwrap().is_err());
-    }
-    #[test]
-    fn stale_binding_and_unknown_fields_fail_closed() {
-        let (mut host, h) = start(1000);
-        let mut binding = launch().binding;
-        binding.revision = 2;
-        binding.member_id = Uuid::from_u128(99);
-        send(
-            &mut host,
-            Host::Renew {
-                version: 1,
-                binding,
-                remaining_ms: 1000,
-            },
-        );
-        assert!(h.join().unwrap().is_err());
-    }
-    #[test]
-    fn reactor_streams_and_reports_exit() {
-        let (mut host, h) = start(3000);
-        send(
-            &mut host,
-            Host::Credit {
-                version: 1,
-                bytes: 65536,
-            },
-        );
-        exec(
-            &mut host,
-            "/workspace",
-            "printf hello; printf error >&2; exit 7",
-            1000,
-        );
-        let mut streams = BTreeMap::<String, Vec<u8>>::new();
-        let mut seq = 0;
-        loop {
-            match read(&mut host) {
-                Guest::Output {
-                    stream,
-                    seq: s,
-                    data,
-                    ..
-                } => {
-                    assert_eq!(s, seq);
-                    seq += 1;
-                    streams
-                        .entry(stream)
-                        .or_default()
-                        .extend(STANDARD.decode(data).unwrap());
-                }
-                Guest::Exit {
-                    status,
-                    termination_confirmed,
-                    stdout_bytes,
-                    stderr_bytes,
-                    ..
-                } => {
-                    assert_eq!(status, Some(7));
-                    assert!(termination_confirmed);
-                    assert_eq!((stdout_bytes, stderr_bytes), (5, 5));
-                    break;
-                }
-                _ => panic!("unexpected receipt"),
-            }
-        }
-        assert_eq!(streams["stdout"], b"hello");
-        assert_eq!(streams["stderr"], b"error");
-        exec(&mut host, "/workspace", "exit 0", 1000);
-        assert!(h.join().unwrap().is_err());
-    }
-    #[test]
-    fn timeout_and_cancel_kill_owned_group() {
-        for cancel in [false, true] {
-            let (mut host, h) = start(3000);
-            send(
-                &mut host,
-                Host::Credit {
-                    version: 1,
-                    bytes: 65536,
-                },
-            );
-            exec(
-                &mut host,
-                "/workspace",
-                "sleep 30 & wait",
-                if cancel { 2000 } else { 30 },
-            );
-            if cancel {
-                send(
-                    &mut host,
-                    Host::Cancel {
-                        version: 1,
-                        id: Uuid::from_u128(10),
-                    },
-                );
-            }
-            loop {
-                if let Guest::Exit {
-                    timed_out,
-                    termination_confirmed,
-                    ..
-                } = read(&mut host)
-                {
-                    assert_eq!(timed_out, !cancel);
-                    assert!(termination_confirmed);
-                    break;
-                }
-            }
-            drop(host);
-            assert!(h.join().unwrap().is_err());
+    fn exact_probe_lines() {
+        assert!(probe_matches(true, "  v24.11.0\nother", "v24.11.0"));
+        assert!(!probe_matches(false, "v24.11.0", "v24.11.0"));
+        for bad in ["v24.11.01", "prefix v24.11.0", "wrong\nv24.11.0", ""] {
+            assert!(!probe_matches(true, bad, "v24.11.0"));
         }
     }
     #[test]
-    fn no_credit_does_not_block_expiry() {
-        let (mut host, h) = start(100);
-        exec(
-            &mut host,
-            "/workspace",
-            "while :; do printf 1234567890; done",
-            2000,
-        );
-        let before = now();
-        assert!(h.join().unwrap().is_err());
-        assert!(now() - before < 2000);
-    }
-    #[test]
-    fn stalled_reader_does_not_block_deadline_or_disconnect() {
-        for disconnect in [false, true] {
-            let (mut host, h) = start(200);
-            send(
-                &mut host,
-                Host::Credit {
-                    version: 1,
-                    bytes: MAX_FRAME as u64,
-                },
-            );
-            exec(
-                &mut host,
-                "/workspace",
-                "while :; do printf 123456789012345678901234567890; done",
-                2000,
-            );
-            thread::sleep(Duration::from_millis(20));
-            if disconnect {
-                drop(host);
-            }
-            let before = now();
-            assert!(h.join().unwrap().is_err());
-            assert!(now() - before < 2000);
-        }
+    fn host_cannot_supervise() {
+        assert!(require_pid1().is_err());
     }
 }

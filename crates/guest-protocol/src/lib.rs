@@ -13,6 +13,31 @@ fn uuid<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Uuid, D::
     }
     Ok(id)
 }
+/// Reject duplicate JSON map keys before a map can discard them.
+pub fn unique_map<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error> {
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = BTreeMap<String, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("unique string keys")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut m: M,
+        ) -> std::result::Result<Self::Value, M::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((k, v)) = m.next_entry::<String, String>()? {
+                if out.insert(k, v).is_some() {
+                    return Err(serde::de::Error::custom("duplicate key"));
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(Unique)
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Binding {
@@ -67,6 +92,7 @@ pub enum Host {
         id: Uuid,
         argv: Vec<String>,
         cwd: String,
+        #[serde(deserialize_with = "unique_map")]
         env: BTreeMap<String, String>,
         #[serde(rename = "timeoutMs")]
         timeout_ms: u64,
@@ -110,11 +136,11 @@ impl Host {
                 if argv.is_empty()
                     || argv[0].is_empty()
                     || argv.iter().any(|s| s.contains('\0'))
-                    || !cwd.starts_with("/workspace")
+                    || !(cwd == "/workspace" || cwd.starts_with("/workspace/"))
                     || cwd.contains('\0')
-                    || env
-                        .iter()
-                        .any(|(k, v)| k.is_empty() || k.contains(['=', '\0']) || v.contains('\0'))
+                    || env.iter().any(|(k, v)| {
+                        k == "PATH" || k.is_empty() || k.contains(['=', '\0']) || v.contains('\0')
+                    })
                 {
                     return Err("invalid exec".into());
                 }
@@ -144,6 +170,15 @@ fn positive(n: u64) -> Result<()> {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Guest {
+    SpawnFailed {
+        version: u32,
+        id: Uuid,
+    },
+    Rejected {
+        version: u32,
+        id: Uuid,
+        reason: String,
+    },
     Ready {
         version: u32,
         binding: Binding,
@@ -233,6 +268,9 @@ impl Authority {
             fenced: false,
         })
     }
+    pub fn deadline(&self) -> u64 {
+        self.deadline
+    }
     pub fn permits(&mut self, now: u64) -> bool {
         self.fenced |= now >= self.deadline;
         !self.fenced
@@ -266,6 +304,20 @@ mod tests {
             revision: 1,
             bundle_digest: "a".repeat(64),
         }
+    }
+    #[test]
+    fn duplicate_env_and_fixed_path() {
+        let prefix = r#"{"type":"exec","version":1,"id":"00000000-0000-0000-0000-000000000001","argv":["sh"],"cwd":"/workspace","timeoutMs":1,"env":{ENV}}"#;
+        for env in [r#""A":"1","A":"2""#, r#""PATH":"/evil""#] {
+            let value = prefix.replace("ENV", env);
+            let result = serde_json::from_str::<Host>(&value);
+            assert!(result.is_err() || result.unwrap().validate().is_err());
+        }
+        let valid = prefix.replace("ENV", r#""UNICODE":"é""#);
+        serde_json::from_str::<Host>(&valid)
+            .unwrap()
+            .validate()
+            .unwrap();
     }
     #[test]
     fn expiry_is_sticky_and_renewal_is_scoped() {
