@@ -193,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-26]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -210,6 +210,8 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
         run: |
+          sw_vers -productVersion
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 26
           xcodebuild -version
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 26
           swift build --package-path VirtualMachines
