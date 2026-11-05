@@ -50,3 +50,5 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [windows guest terminals](windows-guest-terminals.md)
 
 - [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
+
+- [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core; host routing, trusted bootstrap provisioning and native acceptance remain outstanding)

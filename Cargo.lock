@@ -71,6 +71,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "canaveral-guest-agent"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "canaveral-guest-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "canaveral-guest-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "canaveral-kubevirt-execution"
 version = "0.1.0"
 dependencies = [
