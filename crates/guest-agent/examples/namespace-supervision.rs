@@ -132,7 +132,10 @@ fn main() {
                         assert_eq!(children.split_whitespace().count(), 1, "orphans accumulated: {children}");
                     }
                 },
-                Guest::Exit{status,timed_out,termination_confirmed,stdout_bytes,stderr_bytes,..} => { assert!(!failed); assert!(termination_confirmed); if n==17 {assert_eq!(status,Some(7)); assert_eq!((stdout_bytes,stderr_bytes),(5,5)); assert!(output.contains("hello") && output.contains("error"));} if n==13 {assert_eq!(status,Some(7));} if n==16 {assert!(!timed_out);} if n==14 {assert!(timed_out); assert!(output.starts_with("1000\n"));} break; },
+                Guest::Exit{status,timed_out,termination_confirmed,stdout_bytes,stderr_bytes,..} => { assert!(!failed); assert!(termination_confirmed); if n==17 {assert_eq!(status,Some(7)); assert_eq!((stdout_bytes,stderr_bytes),(5,5)); assert!(output.contains("hello") && output.contains("error"));}
+                    if n==13 {assert_eq!(status,Some(7));}
+                    if n==16 {assert!(!timed_out);}
+                    if n==14 {assert!(timed_out); assert!(output.starts_with("1000\n"));} break; },
                 other => panic!("unexpected {other:?}"),
             }}
             // Retried late cancel must not close the session; no output credit for silent exit.
