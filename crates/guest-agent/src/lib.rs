@@ -1,27 +1,6 @@
 //! PID1 guest agent. The production entry point never executes on a host.
-use canaveral_guest_protocol::bundle::Manifest;
-use canaveral_guest_protocol::{Binding, Result};
-use serde::Deserialize;
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Launch {
-    pub binding: Binding,
-    pub workspace_bytes: u64,
-    /// Canonical manifest supplied on the trusted per-launch medium.
-    pub manifest: Manifest,
-}
-impl Launch {
-    pub fn validate(&self) -> Result<()> {
-        self.binding.validate()?;
-        if !(16 * 1024 * 1024..=1024 * 1024 * 1024).contains(&self.workspace_bytes) {
-            return Err("workspace capacity must be 16MiB..1GiB".into());
-        }
-        if self.manifest.digest()? != self.binding.bundle_digest {
-            return Err("manifest binding mismatch".into());
-        }
-        Ok(())
-    }
-}
+pub use canaveral_guest_protocol::bundle::Launch;
+use canaveral_guest_protocol::Result;
 #[cfg(target_os = "linux")]
 mod boot;
 #[cfg(unix)]
@@ -41,6 +20,7 @@ pub fn run_pid1() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canaveral_guest_protocol::{bundle::Manifest, Binding};
     #[test]
     fn launch_pins_are_bound_to_manifest_digest() {
         let manifest: Manifest = serde_json::from_slice(include_bytes!(
@@ -59,6 +39,9 @@ mod tests {
             manifest,
         };
         launch.validate().unwrap();
+        // The host serializes exactly what the guest parses.
+        let round: Launch = serde_json::from_slice(&launch.to_bytes().unwrap()).unwrap();
+        round.validate().unwrap();
         launch
             .manifest
             .tool_versions

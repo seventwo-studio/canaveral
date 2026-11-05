@@ -11,7 +11,10 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
+mod bootstrap;
+pub mod bundle;
 pub mod clock;
+pub mod guest;
 mod private;
 pub type Result<T> = std::result::Result<T, &'static str>;
 /// Interval between heartbeat reports while a guest runs; replies carry renewals and stop intent.
@@ -47,6 +50,9 @@ pub struct Image {
 pub struct Installed {
     /// Operator attests this exact digest contains no reusable guest credentials.
     pub credential_free: bool,
+    /// Omitted for existing EFI raw inventory, so retained journals keep their fingerprint.
+    #[serde(default, skip_serializing_if = "bundle::Format::is_efi_raw")]
+    pub format: bundle::Format,
     pub image: Image,
     pub path: PathBuf,
 }
@@ -65,6 +71,9 @@ pub struct Config {
     pub max_cpu: u64,
     pub max_memory_mi_b: u64,
     pub max_disk_gi_b: u64,
+    /// Required by boot-bundle inventory: pinned per-launch bootstrap medium builder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_builder: Option<bundle::Builder>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -123,16 +132,57 @@ struct Journal {
     sequence: u64,
     pending: Option<Value>,
     released: bool,
+    /// Send time of the claim that produced this assignment (continuous seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claimed_at: Option<f64>,
+    /// Boot-bundle launch state; absent for EFI raw journals, including retained ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    direct: Option<Direct>,
+}
+/// Durable direct-boot launch tuple. The boot attempt is consumed with launch intent.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Direct {
+    boot_attempt: uuid::Uuid,
+    /// Lease revision written into launch.json; hello repeats it, renewals follow.
+    revision: u64,
+    bundle_digest: String,
+    /// Admission hashes and metadata identities of kernel, initrd and rootfs.
+    artifacts: Vec<bundle::Pinned>,
+    medium: Option<bundle::Pinned>,
+    /// Exact relay path published by the helper; removed only after positive stop.
+    agent_socket: Option<String>,
+    /// Guest ready observed in this process; withdrawal is sticky.
+    ready: bool,
+    withdrawn: bool,
+    timings: Timings,
+}
+/// Continuous-clock milestones (seconds). Fixture values are not performance evidence.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Timings {
+    claimed: Option<f64>,
+    admitted: Option<f64>,
+    medium_built: Option<f64>,
+    prepared: Option<f64>,
+    vmm_started: Option<f64>,
+    guest_ready: Option<f64>,
+    first_command: Option<f64>,
+}
+/// A boot bundle with its artifacts hashed once for this admission.
+type Admitted = (bundle::Bundle, Vec<bundle::Pinned>);
+fn random_uuid() -> Result<uuid::Uuid> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|_| "randomness unavailable")?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(uuid::Uuid::from_bytes(bytes))
 }
 impl Journal {
     fn fresh(config: Value) -> Result<Self> {
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).map_err(|_| "randomness unavailable")?;
-        bytes[6] = (bytes[6] & 0x0f) | 0x40;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
         Ok(Self {
             config,
-            claim_id: uuid::Uuid::from_bytes(bytes),
+            claim_id: random_uuid()?,
             assignment: None,
             launch_intent: false,
             prepared: false,
@@ -149,6 +199,8 @@ impl Journal {
             sequence: 0,
             pending: None,
             released: false,
+            claimed_at: None,
+            direct: None,
         })
     }
 }
@@ -280,14 +332,31 @@ fn validate_local(c: &Config) -> Result<()> {
     {
         return Err("invalid helper or local configuration");
     }
+    if let Some(builder) = &c.bootstrap_builder {
+        bundle::verify_builder(builder)?;
+    }
     for item in &c.inventory {
         if !item.credential_free
             || item.image.backend != "appleVirtualization"
             || item.image.arch != host_arch()
-            || item.path.extension().and_then(|s| s.to_str()) != Some("raw")
-            || artifact_hash(&item.path, true)? != item.image.digest
         {
             return Err("installed image mismatch");
+        }
+        match item.format {
+            bundle::Format::EfiRaw => {
+                if item.path.extension().and_then(|s| s.to_str()) != Some("raw")
+                    || artifact_hash(&item.path, true)? != item.image.digest
+                {
+                    return Err("installed image mismatch");
+                }
+            }
+            bundle::Format::BootBundle => {
+                if c.bootstrap_builder.is_none() {
+                    return Err("boot bundle requires a pinned bootstrap builder");
+                }
+                // Cheap descriptor proof and canonical manifest digest; hashing is per admission.
+                bundle::Bundle::open(item)?;
+            }
         }
     }
     Ok(())
@@ -402,7 +471,9 @@ impl Satellite {
             .iter()
             .find(|i| i.image == a.image)
             .ok_or("assignment image not installed; declined")?;
-        if io(std::fs::metadata(&installed.path))?.len() > r.disk_gi_b * 1073741824 {
+        if installed.format.is_efi_raw()
+            && io(std::fs::metadata(&installed.path))?.len() > r.disk_gi_b * 1073741824
+        {
             return Err("installed disk exceeds assigned storage; declined");
         }
         Ok(installed)
@@ -420,7 +491,7 @@ impl Satellite {
         }
         Ok((boot_id, continuous))
     }
-    fn admit(&self) -> Result<Installed> {
+    fn admit(&self) -> Result<(Installed, Option<Admitted>)> {
         let a = self.assignment()?;
         let installed = self.validate_assignment(a)?.clone();
         if self.expired() {
@@ -430,10 +501,19 @@ impl Satellite {
         if self.helper_clock()?.0 != self.state.boot_session_id {
             return Err("host rebooted after claim; declined");
         }
-        if hash_file(&installed.path)? != a.image.digest {
-            return Err("installed image changed; declined");
+        if installed.format.is_efi_raw() {
+            if hash_file(&installed.path)? != a.image.digest {
+                return Err("installed image changed; declined");
+            }
+            return Ok((installed, None));
         }
-        Ok(installed)
+        // Hash once per admission; record identities for fail-closed rechecks before effects.
+        let b = bundle::Bundle::open(&installed)?;
+        if self.config.bootstrap_builder.is_none() {
+            return Err("boot bundle requires a pinned bootstrap builder");
+        }
+        let pins = b.admit()?;
+        Ok((installed, Some((b, pins))))
     }
     fn write_machine(&self, name: &str, body: Value) -> Result<()> {
         // Machine directory is created exclusively below our locked workspace by prepare.
@@ -487,6 +567,20 @@ impl Satellite {
         } else {
             None
         };
+        let direct = s.direct.as_ref();
+        // Ready only after the guest's bound probes and exact ready echo, never after restart.
+        let guest_ready =
+            direct.is_some_and(|d| d.ready && !d.withdrawn) && !s.fenced && !s.stopped;
+        let runtime = if s.stopped {
+            "stopped"
+        } else if guest_ready {
+            "running"
+        } else if direct.is_some_and(|d| !d.withdrawn) && !s.fenced {
+            "starting"
+        } else {
+            "unknown"
+        };
+        let command = guest_ready && a.capabilities.iter().any(|c| c == "command");
         let cleanup = if s.cleaned {
             "complete"
         } else if s.terminal && s.stopped {
@@ -499,9 +593,9 @@ impl Satellite {
         Ok(
             json!({"assignmentId":a.id,"sequence":s.sequence+1,"receipt":{
             "leaseId":a.lease_id,"memberId":a.member_id,"backend":a.image.backend,"imageDigest":a.image.digest,
-            "observedRevision":s.revision,"runtimeState":if s.stopped {"stopped"} else {"unknown"},
-            // No guest probe exists in this slice: boot never implies command, PTY or files.
-            "ready":{"command":false,"pty":false,"files":false},
+            "observedRevision":s.revision,"runtimeState":runtime,
+            // EFI boot never implies readiness; PTY and files have no guest transport yet.
+            "ready":{"command":command,"pty":false,"files":false},
             "failure":failure,"executionStopped":s.stopped,"storageRemoved":s.cleaned,
             "credentialsErased":s.cleaned,"cleanup":cleanup}}),
         )
@@ -612,6 +706,15 @@ impl Satellite {
             let resumed = self.state.cleaning;
             self.state.cleaning = true;
             self.save()?;
+            if let Some(path) = self
+                .state
+                .direct
+                .as_ref()
+                .and_then(|d| d.agent_socket.clone())
+            {
+                // Positive stop is proven; only the exact published relay path is removed.
+                guest::remove_published(&path)?;
+            }
             self.dir.cleanup_workspace(resumed)?;
             self.state.cleaned = true;
             self.save()?;
@@ -637,6 +740,119 @@ impl Satellite {
         self.finish(controller)?;
         Err(reason)
     }
+    fn guest_binding(&self, revision: u64) -> Result<canaveral_guest_protocol::Binding> {
+        let a = self.assignment()?;
+        let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+        Ok(canaveral_guest_protocol::Binding {
+            lease_id: a.lease_id,
+            member_id: a.member_id,
+            revision,
+            boot_attempt: d.boot_attempt,
+            bundle_digest: d.bundle_digest.clone(),
+        })
+    }
+    /// Builds the fresh launch medium, rechecks admitted identities, returns the prepare request.
+    fn direct_request(&mut self, a: &Assignment, b: &bundle::Bundle) -> Result<Value> {
+        let builder = self
+            .config
+            .bootstrap_builder
+            .clone()
+            .ok_or("boot bundle requires a pinned bootstrap builder")?;
+        // Guest tmpfs: a quarter of reserved memory, within the agent's 16MiB..1GiB bounds.
+        let workspace_bytes =
+            (a.resources.memory_mi_b * 1048576 / 4).clamp(16 * 1048576, 1073741824);
+        let launch = canaveral_guest_protocol::bundle::Launch {
+            binding: self.guest_binding(self.state.revision)?,
+            workspace_bytes,
+            manifest: b.manifest.clone(),
+        };
+        let medium = bootstrap::build(&builder, &self.workspace().join("bootstrap"), &launch)?;
+        let d = self.state.direct.as_mut().ok_or("no direct launch")?;
+        d.medium = Some(medium.clone());
+        d.timings.medium_built = Some(clock::now().as_secs_f64());
+        let d = d.clone();
+        self.save()?;
+        for pin in &d.artifacts {
+            bundle::recheck(pin)?;
+        }
+        let role = |r: &str| {
+            d.artifacts
+                .iter()
+                .find(|p| p.role == r)
+                .map(bundle::Pinned::swift)
+                .ok_or("missing admitted artifact")
+        };
+        Ok(json!({
+            "id":a.member_id,"leaseID":a.lease_id,"name":"leased-linux","os":"linux","mode":"headless",
+            "cpu":a.resources.cpu,"memoryMiB":a.resources.memory_mi_b,"diskGiB":a.resources.disk_gi_b,
+            "directory":self.workspace(),
+            "directBoot":{
+                "version":1,"revision":self.state.revision,
+                "kernel":role("kernel")?,"initrd":role("initrd")?,"rootfs":role("rootfs")?,
+                "launchMedium":medium.swift(),"launchFilesystemUUID":d.boot_attempt,
+                "bundleDigest":d.bundle_digest,"commandLine":b.manifest.command_line,
+                "leaseID":a.lease_id,"memberID":a.member_id,
+                "bootSessionID":self.state.boot_session_id,"bootAttempt":d.boot_attempt,
+                "workspaceBytes":workspace_bytes
+            }
+        }))
+    }
+    fn withdraw(&mut self) -> Result<()> {
+        if let Some(d) = self.state.direct.as_mut() {
+            d.ready = false;
+            d.withdrawn = true;
+        }
+        self.save()
+    }
+    /// One nonblocking guest step: started record, verified connect, hello, ready, liveness.
+    fn guest_step(
+        &mut self,
+        session: &mut Option<guest::Session>,
+        last: &mut Option<clock::Clock>,
+    ) -> Result<()> {
+        let now = clock::now().as_secs_f64();
+        if session.is_none() {
+            let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+            if d.agent_socket.is_some() || d.withdrawn {
+                return Err("guest session cannot be reopened");
+            }
+            let a = self.assignment()?;
+            let expected = guest::Expected {
+                lease_id: a.lease_id,
+                member_id: a.member_id,
+                boot_session_id: self.state.boot_session_id,
+                boot_attempt: d.boot_attempt,
+                boot: self.state.boot,
+            };
+            let Some(path) = guest::read_started(&self.machine()?, &expected, now)? else {
+                return Ok(());
+            };
+            let d = self.state.direct.as_mut().ok_or("no direct launch")?;
+            d.agent_socket = Some(path.clone());
+            d.timings.vmm_started = Some(now);
+            self.save()?;
+            let launch_revision = self.state.direct.as_ref().map_or(0, |d| d.revision);
+            *session = Some(guest::Session::open(
+                &path,
+                self.guest_binding(launch_revision)?,
+                self.state.deadline,
+                now,
+            )?);
+        }
+        let s = session.as_mut().ok_or("no guest session")?;
+        if s.pump(now)? {
+            let d = self.state.direct.as_mut().ok_or("no direct launch")?;
+            d.ready = true;
+            d.timings.guest_ready = Some(now);
+            self.save()?;
+            *last = None; // Report readiness promptly.
+        }
+        let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+        if d.ready && !s.ready(now) {
+            return Err("guest readiness lapsed");
+        }
+        Ok(())
+    }
     /// One durable claim per journal. Restart never repeats prepare/run after launch intent.
     pub fn run_once(&mut self, controller: &mut impl Controller) -> Result<()> {
         if self.state.released {
@@ -660,6 +876,7 @@ impl Satellite {
             self.state.deadline = start + (a.lease.expires_at - a.lease.controller_now).max(0.0);
             self.state.revision = a.lease.revision;
             self.state.boot_session_id = boot_id;
+            self.state.claimed_at = Some(start);
             self.state.assignment = Some(a);
             self.save()?;
         }
@@ -677,31 +894,52 @@ impl Satellite {
                 "recovered intent: no relaunch; stop/cleanup proof requires reconciliation",
             );
         }
-        let installed = match self.admit() {
-            Ok(installed) => installed,
+        let (installed, direct) = match self.admit() {
+            Ok(admitted) => admitted,
             Err(reason) => return self.decline(controller, reason),
         };
         let a = self.assignment()?.clone();
         // Even prepare is never retried after an interrupted effect.
         self.state.launch_intent = true;
         self.state.boot = clock::now().as_secs_f64();
+        if let Some((b, pins)) = &direct {
+            // A fresh boot attempt is consumed together with launch intent.
+            self.state.direct = Some(Direct {
+                boot_attempt: random_uuid()?,
+                revision: self.state.revision,
+                bundle_digest: b.digest.clone(),
+                artifacts: pins.clone(),
+                medium: None,
+                agent_socket: None,
+                ready: false,
+                withdrawn: false,
+                timings: Timings {
+                    claimed: self.state.claimed_at,
+                    admitted: Some(self.state.boot),
+                    ..Timings::default()
+                },
+            });
+        }
         self.save()?;
         self.dir.workspace()?;
         let remaining = Duration::from_secs_f64(
             (self.state.deadline - clock::now().as_secs_f64()).clamp(0.0, 1800.0),
         );
-        let prepared = command(
-            &self.config.helper,
-            &["prepare"],
-            Some(&json!({
+        let request = match &direct {
+            None => Ok(json!({
                 "id":a.member_id,"leaseID":a.lease_id,"name":"leased-linux","os":"linux","mode":"headless",
                 "cpu":a.resources.cpu,"memoryMiB":a.resources.memory_mi_b,"diskGiB":a.resources.disk_gi_b,
                 "image":installed.path,"directory":self.workspace()
             })),
-            remaining,
-        );
+            Some((b, _)) => self.direct_request(&a, b),
+        };
+        let prepared =
+            request.and_then(|r| command(&self.config.helper, &["prepare"], Some(&r), remaining));
         if prepared.is_ok() {
             self.state.prepared = true;
+            if let Some(d) = self.state.direct.as_mut() {
+                d.timings.prepared = Some(clock::now().as_secs_f64());
+            }
             self.save()?;
             self.write_machine("runner-launch.json", json!({"attemptedAt":self.state.boot}))?;
         }
@@ -722,8 +960,15 @@ impl Satellite {
             .stderr(Stdio::null())
             .spawn())?;
         let mut last: Option<clock::Clock> = None;
+        let mut session: Option<guest::Session> = None;
         while !self.state.fenced {
             if self.expired() || io(child.try_wait())?.is_some() {
+                self.fence()?;
+                break;
+            }
+            if self.state.direct.is_some() && self.guest_step(&mut session, &mut last).is_err() {
+                // The single session cannot be restored: withdraw readiness, then fence.
+                self.withdraw()?;
                 self.fence()?;
                 break;
             }
@@ -732,8 +977,26 @@ impl Satellite {
                 // A lost reply keeps the exact pending report; local expiry still fences.
                 let _ = self.report(controller);
             }
-            std::thread::sleep(Duration::from_millis(100));
+            if let Some(s) = session.as_mut() {
+                let renewed = !self.state.fenced && self.state.revision > s.revision();
+                if renewed
+                    && s.renew(
+                        self.guest_binding(self.state.revision)?,
+                        self.state.deadline,
+                        clock::now().as_secs_f64(),
+                    )
+                    .is_err()
+                {
+                    self.withdraw()?;
+                    self.fence()?;
+                    break;
+                }
+            }
+            let pause = if session.is_some() { 20 } else { 100 };
+            std::thread::sleep(Duration::from_millis(pause));
         }
+        // Close our relay stream before stop proof so the helper's relay can drain and exit.
+        drop(session);
         // Native authorization also cuts power independently if this process dies.
         if self.wait_stopped(Some(&mut child))? {
             return self.finish(controller);
@@ -788,6 +1051,7 @@ mod tests {
             ca: None,
             inventory: vec![Installed {
                 credential_free: true,
+                format: bundle::Format::EfiRaw,
                 image: Image {
                     id: "linux".into(),
                     revision: "1".into(),
@@ -800,6 +1064,7 @@ mod tests {
             max_cpu: 2,
             max_memory_mi_b: 2048,
             max_disk_gi_b: 4,
+            bootstrap_builder: None,
         };
         let script = helper_script(&machine_of(&c));
         install_helper(&mut c, &script);
@@ -830,6 +1095,8 @@ mod tests {
         cancel: bool,
         delay: Duration,
         claim_null: bool,
+        /// Consumer release once a ready receipt arrives.
+        stop_on_ready: bool,
     }
     impl Controller for Wire {
         fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value> {
@@ -848,6 +1115,10 @@ mod tests {
                 LeaseRoute::Claim => Ok(json!({"assignment":self.a})),
                 LeaseRoute::Report => {
                     let r = &body["receipt"];
+                    if self.stop_on_ready && r["ready"]["command"] == true {
+                        assert_eq!(r["runtimeState"], "running");
+                        self.cancel = true;
+                    }
                     // No cleanup evidence while active; a failure ends the lease.
                     let ends = self.cancel || !r["failure"].is_null();
                     if !ends {
@@ -878,8 +1149,11 @@ mod tests {
             cancel: false,
             delay: Duration::ZERO,
             claim_null: false,
+            stop_on_ready: false,
         }
     }
+    #[cfg(target_os = "macos")]
+    mod direct;
     #[test]
     fn claim_reply_loss_replays_across_restart_and_never_changes_identity() {
         let (_tmp, c) = fixture();

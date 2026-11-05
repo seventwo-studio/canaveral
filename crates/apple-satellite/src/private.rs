@@ -233,6 +233,50 @@ impl Directory {
     }
 }
 
+/// Opens a final path component without following it, below a nofollow-walked trusted parent.
+pub(super) fn open_leaf(path: &Path) -> Result<File> {
+    let parent = walk(path.parent().ok_or_else(invalid)?)?;
+    openat(
+        &parent,
+        &name(path.file_name().ok_or_else(invalid)?)?,
+        libc::O_RDONLY,
+    )
+}
+/// Small helper-published record: owned by this uid, no group/other write, one link.
+/// `None` when it has not been published yet.
+pub(super) fn read_owned(path: &Path, max: usize) -> Result<Option<Vec<u8>>> {
+    let parent = walk(path.parent().ok_or_else(invalid)?)?;
+    let n = name(path.file_name().ok_or_else(invalid)?)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            n.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(invalid());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let m = io(file.metadata())?;
+    if !m.is_file()
+        || m.nlink() != 1
+        || m.uid() != unsafe { libc::geteuid() }
+        || m.mode() & 0o022 != 0
+    {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, max as u64 + 1), &mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.is_empty() || bytes.len() > max {
+        return Err(invalid());
+    }
+    Ok(Some(bytes))
+}
 pub(super) fn trust_file(path: &Path, secret: bool) -> Result<Vec<u8>> {
     let parent = walk(path.parent().ok_or_else(invalid)?)?;
     let file = openat(
@@ -301,7 +345,11 @@ fn remove_tree(parent: &File, n: &CString) -> Result<()> {
                 if m.st_mode & libc::S_IFMT == libc::S_IFDIR {
                     remove_tree(&dir, &child)?;
                 } else if unsafe { libc::unlinkat(dir.as_raw_fd(), child.as_ptr(), 0) } != 0 {
-                    return Err(invalid());
+                    // The owned bootstrap medium is user-immutable while a VM may use it.
+                    clear_owned_immutable(&dir, &child, &m)?;
+                    if unsafe { libc::unlinkat(dir.as_raw_fd(), child.as_ptr(), 0) } != 0 {
+                        return Err(invalid());
+                    }
                 }
                 removed = true;
             }
@@ -320,6 +368,31 @@ fn remove_tree(parent: &File, n: &CString) -> Result<()> {
         libc::closedir(entries);
     }
     result
+}
+
+/// Clears only the user-immutable flag of an owned regular file inside the owned workspace.
+#[cfg(target_os = "macos")]
+fn clear_owned_immutable(dir: &File, child: &CString, walked: &libc::stat) -> Result<()> {
+    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+        || walked.st_mode & libc::S_IFMT != libc::S_IFREG
+        || walked.st_uid != unsafe { libc::geteuid() }
+        || walked.st_flags & libc::UF_IMMUTABLE == 0
+    {
+        return Err(invalid());
+    }
+    let file = openat(dir, child, libc::O_RDONLY)?;
+    let m = io(file.metadata())?;
+    if (m.dev(), m.ino()) != (walked.st_dev as u64, walked.st_ino) {
+        return Err(invalid());
+    }
+    if unsafe { libc::fchflags(file.as_raw_fd(), walked.st_flags & !libc::UF_IMMUTABLE) } != 0 {
+        return Err(invalid());
+    }
+    Ok(())
+}
+#[cfg(not(target_os = "macos"))]
+fn clear_owned_immutable(_: &File, _: &CString, _: &libc::stat) -> Result<()> {
+    Err(invalid())
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Guest protocol 1
 
-Status: executable guest core; host routing, Swift integration, native boot and acceptance remain outstanding. Apple Virtualization and KubeVirt remain the backends. No Python production agent is introduced.
+Status: executable guest core. The Rust Apple satellite implements the host hello/ready/renew client and an owned command client, fixture-tested only. The consumer command route, native boot and acceptance remain outstanding. Apple Virtualization and KubeVirt remain the backends. No Python production agent is introduced.
 
 Transport: one AF_VSOCK stream on port 1024, accepted only from HOST_CID (2). One session per launch, no reconnect authority. Every frame is a four-byte unsigned big-endian JSON byte length (1..1048576), then UTF-8 JSON. Unknown fields, invalid types, noncanonical UUIDs and versions other than 1 fail closed. See `canaveral-guest-protocol` for exact field names. All numeric values are integers within JavaScript's safe range.
 
