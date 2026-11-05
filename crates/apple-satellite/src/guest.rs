@@ -258,6 +258,7 @@ impl Session {
     pub fn renew(&mut self, binding: Binding, deadline: f64, now: f64) -> Result<()> {
         let r = (|| {
             if self.phase == Phase::Closed
+                || now >= self.guest_deadline
                 || !binding.same_launch(&self.hello)
                 || binding.revision <= self.revision
             {
@@ -308,6 +309,7 @@ impl Session {
             }
         }
         let mut buf = vec![0; CHUNK];
+        let mut became_ready = false;
         for _ in 0..16 {
             if self.event_bytes >= EVENTS_MAX {
                 break; // Backpressure: unread frames stop reads, never supervision.
@@ -323,15 +325,15 @@ impl Session {
                     else {
                         continue;
                     };
-                    if self.accept(frame)? {
-                        return Ok(true);
-                    }
+                    // Drain the bounded read pass before publishing readiness: an already
+                    // readable EOF or protocol failure must invalidate the transition.
+                    became_ready |= self.accept(frame)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => return Err("guest transport failed"),
             }
         }
-        Ok(false)
+        Ok(became_ready)
     }
     fn accept(&mut self, frame: Guest) -> Result<bool> {
         match (&self.phase, &frame) {
@@ -432,6 +434,90 @@ fn next_id(last: Uuid) -> Result<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn session_pair() -> (Session, UnixStream) {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let binding = Binding {
+            lease_id: Uuid::from_u128(1),
+            member_id: Uuid::from_u128(2),
+            revision: 1,
+            boot_attempt: Uuid::from_u128(3),
+            bundle_digest: "a".repeat(64),
+        };
+        (
+            Session {
+                stream,
+                out: Vec::new(),
+                sent: 0,
+                queued: None,
+                opened: crate::clock::Clock::now(),
+                decoder: GuestDecoder::default(),
+                hello: binding,
+                revision: 1,
+                guest_deadline: 110.0,
+                phase: Phase::Handshake,
+                events: VecDeque::new(),
+                event_bytes: 0,
+                last_id: Uuid::nil(),
+                active: None,
+                first_command: None,
+            },
+            peer,
+        )
+    }
+    fn send_ready(session: &Session, peer: &mut UnixStream) {
+        peer.write_all(
+            &encode(&Guest::Ready {
+                version: 1,
+                binding: session.hello.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn late_renewal_cannot_revive_expired_guest_authority() {
+        for now in [110.0, 110.5] {
+            let (mut session, mut peer) = session_pair();
+            send_ready(&session, &mut peer);
+            assert!(session.pump(109.0).unwrap());
+            assert!(session.ready(109.0));
+            let mut newer = session.hello.clone();
+            newer.revision = 2;
+            assert!(session.renew(newer, 130.0, now).is_err());
+            assert!(!session.ready(now));
+            assert_eq!(session.revision(), 1);
+            assert!(session.pump(now).is_err());
+        }
+    }
+    #[test]
+    fn timely_renewal_extends_live_guest_authority() {
+        let (mut session, mut peer) = session_pair();
+        send_ready(&session, &mut peer);
+        assert!(session.pump(100.0).unwrap());
+        assert!(!session.pump(100.0).unwrap());
+        let mut newer = session.hello.clone();
+        newer.revision = 2;
+        session.renew(newer, 130.0, 109.0).unwrap();
+        assert!(session.ready(111.0));
+        assert_eq!(session.revision(), 2);
+    }
+    #[test]
+    fn buffered_ready_then_eof_never_publishes_readiness() {
+        let (mut session, mut peer) = session_pair();
+        send_ready(&session, &mut peer);
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(session.pump(100.0), Err("guest disconnected"));
+        assert!(!session.ready(100.0));
+    }
+    #[test]
+    fn buffered_ready_then_invalid_frame_never_publishes_readiness() {
+        let (mut session, mut peer) = session_pair();
+        send_ready(&session, &mut peer);
+        peer.write_all(&0u32.to_be_bytes()).unwrap();
+        assert_eq!(session.pump(100.0), Err("guest protocol violation"));
+        assert!(!session.ready(100.0));
+    }
     #[test]
     fn relay_path_and_remaining_bounds() {
         let id = Uuid::from_u128(77);

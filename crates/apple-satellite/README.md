@@ -188,7 +188,9 @@ VM at the host deadline. Ready must echo the binding
 exactly; the guest sends it only after its separate, manifest-bound tool probes. The
 receipt then reports `running` with `ready.command` true, only for images that catalogue
 `command`. Before ready it reports `starting`. Each newer lease revision is forwarded as
-`renew`. Guest I/O is nonblocking with bounded buffers, so a stalled relay never delays
+`renew` only while the prior guest authority is still live; a late revision cannot
+revive it. Readiness is published only after the bounded read pass has checked for an
+already-readable disconnect or protocol failure. Guest I/O is nonblocking with bounded buffers, so a stalled relay never delays
 fencing, renewal or reporting. A disconnect, protocol violation, identity or version
 mismatch, stalled write, handshake timeout, renewal that cannot be delivered, or lapsed
 guest authority withdraws readiness permanently: runtime becomes `unknown` and the VM is
