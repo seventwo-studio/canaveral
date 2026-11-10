@@ -1,5 +1,31 @@
 # Orchestration contract
 
+The authoritative service is TypeScript on Node.js 24 or later. CLI commands use
+`coordination/src/cli.ts` (compiled to `coordination/dist/src/cli.js`); HTTP
+controller modules live in `coordination/src/control`. Rust runners and native
+Swift/C bridges execute only explicitly supported work. Missing adapters fail
+closed; a generated backend definition is not evidence of native execution.
+
+## Controller module boundary
+
+Each module exports `createModule(store: SqliteStore, options: ControlOptions):
+ControlModule` using `coordination/src/control/contracts.ts`. Its `handle(req)`
+returns `{body, status?}` for an owned route and `undefined` otherwise. The request
+contains method, path parts, query, body, token and a current `principal()` resolver.
+Modules use `requireScope`, `requireAdmin` and `owns` for current account authority
+and ownership; storing a role in an old token is not sufficient authorization.
+
+`coordination/src/sqlite.ts` provides synchronous `BEGIN IMMEDIATE` transactions
+through `node:sqlite`; asynchronous work must not escape a transaction callback.
+Credential revalidation, owner checks, idempotent intent comparison and durable
+receipt updates belong at the protected effect boundary. Another owner's UUID
+must be hidden before comparing its request. New module tables do not imply a
+migration of retained accounts, sessions or machines. Back up selected state and
+verify schema compatibility before cutover; do not share writable state with an
+older controller.
+
+## Placement and reconciliation
+
 Canaveral stores machine placements and capacity reservations. Direct hosts and KubeVirt pools advertise capacity through the host API. Do not double-count pools and their underlying nodes. Embedded inference shares the capacity ledger; see [inference](inference.md) for its limits.
 
 Native Android/iOS hosts offer [mobile device templates and control](devices.md)

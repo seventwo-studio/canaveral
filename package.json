@@ -1,0 +1,65 @@
+{
+  "name": "canaveral-machines",
+  "version": "0.2.2",
+  "description": "Canaveral TypeScript controller, SDKs and native Rust execution tools",
+  "type": "module",
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "bin": {
+    "canaveral": "coordination/dist/src/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./coordination/dist/src/consumer-client.d.ts",
+      "default": "./coordination/dist/src/consumer-client.js"
+    },
+    "./consumer-client": {
+      "types": "./coordination/dist/src/consumer-client.d.ts",
+      "default": "./coordination/dist/src/consumer-client.js"
+    },
+    "./contracts": {
+      "types": "./coordination/dist/src/contracts.d.ts",
+      "default": "./coordination/dist/src/contracts.js"
+    },
+    "./sdk": {
+      "types": "./coordination/dist/src/sdk.d.ts",
+      "default": "./coordination/dist/src/sdk.js"
+    },
+    "./terminal-sdk": {
+      "types": "./coordination/dist/src/terminal-sdk.d.ts",
+      "default": "./coordination/dist/src/terminal-sdk.js"
+    },
+    "./visual-sdk": {
+      "types": "./coordination/dist/src/visual-sdk.d.ts",
+      "default": "./coordination/dist/src/visual-sdk.js"
+    },
+    "./accessibility-sdk": {
+      "types": "./coordination/dist/src/accessibility-sdk.d.ts",
+      "default": "./coordination/dist/src/accessibility-sdk.js"
+    }
+  },
+  "files": [
+    "coordination/dist/src",
+    "canaveral/web",
+    "script/tasks.mjs",
+    "coordination/package.json",
+    "coordination/package-lock.json",
+    "dashboard/package.json",
+    "dashboard/package-lock.json",
+    "canaveral/schemas",
+    "native"
+  ],
+  "scripts": {
+    "setup": "node script/tasks.mjs install",
+    "prepare": "node script/tasks.mjs prepare",
+    "build": "node script/tasks.mjs build",
+    "typecheck": "node script/tasks.mjs typecheck",
+    "test": "node script/tasks.mjs test",
+    "test:tools": "node --test script/*.test.mjs",
+    "check:no-python": "node script/check_no_python.mjs",
+    "check": "node script/tasks.mjs check",
+    "test:remote-tls": "node script/check_remote_tls.mjs"
+  },
+  "license": "MIT"
+}

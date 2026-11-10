@@ -71,12 +71,12 @@ Swift fake-backend/device tests exercise payload shape, redaction, node/depth/by
 budgets, stale/native replacement, ancestor/process changes, sleep-age/clock
 checks, advertised actions, shared ownership, late inspection, write failure,
 receipt binding, uncertain replay and control-transition recovery. The native
-guest executable compiles. A Swift-generated fixture passes the packaged Python
+guest executable compiles. A Swift-generated fixture passes the TypeScript
 schema, semantic validator and `LeaseClient.accessibility()` chunk/digest path.
 These checks invoke no native UI or guest permissions and boot no VM.
 
 The helper also has [chunked file transactions](macos-guest-files.md) and an
-internal Python transfer adapter with isolated coverage, plus
+internal host transfer adapter with isolated coverage, plus
 [independent terminal sessions](macos-guest-shells.md). The internal
 [common access adapter](macos-guest-access.md) now connects these protocols to
 provider/runner interfaces through an injected assignment binding. Common-worker

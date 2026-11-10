@@ -3,9 +3,9 @@
 ## Unconfirmed HTTP mutations
 
 The HTTP client does not automatically retry. A connection failure, incomplete
-HTTP response or lost reply after a mutation raises `Error` with
-`outcome='unknown'` and `retryable=False`. A valid UUID in the request body's `id`
-is preserved as `request_id`. Local failures before dispatch can still have no
+HTTP response or lost reply after a mutation raises `ConsumerError` with
+`outcome: "unknown"` and `retryable: false`. A valid UUID in the request body's `id`
+is preserved as `requestId`. Local failures before dispatch can still have no
 outcome metadata. Unknown means completion was not confirmed; it does not mean
 the controller rolled back. A malformed successful JSON response uses
 `response_invalid` with the same mutation uncertainty. These are SDK errors;
@@ -20,7 +20,7 @@ Do not replace them with a new ID or current revision to manufacture another
 operation. Replay returns the existing mutation record with the current lease
 view, which may have advanced since the lost response.
 
-Credential exchange is different: `ConsumerClient.scoped_lease()` rotates a key
+Credential exchange is different: `ConsumerClient.scopedLease(leaseId)` rotates a key
 without an idempotency UUID. Losing its response can invalidate the previous key
 without returning a usable replacement. The client reports an unknown outcome
 with no invented request ID and does not rotate again automatically. The owning
@@ -35,15 +35,16 @@ These fixtures do not establish separate-network or native cleanup acceptance.
 
 ## Staged file downloads
 
-`LeaseClient.download_to_file(request_id, member, path, destination, app=None,
-replace=False)` stages a download privately in the selected existing directory.
+`LeaseClient.downloadToFile(requestId, member, path, destination, options)` stages a download privately in the selected existing directory.
 It publishes the destination only after the existing streaming client verifies
 source completion, byte count and SHA-256. It does not rotate credentials, renew
 or release the lease, reconnect a stream or retry a request.
 
-```python
-lease = LeaseClient.from_credential_file(url, lease_id, private_lease_key_path)
-result = lease.download_to_file(session_id, 'primary', guest_path, local_path)
+```ts
+import { LeaseClient } from "canaveral-machines/sdk";
+
+const lease = LeaseClient.fromCredentialFile({ baseUrl, leaseId, credentialFile });
+const result = await lease.downloadToFile(sessionId, "primary", guestPath, localPath);
 ```
 
 Persist the session UUID before dispatch. The returned object is the verified
@@ -54,23 +55,44 @@ file-size cap.
 ## Publication behavior
 
 The default refuses an existing destination, including a dangling symlink, before
-creating a session. Publication uses an atomic hard link, so a destination created
-by another writer during transfer also remains untouched. The filesystem must
-support that operation; there is no fallback to an overwrite or partial copy.
+creating a session. On POSIX, publication without replacement uses an atomic hard
+link; Windows uses a no-replace native handle rename. A destination created by
+another writer during transfer remains untouched. There is no fallback to an
+overwrite or partial copy when the selected operation is unsupported.
 
-Pass `replace=True` explicitly to publish with atomic replacement. The old file
+Pass `{ replace: true }` explicitly to publish with atomic replacement. The old file
 remains available throughout receipt and verification. A failed transfer, digest
 check or file flush does not replace it. A verified replacement is a new private
 file, with mode 0600 on POSIX; it does not inherit the old file's permissions.
 Select a destination directory controlled by the consuming application.
 
-The client flushes and synchronizes the staged file before publication. On POSIX,
-directory descriptors bind creation, publication and cleanup to the original
-directory even if its path is renamed; the containing directory is synchronized
-after publication. The Windows path uses the same exclusive staging and atomic
-publication operations without POSIX directory-descriptor synchronization.
-Native Windows/filesystem compatibility and crash recovery remain acceptance
-gates; successful API return is not a portable power-loss proof.
+The client flushes the private stage before publication. Linux binds child
+operations through the retained `/proc/self/fd` directory descriptor. Darwin uses
+the installed `canaveral-mobile-native` Rust helper, whose scoped stdio RPC retains
+directory and stage descriptors for `openat`, `linkat`, `renameat`, cleanup and
+directory synchronization. The initial selected-directory alias is resolved once;
+renaming that directory afterward cannot redirect publication into a replacement
+directory. Stage identity checks prevent adoption or cleanup of a foreign
+temporary entry. Set `options.helperPath` to an absolute helper path when it is
+not installed in the usual build location or on `PATH`.
+
+Windows uses the shipped supervised Win32 bridge: the selected drive, ancestor
+directories and private stage retain native handles, volume/file identities and
+metadata checks. Publication renames the stage handle relative to the retained
+parent, with replacement disabled unless requested. A definite collision is
+reported separately from a lost rename acknowledgement. File buffers are flushed;
+Windows omits POSIX directory synchronization. An uncertain rename never triggers
+another publish or disposition of the potentially published file.
+
+External applications may pass `options.files`, implementing the exported
+`DownloadFiles`/`DownloadDirectory` interfaces, instead of using platform bridge
+discovery. The adapter must preserve exclusive creation, bounded writes, pinned
+directory/stage identities, atomic publication and owned cleanup. A missing helper
+or required bridge operation fails before a download session is created.
+Disposable Darwin filesystem/helper and injected Windows-handle fixtures cover
+these publication and recovery paths. Native Windows/filesystem compatibility and
+crash recovery remain acceptance gates; successful return is not a portable
+power-loss proof.
 
 The lower-level `download(..., writer)` retains its existing behavior. Its
 caller-owned writer can contain partial bytes on failure. Use it when the
@@ -92,17 +114,24 @@ error code triggers an automatic retry. A publication error can occur after the
 new destination exists; the client must not claim rollback in that case. A
 temporary filename collision never authorizes removing the pre-existing file.
 
-The [download example](../examples/lease_download.py) uses an existing lease key
-and an explicit session UUID. It prints only correlation identifiers, completion
-state, byte count and digest. It does not print credentials or file content.
-`--replace` is explicit. Its help path is checked; live execution remains gated.
+Download tools should load an existing lease key and require an explicit session
+UUID. Print only correlation identifiers, completion state, byte count and digest;
+keep credentials and file contents private. Replacement must be explicit. A
+successful local help command does not establish live transfer acceptance.
+
+From a checkout, run `npm run build`, then
+`node examples/lease_download.ts --help`. The TypeScript examples import the
+emitted SDK JavaScript under `coordination/dist/src`, so Node's ordinary type
+stripping does not encounter implementation-only TypeScript syntax. The SDK tests
+invoke the five `node examples/lease_*.ts --help` entry points from the checkout;
+they do not substitute separately compiled example copies.
 
 ## Session worker failures
 
 Upload, download, accessibility and display clients preserve received worker
-failure codes. `Error.outcome` is `unknown` for these controls; `request_id`
+failure codes. `Error.outcome` is `unknown` for these controls; `requestId`
 identifies the access session, or the active display action when one is in flight.
-Worker errors have `retryable=False`. This is diagnostic metadata, not proof that
+Worker errors have `retryable: false`. This is diagnostic metadata, not proof that
 nothing executed or permission to submit a replacement request.
 
 | Code | Recovery meaning |
@@ -122,7 +151,7 @@ the SDK does not invent a more specific reason or reconnect to recover it.
 The lower-level stream can contain partial output before an error. Staged local
 downloads retain the worker code/outcome and preserve the destination when the
 failure occurs before publication. Local uncertain publication also exposes
-`outcome='unknown'`. Other errors may leave `outcome` unset (`None`), which means
+`outcome: "unknown"`. Other errors may leave `outcome` unset (`undefined`), which means
 unreported rather than confirmed absence of effects. HTTP error response shapes
 remain unchanged.
 
@@ -130,7 +159,7 @@ Display action/receipt waits also expose an unknown outcome after a timeout,
 dispatch failure or disconnect. Untyped socket/EOF failures become
 `session_incomplete`; existing typed error codes remain intact. The interrupted
 display closes, and input is never replayed. Open a new view-only display session
-and call `receipt(original_action_id)` to inspect the existing durable record.
+and call `receipt(originalActionId)` to inspect the existing durable record.
 A fixture drops a successful acknowledgement after provider completion and
 recovers the receipt this way, verifying one provider invocation. Real native
 crash recovery remains unverified.
@@ -144,4 +173,4 @@ collision and POSIX directory renaming. A separate real controller/broker/runner
 SDK fixture verifies complete publication and rejection after source mutation.
 These checks do not exercise retained machine data, real native adapters or
 separate-network TLS. Broader lease/session/input recovery and release acceptance
-remain in the verification checkpoint.
+remain separate acceptance requirements.

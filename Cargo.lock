@@ -48,6 +48,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "canaveral-apple-native"
+version = "0.1.0"
+
+[[package]]
 name = "canaveral-apple-satellite"
 version = "0.1.0"
 dependencies = [
@@ -119,6 +123,16 @@ dependencies = [
  "sha2",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "canaveral-mobile-native"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cc",
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,9 @@
+[package]
+name = "canaveral-apple-native"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "apple-native-helper"
+path = "src/main.rs"

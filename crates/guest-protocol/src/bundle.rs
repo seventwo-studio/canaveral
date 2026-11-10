@@ -114,10 +114,10 @@ impl Manifest {
         if let Some(initrd) = &self.initrd {
             initrd.validate()?;
         }
-        if self.tool_versions.len() != 4 {
-            return Err("expected shell/git/node/python pins".into());
+        if self.tool_versions.len() != 3 {
+            return Err("expected shell/git/node pins".into());
         }
-        for name in ["shell", "git", "node", "python"] {
+        for name in ["shell", "git", "node"] {
             let pin = self.tool_versions.get(name).ok_or("missing tool pin")?;
             if pin.is_empty() || pin.len() > 128 || !printable(pin) || pin.trim() != pin {
                 return Err("invalid exact probe line".into());
@@ -319,7 +319,6 @@ mod tests {
             ("shell", "canaveral-shell-v1"),
             ("git", "git version 2.47"),
             ("node", "v24.11.0"),
-            ("python", "Python 3.13"),
         ];
         let m = Manifest {
             version: 1,

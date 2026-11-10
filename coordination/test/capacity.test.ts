@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -12,19 +10,17 @@ import { CapacityLedger } from "../src/capacity.ts";
 import { SqliteStore } from "../src/sqlite.ts";
 import { ServiceError } from "../src/errors.ts";
 
-const reference = fileURLToPath(new URL("../../../fixtures/migration/capacity_reference.py", import.meta.url));
+
+const { capacitySchema } = await import(new URL("../../../fixtures/migration/capacity_reference.ts", import.meta.url).href) as { capacitySchema(db: DatabaseSync): void };
 const capacity = { cpu: 8, memoryMiB: 8192, diskGiB: 100 };
 const size = { cpu: 2, memoryMiB: 1024, diskGiB: 8 };
-function python(action: string, path: string, value: unknown = {}): unknown {
-  const result = spawnSync(process.env.CANAVERAL_REFERENCE_PYTHON ?? "python3", [reference, action, path], { input: JSON.stringify(value), encoding: "utf8", timeout: 30_000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
-  assert.equal(result.error, undefined); assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout) as unknown;
-}
 function fixture(t: { after: (callback: () => void) => void }) {
   const directory = mkdtempSync(join(tmpdir(), "canaveral-capacity-parity-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const path = join(directory, "controller.sqlite"); python("initialize", path);
-  const store = new SqliteStore(path, () => 80000), ledger = new CapacityLedger(store);
+  const path = join(directory, "controller.sqlite");
+  const store = new SqliteStore(path, () => 80000);
+  store.transaction(db => capacitySchema(db));
+  const ledger = new CapacityLedger(store);
   const hosts = [randomUUID(), randomUUID()];
   store.transaction(db => {
     for (const host of hosts) db.prepare("INSERT INTO hosts VALUES (?,?,?,80000,1)").run(host, "synthetic-fixture-credential", JSON.stringify({ name: "Host", provider: "libvirt", capacity, templates: [] }));
@@ -86,16 +82,20 @@ test("invalid host limit changes are rejected atomically", t => {
   assert.deepEqual(store.transaction(db => ledger.hostLimits(db, host)), capacity);
 });
 
-test("TypeScript and Python share host limits, usage and exclusion semantics bidirectionally", t => {
+test("persisted host limits and reservations survive direct SQLite edits and reopen", t => {
   const { path, store, ledger, hosts, machine } = fixture(t), host = hosts[0]!;
   const id = machine(host, "running", "unknown"); machine(hosts[1]!);
   const limits = { ...capacity, cpu: 3 };
-  assert.deepEqual(ledger.save(host, { limits }), python("save", path, { host, limits }));
-  assert.deepEqual(store.transaction(db => ledger.hostLimits(db, host)), python("limits", path, { host }));
-  assert.deepEqual(store.transaction(db => ledger.used(db, host, id)), python("used", path, { host, exclude: id }));
-  assert.deepEqual(store.transaction(db => ledger.remaining(db, host)), python("remaining", path, { host }));
-  python("save", path, { host, limits: { ...limits, diskGiB: 5 } });
-  assert.deepEqual(store.transaction(db => ledger.hostLimits(db, host)), python("limits", path, { host }));
+  assert.deepEqual(ledger.save(host, { limits }), {hostId:host,limits});
+  const db = new DatabaseSync(path);
+  try {
+    assert.deepEqual(JSON.parse(String(db.prepare("SELECT limits FROM host_limits WHERE host=?").get(host)!.limits)), limits);
+    db.prepare("UPDATE host_limits SET limits=? WHERE host=?").run(JSON.stringify({...limits,diskGiB:5}),host);
+  } finally {db.close();}
+  const reopened = new CapacityLedger(new SqliteStore(path));
+  assert.deepEqual(store.transaction(db => reopened.hostLimits(db,host)), {...limits,diskGiB:5});
+  assert.deepEqual(store.transaction(db => reopened.used(db,host,id)), {cpu:0,memoryMiB:0,diskGiB:0});
+  assert.deepEqual(store.transaction(db => reopened.remaining(db,host)), {cpu:1,memoryMiB:7168,diskGiB:0});
 });
 
 test("two independent SQLite admission workers cannot spend the same host capacity", { timeout: 30_000 }, async t => {
@@ -130,12 +130,12 @@ test("invalid persisted amounts fail closed and accounting cannot run outside a 
   assert.throws(() => store.transaction(db => ledger.used(db, host)), (e: unknown) => e instanceof ServiceError && e.status === 503);
 });
 
-test("host limit input validation preserves Python resource validation", t => {
-  const { path, ledger, hosts } = fixture(t), host = hosts[0]!;
-  for (const cpu of [0, -1, 0.5, 1, 1_048_577]) {
+test("host limit input validation matches fixed resource boundary expectations", t => {
+  const { ledger, hosts } = fixture(t), host = hosts[0]!;
+  for (const [cpu, expected] of [[0,400], [-1,400], [0.5,400], [1,200], [1_048_577,400]] as const) {
     const limits = { ...capacity, cpu };
     let status = 200;
     try { ledger.save(host, { limits }); } catch (error) { if (!(error instanceof ServiceError)) throw error; status = error.status; }
-    assert.deepEqual({ status }, python("validate", path, { host, limits }));
+    assert.equal(status, expected);
   }
 });

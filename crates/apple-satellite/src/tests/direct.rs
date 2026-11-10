@@ -84,7 +84,6 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
             ("shell", "canaveral-shell-v1"),
             ("git", "git version 2.47"),
             ("node", "v24.11.0"),
-            ("python", "Python 3.13"),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))

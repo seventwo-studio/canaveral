@@ -91,14 +91,14 @@ they must not be used to accept stale or regressing receipts blindly.
 
 ## Existing API boundary and verification
 
-This experimental version is distinct from the existing Python administrator
+This experimental version is distinct from the administrator
 inference API. That API submits a flat `{id, model, prompt, maxTokens?, digest?,
 hostId?}` object, supplies defaults, allows optional digest/host selection and
 has no application ownership. Its reports use `state` and optional `result`;
 its private runner receipts contain `fingerprint` and `report`. It has no explicit
 wire stop/cleanup fields. Its encoded-JSON size limits also differ. None of those
-objects can be passed directly to this contract, and no conversion or changed
-Python behavior is implemented. Shared names and states are deliberate, not a
+objects can be passed directly to this contract without an explicit adapter.
+A shared TypeScript process does not make these request formats interchangeable. Shared names and states are deliberate, not a
 claim of wire compatibility. VM and session schemas are unchanged.
 
 Both test suites consume the same valid/invalid cases, replay comparisons and

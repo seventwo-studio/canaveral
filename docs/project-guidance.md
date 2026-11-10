@@ -1,6 +1,6 @@
 # Technical guide
 
-These documents describe implementation contracts and setup. Native acceptance, provider binding and recovery limits remain explicit in each contract. They do not promise full platform parity. Python runtime paths remain authoritative; experimental Rust and TypeScript libraries do not replace them.
+These documents define the TypeScript controller, TypeScript host and SDK, Rust execution components and native bridge contracts. Node.js 24 or later is required for the controller and host. No Python runtime is required by Canaveral services. Swift and C platform bridges remain intentional native dependencies. Native acceptance, provider binding and recovery limits remain explicit; a portable fixture or successful build does not establish platform parity.
 
 - [access transport](access-transport.md)
 - [user accounts and personal API tokens](accounts-and-tokens.md)
@@ -18,10 +18,10 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [images](images.md)
 - [inference](inference.md)
 - [Rust model execution](rust-model-execution.md)
-- [experimental model-job contract](model-job-contract.md)
+- [model-job wire contract](model-job-contract.md)
 - [TypeScript model-job controller slice](model-controller.md)
 - [TypeScript Linux lease controller slice](linux-lease-controller.md)
-- [Experimental Linux command operations](linux-command-operations.md)
+- [Bounded Linux command operations](linux-command-operations.md)
 - [infrastructure](infrastructure.md)
 - [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
@@ -36,6 +36,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [orchestration](orchestration.md)
 - [power and recovery](power-and-recovery.md)
 - [running](running.md)
+- [managed runtime updates](runtime-updates.md)
 - [runner enrollment](runner-enrollment.md)
 - [Rust runner identity client](../crates/runner-client/README.md)
 - [Rust Apple satellite](../crates/apple-satellite/README.md)

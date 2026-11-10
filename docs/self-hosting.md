@@ -1,30 +1,38 @@
 # Self-hosting Canaveral
 
-The controller stores inventory and assigns work. Host runners connect outbound and report results. Operators provide persistent storage, credentials and HTTPS termination. Native runtime acceptance remains platform-specific.
+The TypeScript controller stores inventory and assigns work. Host runners connect outbound and report results. Operators provide persistent storage, credentials and HTTPS termination. Native runtime acceptance remains platform-specific.
 
 For a controller using a private CA, the host runner accepts `host --ca-file`;
-the Python SDK and its consumer examples accept the same explicit bundle.
+the TypeScript SDK accepts `caFile` for the same purpose.
 See [verified TLS client and host setup](tls-clients.md). This option does not
 install system trust or change enrollment approval.
 
 ## One server
 
-Use Python 3.9+ and the checkout's declared dependencies. From a release checkout,
-install the package, create credentials once and start the controller:
+Use Node.js 24 or later and the checkout's declared dependencies. The CLI lives
+in `coordination/src/cli.ts`; run it from the repository root. Install dependencies,
+create credentials once and start the controller:
 
 ```sh
-python3 -m pip install -e .
-python3 -m canaveral init ./secrets
-python3 -m canaveral serve \
+npm --prefix coordination ci --ignore-scripts
+npm --prefix coordination run build
+node coordination/dist/src/cli.js init ./secrets
+node coordination/dist/src/cli.js serve \
   --database ./state/orchestrator.sqlite3 \
   --admin-token-file ./secrets/admin.token \
   --enrollment-token-file ./secrets/enrollment.token
 ```
 
+For a fresh database, the flag-based CLI records a stable identity beside the
+database as `<database>.controller-id`. Preserve that file with backups. Existing
+state without that identity requires an explicit `--controller-id` or controller
+configuration; the CLI must not guess or adopt an identity. Back up retained state
+and verify schema compatibility before starting the new controller against it.
+
 In another terminal, verify authenticated access:
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token hosts
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token hosts
 ```
 
 An empty list means the controller works and has no execution capacity yet.
@@ -41,7 +49,7 @@ when using cloud-init. Give the runner account the required libvirt/disk access.
 Then enroll a native runner on that same server:
 
 ```sh
-python3 -m canaveral host --config ./host.json --state ./state/host \
+node coordination/dist/src/cli.js host --config ./host.json --state ./state/host \
   --enrollment-token-file ./secrets/enrollment.token
 ```
 
@@ -54,10 +62,10 @@ already a prepared, remotely accessible template.
 Once `hosts` reports the runner online and `templates` lists the installed offer:
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token templates
-python3 -m canaveral --token-file ./secrets/admin.token create first-computer \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token templates
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token create first-computer \
   --template linux-server --request-id 69bfc625-76c6-4642-86c7-5e4a6c84dd44
-python3 -m canaveral --token-file ./secrets/admin.token machines
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token machines
 ```
 
 Choose a new UUID for each computer; keep the same UUID and specification when
@@ -86,7 +94,7 @@ loopback API after receiving the enrollment file through a protected local file:
 umask 077
 docker compose run --rm --no-deps --entrypoint cat orchestrator \
   /run/credentials/enrollment.token > ./enrollment.token
-python3 -m canaveral host --config ./host.json --state ./state/host \
+node coordination/dist/src/cli.js host --config ./host.json --state ./state/host \
   --enrollment-token-file ./enrollment.token
 ```
 

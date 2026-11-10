@@ -4,7 +4,7 @@ export default defineConfig({
   workers: 1,
   use: { baseURL: "http://127.0.0.1:18766", browserName: "chromium" },
   webServer: {
-    command: "python3 e2e/serve.py",
+    command: "node e2e/serve.ts",
     url: "http://127.0.0.1:18766/healthz",
     reuseExistingServer: false,
   },

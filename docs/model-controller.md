@@ -22,15 +22,17 @@ node coordination/dist/src/main.js /absolute/controller-config.json
   "tls": { "certFile": "/absolute/tls/cert.pem", "keyFile": "/absolute/tls/key.pem" } }
 ```
 
-Every field except `tls` is required, and unknown fields are refused. Paths must be
+`tls` and `enrollmentTokenFile` are optional; other fields are required, and unknown
+fields are refused. `enrollmentTokenFile` enables the separate compatibility host
+enrollment flow; bound Rust runners use explicit runner approval. Paths must be
 absolute. `listen.host` must be an IP literal. Plain HTTP is allowed only on loopback.
-Any other address needs `tls`, served with TLS 1.2 or later. The process starts one
-owned SQLite worker and one listener, prints `{"listening":{"host","port"}}` on stdout,
+Any other address needs `tls`, served with TLS 1.2 or later. The process starts identity and control workers on the same selected SQLite
+database and one listener, prints `{"listening":{"host","port"}}` on stdout,
 and stops on SIGTERM/SIGINT. It never selects state, imports legacy hosts or starts a
 runtime by itself. Keep the database and `controllerId` together (see
 [runner enrollment](runner-enrollment.md)). Run only one controller process per
 database in deployment; the multi-process fixture below exists only to exercise SQLite
-serialization. Do not share writable state with the Python controller.
+serialization. Do not share writable state with an older controller. Validate schema compatibility and credential authority before cutover.
 
 ## Authority
 

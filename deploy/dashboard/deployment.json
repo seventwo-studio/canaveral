@@ -33,8 +33,7 @@
             "image": "canaveral-dashboard:local",
             "args": [
               "--url",
-              "http://orchestrator:8765",
-              "--allow-http",
+              "https://orchestrator:8765",
               "dashboard",
               "--bind",
               "0.0.0.0"
@@ -76,6 +75,27 @@
                 "port": "http"
               },
               "initialDelaySeconds": 5
+            },
+            "env": [
+              {
+                "name": "NODE_EXTRA_CA_CERTS",
+                "value": "/run/tls/ca.crt"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "controller-ca",
+                "mountPath": "/run/tls",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "controller-ca",
+            "configMap": {
+              "name": "canaveral-controller-ca"
             }
           }
         ]

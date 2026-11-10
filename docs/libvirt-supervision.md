@@ -1,10 +1,11 @@
 # Libvirt lease supervision component
 
-The internal `libvirt_supervision` module implements a one-use deadline supervisor,
+`coordination/src/providers/libvirt.ts` implements a one-use deadline supervisor,
 domain ownership validation, private execution journals and a dedicated native
 libvirt connection. A companion C source implements Linux kernel deadlines.
-The libvirt provider now prepares and launches this component for leased
-assignments through a dedicated child entry point. The path has isolated fixtures.
+The provider requires an injected native connection and dedicated child-launch
+adapter for leased assignments. Missing native clock, kernel deadline or ownership
+bridges must fail closed; source fixtures do not provide those production adapters.
 Linux kernel behavior, real libvirt/QEMU behavior and native lease acceptance
 remain unverified. Ordinary consumer lease admission remains disabled.
 
@@ -12,7 +13,7 @@ remain unverified. Ordinary consumer lease admission remains disabled.
 
 `LibvirtLeaseBinding` binds a machine, lease, supervisor boot, host boot,
 assignment fingerprint and absolute owned disk path. The journal stores a digest
-of the path rather than its text. `bind_domain_xml` adds namespaced ownership to
+of the path rather than its text. `bindDomainXML` adds namespaced ownership to
 a new definition; it refuses rebinding an existing lease marker. It does not
 write a domain or modify a live definition.
 
@@ -81,7 +82,7 @@ kernel source compiles with warnings treated as errors and its unsupported branc
 refuses execution. This is not Linux timer or real libvirt evidence.
 
 The Linux branch of the kernel fixture is prepared to terminate only its own
-disposable child at expiry. It has not run in this macOS checkpoint. No real
+disposable child at expiry. Its Linux behavior requires a separately authorized acceptance lane. No real
 libvirt connection was opened and no device was started, stopped or inspected.
 
 ## Provider and dedicated child
@@ -92,14 +93,12 @@ unsafe aliases/permissions, bounded size and changes during hashing. The child
 opens it without following a leaf symlink and loads through its pinned descriptor,
 so path replacement cannot substitute another inode after verification.
 
-`script/build_linux_lease_deadline.py --output /absolute/private/new/deadline.so`
+`node script/build_linux_lease_deadline.mjs --output /absolute/private/new/deadline.so`
 prepares an uninstalled Linux build. It refuses an existing destination, publishes
-without overwriting a race-created file and prints artifact/source hashes. Only
-its help path has been run in this macOS checkpoint; the Linux build and installed
-artifact delivery remain native gates. This option grants no lease eligibility.
+without overwriting a race-created file and prints artifact/source hashes. The Linux build and installed artifact delivery remain native gates. This option grants no lease eligibility.
 
 Environment reports now distinguish deadline artifact inspection from native
-consumer lease acceptance. `libvirt_readiness.deadline_artifact` reads a bounded,
+consumer lease acceptance. `deadlineArtifact` in `libvirt-ownership.ts` reads a bounded,
 owned, unlinked-alias-free ELF snapshot without loading code. It checks the
 64-bit little-endian shared-library layout, host architecture, table bounds and
 the two required exported functions in executable code sections, then binds the
@@ -113,7 +112,7 @@ Ordinary consumer admission remains disabled regardless of this artifact check.
 Eight fixtures use synthetic ELF metadata and malformed/private-file cases. They
 explicitly refuse library loading during inspection and cover both host
 architectures, mutation, aliases, special files and redacted health reports.
-There was no native Linux artifact execution or installation in this checkpoint.
+Native Linux artifact execution and installation remain unaccepted.
 
 Preparation refuses existing domains, partial disks and unexplained prior state.
 It binds newly prepared storage and a single domain definition before requesting
@@ -122,9 +121,9 @@ creation or definition: reconciliation must find the exact owned inactive domain
 before it can launch its unused supervisor. Per-assignment reconciliation is
 exclusive; deadline publication uses a separate lock and remains independent.
 
-The parent persists its launch attempt before spawning
-`python -m canaveral.libvirt_supervisor_child`, then records the child's PID and
-creation time. A failed spawn or unconfirmed birth is never automatically retried.
+The parent must persist its launch attempt before spawning the dedicated native
+supervisor child, then record that child's PID and creation time. The TypeScript host
+must refuse leased execution if this child entry point or its deadline bridge is unavailable. A failed spawn or unconfirmed birth is never automatically retried.
 The child checks its parent, private launch/preparation history, host boot and
 assignment ownership before entering the core. It closes inherited helper and
 reconciliation descriptors at spawn. The native connection is confined to this
@@ -156,7 +155,7 @@ separate writable resources; explicit emulator TPM source placement requires
 libvirt 10.10 or later and the documented swtpm prerequisites. Actual installed
 compatibility remains a native environment/readiness gate.
 
-`libvirt_stop.confirm_stopped` requires a matching fenced authorization, unchanged
+`LibvirtProvider.confirmExecutionStopped` requires a matching fenced authorization, unchanged
 assignment/storage and namespace, and the original supervisor's exit with an
 exclusive execution-journal lock. A PID with a different creation time proves
 only that the original child is gone; it never authorizes signalling its
@@ -198,7 +197,7 @@ and its runtime authorization boundary remain in force.
 
 ## Storage handle guard
 
-The internal `libvirt_storage_handles` component now pins a private storage tree
+The internal `StorageHandleGuard` component now pins a private storage tree
 and attempts a Linux write lease on every regular file. It requires the original
 root device/inode, owned directories/files, one link per file and unchanged
 descriptor/path metadata. It refuses symlinks, special files, device boundaries,
@@ -217,7 +216,7 @@ Eighteen isolated fixtures exercise tree races, existing-open acquisition failur
 break detection, changed signal/owner, descriptor exhaustion, partial release,
 fork identity and unsupported-platform refusal. File-lease operations are fakes
 over real temporary files; no Linux kernel contention test has run. All 74
-libvirt-focused fixtures pass in this checkpoint.
+libvirt-focused fixtures must be run against the installed implementation.
 
 The guard is now used by the provider's teardown transaction below. A held guard
 gives only a temporary check, not reusable stop or deletion evidence. QEMU-owned
@@ -228,7 +227,7 @@ lease admission remains disabled; native cleanup acceptance is outstanding.
 
 ## Owned storage transaction and recovery
 
-`libvirt_removal.remove_storage` requires a terminal, stopped lease and its exact
+`LibvirtProvider.removeOwnedStorage` requires a terminal, stopped lease and its exact
 cleanup intent. It retains the execution-journal lock throughout teardown, binds
 the immutable specification and launch history to the deletion receipt, and
 requires the same host boot, fenced authorization, namespace and assignment.
@@ -272,7 +271,7 @@ detached-command fencing and fresh-lease isolation remain required.
 
 ## Host-reboot recovery
 
-`libvirt_reboot` keeps the original binding's host boot ID and records the observed
+The `LibvirtProvider` reboot journal keeps the original binding's host boot ID and records the observed
 kernel boot separately. The production source remains the fixed Linux
 `/proc/sys/kernel/random/boot_id` file. The [Linux random interface](https://man7.org/linux/man-pages/man4/random.4.html)
 documents this kernel-generated value. A different boot ID establishes that old

@@ -85,7 +85,7 @@ export function createIdentityServer(identities: IdentityClient) {
 }
 
 /** Request handler shared by the plain loopback server and an explicitly configured TLS listener. */
-export function createIdentityHandler(identities: IdentityClient): (request: IncomingMessage, response: ServerResponse) => void {
+export function createIdentityHandler(identities: IdentityClient, parsedBody?: (request: IncomingMessage) => Record<string, unknown> | undefined): (request: IncomingMessage, response: ServerResponse) => void {
   let inFlight = 0;
   return (request, response) => {
     const requestId = randomUUID();
@@ -128,7 +128,7 @@ export function createIdentityHandler(identities: IdentityClient): (request: Inc
         if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction && !operationCreate) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
-        const value = await body(request);
+        const value = parsedBody?.(request) ?? await body(request);
         const modelType = modelAdministration[path] ?? modelRunner[path] ?? leaseAdministration[path] ?? leaseBody[path];
         const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);
         if (operationCreate) command = { type: "leases.createOperation", id: operationCreate[1]!, token, body: value };

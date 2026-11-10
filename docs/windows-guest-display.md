@@ -1,11 +1,13 @@
 # Windows display primitives and held input
 
-`canaveral.guest.windows_desktop.Win32Desktop` supplies physical-pixel capture
-and bounded native input batches for a future assigned-guest display worker.
+`Win32Desktop` in `coordination/src/guest/windows/desktop.ts` validates physical-pixel
+capture and bounded input batches through an injected `DesktopAPI`. It supplies
+no production GDI/SendInput binding; the native behavior below is required of an
+assigned-guest bridge.
 It chooses no endpoint, credentials, enrollment or image/lease admission. The
 owner supplies current authorization and optional explicit release authority.
-Native construction requires 64-bit Windows; injected libraries are a fixture
-seam. This component must run in the assigned guest, never on its host as a
+A production native binding requires 64-bit Windows; injected APIs are also the
+portable fixture boundary. This component must run in the assigned guest, never on its host as a
 guest-transport fallback.
 
 ## Capture and native resource ownership
@@ -77,7 +79,7 @@ masks into the native batches above. It requires caller-supplied, side-effect-fr
 key resolution, authorization and durable-save callbacks. Its versioned record
 contains retained native key descriptors, held buttons, transient Unicode
 release candidates and a blocked marker. The save callback must durably persist
-the exact record in the assigned owner/generation scope before returning True.
+the exact record in the assigned owner/generation scope before returning `true`.
 No Windows journal implementation, storage path or owner/enrollment policy is
 selected by this state machine.
 

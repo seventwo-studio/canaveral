@@ -12,12 +12,16 @@ is a small Node 24 client for the application/lease subset of the
 `LeaseClient` has no catalogue, listing, acquisition or credential-rotation method, and each
 client sends only its own bearer. `rotateLeaseCredential` is the explicit owner-only exchange:
 it is not idempotent, is never retried, revokes the previous lease key, and its result must not
-be logged. After an unknown outcome, call it again deliberately. Sessions,
-WebSocket and binary workers, and administrative, host or model endpoints are not implemented.
+be logged. After an unknown outcome, inspect the lease before deliberately exchanging again.
+The companion `coordination/src/sdk.ts` extends these clients with private credential
+file loaders, `scopedLease`, session creation/attachment, streaming files,
+[terminals](terminal-sdk.md), [display](visual-sdk.md) and
+[accessibility](scoped-accessibility.md). Administrative, host and model routes use
+separate interfaces. The SDK does not establish provider eligibility.
 
 ```ts
 const client = new ConsumerClient({ baseUrl: "https://compute.example", applicationKey, caFile });
-const request = { id: persistedUuid, templateId, templateRevision, arch: "amd64" };
+const request = { id: persistedUuid, templateId, templateRevision, arch: "amd64" as const };
 const { created, lease } = await client.acquireLease(request);
 ```
 

@@ -194,27 +194,27 @@ process exit, an available runtime lock and closed disk handles. A fence file
 alone cannot release compute; disks remain reserved until owned cleanup succeeds.
 PID reuse is never a reason to signal an unrelated process.
 
-Independent per-assignment Python workers publish renewal/fence updates without
+Independent per-assignment host workers publish renewal/fence updates without
 entering guest preparation or ordinary VM reconciliation. Each update verifies
 assignment/storage ownership and the native lease binding; it never starts a VM
 or recreates removed storage. Failure leaves the existing native deadline in
-force. The native guard continues when these workers or the Python agent stop.
+force. The native guard continues when these workers or the TypeScript host stop.
 Stopped reconciliation also bypasses guest preparation and credential generation.
 
 macOS uses [continuous Mach time](https://developer.apple.com/documentation/kernel/1646199-mach_continuous_time),
-including system sleep, in both Python and Swift. Linux lease timing uses
-`CLOCK_BOOTTIME`. The Python publisher samples the native clock and subtracts
-its full sampling delay plus 250 ms before publishing a deadline. It does not
-serialize Python's process-relative clock as a native timestamp. This matters
-for [older macOS Python clocks](https://docs.python.org/3.10/library/time.html#time.monotonic),
-and prevents a sleeping host from extending a pending launch's authorization.
+including system sleep. Linux lease timing uses `CLOCK_BOOTTIME`. The host
+publisher must sample the native clock and subtract its full sampling delay plus
+250 ms before publishing a deadline. Node `performance.now()` or process-relative
+monotonic time must not be serialized as a native deadline. A host without a
+qualified suspend-aware clock bridge must refuse leased execution. System sleep
+must never extend a pending launch's authorization.
 
-Verification uses separate signed native watcher processes over disposable
-metadata, including expiry without Python updates, renewal, authorization-file
-loss, same-revision replay, sticky restart fencing and Python/native clock
-agreement. Swift tests prove boot rejection without a supervisor. Python tests
-cover positive process/lock/disk checks, independent updates during blocked
-reconciliation, stopped-preparation bypass and suspend-aware expiry. They do not
+Native verification requires separate authorized watcher processes over disposable
+metadata, including expiry without host updates, renewal, authorization-file
+loss, same-revision replay, sticky restart fencing and host/native clock
+agreement. Portable coverage must include boot rejection without a supervisor,
+positive process/lock/disk checks, independent updates during blocked
+reconciliation, stopped-preparation bypass and suspend-aware expiry. Fixtures do not
 establish expiry of a running VM, detached guest command cancellation or live
 consumer cleanup. No retained administrative machine was converted into a lease.
 

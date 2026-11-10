@@ -26,7 +26,7 @@ released when the runner positively confirms a terminal outcome; installed weigh
 remain outside that per-job reservation. Unknown model budgets must not be offered.
 
 ```sh
-python3 -m canaveral host --config ./host.json --state ./state/host \
+node coordination/dist/src/cli.js host --config ./host.json --state ./state/host \
   --enrollment-token-file ./secrets/enrollment.token
 ```
 
@@ -40,13 +40,13 @@ session. Existing enrollment and host credentials cannot submit or inspect jobs.
 There is no new inference credential or separately exposed inference server.
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token models
-python3 -m canaveral --token-file ./secrets/admin.token generate \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token models
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token generate \
   --model your-model:latest --prompt-file ./prompt.txt \
   --request-id 730111ad-aaee-421f-99c6-25e408489101
-python3 -m canaveral --token-file ./secrets/admin.token job \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token job \
   730111ad-aaee-421f-99c6-25e408489101
-python3 -m canaveral --token-file ./secrets/admin.token cancel-job \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token cancel-job \
   730111ad-aaee-421f-99c6-25e408489101
 ```
 

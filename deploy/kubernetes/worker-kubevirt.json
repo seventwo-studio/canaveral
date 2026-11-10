@@ -176,15 +176,16 @@
                 "imagePullPolicy": "IfNotPresent",
                 "args": [
                   "--url",
-                  "http://orchestrator.canaveral.svc:8765",
-                  "--allow-http",
+                  "https://orchestrator.canaveral.svc:8765",
                   "host",
                   "--config",
                   "/config/host.json",
                   "--state",
                   "/data",
                   "--enrollment-token-file",
-                  "/run/credentials/enrollment.token"
+                  "/run/credentials/enrollment.token",
+                  "--ca-file",
+                  "/run/tls/ca.crt"
                 ],
                 "resources": {
                   "requests": {
@@ -219,6 +220,17 @@
                     "name": "credentials",
                     "mountPath": "/run/credentials",
                     "readOnly": true
+                  },
+                  {
+                    "name": "controller-ca",
+                    "mountPath": "/run/tls",
+                    "readOnly": true
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "NODE_EXTRA_CA_CERTS",
+                    "value": "/run/tls/ca.crt"
                   }
                 ]
               }
@@ -235,6 +247,12 @@
                 "secret": {
                   "secretName": "canaveral-enrollment",
                   "defaultMode": 288
+                }
+              },
+              {
+                "name": "controller-ca",
+                "configMap": {
+                  "name": "canaveral-controller-ca"
                 }
               }
             ]

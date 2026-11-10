@@ -1,4 +1,6 @@
+import { applicationLeaseUsage, legacyTable, mergedLeasePage, refreshLegacyLeases } from "./control/leases.ts";
 import { operationObject, operationArgv, operationReceipt } from "./linux-operations.ts";
+import { updateDraining } from "./updates/drain.ts";
 import type { OperationRow } from "./linux-operations.ts";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
@@ -170,6 +172,13 @@ export class LinuxLeases {
     });
   }
 
+  /** Compose both lease namespaces inside the caller admission/list transaction. */
+  refreshAuthorization(db: DatabaseSync, now: number): void {
+    this.refresh(db, now);
+    this.refreshOperations(db, now);
+    refreshLegacyLeases(db, now);
+  }
+
   // Operator configuration. Callers must have verified the administrator role.
 
   /** Immutable installed-image entry: one backend, one digest, fixed reservation size and headless capabilities. */
@@ -294,6 +303,7 @@ export class LinuxLeases {
         if (existing.request !== frozen) throw new ServiceError("Lease ID already belongs to another acquisition.", 409);
         return { created: false, lease: this.view(db, existing) };
       }
+      if (legacyTable(db, "leases") && db.prepare("SELECT 1 FROM leases WHERE id=?").get(id)) throw new ServiceError("Lease ID is already in use and cannot be taken over.", 409);
       const grant = db.prepare("SELECT digest FROM linux_lease_grants WHERE application=? AND image_id=? AND image_revision=? AND arch=? AND revoked=0").get(application.id, imageId, revision, a) as { digest: string } | undefined;
       if (!image || !minimum || !amount || !grant || grant.digest !== image.digest) throw new ServiceError("Image is not permitted for this application.", 403);
       const offered = JSON.parse(image.capabilities) as string[];
@@ -315,8 +325,8 @@ export class LinuxLeases {
     const cursor = after === undefined ? "" : identifier(after);
     return this.transaction(db => {
       const application = this.applications.verify(db, token);
-      const rows = db.prepare("SELECT * FROM linux_leases WHERE application=? AND id>? ORDER BY id LIMIT 101").all(application.id, cursor) as unknown as LeaseRow[];
-      return { leases: rows.slice(0, 100).map(row => this.view(db, row)), nextCursor: rows.length > 100 ? rows[99]!.id : null };
+      refreshLegacyLeases(db, this.now());
+      return mergedLeasePage(db, application.id, cursor, this.now(), id => this.view(db, this.row(db, id)!));
     });
   }
 
@@ -378,6 +388,7 @@ export class LinuxLeases {
       }
       const approval = this.approval(db, b);
       if (!approval) throw new ServiceError("This runner binding has no Linux lease approval.", 403);
+      if (updateDraining(db, b.runnerId, "runner")) return { assignment: null };
       const open = db.prepare("SELECT count(*) AS n FROM linux_lease_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(open.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };
       const served = new Set(JSON.parse(approval.images) as string[]);
@@ -586,21 +597,17 @@ export class LinuxLeases {
 
   /** Active lease count and held reservations (including terminal-but-unreclaimed) bound admission. */
   private quota(db: DatabaseSync, application: Application, amount: Resources): void {
-    const rows = db.prepare("SELECT state,resources,reservation FROM linux_leases WHERE application=?").all(application.id) as Array<{ state: string; resources: string; reservation: string }>;
-    if (rows.filter(row => ACTIVE.includes(row.state)).length >= application.limits.activeLeases) throw new ServiceError("Application active lease limit exceeded.", 429);
-    const used = { ...amount };
-    for (const row of rows) {
-      if (!this.domains.held(db, row.reservation)) continue;
-      const held = JSON.parse(row.resources) as Resources;
-      for (const key of keys) used[key] += held[key];
-    }
-    if (keys.some(key => used[key] > application.limits.resources[key])) throw new ServiceError("Application resource limit exceeded.", 429);
+    refreshLegacyLeases(db, this.now());
+    const usage = applicationLeaseUsage(db, application.id);
+    if (usage.active >= application.limits.activeLeases) throw new ServiceError("Application active lease limit exceeded.", 429);
+    if (keys.some(key => usage.resources[key] + amount[key] > application.limits.resources[key])) throw new ServiceError("Application resource limit exceeded.", 429);
   }
 
   /** Domains with a current, unrevoked approval for this exact image and backend, in stable order. */
   private placements(db: DatabaseSync, image: ImageRow): string[] {
     const wanted = imageKey(image), domains = new Set<string>();
     for (const row of db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE revoked=0 AND backend=? ORDER BY domain,runner").all(image.backend) as unknown as ApprovalRow[]) {
+      if (updateDraining(db, row.runner, "runner")) continue;
       if ((JSON.parse(row.images) as string[]).includes(wanted) && this.runners?.current(db, bindingOf(row))) domains.add(row.domain);
     }
     return [...domains];

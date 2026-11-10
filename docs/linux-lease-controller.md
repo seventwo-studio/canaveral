@@ -13,7 +13,7 @@ ingestion, PTY or file path, and no native evidence. Its experimental
 
 Run it as described in [the model-job controller slice](model-controller.md#running-the-controller);
 both ledgers share one process, database and `controllerId`. Do not share writable
-state with the Python controller. Python runtime paths remain authoritative.
+state with an older controller. Back up existing state and validate schema compatibility before cutover.
 
 ## Authority
 

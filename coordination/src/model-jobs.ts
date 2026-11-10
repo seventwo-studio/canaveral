@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { updateDraining } from "./updates/drain.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { identifier } from "./consumers.ts";
 import type { ConsumerIdentities } from "./consumers.ts";
@@ -245,6 +246,7 @@ export class ModelJobs {
       const approval = db.prepare("SELECT * FROM model_runner_approvals WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND revoked=0")
         .get(b.controllerId, b.runnerId, b.generation, b.incarnationId) as unknown as ApprovalRow | undefined;
       if (!approval) throw new ServiceError("This runner binding has no model approval.", 403);
+      if (updateDraining(db, b.runnerId, "runner")) return { assignment: null };
       const active = db.prepare("SELECT count(*) AS n FROM model_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(active.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };
       const served = new Set((JSON.parse(approval.models) as Array<[string, string]>).map(m => JSON.stringify(m)));

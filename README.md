@@ -1,17 +1,29 @@
 # Canaveral
 
-Canaveral provides a Python controller, outbound host runners and an optional web dashboard for machine and local-model execution. The controller stores placements and capacity reservations in SQLite. Hosts advertise templates, pull assignments and report state; lost hosts are marked unknown rather than silently duplicating their machines.
+Run the controller in Docker and replace its image through your external deployment workflow. Connected host agents and registered runners use [signed, managed runtime updates](docs/runtime-updates.md), with separate private state, idle checks, staged activation and rollback. Guest and native-helper adoption remains separately acknowledged; staging a bundle does not establish a live guest update.
 
-Backend source covers libvirt/KVM, Hyper-V, Apple Virtualization, KubeVirt, Android emulators and iOS simulators. Implemented adapters and fixture tests do not establish successful native execution on every platform. Ordinary runners remain gated for consumer lease execution. macOS and Windows guest components retain provider-binding and native-acceptance limits documented in their contracts.
+Canaveral provides a TypeScript controller, outbound TypeScript hosts, Rust execution components and an optional web dashboard for machine and local-model execution. The controller stores ownership, placements and capacity reservations in SQLite. Hosts advertise installed templates, pull assignments and report state. Lost hosts remain unknown; their machines are never silently duplicated.
 
-Python remains the runtime implementation. Rust and TypeScript libraries under `crates/execution-core` and `coordination` contain shared wire fixtures and do not replace a running controller or runner.
+The runtime requires Node.js 24 or later and the Rust binaries needed by the selected backend. Python is not required to run the controller, hosts or SDK. Swift VM/guest services and C platform bridges remain intentional native dependencies. A guest image may independently include Python as a workload tool or distribution prerequisite.
 
-[User accounts and personal API tokens](docs/accounts-and-tokens.md) provide private machine ownership, administrator-managed invitations and recovery, and expiring, revocable automation credentials. Guest connections enforce the same ownership and scope checks. The experimental TypeScript account backend refuses databases upgraded to this Python account schema.
+[Accounts and scoped personal tokens](docs/accounts-and-tokens.md) govern private machine ownership. Authorization uses the current account role, credential scope and resource owner. Application, lease, enrollment, runner and guest credentials have separate authority. Callers persist mutation UUIDs and exact requests before dispatch; unknown outcomes require inspection or explicit identical replay where supported.
 
-The experimental [Linux command slice](docs/linux-command-operations.md) connects the TypeScript API and Rust satellite through portable fixtures. [Local boot-bundle tooling](docs/linux-boot-bundle.md) assembles pinned operator-built artifacts and a deterministic initrd. Native admission and release acceptance remain gated.
+Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). The CLI source is `coordination/src/cli.ts`; the controller modules are in `coordination/src/control`. The [consumer SDK](docs/consumer-sdk.md) and its terminal, visual and accessibility clients are TypeScript. Rust workspace components cover execution ownership, runner identity, model execution, Apple supervision, KubeVirt and the guest wire protocol.
 
-Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). Python dependencies and package entry points are declared in `pyproject.toml`. Run portable Python checks with `./script/test.sh` in an environment with the declared dependencies. Native checks require their target platforms and explicit operator setup.
+Portable checks:
 
-The [Apple package](VirtualMachines/README.md) contains native VM and guest-helper components. Existing disks and credentials are not automatically imported. The consumer [OpenAPI](docs/consumer-api.md) and [session protocol](docs/session-protocol.md) describe the implemented subsets and their limits.
+```sh
+npm --prefix coordination ci --ignore-scripts
+npm --prefix coordination run typecheck
+npm --prefix coordination run build
+npm --prefix coordination test
+cargo test --workspace --locked
+```
 
-Licensed under [MIT](LICENSE). Bundled third-party notices retain their own terms. Container publication configuration requires operator review; example package coordinates do not identify published artifacts.
+Root scripts also provide `npm run setup`, `npm run typecheck`, `npm run build`,
+`npm test` and `npm run check:no-python`. The language scan is a repository check;
+external guest tool pins are not controller runtime dependencies.
+
+These checks do not prove a guest boots, native input works, deadlines survive suspend or owned resources are reclaimed. Native experiments, signing, installation and deployment require explicit operator authorization. Provider-specific acceptance gaps remain in the contracts. Linux guest command execution has bounded fixture coverage; it does not confer consumer lease eligibility on every provider.
+
+Back up existing databases before cutover. New module tables and wire compatibility do not establish a safe migration of legacy user, session or machine records. Do not run old and new controllers against the same writable state. Preserve controller identity, credential authority, ownership and uncertain-operation receipts; validate the installed schema and migration path before selecting retained state.

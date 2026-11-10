@@ -27,6 +27,9 @@ function operator(token: string): boolean {
 function requireAdministrator(token: string): void {
   if (!operator(token) && !accounts.authorized(token)) throw new ServiceError("Credential rejected.", 401);
 }
+function administratorTransaction<T>(token: string, operation: () => T): T {
+  return store.transaction(() => { requireAdministrator(token); return operation(); });
+}
 
 async function dispatch(command: IdentityCommand): Promise<unknown> {
   if (command.type.startsWith("runner.")) {
@@ -40,13 +43,13 @@ async function dispatch(command: IdentityCommand): Promise<unknown> {
   if (isModel(command)) return model(command);
   if (isLease(command)) return lease(command);
   switch (command.type) {
-    case "runner.issue": return runners!.issue(command.body);
+    case "runner.issue": return administratorTransaction(command.token, () => runners!.issue(command.body));
     case "runner.consume": return runners!.consume(command.token, command.body);
     case "runner.authenticate": return runners!.authenticate(command.token, command.body);
-    case "runner.rotate": return runners!.manage(command.body, false);
-    case "runner.revoke": return runners!.manage(command.body, true);
-    case "runner.inspect": return runners!.inspect(command.id);
-    case "runner.revokeEnrollment": return runners!.revokeEnrollment(command.id);
+    case "runner.rotate": return administratorTransaction(command.token, () => runners!.manage(command.body, false));
+    case "runner.revoke": return administratorTransaction(command.token, () => runners!.manage(command.body, true));
+    case "runner.inspect": return administratorTransaction(command.token, () => runners!.inspect(command.id));
+    case "runner.revokeEnrollment": return administratorTransaction(command.token, () => runners!.revokeEnrollment(command.id));
     case "status": return accounts.status();
     case "authorize":
       if (command.setup) {
@@ -59,13 +62,12 @@ async function dispatch(command: IdentityCommand): Promise<unknown> {
     case "login": return await accounts.login(command.body);
     case "session": return accounts.session(command.token);
     case "logout": requireAdministrator(command.token); return accounts.logout(command.token);
-    case "applications.list": requireAdministrator(command.token); return { consumers: applications.list() };
-    case "applications.create": requireAdministrator(command.token); return applications.create(command.body);
+    case "applications.list": return administratorTransaction(command.token, () => ({ consumers: applications.list() }));
+    case "applications.create": return administratorTransaction(command.token, () => applications.create(command.body));
     case "applications.rotate":
     case "applications.revoke":
-      requireAdministrator(command.token);
       if (Object.keys(object(command.body)).length) throw new ServiceError("Credential rotation/revocation expects an empty object.", 400);
-      return command.type === "applications.rotate" ? applications.rotate(command.id) : applications.revoke(command.id);
+      return administratorTransaction(command.token, () => command.type === "applications.rotate" ? applications.rotate(command.id) : applications.revoke(command.id));
   }
 }
 
@@ -82,8 +84,7 @@ function model(command: Extract<IdentityCommand, { type: `models.${string}` }>):
     case "models.report": return jobs.report(command.token, command.body);
     default: break;
   }
-  requireAdministrator(command.token);
-  switch (command.type) {
+  return administratorTransaction(command.token, () => { switch (command.type) {
     case "models.catalog": return jobs.catalog(command.body);
     case "models.domain": return jobs.defineDomain(command.body);
     case "models.domainInspect": return jobs.inspectDomain(command.id);
@@ -92,7 +93,7 @@ function model(command: Extract<IdentityCommand, { type: `models.${string}` }>):
     case "models.approve": return jobs.approve(command.body);
     case "models.approvalRevoke": return jobs.revokeApproval(command.body);
     default: throw new ServiceError("Unknown endpoint.", 404);
-  }
+  } });
 }
 
 function isLease(command: IdentityCommand): command is Extract<IdentityCommand, { type: `leases.${string}` }> {
@@ -116,15 +117,14 @@ function lease(command: Extract<IdentityCommand, { type: `leases.${string}` }>):
     case "leases.report": return leases.report(command.token, command.body);
     default: break;
   }
-  requireAdministrator(command.token);
-  switch (command.type) {
+  return administratorTransaction(command.token, () => { switch (command.type) {
     case "leases.image": return leases.image(command.body);
     case "leases.grant": return leases.grant(command.body);
     case "leases.grantRevoke": return leases.grant(command.body, true);
     case "leases.approve": return leases.approve(command.body);
     case "leases.approvalRevoke": return leases.revokeApproval(command.body);
     default: throw new ServiceError("Unknown endpoint.", 404);
-  }
+  } });
 }
 
 port.on("message", (message: { id: number; command: IdentityCommand }) => {

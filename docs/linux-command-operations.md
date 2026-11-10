@@ -2,7 +2,7 @@
 
 The TypeScript controller implements durable shell-operation submission and receipts
 on direct-boot Linux assignments served by an explicitly approved
-`appleVirtualization` runner with command capability. Python remains authoritative.
+`appleVirtualization` runner with command capability. The TypeScript controller owns this ledger; Rust runners own execution.
 The controller and SDK tests use disposable SQLite files and fake runner peers;
 they establish no native VM execution, fencing, image delivery or cleanup acceptance.
 KubeVirt command dispatch, PTY and files are outside this tranche.

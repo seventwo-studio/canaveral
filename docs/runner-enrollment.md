@@ -38,13 +38,14 @@ This is identity fencing only: revoking a disconnected or unknown runner does no
 
 ## Compatibility and remaining gates
 
-Only the new `runner_controller_identity`, `runner_enrollments`, `runner_bindings` and `runner_credential_history` tables are added. Legacy Python host, setup, application and workload records are not altered or migrated. A runner UUID already in the legacy `hosts` table is rejected rather than adopted. Python remains a source reference; this implementation never invokes Python. Existing Python enrollment endpoints are not converted by these new routes.
+Enrollment adds `runner_controller_identity`, `runner_enrollments`, `runner_bindings` and `runner_credential_history`. These routes do not migrate legacy host, setup, application or workload records. A runner UUID already in the legacy `hosts` table is rejected rather than adopted. The controller requires no Python runtime. Legacy host enrollment and bound runner enrollment are separate credential protocols; neither silently converts the other.
 
 Fixtures cover role and pair rejection, expiry boundaries, transaction races through independent workers, exact lost-response retries, rotation/revocation, restart persistence, generation regression, immutable incarnation history and retained legacy rows. These establish source behavior on disposable databases and loopback HTTP only. They do not establish native runner integration, secure credential delivery, TLS/proxy deployment, cloned-state detection, workload fencing or release acceptance. Database retention/backup policy for approval receipts and historical bindings is also future work; do not prune them without preserving replay and generation fencing.
 
-The next slice must wire Rust runner identity storage, authenticated outbound transport and bounded session ownership to these bindings. A clone carrying the same credential, generation and incarnation is cryptographically indistinguishable here; detecting concurrent claims needs transport/session fencing and operator reconciliation. No inventory, scheduling or networking is included in this foundation; the separate [model-job controller slice](model-controller.md) re-verifies these bindings for model claims and reports.
+The [Rust runner client](../crates/runner-client/README.md) provides private identity storage and authenticated outbound transport for these bindings. Provider and bounded session ownership must still enforce the same exact binding. A clone carrying the same credential, generation and incarnation is cryptographically indistinguishable here; detecting concurrent claims needs transport/session fencing and operator reconciliation. No inventory, scheduling or networking is included in this foundation; the separate [model-job controller slice](model-controller.md) re-verifies these bindings for model claims and reports.
 
-Do not run legacy Python and TypeScript enrollment against the same database concurrently.
-The legacy Python endpoint does not check new runner bindings; sharing writable state
-would permit a colliding legacy UUID. Cutover requires a separate compatibility and
-authority-fencing procedure before either path becomes production authority.
+Do not run legacy and current enrollment implementations against the same writable
+database. An older endpoint may not check bound runner identities; sharing writable
+state could admit a colliding UUID. Cutover requires schema compatibility checks and
+explicit fencing of the previous credential authority. Preserve historical bindings
+and receipt identities; replacing the executable does not establish migration safety.

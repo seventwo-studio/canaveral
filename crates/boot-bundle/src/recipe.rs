@@ -65,10 +65,8 @@ impl Recipe {
         bootstrap.kernel = r.bootstrap.clone();
         bootstrap.validate()?;
         super::bootstrap::base_args(&r.command_line)?;
-        if !r.tool_versions["git"].starts_with("git version ")
-            || !r.tool_versions["python"].starts_with("Python ")
-        {
-            return Err("exact Git/Python probe lines required".into());
+        if !r.tool_versions["git"].starts_with("git version ") {
+            return Err("exact Git probe line required".into());
         }
 
         let p = &r.provenance;
@@ -139,13 +137,7 @@ impl Recipe {
             }
         }
         // Required direct packages, including version and arm64 identity; transitive closure is operator evidence.
-        for name in [
-            "bash=",
-            "coreutils=",
-            "git=",
-            "ca-certificates=",
-            "python3=",
-        ] {
+        for name in ["bash=", "coreutils=", "git=", "ca-certificates="] {
             if !p.debian.packages.iter().any(|v| {
                 v.identity.starts_with(name)
                     && v.identity

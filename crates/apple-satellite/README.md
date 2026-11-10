@@ -1,8 +1,8 @@
 # Rust Apple satellite (Linux guests)
 
 This executable supervises the existing signed CanaveralVMRunner helper over its
-CLI and private files. It creates no listener, downloads nothing, and uses no
-Python production code. It speaks the `linux-lease-runner` wire of the
+CLI and private files. It creates no listener, downloads nothing, and requires no
+Python runtime. It speaks the `linux-lease-runner` wire of the
 [TypeScript Linux lease controller](../../docs/linux-lease-controller.md) and is
 fixture-tested against that controller. It is not native VM acceptance. The
 crate builds only on Unix; on other hosts the binary exits as unsupported.
@@ -87,10 +87,12 @@ copied, and cleanup never deletes them. v1 requires arm64, an initrd, and
 `root=/dev/vda rootfstype=erofs ro`. These also need a pinned bootstrap builder:
 
 ```json
+{
 "inventory": [{"credentialFree": true, "format": "bootBundle", "path": "/ABS/bundle/manifest.json",
   "image": {"id": "linux-coding", "revision": "1", "arch": "arm64",
             "backend": "appleVirtualization", "digest": "sha256:REPLACE_WITH_MANIFEST_DIGEST"}}],
 "bootstrapBuilder": {"path": "/ABS/bin/mkfs.erofs", "sha256": "sha256:REPLACE_WITH_64_HEX"}
+}
 ```
 
 Artifact proof runs each `run-once` before any claim. It walks every component without
@@ -265,8 +267,8 @@ Command tests cover the real supervision poll/exec/report path, lost report repl
 bounded/truncated capture, sequence/count failures, restart after received intent,
 legacy journals, cancellation while controller I/O stalls and local fencing during
 an active command with a stalled poll. This is experimental Rust fixture coverage,
-separate from the experimental TypeScript fixtures and native acceptance. Python
-runtime paths remain authoritative.
+separate from native acceptance. The TypeScript controller owns authorization
+and reservations; the Rust satellite owns bounded execution and reports.
 `fixtures/apple-satellite/public-api.mjs` (required CI job
 `apple-satellite-conformance`) starts the real TypeScript controller with TLS and
 a fixture clock, enrolls a disposable runner through the Rust identity client,

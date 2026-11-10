@@ -154,7 +154,7 @@ cargo test --workspace --locked
 cargo build --locked -p canaveral-model-execution
 node fixtures/model-execution/public-api.mjs \
   coordination/dist/src/main.js target/debug/canaveral-model-execution \
-  target/debug/deps/owned-<test executable hash>
+  "target/debug/deps/owned-REPLACE_WITH_TEST_EXECUTABLE_HASH"
 ```
 
 Build the TypeScript controller first with `npm --prefix coordination run build`.

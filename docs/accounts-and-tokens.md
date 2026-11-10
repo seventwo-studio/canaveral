@@ -1,9 +1,10 @@
 # User accounts and personal API tokens
 
-This contract covers the authoritative Python controller and dashboard. The
-implementation uses SQLite-backed identities and credentials. Experimental TypeScript and Rust paths do not
-implement this account contract. Application, lease, enrollment, runner and
-guest credentials retain their existing independent boundaries.
+This contract defines account and ownership requirements for the TypeScript controller
+and dashboard. Identities and credentials are SQLite-backed. Application, lease,
+enrollment, runner and guest credentials retain independent boundaries. Availability
+of an account route does not establish compatibility with a retained database; the
+upgrade requirements below must be verified for the installed schema.
 
 ## Identity and ownership
 
@@ -159,7 +160,7 @@ Files are created with POSIX mode 0600; Windows directory ACLs still apply.
 For remote first-admin setup, an operator creates a private link file:
 
 ```sh
-python3 -m canaveral --url https://controller.example.internal \
+node coordination/dist/src/cli.js --url https://controller.example.internal \
   --token-file ./secrets/admin.token admin setup-link \
   --dashboard-url https://canaveral.example.internal \
   --output-file ./secrets/first-admin.link
@@ -172,7 +173,7 @@ prints safe metadata and the file path, never the link secret.
 After activation or invitation acceptance, save a login session privately:
 
 ```sh
-python3 -m canaveral --url https://controller.example.internal login \
+node coordination/dist/src/cli.js --url https://controller.example.internal login \
   --username alice --output-file ./secrets/alice.session
 ```
 
@@ -181,14 +182,14 @@ for noninteractive use. A personal session can list visible machines and mint a
 read-only automation token:
 
 ```sh
-python3 -m canaveral --url https://controller.example.internal \
+node coordination/dist/src/cli.js --url https://controller.example.internal \
   --token-file ./secrets/alice.session machines
-python3 -m canaveral --url https://controller.example.internal \
+node coordination/dist/src/cli.js --url https://controller.example.internal \
   --token-file ./secrets/alice.session tokens create --name inventory \
   --scope machines:read --expires-in 2592000 \
   --request-id 80325a82-78ce-45ee-aeb3-cc624e5248eb \
   --output-file ./secrets/inventory.token
-python3 -m canaveral --url https://controller.example.internal \
+node coordination/dist/src/cli.js --url https://controller.example.internal \
   --token-file ./secrets/inventory.token machines
 ```
 
@@ -213,13 +214,15 @@ removes an operator/API-token file masquerading as a login session.
 
 ## Upgrade and verification
 
-Migration is transactional and idempotent, including concurrent startup. It copies
-the legacy administrator's existing hash and still-valid sessions into user-bound
-records, marks the legacy credential tables consumed, and prevents a restart from
-resurrecting revoked sessions. Credential rows in legacy tables must not remain a
-second accepted login authority. Back up the controller database before live
-upgrades; running an older authentication implementation against an upgraded
-database is unsupported and must fail closed where detectable.
+A migration of retained accounts must be transactional and idempotent, including
+concurrent startup. It must preserve the existing password representation, user IDs,
+machine ownership and still-valid sessions, consume the old credential authority,
+and prevent restart from resurrecting revoked credentials. Back up the database
+before an upgrade. New module schemas are not permission to rewrite existing user
+tables or to adopt unowned machines. A schema without an explicitly supported
+migration must fail closed; use a separately selected fresh database for fixtures.
+Do not run an older authentication implementation against upgraded state or run
+two controller implementations against the same writable database.
 
 Required fixtures cover two ordinary users and an admin, all machine/receipt and
 direct-connector authorization paths, revocation during streams, credential-type
