@@ -1,0 +1,25 @@
+[Unit]
+Description=Seven isolated execution worker
+After=local-fs.target
+[Service]
+Type=simple
+User=seven
+Group=seven
+StateDirectory=seven
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/seven
+ExecStart=/usr/bin/python3 /opt/seven/seven_agent.py --worker-only
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_VSOCK AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+KillMode=control-group
+TimeoutStopSec=10
+[Install]
+WantedBy=multi-user.target
