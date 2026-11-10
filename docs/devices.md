@@ -55,7 +55,7 @@ SDK binaries, system images and emulator overhead. Shared runtimes are owner-man
 Enroll a runner using the normal credential flow:
 
 ```sh
-python3 -m canaveral --url https://canaveral.example.internal host \
+node coordination/dist/src/cli.js --url https://canaveral.example.internal host \
   --config /private/canaveral/host-ios.json \
   --state /private/canaveral/ios-agent \
   --enrollment-token-file /private/canaveral/enrollment.token
@@ -64,7 +64,7 @@ python3 -m canaveral --url https://canaveral.example.internal host \
 Provision with a stable caller UUID, then wait until `machines` reports ready:
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token create test-phone \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token create test-phone \
   --template ios-phone --request-id 307cd365-a75d-43a8-aefb-1f23b22b8aa2
 ```
 
@@ -82,11 +82,11 @@ stable request UUID; read its receipt to obtain `queued`, `succeeded`, `failed` 
 This interface provides screenshots and discrete input, rather than a video stream.
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token device \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token device \
   307cd365-a75d-43a8-aefb-1f23b22b8aa2 screenshot \
   --request-id dc2934dd-dbab-494f-a709-8b97b5754717
 
-python3 -m canaveral --token-file ./secrets/admin.token operation \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token operation \
   dc2934dd-dbab-494f-a709-8b97b5754717 --output ./screen.png
 ```
 

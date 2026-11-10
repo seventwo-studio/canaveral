@@ -228,17 +228,17 @@ fn require_pid1() -> Result<()> {
 fn probe_matches(success: bool, output: &str, pin: &str) -> bool {
     success && output.lines().next().is_some_and(|line| line.trim() == pin)
 }
+const TOOL_PROBES: [(&str, &str, &[&str]); 3] = [
+    (
+        "shell",
+        "/bin/sh",
+        &["-c", "printf 'canaveral-shell-v1\\n'"],
+    ),
+    ("git", "/usr/bin/git", &["--version"]),
+    ("node", "/usr/local/bin/node", &["--version"]),
+];
 fn probe_tools(launch: &Launch) -> Result<()> {
-    for (name, path, args) in [
-        (
-            "shell",
-            "/bin/sh",
-            vec!["-c", "printf 'canaveral-shell-v1\\n'"],
-        ),
-        ("git", "/usr/bin/git", vec!["--version"]),
-        ("node", "/usr/local/bin/node", vec!["--version"]),
-        ("python", "/usr/bin/python3", vec!["--version"]),
-    ] {
+    for (name, path, args) in TOOL_PROBES {
         let mut child = Command::new(path)
             .args(args)
             .env_clear()
@@ -758,6 +758,7 @@ mod tests {
     }
     #[test]
     fn exact_probe_lines() {
+        assert_eq!(TOOL_PROBES.map(|probe| probe.0), ["shell", "git", "node"]);
         assert!(probe_matches(true, "  v24.11.0\nother", "v24.11.0"));
         assert!(!probe_matches(false, "v24.11.0", "v24.11.0"));
         for bad in ["v24.11.01", "prefix v24.11.0", "wrong\nv24.11.0", ""] {

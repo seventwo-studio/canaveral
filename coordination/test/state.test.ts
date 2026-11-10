@@ -27,7 +27,8 @@ test("account setup, PBKDF2 and sessions survive reopening without plaintext cre
   assert.deepEqual(accounts.status(), { setupRequired: true });
   const first = await accounts.setup({ username: "ADMIN", password });
   assert.equal(first.expiresAt, now.seconds + SESSION_SECONDS);
-  assert.deepEqual(first.user, { username: "admin" });
+  assert.deepEqual(first.user, { id: first.user.id, username: "admin", role: "admin", status: "active", createdAt: now.seconds });
+  assert.match(first.user.id, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
   const restored = new Accounts(new SqliteStore(store.path, () => now.seconds));
   assert.equal(restored.authorized(first.token), true);
   assert.deepEqual(restored.status(), { setupRequired: false });
@@ -35,12 +36,12 @@ test("account setup, PBKDF2 and sessions survive reopening without plaintext cre
   const login = await restored.login({ username: "ADMIN", password });
   assert.equal(restored.authorized(login.token), true);
   store.transaction(db => {
-    const row = db.prepare("SELECT salt,password_hash,iterations FROM administrator").get()!;
+    const row = db.prepare("SELECT salt,password_hash,iterations FROM users").get()!;
     assert.equal(row.iterations, ITERATIONS);
     assert.equal((row.salt as string).length, 64);
     assert.equal((row.password_hash as string).length, 64);
     assert.notEqual(row.password_hash, password);
-    assert.notEqual(db.prepare("SELECT token_hash FROM admin_sessions").get()!.token_hash, first.token);
+    assert.notEqual(db.prepare("SELECT token_hash FROM user_sessions").get()!.token_hash, first.token);
   });
   assert.equal(statSync(store.path).mode & 0o777, 0o600);
   assert.deepEqual(restored.logout(first.token), { ok: true });
@@ -56,8 +57,8 @@ test("concurrent first-run requests create exactly one durable administrator", a
   assert.equal(outcomes.filter(outcome => outcome.status === "fulfilled").length, 1);
   for (const outcome of outcomes) if (outcome.status === "rejected") assert.ok(status(409)(outcome.reason));
   store.transaction(db => {
-    assert.equal(db.prepare("SELECT count(*) AS n FROM administrator").get()!.n, 1);
-    assert.equal(db.prepare("SELECT count(*) AS n FROM admin_sessions").get()!.n, 1);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM users WHERE role='admin' AND status='active'").get()!.n, 1);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM user_sessions").get()!.n, 1);
   });
 });
 
@@ -97,16 +98,16 @@ test("password character counts and UTF-8 match Python without Unicode normaliza
 
 test("expired sessions are pruned and live administrator sessions remain bounded", async t => {
   const { store, now } = fixture(t); const accounts = new Accounts(store);
-  await accounts.setup({ username: "admin", password });
+  const admin = await accounts.setup({ username: "admin", password });
   store.transaction(db => {
-    const insert = db.prepare("INSERT INTO admin_sessions VALUES (?,?)");
-    for (let i = 0; i < 70; i++) insert.run("fixture-" + i, now.seconds + 1000 + i);
-    insert.run("expired", now.seconds);
+    const insert = db.prepare("INSERT INTO user_sessions VALUES (?,?,?)");
+    for (let i = 0; i < 70; i++) insert.run("fixture-" + i, admin.user.id, now.seconds + 1000 + i);
+    insert.run("expired", admin.user.id, now.seconds);
   });
   await accounts.login({ username: "admin", password });
   store.transaction(db => {
-    assert.equal(db.prepare("SELECT count(*) AS n FROM admin_sessions").get()!.n, 64);
-    assert.equal(db.prepare("SELECT count(*) AS n FROM admin_sessions WHERE expires<=?").get(now.seconds)!.n, 0);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM user_sessions").get()!.n, 64);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM user_sessions WHERE expires<=?").get(now.seconds)!.n, 0);
   });
 });
 
@@ -166,4 +167,31 @@ test("application policies pin installed image revisions and roll back failed cr
     assert.throws(() => applicationSpec({ ...request, limits }), status(400));
   }
   assert.throws(() => applicationSpec({ ...request, id: request.id + "\n" }), status(400));
+});
+
+test("independent account workers cannot disable both final administrators", async t => {
+  const { store } = fixture(t), accounts = new Accounts(store);
+  const first = await accounts.setup({ username: "firstadmin", password });
+  const pending = accounts.createUser("", { id: "11111111-2222-4333-8444-555555555555", username: "secondadmin", role: "admin" }, true);
+  const claim = accounts.issueClaim("", "invite", pending.id, true);
+  const second = await accounts.redeem({ token: claim.token, password });
+  const outcomes = await Promise.all([first.user.id, second.user.id].map(id => new Promise<number>((resolve, reject) => {
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      Promise.all([import(workerData.accounts), import(workerData.sqlite)]).then(([{Accounts},{SqliteStore}]) => {
+        const accounts = new Accounts(new SqliteStore(workerData.path));
+        try { accounts.updateUser('', workerData.id, {status:'disabled'}, true); parentPort.postMessage(200); }
+        catch(error) { if (error.status !== 409) throw error; parentPort.postMessage(error.status); }
+      });
+    `, { eval: true, workerData: { path: store.path, id, accounts: new URL("../src/accounts.js", import.meta.url).href, sqlite: new URL("../src/sqlite.js", import.meta.url).href } });
+    let result: number | undefined;
+    worker.once("message", value => { result = value as number; });
+    worker.once("error", reject);
+    worker.once("exit", code => {
+      if (code !== 0 || result === undefined) reject(new Error("Last-administrator worker failed"));
+      else resolve(result);
+    });
+  })));
+  assert.deepEqual(outcomes.sort(), [200, 409]);
+  store.transaction(db => assert.equal(db.prepare("SELECT count(*) AS n FROM users WHERE role='admin' AND status='active'").get()!.n, 1));
 });

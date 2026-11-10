@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=/opt/canaveral
 Environment=CANAVERAL_URL=https://canaveral.example.internal
 Environment=CANAVERAL_ENROLLMENT_TOKEN_FILE=/etc/canaveral/enrollment.token
-ExecStart=/usr/bin/python3 -m canaveral host --config /etc/canaveral/host.json --state /var/lib/canaveral/agent
+ExecStart=/usr/bin/node /opt/canaveral/coordination/dist/src/cli.js host --config /etc/canaveral/host.json --state /var/lib/canaveral/agent
 Restart=on-failure
 RestartSec=10
 UMask=0077

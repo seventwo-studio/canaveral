@@ -53,7 +53,7 @@ need acceptance; successful syscalls alone are not that proof.
 Use an already installed Android NDK:
 
 ```sh
-python3 script/build_android_transfer.py \
+node script/build_android_transfer.mjs \
   --ndk /path/to/installed/ndk \
   --output-dir ./dist/android-transfer
 ```
@@ -61,8 +61,8 @@ python3 script/build_android_transfer.py \
 The script builds PIE executables for Android API 26+ on `arm64` and `amd64`.
 It checks ELF architecture and writes a SHA-256 manifest. Test-only fault
 injection is excluded from these artifacts. It downloads no toolchain and
-does not push, install or execute a helper. The C source ships in the Python
-package; this does not add a native compiler requirement to SDK runtime use.
+does not push, install or execute a helper. The retained C source is an intentional
+native dependency; SDK runtime use does not require a native compiler.
 
 ## Configure the Android runtime
 

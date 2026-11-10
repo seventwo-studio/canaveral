@@ -22,13 +22,15 @@ The controller retains the durable preparation receipt separately from live
 `guestConnectionReady`; current runners probe the guest connection after restart
 before reporting ready. Legacy unreported connection readiness remains null.
 
-Install the Python package dependencies into a virtual environment, then use an
-already installed compatible ARM64 Linux cloud disk and signed Apple runner:
+Install the TypeScript runtime dependencies, then use an already installed
+compatible ARM64 Linux cloud disk and signed Apple runner. Local launch requires
+that the selected provider is wired to the TypeScript host; otherwise it must
+return an explicit unsupported result before creating resources:
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/python -m canaveral local \
+npm --prefix coordination ci --ignore-scripts
+npm --prefix coordination run build
+node coordination/dist/src/cli.js local \
   --android-sdk "$HOME/Library/Android/sdk" \
   --linux-image /absolute/path/ubuntu-arm64.qcow2 \
   --apple-runner /absolute/path/CanaveralVMRunner
@@ -40,7 +42,9 @@ identity and devices are retained. The generated Linux image uses 2 vCPUs, 4 GiB
 memory and at least 32 GiB disk. Review the generated host limits alongside any
 other runners on the same physical machine. Installed images and runtimes are not
 downloaded by the launcher. Guest preparation installs XFCE, TigerVNC, AT-SPI,
-screenshot tools and Python packages through the guest's package manager.
+screenshot tools through the guest's package manager. The TypeScript/Rust guest
+service must be installed before readiness can be acknowledged; a legacy helper
+payload is not an implicit runtime fallback.
 
 The guest desktop account has passwordless sudo for full administration of this
 owned VM. Each assignment receives its own guest service token and SSH host key;
@@ -58,7 +62,8 @@ the guest. Existing cloud-init callback behavior is retained for other images.
 ## Headless Linux setup
 
 A Linux image with `guestAccess: true` and `mode: headless` receives the
-`canaveral-headless.service` profile. It installs Python, curl and OpenSSH without
+`canaveral-headless.service` profile. Its service requires the matching Rust or
+TypeScript guest runtime, curl and OpenSSH without
 XFCE, VNC or AT-SPI. The existing guest account and file paths stay compatible
 with shell and file access. Switching profiles disables only the other Canaveral
 service. New assignments refresh managed helper code while preserving source

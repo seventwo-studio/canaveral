@@ -1,7 +1,7 @@
 # macOS guest terminal sessions
 
 The native `CanaveralGuest` helper implements independent PTYs behind the same
-authenticated bridge as files and accessibility. The internal Python
+authenticated bridge as files and accessibility. The internal TypeScript
 `GuestChunkShells` adapter translates common shell controls into this protocol.
 The internal [common access adapter](macos-guest-access.md) connects these
 protocols to provider/runner interfaces with isolated coverage. Production
@@ -22,7 +22,7 @@ directory rather than inherited service secrets.
 `read` (`session`, `offset`), `write` (`session`, `text`), `resize` (`session`,
 `cols`, `rows`) and `close` (`session`). Fields are exact, queries are refused,
 and requests fit a 16 KiB control body. Authentication and browser Origin checks
-happen before service dispatch. The Python adapter supplies default 80 × 24
+happen before service dispatch. The host adapter supplies default 80 × 24
 initial dimensions for the existing common `shell-open` operation.
 
 There is no product shell-count cap. Each PTY drains independently through a
@@ -96,11 +96,11 @@ buffer bounds/truncation, waitable exit, nine simultaneous independent native
 PTYs and close of a foreground job that ignores hangup. These processes use
 separate temporary HOME/working directories. They are not live VM tests.
 
-Python fixtures exercise common control translation, response and UTF-8 byte
+Portable fixtures must exercise common control translation, response and UTF-8 byte
 validation, bounded output, truncation, cleanup acknowledgements, nine session
 identities and no retry after lost mutation responses. A deterministic transcript
 from the actual Swift manager with a fake process backend checks all five
-controls against the Python adapter. It establishes protocol compatibility,
+controls against the host adapter. It establishes protocol compatibility,
 not a network boundary or real guest delivery.
 
 Native installation/bootstrap, approved guest connectivity, common display and

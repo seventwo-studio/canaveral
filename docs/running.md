@@ -1,10 +1,13 @@
 # Running Canaveral
 
-Run the control plane on any supported Python host, in Docker or in Kubernetes. Native host agents run where their hypervisor is installed. macOS guests stay on Apple hardware. A Linux container does not add Hyper-V or Apple Virtualization to its host; Docker Desktop on a Mac is not the Apple host backend.
+Run the TypeScript control plane on Node.js 24 or later, directly or in a matching container image. Native host agents run where their hypervisor is installed. macOS guests stay on Apple hardware. A Linux container does not add Hyper-V or Apple Virtualization to its host; Docker Desktop on a Mac is not the Apple host backend.
 
 ## Native controller and hosts
 
-Use Python 3.9+ and run `python3 -m canaveral` from the checkout, or install the package and use `canaveral`. `python3 -m canaveral init ./secrets` creates private credential files. It refuses to overwrite existing files. Start `serve` as in the root README; its default bind address is loopback. For access from other machines, provide a TLS proxy and set `--bind` to the intended private interface. Persist `--database` and keep administrator credentials with the owner.
+Install dependencies with `npm --prefix coordination ci --ignore-scripts`, build
+with `npm --prefix coordination run build` and run
+`node coordination/dist/src/cli.js --help` from the checkout. The root npm scripts build and check the workspace; the installed `canaveral`
+binary runs this compiled CLI. `node coordination/dist/src/cli.js init ./secrets` creates private credential files. It refuses to overwrite existing files. Start `serve` as in [self-hosting](self-hosting.md#one-server); its default bind address is loopback. For access from other machines, provide a TLS proxy and set `--bind` to the intended private interface. Persist `--database` and keep administrator credentials with the owner.
 
 Use [user accounts and scoped personal API tokens](accounts-and-tokens.md) for
 normal machine access. Users own private machines; admins manage all users and
@@ -14,7 +17,7 @@ existing controller database before its first upgrade to the user account schema
 Copy an example from `examples/` into a private host configuration. Set a deliberate host capacity limit, correct architecture, bootable base image paths and immutable revision IDs. Use reusable template files and preparation recipes as described in [Configurable computers](templates.md). Remove templates that are not installed. On each host:
 
 ```sh
-python3 -m canaveral --url https://canaveral.example.internal host \
+node coordination/dist/src/cli.js --url https://canaveral.example.internal host \
   --config /etc/canaveral/host.json --state /var/lib/canaveral/agent \
   --enrollment-token-file /etc/canaveral/enrollment.token
 ```
@@ -23,9 +26,9 @@ Deliver the enrollment file through your normal secret-management channel. After
 
 For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and access to the template/storage directories. Let the host's libvirt ownership and SELinux/AppArmor policies govern runtime disk access; do not place the disks under the private agent-credential directory. `deploy/systemd/canaveral-host.service` is an editable service example.
 
-For Windows, enable Hyper-V on a supported host edition, install Python and use prepared Generation 2 VHDX templates plus an existing virtual switch. Run the agent under an account authorized for Hyper-V. Configure private state/storage paths in the Windows example. For first-boot preparation, use a base with Cloudbase-Init enabled and a ConfigDrive recipe. Windows guests require appropriate usage rights; Microsoft's [Enterprise evaluation](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise) lasts 90 days. Canaveral does not bypass activation or licensing.
+For Windows, enable Hyper-V on a supported host edition, install Node.js 24 or later and use prepared Generation 2 VHDX templates plus an existing virtual switch. Run the agent under an account authorized for Hyper-V. Configure private state/storage paths in the Windows example. For first-boot preparation, use a base with Cloudbase-Init enabled and a ConfigDrive recipe. Windows guests require appropriate usage rights; Microsoft's [Enterprise evaluation](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise) lasts 90 days. Canaveral does not bypass activation or licensing.
 
-For Apple hosts on macOS 26+, run `./script/build_apple_runner.sh`. It builds and signs `dist/CanaveralVMRunner` with the existing Apple Development identity; set `CANAVERAL_SIGNING_IDENTITY` if identity selection is ambiguous. Configure its absolute path and private disk storage in `host-apple.json`. macOS templates use a local compatible IPSW and Apple silicon. Linux templates use standalone raw or supported QCOW2 disks for the host architecture. The retained QCOW2 importer has its documented 16 GiB virtual-size limit; use raw images for larger templates. Whole-GiB memory is required. Increase template minimums if an IPSW requires more resources; provisioning never silently exceeds the reservation. Native runners retain their own runtime locks and keep running when the Python agent exits. Check a machine's `runner.log` and native status before clearing an uncertain `runner-launch.json` receipt.
+For Apple hosts on macOS 26+, the operator-authorized native build command is `./script/build_apple_runner.sh`. It builds and signs `dist/CanaveralVMRunner` with the existing Apple Development identity; set `CANAVERAL_SIGNING_IDENTITY` if identity selection is ambiguous. Configure its absolute path and private disk storage in `host-apple.json`. macOS templates use a local compatible IPSW and Apple silicon. Linux templates use standalone raw or supported QCOW2 disks for the host architecture. The retained QCOW2 importer has its documented 16 GiB virtual-size limit; use raw images for larger templates. Whole-GiB memory is required. Increase template minimums if an IPSW requires more resources; provisioning never silently exceeds the reservation. Native runners retain their own runtime locks and keep running when the TypeScript host exits. Check a machine's `runner.log` and native status before clearing an uncertain `runner-launch.json` receipt.
 
 Linux cloud-init templates can configure accounts, public SSH keys, software and workload checks during preparation. Other image types need their declared bootstrap mechanism installed or remote access configured. Disk expansion changes virtual device capacity; growing guest partitions/filesystems remains the guest's responsibility.
 
@@ -46,6 +49,10 @@ address from an already replaced VMI or recreate its disk to repair networking.
 
 ## Docker
 
+Container and deployment files must select the Node.js runtime and the same CLI
+entry point as the source release. Existing deployment inputs are configuration
+examples, not proof of a completed upgrade or provider acceptance.
+
 Android emulator and iOS simulator runners use native SDKs rather than the VM
 backends above. See [mobile devices](devices.md) for host prerequisites, examples,
 control operations and acceptance. The controller can stay in Docker or Kubernetes.
@@ -62,7 +69,7 @@ docker compose run --rm --no-deps orchestrator \
 
 Run initialization once. It intentionally fails if credential files already exist. The host-published port is bound to `127.0.0.1`; add your private TLS proxy for remote use. Internal Compose HTTP is explicitly enabled in the example CLI call. Export an enrollment file to a protected local destination if registering native hosts, for example by redirecting `docker compose run --rm --no-deps --entrypoint cat orchestrator /run/credentials/enrollment.token` directly to that file; do not paste credentials into chat or command-line flags.
 
-The [optional web dashboard](dashboard.md) runs separately with `python3 -m canaveral dashboard` or `docker compose --profile dashboard up -d`. It is not required by the orchestrator. Kubernetes has a separate opt-in `deploy/kubernetes/dashboard.json` Deployment and internal Service.
+The [optional web dashboard](dashboard.md) runs separately with `node coordination/dist/src/cli.js dashboard` or `docker compose --profile dashboard up -d`. It is not required by the orchestrator. Kubernetes has a separate opt-in `deploy/kubernetes/dashboard.json` Deployment and internal Service.
 
 Build the worker images when needed:
 

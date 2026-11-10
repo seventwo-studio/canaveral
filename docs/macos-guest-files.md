@@ -1,7 +1,7 @@
 # macOS guest file transactions
 
 The native `CanaveralGuest` helper implements chunked file listing, uploads and
-downloads through its authenticated HTTP bridge. The internal Python
+downloads through its authenticated HTTP bridge. The internal TypeScript
 `GuestChunkFiles` adapter translates this protocol into the shared transfer
 reader/result interfaces. A provider must still supply the authenticated,
 assignment-bound transport; the adapter chooses no address or credentials.
@@ -64,7 +64,7 @@ performing another rename; different byte counts/digests conflict. A publication
 whose response or synchronization fails is not automatically repeated.
 
 Downloads check identity around each chunk and perform a bounded second pass
-before acknowledging the final digest. The Python adapter also checks response
+before acknowledging the final digest. The host adapter also checks response
 identity, exact offsets, base64 shape, bounded verification progress and the
 received-byte digest. A shared worker can then emit its existing verified finish
 message. Source verification is not an immutable filesystem snapshot: bytes
@@ -85,7 +85,7 @@ staging ownership refuses cleanup. Abort never removes a published destination
 and refuses uncertain publication. A replaced staging file, symlink receipt or
 foreign parent is retained rather than treated as owned cleanup.
 
-The Python adapter never automatically retries a mutation after a lost response.
+The host adapter never automatically retries a mutation after a lost response.
 It attempts explicit abort on failure only while still authorized. Revocation
 stops further transport calls. Open transfers still need explicit close/abort or
 helper shutdown; automatic lease-scoped transfer reclamation and interrupted
@@ -98,9 +98,9 @@ Disposable Swift filesystem tests cover binary/empty files, large declared
 lengths, atomic replacement, digest rejection, malformed requests, exact cursor
 checks, duplicate/conflicting requests, staging replacement/mutation/hard links,
 publication interruption, restart, owned cleanup, parent rebinding and symlinks.
-Python adapter fixtures cover bounded reads, malformed helper responses,
+host adapter fixtures cover bounded reads, malformed helper responses,
 interruption, revocation and verification. An exported transcript of actual
-Swift service responses passes the Python upload/download adapter, including a
+Swift service responses passes the host upload/download adapter, including a
 524,325-byte binary round trip. No native guest is involved in these fixtures.
 
 The guest executable compiles; it has not been installed, launched or promoted as

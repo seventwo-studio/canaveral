@@ -385,7 +385,7 @@ try {
   await exec('/usr/bin/chflags', ['uchg', ...artifacts]);
   const manifest = {version: 1, id: 'fixture-coding', revision: 1, arch: 'arm64', kernel: pins.kernel, initrd: pins.initrd, rootfs: pins.rootfs,
     commandLine: 'console=hvc0 root=/dev/vda rootfstype=erofs ro', agentVsockPort: 1024, protocol: 1,
-    toolVersions: {shell: 'canaveral-shell-v1', git: 'git version 2.47', node: 'v24.11.0', python: 'Python 3.13'}};
+    toolVersions: {shell: 'canaveral-shell-v1', git: 'git version 2.47', node: 'v24.11.0'}};
   // Independent canonical bytes (sorted keys, no whitespace; these ASCII values need no other escaping).
   const canonical = v => v === null ? 'null' : typeof v === 'object' ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}' : JSON.stringify(v);
   const bundleDigest = createHash('sha256').update(canonical(manifest)).digest('hex');

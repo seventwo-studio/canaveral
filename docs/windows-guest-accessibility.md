@@ -1,17 +1,15 @@
 # Windows native accessibility component
 
-`canaveral.guest.windows_accessibility` implements UI Automation capture and
-guarded Invoke-pattern actions. It is an internal guest worker component, not
-an enrolled Windows service or a production provider connection. No Windows
-image or lease capability is enabled by adding it.
+`coordination/src/guest/windows/accessibility.ts` implements `WindowsInspections`
+with an injected `WindowsUIAAPI`. It validates capture, retained targets and guarded
+Invoke-pattern actions. It does not provide a production COM binding, enrolled
+Windows service or provider connection, and enables no image or lease capability.
 
-The optional `windows-guest` package extra declares `comtypes` only on Windows.
-`native_api()` loads the system UI Automation type library and creates an
-in-process COM client in a fresh MTA worker. It requires a physical-coordinate
-DPI context and restores the previous context on exit. It refuses other
-operating systems and already-initialized COM workers, with no host or pixel
-input fallback. The standalone module command supports read-only capture;
-actions require the in-memory worker context described below.
+The native bridge must load UI Automation and create its COM client in a fresh MTA
+worker, establish a physical-coordinate DPI context and restore it on exit. It must
+refuse other operating systems and incompatible initialized workers. There is no
+host or pixel-input fallback. The native behavior below is the bridge contract;
+TypeScript fixtures against an injected API do not establish native execution.
 
 Capture uses the UIA control view and the common accessibility snapshot shape:
 `windows-uia`, `screen-pixels`, native runtime IDs, AutomationId, localized role,
@@ -41,12 +39,12 @@ The worker therefore retains native references rather than reconstructing an
 action from an ID. The implementation follows Microsoft's [dedicated MTA client
 guidance](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading)
 and [physical/logical coordinate distinction](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-screenscaling).
-The COM wrapper uses the documented [comtypes client API](https://comtypes.readthedocs.io/en/stable/client.html).
 
 ## Owned worker lifetime
 
-`WindowsWorker(authorized, timeout=5)` launches the native worker lazily in a
-separate process. A private, length-prefixed JSON pipe keeps capture and action
+`WindowsProcessWorker` in `coordination/src/guest/windows/ipc.ts` provides lazy
+private-process transport with explicit command, authorization and `timeoutMs`
+options. A production guest service must bind it to the qualified native worker. A private, length-prefixed JSON pipe keeps capture and action
 on the same MTA thread and retains the original inspection handles. Request
 UUIDs correlate every acknowledgement; no command is retried or replayed. IPC
 requests are limited to 16 KiB and responses to the snapshot envelope plus
@@ -77,19 +75,19 @@ credentials, display owner or admission policy.
 
 ## Evidence and remaining integration
 
-Twenty-two isolated tests use UIA-shaped doubles. They cover the packaged JSON
+Required portable cases use UIA-shaped doubles and cover the packaged JSON
 schema, native property projection, protected content, partial/depth/byte
 coverage, parent/identity changes, recycled IDs with replaced handles, expiry,
 worker-thread affinity, single-use actions and uncertain invocation. They load
 no Windows DLL, initialize no COM apartment and interact with no desktop.
 
-Eighteen supervisor tests use real disposable Python subprocesses on the
-development host. They cover retained inspection/action context, busy refusal,
+Supervisor conformance requires disposable subprocesses on the
+development host to cover retained inspection/action context, busy refusal,
 non-reading and stalled fixture children, timeout/revocation, late startup, framing/correlation,
 cleanup and unknown invocation results. They do not prove Windows pipe/process
 handle behavior or native COM cancellation.
-All 40 Windows component tests pass in source and against the private wheel,
-with resource warnings treated as errors.
+The retained fixture cases define portable coverage requirements; passing them
+against the TypeScript/Rust implementation must be established separately.
 
 Native acceptance requires an approved disposable Windows guest, interactive
 user session, installed helper dependencies and actual provider behavior across

@@ -45,7 +45,7 @@ export function LoginScreen({
                 password. The operator can also create the first account through
                 localhost setup or admin create.
                 <code className="block break-all">
-                  python3 -m canaveral --token-file /path/to/operator.token
+                  canaveral --token-file /path/to/operator.token
                   admin setup-link --dashboard-url
                   https://your-dashboard.example
                 </code>

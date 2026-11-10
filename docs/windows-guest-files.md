@@ -1,10 +1,12 @@
 # Windows pinned files and verified downloads
 
-`canaveral.guest.windows_file_handles` provides the native ownership foundation
-for Windows listing, reads and subsequent transfer transactions. It is an
-internal guest component, not a file server or an enrolled provider. The caller
-supplies an approved guest drive and optional root components; it does not
-select credentials, enrollment, a public path namespace or image admission.
+`WindowsRoot` in `coordination/src/guest/windows/files.ts` provides handle-based
+ownership validation for Windows listing, reads and transfer transactions through
+an injected `WindowsFileAPI`. The caller supplies an approved guest drive and root
+components. The TypeScript component is not a file server or enrolled provider,
+and supplies no production Win32 binding. The native behavior below is required
+of the guest bridge; it selects no credentials, public path namespace or image
+admission. Missing native operations must fail closed.
 
 `WindowsRoot` construction opens nothing. `start()` pins the selected drive and
 each configured directory component, retaining their handles. `pin(parts)`
@@ -40,7 +42,7 @@ deleted by this component.
 
 ## Common download transactions
 
-`canaveral.guest.windows_downloads.WindowsDownloads` implements the existing
+`WindowsDownloads` in `coordination/src/guest/windows/downloads.ts` implements the existing
 `GuestChunkFiles` list and download routes over a started `WindowsRoot`. The
 owner injects a guest-path resolver and current assignment authorization. No
 public namespace, service endpoint or production provider binding is selected.
@@ -152,8 +154,10 @@ durability evidence.
 
 ## Private file worker
 
-`WindowsFileWorker` moves the pinned root and read/download manager into one
-retained subprocess inside the assigned guest. The owner supplies the approved
+A production private file worker must move the pinned root and read/download
+manager into one retained subprocess inside the assigned guest. The generic
+transport is `coordination/src/guest/windows/ipc.ts`; it does not supply the native
+worker executable or service binding. The owner supplies the approved
 drive, root components, guest-path resolver and current authorization predicate.
 The resolver runs in the parent; validated relative components cross private,
 length-bounded, UUID-correlated stdio IPC. Credentials, enrollment and the public
@@ -188,35 +192,35 @@ durable restart recovery and production service/provider binding remain required
 
 ## Evidence and remaining work
 
-Nineteen tests use filesystem API doubles and Python threads. They cover native
+Required portable cases use filesystem API doubles and worker threads to cover native
 structure widths and relative-open marshalling, Unicode directory records,
 unsafe names/reparse/type/volume refusal, metadata changes, bounded large-offset
 reads, enumeration limits, open/read/close races and uncertain release. The
 large-file case uses virtual metadata for a 64 GiB file; it allocates only bounded
 read buffers. No Windows DLL, drive or native filesystem was accessed.
 
-Seventeen additional tests exercise the common file adapter with binary and empty
+Common file adapter cases must exercise with binary and empty
 downloads, bounded verification steps, cursor/path conflicts, metadata and digest
 changes, short reads, uncertain cleanup, large virtual sources, authorization,
 concurrent transfers, shutdown during reads and failed-open cleanup. These use
 the pinned-file component with filesystem API doubles. They establish protocol
 interoperability in isolation, not native Windows filesystem behavior.
 
-Seventeen worker cases use real disposable Python subprocesses with the same
-file manager and filesystem doubles. They cover shared-adapter downloads and
+Worker cases must use disposable subprocesses with the same
+file manager and filesystem doubles to cover shared-adapter downloads and
 large listings, busy refusal, independent bindings, active/idle revocation,
 timeouts/crashes, malformed replies, blocked large pipe writes and positive versus
 unknown native/process cleanup. This establishes development-host IPC behavior;
 Windows kernel handles, pipe cancellation and native filesystem semantics remain
 unverified.
 
-Twenty-one staging cases use filesystem/thread/FFI doubles for fresh relative
+Staging cases must use filesystem/thread/FFI doubles for fresh relative
 creation, binary/empty and virtual large sources, bounded partial writes,
 digest/metadata refusal, pre/post-dispatch revocation, name collisions,
 open/write/close races and retained disposition/close failures. No native Windows
 file was created, written, flushed or deleted.
 
-Fifteen publication cases use the same doubles for replacement, Unicode/empty
+Publication cases must use the same doubles for replacement, Unicode/empty
 files, retained-handle marshalling, pre-effect refusal, lost/negative native
 results, flush/identity failures, revocation and close races. They check that
 cleanup preserves every potentially published target and that unknown ownership

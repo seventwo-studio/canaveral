@@ -49,3 +49,9 @@ mod tests {
         assert!(launch.validate().is_err());
     }
 }
+
+mod classic;
+/// Explicit classic worker mode. Never used by the protocol 1 bootstrap.
+pub use classic::run as run_classic_worker;
+
+pub mod atspi;

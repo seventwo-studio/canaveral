@@ -16,13 +16,21 @@ services:
     volumes:
       - canaveral-state:/data
       - canaveral-credentials:/run/credentials:ro
+      # Operator supplies a certificate valid for the orchestrator DNS name.
+      - "${CANAVERAL_TLS_DIRECTORY:?Set CANAVERAL_TLS_DIRECTORY with server.crt, server.key and ca.crt}:/run/tls:ro"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     restart: unless-stopped
   dashboard:
     profiles: [dashboard]
     build:
       context: .
       target: dashboard
-    command: [--url, "http://orchestrator:8765", --allow-http, dashboard, --bind, "0.0.0.0"]
+    command: [--url, "https://orchestrator:8765", dashboard, --bind, "0.0.0.0"]
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+    volumes:
+      - "${CANAVERAL_TLS_DIRECTORY:?Set CANAVERAL_TLS_DIRECTORY}/ca.crt:/run/tls/ca.crt:ro"
     ports:
       - "127.0.0.1:8766:8766"
     depends_on:

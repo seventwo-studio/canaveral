@@ -5,15 +5,16 @@ describes the implemented application/lease HTTP interface using
 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html) and JSON Schema 2020-12.
 Load it without a controller connection or optional validator dependencies:
 
-```python
-from canaveral.contracts import consumer_api_schema
+```ts
+import { readFileSync } from "node:fs";
 
-contract = consumer_api_schema()
+const contract = JSON.parse(readFileSync("canaveral/schemas/consumer-api.openapi.json", "utf8"));
 ```
 
-Each call returns a fresh dictionary. The JSON file is the canonical artifact;
-update it alongside endpoint changes and run the `test` extra's contract tests.
-It is distributed in the wheel, not served by a new HTTP endpoint.
+The JSON file is the canonical wire artifact; update it alongside endpoint changes
+and run the corresponding TypeScript contract checks. Reading it does not contact
+the controller or enable an unsupported route. Runtime support remains bounded
+by the controller modules and provider implementations described in this guide.
 
 ## Covered endpoints
 
@@ -78,4 +79,4 @@ unexpected host fields and session secret leakage.
 
 These are fixture proofs, not separate-network TLS or native environment
 acceptance. Binary interoperability, live client examples, recovery and
-portable release acceptance remain open. See the verification checkpoint.
+portable release acceptance remain open. Provider acceptance must be recorded separately from portable fixture results.

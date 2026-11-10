@@ -21,7 +21,7 @@ A reusable JSON definition has these fields:
 Validate a definition without contacting an orchestrator:
 
 ```sh
-python3 -m canaveral template validate examples/templates/linux-development.json
+node coordination/dist/src/cli.js template validate examples/templates/linux-development.json
 ```
 
 Reference it in a host configuration as shown in `examples/host-with-templates.json`:
@@ -40,7 +40,7 @@ The host advertises resource defaults, preparation driver and a digest of the re
 For a `source`, configure the native host's `imageCache` directory so its hypervisor can read cached images. The agent resolves sources before offering capacity. You can also cache a base explicitly:
 
 ```sh
-python3 -m canaveral template prepare my-template.json --cache /var/lib/canaveral/base-cache
+node coordination/dist/src/cli.js template prepare my-template.json --cache /var/lib/canaveral/base-cache
 ```
 
 This command validates and caches the base artifact. Guest software preparation runs on each spawned VM. Downloads use HTTPS; redirects cannot downgrade transport or introduce URL credentials. Cache names are derived from the checksum. A mismatch never publishes the image, and a corrupted existing cache entry is not overwritten. Host-local images without `source` remain supported as owner-managed bases.
@@ -65,7 +65,10 @@ KubeVirt templates use a `pvc` binding and omit `source`; import the base PVC th
 
 ## Linux preparation
 
-Set `prepare.driver` to `cloud-init`. The base needs cloud-init with NoCloud support and Python 3. Canaveral attaches a per-instance CIDATA seed with a unique instance ID. The recipe can specify:
+Set `prepare.driver` to `cloud-init`. The base needs cloud-init with NoCloud support
+and its distribution runtime dependencies. Some distributions require Python 3
+for cloud-init or guest coding tools; that is an external guest-image requirement,
+not a Canaveral controller, host or SDK runtime. Canaveral attaches a per-instance CIDATA seed with a unique instance ID. The recipe can specify:
 
 - `packages`: package names for apt, dnf or apk. Use package names appropriate to that image.
 - `user` and optional `sshAuthorizedKeys`: configure a Linux account and its public keys.
@@ -107,8 +110,8 @@ For a macOS clone, bind a clean shutdown standalone `.raw` base disk plus its ma
 Register an agent with the template references, then inspect offerings and request a version:
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token templates
-python3 -m canaveral --token-file ./secrets/admin.token create development \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token templates
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token create development \
   --template linux-development --template-revision 1 \
   --request-id 730111ad-aaee-421f-99c6-25e408489102
 ```

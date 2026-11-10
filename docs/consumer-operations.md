@@ -27,10 +27,12 @@ another lease or an administrative operation is hidden. The response contains
 It omits host addresses, host/machine identifiers and credentials. Guest command
 output in `result` can contain sensitive application data.
 
-```python
-operation = lease.create_operation(operation_id, 'primary', 'shell',
-                                   {'argv': ['printf', 'hello']})
-receipt = lease.operation(operation_id)
+```ts
+const { operation } = await lease.createOperation({
+  id: operationId, member: "primary", action: "shell",
+  arguments: { argv: ["printf", "hello"] },
+});
+const receipt = await lease.operation(operationId);
 ```
 
 `lease` is an existing `LeaseClient`. Neither method retries, polls, rotates a key,
@@ -39,17 +41,19 @@ request UUID through the existing SDK error contract. Inspect that ID, or
 explicitly resubmit the identical request. Never infer that an unknown effect
 failed or issue a new UUID as an automatic retry.
 
-The [command example](../examples/lease_operation.py) accepts a persisted request
-file or an operation UUID to inspect, using an existing private lease-key file.
-It prints receipt metadata without guest output or credentials. Its help path
-is checked; native consumer execution remains unverified.
+Command tools should accept a persisted request file or the original operation
+UUID to inspect, using an existing private lease key. Print receipt metadata
+without guest output or credentials. Tool availability does not establish native
+consumer execution acceptance.
 
 ## Capability and execution boundaries
 
-The implemented common subset covers screenshot, hierarchy, accessibility and
-accessibility actions; tap, swipe, text and keys; directory listing and bounded
-push/pull; guest commands and shell open/read/write/resize/close. Existing
-argument validation and native adapters remain authoritative. App installation,
+The bounded Linux ledger implements `shell` with an argv array; see
+[Linux command operations](linux-command-operations.md). Other control modules
+and native bridges have contracts for screenshot, hierarchy, accessibility, input,
+files and shells. Those contracts do not make every action available on the Linux
+lease wire. Each route must validate its own action envelope and refuse missing
+provider bindings before dispatch. App installation,
 launch, permissions and other mobile administrative actions are outside this
 consumer subset. iOS shell and headless graphical operations remain unsupported.
 

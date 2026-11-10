@@ -17,7 +17,7 @@ import CryptoKit
     private var expectedRuntime: String?
     public var configured: Bool { FileManager.default.fileExists(atPath: directory.appendingPathComponent("disk.img").path) }
     public init(directory: URL) { self.directory = directory; super.init() }
-    public func prepare(rawImage: URL, script: Data, unit: Data) async throws {
+    public func prepare(rawImage: URL, script: Data, unit: Data, agentBinary: Data) async throws {
         guard !configured, virtualMachine == nil, !busy else { throw CanaveralError.invalid("This agent VM already has a disk. Its existing memory and projects are preserved.") }
         busy = true; defer { busy = false }
         let size = (try FileManager.default.attributesOfItem(atPath: rawImage.path)[.size] as? NSNumber)?.uint64Value ?? 0
@@ -29,18 +29,20 @@ import CryptoKit
             try await Task.detached { try CloudDisk.convert(rawImage, to: disk) }.value
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: disk.path)
             let file = try FileHandle(forWritingTo: disk); try file.truncate(atOffset: 16 * 1073741824); try file.close()
-            try await stageRuntime(script: script, unit: unit)
+            try await stageRuntime(script: script, unit: unit, agentBinary: agentBinary)
         } catch { try? FileManager.default.removeItem(at: disk); throw error }
     }
     // Update only provisioning media. Guest memory, projects, disk identity and EFI persist.
-    public func updateRuntime(script: Data, unit: Data) async throws {
+    public func updateRuntime(script: Data, unit: Data, agentBinary: Data) async throws {
         guard configured, virtualMachine == nil, !busy else { throw CanaveralError.invalid("Stop the Linux agent before updating its runtime.") }
         try acquireLease(); busy = true; defer { busy = false }
-        try await stageRuntime(script: script, unit: unit)
+        try await stageRuntime(script: script, unit: unit, agentBinary: agentBinary)
     }
-    private func stageRuntime(script: Data, unit: Data) async throws {
+    private func stageRuntime(script: Data, unit: Data, agentBinary: Data) async throws {
+        guard agentBinary.count >= 64, Array(agentBinary.prefix(4)) == [0x7f, 0x45, 0x4c, 0x46], !script.isEmpty else { throw CanaveralError.invalid("Supply the configured Linux ELF Rust guest-agent and Node TypeScript worker.") }
+        // The cloud disk must already contain Node 24+ at /usr/local/bin/node. No boot-time downloads.
         expectedRuntime = SHA256.hash(data: script).map { String(format: "%02x", $0) }.joined()
-        let version = SHA256.hash(data: script + unit + Data("seed-v3-local".utf8)).map { String(format: "%02x", $0) }.joined()
+        let version = SHA256.hash(data: script + unit + agentBinary + Data("seed-v4-rust-node".utf8)).map { String(format: "%02x", $0) }.joined()
         if (try? String(contentsOf: directory.appendingPathComponent("runtime.sha256"), encoding: .utf8)) == version { return }
         let seed = directory.appendingPathComponent("seed-\(UUID())")
         try FileManager.default.createDirectory(at: seed, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -57,7 +59,12 @@ import CryptoKit
             lock_passwd: true
             shell: /usr/sbin/nologin
         write_files:
-          - path: /opt/seven/seven_agent.py
+          - path: /sbin/canaveral-guest-agent
+            owner: root:root
+            permissions: '0755'
+            encoding: b64
+            content: \(agentBinary.base64EncodedString())
+          - path: /opt/seven/seven-agent.ts
             owner: root:root
             permissions: '0644'
             encoding: b64

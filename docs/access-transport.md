@@ -5,7 +5,7 @@ JSON envelopes, peer directions and binary-message metadata. Stream sequencing,
 authorization and completion rules below still apply beyond shape validation.
 
 Implementation contract. Native acceptance limits are described below.
-The controller session store, paired WebSocket relay and scoped Python session
+The controller session store, paired WebSocket relay and scoped TypeScript session
 client are implemented. The local dashboard still opens provider connections
 directly from its attached agent. Outbound runner workers now attach PTYs and
 streaming file, display and native accessibility providers, with durable attempt receipts and local lease fencing.

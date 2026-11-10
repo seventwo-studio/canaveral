@@ -1,13 +1,16 @@
 # Windows ConPTY source component
 
-`canaveral.guest.windows_conpty.ConPTY` implements one terminal's native
-creation, input, output, resize and owned-process cleanup. It is a source
-component with a private supervised worker, not a completed Windows shell service.
-It selects no guest or credentials and enables no image/lease admission.
+`ConPTY` and `WindowsTerminalWorker` in
+`coordination/src/guest/windows/terminal.ts` implement session validation, separate
+I/O lanes and supervised terminal protocol calls. Native creation, ConPTY handles,
+job containment and process cleanup require an injected `TerminalAPI` or qualified
+worker transport. No production Win32 binding or completed Windows shell service
+is implied. The native behavior below is required of that bridge; the TypeScript
+component selects no guest or credentials and enables no image/lease admission.
 
 The caller supplies a session UUID, absolute Windows executable, argument vector
 and working directory inside its guest. There is no host-shell fallback.
-Construction opens nothing; `start()` is a separate operation, allowing the
+Construction opens nothing; an explicit shell-open request is a separate operation, allowing the
 owner to retain the object and retry cleanup even when startup fails. Each
 object has an independent pseudoconsole, unnamed job and output reader. There
 is no total shell-count cap or automatic recreation after failure.
@@ -80,7 +83,7 @@ that receipt path.
 
 ## Evidence and remaining gates
 
-Sixteen tests use native-shaped API doubles and Python reader threads. They
+Required portable cases use native-shaped API doubles and reader threads to
 cover independent sessions beyond eight, UTF-8 and partial input, concurrent
 output during blocked input, bounded cursors, startup failures, uncertain
 input/resize, cleanup retry, Win32 structure layouts and startup-attribute
@@ -88,12 +91,12 @@ marshalling. The common `GuestChunkShells` adapter also validates the component'
 open/write/read/resize/close responses and cursors. No Windows DLL, real
 pseudoconsole, job or shell was invoked.
 
-Fourteen private-worker cases use real disposable Python child processes with
-ConPTY-shaped doubles. They cover common lifecycle, independent reads during
+Private-worker conformance requires disposable child processes with
+ConPTY-shaped doubles to cover common lifecycle, independent reads during
 blocked input, lane readiness, uncertain input/cleanup, malformed acknowledgements,
 session binding, failed construction, startup timeout, active/idle revocation,
-and nine independent workers. All 70 Windows component tests pass in source and
-against the private installed wheel with resource warnings treated as errors.
+and nine independent workers. Equivalent TypeScript/Rust portable coverage must
+be established for the installed implementation.
 This establishes development-host process/IPC behavior, not Windows kernel,
 ConPTY, job-object or pipe semantics.
 

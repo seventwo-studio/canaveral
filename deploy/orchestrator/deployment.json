@@ -54,14 +54,16 @@
             "readinessProbe": {
               "httpGet": {
                 "path": "/healthz",
-                "port": 8765
+                "port": 8765,
+                "scheme": "HTTPS"
               },
               "initialDelaySeconds": 2
             },
             "livenessProbe": {
               "httpGet": {
                 "path": "/healthz",
-                "port": 8765
+                "port": 8765,
+                "scheme": "HTTPS"
               },
               "initialDelaySeconds": 10
             },
@@ -83,7 +85,27 @@
                 "name": "credentials",
                 "mountPath": "/run/credentials",
                 "readOnly": true
+              },
+              {
+                "name": "tls",
+                "mountPath": "/run/tls",
+                "readOnly": true
               }
+            ],
+            "args": [
+              "serve",
+              "--bind",
+              "0.0.0.0",
+              "--database",
+              "/data/orchestrator.sqlite3",
+              "--admin-token-file",
+              "/run/credentials/admin.token",
+              "--enrollment-token-file",
+              "/run/credentials/enrollment.token",
+              "--tls-cert-file",
+              "/run/tls/server.crt",
+              "--tls-key-file",
+              "/run/tls/server.key"
             ]
           }
         ],
@@ -99,6 +121,23 @@
             "secret": {
               "secretName": "canaveral-credentials",
               "defaultMode": 288
+            }
+          },
+          {
+            "name": "tls",
+            "secret": {
+              "secretName": "canaveral-controller-tls",
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "tls.crt",
+                  "path": "server.crt"
+                },
+                {
+                  "key": "tls.key",
+                  "path": "server.key"
+                }
+              ]
             }
           }
         ]

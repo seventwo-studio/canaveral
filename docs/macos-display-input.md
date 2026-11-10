@@ -132,7 +132,7 @@ persists its own pending/completed receipt. Uncertain results remain blocked.
 The [common access adapter](macos-guest-access.md) connects this socket to the
 runner through an injected assignment binding, without selecting a destination
 or credentials. A committed Swift fake-device transcript is replayed through the
-Python adapter; common broker/SDK fixtures exercise two viewers, PNG decoding,
+host adapter; common broker/SDK fixtures exercise two viewers, PNG decoding,
 held modifiers, dragging, semantic receipts and interruption. These fixtures do
 not admit a macOS image or run a guest.
 

@@ -11,7 +11,9 @@ state/
 secrets/
 host.json
 node_modules/
-/target/
+target/
+/native/
 /coordination/dist/
 dashboard/test-results/
 dashboard/playwright-report/
+*.pyo

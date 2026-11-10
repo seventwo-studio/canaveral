@@ -2,4 +2,4 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-python3 -B -m unittest discover -s tests -p 'test_*.py' "$@"
+exec node script/tasks.mjs test "$@"

@@ -1,5 +1,6 @@
 import { operationReceipt } from "./linux-operations.ts";
-import { X509Certificate } from "node:crypto";
+import { X509Certificate, randomBytes, createHash } from "node:crypto";
+import type { Duplex } from "node:stream";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import type { IncomingMessage, OutgoingHttpHeaders } from "node:http";
@@ -157,7 +158,8 @@ function isLoopback(host: string): boolean {
   return (family === 4 && bare.startsWith("127.")) || (family === 6 && (bare === "::1" || bare === "0:0:0:0:0:0:0:1"));
 }
 
-class Transport {
+/** Shared verified HTTP/session transport. No retries or credential exchanges. */
+export class Transport {
   readonly #base: URL;
   readonly #prefix: string;
   readonly #timeoutMs: number;
@@ -184,7 +186,7 @@ class Transport {
     if (options.ca !== undefined && options.caFile !== undefined) throw new ConsumerConfigurationError("Pass ca or caFile, not both.");
     if (options.caFile !== undefined) {
       try { this.#ca = readFileSync(options.caFile); } catch { throw new ConsumerConfigurationError("The CA file could not be read.", "invalid_ca"); }
-    } else this.#ca = options.ca;
+    } else this.#ca = Buffer.isBuffer(options.ca) ? Buffer.from(options.ca) : options.ca;
     if (this.#ca !== undefined) {
       try {
         const blocks = String(this.#ca).match(/-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----/g);
@@ -201,6 +203,45 @@ class Transport {
     const limit = options.maxResponseBytes ?? 4_194_304;
     if (!Number.isInteger(limit) || limit < 1 || limit > 16_777_216) throw new ConsumerConfigurationError("maxResponseBytes must be 1 to 16777216.");
     this.#maxResponse = limit;
+  }
+
+  async openSession(path: string): Promise<{ socket: Duplex; head: Buffer }> {
+    if (!/^\/v1\/leases\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/i.test(path)) {
+      throw new ConsumerConfigurationError("Invalid session attachment path.");
+    }
+    const key = randomBytes(16).toString("base64");
+    const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    return new Promise((resolve, reject) => {
+      let settled = false, verified = !this.#secure;
+      const request = (this.#secure ? https : http).request({
+        protocol: this.#base.protocol, hostname: this.#base.hostname.replace(/^\[|\]$/g, ""), port: this.#base.port || undefined,
+        path: this.#prefix + path, method: "GET", agent: false,
+        headers: { Authorization: "Bearer " + this.#credential, Connection: "Upgrade", Upgrade: "websocket",
+          "Sec-WebSocket-Key": key, "Sec-WebSocket-Version": "13", "Sec-WebSocket-Protocol": "canaveral-session-v1" },
+        ...(this.#secure ? { minVersion: "TLSv1.2", rejectUnauthorized: true, ...(this.#ca !== undefined ? { ca: this.#ca } : {}) } : {}),
+      });
+      const fail = (error: ConsumerError) => { if (!settled) { settled = true; clearTimeout(timer); request.destroy(); reject(error); } };
+      const timer = setTimeout(() => fail(new ConsumerTransportError("Session attachment timed out.", "timeout", {})), this.#timeoutMs);
+      request.on("socket", socket => { if (this.#secure) socket.once("secureConnect", () => { verified = true; }); });
+      request.on("error", (error: NodeJS.ErrnoException) => fail(new ConsumerTransportError("Session attachment failed; no input was replayed.",
+        !verified && TLS_CODES.test(error.code ?? "") ? "tls_verification_failed" : "connection_failed", {})));
+      request.on("response", response => {
+        response.destroy();
+        const status = response.statusCode ?? 0;
+        fail(new ConsumerProtocolError("Session upgrade was refused.", status >= 300 && status < 400 ? "redirect_refused" : "session_upgrade_refused", status, {}));
+      });
+      request.on("upgrade", (response, socket, head) => {
+        if (settled) { socket.destroy(); return; }
+        if (response.statusCode !== 101 || response.headers["upgrade"]?.toLowerCase() !== "websocket" ||
+            !String(response.headers["connection"]).toLowerCase().split(/\s*,\s*/).includes("upgrade") ||
+            response.headers["sec-websocket-accept"] !== accept || response.headers["sec-websocket-protocol"] !== "canaveral-session-v1" ||
+            response.headers["sec-websocket-extensions"] !== undefined) {
+          socket.destroy(); fail(new ConsumerProtocolError("Invalid session upgrade response.", "session_protocol_error", 101, {})); return;
+        }
+        settled = true; clearTimeout(timer); socket.pause(); resolve({ socket, head });
+      });
+      request.end();
+    });
   }
 
   /** `mutating` makes every uncertain failure carry `outcome: "unknown"`. `requestId` is the caller-owned body UUID. */

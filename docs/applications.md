@@ -67,68 +67,35 @@ Current policy is immutable. To change an allowlist or limits, create a new
 application and revoke the old identity under an explicit migration plan. An
 in-place policy editor and application dashboard are not implemented yet.
 
-## Python lifecycle SDK
+## TypeScript lifecycle and access SDK
 
-An optional `ca_file` configures verified HTTPS and WebSocket trust consistently.
-See [TLS clients](tls-clients.md) for factory/example usage and live acceptance limits.
+The [consumer SDK](consumer-sdk.md) loads private application or lease credentials,
+discovers the catalogue and manages leases with caller-owned mutation UUIDs.
+`coordination/src/sdk.ts` adds scoped sessions, terminals, display, accessibility
+and streaming files to the HTTP client in `consumer-client.ts`. No SDK method
+silently retries input, renews a lease or substitutes operator credentials.
 
-`canaveral.sdk.ConsumerClient` loads a private application credential file, discovers
-the catalogue, acquires/lists/inspects leases and exchanges a lease-scoped client.
-`LeaseClient` inspects, renews and releases that one lease. It also creates,
-inspects, closes and connects scoped sessions through the controller relay.
-Its [terminal client](terminal-sdk.md) wraps each PTY attachment with independent
-input/output, resizing and explicit exit/truncation events, without reconnect or
-input replay.
-Acquisition and mutation
-methods require caller-owned stable UUIDs; they never silently retry a side effect.
-Errors expose `status`, `code`, `request_id` and `retryable`. Received worker errors
-also expose `outcome='unknown'`; see [session failure recovery](client-recovery.md#session-worker-failures).
-Reuse the same UUID
-and body after an uncertain outcome; a retryable flag is not permission to generate
-a new acquisition identity.
+`ConsumerClient.fromCredentialFile({baseUrl, credentialFile, caFile?})` loads an
+application key. `LeaseClient.fromCredentialFile({baseUrl, leaseId, credentialFile,
+caFile?})` loads an existing lease key without rotation. The explicit
+`scopedLease(leaseId)` exchange rotates the scoped key; losing its response can
+revoke the previous key without returning a usable replacement. Inspect with the
+application key before deliberately exchanging again. Never log key responses.
 
-The [lifecycle example](../examples/lease_lifecycle.py) acquires, inspects and
-releases without printing credentials. It requires a lease-capable runner. SDK
-session and transfer methods have separate fixture coverage; the lifecycle
-example does not exercise them or satisfy live client-to-environment acceptance.
-From the repository root, run `python -m examples.lease_lifecycle --help` for its
-arguments; an application using an installed package imports `canaveral.sdk`.
+`createSession({id, member, capability})`, `session(id)`, `closeSession(id)` and
+`connectSession(metadata)` retain exact lease/member/generation bindings. Sessions
+use `canaveral-session-v1`, controls bounded to 16 KiB and binary messages bounded
+to 64 KiB. Reconnection uses a new session ID and never replays unconfirmed input.
+Closing a stream does not release its lease.
 
-`LeaseClient.create_session(request_id, member, capability)` returns persisted
-metadata. `session(session_id)` inspects it and `close_session(session_id)` closes
-it idempotently. `connect_session(metadata)` authenticates an outbound WebSocket,
-waits for both peers to become ready and returns a context-managed connection.
-That connection supports `send_control(dict)`, `send_bytes(bytes)` and
-`receive(timeout)`; text controls fit 16 KiB and individual binary messages fit
-64 KiB. Chunking a large file does not impose a per-file size limit. Closing a
-connection does not renew or release its lease. Reconnection requires a new
-session ID and does not replay unacknowledged input.
+[Terminals](terminal-sdk.md) have independent input/output and resizing.
+[Display](visual-sdk.md) keeps view-only capture separate from exclusive input and
+durable action receipts. [Accessibility](scoped-accessibility.md) returns a complete,
+integrity-checked native snapshot without taking input ownership. Streaming uploads
+require a durable finish; downloads require count/digest and source verification.
+`downloadToFile` adds private staging and explicit replacement policy; see
+[recovery](client-recovery.md) for publication uncertainty.
 
-`upload(request_id, member, path, reader, size, app=None)` streams a known-length
-source with an explicit finish and requires durable publication acknowledgement.
-`download(request_id, member, path, writer, app=None)` requires source identity,
-byte count and digest confirmation; its caller-owned destination may contain
-partial bytes on failure. Neither method silently retries or limits total file
-size beyond the protocol's integer representation.
-
-`download_to_file(request_id, member, path, destination, app=None, replace=False)`
-adds private staging and verified local publication. It preserves the destination
-on transfer failure, refuses overwrite by default and reports uncertain publication
-separately. See [download recovery](client-recovery.md) for filesystem behavior,
-error codes and the example.
-
-`LeaseClient.from_credential_file(url, lease_id, path)` loads an existing private
-lease key without rotating credentials. Both client file loaders use the same
-ownership/regular-file/permission checks. `accessibility(request_id, member)`
-retrieves a complete, integrity-checked [native snapshot](scoped-accessibility.md)
-without display ownership or the image extra. It preserves coverage/truncation
-and native properties; it does not invoke input.
-
-The controller/runner/SDK tests execute disposable PTYs and files through real
-paired sockets. Existing live runners remain unavailable for consumer leases
-until execution fencing and cleanup are complete. Display workers now have fixture
-coverage through the broker, including owned discrete input and read-only action
-receipts. The optional [Python display SDK](visual-sdk.md) adds complete PNG
-captures, input ownership, keyboard/pointer dispatch and durable action/receipt
-methods over that same scoped connection. Complete guest cancellation and live platform
-acceptance remain open.
+All these methods require a supported controller route and a bound, eligible
+provider. Portable SDK fixtures do not enable consumer placement on ordinary native
+runners, qualify detached-command cancellation or establish live platform parity.

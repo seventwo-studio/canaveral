@@ -2,4 +2,5 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-exec python3 -m canaveral "$@"
+npm --prefix coordination run build
+exec node coordination/dist/src/cli.js "$@"

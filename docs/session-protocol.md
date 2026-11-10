@@ -2,12 +2,12 @@
 
 The packaged [session control schema](../canaveral/schemas/session-control.schema.json)
 describes implemented `canaveral-session-v1` JSON text messages. Load a fresh
-dictionary without a controller connection or validator dependencies:
+object without a controller connection or validator dependencies:
 
-```python
-from canaveral.contracts import session_protocol_schema
+```ts
+import { readFileSync } from "node:fs";
 
-contract = session_protocol_schema()
+const contract = JSON.parse(readFileSync("canaveral/schemas/session-control.schema.json", "utf8"));
 ```
 
 The root schema accepts known control shapes. Validate a specific capability and

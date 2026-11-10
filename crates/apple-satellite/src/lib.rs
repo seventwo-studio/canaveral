@@ -391,6 +391,18 @@ fn validate_config(c: &Config) -> Result<()> {
         Ok(())
     }
 }
+/// Validate private runtime state and authenticate the current binding before managed readiness.
+/// The callback must return before any claim, helper clock request or execution effect.
+pub fn run_once_with_ready(config: Config, ready: impl FnOnce() -> Result<()>) -> Result<()> {
+    let mut satellite = Satellite::open(config.clone())?;
+    let ca = config.ca.as_ref().map(|path| read_ca(path)).transpose()?;
+    let transport = Transport::new(&config.origin, ca.as_deref()).map_err(|_| "invalid HTTPS transport")?;
+    let mut identity = Identity::open(&config.identity, &config.origin, &config.binding).map_err(|_| "identity binding rejected")?;
+    identity.authenticate(&transport).map_err(|_| "current identity authentication failed")?;
+    ready()?;
+    satellite.run_once(&mut Authenticated { identity: &identity, transport: &transport })
+}
+
 pub struct Satellite {
     config: Config,
     dir: private::Directory,
@@ -1787,4 +1799,46 @@ mod tests {
         assert_eq!(s.state.deadline, old);
         assert!(!s.state.cleaned && !s.state.stopped);
     }
+}
+
+/// Readonly terminal-journal evidence under the ordinary satellite lock. No helper or VM commands.
+pub fn update_status(config: &Config) -> Result<bool> {
+    let _identity = Identity::open(&config.identity, &config.origin, &config.binding).map_err(|_| "identity binding rejected")?;
+    with_update_status_lock(&config.state, || {
+        for name in ["workspace", "state.next"] { if !update_path_absent(&config.state.join(name))? { return Ok(false); } }
+        let path = config.state.join("state.json");
+        if update_path_absent(&path)? {
+            for entry in std::fs::read_dir(&config.state).map_err(|_| "state inventory unavailable")? {
+                if entry.map_err(|_| "state inventory unavailable")?.file_name() != "lock" { return Ok(false); }
+            }
+            return Ok(true);
+        }
+        let state: Journal = decode(&private::trust_file(&path, true)?)?;
+        if state.config != serde_json::to_value(config).map_err(|_| "invalid config")? || state.pending.is_some() || state.operations.current.as_ref().is_some_and(|op| !op.acknowledged) { return Ok(false); }
+        if state.assignment.is_none() { return Ok(!state.launch_intent && !state.prepared && !state.cleaning && !state.cleaned); }
+        // cleaned follows positive native runtime-lock/handle proof and owned workspace removal;
+        // released is set only by the exact controller acknowledgment of that complete receipt.
+        Ok(state.stopped && state.terminal && state.cleaned && state.released)
+    })
+}
+
+/// Inspect under the same existing exclusive lock as ordinary execution; never create or repair state.
+fn with_update_status_lock(path: &std::path::Path, inspect: impl FnOnce() -> Result<bool>) -> Result<bool> {
+    use std::os::{fd::AsRawFd, unix::fs::{MetadataExt, OpenOptionsExt}};
+    let dir = private::walk(path)?;
+    let dm = dir.metadata().map_err(|_| "update state unavailable")?;
+    if dm.uid() != unsafe { libc::geteuid() } || dm.mode() & 0o7777 != 0o700 { return Err("private update state required"); }
+    let lock = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path.join("lock")).map_err(|_| "existing runtime lock required")?;
+    let lm = lock.metadata().map_err(|_| "update lock unavailable")?;
+    if !lm.is_file() || lm.nlink() != 1 || lm.uid() != dm.uid() || lm.mode() & 0o7777 != 0o600 { return Err("private runtime lock required"); }
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 { return Ok(false); }
+    let check = || -> Result<()> {
+        let current = private::walk(path)?.metadata().map_err(|_| "update directory changed")?;
+        let current_lock = std::fs::symlink_metadata(path.join("lock")).map_err(|_| "update lock changed")?;
+        if (current.dev(),current.ino()) != (dm.dev(),dm.ino()) || (current_lock.dev(),current_lock.ino()) != (lm.dev(),lm.ino()) { return Err("update state ownership changed"); } Ok(())
+    };
+    check()?; let result = inspect()?; check()?; Ok(result)
+}
+fn update_path_absent(path: &std::path::Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) { Ok(_) => Ok(false), Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true), Err(_) => Err("update path unavailable") }
 }

@@ -87,8 +87,8 @@ included in this conversion.
 Run `npm ci`, `npm run typecheck`, `npm test` and `npm run build` in `dashboard`.
 The compiled web bundle remains checked in under `canaveral/web` for the current
 gateway. Browser fixtures use temporary state and a private fixture server;
-live-machine scenarios need their separate explicit authorization. Current
-services and native-platform acceptance are not changed by this source migration.
+live-machine scenarios need their separate explicit authorization. Frontend fixtures do not establish gateway/provider interoperability or native
+platform acceptance.
 
 The dashboard is a separate, stateless service. The orchestrator, CLI and host agents work without it. It displays machines, preparation readiness, host capacity and available images. It can request machine creation, graceful start/stop and host drain/accept. Android devices have a control workspace with screenshots/input, file browsing and multiple persistent shells. iOS supports app-container browsing and discrete controls through a configured simulator host; screenshot tapping is currently Android-only because iOS point scaling is not yet negotiated. Configured local Linux desktops now have a live desktop connection, files, terminals and an accessibility inspector; see [guest access](guest-access.md). Other VM guest connections, general outbound display brokering, image import/build, deletion, snapshots and live resource telemetry remain unimplemented.
 
@@ -98,7 +98,7 @@ From the checkout, with an already installed Android SDK and a compatible system
 image:
 
 ```sh
-python3 -m canaveral local --android-sdk "$HOME/Library/Android/sdk"
+node coordination/dist/src/cli.js local --android-sdk "$HOME/Library/Android/sdk"
 ```
 
 Open [the local workspace](http://127.0.0.1:8876). Create the first administrator,
@@ -206,10 +206,10 @@ npm run test:browser
 
 Edit `dashboard/src/`, then rebuild. Vite emits the production assets into
 `canaveral/web/`; commit source, lockfile and generated assets together. CI rebuilds
-and checks that the assets match. Python packages and Docker images continue
-serving those bundled static files; Node.js is only a development dependency.
-The browser tests use synthetic API fixtures with the real Python gateway and
-its content security policy. They do not test a deployed host or guest boot.
+and checks that the assets match. The TypeScript gateway serves those bundled
+static files at runtime on Node.js 24 or later. Browser tests use synthetic API
+fixtures and the gateway content security policy; they do not test a deployed host
+or guest boot.
 
 Sessions use a persistent HttpOnly, SameSite=Strict cookie. Creation retries retain the same request ID while
 the form is unchanged. Editing or reopening the form starts a new intent. Radix
@@ -222,13 +222,13 @@ same-origin bundles by the gateway's content security policy.
 Start the orchestrator with `canaveral serve` as described in [Running Canaveral](running.md), then start the optional dashboard:
 
 ```sh
-python3 -m canaveral dashboard
+node coordination/dist/src/cli.js dashboard
 ```
 
 Open [the local dashboard](http://127.0.0.1:8766). If no administrator exists, the first-run screen lets you choose a username and a password of at least 12 characters. Later visits show the sign-in form. Existing accounts are never overwritten. Native first-run setup automatically uses `./secrets/admin.token` when present; a different operator file can be passed with `dashboard --bootstrap-token-file /private/path/admin.token`. This credential is never sent to the browser. The default upstream is `http://127.0.0.1:8765`. For a remote orchestrator:
 
 ```sh
-python3 -m canaveral --url https://canaveral.example.internal dashboard
+node coordination/dist/src/cli.js --url https://canaveral.example.internal dashboard
 ```
 
 The dashboard binds to loopback by default. The local first-admin form requires both a loopback peer and a loopback Host. For remote setup, an operator can issue a one-time setup link; the recipient chooses a separate Canaveral password in their own browser. Existing administrators invite additional users from **Account menu → Users**. See [accounts and personal API tokens](accounts-and-tokens.md) for the complete contract.
@@ -238,13 +238,13 @@ For remote access, put the dashboard behind your private HTTPS proxy, preserve t
 An operator can also create the first account through the CLI. It prompts privately for a password, or accepts `--password-file` for an already protected local file. Running it again leaves the existing account unchanged:
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token admin create --username admin
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token admin create --username admin
 ```
 
 To let the first administrator choose their password remotely instead:
 
 ```sh
-python3 -m canaveral --token-file ./secrets/admin.token admin setup-link \
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token admin setup-link \
   --dashboard-url https://canaveral.example.internal \
   --output-file ./secrets/first-admin.link
 ```
@@ -281,7 +281,7 @@ The example assumes the existing `canaveral` namespace and `orchestrator` Servic
 
 ## Authentication and state
 
-The orchestrator stores a salted PBKDF2-HMAC-SHA-256 password hash with 600,000 iterations. The implementation uses Python's standard library; [OWASP's password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) documents this work factor. Initial setup requires operator proof and atomically creates the first administrator. Sign-in and public claim attempts have a persistent rate limit. Usernames are case-insensitive. Ordinary users access only their machines; admins manage all machines and user accounts. There is no public registration.
+The orchestrator stores a salted PBKDF2-HMAC-SHA-256 password hash with 600,000 iterations. The implementation uses Node's crypto APIs and preserves the stored hash representation. Initial setup requires operator proof and atomically creates the first administrator. Sign-in and public claim attempts have a persistent rate limit. Usernames are case-insensitive. Ordinary users access only their machines; admins manage all machines and user accounts. There is no public registration.
 
 **Account** provides password change. **API tokens** creates and revokes personal
 tokens with explicit permissions and expiry; save the secret when it is shown.
@@ -290,8 +290,9 @@ lets an admin create invitations, issue password-reset links, change roles and
 disable accounts. Re-enabling returns an account to pending and requires a fresh
 invitation and password. Password reset immediately blocks the previous password and
 revokes existing sessions and tokens. The last active admin requires operator
-recovery. Back up the database before upgrading; legacy users/sessions and
-non-lease machine ownership migrate together. Retain the operator credential for
+recovery. Back up the database before upgrading; retained users, sessions and
+non-lease ownership require an explicitly supported schema migration. New controller
+modules do not authorize overwriting or silently adopting those records. Retain the operator credential for
 recovery without deleting users or their machines.
 
 Successful setup or sign-in creates a random 30-day session. Only a hash of the

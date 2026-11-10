@@ -51,6 +51,11 @@ impl Controller {
 /// Runs at most one assignment. Reinvoke with the same private state after a lost reply.
 /// Unresolved execution prevents new claims; no enrollment, recovery or capacity advertising.
 pub fn run_once(config: RunnerConfig) -> Result<()> {
+    run_once_with_ready(config, || Ok(()))
+}
+/// The callback fences managed startup before any claim, report or execution effect.
+/// Success proves private state validation and fresh exact-binding authentication.
+pub fn run_once_with_ready(config: RunnerConfig, ready: impl FnOnce() -> Result<()>) -> Result<()> {
     let url = reqwest::Url::parse(&config.controller).map_err(|_| "invalid controller origin")?;
     let loopback = url
         .host_str()
@@ -102,6 +107,31 @@ pub fn run_once(config: RunnerConfig) -> Result<()> {
         secret,
     };
     let mut executor = Executor::open(config.execution.clone())?;
+    if executor
+        .journal()
+        .is_some_and(|j| j.binding != config.binding)
+    {
+        return Err("state belongs to another binding");
+    }
+    let proof = controller.post(
+        "/v1/runners/authenticate",
+        serde_json::to_value(&config.binding).map_err(|_| "invalid binding")?,
+    )?;
+    let expected = serde_json::to_value(&config.binding).map_err(|_| "invalid binding")?;
+    if proof.as_object().is_none_or(|p| p.len() != 5)
+        || expected
+            .as_object()
+            .ok_or("invalid binding")?
+            .iter()
+            .any(|(k, v)| proof.get(k) != Some(v))
+        || proof
+            .get("credentialRevision")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+    {
+        return Err("current binding authentication rejected");
+    }
+    ready()?;
     if let Some(j) = executor.journal() {
         if j.binding != config.binding {
             return Err("state belongs to another binding");
@@ -259,4 +289,58 @@ fn report(c: &Controller, j: &Journal) -> Result<()> {
         return Err("report acknowledgement mismatch");
     }
     Ok(())
+}
+
+/// Positive idle needs acknowledged terminal receipts with stop and cleanup proof, plus no workspace.
+/// No executor is opened and no pending journal is repaired by this readonly inspection.
+pub fn update_status(config: &RunnerConfig) -> Result<bool> {
+    if config.binding.generation == 0 || config.binding.controller_id.is_nil() || config.binding.runner_id.is_nil() || config.binding.incarnation_id.is_nil() { return Err("invalid binding"); }
+    let secret = private::trust_file(&config.credential_file, true)?;
+    let secret = std::str::from_utf8(&secret).map_err(|_| "invalid credential")?.trim();
+    if !(43..=128).contains(&secret.len()) || !secret.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)) { return Err("invalid credential"); }
+    with_update_status_lock(&config.execution.state_dir, || {
+        for name in ["workspace", "receipt.next", "claim.next"] { if !update_path_absent(&config.execution.state_dir.join(name))? { return Ok(false); } }
+        let path = config.execution.state_dir.join("receipt.json");
+        if update_path_absent(&path)? {
+            // An empty history is admissible only before any workspace/receipt was published.
+            for entry in std::fs::read_dir(&config.execution.state_dir).map_err(|_| "state inventory unavailable")? {
+                let entry = entry.map_err(|_| "state inventory unavailable")?;
+                if !["lock", "runtime", "claim.json"].iter().any(|n| entry.file_name() == *n) { return Ok(false); }
+            }
+        } else {
+            let store: Store = serde_json::from_slice(&private::trust_file(&path, true)?).map_err(|_| "invalid update journal")?;
+            if !store.entries.contains_key(&store.current) || store.entries.is_empty() { return Err("missing current journal"); }
+            for j in store.entries.values() {
+                j.receipt.validate()?; j.assignment.job.validate()?;
+                if j.binding != config.binding || !j.assignment.job.receipt_matches(&j.receipt) || j.pending || j.launch_intent || !j.stop_confirmed || !j.cleanup_confirmed || !j.receipt.can_release() { return Ok(false); }
+            }
+        }
+        let claim = config.execution.state_dir.join("claim.json");
+        if !update_path_absent(&claim)? {
+            let claim: Claim = serde_json::from_slice(&private::trust_file(&claim, true)?).map_err(|_| "invalid claim")?;
+            if claim.binding != config.binding || claim.id.is_nil() { return Ok(false); }
+        }
+        Ok(true)
+    })
+}
+
+/// Inspect under the same existing exclusive lock as ordinary execution; never create or repair state.
+fn with_update_status_lock(path: &std::path::Path, inspect: impl FnOnce() -> Result<bool>) -> Result<bool> {
+    use std::os::{fd::AsRawFd, unix::fs::{MetadataExt, OpenOptionsExt}};
+    let dir = private::walk(path)?;
+    let dm = dir.metadata().map_err(|_| "update state unavailable")?;
+    if dm.uid() != unsafe { libc::geteuid() } || dm.mode() & 0o7777 != 0o700 { return Err("private update state required"); }
+    let lock = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path.join("lock")).map_err(|_| "existing runtime lock required")?;
+    let lm = lock.metadata().map_err(|_| "update lock unavailable")?;
+    if !lm.is_file() || lm.nlink() != 1 || lm.uid() != dm.uid() || lm.mode() & 0o7777 != 0o600 { return Err("private runtime lock required"); }
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 { return Ok(false); }
+    let check = || -> Result<()> {
+        let current = private::walk(path)?.metadata().map_err(|_| "update directory changed")?;
+        let current_lock = std::fs::symlink_metadata(path.join("lock")).map_err(|_| "update lock changed")?;
+        if (current.dev(),current.ino()) != (dm.dev(),dm.ino()) || (current_lock.dev(),current_lock.ino()) != (lm.dev(),lm.ino()) { return Err("update state ownership changed"); } Ok(())
+    };
+    check()?; let result = inspect()?; check()?; Ok(result)
+}
+fn update_path_absent(path: &std::path::Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) { Ok(_) => Ok(false), Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true), Err(_) => Err("update path unavailable") }
 }

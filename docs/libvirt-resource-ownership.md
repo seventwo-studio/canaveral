@@ -1,6 +1,6 @@
 # Libvirt runtime resource attribution
 
-2026-11-03 source/fixture checkpoint. This adds process accounting to the existing
+This contract defines process accounting for the
 host observer; it does not establish native Linux acceptance or enable leases.
 
 ## Ownership and scope
@@ -74,5 +74,5 @@ operations are real where appropriate; there is no real libvirt/QEMU connection.
 Native Linux acceptance must verify installed libvirt/QEMU versions, kernel/PID
 namespace visibility, actual scope layout and helper placement, restart recovery,
 counter responsiveness and totals against host observations. Cgroup-v1 and
-unavailable native interfaces remain explicitly unknown. This fixture checkpoint
+unavailable native interfaces remain explicitly unknown. Portable fixture coverage
 does not close host accounting or the wider execution goal.

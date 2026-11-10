@@ -1,14 +1,15 @@
 # macOS common guest access adapter
 
-`GuestHelperAccess` connects the native helper's file, terminal, display and
-accessibility protocols to the existing provider and runner interfaces. It has
-isolated common-worker coverage. No production provider currently constructs it;
-provider connection/bootstrap, admission and native acceptance remain open.
+The TypeScript guest adapters connect the native helper's file, terminal, display
+and accessibility protocols to provider and runner interfaces. Their binding is
+`GuestHelperBinding` in `coordination/src/control/session-protocol.ts`. Production
+macOS guest connection/bootstrap, admission and native acceptance remain open.
 
 ## HTTPS request transport
 
-`GuestHTTPS(origin, credential, ca_file=None, timeout=20)` implements the
-binding's request callable. It requires HTTPS with certificate and hostname
+`GuestHTTPS` in `coordination/src/guest/https.ts` implements the binding's request
+callable. Its constructor accepts `origin`, `credential`, optional `caFile` and a
+timeout in seconds (default 20); its `call` property is the request function. It requires HTTPS with certificate and hostname
 verification, using system trust or an explicitly supplied CA file. The caller
 must already have verified that the endpoint and credential belong to the
 current guest assignment and boot. The transport does not discover guests,
@@ -38,10 +39,8 @@ network/proxy boundary or production provider binding.
 ## Assignment binding
 
 A provider supplies a resolver accepting its machine, image and assignment
-folder. The resolver returns `GuestHelperBinding(request, authorized,
-cleanup_authorized=None)`. It must pin requests to the authenticated guest's
-verified destination and current assignment/boot/lease identity. `request(path,
-None)` performs a read; `request(path, object)` posts the exact JSON object.
+folder. The resolver returns `GuestHelperBinding(request, authorized, cleanupAuthorized?)`. It must pin requests to the authenticated guest's
+verified destination and current assignment/boot/lease identity. `request(path, null)` performs a read; `request(path, object)` posts the exact JSON object.
 The transport must enforce bounded responses, verified TLS where applicable,
 timeouts and typed helper refusals. The adapter selects no address, trust store,
 credential, enrollment or initial setup policy.
@@ -68,12 +67,11 @@ revocation. This is not native lease deadline enforcement or disk erasure.
 - Terminals use `GuestChunkShells` with independent session UUIDs. No shell-count
   cap is added. Native helper closure must be positively acknowledged.
 - Displays use `GuestStreamScreen` through the shared RFB endpoint. The runner
-  passes session authorization into `desktop_session`, so buffered native input
+  passes session authorization into the display connection, so buffered native input
   cannot rely solely on a still-current machine assignment after its session
   ends. Cleanup remains separately bound to ownership.
-- Accessibility uses the native flat snapshot directly. The explicit internal
-  `inspection_systems` declaration lets `inspect_provider` and the common runner
-  select this adapter for macOS. Source, coordinates, schema and byte envelope
+- Accessibility uses the native flat snapshot directly. Provider selection must explicitly bind the macOS inspection adapter; a source
+  label alone cannot select or authorize a native transport. Source, coordinates, schema and byte envelope
   are checked. Snapshot identities and native handles retain helper semantics;
   screenshots travel separately on the display connection. Read-only inspection
   never claims or resets input.
@@ -97,4 +95,4 @@ guest responses and temporary files; they prove no real guest input, permission,
 filesystem, networking, expiry or isolation behavior. Native bootstrap, verified
 transport, permission/readiness checks, input/inspection refresh, capture/clone
 and the full lease lifecycle still require implementation or native acceptance
-under the six-workstream plan.
+before provider acceptance.
