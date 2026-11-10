@@ -100,6 +100,10 @@ function isLease(command: IdentityCommand): command is Extract<IdentityCommand, 
 }
 function lease(command: Extract<IdentityCommand, { type: `leases.${string}` }>): unknown {
   switch (command.type) {
+    case "leases.operation": return leases.operation(command.token, command.id, command.operationId);
+    case "leases.createOperation": return leases.createOperation(command.token, command.id, command.body);
+    case "leases.pollOperation": return leases.pollOperation(command.token, command.body);
+    case "leases.reportOperation": return leases.reportOperation(command.token, command.body);
     case "leases.catalogue": return leases.catalogue(command.token);
     case "leases.list": return leases.list(command.token, command.after);
     case "leases.inspect": return leases.inspect(command.token, command.id);

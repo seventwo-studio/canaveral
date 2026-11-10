@@ -151,9 +151,12 @@ prepare or uncertain launch is never retried. Restart fences the machine and
 reports `unknown`; it does not infer stop from a missing PID. No automatic
 reassignment or state reset is implemented. An operator must reconcile held work.
 Heartbeat reports run every second while the guest runs; a lost reply keeps the
-exact pending report, and local expiry fences without controller contact. A
-report can block for up to the identity client's 15-second request deadline; the
-native authorization guard independently ends execution at the deadline meanwhile.
+exact pending report, and local expiry fences without controller contact. All controller calls during supervision use one scoped background worker with one
+in-flight request and capacity-one request/response channels. Heartbeat, poll and
+operation-report stalls never block guest pumping, cancellation or local expiry.
+The worker borrows the locked identity; it joins after fencing and stop proof,
+with the transport's 15-second bound. The identity lock remains held throughout.
+The native authorization guard independently ends execution at the deadline.
 
 A supervised stop requires the direct helper process to exit (or a failed prepare
 process to have been reaped), an unlocked native runtime lock and a system lsof
@@ -200,10 +203,46 @@ still owned and contains only `agent.sock`. Our stream is closed before stop pro
 helper's relay never waits on it. The owned workspace (including the immutable medium) is
 deleted after terminal acknowledgment.
 
-The satellite never sends exec. `guest::Session` offers an owned command client for the
-next slice's consumer route: strictly increasing time-ordered command UUIDs, one active
-command, every earlier control frame read and nothing queued before exec, plus bounded
-credit and cancel. Consumer command execution, PTY and files are **not** implemented.
+### Experimental command operations
+
+Only direct-boot assignments with observed command readiness poll the closed runner
+`operations/poll` route. The immutable assignment/boot/digest tuple and a durable
+poll UUID bind every handoff. Null replies reuse that UUID. Each new operation is
+journaled before any guest exec or credit; the public UUID maps to a separate
+strictly increasing guest UUID. Exact poll replays never execute again. Terminal
+receipts remain durable until acknowledged and are retried exactly after reply loss.
+Recovery of any received intent without a terminal receipt marks it unknown, fences
+the lease, and never reconnects or executes. Existing journals default to an empty
+operation lane; their existing launch-intent recovery still prevents execution.
+
+Commands use `/workspace`, empty supplied environment, closed stdin, no PTY and a
+maximum 30000ms timeout shortened by remaining guest authority (including its 2s
+margin). The controller start window is checked against request-send time, so reply
+latency cannot extend it. Output sequence and final observed byte counts must agree.
+Capture totals at most 262144 bytes across stdout/stderr. Initial credit is 65536
+bytes; consumed output replenishes equal credit even after capture fills. Receipts
+use canonical padded Base64 and record observed counts and truncation. No result is
+reported as successful without confirmed termination and exit zero. Spawn failure
+is a definite failed receipt; uncertain termination omits result, blocks the lane
+and fences. Cancellation, authorization loss, guest failure and local timeout never
+supply reservation-release evidence. Separate native stop/cleanup proof remains
+mandatory.
+
+Only the current command's capture/report is retained in the main journal.
+Completed UUIDs are retained in assignment-bound, append-only history buckets with
+fixed-memory scans; they are never evicted to admit another command. There is no
+execution-count cutoff. Older inline history is migrated durably before it is
+removed from the journal. A partial or replaced history file fails closed; no
+automatic repair or history garbage collection is implemented. Disk use grows
+with retained tombstones. Polling is at most five times
+per second when controller calls complete promptly; heartbeat scheduling takes
+priority. No public proxy, PTY, file transport or boot replacement is implemented.
+
+Positive native cleanup can release resources independently of command reporting.
+An unacknowledged command receipt remains in the released journal and is replayed
+before a new claim may replace that journal. A failed or mismatched acknowledgment
+retains the old evidence rather than discarding it during cleanup or restart.
+
 Journal timings (claimed, admitted, medium built, prepared, VMM started, guest ready) are
 continuous-clock milestones; fixture values are not performance claims.
 
@@ -221,7 +260,13 @@ node fixtures/apple-satellite/public-api.mjs coordination target/debug/canaveral
   target/debug/examples/fixture-bootstrap-builder
 ```
 
-Rust unit tests use fake helper subprocesses and disposable directories.
+Rust unit tests use fake helper subprocesses, socketpairs and disposable directories.
+Command tests cover the real supervision poll/exec/report path, lost report replies,
+bounded/truncated capture, sequence/count failures, restart after received intent,
+legacy journals, cancellation while controller I/O stalls and local fencing during
+an active command with a stalled poll. This is experimental Rust fixture coverage,
+separate from the experimental TypeScript fixtures and native acceptance. Python
+runtime paths remain authoritative.
 `fixtures/apple-satellite/public-api.mjs` (required CI job
 `apple-satellite-conformance`) starts the real TypeScript controller with TLS and
 a fixture clock, enrolls a disposable runner through the Rust identity client,
@@ -253,5 +298,8 @@ release, guest credential hygiene/cleanup, real guest probes, shared domain
 contention and prepare duration on real images remain unaccepted native gates. Direct
 boot adds these: real `mkfs.erofs` output mounted by the audited initrd, filesystem UUID
 selection, virtio serial delivery, the real helper relay and vsock, foreign-uid relay
-rejection, and the timings on real images. Initrd and image building are not implemented
-here; they remain required operator-installed, pinned inputs.
+rejection, and the timings on real images. The separate
+[boot-bundle assembler](../../docs/linux-boot-bundle.md) packages a pinned bootstrap
+binary into an initrd; kernel/rootfs construction and native bootstrap qualification
+remain open. All installed boot artifacts still require operator pins and immutable
+installation before satellite admission.

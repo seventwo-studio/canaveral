@@ -8,6 +8,8 @@ Python remains the runtime implementation. Rust and TypeScript libraries under `
 
 [User accounts and personal API tokens](docs/accounts-and-tokens.md) provide private machine ownership, administrator-managed invitations and recovery, and expiring, revocable automation credentials. Guest connections enforce the same ownership and scope checks. The experimental TypeScript account backend refuses databases upgraded to this Python account schema.
 
+The experimental [Linux command slice](docs/linux-command-operations.md) connects the TypeScript API and Rust satellite through portable fixtures. [Local boot-bundle tooling](docs/linux-boot-bundle.md) assembles pinned operator-built artifacts and a deterministic initrd. Native admission and release acceptance remain gated.
+
 Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). Python dependencies and package entry points are declared in `pyproject.toml`. Run portable Python checks with `./script/test.sh` in an environment with the declared dependencies. Native checks require their target platforms and explicit operator setup.
 
 The [Apple package](VirtualMachines/README.md) contains native VM and guest-helper components. Existing disks and credentials are not automatically imported. The consumer [OpenAPI](docs/consumer-api.md) and [session protocol](docs/session-protocol.md) describe the implemented subsets and their limits.

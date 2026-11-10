@@ -5,9 +5,9 @@ The controller implements application-scoped single-member acquisition, inspecti
 listing, scoped credential exchange, renewal, release and session admission with
 a paired WebSocket relay. Terminal cleanup coordination, the owned Apple cleanup
 worker and provider-independent unstarted-assignment cleanup have fixture coverage.
-Full provider deadline enforcement,
-durable consumer operation endpoints, paired environments and live consumer acceptance
-remain open. Current administrative runners do not advertise lease execution
+Full provider deadline enforcement, paired environments and live consumer acceptance
+remain open. [Durable consumer operations](consumer-operations.md) have controller/runner
+fixture coverage. Current administrative runners do not advertise lease execution
 protocol 1, so they cannot accidentally accept consumer leases before those paths
 are implemented. Fixture hosts explicitly opt into that protocol for lifecycle tests.
 
@@ -80,8 +80,9 @@ production rather than allowing a duplicate acquisition to recreate an old lease
 The lifecycle and session admission/inspection/close paths below are implemented.
 The controller also implements the paired session transport described in
 [outbound access](access-transport.md), including outbound PTY/file provider
-workers and display input. Complete execution cancellation, live cleanup acceptance,
-other provider cleanup and durable consumer operation endpoints remain open. HTTPS and bearer authentication are
+workers and display input. The durable operation endpoints below have fixture coverage;
+complete execution cancellation, live cleanup acceptance and other provider cleanup remain open.
+HTTPS and bearer authentication are
 required for remote access. Browser access continues through an authenticated
 gateway; do not remove existing direct-origin protections.
 
@@ -97,8 +98,8 @@ gateway; do not remove existing direct-origin protections.
 | POST /v1/leases/{id}/sessions | lease | negotiate supported shell/file/visual session |
 | GET /v1/leases/{id}/sessions/{sessionId} | lease | inspect owned session metadata |
 | POST /v1/leases/{id}/sessions/{sessionId}/close | lease | close an owned session with `{}` |
-| POST /v1/leases/{id}/operations | lease | Planned durable discrete device/command operation endpoint |
-| GET /v1/leases/{id}/operations/{operationId} | lease | Planned owned operation receipt endpoint |
+| POST /v1/leases/{id}/operations | lease | Submit or replay a durable discrete device/command operation |
+| GET /v1/leases/{id}/operations/{operationId} | lease | Inspect an owned operation receipt |
 
 Acquisition example (UUIDs are caller-generated):
 

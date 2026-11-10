@@ -100,6 +100,29 @@ test("application client covers catalogue, paging, acquire, inspect, renew and r
   ]);
 });
 
+test("uncertain operation errors retain durable identity rather than HTTP tracing identity", async t => {
+  const operationId = randomUUID(), traceId = randomUUID();
+  const { seen, url } = await server(t, (_request, response) => json(response, 503, {
+    error: "Unavailable", message: "Unavailable", code: "unavailable", requestId: traceId,
+    retryable: false, outcome: "unknown",
+  }));
+  const client = scoped(url);
+  await assert.rejects(client.createOperation({ id: operationId, member: "primary", action: "shell", arguments: { argv: ["printf", "hello"] } }), error => {
+    assert.ok(error instanceof ConsumerServiceError);
+    assert.equal(error.status, 503); assert.equal(error.outcome, "unknown");
+    assert.equal(error.requestId, operationId);
+    return true;
+  });
+  assert.equal(seen.length, 1, "uncertain mutation was retried automatically");
+  assert.equal(JSON.parse(seen[0]!.body).id, operationId);
+  await assert.rejects(client.operation(operationId), error => {
+    assert.ok(error instanceof ConsumerServiceError);
+    assert.equal(error.outcome, undefined); assert.equal(error.requestId, traceId);
+    return true;
+  });
+  assert.equal(seen.length, 2);
+});
+
 test("caller-owned identity and body are sent unchanged and identically on explicit replay", async t => {
   const { seen, url } = await server(t, (_request, response) => json(response, 200, lease()));
   const client = app(url);

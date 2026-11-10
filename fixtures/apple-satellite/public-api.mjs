@@ -18,7 +18,7 @@ const exec = promisify(execFile);
 assert.equal(process.platform, 'darwin', 'the Apple satellite fixture requires a macOS host (no VM is started)');
 const [coordination, satelliteBin, runnerBin, helperBin, builderBin] = process.argv.slice(2).map(p => p && resolve(p));
 assert(coordination && satelliteBin && runnerBin && helperBin && builderBin, 'COORDINATION_DIR SATELLITE RUNNER_CLIENT FIXTURE_HELPER FIXTURE_BUILDER required');
-const {ConsumerClient, ConsumerServiceError} = await import(pathToFileURL(join(coordination, 'dist/src/consumer-client.js')));
+const {ConsumerClient, LeaseClient, ConsumerServiceError} = await import(pathToFileURL(join(coordination, 'dist/src/consumer-client.js')));
 const dir = realpathSync(mkdtempSync(join(tmpdir(), 'canaveral-apple-satellite-')));
 const children = [], orphans = [], relays = [];
 const key = () => randomBytes(32).toString('base64url');
@@ -150,7 +150,7 @@ try {
   await new Promise(r => proxy.listen(0, '127.0.0.1', r));
   const origin = `https://localhost:${proxy.address().port}`;
   const leaseRoutes = () => log.filter(e => e.route.startsWith('/v1/runners/linux-leases/'));
-  const reports = () => leaseRoutes().filter(e => e.route.endsWith('/report'));
+  const reports = () => leaseRoutes().filter(e => e.route === '/v1/runners/linux-leases/report');
 
   // Operator setup: application, immutable Apple image, grant, one-VM domain, explicit enrollment and approval.
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
@@ -430,7 +430,7 @@ try {
   assert(!existsSync(directState), 'direct preflight failure created satellite state');
 
   // 7b. Ready only after the bound guest ready; renewal reaches the guest; release cleans owned state.
-  guestMode('ready');
+  guestMode('commands');
   const callsBefore = {prepare: calls('prepare'), run: calls('run')};
   const d1 = (await acquireDirect()).lease;
   const readySatellite = satellite(directConfig);
@@ -454,6 +454,45 @@ try {
   assert.equal(started.bootAttempt, boot.bootAttempt.toUpperCase()); assert.equal(started.leaseID, d1.id.toUpperCase());
   assert.match(started.agentSocket, /^\/private\/tmp\/canaveral-[0-9a-f-]{36}\/agent\.sock$/); relays.push(started.agentSocket);
   await noDirectCapacity();
+
+  // Canned guest output traverses the real consumer route, durable controller ledger,
+  // outbound Rust runner and guest wire. The fake guest never executes a program.
+  const scoped = await sdk.rotateLeaseCredential(d1.id);
+  const commandClient = new LeaseClient({baseUrl: origin, caFile: pem('ca.pem'), leaseId: d1.id, leaseKey: scoped.credential});
+  const command = {id: randomUUID(), member: 'primary', action: 'shell', arguments: {argv: ['fixture', 'success']}};
+  const commandRoute = `/v1/leases/${d1.id}/operations`;
+  const operationReport = '/v1/runners/linux-leases/operations/report';
+  const execsBefore = calls('exec');
+  drops.add(operationReport);
+  drops.add(commandRoute);
+  await assert.rejects(commandClient.createOperation(command), error => error.outcome === 'unknown' && error.requestId === command.id);
+  const submitted = await commandClient.createOperation(command);
+  assert.equal(submitted.created, false, 'explicit replay should find the committed command');
+  const completed = await until(async () => { const receipt = await commandClient.operation(command.id); return receipt.state === 'succeeded' && receipt; }, 'consumer command completion');
+  assert.equal(Buffer.from(completed.result.stdoutBase64, 'base64').toString(), 'fixture-output\n');
+  assert.equal(completed.result.exitCode, 0); assert.equal(completed.result.terminationConfirmed, true);
+  assert.equal(completed.result.truncated, false);
+  assert.equal(completed.result.stdoutBytes, 15); assert.equal(completed.result.stderrBytes, 0);
+  const replay = await api('POST', commandRoute, command, scoped.credential);
+  assert.equal(replay.status, 200); assert.deepEqual(replay.body, completed);
+  assert.equal((await api('POST', commandRoute, {...command, arguments: {argv: ['fixture', 'wait']}}, scoped.credential)).status, 409);
+  assert([401, 403].includes((await api('GET', `${commandRoute}/${command.id}`, undefined, app.credential)).status));
+  await until(() => log.some(e => e.route === operationReport && e.body?.operationId === command.id && e.dropped), 'lost command report response');
+  await until(() => log.filter(e => e.route === operationReport && e.body?.operationId === command.id).length >= 2, 'exact command report replay');
+  const commandReports = log.filter(e => e.route === operationReport && e.body?.operationId === command.id);
+  assert.deepEqual(commandReports[0].body, commandReports[1].body);
+  assert.equal(calls('exec'), execsBefore + 1, 'lost reports or explicit replay repeated guest exec');
+  // Credit belongs to the guest session, not an individual command. Repeated short
+  // commands must not accumulate fresh grants until the protocol's 1 MiB ceiling.
+  const completedCommands = 18;
+  for (let i = 1; i < completedCommands; i++) {
+    const next = {...command, id: randomUUID()};
+    assert.equal((await commandClient.createOperation(next)).created, true);
+    const receipt = await until(async () => { const r = await commandClient.operation(next.id); return r.state !== 'queued' && r; }, `sequential command ${i}`);
+    assert.equal(receipt.state, 'succeeded');
+    assert.equal(Buffer.from(receipt.result.stdoutBase64, 'base64').toString(), 'fixture-output\n');
+  }
+  assert.equal(calls('exec'), execsBefore + completedCommands);
   await sdk.releaseLease(d1.id, {id: randomUUID()});
   const readyDone = await readySatellite.done;
   assert.equal(readyDone.code, 0, readyDone.errors);
@@ -487,13 +526,18 @@ try {
 
   // 7e. Crash after ready with a lost report: recovery replays it, never relaunches or executes,
   //     withdraws readiness and keeps the reservation until stop is proven.
-  guestMode('ready');
+  guestMode('commands');
   const d4 = (await acquireDirect()).lease;
   const crash = satellite(directConfig);
   await until(async () => (await inspect(d4.id)).state === 'ready', 'second direct guest ready');
   const d4Machine = directMachine(d4);
   orphans.push(Number(readFileSync(join(d4Machine, 'fixture-running'), 'utf8')));
   relays.push(JSON.parse(readFileSync(join(d4Machine, 'direct-started.json'), 'utf8')).agentSocket);
+  const interruptedKey = await sdk.rotateLeaseCredential(d4.id);
+  const interrupted = {id: randomUUID(), member: 'primary', action: 'shell', arguments: {argv: ['fixture', 'wait']}};
+  const interruptedRoute = `/v1/leases/${d4.id}/operations`;
+  assert.equal((await api('POST', interruptedRoute, interrupted, interruptedKey.credential)).status, 201);
+  await until(() => calls('exec') === execsBefore + completedCommands + 1, 'guest command before crash');
   drops.add('/v1/runners/linux-leases/report');
   await until(() => assignmentReports(d4.id).some(e => e.dropped), 'dropped direct report');
   crash.kill('SIGKILL'); await crash.done;
@@ -506,8 +550,11 @@ try {
   assert.equal(view.state, 'failed'); assert.equal(view.runtimeState, 'unknown'); assert.equal(view.members[0].ready, false);
   assert.notEqual(view.cleanup.state, 'complete'); await noDirectCapacity();
   assert.equal(assignmentReports(d4.id).at(-1).body.receipt.ready.command, false);
-  assert.equal(calls('run'), runs); assert.equal(calls('prepare'), prepares); assert.equal(calls('exec'), 0, 'no guest command was executed');
-  console.log('PASS Apple satellite public API fixture (fake helper, no VM): preflight before claim, TLS trust, SDK acquire/release, lost claim and report replay, never-ready receipts, cleanup-gated reservation, controller expiry, native local deadline under a stalled controller with durable-stop recovery, crash unknown retention without relaunch, stale binding; direct boot (simulated EROFS medium, fake guest): preflight before claim, ready only after bound guest ready, renewal forwarding, wrong identity, stalled handshake expiry, owned cleanup, crash recovery without relaunch or exec');
+  const unknownCommand = await ok('GET', `${interruptedRoute}/${interrupted.id}`, undefined, interruptedKey.credential);
+  assert.equal(unknownCommand.state, 'unknown');
+  assert.equal(calls('run'), runs); assert.equal(calls('prepare'), prepares);
+  assert.equal(calls('exec'), execsBefore + completedCommands + 1, 'crash recovery repeated a guest command');
+  console.log('PASS Apple satellite public API fixture (fake helper, no VM or real command execution): preflight, TLS trust, SDK lifecycle, exact claim/report replay, cleanup-gated capacity, expiry under stalled controller, crash uncertainty without relaunch; simulated direct boot: bound readiness/renewal, command output through consumer API, lost operation report replay without duplicate exec, interrupted-command uncertainty, wrong identity, handshake expiry and owned cleanup');
 } finally {
   for (const c of children) if (c.exitCode === null && c.signalCode === null) { c.kill('SIGKILL'); await once(c, 'exit'); }
   for (const pid of orphans) { try { process.kill(pid, 'SIGKILL'); } catch {} }

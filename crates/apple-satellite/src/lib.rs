@@ -15,6 +15,7 @@ mod bootstrap;
 pub mod bundle;
 pub mod clock;
 pub mod guest;
+mod operations;
 mod private;
 pub type Result<T> = std::result::Result<T, &'static str>;
 /// Interval between heartbeat reports while a guest runs; replies carry renewals and stop intent.
@@ -138,6 +139,8 @@ struct Journal {
     /// Boot-bundle launch state; absent for EFI raw journals, including retained ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     direct: Option<Direct>,
+    #[serde(default)]
+    operations: operations::Lane,
 }
 /// Durable direct-boot launch tuple. The boot attempt is consumed with launch intent.
 #[derive(Clone, Serialize, Deserialize)]
@@ -201,6 +204,7 @@ impl Journal {
             released: false,
             claimed_at: None,
             direct: None,
+            operations: operations::Lane::default(),
         })
     }
 }
@@ -410,7 +414,15 @@ impl Satellite {
         } else {
             Journal::fresh(fingerprint)?
         };
-        let s = Self { config, dir, state };
+        let mut s = Self { config, dir, state };
+        if !s.state.operations.completed.is_empty() {
+            let assignment = s.assignment()?.id;
+            for id in &s.state.operations.completed {
+                s.dir.record_operation(s.state.claim_id, assignment, *id)?;
+            }
+            // Publish replay membership before retiring legacy inline UUIDs.
+            s.state.operations.completed.clear();
+        }
         s.save()?;
         Ok(s)
     }
@@ -611,6 +623,9 @@ impl Satellite {
             LeaseRoute::Report,
             self.state.pending.clone().ok_or("missing report")?,
         )?;
+        self.accept_report(reply, start)
+    }
+    fn accept_report(&mut self, reply: Value, start: f64) -> Result<()> {
         if reply["assignmentId"] != json!(self.assignment()?.id)
             || reply["sequence"] != json!(self.state.sequence + 1)
         {
@@ -853,9 +868,216 @@ impl Satellite {
         }
         Ok(())
     }
+    fn operation_binding(&self) -> Result<Value> {
+        let d = self
+            .state
+            .direct
+            .as_ref()
+            .ok_or("operations require direct boot")?;
+        Ok(
+            json!({"binding":self.config.binding,"assignmentId":self.assignment()?.id,
+            "bootAttempt":d.boot_attempt,"bundleDigest":d.bundle_digest}),
+        )
+    }
+    fn operation_report(&self) -> Result<Value> {
+        let mut body = self.operation_binding()?;
+        let op = self
+            .state
+            .operations
+            .current
+            .as_ref()
+            .ok_or("missing operation")?;
+        body["operationId"] = json!(op.command.id);
+        body["receipt"] = op.receipt.clone().ok_or("missing operation receipt")?;
+        Ok(body)
+    }
+    fn retry_operation_report(&mut self, controller: &mut impl Controller) -> Result<()> {
+        if self
+            .state
+            .operations
+            .current
+            .as_ref()
+            .is_some_and(|op| op.receipt.is_some() && !op.acknowledged)
+        {
+            let reply =
+                controller.request(LeaseRoute::OperationReport, self.operation_report()?)?;
+            self.acknowledge_operation(reply)?;
+        }
+        Ok(())
+    }
+    fn acknowledge_operation(&mut self, reply: Value) -> Result<()> {
+        self.state.operations.validate_acknowledgment(&reply)?;
+        let id = self
+            .state
+            .operations
+            .current
+            .as_ref()
+            .ok_or("missing operation")?
+            .command
+            .id;
+        self.dir
+            .record_operation(self.state.claim_id, self.assignment()?.id, id)?;
+        self.state.operations.acknowledge(reply)?;
+        self.save()
+    }
+    fn operation_events(&mut self, session: &mut guest::Session) -> Result<()> {
+        while let Some(event) = session.next_event() {
+            let op = self
+                .state
+                .operations
+                .current
+                .as_mut()
+                .ok_or("unsolicited guest event")?;
+            op.event(event, session)?;
+            self.save()?;
+        }
+        if let Some(op) = self.state.operations.current.as_mut() {
+            if op.receipt.is_none()
+                && !op.cancel_sent
+                && clock::now().as_secs_f64() >= op.deadline - 2.0
+            {
+                if let Some(id) = op.guest_id {
+                    session.cancel(id)?;
+                }
+                op.cancel_sent = true;
+            }
+            if op.receipt.is_none() && clock::now().as_secs_f64() >= op.deadline {
+                if let Some(id) = op.guest_id {
+                    session.cancel(id)?;
+                }
+                op.unknown();
+                self.save()?;
+                return Err("operation termination uncertain");
+            }
+            if op.receipt.as_ref().is_some_and(|r| r["state"] == "unknown") {
+                return Err("operation termination uncertain");
+            }
+        }
+        Ok(())
+    }
+    fn accept_poll(
+        &mut self,
+        reply: Value,
+        start: f64,
+        session: Option<&mut guest::Session>,
+    ) -> Result<()> {
+        let poll: operations::Poll =
+            serde_json::from_value(reply).map_err(|_| "invalid operation poll")?;
+        let lease = &poll.lease;
+        if !lease.expires_at.is_finite()
+            || !lease.controller_now.is_finite()
+            || lease.revision < self.state.revision
+            || lease.revision == 0
+            || lease.revision > canaveral_guest_protocol::MAX_SAFE
+            || lease.expires_at <= lease.controller_now
+            || self.expired()
+            || poll.cancel_requested
+            || !matches!(lease.state.as_str(), "ready" | "provisioning")
+        {
+            return Err("operation authorization ended");
+        }
+        if lease.revision > self.state.revision {
+            self.state.deadline = start + (lease.expires_at - lease.controller_now).max(0.0);
+            self.state.revision = lease.revision;
+            self.save()?;
+            self.authorize()?;
+        }
+        let Some(c) = poll.command else {
+            return Ok(());
+        };
+        let a = self.assignment()?;
+        let d = self.state.direct.as_ref().ok_or("no direct boot")?;
+        if c.id.is_nil()
+            || c.lease_id != a.lease_id
+            || c.member_id != a.member_id
+            || c.assignment_id != a.id
+            || c.boot_attempt != d.boot_attempt
+            || c.bundle_digest != d.bundle_digest
+            || !c.start_before.is_finite()
+            || c.timeout_ms != 30000
+            || !d.ready
+            || d.withdrawn
+            || a.image.backend != "appleVirtualization"
+            || !a.capabilities.iter().any(|c| c == "command")
+        {
+            return Err("operation launch binding mismatch");
+        }
+        if let Some(op) = self
+            .state
+            .operations
+            .current
+            .as_ref()
+            .filter(|o| o.command.id == c.id)
+        {
+            if op.command.arguments != c.arguments || op.command.start_before != c.start_before {
+                return Err("operation replay changed immutable request");
+            }
+            return Ok(());
+        }
+        if self
+            .dir
+            .operation_completed(self.state.claim_id, a.id, c.id)?
+        {
+            return Err("completed operation cannot execute again");
+        }
+        if c.state != "queued" {
+            return Err("unexpected terminal operation handoff");
+        }
+        let now = clock::now().as_secs_f64();
+        let remaining_start = c.start_before - lease.controller_now - (now - start);
+        if remaining_start <= 0.0 {
+            return Err("operation start expired");
+        }
+        let timeout = guest::remaining_ms(self.state.deadline, now)?.min(30000);
+        self.state
+            .operations
+            .receive(c, now + timeout as f64 / 1000.0 + 2.0)?;
+        self.save()?; // Durable dispatch intent precedes any exec/credit effect.
+        let session = session.ok_or("missing guest session")?;
+        if session.revision() < self.state.revision {
+            session.renew(
+                self.guest_binding(self.state.revision)?,
+                self.state.deadline,
+                now,
+            )?;
+            session.pump(now)?;
+        }
+        let argv = self
+            .state
+            .operations
+            .current
+            .as_ref()
+            .ok_or("missing operation")?
+            .command
+            .arguments
+            .argv
+            .clone();
+        let id = session.exec(
+            argv,
+            "/workspace".into(),
+            std::collections::BTreeMap::new(),
+            timeout,
+            now,
+        )?;
+        self.state
+            .operations
+            .current
+            .as_mut()
+            .ok_or("missing operation")?
+            .guest_id = Some(id);
+        self.save()?;
+        session.start_output_credit()?;
+        if let Some(d) = self.state.direct.as_mut() {
+            d.timings.first_command = Some(now);
+        }
+        self.save()
+    }
     /// One durable claim per journal. Restart never repeats prepare/run after launch intent.
-    pub fn run_once(&mut self, controller: &mut impl Controller) -> Result<()> {
+    pub fn run_once(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
         if self.state.released {
+            // Cleanup acknowledgment cannot retire a command receipt that has not
+            // itself been acknowledged. Keep the old binding until exact replay succeeds.
+            self.retry_operation_report(controller)?;
             // The closed assignment's workspace is deleted; a new claim starts a new journal.
             self.state = Journal::fresh(self.state.config.clone())?;
             self.save()?;
@@ -881,10 +1103,18 @@ impl Satellite {
             self.save()?;
         }
         if self.state.cleaned {
+            // Resource cleanup may progress independently, but its journal retains
+            // any command receipt until the next invocation can acknowledge it.
+            let _ = self.retry_operation_report(controller);
             return self.finish(controller);
         }
         if self.state.launch_intent || self.state.fenced {
+            if let Some(op) = self.state.operations.current.as_mut() {
+                op.unknown();
+            }
+            self.save()?;
             self.fence()?;
+            let _ = self.retry_operation_report(controller);
             if self.state.stopped {
                 return self.finish(controller);
             }
@@ -959,46 +1189,145 @@ impl Satellite {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn())?;
-        let mut last: Option<clock::Clock> = None;
-        let mut session: Option<guest::Session> = None;
-        while !self.state.fenced {
-            if self.expired() || io(child.try_wait())?.is_some() {
-                self.fence()?;
-                break;
-            }
-            if self.state.direct.is_some() && self.guest_step(&mut session, &mut last).is_err() {
-                // The single session cannot be restored: withdraw readiness, then fence.
-                self.withdraw()?;
-                self.fence()?;
-                break;
-            }
-            if self.state.pending.is_some() || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
-                last = Some(clock::Clock::now());
-                // A lost reply keeps the exact pending report; local expiry still fences.
-                let _ = self.report(controller);
-            }
-            if let Some(s) = session.as_mut() {
-                let renewed = !self.state.fenced && self.state.revision > s.revision();
-                if renewed
-                    && s.renew(
-                        self.guest_binding(self.state.revision)?,
-                        self.state.deadline,
-                        clock::now().as_secs_f64(),
-                    )
-                    .is_err()
-                {
-                    self.withdraw()?;
-                    self.fence()?;
-                    break;
+        let stopped = std::thread::scope(|scope| -> Result<bool> {
+            let worker = operations::Worker::spawn(scope, controller);
+            let mut inflight = false;
+            let mut last: Option<clock::Clock> = None;
+            let mut polled: Option<clock::Clock> = None;
+            let mut session: Option<guest::Session> = None;
+            let supervised = (|| -> Result<()> {
+                while !self.state.fenced {
+                    if self.expired() || io(child.try_wait())?.is_some() {
+                        self.fence()?;
+                        break;
+                    }
+                    if self.state.direct.is_some()
+                        && self.guest_step(&mut session, &mut last).is_err()
+                    {
+                        self.withdraw()?;
+                        self.fence()?;
+                        break;
+                    }
+                    if let Some(s) = session.as_mut() {
+                        if self.operation_events(s).is_err() {
+                            self.withdraw()?;
+                            self.fence()?;
+                            break;
+                        }
+                    }
+                    if inflight {
+                        if let Ok((route, start, reply)) = worker.recv.try_recv() {
+                            inflight = false;
+                            if let Ok(reply) = reply {
+                                let accepted = match route {
+                                    LeaseRoute::Report => self.accept_report(reply, start),
+                                    LeaseRoute::OperationPoll => {
+                                        self.accept_poll(reply, start, session.as_mut())
+                                    }
+                                    LeaseRoute::OperationReport => {
+                                        self.acknowledge_operation(reply)
+                                    }
+                                    _ => Err("unexpected controller response"),
+                                };
+                                if accepted.is_err() {
+                                    self.withdraw()?;
+                                    self.fence()?;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(s) = session.as_mut() {
+                        if !self.state.fenced
+                            && self.state.revision > s.revision()
+                            && s.renew(
+                                self.guest_binding(self.state.revision)?,
+                                self.state.deadline,
+                                clock::now().as_secs_f64(),
+                            )
+                            .is_err()
+                        {
+                            self.withdraw()?;
+                            self.fence()?;
+                            break;
+                        }
+                    }
+                    if !inflight && !self.state.fenced {
+                        let request = if last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
+                            if self.state.pending.is_none() {
+                                self.state.pending = Some(self.receipt()?);
+                                self.save()?;
+                            }
+                            last = Some(clock::Clock::now());
+                            Some((
+                                LeaseRoute::Report,
+                                self.state.pending.clone().ok_or("missing report")?,
+                            ))
+                        } else if self
+                            .state
+                            .operations
+                            .current
+                            .as_ref()
+                            .is_some_and(|o| o.receipt.is_some() && !o.acknowledged)
+                        {
+                            Some((LeaseRoute::OperationReport, self.operation_report()?))
+                        } else if session
+                            .as_ref()
+                            .is_some_and(|s| s.ready(clock::now().as_secs_f64()))
+                            && self
+                                .assignment()?
+                                .capabilities
+                                .iter()
+                                .any(|c| c == "command")
+                            && polled.is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
+                        {
+                            let poll_id = self.state.operations.poll_id()?;
+                            self.save()?;
+                            let mut body = self.operation_binding()?;
+                            body["pollId"] = json!(poll_id);
+                            polled = Some(clock::Clock::now());
+                            Some((LeaseRoute::OperationPoll, body))
+                        } else {
+                            None
+                        };
+                        if let Some(request) = request {
+                            worker
+                                .send
+                                .send(request)
+                                .map_err(|_| "controller worker stopped")?;
+                            inflight = true;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(if session.is_some() {
+                        20
+                    } else {
+                        100
+                    }));
+                }
+                Ok(())
+            })();
+            if let Some(op) = self.state.operations.current.as_mut() {
+                if op.receipt.is_none() {
+                    if let (Some(s), Some(id)) = (session.as_mut(), op.guest_id) {
+                        let _ = s.cancel(id);
+                        let _ = s.pump(clock::now().as_secs_f64());
+                    }
+                    op.unknown();
                 }
             }
-            let pause = if session.is_some() { 20 } else { 100 };
-            std::thread::sleep(Duration::from_millis(pause));
-        }
-        // Close our relay stream before stop proof so the helper's relay can drain and exit.
-        drop(session);
-        // Native authorization also cuts power independently if this process dies.
-        if self.wait_stopped(Some(&mut child))? {
+            let saved = self.save();
+            // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
+            let fenced = self.fence();
+            drop(session);
+            drop(worker);
+            fenced?;
+            let stopped = self.wait_stopped(Some(&mut child))?;
+            saved?;
+            supervised?;
+            Ok(stopped)
+        })?;
+        let _ = self.retry_operation_report(controller);
+        if stopped {
             return self.finish(controller);
         }
         Err("stop unproven; reservation held")
@@ -1007,6 +1336,7 @@ impl Satellite {
 
 #[cfg(test)]
 mod tests {
+    mod operations;
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
     fn boot_id() -> uuid::Uuid {
@@ -1104,6 +1434,8 @@ mod tests {
                 LeaseRoute::Claim => "claim",
                 LeaseRoute::Report => "report",
                 LeaseRoute::Assignments => "assignments",
+                LeaseRoute::OperationPoll => "operationPoll",
+                LeaseRoute::OperationReport => "operationReport",
             };
             self.requests.push((name, body.clone()));
             std::thread::sleep(self.delay);
