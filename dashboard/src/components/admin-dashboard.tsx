@@ -379,7 +379,7 @@ export function AdminOverview({
                 All machines
               </a>
               <a href="#hosts" className="underline underline-offset-4">
-                Hosts and budgets
+                Hosts and limits
               </a>
               <a href="#orchestrators" className="underline underline-offset-4">
                 Orchestrators

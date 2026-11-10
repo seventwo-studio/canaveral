@@ -197,10 +197,6 @@ def server(store, address, admin_token, enrollment_token):
                     result = accounts.logout(token)
                 elif self.command == "POST" and parts == ["v1", "connection-setups"]:
                     result = store.create_setup(value)
-                elif self.command == 'POST' and parts == ['v1','resource-budgets']:
-                    result = store.save_resource_budget(value)
-                elif self.command == 'GET' and parts == ['v1','resource-budgets']:
-                    result = {'budgets':store.resource_budgets()}
                 elif self.command=='GET' and parts==['v1','images']:
                     result={'images':store.images()}
                 elif self.command=='POST' and parts==['v1','images','captures']:
@@ -215,6 +211,8 @@ def server(store, address, admin_token, enrollment_token):
                     result = store.revoke_setup(parts[2])
                 elif self.command == "POST" and len(parts)==4 and parts[:2]==["v1","hosts"] and parts[3]=="checks":
                     result = store.request_checks(parts[2])
+                elif self.command == "POST" and len(parts)==4 and parts[:2]==["v1","hosts"] and parts[3]=="limits":
+                    result = store.save_host_limits(parts[2],value)
                 elif self.command == "GET" and len(parts)==4 and parts[:2]==["v1","hosts"] and parts[3]=="resources":
                     result = store.host_resources(parts[2])
                 elif self.command == "GET" and parts == ["v1", "auth", "session"]:

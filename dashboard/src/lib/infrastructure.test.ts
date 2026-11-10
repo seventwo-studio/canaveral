@@ -1,5 +1,7 @@
 import { expect, test } from "vitest";
 import {
+  allocationLimits,
+  hostLimitReceipt,
   connectionSetups,
   resourceDetails,
   runnerBindings,
@@ -10,7 +12,8 @@ import {
 const amounts = { cpu: 8, memoryMiB: 8192, diskGiB: 100 };
 const report = () => ({
   hostId: "host",
-  budget: amounts,
+  capacity: amounts,
+  limits: amounts,
   categories: [
     {
       id: "retainedDisks",
@@ -64,7 +67,7 @@ test("cross-host or malformed resource reports cannot replace the selected host'
     { ...r, hostId: "other" },
     { ...r, categories: [...r.categories, ...r.categories] },
     { ...r, samples: [{ receivedAt: 1000, cpuPercent: "0" }] },
-    { ...r, budget: { ...amounts, diskGiB: -1 } },
+    { ...r, limits: { ...amounts, diskGiB: -1 } },
   ])
     expect(() => resourceDetails(value, "host")).toThrow();
 });
@@ -117,4 +120,18 @@ test("one-time setup and revocation receipts must acknowledge the original reque
       ],
     }).setups[0]?.state,
   ).toBe("expired");
+});
+
+test("host limits require matching save amounts and respect a smaller host offer", () => {
+  const limits = { ...amounts, cpu: 4 };
+  expect(hostLimitReceipt({ hostId: "host", limits }, "host", limits)).toEqual(
+    limits,
+  );
+  expect(() =>
+    hostLimitReceipt({ hostId: "host", limits: amounts }, "host", limits),
+  ).toThrow();
+  expect(allocationLimits({ capacity: amounts, limits })).toEqual(limits);
+  expect(allocationLimits({ capacity: limits, limits: amounts })).toEqual(
+    limits,
+  );
 });

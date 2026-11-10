@@ -1,5 +1,6 @@
 import type { FormEvent, ReactNode } from "react";
 import {
+  allocationLimits,
   connectionSetups,
   resourceDetails,
   runnerBindings,
@@ -30,6 +31,7 @@ import {
 import { api, errorMessage, memory, number, provider, since } from "@/lib/api";
 import { Button } from "./ui/button";
 import { StackedResources, HostMachines, HostImages } from "./host-overview";
+import { HostLimits } from "./host-limits";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
@@ -285,8 +287,8 @@ export function NamespaceResources({
         ))
       )}
       <p className="text-muted-foreground">
-        Kubernetes quota and live usage are observations; Canaveral shared
-        budgets independently constrain placement reservations.
+        Kubernetes quota and live usage are observations; Canaveral host limits
+        constrain placement reservations.
       </p>
     </section>
   );
@@ -320,13 +322,13 @@ function ReservationMeters({
             <span>{label}</span>
             <span>
               {unit
-                ? `${number(host.reserved?.[key] || 0)} / ${number(host.capacity[key])} ${unit}`
-                : `${memory(host.reserved?.[key] || 0)} / ${memory(host.capacity[key])}`}
+                ? `${number(host.reserved?.[key] || 0)} / ${number(allocationLimits(host)[key])} ${unit}`
+                : `${memory(host.reserved?.[key] || 0)} / ${memory(allocationLimits(host)[key])}`}
             </span>
           </div>
           <meter
             min="0"
-            max={Math.max(1, host.capacity[key])}
+            max={Math.max(1, allocationLimits(host)[key])}
             value={host.reserved?.[key] || 0}
             aria-label={`${label} reserved`}
           />
@@ -396,7 +398,7 @@ export function InfrastructureCard({
           className="group block min-w-0 space-y-3 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="text-muted-foreground">Reserved / budget</span>
+            <span className="text-muted-foreground">Reserved / limit</span>
             <span className="flex items-center gap-1 group-hover:underline">
               View resources
               <ArrowUpRight className="size-3" />
@@ -405,16 +407,11 @@ export function InfrastructureCard({
           <ReservationMeters host={host} />
           {host.overcommitted && (
             <p className="text-xs text-destructive">
-              Reservations exceed the current budget. Existing allocations
-              remain reserved.
+              Reservations exceed the current limit. Existing allocations remain
+              reserved.
             </p>
           )}
         </a>
-        {!!host.sharedBudgets?.length && (
-          <p className="text-xs text-muted-foreground">
-            Shared limits: {host.sharedBudgets.map((b) => b.name).join(", ")}
-          </p>
-        )}
       </CardContent>
       <CardFooter className="flex flex-wrap gap-2">
         <Button
@@ -527,6 +524,14 @@ export function InfrastructureDetails({
         </div>
       )}
       <StackedResources host={host} data={data} unavailable={Boolean(error)} />
+      <HostLimits
+        key={host.id}
+        host={host}
+        onRefresh={async () => {
+          setReload((value) => value + 1);
+          await onRefresh();
+        }}
+      />
       <div className="grid min-w-0 gap-6 border-t pt-6 xl:grid-cols-2">
         <HostMachines
           host={host}
@@ -553,22 +558,6 @@ export function InfrastructureDetails({
             {host.usage?.cluster && (
               <NamespaceResources cluster={host.usage.cluster} />
             )}
-            {data?.sharedBudgets?.map((b) => (
-              <div key={b.id} className="rounded-md border p-3 text-xs">
-                <p className="font-medium">{b.name}</p>
-                <p className="mt-1 text-muted-foreground">
-                  Shared reservations: {b.reserved.cpu} / {b.capacity.cpu} vCPU
-                  · {memory(b.reserved.memoryMiB)} /{" "}
-                  {memory(b.capacity.memoryMiB)} · {b.reserved.diskGiB} /{" "}
-                  {b.capacity.diskGiB} GiB
-                </p>
-                {b.overcommitted && (
-                  <p className="mt-1 text-destructive">
-                    Over budget; existing allocations are preserved.
-                  </p>
-                )}
-              </div>
-            ))}
             {samples.length > 1 && (
               <figure>
                 <svg
@@ -599,9 +588,8 @@ export function InfrastructureDetails({
             <p className="text-xs text-muted-foreground">
               Usage includes other workloads. Shared resource domain:{" "}
               {host.usage?.domain || "unknown"}. Do not sum physical usage from
-              runners on the same host. Configure shared budgets to constrain
-              combined reservations. KubeVirt runner measurements are separate
-              from namespace usage and quotas.
+              runners on the same host. KubeVirt runner measurements are
+              separate from namespace usage and quotas.
             </p>
           </section>
         </div>
@@ -970,7 +958,7 @@ export function ConnectionSetup({
             </label>
             <fieldset className="space-y-2">
               <legend className="text-xs font-medium">
-                Canaveral resource budget
+                Canaveral host limits
               </legend>
               <div className="grid grid-cols-3 gap-3">
                 {resourceFields.map(([key, label]) => (
@@ -994,8 +982,9 @@ export function ConnectionSetup({
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">
-                Reserve a budget for this runner. Divide resources between
-                runners sharing a physical host or cluster pool.
+                Set how much Canaveral can allocate on this host. Divide
+                resources between runners sharing a physical host or cluster
+                pool.
               </p>
             </fieldset>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -1021,7 +1010,7 @@ export function ConnectionSetup({
                   Enabled runtimes
                 </legend>
                 <p className="text-xs text-muted-foreground">
-                  One physical host identity and resource budget covers all
+                  One physical host identity and set of limits covers all
                   enabled runtimes.
                 </p>
                 {runtimeChoices[backend]!.map((name) => (

@@ -15,7 +15,7 @@ for (const width of [320, 390, 1440])
           id: "disk",
           label: "Storage headroom",
           status: "warning",
-          detail: "Logical budget exceeds currently free storage.",
+          detail: "Offered disk capacity exceeds currently free storage.",
         },
       ],
       capabilities: { virtualMachines: true, shell: false },
@@ -95,7 +95,8 @@ for (const width of [320, 390, 1440])
       if (path.endsWith("/resources"))
         result = {
           hostId: path.split("/")[1],
-          budget: host.capacity,
+          capacity: host.capacity,
+          limits: host.capacity,
           images: [],
           categories: [
             {

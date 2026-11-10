@@ -179,15 +179,15 @@ def inspect(config, provider, state_dir):
                     'Helper manifest, image API level, architecture or checksum validation failed. Rebuild or correct the configured artifacts.')
     measured=sample(config)
     if config['provider']!='kubevirt':
-        too_large=any(measured[key] is not None and config['capacity'][budget]>measured[key]
-                      for key,budget in (('cpuCount','cpu'),('memoryTotalMiB','memoryMiB')))
-        add('budget','Physical resource budget','failed' if too_large else 'passed' if measured['memoryTotalMiB'] else 'warning',
-            'CPU or memory budget exceeds this host; lower the configured budget.' if too_large else 'Budget fits measured CPU and memory. Divide this budget between runners sharing the host.' if measured['memoryTotalMiB'] else 'Physical resources unavailable; install psutil and verify the configured budget.')
+        too_large=any(measured[key] is not None and config['capacity'][resource]>measured[key]
+                      for key,resource in (('cpuCount','cpu'),('memoryTotalMiB','memoryMiB')))
+        add('capacity','Offered host capacity','failed' if too_large else 'passed' if measured['memoryTotalMiB'] else 'warning',
+            'Offered CPU or memory exceeds this host; lower the configured capacity.' if too_large else 'Offered capacity fits measured CPU and memory. Divide capacity between runners sharing the host.' if measured['memoryTotalMiB'] else 'Physical resources unavailable; install psutil and verify the configured capacity.')
         low=measured['diskFreeGiB'] is not None and config['capacity']['diskGiB']>measured['diskFreeGiB']
         add('disk-space','Storage headroom','warning' if low else 'passed',
-            'Logical disk budget exceeds currently free storage. Existing disks and thin provisioning affect physical usage.' if low else 'Storage headroom measured; logical reservations remain separate from physical usage.')
+            'Offered logical disk capacity exceeds currently free storage. Existing disks and thin provisioning affect physical usage.' if low else 'Storage headroom measured; logical reservations remain separate from physical usage.')
     else:
-        add('pool','Cluster capacity scope','warning','This is an operator budget for one namespace pool. Runner metrics are not cluster utilization; divide budgets across overlapping pools and nodes.')
+        add('pool','Cluster capacity scope','warning','This is configured capacity for one namespace pool. Runner metrics are not cluster utilization; divide capacity across overlapping pools and nodes.')
     if any(c['status']=='failed' for c in checks):
         add('backend','Runtime and image validation','skipped','Fix failed prerequisites, then run checks again.')
     else:

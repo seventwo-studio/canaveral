@@ -53,8 +53,10 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
             db.execute("CREATE INDEX IF NOT EXISTS inference_jobs_host_state ON inference_jobs (host,state)")
             db.execute("CREATE TABLE IF NOT EXISTS device_operations (id TEXT PRIMARY KEY,machine TEXT NOT NULL,host TEXT NOT NULL,request TEXT NOT NULL,state TEXT NOT NULL,result TEXT,updated REAL NOT NULL,created REAL NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS device_operations_host_state ON device_operations (host,state)")
-            for row in db.execute("SELECT offer FROM hosts").fetchall():
-                self._register_templates(db, offer(json.loads(row[0])))
+            for row in db.execute("SELECT id,offer FROM hosts").fetchall():
+                advertised=offer(json.loads(row['offer']))
+                self._register_templates(db, advertised)
+                db.execute('INSERT OR IGNORE INTO host_limits VALUES (?,?)',(row['id'],json.dumps(advertised['capacity'])))
         os.chmod(self.path, 0o600)
         self._leases_ready=True
         with self.transaction():pass # Persist expiry before serving after restart.
@@ -96,6 +98,7 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
             self._validate_catalogue_offer(db,host_id,proposed)
             self._register_templates(db, proposed)
             db.execute("INSERT INTO hosts VALUES (?,?,?,?,1)", (host_id, credential, json.dumps(proposed), self.clock()))
+            db.execute('INSERT INTO host_limits VALUES (?,?)',(host_id,json.dumps(proposed['capacity'])))
         return {"id": host_id}
 
     def _register_templates(self, db, proposed):
@@ -202,8 +205,8 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
                 sample = db.execute('SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 1',(row['id'],)).fetchone()
                 item['usage'] = {**json.loads(sample['report']), 'receivedAt':sample['captured'], 'fresh':item['online'] and self.clock()-sample['captured']<30} if sample else None
                 item['available'] = self._remaining_capacity(db,row['id'])
-                item['sharedBudgets'] = self._host_budgets(db,row['id'])
-                item['overcommitted'] = any(item['reserved'][key]>item['capacity'][key] for key in item['capacity'])
+                item['limits'] = self._host_limits(db,row['id'])
+                item['overcommitted'] = any(item['reserved'][key]>min(item['capacity'][key],item['limits'][key]) for key in item['capacity'])
                 result.append(item)
             return result
 

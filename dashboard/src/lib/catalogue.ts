@@ -46,14 +46,6 @@ export interface ImageTask {
     | (Record<string, unknown> & { detail?: string; consistency?: string })
     | null;
 }
-export interface SharedBudget {
-  id: string;
-  name: string;
-  capacity: Resources;
-  reserved: Resources;
-  hostIds: string[];
-  overcommitted: boolean;
-}
 function nonempty(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
@@ -143,35 +135,4 @@ export function registryEntries(value: unknown): RegistryEntry[] {
     ids.add(entry.id);
     return { ...entry, minimum: resources(e.minimum) };
   });
-}
-export function sharedBudget(
-  value: unknown,
-  expectedId?: string,
-): SharedBudget {
-  const b = record(value);
-  if (
-    !nonempty(b.id) ||
-    (expectedId !== undefined && b.id !== expectedId) ||
-    !nonempty(b.name) ||
-    typeof b.overcommitted !== "boolean" ||
-    !Array.isArray(b.hostIds) ||
-    !b.hostIds.every(nonempty) ||
-    new Set(b.hostIds).size !== b.hostIds.length
-  )
-    throw new Error(
-      "Shared budget acknowledgement was not confirmed. Inspect the original budget before retrying.",
-    );
-  return {
-    id: b.id,
-    name: b.name,
-    hostIds: b.hostIds,
-    overcommitted: b.overcommitted,
-    capacity: resources(b.capacity),
-    reserved: resources(b.reserved),
-  };
-}
-export function sharedBudgets(value: unknown): SharedBudget[] {
-  const v = record(value);
-  if (!Array.isArray(v.budgets)) throw new Error("Invalid shared budget list.");
-  return v.budgets.map((v) => sharedBudget(v));
 }

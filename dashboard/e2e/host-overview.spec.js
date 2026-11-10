@@ -132,7 +132,8 @@ for (const width of [320, 768, 1440]) {
       if (path === "hosts/mac/resources")
         result = {
           hostId: host.id,
-          budget: host.capacity,
+          capacity: host.capacity,
+          limits: host.capacity,
           reserved: host.reserved,
           categories,
           allocations: machines

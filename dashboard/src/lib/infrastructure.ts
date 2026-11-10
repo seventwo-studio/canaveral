@@ -1,6 +1,6 @@
 import { record } from "./types";
-import { resources, sharedBudget } from "./catalogue";
-import type { CatalogueHost, Resources, SharedBudget } from "./catalogue";
+import { resources } from "./catalogue";
+import type { CatalogueHost, Resources } from "./catalogue";
 
 export interface MetricCoverage {
   status: "complete" | "incomplete" | "unavailable";
@@ -65,7 +65,7 @@ export interface Host extends CatalogueHost {
   overcommitted?: boolean;
   capacity: Resources;
   reserved?: Resources;
-  sharedBudgets?: SharedBudget[];
+  limits?: Resources;
   usage?: HostUsage;
   health?: CatalogueHost["health"] & {
     fresh?: boolean;
@@ -111,12 +111,12 @@ export interface HostImage {
 }
 export interface ResourceDetails {
   hostId: string;
-  budget: Resources;
+  capacity: Resources;
+  limits: Resources;
   categories?: Array<Resources & { id: string; label: string }>;
   images?: HostImage[];
   allocations: HostAllocation[];
   samples: ResourceSample[];
-  sharedBudgets?: SharedBudget[];
 }
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const finite = (v: unknown): v is number =>
@@ -133,7 +133,8 @@ export function resourceDetails(
     !Array.isArray(r.samples)
   )
     throw new Error("Resource report does not match this host.");
-  const budget = resources(r.budget);
+  const capacity = resources(r.capacity);
+  const limits = resources(r.limits);
   const categories =
     r.categories === undefined
       ? undefined
@@ -198,18 +199,14 @@ export function resourceDetails(
       return i as unknown as HostImage;
     });
   }
-  if (r.sharedBudgets !== undefined && !Array.isArray(r.sharedBudgets))
-    throw new Error("Invalid shared resource budgets.");
   return {
     hostId,
-    budget,
+    capacity,
+    limits,
     categories,
     allocations,
     samples,
     images,
-    sharedBudgets: (r.sharedBudgets as unknown[] | undefined)?.map((v) =>
-      sharedBudget(v),
-    ),
   };
 }
 export type RunnerBindings = Record<string, unknown> & {
@@ -282,4 +279,33 @@ export function setupRevocation(value: unknown, expectedId: string): void {
   const r = record(value);
   if (r.id !== expectedId || r.state !== "revoked")
     throw new Error("Setup revocation was not confirmed.");
+}
+
+export function hostLimitReceipt(
+  value: unknown,
+  hostId: string,
+  expected: Resources,
+): Resources {
+  const r = record(value);
+  const limits = resources(r.limits);
+  if (
+    r.hostId !== hostId ||
+    resourceKeys.some((key) => limits[key] !== expected[key])
+  )
+    throw new Error(
+      "Host limits were not confirmed. Reload this host before retrying.",
+    );
+  return limits;
+}
+const resourceKeys = ["cpu", "memoryMiB", "diskGiB"] as const;
+export function allocationLimits(host: {
+  capacity: Resources;
+  limits?: Resources;
+}): Resources {
+  const limits = host.limits || host.capacity;
+  return {
+    cpu: Math.min(host.capacity.cpu, limits.cpu),
+    memoryMiB: Math.min(host.capacity.memoryMiB, limits.memoryMiB),
+    diskGiB: Math.min(host.capacity.diskGiB, limits.diskGiB),
+  };
 }

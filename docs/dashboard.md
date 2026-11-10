@@ -54,11 +54,11 @@ retarget a replacement display connection. Headless machines expose files and
 independent terminals without opening a graphics connection; iOS continues to
 deny shell access. The workspace imposes no shell-count or total upload-size cap.
 
-Image import/capture/activity, the base-image registry and shared-budget controls
+Image import/capture/activity, the base-image registry and host-limit controls
 also use TypeScript. Image-task responses are bound to the original request ID;
 import receipts must match the expected ID and byte count with a SHA-256 identity.
-Shared-budget receipts validate their ID, membership, reservations and overcommit
-flag before confirming a save. Registry entries validate media, resource amounts
+Host-limit receipts validate the selected host and requested CPU, memory and disk
+amounts before confirming a save. Registry entries validate media, resource amounts
 and HTTPS source links. Unknown task outcomes remain recovery states without
 automatic mutation replay. Numeric form fields retain their empty editing state.
 
@@ -157,7 +157,9 @@ Machine inventory must reflow rather than scroll horizontally or clip fields.
 Use wrapping cards, break long names/identifiers and keep every action visible
 within the available content width, including with the sidebar open.
 
-The Hosts inventory keeps **Add host** and **Shared budgets** in the top bar.
+The Hosts inventory keeps **Add host** in the top bar. Each host overview has
+**Canaveral host limits** with editable CPU, memory and disk fields. Shared
+budgets are no longer available.
 Omit the repeated visible Hosts heading and description; retain a screen-reader
 heading and let the top-bar actions wrap at narrow widths.
 
@@ -308,7 +310,7 @@ request that supplies both a bearer credential and a session cookie.
 
 The dashboard forwards inventory, lifecycle, infrastructure setup/diagnostics and authentication endpoints to its fixed upstream, without forwarding browser Origin headers. The orchestrator continues rejecting direct browser origins. No public access or external identity provider is configured by starting the dashboard; use an existing trusted private access boundary.
 
-Inventory refreshes every five seconds while the tab is visible. Connection failures keep the last inventory visible with a stale-data notice. Running and ready are separate states: required preparation must finish before a running guest is shown as ready. Host bars show the orchestrator's reservations against its configured budget, not CPU or memory utilization. Disks stay reserved after shutdown; compute is released only after the host confirms a stopped state. Offline hosts retain their placement and reservation rules.
+Inventory refreshes every five seconds while the tab is visible. Connection failures keep the last inventory visible with a stale-data notice. Running and ready are separate states: required preparation must finish before a running guest is shown as ready. Host bars show the orchestrator's reservations against its host limits, not CPU or memory utilization. Disks stay reserved after shutdown; compute is released only after the host confirms a stopped state. Offline hosts retain their placement and reservation rules.
 
 Creation pins the template revision and architecture, uses its resource defaults and lets the scheduler choose an eligible host or honor a selected host. Retries of an unchanged creation form reuse the request ID, so a lost response cannot create a second computer. Keep the form open for a retry after an uncertain result. Closing the form, reloading or editing the specification starts a new intent; inspect inventory before creating again. A lifecycle response records requested state; the machine remains pending or transitioning until its host reports the result. Draining prevents new placements and restarts while retaining existing machines.
 
@@ -319,7 +321,7 @@ preflight and outbound connection. Cards show check status and compact CPU,
 memory and storage reservation meters. A host name or **View resources** opens
 its overview at `#hosts/{id}` or `#orchestrators/{id}`. Older `/resources` links
 remain valid. CPU, memory and storage bars stack all reservation categories and
-show unreserved capacity or over-budget amounts. The legend retains zero-value
+show unreserved capacity or over-limit amounts. The legend retains zero-value
 categories. Machines are scoped to that host, with running machines first,
 status, resource specifications and existing Details/Control actions.
 The machine list offers **All machines** and **Running** filters; offline hosts
@@ -332,5 +334,5 @@ Failed refreshes retain the previous report with a stale notice; **Retry
 resources** requests a fresh report without leaving the overview.
 The page supports direct links and browser history. Details stack on narrow
 screens; the inventory keeps its compact summary. See [infrastructure setup and
-resource accounting](infrastructure.md) for enrollment scope, freshness, shared
-host budgets and the distinction between KubeVirt runner and cluster metrics.
+resource accounting](infrastructure.md) for enrollment scope, freshness, per-host
+limits and the distinction between KubeVirt runner and cluster metrics.

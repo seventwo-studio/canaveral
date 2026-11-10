@@ -1,5 +1,5 @@
 import { record } from "./types";
-import { resources, sharedBudget } from "./catalogue";
+import { resources } from "./catalogue";
 import type { Resources } from "./catalogue";
 import type {
   Host,
@@ -222,8 +222,6 @@ export function hostsResponse(value: unknown): Host[] {
           requiredStrings(record(value), ["id", "label", "status", "detail"]);
       }
     }
-    if (h.sharedBudgets !== undefined && !Array.isArray(h.sharedBudgets))
-      throw new Error("Invalid host budgets.");
     return {
       ...h,
       platform: h.platform ?? undefined,
@@ -231,9 +229,7 @@ export function hostsResponse(value: unknown): Host[] {
       reserved: h.reserved == null ? undefined : resources(h.reserved),
       health: h.health ?? undefined,
       usage: h.usage == null ? undefined : hostUsage(h.usage),
-      sharedBudgets: (h.sharedBudgets as unknown[] | undefined)?.map((v) =>
-        sharedBudget(v),
-      ),
+      limits: h.limits === undefined ? undefined : resources(h.limits),
     } as unknown as Host;
   });
 }

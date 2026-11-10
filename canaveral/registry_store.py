@@ -44,7 +44,7 @@ class RegistryStore:
                 if request['source']!=source:raise Error('Registry source was already pinned to another artifact.',409)
             else:
                 cost=math.ceil(source['bytes']/1073741824)
-                if cost>self._remaining_capacity(db,host_id)['diskGiB']:raise Error('Registry image exceeds available host or shared storage budget.',409)
+                if cost>self._remaining_capacity(db,host_id)['diskGiB']:raise Error('Registry image exceeds available host storage limit.',409)
                 request.update(source=source,bytes=source['bytes'])
                 db.execute("UPDATE image_tasks SET request=?,reserved_disk=?,state='running',updated=? WHERE id=?",(json.dumps(request),cost,self.clock(),row['id']))
             return {'id':row['id'],**request}

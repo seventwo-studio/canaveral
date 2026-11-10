@@ -169,7 +169,7 @@ export function ImageImport({
           <DialogTitle>Import base image</DialogTitle>
           <DialogDescription>
             Upload installation media or an installed boot disk to a host. The
-            artifact is immutable and consumes its storage budget.
+            artifact is immutable and counts toward the host’s disk limit.
           </DialogDescription>
         </DialogHeader>
         {error && (

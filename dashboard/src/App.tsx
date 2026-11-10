@@ -113,7 +113,6 @@ import {
   InfrastructureCard,
   InfrastructureDetails,
 } from "@/components/infrastructure";
-import { SharedBudgets } from "@/components/shared-budgets";
 import { BaseImageRegistry } from "@/components/image-registry";
 import { MachinePowerOff } from "@/components/machine-power";
 import {
@@ -282,7 +281,6 @@ export function App() {
       "host" | "orchestrator" | null
     >(null),
     [infrastructureId, setInfrastructureId] = useState(currentInfrastructure);
-  const [budgetOpen, setBudgetOpen] = useState(false);
   const [imageImport, setImageImport] = useState<boolean | RegistryEntry>(
       false,
     ),
@@ -327,7 +325,6 @@ export function App() {
     setDetailId(null);
     setControlId(null);
     setConnectionSetup(null);
-    setBudgetOpen(false);
     setImageImport(false);
     setRegistryOpen(false);
     setPowerOffId(null);
@@ -716,13 +713,6 @@ export function App() {
             {view === "hosts" && !resourcePage && (
               <>
                 <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setBudgetOpen(true)}
-                >
-                  Shared budgets
-                </Button>
-                <Button
                   size="sm"
                   onClick={() => setConnectionSetup("host")}
                   disabled={busy}
@@ -888,14 +878,6 @@ export function App() {
                         onClick={() => setImageImport(true)}
                       >
                         Import image
-                      </Button>
-                    )}
-                    {isInfrastructure && (
-                      <Button
-                        variant="outline"
-                        onClick={() => setBudgetOpen(true)}
-                      >
-                        Shared budgets
                       </Button>
                     )}
                     <Button
@@ -1353,13 +1335,6 @@ export function App() {
         <ImageCapture
           machine={inventory.machines.find((m) => m.id === captureId)!}
           onClose={() => setCaptureId(null)}
-          onRefresh={refresh}
-        />
-      )}
-      {budgetOpen && (
-        <SharedBudgets
-          hosts={inventory.hosts}
-          onClose={() => setBudgetOpen(false)}
           onRefresh={refresh}
         />
       )}

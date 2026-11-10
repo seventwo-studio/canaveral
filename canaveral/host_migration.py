@@ -35,9 +35,6 @@ class HostMigrationStore:
                 if retired and retired[0]!=target_id:raise Error('Runtime was already moved to another host.')
                 for table in ('machines','device_operations','inference_jobs'):
                     db.execute('UPDATE '+table+' SET host=? WHERE host=?',(target_id,source))
-                for membership in db.execute('SELECT budget FROM resource_budget_members WHERE host=?',(source,)).fetchall():
-                    db.execute('INSERT OR IGNORE INTO resource_budget_members VALUES (?,?)',(membership[0],target_id))
-                db.execute('DELETE FROM resource_budget_members WHERE host=?',(source,))
                 db.execute('UPDATE hosts SET enabled=0 WHERE id=?',(source,))
                 db.execute('INSERT OR IGNORE INTO retired_runners VALUES (?,?)',(source,target_id))
             self._register_templates(db,proposed)

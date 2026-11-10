@@ -5,8 +5,6 @@ import {
   importedImage,
   registryEntries,
   resources,
-  sharedBudget,
-  sharedBudgets,
 } from "./catalogue";
 
 const amounts = { cpu: 2, memoryMiB: 4096, diskGiB: 32 };
@@ -34,14 +32,6 @@ const entry = {
   status: "available",
   minimum: amounts,
   note: "Installed disk",
-};
-const budget = {
-  id: "shared",
-  name: "Shared host",
-  capacity: amounts,
-  reserved: { cpu: 0, memoryMiB: 0, diskGiB: 64 },
-  hostIds: ["one", "two"],
-  overcommitted: true,
 };
 
 test("image tasks preserve uncertain outcomes and bind acknowledgements to the caller's intent", () => {
@@ -98,16 +88,6 @@ test("registry decoder distinguishes installer media and manual sources without 
       entries: [{ ...entry, minimum: { ...amounts, diskGiB: null } }],
     }),
   ).toThrow();
-});
-test("shared budget decoding preserves stopped disk reservations and overcommit, requiring matched receipt identity", () => {
-  expect(sharedBudget(budget, "shared")).toEqual(budget);
-  expect(sharedBudgets({ budgets: [budget] })).toEqual([budget]);
-  for (const value of [
-    { ...budget, id: "other" },
-    { ...budget, overcommitted: "false" },
-    { ...budget, hostIds: ["one", "one"] },
-  ])
-    expect(() => sharedBudget(value, "shared")).toThrow();
 });
 test("resource amounts never turn missing or invalid usage into zero", () => {
   expect(resources({ cpu: 0, memoryMiB: 0, diskGiB: 0 })).toEqual({

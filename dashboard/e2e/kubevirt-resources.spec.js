@@ -69,7 +69,8 @@ for (const width of [320, 1440]) {
         if (path === "hosts/pool/resources")
           result = {
             hostId: host.id,
-            budget: host.capacity,
+            capacity: host.capacity,
+            limits: host.capacity,
             reserved: host.reserved,
             categories: [],
             images: [],
