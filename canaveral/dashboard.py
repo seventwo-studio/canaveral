@@ -74,11 +74,13 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                 auth_status = self.command == "GET" and route == "/api/v1/auth/status"
                 login = self.command == "POST" and route == "/api/v1/auth/login"
                 setup = self.command == "POST" and route == "/api/v1/auth/setup"
+                claim = self.command=='POST' and route in ('/api/v1/auth/claim','/api/v1/auth/claim/info')
+                account_route = (self.command=='GET' and route in ('/api/v1/auth/session','/api/v1/auth/tokens','/api/v1/users') or self.command=='POST' and (route in ('/api/v1/auth/password','/api/v1/auth/tokens','/api/v1/users') or re.fullmatch(r'/api/v1/auth/tokens/[a-f0-9-]{36}/revoke',route) or re.fullmatch(r'/api/v1/users/[a-f0-9-]{36}/(?:update|invite|reset-password|revoke-invite)',route)))
                 logout = self.command == "POST" and route == "/api/v1/auth/logout"
                 readable = route in ("/api/v1/hosts", "/api/v1/machines", "/api/v1/templates", "/api/v1/connection-setups", "/api/v1/resource-budgets",'/api/v1/images','/api/v1/image-tasks','/api/v1/image-registry') or re.fullmatch(r'/api/v1/image-tasks/[a-f0-9-]{36}',route) or re.fullmatch(r"/api/v1/hosts/[a-f0-9-]{36}/resources",route) or re.fullmatch(r"/api/v1/operations/[a-f0-9-]{36}", route)
                 writable = route in ("/api/v1/machines", "/api/v1/connection-setups", "/api/v1/resource-budgets",'/api/v1/images/captures','/api/v1/image-registry/imports') or re.fullmatch(
-                    r"/api/v1/(?:machines/[a-f0-9-]{36}/(?:desired|operations|power-off)|hosts/[a-f0-9-]{36}/(?:accepting|checks)|connection-setups/[a-f0-9-]{36}/revoke)", route)
-                if not (image_upload or shell or download or upload or inspection or desktop or auth_status or login or setup or logout or (self.command == "GET" and readable) or (self.command == "POST" and writable)):
+                    r"/api/v1/(?:machines/[a-f0-9-]{36}/(?:desired|operations|power-off|delete|authorize)|hosts/[a-f0-9-]{36}/(?:accepting|checks)|connection-setups/[a-f0-9-]{36}/revoke)", route)
+                if not (image_upload or shell or download or upload or inspection or desktop or auth_status or login or claim or account_route or setup or logout or (self.command == "GET" and readable) or (self.command == "POST" and writable)):
                     raise Error("Unknown dashboard endpoint.", 404)
                 # Cookie sessions are same-origin only; bearer clients remain supported.
                 origins, hosts = self.headers.get_all("Origin", []), self.headers.get_all("Host", [])
@@ -99,12 +101,14 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                 cookie = SimpleCookie()
                 cookie.load(self.headers.get("Cookie", ""))
                 cookie_token = cookie["canaveral_session"].value if "canaveral_session" in cookie else ""
+                if tokens and cookie_token:
+                    raise Error('Mixed cookie and bearer credentials are forbidden.',400)
                 token = ""
                 if setup:
                     if not local_setup:
                         raise Error("Create the first administrator from localhost with an operator credential file configured.", 403)
                     token = bootstrap_token
-                elif not login:
+                elif not (login or claim):
                     if tokens:
                         if not tokens[0].startswith("Bearer "):
                             raise Error("Administrator credential required.", 401)
@@ -118,6 +122,8 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                             token = secret(token)
                         except Error:
                             raise Error("Administrator credential rejected.", 401)
+                def authorize_machine(client, machine_id):
+                    return client.request('POST','/v1/machines/'+machine_id+'/authorize',{'action':'access'})
                 if logout:
                     self.set_session_cookie("", clear=True)
                 if image_upload:
@@ -136,14 +142,12 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                     metadata=json.loads(unquote(headers[0]))
                     host_id=image_upload.group(1)
                     image_import_connector(host_id,check_only=True)
-                    last_check=[0]
                     def image_authorized():
                         try:
-                            if not last_check[0] or execution_monotonic()-last_check[0]>=1:
-                                client.request('GET','/v1/hosts');last_check[0]=execution_monotonic()
+                            client.request('GET','/v1/hosts')
                             return image_import_connector(host_id,check_only=True)
                         except Error:return False
-                    result=image_import_connector(host_id,metadata,self.rfile,size,image_authorized)
+                    result=image_import_connector(host_id,metadata,AuthorizedReader(self.rfile,image_authorized),size,image_authorized)
                     self.json(result)
                     return
                 if download:
@@ -157,14 +161,14 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                     target=options.get("path")
                     if not isinstance(target,str) or not target or "\x00" in target:raise Error("Invalid guest path.",400)
                     client=Client(orchestrator_url,token,allow_http)
-                    client.request("GET","/v1/machines")
+                    authorize_machine(client,download.group(1))
                     source=download_connector(download.group(1),target,options.get("app"))
                     self.close_connection=True
                     try:
                         # Check before headers, including empty files. Hold the final
                         # block until verification so a failed transfer ends short.
                         source.verify()
-                        if not download_connector(download.group(1),check_only=True):raise Error('Download authorization ended.',401)
+                        if not (authorize_machine(client,download.group(1)) and download_connector(download.group(1),check_only=True)):raise Error('Download authorization ended.',401)
                         self.streaming = True
                         self.send_response(200)
                         self.send_header("Content-Type","application/octet-stream")
@@ -176,23 +180,24 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                         self.end_headers()
                         remaining=source.size
                         while remaining:
-                            client.request("GET","/v1/machines")
-                            if not download_connector(download.group(1),check_only=True):break
+                            if not (authorize_machine(client,download.group(1)) and download_connector(download.group(1),check_only=True)):break
                             data=source.read(min(1048576,remaining))
                             if not data:break
                             if len(data)>min(1048576,remaining):raise Error('Download source exceeded its declared length.',409)
                             if len(data)==remaining:source.verify()
-                            if not download_connector(download.group(1),check_only=True):break
+                            if not (authorize_machine(client,download.group(1)) and download_connector(download.group(1),check_only=True)):break
                             self.wfile.write(data);remaining-=len(data)
                     finally:source.close()
                     return
                 if upload or inspection:
                     client = Client(orchestrator_url, token, allow_http)
-                    client.request("GET", "/v1/machines")
+                    authorize_machine(client,(inspection or upload).group(1))
                     if inspection:
                         if not accessibility_connector:
                             raise Error("Live inspection is not attached to this dashboard.", 409)
-                        self.json(accessibility_connector(inspection.group(1)))
+                        result=accessibility_connector(inspection.group(1))
+                        authorize_machine(client,inspection.group(1))
+                        self.json(result)
                         return
                     if not upload_connector:
                         raise Error("Streaming uploads are not attached to this dashboard.", 409)
@@ -207,31 +212,35 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                     app = self.headers.get("X-Canaveral-App")
                     if not target or len(target) > 4096 or "\x00" in target:
                         raise Error("Choose a guest destination path.", 400)
-                    checked = [0.0]
                     def authorized():
-                        if not checked[0] or execution_monotonic() - checked[0] >= 1:
-                            client.request("GET", "/v1/machines")
-                            checked[0] = execution_monotonic()
-                        return bool(upload_connector(upload.group(1), check_only=True))
-                    self.json(upload_connector(upload.group(1), target, app, self.rfile, size, authorized))
+                        try:
+                            authorize_machine(client,upload.group(1))
+                            return bool(upload_connector(upload.group(1), check_only=True))
+                        except Error:return False
+                    self.json(upload_connector(upload.group(1), target, app, AuthorizedReader(self.rfile,authorized), size, authorized))
                     return
                 if shell:
                     if not shell_connector:raise Error('No interactive shell runner is attached.',409)
                     if not origins or self.headers.get('Upgrade','').lower()!='websocket':raise Error('A same-origin terminal WebSocket is required.',403)
                     client=Client(orchestrator_url,token,allow_http)
-                    client.request('GET','/v1/auth/session')
                     machine_id,session_id=shell.groups()
+                    authorize_machine(client,machine_id)
                     shell_connector(machine_id,check_only=True)
                     def shell_authorized():
                         try:
-                            client.request('GET','/v1/auth/session')
+                            authorize_machine(client,machine_id)
                             return shell_connector(machine_id,check_only=True)
                         except Error:return False
                     # Established streams do not consume the short-request pool or
                     # impose a shell count cap. OS resources remain the limit.
                     self.server.release_slot(self.connection)
                     from .shell_socket import relay as shell_relay
-                    shell_relay(self,session_id,lambda request:shell_connector(machine_id,request=request),shell_authorized)
+                    def control(request):
+                        if not shell_authorized():raise Error('Terminal authorization ended.',401)
+                        result=shell_connector(machine_id,request=request)
+                        if not shell_authorized():raise Error('Terminal authorization ended.',401)
+                        return result
+                    shell_relay(self,session_id,control,shell_authorized)
                     return
                 if desktop:
                     if not desktop_connector:
@@ -239,11 +248,11 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                     if not origins or self.headers.get("Upgrade", "").lower() != "websocket":
                         raise Error("A same-origin desktop WebSocket is required.", 403)
                     client = Client(orchestrator_url, token, allow_http)
-                    client.request("GET", "/v1/auth/session")
                     machine_id = desktop.group(1)
+                    authorize_machine(client,machine_id)
                     def authorized():
                         try:
-                            client.request("GET", "/v1/auth/session")
+                            authorize_machine(client,machine_id)
                             return desktop_connector(machine_id, check_only=True)
                         except Error:
                             return False
@@ -251,7 +260,8 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                     # release short-request capacity after authentication and
                     # let the operator and available OS resources set the count.
                     self.server.release_slot(self.connection)
-                    remote = desktop_connector(machine_id)
+                    if not authorized():raise Error('Desktop authorization ended.',401)
+                    remote = AuthorizedRemote(desktop_connector(machine_id),authorized)
                     from .desktop_socket import relay
                     relay(self, remote, authorized)
                     return
@@ -277,7 +287,7 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                 result = Client(orchestrator_url, token, allow_http).request(self.command, route[4:], value)
                 if route == '/api/v1/connection-setups':
                     result['controllerUrl'] = orchestrator_url
-                if login or setup:
+                if login or setup or claim and route=="/api/v1/auth/claim":
                     self.set_session_cookie(secret(result.pop("token")))
                 if auth_status:
                     result["setupAllowed"] = local_setup
@@ -376,3 +386,74 @@ def server(address, orchestrator_url, allow_http=False, bootstrap_token=None, re
                 self.release_slot(args[0])
 
     return Server(address, Handler)
+
+
+class AuthorizedRemote:
+    """Fence socket and native-display I/O after blocking reads as well as writes."""
+    def __init__(self, remote, authorized):
+        self.remote,self.authorized=remote,authorized
+        # Native display engines also fence their internal provider writes.
+        callback=getattr(remote,'authorized_callback',None)
+        if callable(callback):
+            remote.authorized_callback=lambda:authorized() and callback()
+
+    def check(self):
+        if not self.authorized():raise Error('Connection authorization ended.',401)
+
+    def recv(self, size):
+        self.check()
+        data=self.remote.recv(size)
+        self.check()
+        return data
+
+    def sendall(self, data):
+        self.check()
+        return self.remote.sendall(data)
+
+    def __getattr__(self, name):
+        if name=='run_display':
+            run=getattr(self.remote,name)
+            def display(channel):
+                self.check()
+                return run(AuthorizedChannel(channel,self.authorized))
+            return display
+        return getattr(self.remote,name)
+
+
+class AuthorizedChannel:
+    def __init__(self, channel, authorized):
+        self.channel,self.authorized=channel,authorized
+
+    def check(self):
+        if not self.authorized():raise Error('Display authorization ended.',401)
+
+    def send(self, *args, **kwargs):
+        self.check()
+        return self.channel.send(*args,**kwargs)
+
+    def send_bytes(self, data):
+        self.check()
+        return self.channel.send_bytes(data)
+
+    def send_control(self, value):
+        self.check()
+        return self.channel.send_control(value)
+
+    def receive(self, timeout=.25):
+        self.check()
+        result=self.channel.receive(min(timeout,.25))
+        self.check()
+        return result
+
+    def __getattr__(self,name):return getattr(self.channel,name)
+
+
+class AuthorizedReader:
+    def __init__(self, source, authorized):
+        self.source,self.authorized=source,authorized
+
+    def read(self, size=-1):
+        if not self.authorized():raise Error('Transfer authorization ended.',401)
+        data=self.source.read(size)
+        if not self.authorized():raise Error('Transfer authorization ended.',401)
+        return data

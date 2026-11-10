@@ -3,6 +3,7 @@
 These documents describe implementation contracts and setup. Native acceptance, provider binding and recovery limits remain explicit in each contract. They do not promise full platform parity. Python runtime paths remain authoritative; experimental Rust and TypeScript libraries do not replace them.
 
 - [access transport](access-transport.md)
+- [user accounts and personal API tokens](accounts-and-tokens.md)
 - [android runtime ownership](android-runtime-ownership.md)
 - [android transfer](android-transfer.md)
 - [applications](applications.md)

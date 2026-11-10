@@ -18,7 +18,16 @@ import { record } from "@/lib/types";
 import type { AuthState } from "@/lib/types";
 import type { Host } from "@/lib/infrastructure";
 import type { RegistryEntry, Resources } from "@/lib/catalogue";
-type View = "machines" | "hosts" | "orchestrators" | "templates";
+type View =
+  | "machines"
+  | "hosts"
+  | "orchestrators"
+  | "templates"
+  | "account"
+  | "tokens"
+  | "users";
+import { AccountPage, TokensPage, UsersPage } from "@/components/accounts";
+import { ClaimScreen, takeClaim } from "@/components/claim-screen";
 interface CreateConfig {
   templates: GroupedImage[];
   selected?: GroupedImage;
@@ -177,7 +186,8 @@ const currentView = (): View => {
   const name = location.hash.slice(1).split("/")[0] ?? "";
   return name === "images"
     ? "templates"
-    : Object.hasOwn(views, name)
+    : ["account", "tokens", "users"].includes(name) ||
+        Object.hasOwn(views, name)
       ? (name as View)
       : "machines";
 };
@@ -226,6 +236,8 @@ function Status({ text }: { text: string }) {
   );
 }
 export function App() {
+  const [claim, setClaim] = useState(takeClaim);
+  const identity = useRef<User | null>(null);
   const [auth, setAuth] = useState<AuthState>("checking"),
     [user, setUser] = useState<User | null>(null),
     [authError, setAuthError] = useState("");
@@ -239,7 +251,7 @@ export function App() {
     [message, setMessage] = useState(""),
     [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false),
-    [view, setView] = useState(currentView),
+    [requestedView, setView] = useState(currentView),
     [filter, setFilter] = useState("all"),
     [query, setQuery] = useState("");
   const [controlId, setControlId] = useState<string | null>(null);
@@ -254,6 +266,11 @@ export function App() {
     [captureId, setCaptureId] = useState<string | null>(null);
   const [registryOpen, setRegistryOpen] = useState(false);
   const [powerOffId, setPowerOffId] = useState<string | null>(null);
+  const view: View =
+    user?.role !== "admin" &&
+    ["hosts", "orchestrators", "users"].includes(requestedView)
+      ? "machines"
+      : requestedView;
   const isInfrastructure = view === "hosts" || view === "orchestrators";
   const infrastructureKind = (h: Host) =>
     h.kind || (h.provider === "kubevirt" ? "orchestrator" : "host");
@@ -279,6 +296,7 @@ export function App() {
     refreshing.current = null;
     acting.current = false;
     setUser(null);
+    identity.current = null;
     setBusy(old);
     setCreate(null);
     setDetailId(null);
@@ -298,8 +316,9 @@ export function App() {
     setAuthError(reason);
     try {
       if (old) await api("auth/logout", {});
-    } catch {
-      setAuthError("Could not sign out on the server. Retry when connected.");
+    } catch (error) {
+      if (statusCode(error) !== 401)
+        setAuthError("Could not sign out on the server. Retry when connected.");
     } finally {
       if (session.current.generation === generation) setBusy(false);
     }
@@ -316,7 +335,8 @@ export function App() {
     setAuthError("");
     try {
       const s = await api("auth/status", undefined, authStatus);
-      if (s.user) {
+      if (s.user?.status === "active") {
+        identity.current = s.user;
         session.current.active = true;
         setUser(s.user);
         await refresh();
@@ -330,7 +350,7 @@ export function App() {
     }
   }
   useEffect(() => {
-    loadAuth();
+    if (!claim) loadAuth();
   }, []);
   async function refresh() {
     if (refreshing.current) return refreshing.current;
@@ -338,8 +358,30 @@ export function App() {
     if (!active) return;
     const task = (async () => {
       try {
+        const current = await api("auth/session", undefined, loginReceipt);
+        if (generation !== session.current.generation) return;
+        if (current.user.status !== "active") {
+          await signOut(
+            "This account is not active. Contact your administrator.",
+          );
+          return;
+        }
+        if (
+          identity.current &&
+          (identity.current.id !== current.user.id ||
+            identity.current.role !== current.user.role)
+        ) {
+          await signOut(
+            "Your account access changed. Sign in again to continue.",
+          );
+          return;
+        }
+        identity.current = current.user;
+        setUser(current.user);
         const [h, m, t] = await Promise.all([
-          api("hosts", undefined, hostsResponse),
+          identity.current?.role === "admin"
+            ? api("hosts", undefined, hostsResponse)
+            : Promise.resolve([]),
           api("machines", undefined, machinesResponse),
           api("templates", undefined, imagesResponse),
         ]);
@@ -419,6 +461,9 @@ export function App() {
       );
       if (generation !== session.current.generation) return;
       session.current.active = true;
+      if (result.user.status !== "active")
+        throw new Error("This account is not active.");
+      identity.current = result.user;
       setUser(result.user);
       setAuth("login");
       await refresh();
@@ -508,6 +553,16 @@ export function App() {
   const resourceHost = infrastructureHosts.find(
     (host) => host.id === infrastructureId,
   );
+  if (claim)
+    return (
+      <ClaimScreen
+        token={claim}
+        onDone={() => {
+          setClaim(null);
+          loadAuth();
+        }}
+      />
+    );
   if (!user)
     return (
       <LoginScreen
@@ -563,7 +618,11 @@ export function App() {
   return (
     <SidebarProvider>
       <WorkspaceSidebar
-        views={views}
+        views={
+          user.role === "admin"
+            ? views
+            : { machines: views.machines, templates: views.templates }
+        }
         view={view}
         counts={{
           machines: inventory.machines.length,
@@ -642,7 +701,18 @@ export function App() {
           </div>
         </header>
         <div className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 lg:px-6">
-          {resourcePage ? (
+          {view === "account" ? (
+            <AccountPage
+              user={user}
+              onChanged={() =>
+                signOut("Password changed. Sign in with your new password.")
+              }
+            />
+          ) : view === "tokens" ? (
+            <TokensPage user={user} />
+          ) : view === "users" && user.role === "admin" ? (
+            <UsersPage />
+          ) : resourcePage ? (
             <>
               <div className="min-w-0 space-y-2">
                 <a
@@ -716,7 +786,7 @@ export function App() {
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {view === "templates" && (
+                    {view === "templates" && user.role === "admin" && (
                       <Button
                         variant="outline"
                         onClick={() => setRegistryOpen(true)}
@@ -724,7 +794,7 @@ export function App() {
                         Base image registry
                       </Button>
                     )}
-                    {view === "templates" && (
+                    {view === "templates" && user.role === "admin" && (
                       <Button
                         variant="outline"
                         onClick={() => setImageImport(true)}
@@ -777,7 +847,7 @@ export function App() {
                   spacing={1}
                   aria-label="Filter inventory"
                 >
-                  {views[view].filters.map((f) => (
+                  {views[view as keyof typeof views].filters.map((f) => (
                     <ToggleGroupItem
                       className="rounded-md text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm"
                       key={f}
@@ -805,7 +875,9 @@ export function App() {
                   </InputGroup>
                 </div>
               </div>
-              {view === "templates" && <ImageActivity onRefresh={refresh} />}
+              {view === "templates" && user.role === "admin" && (
+                <ImageActivity onRefresh={refresh} />
+              )}
               <section
                 className={
                   !items.length
@@ -984,21 +1056,22 @@ export function App() {
                                 Power off
                               </Button>
                             )}
-                          {m.template.mode !== "device" && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={
-                                m.desired !== "stopped" ||
-                                m.observed !== "stopped" ||
-                                !!m.powerOffRequest
-                              }
-                              onClick={() => setCaptureId(m.id)}
-                              aria-label={`Capture ${m.name} as image`}
-                            >
-                              Capture image
-                            </Button>
-                          )}
+                          {user.role === "admin" &&
+                            m.template.mode !== "device" && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  m.desired !== "stopped" ||
+                                  m.observed !== "stopped" ||
+                                  !!m.powerOffRequest
+                                }
+                                onClick={() => setCaptureId(m.id)}
+                                aria-label={`Capture ${m.name} as image`}
+                              >
+                                Capture image
+                              </Button>
+                            )}
                           {(m.template.mode === "device" ||
                             m.template.guestAccess) && (
                             <Button

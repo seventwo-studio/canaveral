@@ -1,4 +1,4 @@
-"""Isolated differential harness for the unchanged Python reference modules.
+"""Isolated differential harness, including one-way legacy account migration.
 
 The caller supplies a disposable database and synthetic secrets over stdin.
 This fixture is not a production dependency or a live-state conversion tool.
@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from canaveral.accounts import Accounts
 from canaveral.consumers import ConsumerStore
+from canaveral.store import Store
 
 
 class FixtureStore(ConsumerStore):
@@ -37,14 +38,16 @@ class FixtureStore(ConsumerStore):
             db.close()
 
 
-value = json.load(sys.stdin)
-store = FixtureStore(sys.argv[2])
-accounts = Accounts(store)
 action = sys.argv[1]
+value = json.load(sys.stdin)
+account_actions = ('setup', 'login', 'session', 'logout', 'authorized')
+store = Store(sys.argv[2], clock=lambda: 80000) if action in account_actions else FixtureStore(sys.argv[2])
+accounts = Accounts(store) if action in account_actions else None
 if action == 'setup': result = accounts.setup(value)
 elif action == 'login': result = accounts.login(value)
 elif action == 'session': result = accounts.session(value['token'])
 elif action == 'logout': result = accounts.logout(value['token'])
+elif action == 'authorized': result = {'authorized': accounts.authorized(value['token'])}
 elif action == 'create': result = store.create_consumer(value)
 elif action == 'authenticate': result = store.authenticate_consumer(value['token'])
 elif action == 'rotate': result = store.consumer_credential(value['id'])

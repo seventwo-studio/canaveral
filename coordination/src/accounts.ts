@@ -42,11 +42,17 @@ interface Account { username: string; salt: string; password_hash: string; itera
 export class Accounts {
   private readonly dummySalt = randomBytes(32).toString("hex");
   constructor(readonly store: SqliteStore) {
-    store.transaction(db => db.exec(`
+    store.transaction(db => {
+      const migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_migrations'").get();
+      if (migrated && db.prepare("SELECT 1 FROM account_migrations WHERE id=1").get()) {
+        throw new ServiceError("This database uses Python user and API-token authorization. Use the Python controller; the experimental TypeScript account backend cannot open it.", 503);
+      }
+      db.exec(`
       CREATE TABLE IF NOT EXISTS administrator (id INTEGER PRIMARY KEY CHECK (id=1), username TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password_hash TEXT NOT NULL, iterations INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS admin_sessions (token_hash TEXT PRIMARY KEY, expires REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS auth_throttle (id INTEGER PRIMARY KEY CHECK (id=1), started REAL NOT NULL, attempts INTEGER NOT NULL);
-    `));
+      `);
+    });
   }
 
   status(): { setupRequired: boolean } {

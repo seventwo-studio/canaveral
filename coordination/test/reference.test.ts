@@ -27,26 +27,34 @@ function python(action: string, path: string, value: unknown): Record<string, un
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
 
-test("Python-created account hashes and sessions are readable and revocable from TypeScript", async t => {
+test("Python user accounts retain login and revocation while refusing legacy TypeScript authority", t => {
   const { path, store } = fixture(t);
   const created = python("setup", path, { username: "ADMIN", password });
-  const accounts = new Accounts(store);
-  assert.deepEqual(accounts.session(created.token), { user: { username: "admin" }, expiresAt: created.expiresAt });
-  const login = await accounts.login({ username: "ADMIN", password });
+  assert.throws(() => new Accounts(store), /Use the Python controller/);
+  const login = python("login", path, { username: "ADMIN", password });
   assert.deepEqual(python("session", path, { token: login.token }), { user: login.user, expiresAt: login.expiresAt });
   python("logout", path, { token: login.token });
-  assert.equal(accounts.authorized(login.token), false);
-  accounts.logout(created.token);
-  assert.equal(store.transaction(db => db.prepare("SELECT count(*) AS n FROM admin_sessions").get()!.n), 0);
+  assert.equal(python("authorized", path, { token: login.token }).authorized, false);
+  python("logout", path, { token: created.token });
+  assert.equal(store.transaction(db => db.prepare("SELECT count(*) AS n FROM user_sessions").get()!.n), 0);
 });
 
-test("TypeScript-created account hashes and sessions are readable from Python", async t => {
+test("legacy TypeScript account hashes and sessions migrate once into Python user identities", async t => {
   const { path, store } = fixture(t);
   const accounts = new Accounts(store);
   const created = await accounts.setup({ username: "admin", password });
-  assert.deepEqual(python("session", path, { token: created.token }), { user: created.user, expiresAt: created.expiresAt });
+  const migrated = python("session", path, { token: created.token });
+  const user = migrated.user as { id: string; username: string; role: string };
+  assert.equal(user.username, created.user.username);
+  assert.equal(user.role, "admin");
+  assert.match(user.id, /^[a-f0-9-]{36}$/);
+  assert.equal(migrated.expiresAt, created.expiresAt);
   const login = python("login", path, { username: "ADMIN", password });
-  assert.equal(accounts.authorized(login.token), true);
+  assert.equal((login.user as { id: string }).id, user.id);
+  assert.equal(accounts.authorized(created.token), false);
+  assert.equal(accounts.authorized(login.token), false);
+  await assert.rejects(accounts.login({ username: "admin", password }), /Username or password rejected/);
+  assert.throws(() => new Accounts(store), /Use the Python controller/);
 });
 
 test("application policies, one-time credential hashes, rotations and revocation interoperate", t => {

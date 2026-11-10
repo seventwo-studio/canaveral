@@ -1,3 +1,4 @@
+import { adminUser } from "./auth-fixture.js";
 import { test, expect } from "@playwright/test";
 
 for (const width of [320, 1440]) {
@@ -32,8 +33,8 @@ for (const width of [320, 1440]) {
     await page.route("**/api/v1/**", async (route) => {
       const path = new URL(route.request().url()).pathname.split("/api/v1/")[1];
       let result = {};
-      if (path === "auth/status")
-        result = { setupRequired: false, user: { username: "admin" } };
+      if (["auth/status", "auth/session"].includes(path))
+        result = { setupRequired: false, user: adminUser };
       else if (path === "hosts") result = { hosts: [host] };
       else if (path === "templates") result = { templates: [image] };
       else if (path === "machines") result = { machines: [machine] };
@@ -131,21 +132,20 @@ for (const width of [1440, 1133, 390, 320])
       const path = new URL(route.request().url()).pathname.split("/api/v1/")[1];
       if (path === "auth/login") signedIn = true;
       if (path === "auth/logout") signedIn = false;
-      const value =
-        path === "auth/status"
-          ? {
-              setupRequired: false,
-              ...(signedIn ? { user: { username: "admin" } } : {}),
-            }
-          : path === "auth/login"
-            ? { user: { username: "admin" } }
-            : path === "hosts"
-              ? { hosts: [h] }
-              : path === "machines"
-                ? { machines: [m] }
-                : path === "templates"
-                  ? { templates: [t] }
-                  : {};
+      const value = ["auth/status", "auth/session"].includes(path)
+        ? {
+            setupRequired: false,
+            ...(signedIn ? { user: adminUser } : {}),
+          }
+        : path === "auth/login"
+          ? { user: adminUser }
+          : path === "hosts"
+            ? { hosts: [h] }
+            : path === "machines"
+              ? { machines: [m] }
+              : path === "templates"
+                ? { templates: [t] }
+                : {};
       await route.fulfill({ json: value });
     });
     const response = await page.goto("/");
@@ -313,8 +313,8 @@ test("device workspace browses files and keeps two terminals under CSP", async (
       "",
     );
     let result;
-    if (path === "auth/status")
-      result = { setupRequired: false, user: { username: "admin" } };
+    if (["auth/status", "auth/session"].includes(path))
+      result = { setupRequired: false, user: adminUser };
     else if (path === "hosts") result = { hosts: [h] };
     else if (path === "machines") result = { machines: [device] };
     else if (path === "templates") result = { templates: [t] };

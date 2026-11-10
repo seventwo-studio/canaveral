@@ -46,7 +46,10 @@ export interface Inventory {
   templates: ImageOffer[];
 }
 export interface User {
+  id: string;
   username: string;
+  role: "admin" | "user";
+  status: "pending" | "active" | "disabled";
 }
 const string = (v: unknown): v is string => typeof v === "string";
 const finite = (v: unknown): v is number =>
@@ -289,10 +292,20 @@ export function imagesResponse(value: unknown): ImageOffer[] {
     } as unknown as ImageOffer;
   });
 }
-function user(value: unknown): User {
+export function user(value: unknown): User {
   const u = record(value);
-  requiredStrings(u, ["username"]);
-  return { username: u.username as string };
+  requiredStrings(u, ["id", "username"]);
+  if (
+    !["admin", "user"].includes(String(u.role)) ||
+    !["pending", "active", "disabled"].includes(String(u.status))
+  )
+    throw new Error("Invalid account identity.");
+  return {
+    id: u.id as string,
+    username: u.username as string,
+    role: u.role as User["role"],
+    status: u.status as User["status"],
+  };
 }
 export function authStatus(value: unknown): {
   user?: User;

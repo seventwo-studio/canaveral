@@ -144,8 +144,22 @@ test("authentication accepts an explicit user and rejects truthy malformed setup
     setupAllowed: false,
     user: undefined,
   });
-  expect(loginReceipt({ user: { username: "operator" } })).toEqual({
-    user: { username: "operator" },
+  expect(
+    loginReceipt({
+      user: {
+        id: "operator-id",
+        username: "operator",
+        role: "admin",
+        status: "active",
+      },
+    }),
+  ).toEqual({
+    user: {
+      id: "operator-id",
+      username: "operator",
+      role: "admin",
+      status: "active",
+    },
   });
   expect(() => authStatus({ setupRequired: "false" })).toThrow();
   expect(() => loginReceipt({ user: {} })).toThrow();

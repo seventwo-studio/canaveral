@@ -33,7 +33,7 @@ export function WorkspaceSidebar({
   views: Record<string, { icon: LucideIcon }>;
   view: string;
   counts: Record<string, number>;
-  user: { username: string };
+  user: { username: string; role: "admin" | "user" };
   onSignOut: () => void;
 }) {
   const { setOpenMobile, isMobile } = useSidebar();
@@ -64,7 +64,7 @@ export function WorkspaceSidebar({
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel className="text-[10px] uppercase tracking-widest">
-            Infrastructure
+            Workspace
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <nav aria-label="Main navigation">
@@ -118,7 +118,7 @@ export function WorkspaceSidebar({
                   <div className="grid flex-1 text-left leading-tight">
                     <span className="truncate text-sm">{user.username}</span>
                     <span className="text-xs text-muted-foreground">
-                      Administrator
+                      {user.role === "admin" ? "Administrator" : "User"}
                     </span>
                   </div>
                   <ChevronsUpDown className="ml-auto size-4" />
@@ -131,6 +131,17 @@ export function WorkspaceSidebar({
               >
                 <DropdownMenuLabel>{user.username}</DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <a href="#account">Account</a>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <a href="#tokens">API tokens</a>
+                </DropdownMenuItem>
+                {user.role === "admin" && (
+                  <DropdownMenuItem asChild>
+                    <a href="#users">Users</a>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onSelect={onSignOut}>
                   <LogOut />
                   Sign out

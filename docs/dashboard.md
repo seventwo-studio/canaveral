@@ -194,13 +194,27 @@ Open [the local dashboard](http://127.0.0.1:8766). If no administrator exists, t
 python3 -m canaveral --url https://canaveral.example.internal dashboard
 ```
 
-The dashboard binds to loopback by default. Browser account creation additionally requires both a loopback peer and a loopback Host; use localhost or a local port-forward for the initial setup. Remote browsers can sign in after the first account exists. For remote access, put the dashboard behind your private HTTPS proxy, preserve the incoming Host header, proxy the entire origin without a path prefix, and bind only to the intended interface. The browser refuses credentials over non-loopback cleartext HTTP. Upstream HTTPS certificate checks remain enabled; `--allow-http` explicitly permits a trusted private upstream network, independently of browser transport.
+The dashboard binds to loopback by default. The local first-admin form requires both a loopback peer and a loopback Host. For remote setup, an operator can issue a one-time setup link; the recipient chooses a separate Canaveral password in their own browser. Existing administrators invite additional users from **Account menu → Users**. See [accounts and personal API tokens](accounts-and-tokens.md) for the complete contract.
+
+For remote access, put the dashboard behind your private HTTPS proxy, preserve the incoming Host header, proxy the entire origin without a path prefix, and bind only to the intended interface. The browser refuses credentials over non-loopback cleartext HTTP. Upstream HTTPS certificate checks remain enabled; `--allow-http` explicitly permits a trusted private upstream network, independently of browser transport.
 
 An operator can also create the first account through the CLI. It prompts privately for a password, or accepts `--password-file` for an already protected local file. Running it again leaves the existing account unchanged:
 
 ```sh
 python3 -m canaveral --token-file ./secrets/admin.token admin create --username admin
 ```
+
+To let the first administrator choose their password remotely instead:
+
+```sh
+python3 -m canaveral --token-file ./secrets/admin.token admin setup-link \
+  --dashboard-url https://canaveral.example.internal \
+  --output-file ./secrets/first-admin.link
+```
+
+Open the private link file within 15 minutes. The operator credential remains on
+the server. The link is single-use; generating a replacement invalidates the old
+one. It grants first-admin setup only and stops working after setup completes.
 
 ## Docker and Kubernetes
 
@@ -230,7 +244,18 @@ The example assumes the existing `canaveral` namespace and `orchestrator` Servic
 
 ## Authentication and state
 
-The orchestrator stores a salted PBKDF2-HMAC-SHA-256 password hash with 600,000 iterations, not the password. The implementation uses Python's standard library; [OWASP's password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) documents this work factor. Initial setup requires the operator credential and atomically creates only the first administrator. Login is limited to ten attempts per minute across dashboard replicas, with the budget retained over restarts. Usernames are case-insensitive. There is no public registration, account replacement or password-reset endpoint in this initial account implementation; retain the database and operator credential for recovery.
+The orchestrator stores a salted PBKDF2-HMAC-SHA-256 password hash with 600,000 iterations. The implementation uses Python's standard library; [OWASP's password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) documents this work factor. Initial setup requires operator proof and atomically creates the first administrator. Sign-in and public claim attempts have a persistent rate limit. Usernames are case-insensitive. Ordinary users access only their machines; admins manage all machines and user accounts. There is no public registration.
+
+**Account** provides password change. **API tokens** creates and revokes personal
+tokens with explicit permissions and expiry; save the secret when it is shown.
+Tokens remain limited by their owner's current account permissions. **Users**
+lets an admin create invitations, issue password-reset links, change roles and
+disable accounts. Re-enabling returns an account to pending and requires a fresh
+invitation and password. Password reset immediately blocks the previous password and
+revokes existing sessions and tokens. The last active admin requires operator
+recovery. Back up the database before upgrading; legacy users/sessions and
+non-lease machine ownership migrate together. Retain the operator credential for
+recovery without deleting users or their machines.
 
 Successful setup or sign-in creates a random 30-day session. Only a hash of the
 token is persisted in SQLite. The gateway stores it in a host-only HttpOnly,
@@ -242,8 +267,9 @@ clears the cookie and revokes the controller session. An unreachable controller
 may delay revocation until expiry. Account/session state survives controller and
 gateway restarts through the existing database. Cookie mutations require a
 same-origin Origin header; cross-origin browser requests remain rejected.
-The operator and enrollment credentials remain separate for CLI, bootstrap and
-worker use; account sessions cannot enroll hosts.
+The operator, personal API token and enrollment credentials remain separate;
+account sessions and personal tokens cannot enroll hosts. The gateway rejects a
+request that supplies both a bearer credential and a session cookie.
 
 The dashboard forwards inventory, lifecycle, infrastructure setup/diagnostics and authentication endpoints to its fixed upstream, without forwarding browser Origin headers. The orchestrator continues rejecting direct browser origins. No public access or external identity provider is configured by starting the dashboard; use an existing trusted private access boundary.
 

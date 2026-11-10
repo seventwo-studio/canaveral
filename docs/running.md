@@ -6,6 +6,11 @@ Run the control plane on any supported Python host, in Docker or in Kubernetes. 
 
 Use Python 3.9+ and run `python3 -m canaveral` from the checkout, or install the package and use `canaveral`. `python3 -m canaveral init ./secrets` creates private credential files. It refuses to overwrite existing files. Start `serve` as in the root README; its default bind address is loopback. For access from other machines, provide a TLS proxy and set `--bind` to the intended private interface. Persist `--database` and keep administrator credentials with the owner.
 
+Use [user accounts and scoped personal API tokens](accounts-and-tokens.md) for
+normal machine access. Users own private machines; admins manage all users and
+machines. Keep operator and runner-enrollment credentials separate. Back up an
+existing controller database before its first upgrade to the user account schema.
+
 Copy an example from `examples/` into a private host configuration. Set a deliberate capacity budget, correct architecture, bootable base image paths and immutable revision IDs. Use reusable template files and preparation recipes as described in [Configurable computers](templates.md). Remove templates that are not installed. On each host:
 
 ```sh

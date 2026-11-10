@@ -28,6 +28,10 @@ python3 -m canaveral --token-file ./secrets/admin.token hosts
 ```
 
 An empty list means the controller works and has no execution capacity yet.
+For everyday machine access and automation, create a user account and a scoped
+[personal API token](accounts-and-tokens.md). Keep the operator credential for
+bootstrap, recovery and administration. Users see only their own machines; admins
+can manage every user's machines.
 For a Linux server with KVM/libvirt, copy `examples/host-libvirt.json` to
 `host.json`. Keep only installed templates. Set the actual architecture,
 absolute image and disk paths, libvirt network, immutable template revision and
