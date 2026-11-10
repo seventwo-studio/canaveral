@@ -316,7 +316,7 @@ mod unix {
                     &mut master,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut winsize,
+                    &raw mut winsize,
                 )
             };
             if pid < 0 {

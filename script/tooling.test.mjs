@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -143,4 +143,21 @@ test('npm executable finalization adds one Node shebang and executable permissio
  writeFileSync(cli,'console.log("fixture");\n');prepareCli(cli);prepareCli(cli);
  assert.equal(readFileSync(cli,'utf8'),'#!/usr/bin/env node\nconsole.log("fixture");\n');
  if(process.platform!=='win32') assert.equal(lstatSync(cli).mode&0o777,0o755);
+});
+test('native packaging breaks Cargo artifact hardlinks before owned runtime admission',async t=>{
+ const {prepareNative}=await import('./prepare_native.mjs'),root=directory(t),build=join(root,'target/debug');
+ mkdirSync(build,{recursive:true});const suffix=process.platform==='win32'?'.exe':'';
+ for(const name of ['canaveral-mobile-native','apple-native-helper']) {
+  const source=join(build,name+suffix);writeFileSync(source,Buffer.from('compiled fixture '+name));
+  linkSync(source,source+'.cargo-artifact');assert.equal(lstatSync(source).nlink,2);
+ }
+ prepareNative(root);
+ const manifest=JSON.parse(readFileSync(join(root,'native/runtime.json')));
+ for(const name of ['canaveral-mobile-native','apple-native-helper']) {
+  const installed=join(root,'native',name+suffix),bytes=readFileSync(installed),source=join(build,name+suffix);
+  assert.equal(lstatSync(installed).nlink,1);
+  assert.deepEqual(manifest.artifacts[name],{file:name+suffix,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
+  writeFileSync(source+'.cargo-artifact','changed build output');assert.deepEqual(readFileSync(installed),bytes);
+  if(process.platform!=='win32')assert.equal(lstatSync(installed).mode&0o777,0o755);
+ }
 });

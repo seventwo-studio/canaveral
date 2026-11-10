@@ -42,8 +42,10 @@ jobs:
             ~/.cargo/git
             target
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-typescript-fixtures
-      - name: Build Rust helper for disposable process and filesystem fixtures
-        run: cargo build --manifest-path ../Cargo.toml -p canaveral-mobile-native --locked
+      - name: Build and install Rust helpers for disposable process and filesystem fixtures
+        run: |
+          cargo build --manifest-path ../Cargo.toml -p canaveral-mobile-native -p canaveral-apple-native --locked
+          node ../script/prepare_native.mjs debug
       - run: npm run typecheck && npm run build && npm test
       - run: node --test ../crates/guest-agent/worker.test.ts ../VirtualMachines/GuestHelpers/linux_desktop.test.ts
   rust:
