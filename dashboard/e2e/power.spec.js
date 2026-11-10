@@ -1,3 +1,4 @@
+import { adminUser } from "./auth-fixture.js";
 import { test, expect } from "@playwright/test";
 
 for (const width of [320, 1440])
@@ -44,8 +45,8 @@ for (const width of [320, 1440])
       );
       let result = {},
         status = 200;
-      if (path === "auth/status")
-        result = { setupRequired: false, user: { username: "admin" } };
+      if (["auth/status", "auth/session"].includes(path))
+        result = { setupRequired: false, user: adminUser };
       if (path === "hosts") result = { hosts: [host] };
       if (path === "machines") result = { machines: [machine] };
       if (path === "templates") result = { templates: [] };

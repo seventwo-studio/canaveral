@@ -108,10 +108,10 @@ class InfrastructureStore(CapacityStore,HostMigrationStore):
         with self.transaction() as db:
             host=db.execute('SELECT * FROM hosts WHERE id=?',(host_id,)).fetchone()
             if not host:raise Error('Unknown host.',404)
-            return {'hostId':host_id,'budget':json.loads(host['offer'])['capacity'],'reserved':self._used(db,host_id),
+            return {'hostId':host_id,'capacity':json.loads(host['offer'])['capacity'],'limits':self._host_limits(db,host_id),'reserved':self._used(db,host_id),
                     'images':self._host_images(db,host),
                     'categories':self._resource_categories(db,host_id),
-                    'available':self._remaining_capacity(db,host_id),'sharedBudgets':self._host_budgets(db,host_id),
+                    'available':self._remaining_capacity(db,host_id),
                     'samples':[{'receivedAt':r['captured'],**json.loads(r['report'])} for r in db.execute('SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 360',(host_id,))],
                     'allocations':[{'id':r['id'],'name':json.loads(r['request'])['name'],'resources':json.loads(r['request'])['resources'],
                                     'desired':r['desired'],'observed':r['observed'],

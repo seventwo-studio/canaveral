@@ -1,3 +1,4 @@
+import { allocationLimits } from "@/lib/infrastructure";
 import type {
   Host,
   HostAllocation,
@@ -34,13 +35,13 @@ export function StackedResources({
   unavailable?: boolean;
 }) {
   const categories = data?.categories;
-  const budget = data?.budget || host.capacity;
+  const limits = allocationLimits(data || host);
   return (
     <section className="min-w-0 space-y-5" aria-label="Resources by category">
       <div>
         <h2 className="text-base font-medium">Resources</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Reserved capacity against this host’s budget. Measured usage is shown
+          Reserved capacity against this host’s limit. Measured usage is shown
           separately below.
         </p>
       </div>
@@ -64,7 +65,7 @@ export function StackedResources({
                   (sum, item) => sum + item[key],
                   0,
                 ),
-                capacity = budget[key];
+                capacity = limits[key];
               const scale = Math.max(capacity, total, 1),
                 free = Math.max(0, capacity - total);
               let offset = 0;
@@ -127,7 +128,7 @@ export function StackedResources({
                     className={`text-xs ${total > capacity ? "text-destructive" : "text-muted-foreground"}`}
                   >
                     {total > capacity
-                      ? `${amount(key, total - capacity)} over budget`
+                      ? `${amount(key, total - capacity)} over limit`
                       : `${amount(key, free)} unreserved`}
                   </p>
                 </div>

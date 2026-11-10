@@ -47,7 +47,7 @@ runner services in the same sample.
 Memory remains summed process RSS, not unique physical memory or guest allocation.
 CPU remains normalized to measured host CPU count; its first observation, missing
 host CPU count, invalid counters or counter rollback cannot invent usage. These
-samples remain separate from configured budgets, reservations and host totals.
+samples remain separate from saved host limits, reservations and host totals.
 Inventory and counter reads are not an atomic kernel snapshot.
 
 Missing native libraries/permissions, unsupported or partial cgroup mounts,

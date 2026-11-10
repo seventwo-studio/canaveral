@@ -46,7 +46,7 @@ requires matching storage and assignment ownership before reporting absence.
 This is process accounting, not execution fencing or a cleanup receipt. It does
 not prove that every detached helper has exited, guest data is erased, quota can
 be released or an expired lease has stopped. It changes no controller admission,
-installed SDK, enrollment, machine lifecycle or resource budget. Ordinary consumer
+installed SDK, enrollment, machine lifecycle or host limits. Ordinary consumer
 execution remains gated.
 
 ## Verification

@@ -56,6 +56,19 @@ test("inventory preserves offline hosts, withheld image admission and unknown gu
     capabilities: machine.capabilities,
   });
 });
+test("machine ownership preserves null and unavailable values and rejects invalid IDs", () => {
+  expect(
+    machinesResponse({ machines: [{ ...machine, ownerId: null }] })[0]?.ownerId,
+  ).toBeNull();
+  expect(machinesResponse({ machines: [machine] })[0]?.ownerId).toBeUndefined();
+  expect(
+    machinesResponse({ machines: [{ ...machine, ownerId: "alice" }] })[0]
+      ?.ownerId,
+  ).toBe("alice");
+  expect(() =>
+    machinesResponse({ machines: [{ ...machine, ownerId: 123 }] }),
+  ).toThrow("Invalid machine owner");
+});
 test("malformed inventory collections and capabilities are not accepted as empty inventory", () => {
   expect(() => hostsResponse({})).toThrow();
   expect(() =>
@@ -144,8 +157,22 @@ test("authentication accepts an explicit user and rejects truthy malformed setup
     setupAllowed: false,
     user: undefined,
   });
-  expect(loginReceipt({ user: { username: "operator" } })).toEqual({
-    user: { username: "operator" },
+  expect(
+    loginReceipt({
+      user: {
+        id: "operator-id",
+        username: "operator",
+        role: "admin",
+        status: "active",
+      },
+    }),
+  ).toEqual({
+    user: {
+      id: "operator-id",
+      username: "operator",
+      role: "admin",
+      status: "active",
+    },
   });
   expect(() => authStatus({ setupRequired: "false" })).toThrow();
   expect(() => loginReceipt({ user: {} })).toThrow();

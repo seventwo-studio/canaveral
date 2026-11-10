@@ -1,5 +1,40 @@
 # Optional web dashboard
 
+## Administration
+
+Administrators have a visible Administration group in the sidebar. Open `#admin`
+for current machine, user, API-token and infrastructure counts, machine/connection
+attention states and links to the existing operational controls. Counts use the
+current inventory and credential snapshots. Unavailable data stays unavailable;
+these are not historical utilization or audit charts.
+
+`#admin/users` provides user search and status filters, machine ownership counts,
+invitations, recovery and role/status controls. Disable, password reset and role
+changes require a confirmation naming the account and consequences. Invitations
+and recovery links last 24 hours and are delivered manually. Re-enabling an account
+requires a fresh invitation and password; the controller protects the last active
+administrator. The old `#users` route remains usable.
+
+`#admin/tokens` lists personal API-token metadata across all users: owner,
+permissions, prefix, expiry, last use and revocation. Revocation requires explicit
+confirmation, checks the returned token/owner identity and refreshes the list.
+Unknown replies trigger a status refresh without replaying the mutation. Revoked
+records remain visible. Creating a token remains a personal account action; no
+administrator receives another user's secret. The controller and gateway enforce
+current administrator authority independently of navigation.
+
+The machine inventory shows owner names and an owner filter to administrators.
+`No user owner` means an explicit null owner; it does not establish whether the
+machine was created by an operator or an application lease. Older responses that
+omit ownership show `Owner unavailable`. Ownership is not reassigned here.
+Infrastructure, images, budgets and guest controls keep their existing contracts.
+
+Ordinary-user admin deep links return to the machine workspace without fetching
+privileged collections. Administrative caches belong to the active identity;
+late replies cannot restore a prior identity's data, and 401/403 responses clear
+the affected collection. Transport failures retain a labeled last snapshot where
+available. New admin endpoints require a matching controller and gateway version.
+
 ## TypeScript migration
 
 The React dashboard uses TypeScript. The entrypoint, all shared UI primitives, sidebar,
@@ -19,11 +54,11 @@ retarget a replacement display connection. Headless machines expose files and
 independent terminals without opening a graphics connection; iOS continues to
 deny shell access. The workspace imposes no shell-count or total upload-size cap.
 
-Image import/capture/activity, the base-image registry and shared-budget controls
+Image import/capture/activity, the base-image registry and host-limit controls
 also use TypeScript. Image-task responses are bound to the original request ID;
 import receipts must match the expected ID and byte count with a SHA-256 identity.
-Shared-budget receipts validate their ID, membership, reservations and overcommit
-flag before confirming a save. Registry entries validate media, resource amounts
+Host-limit receipts validate the selected host and requested CPU, memory and disk
+amounts before confirming a save. Registry entries validate media, resource amounts
 and HTTPS source links. Unknown task outcomes remain recovery states without
 automatic mutation replay. Numeric form fields retain their empty editing state.
 
@@ -122,7 +157,9 @@ Machine inventory must reflow rather than scroll horizontally or clip fields.
 Use wrapping cards, break long names/identifiers and keep every action visible
 within the available content width, including with the sidebar open.
 
-The Hosts inventory keeps **Add host** and **Shared budgets** in the top bar.
+The Hosts inventory keeps **Add host** in the top bar. Each host overview has
+**Canaveral host limits** with editable CPU, memory and disk fields. Shared
+budgets are no longer available.
 Omit the repeated visible Hosts heading and description; retain a screen-reader
 heading and let the top-bar actions wrap at narrow widths.
 
@@ -194,13 +231,27 @@ Open [the local dashboard](http://127.0.0.1:8766). If no administrator exists, t
 python3 -m canaveral --url https://canaveral.example.internal dashboard
 ```
 
-The dashboard binds to loopback by default. Browser account creation additionally requires both a loopback peer and a loopback Host; use localhost or a local port-forward for the initial setup. Remote browsers can sign in after the first account exists. For remote access, put the dashboard behind your private HTTPS proxy, preserve the incoming Host header, proxy the entire origin without a path prefix, and bind only to the intended interface. The browser refuses credentials over non-loopback cleartext HTTP. Upstream HTTPS certificate checks remain enabled; `--allow-http` explicitly permits a trusted private upstream network, independently of browser transport.
+The dashboard binds to loopback by default. The local first-admin form requires both a loopback peer and a loopback Host. For remote setup, an operator can issue a one-time setup link; the recipient chooses a separate Canaveral password in their own browser. Existing administrators invite additional users from **Account menu → Users**. See [accounts and personal API tokens](accounts-and-tokens.md) for the complete contract.
+
+For remote access, put the dashboard behind your private HTTPS proxy, preserve the incoming Host header, proxy the entire origin without a path prefix, and bind only to the intended interface. The browser refuses credentials over non-loopback cleartext HTTP. Upstream HTTPS certificate checks remain enabled; `--allow-http` explicitly permits a trusted private upstream network, independently of browser transport.
 
 An operator can also create the first account through the CLI. It prompts privately for a password, or accepts `--password-file` for an already protected local file. Running it again leaves the existing account unchanged:
 
 ```sh
 python3 -m canaveral --token-file ./secrets/admin.token admin create --username admin
 ```
+
+To let the first administrator choose their password remotely instead:
+
+```sh
+python3 -m canaveral --token-file ./secrets/admin.token admin setup-link \
+  --dashboard-url https://canaveral.example.internal \
+  --output-file ./secrets/first-admin.link
+```
+
+Open the private link file within 15 minutes. The operator credential remains on
+the server. The link is single-use; generating a replacement invalidates the old
+one. It grants first-admin setup only and stops working after setup completes.
 
 ## Docker and Kubernetes
 
@@ -230,7 +281,18 @@ The example assumes the existing `canaveral` namespace and `orchestrator` Servic
 
 ## Authentication and state
 
-The orchestrator stores a salted PBKDF2-HMAC-SHA-256 password hash with 600,000 iterations, not the password. The implementation uses Python's standard library; [OWASP's password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) documents this work factor. Initial setup requires the operator credential and atomically creates only the first administrator. Login is limited to ten attempts per minute across dashboard replicas, with the budget retained over restarts. Usernames are case-insensitive. There is no public registration, account replacement or password-reset endpoint in this initial account implementation; retain the database and operator credential for recovery.
+The orchestrator stores a salted PBKDF2-HMAC-SHA-256 password hash with 600,000 iterations. The implementation uses Python's standard library; [OWASP's password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) documents this work factor. Initial setup requires operator proof and atomically creates the first administrator. Sign-in and public claim attempts have a persistent rate limit. Usernames are case-insensitive. Ordinary users access only their machines; admins manage all machines and user accounts. There is no public registration.
+
+**Account** provides password change. **API tokens** creates and revokes personal
+tokens with explicit permissions and expiry; save the secret when it is shown.
+Tokens remain limited by their owner's current account permissions. **Users**
+lets an admin create invitations, issue password-reset links, change roles and
+disable accounts. Re-enabling returns an account to pending and requires a fresh
+invitation and password. Password reset immediately blocks the previous password and
+revokes existing sessions and tokens. The last active admin requires operator
+recovery. Back up the database before upgrading; legacy users/sessions and
+non-lease machine ownership migrate together. Retain the operator credential for
+recovery without deleting users or their machines.
 
 Successful setup or sign-in creates a random 30-day session. Only a hash of the
 token is persisted in SQLite. The gateway stores it in a host-only HttpOnly,
@@ -242,12 +304,13 @@ clears the cookie and revokes the controller session. An unreachable controller
 may delay revocation until expiry. Account/session state survives controller and
 gateway restarts through the existing database. Cookie mutations require a
 same-origin Origin header; cross-origin browser requests remain rejected.
-The operator and enrollment credentials remain separate for CLI, bootstrap and
-worker use; account sessions cannot enroll hosts.
+The operator, personal API token and enrollment credentials remain separate;
+account sessions and personal tokens cannot enroll hosts. The gateway rejects a
+request that supplies both a bearer credential and a session cookie.
 
 The dashboard forwards inventory, lifecycle, infrastructure setup/diagnostics and authentication endpoints to its fixed upstream, without forwarding browser Origin headers. The orchestrator continues rejecting direct browser origins. No public access or external identity provider is configured by starting the dashboard; use an existing trusted private access boundary.
 
-Inventory refreshes every five seconds while the tab is visible. Connection failures keep the last inventory visible with a stale-data notice. Running and ready are separate states: required preparation must finish before a running guest is shown as ready. Host bars show the orchestrator's reservations against its configured budget, not CPU or memory utilization. Disks stay reserved after shutdown; compute is released only after the host confirms a stopped state. Offline hosts retain their placement and reservation rules.
+Inventory refreshes every five seconds while the tab is visible. Connection failures keep the last inventory visible with a stale-data notice. Running and ready are separate states: required preparation must finish before a running guest is shown as ready. Host bars show the orchestrator's reservations against its host limits, not CPU or memory utilization. Disks stay reserved after shutdown; compute is released only after the host confirms a stopped state. Offline hosts retain their placement and reservation rules.
 
 Creation pins the template revision and architecture, uses its resource defaults and lets the scheduler choose an eligible host or honor a selected host. Retries of an unchanged creation form reuse the request ID, so a lost response cannot create a second computer. Keep the form open for a retry after an uncertain result. Closing the form, reloading or editing the specification starts a new intent; inspect inventory before creating again. A lifecycle response records requested state; the machine remains pending or transitioning until its host reports the result. Draining prevents new placements and restarts while retaining existing machines.
 
@@ -258,7 +321,7 @@ preflight and outbound connection. Cards show check status and compact CPU,
 memory and storage reservation meters. A host name or **View resources** opens
 its overview at `#hosts/{id}` or `#orchestrators/{id}`. Older `/resources` links
 remain valid. CPU, memory and storage bars stack all reservation categories and
-show unreserved capacity or over-budget amounts. The legend retains zero-value
+show unreserved capacity or over-limit amounts. The legend retains zero-value
 categories. Machines are scoped to that host, with running machines first,
 status, resource specifications and existing Details/Control actions.
 The machine list offers **All machines** and **Running** filters; offline hosts
@@ -271,5 +334,5 @@ Failed refreshes retain the previous report with a stale notice; **Retry
 resources** requests a fresh report without leaving the overview.
 The page supports direct links and browser history. Details stack on narrow
 screens; the inventory keeps its compact summary. See [infrastructure setup and
-resource accounting](infrastructure.md) for enrollment scope, freshness, shared
-host budgets and the distinction between KubeVirt runner and cluster metrics.
+resource accounting](infrastructure.md) for enrollment scope, freshness, per-host
+limits and the distinction between KubeVirt runner and cluster metrics.

@@ -7,7 +7,8 @@ subset of the [consumer HTTP contract](consumer-api.md) that the
 outbound runner wire. It is provider-neutral across two execution backends that host
 a Linux guest: `kubevirt` and `appleVirtualization` (a Linux guest on Apple
 Virtualization; this is not macOS guest scope). It contains no VM executor, image
-ingestion, PTY, command or file path, and no native evidence. A lease never becomes
+ingestion, PTY or file path, and no native evidence. Its experimental
+[command operation path](linux-command-operations.md) uses durable bound runner handoffs. A lease never becomes
 `ready` without an explicit runner runtime and capability report.
 
 Run it as described in [the model-job controller slice](model-controller.md#running-the-controller);
@@ -20,8 +21,8 @@ state with the Python controller. Python runtime paths remain authoritative.
 | --- | --- | --- |
 | Administrator | Operator token or account session | Images, grants, runner approvals, resource domains |
 | Application | Application credential | Catalogue, acquire, list; inspect/renew/release/credential of its own leases |
-| Lease | That lease's current key | Inspect, renew, release of that lease only |
-| Runner | Current runner credential plus exact `binding` | Claim, list assignments, report |
+| Lease | That lease's current key | Inspect, renew, release; command submission and receipts for that lease only |
+| Runner | Current runner credential plus exact `binding` | Claim, list assignments, report; bound operation poll/report |
 
 Every credential is checked inside the same `BEGIN IMMEDIATE` transaction as the
 effect. Credentials never cross roles. Another application's lease looks missing
@@ -207,9 +208,11 @@ reconciliation (not implemented). There is no automatic failover or reassignment
 
 ### Open integration gates
 
-Image ingestion/installed-inventory verification, VM boot, PTY, command and file
+Image ingestion/installed-inventory verification, VM boot, PTY and file
 execution, guest credential erasure and native stop evidence belong to the runner
-adapter and require separate fixture and native acceptance.
+adapter and require separate fixture and native acceptance. The
+[command operation contract](linux-command-operations.md) defines the implemented
+TypeScript command ledger and runner wire, without native execution acceptance.
 
 The [Rust Apple satellite](../crates/apple-satellite/README.md) implements this wire
 for `appleVirtualization`. `fixtures/apple-satellite/public-api.mjs` drives it
@@ -223,7 +226,7 @@ jobs, once, at admission, with `kind: "linux-lease"` and the lease as owner. A c
 adopts that reservation and refuses to hand out a lease whose reservation is not
 held. Release requires the lease owner. Model-job claims see lease reservations and
 vice versa, so one physical budget is never offered twice. The lease ledger does not
-read the legacy `hosts`/`resource_budgets`/`leases` tables; do not offer the same
+read the legacy `hosts`/`host_limits`/`leases` tables; do not offer the same
 physical capacity to both.
 
 Only additive tables are created: `linux_lease_images`, `linux_lease_grants`,
@@ -233,7 +236,9 @@ Only additive tables are created: `linux_lease_images`, `linux_lease_grants`,
 The controller has no background timer. Expiry is applied when any lease route
 runs. A model-job claim does not refresh leases, so an expired, unclaimed lease
 holds its reservation until the next lease transaction; this is conservative and
-never double counts. Not implemented: sessions, durable operations, paired members,
+never double counts. [Durable command operations](linux-command-operations.md) add
+scoped submission/get and bound runner poll/report routes, with three additive
+operation tables. Not implemented: sessions, paired members,
 operator reconciliation of revoked runners' leases, mutable catalog entries,
 tombstone retention, and cleanup retry metadata (`attempts` is always 0).
 

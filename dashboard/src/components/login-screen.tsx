@@ -39,8 +39,16 @@ export function LoginScreen({
           {auth === "blocked" && (
             <Alert className="mb-6">
               <AlertDescription>
-                Create the first administrator from localhost or a local
-                port-forward. Then sign in here.
+                Ask the Canaveral operator to issue a setup link with the admin
+                setup-link command, using this dashboard’s HTTPS URL and their
+                operator credential. Open the link here to choose your account
+                password. The operator can also create the first account through
+                localhost setup or admin create.
+                <code className="block break-all">
+                  python3 -m canaveral --token-file /path/to/operator.token
+                  admin setup-link --dashboard-url
+                  https://your-dashboard.example
+                </code>
               </AlertDescription>
             </Alert>
           )}

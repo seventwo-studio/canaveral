@@ -1,3 +1,4 @@
+import { adminUser } from "./auth-fixture.js";
 import { test, expect } from "@playwright/test";
 
 for (const width of [320, 390, 1440])
@@ -14,7 +15,7 @@ for (const width of [320, 390, 1440])
           id: "disk",
           label: "Storage headroom",
           status: "warning",
-          detail: "Logical budget exceeds currently free storage.",
+          detail: "Offered disk capacity exceeds currently free storage.",
         },
       ],
       capabilities: { virtualMachines: true, shell: false },
@@ -70,8 +71,8 @@ for (const width of [320, 390, 1440])
         "",
       );
       let result = {};
-      if (path === "auth/status")
-        result = { setupRequired: false, user: { username: "admin" } };
+      if (["auth/status", "auth/session"].includes(path))
+        result = { setupRequired: false, user: adminUser };
       if (path === "hosts") result = { hosts: [host, pool] };
       if (path === "machines") result = { machines: [] };
       if (path === "templates") result = { templates: [] };
@@ -94,7 +95,8 @@ for (const width of [320, 390, 1440])
       if (path.endsWith("/resources"))
         result = {
           hostId: path.split("/")[1],
-          budget: host.capacity,
+          capacity: host.capacity,
+          limits: host.capacity,
           images: [],
           categories: [
             {

@@ -8,7 +8,8 @@
 //! attempt receipt, publishes the private relay socket and `direct-started.json`, and answers
 //! as a protocol-faithful guest PID1 bound to the simulated medium's launch.json. A
 //! `guest-mode` file beside the executable selects `ready` (default), `stall`,
-//! `wrong-identity` or `wrong-version`. A received exec is logged as `exec`; none is run.
+//! `wrong-identity`, `wrong-version` or `commands`. The last mode emits canned command
+//! receipts for fixture arguments only. A received exec is logged as `exec`; none is run.
 #[cfg(unix)]
 mod fixture {
     use serde_json::{json, Value};
@@ -423,6 +424,9 @@ mod fixture {
             let mut decoder = Decoder::default();
             let mut buf = [0u8; 4096];
             let mut revision = 0;
+            let mut credit = 0u64;
+            let mut active: Option<(uuid::Uuid, bool)> = None;
+            let mut last_command = uuid::Uuid::nil();
             loop {
                 let want = decoder.needed().min(buf.len());
                 let n = stream.read(&mut buf[..want]).map_err(fail)?;
@@ -464,11 +468,99 @@ mod fixture {
                         revision = binding.revision;
                         log("guest-renew")?;
                     }
+                    Host::Exec {
+                        id,
+                        argv,
+                        cwd,
+                        env,
+                        timeout_ms,
+                        ..
+                    } if mode == "commands" && revision != 0 && active.is_none() => {
+                        log("exec")?;
+                        if id <= last_command
+                            || cwd != "/workspace"
+                            || !env.is_empty()
+                            || timeout_ms == 0
+                            || timeout_ms > 30_000
+                        {
+                            return Err("invalid fixture command scope".into());
+                        }
+                        last_command = id;
+                        if argv == ["fixture", "success"] {
+                            active = Some((id, false));
+                        } else if argv == ["fixture", "wait"] {
+                            active = Some((id, true));
+                        } else {
+                            return Err("fixture command is not a canned operation".into());
+                        }
+                    }
+                    Host::Credit { bytes, .. } if mode == "commands" && revision != 0 => {
+                        credit = credit.checked_add(bytes).ok_or("fixture credit overflow")?;
+                        if credit > 1_048_576 {
+                            return Err("fixture credit exceeded protocol bound".into());
+                        }
+                    }
+                    Host::Cancel { id, .. } if active == Some((id, true)) => {
+                        log("guest-cancel")?;
+                        stream
+                            .write_all(
+                                &encode(&Guest::Exit {
+                                    version: 1,
+                                    id,
+                                    status: None,
+                                    signal: Some(15),
+                                    timed_out: false,
+                                    duration_ms: 1,
+                                    stdout_bytes: 0,
+                                    stderr_bytes: 0,
+                                    termination_confirmed: true,
+                                })
+                                .map_err(fail)?,
+                            )
+                            .map_err(fail)?;
+                        active = None;
+                    }
+                    Host::Cancel { id, .. }
+                        if mode == "commands" && active.is_none() && id == last_command => {}
                     Host::Exec { .. } => {
                         log("exec")?;
                         return Err("fixture guest never executes".into());
                     }
                     _ => return Err("invalid session transition".into()),
+                }
+                if let Some((id, false)) = active {
+                    if credit >= 15 {
+                        credit -= 15;
+                        stream
+                            .write_all(
+                                &encode(&Guest::Output {
+                                    version: 1,
+                                    id,
+                                    stream: "stdout".into(),
+                                    seq: 0,
+                                    data: "Zml4dHVyZS1vdXRwdXQK".into(),
+                                })
+                                .map_err(fail)?,
+                            )
+                            .map_err(fail)?;
+                        stream
+                            .write_all(
+                                &encode(&Guest::Exit {
+                                    version: 1,
+                                    id,
+                                    status: Some(0),
+                                    signal: None,
+                                    timed_out: false,
+                                    duration_ms: 1,
+                                    stdout_bytes: 15,
+                                    stderr_bytes: 0,
+                                    termination_confirmed: true,
+                                })
+                                .map_err(fail)?,
+                            )
+                            .map_err(fail)?;
+                        active = None;
+                    }
                 }
             }
         }

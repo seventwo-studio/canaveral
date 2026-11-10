@@ -9,7 +9,7 @@ fn io<T>(r: std::io::Result<T>) -> Result<T> {
 use std::{
     ffi::CString,
     fs::File,
-    io::Write,
+    io::{BufReader, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::MetadataExt,
@@ -187,6 +187,102 @@ impl Directory {
         }
         self.check()?;
         Ok(bytes)
+    }
+    fn history_name(claim: uuid::Uuid, operation: uuid::Uuid) -> String {
+        format!("completed-{claim}-{:02x}", operation.as_bytes()[0])
+    }
+    /// Assignment-bound UUID tombstones, partitioned into 256 append-only files.
+    /// Scanning uses fixed memory; history is never evicted to admit another effect.
+    pub fn operation_completed(
+        &self,
+        claim: uuid::Uuid,
+        assignment: uuid::Uuid,
+        operation: uuid::Uuid,
+    ) -> Result<bool> {
+        let n = Self::history_name(claim, operation);
+        if self.absent(&n)? {
+            return Ok(false);
+        }
+        let file = openat(&self.dir, &name(n.as_ref())?, libc::O_RDONLY)?;
+        private(&file, false)?;
+        let before = io(file.metadata())?;
+        if before.len() < 16 || before.len() % 16 != 0 {
+            return Err("incomplete operation history; retain state");
+        }
+        let mut reader = BufReader::with_capacity(65536, file);
+        let mut record = [0u8; 16];
+        io(reader.read_exact(&mut record))?;
+        if record != *assignment.as_bytes() {
+            return Err("operation history assignment mismatch");
+        }
+        let mut found = false;
+        for _ in 1..before.len() / 16 {
+            io(reader.read_exact(&mut record))?;
+            if record == [0; 16] {
+                return Err("invalid operation history");
+            }
+            found |= record == *operation.as_bytes();
+        }
+        let current = openat(&self.dir, &name(n.as_ref())?, libc::O_RDONLY)?;
+        private(&current, false)?;
+        let after = io(current.metadata())?;
+        if (before.dev(), before.ino(), before.len()) != (after.dev(), after.ino(), after.len()) {
+            return Err("operation history changed");
+        }
+        self.check()?;
+        Ok(found)
+    }
+    pub fn record_operation(
+        &self,
+        claim: uuid::Uuid,
+        assignment: uuid::Uuid,
+        operation: uuid::Uuid,
+    ) -> Result<()> {
+        if claim.is_nil() || assignment.is_nil() || operation.is_nil() {
+            return Err("operation history identity required");
+        }
+        if self.operation_completed(claim, assignment, operation)? {
+            // A previous append may have become visible before its fsync failed.
+            // Re-establish durability before publishing an acknowledgment in state.json.
+            let n = Self::history_name(claim, operation);
+            let file = openat(&self.dir, &name(n.as_ref())?, libc::O_RDWR)?;
+            private(&file, false)?;
+            io(file.sync_all())?;
+            io(self.dir.sync_all())?;
+            self.check()?;
+            return Ok(());
+        }
+        let n = Self::history_name(claim, operation);
+        let fresh = self.absent(&n)?;
+        let mut file = openat(
+            &self.dir,
+            &name(n.as_ref())?,
+            libc::O_RDWR
+                | libc::O_APPEND
+                | if fresh {
+                    libc::O_CREAT | libc::O_EXCL
+                } else {
+                    0
+                },
+        )?;
+        private(&file, false)?;
+        if fresh {
+            io(file.write_all(assignment.as_bytes()))?;
+        } else {
+            let mut header = [0u8; 16];
+            io(file.read_exact(&mut header))?;
+            if header != *assignment.as_bytes() || io(file.metadata())?.len() % 16 != 0 {
+                return Err("operation history changed before append");
+            }
+        }
+        io(file.write_all(operation.as_bytes()))?;
+        io(file.sync_all())?;
+        io(self.dir.sync_all())?;
+        // A partial append or replaced entry is uncertain, never silently repaired.
+        if !self.operation_completed(claim, assignment, operation)? {
+            return Err("operation history publication uncertain");
+        }
+        Ok(())
     }
     fn clear_pending(&self, pending: &str) -> Result<()> {
         let n = name(pending.as_ref())?;

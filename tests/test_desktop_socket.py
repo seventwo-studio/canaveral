@@ -11,6 +11,7 @@ from canaveral.dashboard import server
 from canaveral.desktop_socket import relay
 from canaveral.model import Error
 from test_dashboard import DashboardFixture
+from test_orchestration import request
 
 try:
     from wsproto import WSConnection, ConnectionType
@@ -22,6 +23,7 @@ except ImportError:
 class DesktopSocketTests(DashboardFixture):
     def setUp(self):
         super().setUp()
+        self.enroll();self.machine_id=self.store.create(request())["id"]
         self.allowed=True
         def connector(machine,check_only=False):
             if check_only:return self.allowed
@@ -47,7 +49,7 @@ class DesktopSocketTests(DashboardFixture):
         sock=socket.create_connection(('127.0.0.1',self.port));sock.settimeout(3)
         self.addCleanup(sock.close)
         ws=WSConnection(ConnectionType.CLIENT)
-        sock.sendall(ws.send(Request(host='127.0.0.1:'+str(self.port),target='/api/v1/machines/'+str(uuid.uuid4())+'/desktop',
+        sock.sendall(ws.send(Request(host='127.0.0.1:'+str(self.port),target='/api/v1/machines/'+self.machine_id+'/desktop',
             extra_headers=[(b'origin',origin.encode()),(b'cookie',cookie.encode())])))
         return sock,ws
 
@@ -87,6 +89,14 @@ class DesktopSocketTests(DashboardFixture):
                 self.assertEqual(b''.join(e.data for e in ws.events() if isinstance(e,BytesMessage)),b'still-connected')
         finally:
             for sock,_ in connections:sock.close()
+
+    def test_user_session_revocation_closes_established_connection(self):
+        sock,ws=self.handshake(self.url,self.cookie)
+        ws.receive_data(sock.recv(4096))
+        self.assertTrue(any(isinstance(e,AcceptConnection) for e in ws.events()))
+        self.assertEqual(self.fetch('/api/v1/auth/logout',{},headers={'Cookie':self.cookie,'Origin':self.url})[0],200)
+        ws.receive_data(sock.recv(4096))
+        self.assertTrue(any(isinstance(e,CloseConnection) for e in ws.events()))
 
 
 class DesktopRelayCleanupTests(unittest.TestCase):

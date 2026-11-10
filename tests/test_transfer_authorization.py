@@ -17,11 +17,13 @@ from canaveral.model import Error
 from canaveral.runner_sessions import RunnerSession
 from canaveral.transfers import atomic_upload
 from test_dashboard import DashboardFixture
+from test_orchestration import request as machine_request
 
 
 class DashboardTransferAuthorizationTests(DashboardFixture):
     def setUp(self):
         super().setUp();self.allowed=True;self.closed=0
+        self.enroll();self.machine_id=self.store.create(machine_request())['id']
         self.target=Path(self.temp.name)/'existing';self.target.write_bytes(b'original')
         owner=self
         def upload(machine,path=None,app=None,reader=None,size=None,authorized=None,check_only=False):
@@ -45,7 +47,7 @@ class DashboardTransferAuthorizationTests(DashboardFixture):
 
     def test_upload_rechecks_lease_inside_cached_identity_window_and_preserves_destination(self):
         with patch('canaveral.dashboard.execution_monotonic',return_value=100):
-            status,_,_=self.fetch('/api/v1/machines/'+str(uuid.uuid4())+'/files/upload',raw=b'new',token=self.admin,
+            status,_,_=self.fetch('/api/v1/machines/'+self.machine_id+'/files/upload',raw=b'new',token=self.admin,
                 headers={'Content-Type':'application/octet-stream','X-Canaveral-Path':'existing'})
         self.assertEqual(status,401);self.assertEqual(self.target.read_bytes(),b'original')
         self.assertFalse(list(Path(self.temp.name).glob('.canaveral-upload-*')))
@@ -53,7 +55,7 @@ class DashboardTransferAuthorizationTests(DashboardFixture):
     def test_download_does_not_forward_data_returned_after_revocation_and_closes_source(self):
         options=base64.urlsafe_b64encode(json.dumps({'path':'fixture'}).encode()).decode().rstrip('=')
         with self.assertRaises(http.client.IncompleteRead) as failure:
-            self.fetch('/api/v1/machines/'+str(uuid.uuid4())+'/files/download/'+options,token=self.admin)
+            self.fetch('/api/v1/machines/'+self.machine_id+'/files/download/'+options,token=self.admin)
         self.assertEqual(failure.exception.partial,b'');self.assertEqual(self.closed,1)
 
 

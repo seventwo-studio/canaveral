@@ -198,6 +198,7 @@ pub struct Session {
     event_bytes: usize,
     last_id: Uuid,
     active: Option<Uuid>,
+    output_credit_started: bool,
     pub first_command: Option<f64>,
 }
 impl Session {
@@ -220,6 +221,7 @@ impl Session {
             event_bytes: 0,
             last_id: Uuid::nil(),
             active: None,
+            output_credit_started: false,
             first_command: None,
         };
         s.queue(&Host::Hello {
@@ -358,7 +360,7 @@ impl Session {
         self.events.push_back(frame);
         Ok(false)
     }
-    /// Command client for the future consumer transport. The satellite itself never execs.
+    /// Command client for the controller operation lane.
     /// Requires ready, no active command, every earlier control frame read and nothing queued.
     pub fn exec(
         &mut self,
@@ -391,6 +393,15 @@ impl Session {
         self.active = Some(id);
         self.first_command.get_or_insert(now);
         Ok(id)
+    }
+    /// Initialize the session-wide output window once; later reads replenish only
+    /// consumed bytes. Starting another command must not grant a second window.
+    pub fn start_output_credit(&mut self) -> Result<()> {
+        if !self.output_credit_started {
+            self.credit(65536)?;
+            self.output_credit_started = true;
+        }
+        Ok(())
     }
     pub fn credit(&mut self, bytes: u64) -> Result<()> {
         let frame = Host::Credit { version: 1, bytes };
@@ -432,9 +443,9 @@ fn next_id(last: Uuid) -> Result<Uuid> {
     Ok(Uuid::from_u128(id))
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn session_pair() -> (Session, UnixStream) {
+    pub(crate) fn session_pair() -> (Session, UnixStream) {
         let (stream, peer) = UnixStream::pair().unwrap();
         stream.set_nonblocking(true).unwrap();
         let binding = Binding {
@@ -460,12 +471,13 @@ mod tests {
                 event_bytes: 0,
                 last_id: Uuid::nil(),
                 active: None,
+                output_credit_started: false,
                 first_command: None,
             },
             peer,
         )
     }
-    fn send_ready(session: &Session, peer: &mut UnixStream) {
+    pub(crate) fn send_ready(session: &Session, peer: &mut UnixStream) {
         peer.write_all(
             &encode(&Guest::Ready {
                 version: 1,

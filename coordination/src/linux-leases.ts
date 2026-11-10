@@ -1,3 +1,5 @@
+import { operationObject, operationArgv, operationReceipt } from "./linux-operations.ts";
+import type { OperationRow } from "./linux-operations.ts";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { identifier } from "./consumers.ts";
@@ -132,6 +134,13 @@ export class LinuxLeases {
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities, readonly runners: RunnerEnrollment | undefined) {
     store.transaction(db => {
       ResourceDomains.schema(db);
+      db.exec(`CREATE TABLE IF NOT EXISTS linux_operations (
+        id TEXT PRIMARY KEY, lease TEXT NOT NULL, assignment TEXT NOT NULL, request TEXT NOT NULL, argv TEXT NOT NULL,
+        credential TEXT NOT NULL, state TEXT NOT NULL, updated REAL NOT NULL, start_before REAL NOT NULL,
+        dispatched REAL, deadline REAL, result TEXT);
+        CREATE INDEX IF NOT EXISTS linux_operations_lane ON linux_operations(assignment,state);
+        CREATE TABLE IF NOT EXISTS linux_operation_boots (assignment TEXT PRIMARY KEY, boot TEXT NOT NULL, digest TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS linux_operation_polls (id TEXT PRIMARY KEY, assignment TEXT NOT NULL, boot TEXT NOT NULL, digest TEXT NOT NULL, operation TEXT NOT NULL);`);
       db.exec(`CREATE TABLE IF NOT EXISTS linux_lease_images (id TEXT NOT NULL, revision TEXT NOT NULL, arch TEXT NOT NULL, backend TEXT NOT NULL, digest TEXT NOT NULL, resources TEXT NOT NULL, capabilities TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(id,revision,arch));
         CREATE TABLE IF NOT EXISTS linux_lease_grants (application TEXT NOT NULL, image_id TEXT NOT NULL, image_revision TEXT NOT NULL, arch TEXT NOT NULL, digest TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(application,image_id,image_revision,arch));
         CREATE TABLE IF NOT EXISTS linux_lease_runner_approvals (controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, backend TEXT NOT NULL, images TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(controller,runner,generation));
@@ -151,7 +160,14 @@ export class LinuxLeases {
   }
   /** Lease-ledger transaction: expiry, provisioning deadlines and application revocation are applied first. */
   private transaction<T>(operation: (db: DatabaseSync, now: number) => T): T {
-    return this.store.transaction(db => { const now = this.now(); this.refresh(db, now); return operation(db, now); });
+    return this.store.transaction(db => {
+      const now = this.now();
+      this.refresh(db, now);
+      this.refreshOperations(db, now);
+      const result = operation(db, now);
+      this.refreshOperations(db, now);
+      return result;
+    });
   }
 
   // Operator configuration. Callers must have verified the administrator role.
@@ -234,7 +250,7 @@ export class LinuxLeases {
     const input = exact(value, ["binding"], "linux lease runner approval");
     const b = exact(input.binding, ["controllerId", "runnerId", "generation", "incarnationId"], "binding");
     const binding = { controllerId: identifier(b.controllerId), runnerId: identifier(b.runnerId), generation: positive(b.generation, Number.MAX_SAFE_INTEGER, "generation"), incarnationId: identifier(b.incarnationId) };
-    return this.store.transaction(db => {
+    return this.transaction(db => {
       const changed = db.prepare("UPDATE linux_lease_runner_approvals SET revoked=1 WHERE controller=? AND runner=? AND generation=? AND incarnation=?")
         .run(binding.controllerId, binding.runnerId, binding.generation, binding.incarnationId);
       if (!changed.changes) throw new ServiceError("Unknown linux lease runner approval.", 404);
@@ -437,6 +453,115 @@ export class LinuxLeases {
         .run(sequence, encoded, r.observedRevision, r.executionStopped ? 1 : 0, r.storageRemoved ? 1 : 0, r.credentialsErased ? 1 : 0, complete ? 1 : 0, id);
       if (complete) this.domains.release(db, lease.reservation, lease.id, now);
       return this.reportView(db, this.assignmentRow(db, id)!, now);
+    });
+  }
+
+  /** Only the current scoped key can execute or inspect command receipts. */
+  private operationAccess(db: DatabaseSync, id: string, token: string): LeaseRow {
+    const lease = this.row(db, identifier(id));
+    let hash: string;
+    try { hash = leaseHash(secret(token)); } catch { throw new ServiceError("Lease credential rejected.", 401); }
+    if (!lease?.credential || !equalHex(lease.credential, hash)) throw new ServiceError("Lease credential rejected.", 401);
+    this.owner(db, lease.application);
+    return lease;
+  }
+  private operationRow(db: DatabaseSync, id: string): OperationRow | undefined {
+    return db.prepare("SELECT * FROM linux_operations WHERE id=?").get(id) as unknown as OperationRow | undefined;
+  }
+  private operationView(row: OperationRow): unknown {
+    return { id: row.id, leaseId: row.lease, member: "primary", state: row.state, updatedAt: utc(row.updated),
+      ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
+  }
+  private commandEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
+    const approval = this.approval(db, bindingOf(a));
+    const report: unknown = a.report ? JSON.parse(a.report) : null;
+    return ACTIVE.includes(lease.state) && lease.state === "ready" && lease.runtime === "running" && !a.closed &&
+      !!this.applications.active(db, lease.application) && !!this.runners?.current(db, bindingOf(a)) &&
+      lease.backend === "appleVirtualization" && approval?.backend === lease.backend && approval.domain === lease.domain &&
+      (JSON.parse(approval.images) as string[]).includes(imageKey({ id: lease.image_id, revision: lease.image_revision, arch: lease.arch, digest: lease.digest })) &&
+      (JSON.parse(lease.capabilities) as string[]).includes("command") && Array.isArray(report) && report[6] === true;
+  }
+  private refreshOperations(db: DatabaseSync, now: number): void {
+    for (const op of db.prepare("SELECT * FROM linux_operations WHERE state='queued'").all() as unknown as OperationRow[]) {
+      const lease = this.row(db, op.lease)!, a = this.assignmentRow(db, op.assignment)!;
+      if (!this.commandEligible(db, lease, a) || lease.credential !== op.credential ||
+          (op.dispatched === null ? now >= op.start_before : now >= Math.min(op.deadline!, lease.expires))) {
+        db.prepare("UPDATE linux_operations SET state=?,updated=? WHERE id=?").run(op.dispatched === null ? "failed" : "unknown", now, op.id);
+      }
+    }
+  }
+  createOperation(token: string, leaseId: string, value: unknown): unknown {
+    const r = operationObject(value, ["id", "member", "action", "arguments"]);
+    const id = identifier(r.id), args = operationObject(r.arguments, ["argv"]), argv = operationArgv(args.argv);
+    if (r.member !== "primary" || r.action !== "shell") throw new ServiceError("Only primary shell operations are supported.", 400);
+    const request = JSON.stringify({ id, member: "primary", action: "shell", arguments: { argv } });
+    return this.transaction((db, now) => {
+      const lease = this.operationAccess(db, leaseId, token), old = this.operationRow(db, id);
+      if (old) {
+        if (old.lease !== lease.id) throw new ServiceError("Unknown operation.", 404);
+        if (old.request !== request) throw new ServiceError("Operation intent changed.", 409);
+        return { created: false, operation: this.operationView(old) };
+      }
+      const a = db.prepare("SELECT * FROM linux_lease_assignments WHERE lease=?").get(lease.id) as unknown as AssignmentRow | undefined;
+      if (!a || !this.commandEligible(db, lease, a)) throw new ServiceError("Command execution is not ready or authorized.", 409);
+      if (db.prepare("SELECT 1 FROM linux_operations WHERE assignment=? AND state IN ('queued','unknown')").get(a.id)) throw new ServiceError("Assignment command lane is occupied.", 429);
+      db.prepare("INSERT INTO linux_operations VALUES (?,?,?,?,?,?,'queued',?,?,NULL,NULL,NULL)")
+        .run(id, lease.id, a.id, request, JSON.stringify(argv), lease.credential!, now, Math.min(now + 120, lease.expires));
+      return { created: true, operation: this.operationView(this.operationRow(db, id)!) };
+    });
+  }
+  operation(token: string, leaseId: string, id: string): unknown {
+    id = identifier(id);
+    return this.transaction(db => {
+      const lease = this.operationAccess(db, leaseId, token), row = this.operationRow(db, id);
+      if (!row || row.lease !== lease.id) throw new ServiceError("Unknown operation.", 404);
+      return this.operationView(row);
+    });
+  }
+  private operationBinding(db: DatabaseSync, token: string, r: Record<string, unknown>): { a: AssignmentRow; lease: LeaseRow; boot: string; digest: string } {
+    const b = this.requireRunners().verify(db, token, r.binding), a = this.assignmentRow(db, identifier(r.assignmentId));
+    if (!a) throw new ServiceError("Unknown assignment.", 404);
+    if (!sameBinding(a, b)) throw new ServiceError("Assignment ownership mismatch.", 403);
+    const lease = this.row(db, a.lease)!, boot = identifier(r.bootAttempt), digest = r.bundleDigest;
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest) || lease.digest !== "sha256:" + digest || lease.backend !== "appleVirtualization") throw new ServiceError("Boot bundle mismatch.", 409);
+    const old = db.prepare("SELECT boot,digest FROM linux_operation_boots WHERE assignment=?").get(a.id) as { boot: string; digest: string } | undefined;
+    if (old && (old.boot !== boot || old.digest !== digest)) throw new ServiceError("Assignment boot tuple is immutable.", 409);
+    return { a, lease, boot, digest };
+  }
+  pollOperation(token: string, value: unknown): unknown {
+    const r = operationObject(value, ["binding", "assignmentId", "bootAttempt", "bundleDigest", "pollId"]), poll = identifier(r.pollId);
+    return this.transaction((db, now) => {
+      const { a, lease, boot, digest } = this.operationBinding(db, token, r);
+      const old = db.prepare("SELECT * FROM linux_operation_polls WHERE id=?").get(poll) as { assignment: string; boot: string; digest: string; operation: string } | undefined;
+      if (old && (old.assignment !== a.id || old.boot !== boot || old.digest !== digest)) throw new ServiceError("Poll ownership mismatch.", 409);
+      const eligible = this.commandEligible(db, lease, a);
+      let op = old ? this.operationRow(db, old.operation) : undefined;
+      if (!old && eligible) {
+        db.prepare("INSERT OR IGNORE INTO linux_operation_boots VALUES (?,?,?)").run(a.id, boot, digest);
+        op = db.prepare("SELECT * FROM linux_operations WHERE assignment=? AND state='queued' AND dispatched IS NULL ORDER BY rowid LIMIT 1").get(a.id) as unknown as OperationRow | undefined;
+        if (op) {
+          db.prepare("UPDATE linux_operations SET dispatched=?,deadline=?,updated=? WHERE id=?").run(now, Math.min(now + 35, lease.expires, op.start_before + 35), now, op.id);
+          db.prepare("INSERT INTO linux_operation_polls VALUES (?,?,?,?,?)").run(poll, a.id, boot, digest, op.id);
+          op = this.operationRow(db, op.id)!;
+        }
+      }
+      return { command: op ? { id: op.id, leaseId: lease.id, memberId: lease.member, assignmentId: a.id, bootAttempt: boot, bundleDigest: digest,
+        arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: 30000, state: op.state } : null,
+        lease: this.authorization(lease, now), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
+    });
+  }
+  reportOperation(token: string, value: unknown): unknown {
+    const r = operationObject(value, ["binding", "assignmentId", "bootAttempt", "bundleDigest", "operationId", "receipt"]);
+    const id = identifier(r.operationId);
+    return this.transaction((db, now) => {
+      const { a, boot, digest } = this.operationBinding(db, token, r), op = this.operationRow(db, id);
+      const registered = db.prepare("SELECT boot,digest FROM linux_operation_boots WHERE assignment=?").get(a.id) as { boot: string; digest: string } | undefined;
+      if (!op || op.assignment !== a.id) throw new ServiceError("Unknown operation.", 404);
+      if (!registered || registered.boot !== boot || registered.digest !== digest || op.dispatched === null) throw new ServiceError("Operation was not dispatched to this boot.", 409);
+      const receipt = operationReceipt(r.receipt);
+      if (op.state === "queued") db.prepare("UPDATE linux_operations SET state=?,result=?,updated=? WHERE id=?")
+        .run(receipt.state, receipt.result === undefined ? null : JSON.stringify(receipt.result), now, id);
+      return { operationId: id, state: this.operationRow(db, id)!.state };
     });
   }
 

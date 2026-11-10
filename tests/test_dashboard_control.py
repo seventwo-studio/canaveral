@@ -5,9 +5,14 @@ import uuid
 
 from test_dashboard import DashboardFixture
 from test_devices import config, create, operation
+from test_orchestration import request as machine_request
 
 
 class DashboardControlTests(DashboardFixture):
+    def persisted_machine(self):
+        self.enroll()
+        return self.store.create(machine_request())['id']
+
     def test_operations_require_auth_and_cookie_origin_and_return_binary_receipts(self):
         host, token = str(uuid.uuid4()), secrets.token_urlsafe(32)
         offered = config()
@@ -42,7 +47,7 @@ class DashboardControlTests(DashboardFixture):
             return {'uploaded':size}
         service=server(('127.0.0.1',0),self.upstream,bootstrap_token=self.admin,upload_connector=connector)
         self.start(service);self.url='http://127.0.0.1:'+str(service.server_port)
-        route='/api/v1/machines/'+str(uuid.uuid4())+'/files/upload'
+        route='/api/v1/machines/'+self.persisted_machine()+'/files/upload'
         payload=b'x'*(2*1024*1024+13)
         headers={'Content-Type':'application/octet-stream','X-Canaveral-Path':'%2Fhome%2Fdesktop%2Flarge.bin'}
         self.assertEqual(self.fetch(route,raw=b'x',headers=headers)[0],401)
@@ -57,7 +62,7 @@ class DashboardControlTests(DashboardFixture):
         calls=[]
         service=server(('127.0.0.1',0),self.upstream,accessibility_connector=lambda machine:(calls.append(machine) or {'nodes':[],'source':'fixture'}))
         self.start(service);self.url='http://127.0.0.1:'+str(service.server_port)
-        route='/api/v1/machines/'+str(uuid.uuid4())+'/accessibility'
+        route='/api/v1/machines/'+self.persisted_machine()+'/accessibility'
         self.assertEqual(self.fetch(route)[0],401)
         self.assertFalse(calls)
         for _ in range(2):self.assertEqual(self.fetch(route,token=self.admin)[0],200)

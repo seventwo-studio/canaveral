@@ -89,7 +89,7 @@ Partial or changed copies never become advertised images; uncertainty
 retains storage reservations and requires positive recovery rather than replay.
 
 Source restart is blocked while capture is queued, running or unresolved. Image
-storage is reserved transactionally alongside VM and shared-host budgets, with
+storage is reserved transactionally alongside other allocations under the host disk limit, with
 an initial extra GiB for container metadata. Completed immutable artifacts are
 charged once per host/content hash/format. Same-format aliases share one artifact;
 different formats retain distinct stored files and charges even for identical

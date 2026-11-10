@@ -43,6 +43,7 @@ function respond(response: ServerResponse, value: unknown, status = 200): void {
 
 // POST routes whose proof is checked by the worker rather than the administrator pre-check.
 const selfAuthenticated = [
+  "/v1/runners/linux-leases/operations/poll", "/v1/runners/linux-leases/operations/report",
   "/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate",
   "/v1/model-jobs", "/v1/runners/model-jobs/claim", "/v1/runners/model-jobs/assignments", "/v1/runners/model-jobs/report",
   "/v1/leases", "/v1/runners/linux-leases/claim", "/v1/runners/linux-leases/assignments", "/v1/runners/linux-leases/report",
@@ -52,6 +53,7 @@ const leaseAdministration: Record<string, IdentityCommand["type"]> = {
   "/v1/linux-lease-runner-approvals": "leases.approve", "/v1/linux-lease-runner-approvals/revoke": "leases.approvalRevoke",
 };
 const leaseBody: Record<string, IdentityCommand["type"]> = {
+  "/v1/runners/linux-leases/operations/poll": "leases.pollOperation", "/v1/runners/linux-leases/operations/report": "leases.reportOperation",
   "/v1/leases": "leases.acquire", "/v1/runners/linux-leases/claim": "leases.claim",
   "/v1/runners/linux-leases/assignments": "leases.assignments", "/v1/runners/linux-leases/report": "leases.report",
 };
@@ -117,17 +119,20 @@ export function createIdentityHandler(identities: IdentityClient): (request: Inc
         const after = query.get("after");
         command = after === null ? { type: "leases.list", token } : { type: "leases.list", token, after };
       }
+      else if (request.method === "GET" && new RegExp(`^/v1/leases/${LEASE_ID}/operations/${LEASE_ID}$`).test(path)) command = { type: "leases.operation", id: path.split("/")[3]!, operationId: path.split("/")[5]!, token };
       else if (request.method === "GET" && new RegExp(`^/v1/leases/${LEASE_ID}$`).test(path)) command = { type: "leases.inspect", id: path.split("/")[3]!, token };
       else if (request.method === "POST") {
+        const operationCreate = new RegExp(`^/v1/leases/(${LEASE_ID})/operations$`).exec(path);
         const modelCancel = /^\/v1\/model-jobs\/([^/]+)\/cancel$/.exec(path);
         const leaseAction = new RegExp(`^/v1/leases/(${LEASE_ID})/(credential|renew|release)$`).exec(path);
-        if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction) {
+        if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction && !operationCreate) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
         const value = await body(request);
         const modelType = modelAdministration[path] ?? modelRunner[path] ?? leaseAdministration[path] ?? leaseBody[path];
         const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);
-        if (modelCancel) command = { type: "models.cancel", id: modelCancel[1]!, token, body: value };
+        if (operationCreate) command = { type: "leases.createOperation", id: operationCreate[1]!, token, body: value };
+        else if (modelCancel) command = { type: "models.cancel", id: modelCancel[1]!, token, body: value };
         else if (leaseAction) command = { type: leaseMutation[leaseAction[2]!], id: leaseAction[1]!, token, body: value } as IdentityCommand;
         else if (modelType) command = { type: modelType, token, body: value } as IdentityCommand;
         else if (enrollmentRevoke) {
@@ -152,6 +157,10 @@ export function createIdentityHandler(identities: IdentityClient): (request: Inc
       if (response.destroyed) return;
       const value = await identities.request(command);
       // A new durable model job or lease is 201; an exact replay of the same submission is 200.
+      if (command.type === "leases.createOperation") {
+        const result = value as { created: boolean; operation: unknown };
+        respond(response, result.operation, result.created ? 201 : 200); return;
+      }
       if (command.type === "leases.acquire") {
         const acquired = value as { created: boolean; lease: unknown };
         respond(response, acquired.lease, acquired.created ? 201 : 200); return;

@@ -18,6 +18,7 @@ from canaveral.model import Error
 from canaveral.dashboard import server as dashboard_server
 from canaveral.transfers import Download
 from test_dashboard import DashboardFixture
+from test_orchestration import request
 
 
 class DownloadIdentityTests(unittest.TestCase):
@@ -82,7 +83,8 @@ class DashboardDownloadIdentityTests(DashboardFixture):
         service=dashboard_server(('127.0.0.1',0),self.upstream,download_connector=download)
         self.start(service);self.url='http://127.0.0.1:'+str(service.server_port)
         options=base64.urlsafe_b64encode(json.dumps({'path':'file'}).encode()).decode().rstrip('=')
-        self.route='/api/v1/machines/'+str(uuid.uuid4())+'/files/download/'+options
+        self.enroll();mid=self.store.create(request())['id']
+        self.route='/api/v1/machines/'+mid+'/files/download/'+options
 
     def fetch(self,*args,**kwargs):
         # Receiving the last byte (or zero-length headers) can precede the
@@ -138,3 +140,11 @@ class DashboardDownloadIdentityTests(DashboardFixture):
         self.before_verify=revoke
         with self.assertRaises(http.client.IncompleteRead) as failure:self.fetch(self.route,token=self.admin)
         self.assertEqual(failure.exception.partial,b'a'*1048576);self.assertEqual(self.closed,1)
+
+    def test_account_revocation_during_read_withholds_bytes(self):
+        from canaveral.accounts import Accounts
+        accounts=Accounts(self.store)
+        session=accounts.setup({'username':'downloadadmin','password':'fixture-password-long-enough'})
+        self.after_read=lambda:accounts.logout(session['token'])
+        with self.assertRaises(http.client.IncompleteRead) as failure:self.fetch(self.route,token=session['token'])
+        self.assertEqual(failure.exception.partial,b'');self.assertEqual(self.closed,1)

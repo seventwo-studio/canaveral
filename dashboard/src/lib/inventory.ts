@@ -1,5 +1,5 @@
 import { record } from "./types";
-import { resources, sharedBudget } from "./catalogue";
+import { resources } from "./catalogue";
 import type { Resources } from "./catalogue";
 import type {
   Host,
@@ -11,6 +11,7 @@ import type { HostAvailability } from "./types";
 import type { WorkspaceMachine } from "./workspace";
 
 export interface Machine extends WorkspaceMachine {
+  ownerId?: string | null;
   hostId: string;
   templateId: string;
   resources: Resources;
@@ -46,7 +47,10 @@ export interface Inventory {
   templates: ImageOffer[];
 }
 export interface User {
+  id: string;
   username: string;
+  role: "admin" | "user";
+  status: "pending" | "active" | "disabled";
 }
 const string = (v: unknown): v is string => typeof v === "string";
 const finite = (v: unknown): v is number =>
@@ -218,8 +222,6 @@ export function hostsResponse(value: unknown): Host[] {
           requiredStrings(record(value), ["id", "label", "status", "detail"]);
       }
     }
-    if (h.sharedBudgets !== undefined && !Array.isArray(h.sharedBudgets))
-      throw new Error("Invalid host budgets.");
     return {
       ...h,
       platform: h.platform ?? undefined,
@@ -227,9 +229,7 @@ export function hostsResponse(value: unknown): Host[] {
       reserved: h.reserved == null ? undefined : resources(h.reserved),
       health: h.health ?? undefined,
       usage: h.usage == null ? undefined : hostUsage(h.usage),
-      sharedBudgets: (h.sharedBudgets as unknown[] | undefined)?.map((v) =>
-        sharedBudget(v),
-      ),
+      limits: h.limits === undefined ? undefined : resources(h.limits),
     } as unknown as Host;
   });
 }
@@ -251,6 +251,8 @@ export function machinesResponse(value: unknown): Machine[] {
     requiredStrings(record(m.preparation), ["state"]);
     booleans(m, ["ready"], true);
     optionalStrings(m, ["detail"]);
+    if (m.ownerId != null && (!string(m.ownerId) || !m.ownerId))
+      throw new Error("Invalid machine owner.");
     optionalNumbers(m, ["updatedAt"]);
     if (m.powerOffRequest != null && !string(m.powerOffRequest))
       throw new Error("Invalid power-off request.");
@@ -289,10 +291,20 @@ export function imagesResponse(value: unknown): ImageOffer[] {
     } as unknown as ImageOffer;
   });
 }
-function user(value: unknown): User {
+export function user(value: unknown): User {
   const u = record(value);
-  requiredStrings(u, ["username"]);
-  return { username: u.username as string };
+  requiredStrings(u, ["id", "username"]);
+  if (
+    !["admin", "user"].includes(String(u.role)) ||
+    !["pending", "active", "disabled"].includes(String(u.status))
+  )
+    throw new Error("Invalid account identity.");
+  return {
+    id: u.id as string,
+    username: u.username as string,
+    role: u.role as User["role"],
+    status: u.status as User["status"],
+  };
 }
 export function authStatus(value: unknown): {
   user?: User;

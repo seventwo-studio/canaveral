@@ -7,12 +7,12 @@ is a small Node 24 client for the application/lease subset of the
 | Class | Credential | Operations |
 | --- | --- | --- |
 | `ConsumerClient` | Application key | `catalogue`, `listLeases`, `acquireLease`, `inspectLease`, `renewLease`, `releaseLease`, `rotateLeaseCredential` |
-| `LeaseClient` | One lease's current key | `inspect`, `renew`, `release` for its bound lease |
+| `LeaseClient` | One lease's current key | `inspect`, `renew`, `release`, `createOperation`, `operation` for its bound lease |
 
 `LeaseClient` has no catalogue, listing, acquisition or credential-rotation method, and each
 client sends only its own bearer. `rotateLeaseCredential` is the explicit owner-only exchange:
 it is not idempotent, is never retried, revokes the previous lease key, and its result must not
-be logged. After an unknown outcome, call it again deliberately. Sessions, durable operations,
+be logged. After an unknown outcome, call it again deliberately. Sessions,
 WebSocket and binary workers, and administrative, host or model endpoints are not implemented.
 
 ```ts
@@ -78,3 +78,25 @@ Successful acquisition replies must identify the caller-owned lease UUID. Renewa
 and release replies must match both the requested lease and mutation UUID; mismatches
 leave the mutation outcome unknown. TLS errors after certificate verification also
 leave mutation outcomes unknown.
+
+## Linux command operations
+
+The experimental [Linux operation contract](linux-command-operations.md) adds two
+methods only to `LeaseClient`:
+
+```ts
+const { created, operation } = await lease.createOperation({
+  id: persistedUuid, member: "primary", action: "shell", arguments: { argv: ["printf", "hello"] },
+});
+const receipt = await lease.operation(persistedUuid);
+```
+
+Persist UUID and intent before submission. `created` distinguishes 201 from exact
+200 replay. Neither method retries, polls, renews or releases. Submission uses the
+existing mutation error contract: unrecognized or lost replies leave outcome
+unknown. Explicitly inspect or replay the same UUID and intent. Responses are
+checked for operation and lease identity, member, state, UTC update time and result
+evidence. Application clients have no operation methods; only the current scoped
+key may submit or inspect, including old receipts after lease termination. Treat
+command arguments and returned output as private. These methods have controller
+and fake-peer fixture coverage, without native execution acceptance.

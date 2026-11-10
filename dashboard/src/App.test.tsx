@@ -93,8 +93,15 @@ beforeEach(() => {
   handler = (path) =>
     path === "auth/status"
       ? json({ setupRequired: false })
-      : path === "auth/login"
-        ? json({ user: { username: "admin" } })
+      : ["auth/login", "auth/session"].includes(path)
+        ? json({
+            user: {
+              id: "admin-id",
+              username: "admin",
+              role: "admin",
+              status: "active",
+            },
+          })
         : path === "hosts"
           ? json({ hosts: [host] })
           : path === "templates"
@@ -130,6 +137,138 @@ async function login() {
   return user;
 }
 describe("dashboard contracts", () => {
+  it.each(["admin", "admin/users", "admin/tokens"])(
+    "blocks ordinary-user deep link %s before requesting admin data",
+    async (hash) => {
+      const original = handler;
+      handler = (p) =>
+        ["auth/login", "auth/session"].includes(p)
+          ? json({
+              user: {
+                id: "alice",
+                username: "alice",
+                role: "user",
+                status: "active",
+              },
+            })
+          : original(p);
+      location.hash = hash;
+      await login();
+      expect(
+        calls.some((c) => ["hosts", "users", "admin/tokens"].includes(c.path)),
+      ).toBe(false);
+      expect(
+        screen.queryByRole("navigation", { name: "Administration navigation" }),
+      ).toBeNull();
+      expect(screen.getByRole("heading", { name: "Machines" })).toBeTruthy();
+    },
+  );
+  it("shows fleet ownership and filters without changing lifecycle controls", async () => {
+    const original = handler;
+    handler = (p) =>
+      p === "users"
+        ? json({
+            users: [
+              {
+                id: "alice",
+                username: "alice",
+                role: "user",
+                status: "active",
+              },
+            ],
+          })
+        : p === "machines"
+          ? json({
+              machines: [
+                { ...machine, ownerId: "alice" },
+                { ...machine, id: "m2", name: "Unassigned", ownerId: null },
+              ],
+            })
+          : original(p);
+    const actor = await login();
+    expect(
+      await screen.findByText("No user owner", { selector: "dd" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Administration navigation" }),
+    ).toBeTruthy();
+    await actor.selectOptions(screen.getByLabelText("Machine owner"), "alice");
+    expect(screen.queryByRole("button", { name: /^Unassigned$/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Stop Voyager" })).toBeTruthy();
+  });
+  it("keeps ordinary users in their workspace without requesting administrator inventory", async () => {
+    const original = handler;
+    handler = (p) =>
+      ["auth/login", "auth/session"].includes(p)
+        ? json({
+            user: {
+              id: "alice",
+              username: "alice",
+              role: "user",
+              status: "active",
+            },
+          })
+        : p === "hosts"
+          ? json({ error: "Forbidden" }, 403)
+          : original(p);
+    location.hash = "hosts/h1";
+    const actor = await login();
+    expect(calls.some((c) => c.path === "hosts")).toBe(false);
+    expect(calls.some((c) => c.path === "templates")).toBe(true);
+    expect(screen.queryByRole("link", { name: "Hosts" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Orchestrators" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Capture Voyager/ }),
+    ).toBeNull();
+    await actor.click(screen.getByRole("link", { name: "Images" }));
+    await screen.findByRole("button", { name: "Use image" });
+    expect(screen.queryByRole("button", { name: "Import image" })).toBeNull();
+    expect(calls.some((c) => c.path.startsWith("image-tasks"))).toBe(false);
+    await actor.click(screen.getByRole("button", { name: "Account menu" }));
+    expect(screen.queryByRole("menuitem", { name: "Users" })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: "API tokens" })).toBeTruthy();
+  });
+  it("fails closed for a login response without account authority", async () => {
+    const original = handler;
+    handler = (p) =>
+      ["auth/login", "auth/session"].includes(p)
+        ? json({ user: { username: "legacy" } })
+        : original(p);
+    const actor = userEvent.setup();
+    render(<App />);
+    await actor.type(await screen.findByLabelText("Username"), "legacy");
+    await actor.type(screen.getByLabelText("Password"), "fixture password");
+    await actor.click(screen.getByRole("button", { name: "Sign in" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.path === "auth/login")).toBe(true),
+    );
+    expect(calls.some((c) => c.path === "hosts" || c.path === "machines")).toBe(
+      false,
+    );
+    expect(screen.queryByRole("button", { name: "Account menu" })).toBeNull();
+  });
+  it("clears privileged inventory when the current account role changes", async () => {
+    const actor = await login(),
+      original = handler;
+    const hostCalls = calls.filter((c) => c.path === "hosts").length;
+    handler = (p) =>
+      p === "auth/session"
+        ? json({
+            user: {
+              id: "admin-id",
+              username: "admin",
+              role: "user",
+              status: "active",
+            },
+          })
+        : original(p);
+    await actor.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByText(
+      "Your account access changed. Sign in again to continue.",
+    );
+    expect(screen.queryByText("Voyager")).toBeNull();
+    expect(calls.filter((c) => c.path === "hosts")).toHaveLength(hostCalls);
+  });
   it("retains the last good inventory when a successful response contains malformed data", async () => {
     const user = await login(),
       original = handler;
@@ -189,7 +328,15 @@ describe("dashboard contracts", () => {
     const original = handler;
     handler = (path) =>
       path === "auth/status"
-        ? json({ setupRequired: false, user: { username: "admin" } })
+        ? json({
+            setupRequired: false,
+            user: {
+              id: "admin-id",
+              username: "admin",
+              role: "admin",
+              status: "active",
+            },
+          })
         : original(path);
     render(<App />);
     await screen.findByRole("button", { name: "Voyager" });

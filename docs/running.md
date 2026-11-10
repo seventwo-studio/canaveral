@@ -6,7 +6,12 @@ Run the control plane on any supported Python host, in Docker or in Kubernetes. 
 
 Use Python 3.9+ and run `python3 -m canaveral` from the checkout, or install the package and use `canaveral`. `python3 -m canaveral init ./secrets` creates private credential files. It refuses to overwrite existing files. Start `serve` as in the root README; its default bind address is loopback. For access from other machines, provide a TLS proxy and set `--bind` to the intended private interface. Persist `--database` and keep administrator credentials with the owner.
 
-Copy an example from `examples/` into a private host configuration. Set a deliberate capacity budget, correct architecture, bootable base image paths and immutable revision IDs. Use reusable template files and preparation recipes as described in [Configurable computers](templates.md). Remove templates that are not installed. On each host:
+Use [user accounts and scoped personal API tokens](accounts-and-tokens.md) for
+normal machine access. Users own private machines; admins manage all users and
+machines. Keep operator and runner-enrollment credentials separate. Back up an
+existing controller database before its first upgrade to the user account schema.
+
+Copy an example from `examples/` into a private host configuration. Set a deliberate host capacity limit, correct architecture, bootable base image paths and immutable revision IDs. Use reusable template files and preparation recipes as described in [Configurable computers](templates.md). Remove templates that are not installed. On each host:
 
 ```sh
 python3 -m canaveral --url https://canaveral.example.internal host \
@@ -85,7 +90,7 @@ Use one replica with the included Recreate strategy and persistent local/block s
 
 Running VMs inside Kubernetes requires a working KubeVirt + CDI installation, virtualization-capable nodes, suitable firmware, storage and prepared template PVCs. It is separate from merely running the Canaveral orchestrator in a pod. KubeVirt handles KVM access and pod scheduling; the controller pod is not privileged. macOS VM creation continues through separate Apple hosts, not generic Kubernetes Linux nodes.
 
-Edit `deploy/kubernetes/worker-kubevirt.json` for the intended templates, architectures, pool budget and worker image. Its default examples require `linux-server-template` and `linux-desktop-template` PVCs in `canaveral-guests`. Source PVCs must be offline and their sizes must fit the advertised minimums. Build/load the worker image, create the namespace and a separate enrollment-only Secret there, then apply:
+Edit `deploy/kubernetes/worker-kubevirt.json` for the intended templates, architectures, pool capacity limit and worker image. Its default examples require `linux-server-template` and `linux-desktop-template` PVCs in `canaveral-guests`. Source PVCs must be offline and their sizes must fit the advertised minimums. Build/load the worker image, create the namespace and a separate enrollment-only Secret there, then apply:
 
 ```sh
 kubectl create namespace canaveral-guests
@@ -94,6 +99,6 @@ kubectl -n canaveral-guests create secret generic canaveral-enrollment \
 kubectl apply -f deploy/kubernetes/worker-kubevirt.json
 ```
 
-The worker StatefulSet retains its host identity on a PVC and uses namespace-scoped access to VM resources and source-volume cloning. Its state is separate from individual VM root disks. Do not scale one pool configuration into multiple independent offers with the same capacity; split the budget deliberately. The in-cluster example explicitly permits private HTTP to the controller Service. Template VMs use independent CDI-cloned disks and `Always`/`Halted` run strategies. Console/VNC access uses `virtctl` and your existing Kubernetes credentials. Guest/network access and Windows secure-boot/TPM storage need acceptance against the cluster's actual KubeVirt configuration.
+The worker StatefulSet retains its host identity on a PVC and uses namespace-scoped access to VM resources and source-volume cloning. Its state is separate from individual VM root disks. Do not scale one pool configuration into multiple independent offers with the same capacity; divide the capacity deliberately. The in-cluster example explicitly permits private HTTP to the controller Service. Template VMs use independent CDI-cloned disks and `Always`/`Halted` run strategies. Console/VNC access uses `virtctl` and your existing Kubernetes credentials. Guest/network access and Windows secure-boot/TPM storage need acceptance against the cluster's actual KubeVirt configuration.
 
 These files are deployment inputs, not evidence of an installed cluster or successful VM boots. The implementation does not automatically deploy into a current kubeconfig context.

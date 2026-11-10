@@ -1,4 +1,4 @@
-"""One physical host identity and capacity budget, with multiple runtimes."""
+"""One physical host identity and set of host limits, with multiple runtimes."""
 import platform
 from pathlib import Path
 

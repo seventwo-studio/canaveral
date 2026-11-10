@@ -131,7 +131,7 @@ class RetentionCheckTests(unittest.TestCase):
                 stable['imageInventory']={host+'/'+row['id']+'/'+row['revision']+'/'+row['arch']:{'hostId':host,**row}
                     for row in resources['images']}
                 stable['nativeBootReceipts']={machine['id']:'a'*64} # Explicit fake native receipt, never a process read.
-                stable['hostBudgets']={host:resources['budget']};stable['reservations']={host:resources['reserved']}
+                stable['hostBudgets']={host:resources['limits']};stable['reservations']={host:resources['reserved']}
                 return result
             before=snapshot(1000);self.assertTrue(compare(before,snapshot(1001))['retentionMatches'])
             store.create(request())

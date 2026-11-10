@@ -11,14 +11,15 @@ value = json.load(sys.stdin)
 store = Store(sys.argv[2], clock=lambda: 80000)
 action = sys.argv[1]
 if action == "initialize": result = {}
-elif action == "save": result = store.save_resource_budget(value)
+elif action == "save": result = store.save_host_limits(value["host"], {"limits":value["limits"]})
 elif action == "validate":
     try:
-        store.save_resource_budget(value)
+        store.save_host_limits(value["host"], {"limits":value["limits"]})
         result = {"status": 200}
     except Error as error:
         result = {"status": error.status}
-elif action == "list": result = store.resource_budgets()
+elif action == "limits":
+    with store.transaction() as db: result = store._host_limits(db, value["host"])
 elif action in ("used", "remaining"):
     with store.transaction() as db:
         operation = store._used if action == "used" else store._remaining_capacity

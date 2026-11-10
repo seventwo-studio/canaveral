@@ -18,7 +18,24 @@ import { record } from "@/lib/types";
 import type { AuthState } from "@/lib/types";
 import type { Host } from "@/lib/infrastructure";
 import type { RegistryEntry, Resources } from "@/lib/catalogue";
-type View = "machines" | "hosts" | "orchestrators" | "templates";
+type View =
+  | "machines"
+  | "hosts"
+  | "orchestrators"
+  | "templates"
+  | "account"
+  | "tokens"
+  | "users"
+  | "admin"
+  | "api-access";
+import { AccountPage, TokensPage, UsersPage } from "@/components/accounts";
+import {
+  AdminOverview,
+  AdminTokensPage,
+  useAdminUsers,
+} from "@/components/admin-dashboard";
+import { ownerLabel } from "@/lib/admin";
+import { ClaimScreen, takeClaim } from "@/components/claim-screen";
 interface CreateConfig {
   templates: GroupedImage[];
   selected?: GroupedImage;
@@ -96,7 +113,6 @@ import {
   InfrastructureCard,
   InfrastructureDetails,
 } from "@/components/infrastructure";
-import { SharedBudgets } from "@/components/shared-budgets";
 import { BaseImageRegistry } from "@/components/image-registry";
 import { MachinePowerOff } from "@/components/machine-power";
 import {
@@ -174,10 +190,18 @@ const views = {
   },
 };
 const currentView = (): View => {
-  const name = location.hash.slice(1).split("/")[0] ?? "";
+  const parts = location.hash.slice(1).split("/");
+  const name = parts[0] ?? "";
+  if (name === "admin")
+    return parts[1] === "users"
+      ? "users"
+      : parts[1] === "tokens"
+        ? "api-access"
+        : "admin";
   return name === "images"
     ? "templates"
-    : Object.hasOwn(views, name)
+    : ["account", "tokens", "users", "api-access"].includes(name) ||
+        Object.hasOwn(views, name)
       ? (name as View)
       : "machines";
 };
@@ -226,6 +250,8 @@ function Status({ text }: { text: string }) {
   );
 }
 export function App() {
+  const [claim, setClaim] = useState(takeClaim);
+  const identity = useRef<User | null>(null);
   const [auth, setAuth] = useState<AuthState>("checking"),
     [user, setUser] = useState<User | null>(null),
     [authError, setAuthError] = useState("");
@@ -239,21 +265,35 @@ export function App() {
     [message, setMessage] = useState(""),
     [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false),
-    [view, setView] = useState(currentView),
+    [requestedView, setView] = useState(currentView),
     [filter, setFilter] = useState("all"),
     [query, setQuery] = useState("");
+  const [owner, setOwner] = useState("all");
+  const directory = useAdminUsers(
+    user,
+    () => {
+      void signOut("Administrator access ended. Sign in again to continue.");
+    },
+    requestedView,
+  );
   const [controlId, setControlId] = useState<string | null>(null);
   const [connectionSetup, setConnectionSetup] = useState<
       "host" | "orchestrator" | null
     >(null),
     [infrastructureId, setInfrastructureId] = useState(currentInfrastructure);
-  const [budgetOpen, setBudgetOpen] = useState(false);
   const [imageImport, setImageImport] = useState<boolean | RegistryEntry>(
       false,
     ),
     [captureId, setCaptureId] = useState<string | null>(null);
   const [registryOpen, setRegistryOpen] = useState(false);
   const [powerOffId, setPowerOffId] = useState<string | null>(null);
+  const view: View =
+    user?.role !== "admin" &&
+    ["hosts", "orchestrators", "users", "admin", "api-access"].includes(
+      requestedView,
+    )
+      ? "machines"
+      : requestedView;
   const isInfrastructure = view === "hosts" || view === "orchestrators";
   const infrastructureKind = (h: Host) =>
     h.kind || (h.provider === "kubevirt" ? "orchestrator" : "host");
@@ -279,12 +319,12 @@ export function App() {
     refreshing.current = null;
     acting.current = false;
     setUser(null);
+    identity.current = null;
     setBusy(old);
     setCreate(null);
     setDetailId(null);
     setControlId(null);
     setConnectionSetup(null);
-    setBudgetOpen(false);
     setImageImport(false);
     setRegistryOpen(false);
     setPowerOffId(null);
@@ -298,8 +338,9 @@ export function App() {
     setAuthError(reason);
     try {
       if (old) await api("auth/logout", {});
-    } catch {
-      setAuthError("Could not sign out on the server. Retry when connected.");
+    } catch (error) {
+      if (statusCode(error) !== 401)
+        setAuthError("Could not sign out on the server. Retry when connected.");
     } finally {
       if (session.current.generation === generation) setBusy(false);
     }
@@ -316,7 +357,8 @@ export function App() {
     setAuthError("");
     try {
       const s = await api("auth/status", undefined, authStatus);
-      if (s.user) {
+      if (s.user?.status === "active") {
+        identity.current = s.user;
         session.current.active = true;
         setUser(s.user);
         await refresh();
@@ -330,7 +372,7 @@ export function App() {
     }
   }
   useEffect(() => {
-    loadAuth();
+    if (!claim) loadAuth();
   }, []);
   async function refresh() {
     if (refreshing.current) return refreshing.current;
@@ -338,8 +380,30 @@ export function App() {
     if (!active) return;
     const task = (async () => {
       try {
+        const current = await api("auth/session", undefined, loginReceipt);
+        if (generation !== session.current.generation) return;
+        if (current.user.status !== "active") {
+          await signOut(
+            "This account is not active. Contact your administrator.",
+          );
+          return;
+        }
+        if (
+          identity.current &&
+          (identity.current.id !== current.user.id ||
+            identity.current.role !== current.user.role)
+        ) {
+          await signOut(
+            "Your account access changed. Sign in again to continue.",
+          );
+          return;
+        }
+        identity.current = current.user;
+        setUser(current.user);
         const [h, m, t] = await Promise.all([
-          api("hosts", undefined, hostsResponse),
+          identity.current?.role === "admin"
+            ? api("hosts", undefined, hostsResponse)
+            : Promise.resolve([]),
           api("machines", undefined, machinesResponse),
           api("templates", undefined, imagesResponse),
         ]);
@@ -386,12 +450,13 @@ export function App() {
       setInfrastructureId(currentInfrastructure());
       setFilter("all");
       setQuery("");
+      setOwner("all");
     };
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
   useEffect(() => {
-    document.title = `Canaveral · ${infrastructureId ? "Overview · " : ""}${title(view)}`;
+    document.title = `Canaveral · ${infrastructureId ? "Overview · " : ""}${view === "admin" ? "Administration" : view === "api-access" ? "API access" : title(view)}`;
   }, [view, infrastructureId]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -419,6 +484,9 @@ export function App() {
       );
       if (generation !== session.current.generation) return;
       session.current.active = true;
+      if (result.user.status !== "active")
+        throw new Error("This account is not active.");
+      identity.current = result.user;
       setUser(result.user);
       setAuth("login");
       await refresh();
@@ -508,6 +576,16 @@ export function App() {
   const resourceHost = infrastructureHosts.find(
     (host) => host.id === infrastructureId,
   );
+  if (claim)
+    return (
+      <ClaimScreen
+        token={claim}
+        onDone={() => {
+          setClaim(null);
+          loadAuth();
+        }}
+      />
+    );
   if (!user)
     return (
       <LoginScreen
@@ -529,7 +607,11 @@ export function App() {
         hostName(m.hostId),
         m.template.os,
         m.template.arch,
+        ownerLabel(m, directory.data ?? []),
       ]) &&
+      (user.role !== "admin" ||
+        owner === "all" ||
+        (owner === "none" ? m.ownerId === null : m.ownerId === owner)) &&
       (filter === "all" ||
         (filter === "attention" ? attention(m) : m.observed === filter)),
   );
@@ -563,7 +645,11 @@ export function App() {
   return (
     <SidebarProvider>
       <WorkspaceSidebar
-        views={views}
+        views={
+          user.role === "admin"
+            ? views
+            : { machines: views.machines, templates: views.templates }
+        }
         view={view}
         counts={{
           machines: inventory.machines.length,
@@ -589,7 +675,13 @@ export function App() {
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem className="hidden sm:block">
-                Workspace
+                {["admin", "users", "api-access"].includes(view) ? (
+                  <a href="#admin">Administration</a>
+                ) : isInfrastructure ? (
+                  "Infrastructure"
+                ) : (
+                  "Workspace"
+                )}
               </BreadcrumbItem>
               <BreadcrumbSeparator className="hidden sm:block" />
               <BreadcrumbItem>
@@ -598,7 +690,13 @@ export function App() {
                     {title(view)}
                   </BreadcrumbLink>
                 ) : (
-                  <BreadcrumbPage>{title(view)}</BreadcrumbPage>
+                  <BreadcrumbPage>
+                    {view === "admin"
+                      ? "Overview"
+                      : view === "api-access"
+                        ? "API access"
+                        : title(view)}
+                  </BreadcrumbPage>
                 )}
               </BreadcrumbItem>
               {resourcePage && (
@@ -615,13 +713,6 @@ export function App() {
             {view === "hosts" && !resourcePage && (
               <>
                 <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setBudgetOpen(true)}
-                >
-                  Shared budgets
-                </Button>
-                <Button
                   size="sm"
                   onClick={() => setConnectionSetup("host")}
                   disabled={busy}
@@ -635,14 +726,69 @@ export function App() {
               variant="ghost"
               size="icon-sm"
               aria-label={stale ? "Retry connection" : "Refresh"}
-              onClick={refresh}
+              onClick={() => {
+                void refresh();
+                void directory.refresh();
+              }}
             >
               <RefreshCw />
             </Button>
           </div>
         </header>
         <div className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 lg:px-6">
-          {resourcePage ? (
+          {view === "admin" && user.role === "admin" ? (
+            <AdminOverview
+              key={user.id}
+              user={user}
+              inventory={inventory}
+              loaded={loaded}
+              stale={stale}
+              directory={directory}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+              onInspect={(id) => {
+                detailTrigger.current = document.activeElement;
+                setDetailId(id);
+              }}
+              onRefresh={() => {
+                void refresh();
+              }}
+            />
+          ) : view === "api-access" && user.role === "admin" ? (
+            <AdminTokensPage
+              key={user.id}
+              user={user}
+              directory={directory}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : view === "account" ? (
+            <AccountPage
+              user={user}
+              onChanged={() =>
+                signOut("Password changed. Sign in with your new password.")
+              }
+            />
+          ) : view === "tokens" ? (
+            <TokensPage user={user} />
+          ) : view === "users" && user.role === "admin" ? (
+            <UsersPage
+              key={user.id}
+              user={user}
+              machines={loaded && !stale ? inventory.machines : undefined}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : resourcePage ? (
             <>
               <div className="min-w-0 space-y-2">
                 <a
@@ -709,14 +855,16 @@ export function App() {
                     </h1>
                     <p className="text-sm text-muted-foreground">
                       {view === "machines"
-                        ? "Manage your machines and their lifecycle."
+                        ? user.role === "admin"
+                          ? "Manage every user's machines and their lifecycle."
+                          : "Manage your machines and their lifecycle."
                         : isInfrastructure
                           ? "Connect infrastructure, verify capabilities and track resources."
                           : "Base images available on your hosts."}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {view === "templates" && (
+                    {view === "templates" && user.role === "admin" && (
                       <Button
                         variant="outline"
                         onClick={() => setRegistryOpen(true)}
@@ -724,20 +872,12 @@ export function App() {
                         Base image registry
                       </Button>
                     )}
-                    {view === "templates" && (
+                    {view === "templates" && user.role === "admin" && (
                       <Button
                         variant="outline"
                         onClick={() => setImageImport(true)}
                       >
                         Import image
-                      </Button>
-                    )}
-                    {isInfrastructure && (
-                      <Button
-                        variant="outline"
-                        onClick={() => setBudgetOpen(true)}
-                      >
-                        Shared budgets
                       </Button>
                     )}
                     <Button
@@ -765,6 +905,13 @@ export function App() {
               <Notice error>{stale}</Notice>
               <Notice>{message}</Notice>
               <Notice error>{actionError}</Notice>
+              {view === "machines" &&
+                user.role === "admin" &&
+                directory.error && (
+                  <Notice
+                    error
+                  >{`Owner names could not be refreshed. User IDs are shown. ${directory.error}`}</Notice>
+                )}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <ToggleGroup
                   className="max-w-full flex-wrap rounded-sm border bg-muted p-1"
@@ -777,7 +924,7 @@ export function App() {
                   spacing={1}
                   aria-label="Filter inventory"
                 >
-                  {views[view].filters.map((f) => (
+                  {views[view as keyof typeof views].filters.map((f) => (
                     <ToggleGroupItem
                       className="rounded-md text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm"
                       key={f}
@@ -792,6 +939,25 @@ export function App() {
                   ))}
                 </ToggleGroup>
                 <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+                  {view === "machines" && user.role === "admin" && (
+                    <label className="shrink-0 text-xs">
+                      <span className="sr-only">Machine owner</span>
+                      <select
+                        aria-label="Machine owner"
+                        className="h-9 max-w-48 rounded-md border bg-background px-2 text-sm"
+                        value={owner}
+                        onChange={(e) => setOwner(e.target.value)}
+                      >
+                        <option value="all">All owners</option>
+                        <option value="none">No user owner</option>
+                        {(directory.data ?? []).map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.username}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <InputGroup className="w-full sm:w-64">
                     <InputGroupInput
                       value={query}
@@ -805,7 +971,9 @@ export function App() {
                   </InputGroup>
                 </div>
               </div>
-              {view === "templates" && <ImageActivity onRefresh={refresh} />}
+              {view === "templates" && user.role === "admin" && (
+                <ImageActivity onRefresh={refresh} />
+              )}
               <section
                 className={
                   !items.length
@@ -964,6 +1132,23 @@ export function App() {
                                 {since(m.updatedAt)}
                               </dd>
                             </div>
+                            {user.role === "admin" && (
+                              <div className="col-span-2 min-w-0">
+                                <dt className="mb-1 text-xs text-muted-foreground">
+                                  Owner
+                                </dt>
+                                <dd className="[overflow-wrap:anywhere]">
+                                  {ownerLabel(m, directory.data ?? [])}
+                                </dd>
+                                {m.ownerId === null && (
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    Admin-only inventory. This may be
+                                    operator-created or managed by an
+                                    application lease.
+                                  </p>
+                                )}
+                              </div>
+                            )}
                           </dl>
                         </CardContent>
                         <CardFooter className="flex flex-wrap gap-2">
@@ -984,21 +1169,22 @@ export function App() {
                                 Power off
                               </Button>
                             )}
-                          {m.template.mode !== "device" && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={
-                                m.desired !== "stopped" ||
-                                m.observed !== "stopped" ||
-                                !!m.powerOffRequest
-                              }
-                              onClick={() => setCaptureId(m.id)}
-                              aria-label={`Capture ${m.name} as image`}
-                            >
-                              Capture image
-                            </Button>
-                          )}
+                          {user.role === "admin" &&
+                            m.template.mode !== "device" && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  m.desired !== "stopped" ||
+                                  m.observed !== "stopped" ||
+                                  !!m.powerOffRequest
+                                }
+                                onClick={() => setCaptureId(m.id)}
+                                aria-label={`Capture ${m.name} as image`}
+                              >
+                                Capture image
+                              </Button>
+                            )}
                           {(m.template.mode === "device" ||
                             m.template.guestAccess) && (
                             <Button
@@ -1149,13 +1335,6 @@ export function App() {
         <ImageCapture
           machine={inventory.machines.find((m) => m.id === captureId)!}
           onClose={() => setCaptureId(null)}
-          onRefresh={refresh}
-        />
-      )}
-      {budgetOpen && (
-        <SharedBudgets
-          hosts={inventory.hosts}
-          onClose={() => setBudgetOpen(false)}
           onRefresh={refresh}
         />
       )}

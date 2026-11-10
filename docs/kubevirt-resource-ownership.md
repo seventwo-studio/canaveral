@@ -5,7 +5,7 @@ assigned VM pods. `usage.cluster.metrics` and ResourceQuota values still include
 other namespace workloads. The optional `usage.cluster.canaveral` report has
 `scope: assigned-vm-pods`, ownership coverage and its own CPU/memory/pod metrics.
 An assigned workload is included in the namespace total; the two values must not
-be added together. Neither observation changes placement reservations or budgets.
+be added together. Neither observation changes placement reservations or host limits.
 
 ## Creation identity
 

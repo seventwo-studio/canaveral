@@ -135,6 +135,7 @@ fn medium_launch(path: &Path) -> Launch {
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Ready,
+    Command,
     WrongIdentity,
     WrongVersion,
     Stall,
@@ -176,6 +177,7 @@ fn fake_guest(d: &Direct, mode: Mode) -> Arc<Mutex<Vec<Host>>> {
         let (mut stream, _) = listener.accept().unwrap();
         let mut decoder = Decoder::default();
         let mut buf = [0u8; 4096];
+        let mut command_id = None;
         loop {
             let want = decoder.needed().min(buf.len());
             let n = match stream.read(&mut buf[..want]) {
@@ -202,7 +204,7 @@ fn fake_guest(d: &Direct, mode: Mode) -> Arc<Mutex<Vec<Host>>> {
                             version: 2,
                             binding: echo,
                         })),
-                        Mode::Ready => Some(encode(&Guest::Ready {
+                        Mode::Ready | Mode::Command => Some(encode(&Guest::Ready {
                             version: 1,
                             binding: echo,
                         })),
@@ -211,6 +213,51 @@ fn fake_guest(d: &Direct, mode: Mode) -> Arc<Mutex<Vec<Host>>> {
                 (Host::Renew { binding, .. }, _) => {
                     assert!(binding.same_launch(&launch.binding));
                     None
+                }
+                (
+                    Host::Exec {
+                        id,
+                        argv,
+                        cwd,
+                        env,
+                        timeout_ms,
+                        ..
+                    },
+                    Mode::Command,
+                ) => {
+                    assert_eq!(argv, &["echo", "fixture"]);
+                    assert_eq!(cwd, "/workspace");
+                    assert!(env.is_empty());
+                    assert!(*timeout_ms <= 30000);
+                    assert_ne!(*id, uuid::Uuid::from_u128(42));
+                    assert!(command_id.replace(*id).is_none(), "duplicate exec");
+                    None
+                }
+                (Host::Credit { .. }, Mode::Command) if command_id.is_some() => {
+                    let id = command_id.take().unwrap();
+                    let mut bytes = encode(&Guest::Output {
+                        version: 1,
+                        id,
+                        stream: "stdout".into(),
+                        seq: 0,
+                        data: "Zml4dHVyZQo=".into(),
+                    })
+                    .unwrap();
+                    bytes.extend(
+                        encode(&Guest::Exit {
+                            version: 1,
+                            id,
+                            status: Some(0),
+                            signal: None,
+                            timed_out: false,
+                            duration_ms: 1,
+                            stdout_bytes: 8,
+                            stderr_bytes: 0,
+                            termination_confirmed: true,
+                        })
+                        .unwrap(),
+                    );
+                    Some(Ok(bytes))
                 }
                 _ => None,
             };
@@ -477,4 +524,136 @@ fn started_record_must_bind_this_launch_and_private_relay() {
     }
     // A relay directory that is not privately owned is never connected.
     assert!(guest::connect(&sock).is_err());
+}
+
+/// Real supervision path, fake helper/socket guest/controller; no VM or signing.
+#[test]
+fn command_poll_report_loss_retries_exact_receipt_and_executes_once() {
+    struct Commands {
+        wire: Wire,
+        pending: Option<Value>,
+        reports: Vec<Value>,
+    }
+    impl Controller for Commands {
+        fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value> {
+            match route {
+                LeaseRoute::OperationPoll => {
+                    if self.pending.is_none() {
+                        self.pending = Some(
+                            json!({"id":uuid::Uuid::from_u128(42),"leaseId":self.wire.a.lease_id,
+                            "memberId":self.wire.a.member_id,"assignmentId":self.wire.a.id,
+                            "bootAttempt":body["bootAttempt"],"bundleDigest":body["bundleDigest"],
+                            "arguments":{"argv":["echo","fixture"]},"startBefore":200.0,"timeoutMs":30000,"state":"queued"}),
+                        );
+                    }
+                    Ok(
+                        json!({"command":self.pending,"lease":{"state":"ready","revision":2,"expiresAt":200.0,"controllerNow":100.0},"cancelRequested":false}),
+                    )
+                }
+                LeaseRoute::OperationReport => {
+                    self.reports.push(body.clone());
+                    assert_eq!(body["receipt"]["state"], "succeeded");
+                    assert_eq!(body["receipt"]["result"]["stdoutBase64"], "Zml4dHVyZQo=");
+                    if self.reports.len() == 1 {
+                        return Err("lost committed report reply");
+                    }
+                    assert_eq!(self.reports[0], body, "exact report retry");
+                    self.wire.cancel = true;
+                    Ok(json!({"operationId":body["operationId"],"state":"succeeded"}))
+                }
+                _ => self.wire.request(route, body),
+            }
+        }
+    }
+    let d = direct_fixture(|_| {});
+    let mut satellite = seeded(&d.c);
+    satellite.state.deadline = clock::now().as_secs_f64() + 20.0;
+    satellite.save().unwrap();
+    let frames = fake_guest(&d, Mode::Command);
+    let mut controller = Commands {
+        wire: wire(satellite.assignment().unwrap().clone()),
+        pending: None,
+        reports: vec![],
+    };
+    satellite.run_once(&mut controller).unwrap();
+    assert!(controller.reports.len() >= 2);
+    assert_eq!(
+        frames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| matches!(f, Host::Exec { .. }))
+            .count(),
+        1
+    );
+    assert!(satellite.state.cleaned);
+}
+#[test]
+fn active_command_stalled_poll_cannot_delay_local_fence_or_stop() {
+    struct Stalled {
+        wire: Wire,
+        polls: usize,
+        machine: PathBuf,
+    }
+    impl Controller for Stalled {
+        fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value> {
+            match route {
+                LeaseRoute::OperationPoll => {
+                    self.polls += 1;
+                    if self.polls == 2 {
+                        std::thread::sleep(Duration::from_secs(5));
+                        assert!(
+                            self.machine.join("power-off.request").exists(),
+                            "local fence waited for controller"
+                        );
+                        self.wire.cancel = true;
+                        return Err("stalled reply lost");
+                    }
+                    Ok(
+                        json!({"command":{"id":uuid::Uuid::from_u128(42),"leaseId":self.wire.a.lease_id,
+                        "memberId":self.wire.a.member_id,"assignmentId":self.wire.a.id,
+                        "bootAttempt":body["bootAttempt"],"bundleDigest":body["bundleDigest"],
+                        "arguments":{"argv":["echo","fixture"]},"startBefore":200.0,"timeoutMs":30000,"state":"queued"},
+                        "lease":{"state":"ready","revision":1,"expiresAt":200.0,"controllerNow":100.0},"cancelRequested":false}),
+                    )
+                }
+                LeaseRoute::OperationReport => {
+                    assert_eq!(body["receipt"], json!({"state":"unknown"}));
+                    Ok(json!({"operationId":body["operationId"],"state":"unknown"}))
+                }
+                _ => {
+                    let mut reply = self.wire.request(route, body)?;
+                    reply["lease"]["revision"] = json!(1);
+                    Ok(reply)
+                }
+            }
+        }
+    }
+    let d = direct_fixture(|_| {});
+    let mut satellite = seeded(&d.c);
+    satellite.state.deadline = clock::now().as_secs_f64() + 3.5;
+    satellite.save().unwrap();
+    // Ready mode leaves exec running; the local deadline must cancel and fence it.
+    let frames = fake_guest(&d, Mode::Ready);
+    let mut controller = Stalled {
+        wire: wire(satellite.assignment().unwrap().clone()),
+        polls: 0,
+        machine: machine_of(&d.c),
+    };
+    satellite.run_once(&mut controller).unwrap();
+    assert_eq!(controller.polls, 2);
+    assert_eq!(
+        frames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| matches!(f, Host::Exec { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        satellite.state.operations.current.as_ref().unwrap().receipt,
+        Some(json!({"state":"unknown"}))
+    );
+    assert!(satellite.state.stopped);
 }

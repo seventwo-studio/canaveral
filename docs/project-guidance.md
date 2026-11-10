@@ -3,6 +3,7 @@
 These documents describe implementation contracts and setup. Native acceptance, provider binding and recovery limits remain explicit in each contract. They do not promise full platform parity. Python runtime paths remain authoritative; experimental Rust and TypeScript libraries do not replace them.
 
 - [access transport](access-transport.md)
+- [user accounts and personal API tokens](accounts-and-tokens.md)
 - [android runtime ownership](android-runtime-ownership.md)
 - [android transfer](android-transfer.md)
 - [applications](applications.md)
@@ -20,6 +21,7 @@ These documents describe implementation contracts and setup. Native acceptance, 
 - [experimental model-job contract](model-job-contract.md)
 - [TypeScript model-job controller slice](model-controller.md)
 - [TypeScript Linux lease controller slice](linux-lease-controller.md)
+- [Experimental Linux command operations](linux-command-operations.md)
 - [infrastructure](infrastructure.md)
 - [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
@@ -51,6 +53,6 @@ These documents describe implementation contracts and setup. Native acceptance, 
 
 - [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
 
-- [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core; satellite bootstrap medium and hello/ready fixture-covered; consumer command route and native acceptance remain outstanding)
+- [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core, deterministic local bundle/initrd assembly and bootstrap source; satellite readiness and consumer commands fixture-covered; kernel/rootfs construction and native acceptance remain outstanding)
 
-- [Native direct Linux boot](../VirtualMachines/Documentation/DirectBoot.md) (direct-kernel helper and relay fixtures; satellite integration fixture-covered; real builder, initrd and native acceptance remain open)
+- [Native direct Linux boot](../VirtualMachines/Documentation/DirectBoot.md) (direct-kernel helper and relay fixtures; satellite integration and initrd assembly fixture-covered; production kernel/rootfs builds, artifact installation and native acceptance remain open)

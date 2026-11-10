@@ -52,7 +52,7 @@ class ImageStore:
             host=db.execute('SELECT * FROM hosts WHERE id=?',(host_id,)).fetchone()
             if not host or self.clock()-host['seen']>=self.lease_seconds:raise Error('Image host must be online.',409)
             disk=math.ceil(size/1073741824)
-            if disk>self._remaining_capacity(db,host_id)['diskGiB']:raise Error('Image exceeds the available host or shared storage budget.',409)
+            if disk>self._remaining_capacity(db,host_id)['diskGiB']:raise Error('Image exceeds the available host storage limit.',409)
             db.execute("INSERT INTO image_tasks VALUES (?,?,NULL,?,'running',NULL,?,?,?)",(metadata['id'],host_id,json.dumps(request),self.clock(),self.clock(),disk))
             return self._image_task(db.execute('SELECT * FROM image_tasks WHERE id=?',(metadata['id'],)).fetchone())
 
@@ -76,7 +76,7 @@ class ImageStore:
                 raise Error('Finish guest-access preparation before capturing an automatically provisioned image.',409)
             if db.execute("SELECT 1 FROM image_tasks WHERE machine=? AND state IN ('queued','running','unknown')",(machine_id,)).fetchone():raise Error('This machine already has an unresolved image capture.',409)
             disk=json.loads(machine['request'])['resources']['diskGiB']+1
-            if disk>self._remaining_capacity(db,machine['host'])['diskGiB']:raise Error('Capture exceeds the available image storage budget.',409)
+            if disk>self._remaining_capacity(db,machine['host'])['diskGiB']:raise Error('Capture exceeds the available host storage limit.',409)
             db.execute("INSERT INTO image_tasks VALUES (?,?,?,?,'queued',NULL,?,?,?)",(task_id,machine['host'],machine_id,json.dumps(request),self.clock(),self.clock(),disk))
             return self._image_task(db.execute('SELECT * FROM image_tasks WHERE id=?',(task_id,)).fetchone())
 

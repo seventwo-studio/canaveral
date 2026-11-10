@@ -11,7 +11,7 @@ with the same viewer and control lifecycle as VMs.
 Device providers are native host processes. The central controller needs no mobile
 SDK, direct adb connection, macOS privileges or inbound route to the device host.
 Separate runners can offer VM and mobile capacity on the same physical host; divide
-their capacity budgets so their combined reservations fit that host. Persist both
+their host limits so their combined reservations fit that host. Persist both
 agent state and device storage, under one operating-system account, across restarts.
 Never share a state directory between runners.
 

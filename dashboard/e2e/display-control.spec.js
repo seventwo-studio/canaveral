@@ -1,3 +1,4 @@
+import { adminUser } from "./auth-fixture.js";
 import { test, expect } from "@playwright/test";
 
 test("real noVNC client accepts separate runner control acknowledgements", async ({
@@ -30,39 +31,40 @@ test("real noVNC client accepts separate runner control acknowledgements", async
   };
   await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
-    const result = path.endsWith("auth/status")
-      ? { setupRequired: false, user: { username: "admin" } }
-      : path.endsWith("/machines")
-        ? { machines: [machine] }
-        : path.endsWith("/hosts")
-          ? { hosts: [] }
-          : path.endsWith("/templates")
-            ? { templates: [] }
-            : path.endsWith("/accessibility")
-              ? {
-                  snapshotId: "11111111-2222-4333-8444-555555555555",
-                  capturedAt: Date.now() / 1000,
-                  source: "fixture",
-                  coordinateSpace: "screen-pixels",
-                  truncated: false,
-                  coverage: "Synthetic normalized native hierarchy fixture",
-                  nodes: [
-                    {
-                      id: "target",
-                      parentId: null,
-                      depth: 0,
-                      name: "Launch fixture",
-                      role: "button",
-                      identifier: "launch",
-                      states: { enabled: true },
-                      properties: {},
-                      path: [0],
-                      bounds: { x: 1, y: 1, width: 4, height: 4 },
-                      actions: ["click"],
-                    },
-                  ],
-                }
-              : {};
+    const result =
+      path.endsWith("auth/status") || path.endsWith("auth/session")
+        ? { setupRequired: false, user: adminUser }
+        : path.endsWith("/machines")
+          ? { machines: [machine] }
+          : path.endsWith("/hosts")
+            ? { hosts: [] }
+            : path.endsWith("/templates")
+              ? { templates: [] }
+              : path.endsWith("/accessibility")
+                ? {
+                    snapshotId: "11111111-2222-4333-8444-555555555555",
+                    capturedAt: Date.now() / 1000,
+                    source: "fixture",
+                    coordinateSpace: "screen-pixels",
+                    truncated: false,
+                    coverage: "Synthetic normalized native hierarchy fixture",
+                    nodes: [
+                      {
+                        id: "target",
+                        parentId: null,
+                        depth: 0,
+                        name: "Launch fixture",
+                        role: "button",
+                        identifier: "launch",
+                        states: { enabled: true },
+                        properties: {},
+                        path: [0],
+                        bounds: { x: 1, y: 1, width: 4, height: 4 },
+                        actions: ["click"],
+                      },
+                    ],
+                  }
+                : {};
     await route.fulfill({ json: result });
   });
   let controlRequest,

@@ -1,3 +1,4 @@
+import { operationReceipt } from "./linux-operations.ts";
 import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
@@ -38,6 +39,22 @@ export interface RenewRequest { id: string; expectedRevision: number; ttlSeconds
 export interface ReleaseRequest { id: string }
 /** Fresh lease-scoped key. Store privately and never log it. */
 export interface LeaseCredential { id: string; credential: string }
+
+export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[] } }
+export interface Operation {
+  id: string; leaseId: string; member: "primary"; state: "queued" | "succeeded" | "failed" | "unknown"; updatedAt: string;
+  result?: Record<string, unknown>;
+}
+export interface CreateOperationResult { created: boolean; operation: Operation }
+function boundOperation(value: unknown, leaseId: string, id: string): Operation {
+  if (!isRecord(value) || typeof value.id !== "string" || !sameId(value.id, id) ||
+      typeof value.leaseId !== "string" || !sameId(value.leaseId, leaseId) || value.member !== "primary" ||
+      !["queued", "succeeded", "failed", "unknown"].includes(value.state as string) ||
+      typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt)) || !value.updatedAt.endsWith("Z")) throw new TypeError("operation");
+  if (value.state === "queued") { if (Object.hasOwn(value, "result")) throw new TypeError("queued result"); }
+  else operationReceipt({ state: value.state, ...(Object.hasOwn(value, "result") ? { result: value.result } : {}) });
+  return value as unknown as Operation;
+}
 
 export type ErrorOutcome = "unknown" | undefined;
 /** Base for all SDK errors. `outcome === "unknown"` means a mutation may or may not have taken effect. */
@@ -275,7 +292,10 @@ class Transport {
     if (typeof json["code"] === "string" && typeof json["message"] === "string" && typeof json["retryable"] === "boolean") {
       const header = response.headers["retry-after"];
       const after = typeof header === "string" && /^[0-9]{1,6}$/.test(header) ? Number(header) : undefined;
-      const echoed = typeof json["requestId"] === "string" && UUID.test(json["requestId"]) ? json["requestId"] : requestId;
+      // HTTP tracing IDs do not identify durable effects. Recovery of an uncertain
+      // mutation must retain the caller's operation/acquisition/mutation UUID.
+      const correlation = typeof json["requestId"] === "string" && UUID.test(json["requestId"]) ? json["requestId"] : requestId;
+      const echoed = mutating && !definite && requestId !== undefined ? requestId : correlation;
       return new ConsumerServiceError(clean(json["message"]), clean(json["code"]).slice(0, 100), status, {
         ...outcome, ...(echoed ? { requestId: echoed } : {}), retryable: json["retryable"], ...(after !== undefined ? { retryAfterSeconds: after } : {}),
       });
@@ -440,6 +460,23 @@ export class LeaseClient extends LeaseOperations {
   constructor(options: LeaseClientOptions) {
     const leaseId = uuid(options.leaseId, "leaseId");
     super(new Transport(options, options.leaseKey)); this.leaseId = leaseId;
+  }
+  async createOperation(request: OperationRequest): Promise<CreateOperationResult> {
+    const r = exact(request, ["id", "member", "action", "arguments"], "Operation request"), id = uuid(r.id, "id");
+    const args = exact(r.arguments, ["argv"], "Operation arguments"), argv = args.argv;
+    if (r.member !== "primary" || r.action !== "shell" || !Array.isArray(argv) || !argv.length || argv[0] === "" ||
+        argv.some(v => typeof v !== "string" || v.includes("\0")) || Buffer.byteLength(JSON.stringify(argv)) > 65536) {
+      throw new ConsumerConfigurationError("Invalid shell operation.", "invalid_request");
+    }
+    const body = { id, member: "primary", action: "shell", arguments: { argv } };
+    const { status, value } = await parsed(this.transport, "POST", `/v1/leases/${this.leaseId}/operations`, body, [200, 201], true, id,
+      value => boundOperation(value, this.leaseId, id));
+    return { created: status === 201, operation: value };
+  }
+  async operation(operationId: string): Promise<Operation> {
+    const id = uuid(operationId, "operationId");
+    return (await parsed(this.transport, "GET", `/v1/leases/${this.leaseId}/operations/${id}`, undefined, [200], false, undefined,
+      value => boundOperation(value, this.leaseId, id))).value;
   }
   inspect(): Promise<Lease> { return this.inspectById(this.leaseId); }
   renew(request: RenewRequest): Promise<MutationResult> { return this.renewById(this.leaseId, request); }

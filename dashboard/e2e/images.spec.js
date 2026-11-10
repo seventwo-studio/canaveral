@@ -1,3 +1,4 @@
+import { adminUser } from "./auth-fixture.js";
 import { test, expect } from "@playwright/test";
 
 for (const width of [390, 1440])
@@ -48,8 +49,8 @@ for (const width of [390, 1440])
         "",
       );
       let result = {};
-      if (path === "auth/status")
-        result = { setupRequired: false, user: { username: "admin" } };
+      if (["auth/status", "auth/session"].includes(path))
+        result = { setupRequired: false, user: adminUser };
       if (path === "hosts") result = { hosts: [host] };
       if (path === "machines") result = { machines: [source] };
       if (path === "templates") result = { templates };
@@ -109,13 +110,11 @@ for (const width of [390, 1440])
       .getByLabel("Image name", { exact: true })
       .fill("Reusable Ubuntu");
     await importer.getByLabel("Format", { exact: true }).selectOption("raw");
-    await importer
-      .getByLabel("Image file", { exact: true })
-      .setInputFiles({
-        name: "ubuntu.raw",
-        mimeType: "application/octet-stream",
-        buffer: Buffer.alloc(2 * 1024 * 1024),
-      });
+    await importer.getByLabel("Image file", { exact: true }).setInputFiles({
+      name: "ubuntu.raw",
+      mimeType: "application/octet-stream",
+      buffer: Buffer.alloc(2 * 1024 * 1024),
+    });
     await importer
       .getByRole("button", { name: "Import image", exact: true })
       .click();

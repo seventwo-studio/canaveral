@@ -31,7 +31,7 @@ class AccountTests(DashboardFixture):
         status = json.loads(self.fetch("/api/v1/auth/status")[2])
         self.assertEqual(status, {"setupRequired": True, "setupAllowed": True})
         first = self.setup_account()
-        self.assertEqual(first["user"], {"username": "admin"})
+        self.assertEqual(first["user"]["username"], "admin")
         self.assertEqual(first["expiresAt"], self.now + SESSION_SECONDS)
         self.assertFalse(json.loads(self.fetch("/api/v1/auth/status")[2])["setupRequired"])
         self.assertEqual(self.fetch("/api/v1/auth/setup", {"username": "replacement", "password": self.password})[0], 409)
@@ -72,7 +72,7 @@ class AccountTests(DashboardFixture):
         self.url = "http://127.0.0.1:" + str(restarted.server_port)
         auth["Origin"] = self.url
         status, _, body = self.fetch("/api/v1/auth/status", headers=auth)
-        self.assertEqual(json.loads(body)["user"], {"username": "admin"})
+        self.assertEqual(json.loads(body)["user"]["username"], "admin")
         for origin in ("https://attacker.example", "null"):
             self.assertEqual(self.fetch("/api/v1/auth/logout", {}, headers={**auth, "Origin": origin})[0], 403)
         self.assertEqual(self.fetch("/api/v1/auth/logout", {}, headers={"Cookie": auth["Cookie"]})[0], 403)
@@ -117,11 +117,11 @@ class AccountTests(DashboardFixture):
     def test_passwords_and_sessions_are_hashed_and_credential_failures_are_generic(self):
         first = self.setup_account()
         with self.store.transaction() as db:
-            row = db.execute("SELECT * FROM administrator").fetchone()
+            row = db.execute("SELECT * FROM users").fetchone()
             self.assertEqual(row["iterations"], ITERATIONS)
             self.assertEqual(len(row["salt"]), 64)
             self.assertNotEqual(row["password_hash"], self.password)
-            session = db.execute("SELECT token_hash FROM admin_sessions").fetchone()[0]
+            session = db.execute("SELECT token_hash FROM user_sessions").fetchone()[0]
             self.assertNotEqual(session, first["token"])
         unknown = self.fetch("/api/v1/auth/login", {"username": "unknown", "password": self.password})
         wrong = self.fetch("/api/v1/auth/login", {"username": "admin", "password": "wrong-test-password"})
@@ -156,7 +156,7 @@ class AccountTests(DashboardFixture):
             results = [item for item in pool.map(attempt, range(4)) if item]
         self.assertEqual(len(results), 1)
         with self.store.transaction() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM administrator").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM users").fetchone()[0], 1)
 
     def test_cli_creation_is_idempotent_and_does_not_print_session_or_password(self):
         path = Path(self.temp.name) / "admin.token"
@@ -172,8 +172,8 @@ class AccountTests(DashboardFixture):
         self.assertIn("already exists; no changes made", output.getvalue())
         self.assertNotIn(self.password, output.getvalue())
         with self.store.transaction() as db:
-            self.assertEqual(db.execute("SELECT username FROM administrator").fetchone()[0], "admin")
-            self.assertEqual(db.execute("SELECT count(*) FROM admin_sessions").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT username FROM users").fetchone()[0], "admin")
+            self.assertEqual(db.execute("SELECT count(*) FROM user_sessions").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

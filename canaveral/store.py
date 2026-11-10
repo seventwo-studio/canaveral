@@ -44,7 +44,7 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
             db.execute("CREATE TABLE IF NOT EXISTS hosts (id TEXT PRIMARY KEY, credential TEXT NOT NULL, offer TEXT NOT NULL, seen REAL NOT NULL, enabled INTEGER NOT NULL DEFAULT 1)")
             db.execute("CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, request TEXT NOT NULL, host TEXT NOT NULL, template TEXT NOT NULL, desired TEXT NOT NULL, observed TEXT NOT NULL, detail TEXT NOT NULL, updated REAL NOT NULL)")
             columns = {row[1] for row in db.execute("PRAGMA table_info(machines)")}
-            for name, definition in {"intent": "TEXT", "preparation_hash": "TEXT", "prepared_at": "REAL NOT NULL DEFAULT 0", "preparation_state": "TEXT NOT NULL DEFAULT 'pending'",'access_ready':'INTEGER'}.items():
+            for name, definition in {"owner": "TEXT", "intent": "TEXT", "preparation_hash": "TEXT", "prepared_at": "REAL NOT NULL DEFAULT 0", "preparation_state": "TEXT NOT NULL DEFAULT 'pending'",'access_ready':'INTEGER'}.items():
                 if name not in columns:
                     db.execute("ALTER TABLE machines ADD COLUMN " + name + " " + definition)
             db.execute("UPDATE machines SET intent=request WHERE intent IS NULL")
@@ -53,8 +53,10 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
             db.execute("CREATE INDEX IF NOT EXISTS inference_jobs_host_state ON inference_jobs (host,state)")
             db.execute("CREATE TABLE IF NOT EXISTS device_operations (id TEXT PRIMARY KEY,machine TEXT NOT NULL,host TEXT NOT NULL,request TEXT NOT NULL,state TEXT NOT NULL,result TEXT,updated REAL NOT NULL,created REAL NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS device_operations_host_state ON device_operations (host,state)")
-            for row in db.execute("SELECT offer FROM hosts").fetchall():
-                self._register_templates(db, offer(json.loads(row[0])))
+            for row in db.execute("SELECT id,offer FROM hosts").fetchall():
+                advertised=offer(json.loads(row['offer']))
+                self._register_templates(db, advertised)
+                db.execute('INSERT OR IGNORE INTO host_limits VALUES (?,?)',(row['id'],json.dumps(advertised['capacity'])))
         os.chmod(self.path, 0o600)
         self._leases_ready=True
         with self.transaction():pass # Persist expiry before serving after restart.
@@ -69,6 +71,10 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
                 self._refresh_leases(db)
                 self._refresh_access_sessions(db)
                 self._close_consumer_operations(db)
+            from .authorization import current
+            policy = current.get()
+            if policy is not None:
+                policy.check(db)
             yield db
             db.commit()
         except BaseException:
@@ -92,6 +98,7 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
             self._validate_catalogue_offer(db,host_id,proposed)
             self._register_templates(db, proposed)
             db.execute("INSERT INTO hosts VALUES (?,?,?,?,1)", (host_id, credential, json.dumps(proposed), self.clock()))
+            db.execute('INSERT INTO host_limits VALUES (?,?)',(host_id,json.dumps(proposed['capacity'])))
         return {"id": host_id}
 
     def _register_templates(self, db, proposed):
@@ -198,8 +205,8 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
                 sample = db.execute('SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 1',(row['id'],)).fetchone()
                 item['usage'] = {**json.loads(sample['report']), 'receivedAt':sample['captured'], 'fresh':item['online'] and self.clock()-sample['captured']<30} if sample else None
                 item['available'] = self._remaining_capacity(db,row['id'])
-                item['sharedBudgets'] = self._host_budgets(db,row['id'])
-                item['overcommitted'] = any(item['reserved'][key]>item['capacity'][key] for key in item['capacity'])
+                item['limits'] = self._host_limits(db,row['id'])
+                item['overcommitted'] = any(item['reserved'][key]>min(item['capacity'][key],item['limits'][key]) for key in item['capacity'])
                 result.append(item)
             return result
 
@@ -211,7 +218,7 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
 
     def _machine(self, row, online):
         result = json.loads(row["request"])
-        result.update(hostId=row["host"], template=json.loads(row["template"]), desired=row["desired"],
+        result.update(ownerId=row["owner"], hostId=row["host"], template=json.loads(row["template"]), desired=row["desired"],
                       observed=row["observed"] if online else "unknown", detail=row["detail"], updatedAt=row["updated"])
         required = result["template"].get("preparationDriver", "none") != "none"
         result["preparation"] = {"state": row["preparation_state"] if required else "notRequired", "completedAt": row["prepared_at"] or None}
@@ -244,7 +251,12 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
     def machines(self):
         with self.transaction() as db:
             return [self._deletion_assignment(db,self._power_assignment(db,self._machine(row, self.clock() - row["seen"] < self.lease_seconds))) for row in
-                    db.execute("SELECT m.*,h.seen FROM machines m JOIN hosts h ON m.host=h.id ORDER BY m.id") if not self._deleted(db,row['id'])]
+                    db.execute("SELECT m.*,h.seen FROM machines m JOIN hosts h ON m.host=h.id ORDER BY m.id") if not self._deleted(db,row['id']) and self._human_visible(row)]
+
+    def _human_visible(self, row):
+        from .authorization import current
+        policy=current.get()
+        return policy is None or policy.principal['kind']=='operator' or policy.principal['user']['role']=='admin' or row['owner']==policy.principal['user']['id']
 
     def _used(self, db, host_id, exclude=None):
         used = self._inference_used(db, host_id)
@@ -261,6 +273,8 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
         return used
 
     def create(self, value):
+        from .accounts import fields
+        fields(value,('id','name','templateId','resources','templateRevision','hostId','arch'))
         request = machine_request(value)
         with self.transaction() as db:
             return self._create_machine(db,request)
@@ -295,7 +309,10 @@ class Store(ConsumerOperationStore, InferenceStore, DeviceStore, InfrastructureS
             raise Error("Multiple template revisions are available; choose templateRevision explicitly.")
         _, host_id, image, size = min(candidates, key=lambda item: (item[0], item[1]))
         effective = {**request, "resources": size}
-        db.execute("INSERT INTO machines (id,request,host,template,desired,observed,detail,updated,intent) VALUES (?,?,?,?,?,?,?,?,?)", (request["id"], json.dumps(effective), host_id, json.dumps(image), "running", "pending", "", self.clock(), json.dumps(request)))
+        from .authorization import current
+        policy=current.get()
+        owner=policy.principal['user']['id'] if not leased and policy is not None and policy.principal['kind']!='operator' else None
+        db.execute("INSERT INTO machines (id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,?,?,?,?,?,?)", (request["id"], json.dumps(effective), host_id, json.dumps(image), "running", "pending", "", self.clock(), json.dumps(request), owner))
         row = db.execute("SELECT * FROM machines WHERE id=?", (request["id"],)).fetchone()
         return self._machine(row, True)
 

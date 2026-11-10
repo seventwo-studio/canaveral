@@ -11,15 +11,15 @@ ledger. The central Canaveral controller is distinct from these connections.
 Open **Hosts → Add host** or **Orchestrators → Add orchestrator**. Select the
 host operating system and enabled runtimes (or external orchestrator provider),
 name, controller origin reachable from that runner and its Canaveral
-resource budget. Configure storage and provider bindings using the form;
+host limits. Configure storage and provider bindings using the form;
 advanced configuration holds installed image definitions and other bindings.
 Kubernetes context credentials remain in the runner's kubeconfig. An empty image
 catalogue is allowed during onboarding; it cannot receive machine placements.
 
 Create and download the private `canaveral-setup.json` file. It contains a
 30-minute enrollment credential bound to the configured name, provider and
-budget. The controller persists its hash, not the secret, and returns the secret
-once. Pending credentials can be revoked. If a creation response is lost, inspect
+initial capacity. The controller persists its hash, not the secret, and returns
+the secret once. Pending credentials can be revoked. If a creation response is lost, inspect
 pending setups and revoke that credential before creating a replacement; retrying
 the same intent never returns a second secret. Closing the dialog clears its
 in-memory copy. No setup credential goes into browser local/session storage or
@@ -58,7 +58,7 @@ operator-managed enrollment files remain compatible.
 ## Capabilities and environment checks
 
 Runners check platform/architecture, writable storage, executable availability
-and available versions, configured CPU/memory budget against the local machine,
+and available versions, offered CPU/memory capacity against the local machine,
 storage headroom, backend access and image bindings. Reports contain bounded,
 structured checks with passed/warning/failed/skipped status and repair guidance.
 Raw SDK stderr, environment variables, kubeconfig and credentials are not sent.
@@ -89,10 +89,13 @@ Windows/macOS guest access are not inferred from backend availability.
 
 ## Resource accounting
 
-The dashboard separates three quantities:
+The dashboard separates host limits, reservations and observed usage:
 
-- **Budget:** the configured CPU, memory and logical disk amount assigned to this
-  runner or pool. It is not automatic discovery of allocatable cluster capacity.
+- **Host limits:** controller-owned CPU, memory and logical disk limits on what
+  Canaveral may allocate to this host or pool. Initial limits come from the
+  enrollment capacity; administrators can edit them in the host overview. Each
+  resource must fit both its saved limit and the current runner offer. Neither
+  value automatically discovers allocatable cluster capacity.
 - **Reservations:** the authoritative transactional allocation ledger. CPU and
   memory remain reserved until a stopped intent is confirmed stopped. Logical
   disks remain reserved after shutdown. Unknown/offline assignments keep their
@@ -120,7 +123,7 @@ disk totals equal `reserved`. Stopping and unknown machines keep compute charged
 only a confirmed stopped intent moves their disks into the stopped category.
 
 Host overviews render these ledger categories as stacked CPU, memory and storage
-bars with explicit unreserved/over-budget capacity and a complete legend. Their
+bars with explicit unreserved/over-limit capacity and a complete legend. Their
 machine list stays scoped to the selected host and keeps stopped allocations
 visible alongside running machines. The resource API also returns `images`:
 that host's public runtime-image bindings and registered artifact metadata,
@@ -242,16 +245,24 @@ executing runtime/provider commands. Controlled event races also verify lost-wak
 prevention and discarded late environment results. Native process cleanup and retained-device
 lifecycle acceptance remain separate gates.
 
-A physical host uses one identity and budget across its compatible runtimes.
-Historical runtime agents and overlapping orchestrator pools can additionally be
-members of operator-owned **Shared budgets**. Each applicable budget constrains
-admission in the same transaction as per-runner limits. Overlapping memberships
-are supported; agents cannot change them in a heartbeat. Lowering a budget keeps
-existing reservations, reports overcommit and blocks excess new placements or
-restarts. Offline assignments and retained disks still consume shared budgets.
+A physical host uses one identity and set of limits across its compatible
+runtimes. Limits belong to the controller and cannot be changed by heartbeats
+or repeated enrollment. Lowering a limit preserves existing reservations, reports
+overcommit and blocks excess new placements or restarts. Offline assignments,
+retained disks, inference, registered images and unresolved image tasks still
+count toward host limits. These are allocation limits, not runtime CPU throttles
+or hard ceilings on measured memory or storage usage.
+
+Shared budgets, overlapping budget membership and their administrative endpoints
+have been removed. Existing database rows are left inert; they no longer affect
+admission. Existing hosts seed their limits once from their last advertised
+capacity when the controller opens the database. Do not advertise the same
+physical capacity under multiple identities: each host's limits are independent,
+and there is no combined limit across hosts or overlapping pools.
+
 Direct runners on the same physical machine report the same opaque resource
-domain. Their observed usage must not be summed. The domain is a discovery hint;
-shared budget membership is explicit controller state, not an agent assertion. KubeVirt measurements have
+domain. Their observed usage must not be summed. The domain is a discovery hint,
+not additional capacity or an automatic grouping rule. KubeVirt measurements have
 `scope: runner`: they describe the worker machine/container, never cluster node
 utilization. The KubeVirt runner additionally reads namespace pod CPU/memory from the metrics
 API and namespace ResourceQuota hard/used values. These include all namespace
@@ -277,15 +288,14 @@ isolated creation-UID/owner-graph coverage; live cluster attribution remains
 unverified. The Metrics API defines each reading's timestamp and averaging window;
 see the [Kubernetes resource metrics pipeline](https://kubernetes.io/docs/tasks/debug/debug-cluster/resource-metrics-pipeline/).
 Collection runs outside heartbeats with bounded command timeouts. Quota and
-metric observations do not automatically rewrite configured placement budgets.
+metric observations do not automatically rewrite saved host limits.
 Cluster node/cgroup attribution and live cluster acceptance remain open. Do not enroll backing nodes as
-additional capacity for an already budgeted overlapping cluster pool.
+additional capacity for an already offered overlapping cluster pool.
 
 ## API
 
-The TypeScript migration
-now includes a compatible shared-budget and reservation-accounting component.
-Its SQLite fixtures cover overlap, retained charges, overcommit and concurrent
+The TypeScript migration now includes compatible per-host limits and reservation accounting.
+Its SQLite fixtures cover limit edits, retained charges and concurrent
 admission. It is not yet connected to the replacement controller scheduler or
 HTTP worker, and does not replace running services or establish native cleanup.
 
@@ -297,9 +307,15 @@ Account sessions or the operator credential authorize these administrative paths
 | `GET /v1/connection-setups` | List the latest 100 setup states without secrets |
 | `POST /v1/connection-setups/{id}/revoke` | Revoke enrollment credential; existing host identity survives |
 | `POST /v1/hosts/{id}/checks` | Request an outbound environment check refresh |
-| `GET /v1/hosts/{id}/resources` | Budget, reservations, observed sample history and machine allocations |
+| `GET /v1/hosts/{id}/resources` | Host capacity, limits, reservations, observed sample history and machine allocations |
 
-`GET /v1/hosts` adds `kind`, `health`, `usage`, `available`, `overcommitted` and
+`POST /v1/hosts/{id}/limits` saves `{limits: {cpu, memoryMiB, diskGiB}}` and
+returns `{hostId, limits}`. Values are positive integers up to 1,048,576. A save
+is atomic with placement admission and does not stop or resize existing machines.
+The dashboard binds the response to the requested host and amounts and does not
+automatically replay an uncertain save.
+
+`GET /v1/hosts` adds `limits`, `kind`, `health`, `usage`, `available`, `overcommitted` and
 `placementReady`. Image offers use health-qualified accepting state. Heartbeats
 optionally carry bounded `health` and `resources` reports and receive
 `checksRequestedAt`. Host identity may not switch provider after enrollment.
@@ -316,8 +332,8 @@ New direct hosts use `provider: macos`, `linux` or `windows`, plus a `runtimes`
 object. macOS supports the existing Apple VM, Android and iOS adapters; Linux
 supports libvirt and Android; Windows currently supports Hyper-V. Each runtime
 has its local backend bindings and storage, while image definitions and the
-capacity budget belong to the parent host. Image OS selects its matching runtime,
-or an explicit `runtime` image field selects an enabled compatible backend.
+capacity offer and saved limits belong to the parent host. Image OS selects its
+matching runtime, or an explicit `runtime` image field selects an enabled compatible backend.
 
 The local launcher consolidates historical local runtime identities while holding
 all old agent locks. It retains the canonical credential, immutable image
@@ -326,11 +342,5 @@ receipts; source identities are retired and cannot heartbeat. A private SQLite
 backup precedes migration. This is locally fenced maintenance, not an API that
 can reassign an unavailable remote host. The resulting configuration is
 `state/local/machine-host.json`; old configuration files remain as evidence.
-
-`GET/POST /v1/resource-budgets` lists or saves shared budgets with fields `id`,
-`name`, `capacity` and `hostIds`. These are operator/account-session endpoints.
-Host inventory and resource details include applicable `sharedBudgets` and
-health-qualified capacity remaining after every applicable limit. Legacy direct
-inference reservations also consume shared budgets during compatibility.
 
 Kubernetes resource semantics follow the [ResourceQuota contract](https://kubernetes.io/docs/concepts/policy/resource-quotas/).

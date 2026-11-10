@@ -6,7 +6,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
-from .accounts import Accounts
+from .accounts import Accounts, fields
+from .authorization import Policy, current
 from .model import Error, secret
 
 
@@ -37,6 +38,7 @@ def server(store, address, admin_token, enrollment_token):
             self.connection.settimeout(20)
             request_id=str(uuid.uuid4())
             response_status=200
+            policy_context=None
             try:
                 if self.headers.get("Origin") is not None:
                     raise Error("Browser origins are not supported.", 403)
@@ -44,7 +46,12 @@ def server(store, address, admin_token, enrollment_token):
                     raise Error("Ambiguous authorization.", 400)
                 token = self.headers.get("Authorization", "")
                 token = token[7:] if token.startswith("Bearer ") else ""
-                parts = urlsplit(self.path).path.strip("/").split("/")
+                target=urlsplit(self.path)
+                if any(k.lower() in ('token','authorization','secret','claim','access_token') for k in parse_qs(target.query,keep_blank_values=True)):
+                    raise Error('Credentials in query strings are forbidden.',400)
+                if self.headers.get('Cookie'):
+                    raise Error('Controller accepts header credentials only.',400)
+                parts = target.path.strip("/").split("/")
                 if self.command == "GET" and parts == ["healthz"]:
                     self.respond({"ok": True})
                     return
@@ -53,6 +60,7 @@ def server(store, address, admin_token, enrollment_token):
                     return
                 login = self.command == "POST" and parts == ["v1", "auth", "login"]
                 setup = self.command == "POST" and parts == ["v1", "auth", "setup"]
+                public_claim = self.command=='POST' and parts in (['v1','auth','claim'],['v1','auth','claim','info'])
                 enrollment = parts == ["v1", "hosts", "enroll"] and self.command == "POST"
                 heartbeat = len(parts) == 4 and parts[:2] == ["v1", "hosts"] and parts[3] == "heartbeat" and self.command == "POST"
                 prepared = len(parts) == 4 and parts[:2] == ["v1", "machines"] and parts[3] == "prepared" and self.command == "POST"
@@ -65,7 +73,7 @@ def server(store, address, admin_token, enrollment_token):
                     store.authenticate_setup(token)
                 if setup and not secrets.compare_digest(token, admin_token):
                     raise Error("Administrator setup credential required.", 401)
-                if not enrollment and not login and not setup and not heartbeat and not prepared and not consumer_catalogue and not lease_route and not registry_resolve and not session_socket and not (
+                if not enrollment and not login and not public_claim and not setup and not heartbeat and not prepared and not consumer_catalogue and not lease_route and not registry_resolve and not session_socket and not (
                     secrets.compare_digest(token, expected) or (not enrollment and accounts.authorized(token))
                 ):
                     raise Error("Credential rejected.", 401)
@@ -99,7 +107,45 @@ def server(store, address, admin_token, enrollment_token):
                     value = json.loads(body)
                     if not isinstance(value, dict):
                         raise Error("Expected a JSON object.", 400)
-                if setup:
+                operator=secrets.compare_digest(token,admin_token)
+                if not (setup or login or public_claim or enrollment or heartbeat or prepared or consumer_catalogue or lease_route or registry_resolve):
+                    policy=Policy(accounts,token,operator,self.command,parts,value)
+                    with store.transaction() as db:policy.check(db)
+                    policy_context=current.set(policy)
+                if public_claim:
+                    result=accounts.redeem(value) if len(parts)==3 else accounts.claim_info(value)
+                elif self.command=='POST' and parts==['v1','auth','bootstrap']:
+                    if not operator:raise Error('Operator credential required.',403)
+                    fields(value,())
+                    result=accounts.issue_claim(token,'bootstrap',operator=True)
+                elif self.command=='POST' and parts==['v1','auth','password']:
+                    result=accounts.change_password(token,value)
+                elif parts==['v1','auth','tokens'] and self.command in ('GET','POST'):
+                    result=accounts.tokens(token,value if self.command=='POST' else None)
+                elif len(parts)==5 and parts[:3]==['v1','auth','tokens'] and parts[4]=='revoke' and self.command=='POST':
+                    fields(value,())
+                    result=accounts.tokens(token,revoke=parts[3])
+                elif self.command=='GET' and parts==['v1','admin','tokens']:
+                    result=accounts.admin_tokens(token,operator=operator)
+                elif self.command=='POST' and len(parts)==5 and parts[:3]==['v1','admin','tokens'] and parts[4]=='revoke':
+                    fields(value,())
+                    result=accounts.admin_tokens(token,revoke=parts[3],operator=operator)
+                elif parts==['v1','users'] and self.command in ('GET','POST'):
+                    result=accounts.users(token,operator) if self.command=='GET' else accounts.create_user(token,value,operator)
+                elif len(parts)==4 and parts[:2]==['v1','users'] and self.command=='POST':
+                    from .model import identifier
+                    uid=identifier(parts[2]);action=parts[3]
+                    if action=='update':result=accounts.update_user(token,uid,value,operator)
+                    elif action in ('invite','reset-password','revoke-invite'):
+                        fields(value,())
+                        result=accounts.revoke_claim(token,uid,operator) if action=='revoke-invite' else accounts.issue_claim(token,'invite' if action=='invite' else 'reset',uid,operator)
+                    else:raise Error('Unknown endpoint.',404)
+                elif self.command=='GET' and len(parts)==3 and parts[:2]==['v1','machines']:
+                    result=next((m for m in store.machines() if m['id']==parts[2]),None)
+                    if result is None:raise Error('Unknown machine.',404)
+                elif self.command=='POST' and len(parts)==4 and parts[:2]==['v1','machines'] and parts[3]=='authorize':
+                    result={'authorized':True,'machineId':parts[2],'action':value['action']}
+                elif setup:
                     result = accounts.setup(value)
                 elif consumer_catalogue:
                     result=store.consumer_catalogue(token)
@@ -147,13 +193,10 @@ def server(store, address, admin_token, enrollment_token):
                 elif login:
                     result = accounts.login(value)
                 elif self.command == "POST" and parts == ["v1", "auth", "logout"]:
+                    fields(value,())
                     result = accounts.logout(token)
                 elif self.command == "POST" and parts == ["v1", "connection-setups"]:
                     result = store.create_setup(value)
-                elif self.command == 'POST' and parts == ['v1','resource-budgets']:
-                    result = store.save_resource_budget(value)
-                elif self.command == 'GET' and parts == ['v1','resource-budgets']:
-                    result = {'budgets':store.resource_budgets()}
                 elif self.command=='GET' and parts==['v1','images']:
                     result={'images':store.images()}
                 elif self.command=='POST' and parts==['v1','images','captures']:
@@ -168,6 +211,8 @@ def server(store, address, admin_token, enrollment_token):
                     result = store.revoke_setup(parts[2])
                 elif self.command == "POST" and len(parts)==4 and parts[:2]==["v1","hosts"] and parts[3]=="checks":
                     result = store.request_checks(parts[2])
+                elif self.command == "POST" and len(parts)==4 and parts[:2]==["v1","hosts"] and parts[3]=="limits":
+                    result = store.save_host_limits(parts[2],value)
                 elif self.command == "GET" and len(parts)==4 and parts[:2]==["v1","hosts"] and parts[3]=="resources":
                     result = store.host_resources(parts[2])
                 elif self.command == "GET" and parts == ["v1", "auth", "session"]:
@@ -210,6 +255,7 @@ def server(store, address, admin_token, enrollment_token):
                 elif self.command == "GET" and len(parts) == 3 and parts[:2] == ["v1", "operations"]:
                     result = store.device_operation(parts[2])
                 elif self.command == "POST" and len(parts) == 4 and parts[:2] == ["v1", "machines"] and parts[3] == "desired":
+                    fields(value,("state",),("state",))
                     result = store.desired(parts[2], value.get("state"))
                 elif self.command == "POST" and len(parts) == 4 and parts[:2] == ["v1", "hosts"] and parts[3] == "accepting":
                     if type(value.get("enabled")) is not bool:
@@ -227,6 +273,9 @@ def server(store, address, admin_token, enrollment_token):
             except Exception:
                 logging.exception("Orchestrator operation failed")
                 self.respond({"error": "Orchestrator storage or service unavailable."}, 503)
+
+            finally:
+                if policy_context is not None:current.reset(policy_context)
 
         def respond(self, value, status=200):
             body = json.dumps(value).encode()

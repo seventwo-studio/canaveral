@@ -53,9 +53,14 @@ def parser():
     dashboard.add_argument("--bootstrap-token-file", default=os.getenv("CANAVERAL_ADMIN_TOKEN_FILE"),
                            help="Operator credential for localhost-only first-admin setup; defaults to ./secrets/admin.token when present")
     admin = commands.add_parser("admin", help="Create the first administrator without replacing an existing account")
-    admin.add_argument("action", choices=["create"])
+    admin.add_argument("action", choices=["create", "setup-link", "recover"])
     admin.add_argument("--username", default="admin")
     admin.add_argument("--password-file", help="Read the initial password from a protected file instead of prompting")
+    admin.add_argument("--user-id", help="Existing user UUID for operator recovery")
+    admin.add_argument("--dashboard-url", help="Dashboard origin for a one-time setup/recovery link")
+    admin.add_argument("--output-file", help="New private setup/recovery-link file")
+    from .account_cli import add_commands
+    add_commands(commands)
     host = commands.add_parser("host", help="Offer capacity through local machine and inference runners")
     host_config = host.add_mutually_exclusive_group(required=True)
     host_config.add_argument("--config")
@@ -184,6 +189,9 @@ def main(argv=None):
                     raise Error("This template has no base image source to cache.")
                 result["image"] = prepare_image(value["source"], args.cache)
             print(json.dumps(result, indent=2))
+            return
+        from .account_cli import handle as handle_account_command
+        if handle_account_command(args):
             return
         client = Client(args.url, token_file(args.token_file), args.allow_http)
         if args.command == "admin":

@@ -51,6 +51,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "canaveral-apple-satellite"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "canaveral-guest-protocol",
  "canaveral-runner-client",
  "getrandom 0.3.4",
@@ -59,6 +60,18 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "canaveral-boot-bundle"
+version = "0.1.0"
+dependencies = [
+ "canaveral-guest-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
  "uuid",
 ]
 

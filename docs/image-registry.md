@@ -51,7 +51,7 @@ The assigned host resolves the channel once. It authenticates a source resolutio
 at `POST /v1/hosts/{host}/image-tasks/{task}/resolve`, containing pinned official URL,
 version, byte length and publisher SHA-256 when supplied. This endpoint accepts only
 that host's credential and owned registry task. The controller reserves the actual
-artifact length in the host/shared budget before any payload copy. Identical retries
+artifact length in the host disk limit before any payload copy. Identical retries
 return the original resolved source; changed metadata cannot replace it.
 
 The host streams bounded chunks directly into the immutable image library. Linux
@@ -65,7 +65,7 @@ An identical local artifact can supply the bytes without another network downloa
 Completed artifacts have registry ID/version/source provenance and become offered
 only after controller acknowledgement. Image storage is charged once per host,
 content hash and format. There is no application-defined per-image download limit;
-validated integer length and available storage budget still apply.
+validated integer length and available host disk capacity still apply.
 
 The task and started download receipt survive restart. Verified published manifests
 can recover a lost final report. An interrupted copy with uncertain cleanup becomes
