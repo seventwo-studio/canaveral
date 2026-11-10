@@ -38,8 +38,14 @@ test.describe("real account controller and gateway", () => {
     await expect(
       page.getByText("Admin private machine", { exact: true }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Account menu" }).click();
-    await page.getByRole("menuitem", { name: "Users", exact: true }).click();
+    await page.getByRole("link", { name: "Overview", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Administration", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Manage users", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("link", { name: "Users", exact: true }).click();
     await page.getByLabel("New username", { exact: true }).fill("alice");
     await page
       .getByRole("button", { name: "Create user", exact: true })
@@ -49,6 +55,10 @@ test.describe("real account controller and gateway", () => {
       .click();
     await page
       .getByRole("button", { name: "Disable alice", exact: true })
+      .click();
+    await expect(page.getByRole("alertdialog")).toContainText("Disable alice?");
+    await page
+      .getByRole("button", { name: "Disable account", exact: true })
       .click();
     await page
       .getByRole("button", { name: "Enable alice", exact: true })
@@ -97,6 +107,38 @@ test.describe("real account controller and gateway", () => {
       });
       expect(created.status()).toBe(200);
       const machine = await created.json();
+      const adminRequests = [];
+      alice.on("request", (r) => {
+        if (/\/api\/v1\/(?:users|admin\/|hosts)/.test(r.url()))
+          adminRequests.push(r.url());
+      });
+      await alice.goto("/#admin/tokens");
+      await expect(
+        alice.getByRole("heading", { name: "Machines", exact: true }),
+      ).toBeVisible();
+      expect(adminRequests).toEqual([]);
+      await page.goto("/#machines");
+      await expect(
+        page.getByRole("button", {
+          name: "Alice private machine",
+          exact: true,
+        }),
+      ).toBeVisible();
+      await page
+        .getByLabel("Machine owner", { exact: true })
+        .selectOption(machine.ownerId);
+      await expect(
+        page.getByRole("button", {
+          name: "Admin private machine",
+          exact: true,
+        }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("button", {
+          name: "Alice private machine",
+          exact: true,
+        }),
+      ).toBeVisible();
       const inventory = await alice.request.get(`${baseURL}/api/v1/machines`);
       expect((await inventory.json()).machines.map((m) => m.id)).toEqual([
         machine.id,
@@ -138,13 +180,83 @@ test.describe("real account controller and gateway", () => {
       await expect(
         alice.getByRole("textbox", { name: "New API token", exact: true }),
       ).toHaveCount(0);
-      await alice
+      await page.getByRole("link", { name: "API access", exact: true }).click();
+      const tokenRow = page.getByRole("row").filter({ hasText: "Read only" });
+      await expect(tokenRow).toContainText("alice");
+      await tokenRow
         .getByRole("button", { name: "Revoke Read only", exact: true })
+        .click();
+      expect((await api.get("/api/v1/machines")).status()).toBe(200);
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await tokenRow
+        .getByRole("button", { name: "Revoke Read only", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Revoke token", exact: true })
+        .click();
+      await expect(tokenRow).toContainText("Revoked");
+      await expect(
+        tokenRow.getByRole("button", { name: "Revoke Read only", exact: true }),
+      ).toHaveCount(0);
+      expect((await api.get("/api/v1/machines")).status()).toBe(401);
+      await alice
+        .getByRole("button", { name: "Refresh tokens", exact: true })
         .click();
       await expect(
         alice.getByText("Read only · Revoked", { exact: true }),
       ).toBeVisible();
-      expect((await api.get("/api/v1/machines")).status()).toBe(401);
+      if (process.env.CANAVERAL_DASHBOARD_SCREENSHOTS) {
+        await page.screenshot({
+          path: join(
+            process.env.CANAVERAL_DASHBOARD_SCREENSHOTS,
+            "api-access-desktop.png",
+          ),
+          fullPage: true,
+        });
+      }
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      if (process.env.CANAVERAL_DASHBOARD_SCREENSHOTS) {
+        await page.screenshot({
+          path: join(
+            process.env.CANAVERAL_DASHBOARD_SCREENSHOTS,
+            "api-access-mobile.png",
+          ),
+          fullPage: true,
+        });
+      }
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.getByRole("link", { name: "Users", exact: true }).click();
+      await page.getByLabel("Search users", { exact: true }).fill("alice");
+      await expect(
+        page.getByRole("row").filter({ hasText: "alice" }),
+      ).toContainText("1");
+      if (process.env.CANAVERAL_DASHBOARD_SCREENSHOTS) {
+        await page.screenshot({
+          path: join(
+            process.env.CANAVERAL_DASHBOARD_SCREENSHOTS,
+            "users-desktop.png",
+          ),
+          fullPage: true,
+        });
+      }
+      await page.getByRole("link", { name: "Overview", exact: true }).click();
+      await expect(
+        page.getByRole("heading", { name: "Administration", exact: true }),
+      ).toBeVisible();
+      if (process.env.CANAVERAL_DASHBOARD_SCREENSHOTS) {
+        await page.screenshot({
+          path: join(
+            process.env.CANAVERAL_DASHBOARD_SCREENSHOTS,
+            "overview-desktop.png",
+          ),
+          fullPage: true,
+        });
+      }
       expect(
         await alice.evaluate(() => localStorage.length + sessionStorage.length),
       ).toBe(0);

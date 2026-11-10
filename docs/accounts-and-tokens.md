@@ -100,6 +100,20 @@ are updated at most once per minute. Restricting scopes and changing account sta
 take effect on subsequent authorization checks. Established connections recheck
 authorization periodically and before forwarding bytes after blocking reads.
 
+Administrators can list personal token metadata for every user and revoke a
+selected token. This list includes expired and revoked tokens, ordered by
+creation time and token UUID, with the owner's `userId` alongside the same safe
+metadata as the personal list. It is a single unpaginated snapshot, like the
+user list. It never includes token secrets, credential hashes, passwords or
+login-session records. It provides no way to create a token for another user.
+Both an active administrator session and an active administrator's token with
+the `admin` scope can use these routes; the operator credential also retains
+administrative access.
+The current role and credential status are checked in the same transaction as
+the list or revocation. Repeated revocation preserves the original `revokedAt`.
+Revoking the caller's own API token succeeds, then subsequent use is rejected;
+revoking an API token does not revoke its owner's separate browser session.
+
 ## HTTP interface
 
 JSON POST bodies reject unknown fields. User and token management routes require
@@ -125,6 +139,8 @@ the appropriate current principal; missing or foreign resources return 404.
 | GET `/v1/auth/tokens` | Login session only; `{tokens:[...]}` for current user |
 | POST `/v1/auth/tokens` | Login session only; `{id,name,scopes,expiresInSeconds?}`; metadata and one-time `token` |
 | POST `/v1/auth/tokens/{id}/revoke` | Login session only, `{}`; idempotent own-token revocation |
+| GET `/v1/admin/tokens` | Admin only; `{tokens:[...]}` for all users, safe token metadata plus `userId` |
+| POST `/v1/admin/tokens/{id}/revoke` | Admin only, `{}`; idempotent revocation, safe token metadata plus `userId` |
 | GET `/v1/machines/{id}` | Visible machine; requires `machines:read` |
 | POST `/v1/machines/{id}/authorize` | `{action}` where action is `read`, `write` or `access`; exact machine authorization |
 

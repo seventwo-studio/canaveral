@@ -25,8 +25,16 @@ type View =
   | "templates"
   | "account"
   | "tokens"
-  | "users";
+  | "users"
+  | "admin"
+  | "api-access";
 import { AccountPage, TokensPage, UsersPage } from "@/components/accounts";
+import {
+  AdminOverview,
+  AdminTokensPage,
+  useAdminUsers,
+} from "@/components/admin-dashboard";
+import { ownerLabel } from "@/lib/admin";
 import { ClaimScreen, takeClaim } from "@/components/claim-screen";
 interface CreateConfig {
   templates: GroupedImage[];
@@ -183,10 +191,17 @@ const views = {
   },
 };
 const currentView = (): View => {
-  const name = location.hash.slice(1).split("/")[0] ?? "";
+  const parts = location.hash.slice(1).split("/");
+  const name = parts[0] ?? "";
+  if (name === "admin")
+    return parts[1] === "users"
+      ? "users"
+      : parts[1] === "tokens"
+        ? "api-access"
+        : "admin";
   return name === "images"
     ? "templates"
-    : ["account", "tokens", "users"].includes(name) ||
+    : ["account", "tokens", "users", "api-access"].includes(name) ||
         Object.hasOwn(views, name)
       ? (name as View)
       : "machines";
@@ -254,6 +269,14 @@ export function App() {
     [requestedView, setView] = useState(currentView),
     [filter, setFilter] = useState("all"),
     [query, setQuery] = useState("");
+  const [owner, setOwner] = useState("all");
+  const directory = useAdminUsers(
+    user,
+    () => {
+      void signOut("Administrator access ended. Sign in again to continue.");
+    },
+    requestedView,
+  );
   const [controlId, setControlId] = useState<string | null>(null);
   const [connectionSetup, setConnectionSetup] = useState<
       "host" | "orchestrator" | null
@@ -268,7 +291,9 @@ export function App() {
   const [powerOffId, setPowerOffId] = useState<string | null>(null);
   const view: View =
     user?.role !== "admin" &&
-    ["hosts", "orchestrators", "users"].includes(requestedView)
+    ["hosts", "orchestrators", "users", "admin", "api-access"].includes(
+      requestedView,
+    )
       ? "machines"
       : requestedView;
   const isInfrastructure = view === "hosts" || view === "orchestrators";
@@ -428,12 +453,13 @@ export function App() {
       setInfrastructureId(currentInfrastructure());
       setFilter("all");
       setQuery("");
+      setOwner("all");
     };
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
   useEffect(() => {
-    document.title = `Canaveral · ${infrastructureId ? "Overview · " : ""}${title(view)}`;
+    document.title = `Canaveral · ${infrastructureId ? "Overview · " : ""}${view === "admin" ? "Administration" : view === "api-access" ? "API access" : title(view)}`;
   }, [view, infrastructureId]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -584,7 +610,11 @@ export function App() {
         hostName(m.hostId),
         m.template.os,
         m.template.arch,
+        ownerLabel(m, directory.data ?? []),
       ]) &&
+      (user.role !== "admin" ||
+        owner === "all" ||
+        (owner === "none" ? m.ownerId === null : m.ownerId === owner)) &&
       (filter === "all" ||
         (filter === "attention" ? attention(m) : m.observed === filter)),
   );
@@ -648,7 +678,13 @@ export function App() {
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem className="hidden sm:block">
-                Workspace
+                {["admin", "users", "api-access"].includes(view) ? (
+                  <a href="#admin">Administration</a>
+                ) : isInfrastructure ? (
+                  "Infrastructure"
+                ) : (
+                  "Workspace"
+                )}
               </BreadcrumbItem>
               <BreadcrumbSeparator className="hidden sm:block" />
               <BreadcrumbItem>
@@ -657,7 +693,13 @@ export function App() {
                     {title(view)}
                   </BreadcrumbLink>
                 ) : (
-                  <BreadcrumbPage>{title(view)}</BreadcrumbPage>
+                  <BreadcrumbPage>
+                    {view === "admin"
+                      ? "Overview"
+                      : view === "api-access"
+                        ? "API access"
+                        : title(view)}
+                  </BreadcrumbPage>
                 )}
               </BreadcrumbItem>
               {resourcePage && (
@@ -694,14 +736,49 @@ export function App() {
               variant="ghost"
               size="icon-sm"
               aria-label={stale ? "Retry connection" : "Refresh"}
-              onClick={refresh}
+              onClick={() => {
+                void refresh();
+                void directory.refresh();
+              }}
             >
               <RefreshCw />
             </Button>
           </div>
         </header>
         <div className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 lg:px-6">
-          {view === "account" ? (
+          {view === "admin" && user.role === "admin" ? (
+            <AdminOverview
+              key={user.id}
+              user={user}
+              inventory={inventory}
+              loaded={loaded}
+              stale={stale}
+              directory={directory}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+              onInspect={(id) => {
+                detailTrigger.current = document.activeElement;
+                setDetailId(id);
+              }}
+              onRefresh={() => {
+                void refresh();
+              }}
+            />
+          ) : view === "api-access" && user.role === "admin" ? (
+            <AdminTokensPage
+              key={user.id}
+              user={user}
+              directory={directory}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : view === "account" ? (
             <AccountPage
               user={user}
               onChanged={() =>
@@ -711,7 +788,16 @@ export function App() {
           ) : view === "tokens" ? (
             <TokensPage user={user} />
           ) : view === "users" && user.role === "admin" ? (
-            <UsersPage />
+            <UsersPage
+              key={user.id}
+              user={user}
+              machines={loaded && !stale ? inventory.machines : undefined}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
           ) : resourcePage ? (
             <>
               <div className="min-w-0 space-y-2">
@@ -779,7 +865,9 @@ export function App() {
                     </h1>
                     <p className="text-sm text-muted-foreground">
                       {view === "machines"
-                        ? "Manage your machines and their lifecycle."
+                        ? user.role === "admin"
+                          ? "Manage every user's machines and their lifecycle."
+                          : "Manage your machines and their lifecycle."
                         : isInfrastructure
                           ? "Connect infrastructure, verify capabilities and track resources."
                           : "Base images available on your hosts."}
@@ -835,6 +923,13 @@ export function App() {
               <Notice error>{stale}</Notice>
               <Notice>{message}</Notice>
               <Notice error>{actionError}</Notice>
+              {view === "machines" &&
+                user.role === "admin" &&
+                directory.error && (
+                  <Notice
+                    error
+                  >{`Owner names could not be refreshed. User IDs are shown. ${directory.error}`}</Notice>
+                )}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <ToggleGroup
                   className="max-w-full flex-wrap rounded-sm border bg-muted p-1"
@@ -862,6 +957,25 @@ export function App() {
                   ))}
                 </ToggleGroup>
                 <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+                  {view === "machines" && user.role === "admin" && (
+                    <label className="shrink-0 text-xs">
+                      <span className="sr-only">Machine owner</span>
+                      <select
+                        aria-label="Machine owner"
+                        className="h-9 max-w-48 rounded-md border bg-background px-2 text-sm"
+                        value={owner}
+                        onChange={(e) => setOwner(e.target.value)}
+                      >
+                        <option value="all">All owners</option>
+                        <option value="none">No user owner</option>
+                        {(directory.data ?? []).map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.username}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <InputGroup className="w-full sm:w-64">
                     <InputGroupInput
                       value={query}
@@ -1036,6 +1150,23 @@ export function App() {
                                 {since(m.updatedAt)}
                               </dd>
                             </div>
+                            {user.role === "admin" && (
+                              <div className="col-span-2 min-w-0">
+                                <dt className="mb-1 text-xs text-muted-foreground">
+                                  Owner
+                                </dt>
+                                <dd className="[overflow-wrap:anywhere]">
+                                  {ownerLabel(m, directory.data ?? [])}
+                                </dd>
+                                {m.ownerId === null && (
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    Admin-only inventory. This may be
+                                    operator-created or managed by an
+                                    application lease.
+                                  </p>
+                                )}
+                              </div>
+                            )}
                           </dl>
                         </CardContent>
                         <CardFooter className="flex flex-wrap gap-2">

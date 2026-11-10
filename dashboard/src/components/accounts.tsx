@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, errorMessage } from "@/lib/api";
-import { user as decodeUser, type User } from "@/lib/inventory";
+import { user as decodeUser, type Machine, type User } from "@/lib/inventory";
 import { record } from "@/lib/types";
 import {
   tokenList,
@@ -25,7 +25,40 @@ import {
   FieldSet,
   FieldError,
 } from "./ui/field";
-import { Card, CardHeader, CardTitle, CardContent } from "./ui/card";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "./ui/card";
+import { Badge } from "./ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "./ui/table";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./ui/alert-dialog";
+import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "./ui/empty";
 
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -399,169 +432,556 @@ export function TokensPage({ user }: { user: User }) {
     </Panel>
   );
 }
-export function UsersPage() {
+interface UserMutation {
+  path: string;
+  body: Record<string, unknown>;
+  label: string;
+  username: string;
+  claim?: boolean;
+}
+interface UserConfirmation {
+  mutation: UserMutation;
+  title: string;
+  description: string;
+  button: string;
+}
+const responseStatus = (error: unknown) =>
+  error && typeof error === "object" && "status" in error
+    ? error.status
+    : undefined;
+
+export function UsersPage({
+  user,
+  machines,
+  onDenied,
+}: {
+  user?: User;
+  machines?: Machine[];
+  onDenied?: () => void;
+} = {}) {
   const [users, setUsers] = useState<User[]>([]),
     [error, setError] = useState(""),
+    [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
-    [link, setLink] = useState<string | null>(null);
+    [loading, setLoading] = useState(true),
+    [loaded, setLoaded] = useState(false),
+    [loadedFor, setLoadedFor] = useState<string | null>(null),
+    [uncertain, setUncertain] = useState(false),
+    [denied, setDenied] = useState(false),
+    [query, setQuery] = useState(""),
+    [status, setStatus] = useState("all"),
+    [link, setLink] = useState<{ value: string; username: string } | null>(
+      null,
+    ),
+    [confirmation, setConfirmation] = useState<UserConfirmation | null>(null);
   const locked = useRef(false),
-    mounted = useRef(true);
-  async function load() {
+    mounted = useRef(false),
+    epoch = useRef(0),
+    confirmationFocus = useRef<HTMLElement | null>(null),
+    deniedCallback = useRef(onDenied);
+  deniedCallback.current = onDenied;
+  const principal = `${user?.id ?? ""}:${user?.role ?? ""}`;
+  const visible = loadedFor === principal && (!user || user.role === "admin");
+  const current = (request: number) =>
+    mounted.current && epoch.current === request;
+  function handleDenied(error: unknown, request: number) {
+    const code = responseStatus(error);
+    if (!current(request) || (code !== 401 && code !== 403)) return false;
+    setUsers([]);
+    setLink(null);
+    setConfirmation(null);
+    setNotice("");
+    setLoaded(false);
+    setLoadedFor(null);
+    setDenied(true);
+    setError(
+      code === 401
+        ? "Your session has ended. Sign in again to manage users."
+        : "Administrator access is required to manage users.",
+    );
+    deniedCallback.current?.();
+    return true;
+  }
+  async function load(request: number) {
     const r = record(await api("users"));
     if (!Array.isArray(r.users)) throw new Error("Invalid users list.");
     const list = r.users.map(decodeUser);
-    if (mounted.current) setUsers(list);
+    if (!current(request)) return false;
+    setUsers(list);
+    setLoaded(true);
+    setLoadedFor(principal);
+    setDenied(false);
+    return true;
+  }
+  async function refresh() {
+    if (locked.current) return;
+    locked.current = true;
+    const request = ++epoch.current;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      if (await load(request)) setUncertain(false);
+    } catch (e) {
+      if (!current(request) || handleDenied(e, request)) return;
+      setError(
+        "Users could not be refreshed. Previous account data may be stale. Refresh users to try again.",
+      );
+    } finally {
+      if (current(request)) {
+        locked.current = false;
+        setLoading(false);
+      }
+    }
   }
   useEffect(() => {
     mounted.current = true;
-    load().catch((e) => setError(errorMessage(e)));
+    ++epoch.current;
+    locked.current = false;
+    setUsers([]);
+    setLink(null);
+    setConfirmation(null);
+    setLoaded(false);
+    setLoadedFor(null);
+    setUncertain(false);
+    setBusy(false);
+    setDenied(false);
+    setNotice("");
+    setQuery("");
+    setStatus("all");
+    if (user && user.role !== "admin") {
+      setDenied(true);
+      setLoading(false);
+      setError("Administrator access is required to manage users.");
+    } else void refresh();
     return () => {
       mounted.current = false;
+      ++epoch.current;
+      locked.current = false;
     };
-  }, []);
-  async function action(path: string, body: unknown, claim = false) {
-    if (locked.current) return;
+  }, [user?.id, user?.role]);
+  async function action(mutation: UserMutation) {
+    if (locked.current || uncertain || denied || !visible) return;
     locked.current = true;
+    const request = ++epoch.current;
     setBusy(true);
     setError("");
+    setNotice("");
     setLink(null);
+    setConfirmation(null);
     try {
-      const response = await api(path, body);
-      if (!mounted.current) return;
-      if (claim) {
+      const response = await api(mutation.path, mutation.body);
+      if (!current(request)) return;
+      if (mutation.claim) {
         const r = record(response);
         if (typeof r.token !== "string" || !r.token)
-          throw new Error(
-            "The link could not be confirmed. Issue a replacement link.",
-          );
-        setLink(
-          `${location.origin}${location.pathname}#claim=${encodeURIComponent(r.token)}`,
+          throw new Error("Account link missing.");
+        setLink({
+          value: `${location.origin}${location.pathname}#claim=${encodeURIComponent(r.token)}`,
+          username: mutation.username,
+        });
+      }
+      try {
+        if (await load(request)) setNotice(`${mutation.label} completed.`);
+      } catch (e) {
+        if (!current(request) || handleDenied(e, request)) return;
+        setUncertain(true);
+        setError(
+          "The change was submitted, but users could not be refreshed. Refresh users to check account status before making another change.",
         );
       }
-      await load();
     } catch (e) {
-      if (mounted.current)
+      if (!current(request) || handleDenied(e, request)) return;
+      const code = responseStatus(e);
+      if (typeof code !== "number" || code >= 500) {
+        setUncertain(true);
         setError(
-          errorMessage(e) +
-            (claim
-              ? " Sign in if the password was already chosen, or issue a new link."
-              : " Refresh users before trying again."),
+          `${mutation.label} could not be confirmed. Refresh users and check ${mutation.username}'s account before trying again. If a link was lost, issue a replacement after checking.`,
         );
+      } else setError(errorMessage(e));
     } finally {
-      locked.current = false;
-      if (mounted.current) setBusy(false);
+      if (current(request)) {
+        locked.current = false;
+        setBusy(false);
+      }
     }
   }
   function create(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (locked.current || uncertain || denied || loading) return;
     const form = e.currentTarget,
-      data = new FormData(form);
-    const username = String(data.get("username")).trim();
+      username = String(new FormData(form).get("username")).trim();
+    if (!username) return;
     form.reset();
-    void action("users", { id: crypto.randomUUID(), username, role: "user" });
+    void action({
+      path: "users",
+      body: { id: crypto.randomUUID(), username, role: "user" },
+      label: `Creation of ${username}`,
+      username,
+    });
   }
+  function confirm(target: User, kind: "disable" | "reset" | "role") {
+    confirmationFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const self = target.id === user?.id ? " This is your account." : "";
+    const base = `users/${encodeURIComponent(target.id)}`;
+    if (kind === "disable")
+      setConfirmation({
+        title: `Disable ${target.username}?`,
+        description: `This signs ${target.username} out and revokes their API tokens. Their machines are retained. Re-enabling requires a fresh invitation and password.${self} Canaveral protects the last active administrator.`,
+        button: "Disable account",
+        mutation: {
+          path: `${base}/update`,
+          body: { status: "disabled" },
+          label: `Disabling ${target.username}`,
+          username: target.username,
+        },
+      });
+    else if (kind === "reset")
+      setConfirmation({
+        title: `Reset password for ${target.username}?`,
+        description: `This immediately blocks ${target.username}'s current password, signs them out and revokes their API tokens. Send them the new recovery link privately.${self} The last active administrator requires operator recovery.`,
+        button: "Reset password",
+        mutation: {
+          path: `${base}/reset-password`,
+          body: {},
+          claim: true,
+          label: `Password reset for ${target.username}`,
+          username: target.username,
+        },
+      });
+    else {
+      const promote = target.role !== "admin";
+      setConfirmation({
+        title: `${promote ? "Make" : "Remove administrator access from"} ${target.username}${promote ? " an administrator" : ""}?`,
+        description: promote
+          ? `${target.username} will be able to manage all users, machines, API access and infrastructure. Existing account links are invalidated.${self}`
+          : `${target.username} will be limited to their own machines and personal API tokens. Existing account links are invalidated.${self} Canaveral protects the last active administrator.`,
+        button: promote
+          ? "Grant administrator access"
+          : "Remove administrator access",
+        mutation: {
+          path: `${base}/update`,
+          body: { role: promote ? "admin" : "user" },
+          label: `Role change for ${target.username}`,
+          username: target.username,
+        },
+      });
+    }
+  }
+  const filtered = (visible ? users : []).filter(
+    (u) =>
+      (status === "all" || u.status === status) &&
+      `${u.username} ${u.id}`
+        .toLowerCase()
+        .includes(query.trim().toLowerCase()),
+  );
+  const unavailable = busy || loading || uncertain || denied || !visible;
+  const activeAdmins = users.filter(
+    (u) => u.role === "admin" && u.status === "active",
+  ).length;
   return (
-    <Panel title="Users">
-      <form onSubmit={create}>
-        <FieldSet disabled={busy}>
-          <FieldGroup>
-            <TextField name="username" label="New username" />
-            <p>
-              New accounts start pending with the User role. Pending accounts
-              need an invitation so the person can choose their password.
-            </p>
-            <Button type="submit">Create user</Button>
-          </FieldGroup>
-        </FieldSet>
-      </form>
-      {error && <FieldError>{error}</FieldError>}
-      {link && (
-        <Secret
-          value={link}
-          label="Account link"
-          onDismiss={() => setLink(null)}
-        />
-      )}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => load().catch((e) => setError(errorMessage(e)))}
-      >
-        Refresh users
-      </Button>
-      {users.map((u) => (
-        <section key={u.id} className="space-y-3 border-t pt-4">
-          <h2>
-            {u.username} · {u.role} · {u.status}
-          </h2>
-          <div className="flex flex-wrap gap-2">
-            {u.status === "pending" ? (
-              <>
-                <Button
-                  disabled={busy}
-                  onClick={() => action(`users/${u.id}/invite`, {}, true)}
-                >
-                  Issue invitation for {u.username}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => action(`users/${u.id}/revoke-invite`, {})}
-                >
-                  Revoke invitation for {u.username}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    action(`users/${u.id}/update`, { status: "disabled" })
-                  }
-                >
-                  Disable {u.username}
-                </Button>
-              </>
-            ) : (
-              <>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    action(`users/${u.id}/reset-password`, {}, true)
-                  }
-                >
-                  Reset password for {u.username}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    action(`users/${u.id}/update`, {
-                      status: u.status === "active" ? "disabled" : "pending",
-                    })
-                  }
-                >
-                  {u.status === "active" ? "Disable" : "Enable"} {u.username}
-                </Button>
-              </>
-            )}
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() =>
-                action(`users/${u.id}/update`, {
-                  role: u.role === "admin" ? "user" : "admin",
-                })
-              }
-            >
-              Make {u.username} {u.role === "admin" ? "user" : "admin"}
-            </Button>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            Password reset signs this account out and revokes its API tokens.
-            Enabling a disabled account requires a new invitation and password.
+    <section
+      className="@container min-w-0 space-y-6"
+      aria-labelledby="users-heading"
+    >
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-2">
+          <h1
+            id="users-heading"
+            className="font-display text-2xl font-semibold"
+          >
+            Users
+          </h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Invite people and manage account access. Users can access only their
+            own machines.
           </p>
-        </section>
-      ))}
-    </Panel>
+        </div>
+        <Button
+          variant="outline"
+          disabled={busy || loading}
+          onClick={() => void refresh()}
+        >
+          Refresh users
+        </Button>
+      </header>
+      {error && <FieldError>{error}</FieldError>}
+      {notice && (
+        <p role="status" className="text-sm">
+          {notice}
+        </p>
+      )}
+      {link && visible && (
+        <div className="space-y-2">
+          <Secret
+            value={link.value}
+            label="Account link"
+            onDismiss={() => setLink(null)}
+          />
+          <p className="text-sm text-muted-foreground">
+            Send this single-use link privately to {link.username}. It expires
+            in 24 hours. Issuing a replacement invalidates the previous link.
+          </p>
+        </div>
+      )}
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            <h2>New user</h2>
+          </CardTitle>
+          <CardDescription>
+            New accounts start pending with the User role. Issue an invitation
+            so the person can choose their password.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={create}>
+            <FieldSet disabled={unavailable}>
+              <FieldGroup className="gap-3 sm:flex-row sm:items-end">
+                <TextField name="username" label="New username" />
+                <Button type="submit" className="shrink-0">
+                  Create user
+                </Button>
+              </FieldGroup>
+            </FieldSet>
+          </form>
+        </CardContent>
+      </Card>
+      <FieldGroup className="gap-3 sm:flex-row sm:items-end">
+        <Field>
+          <FieldLabel htmlFor="users-search">Search users</FieldLabel>
+          <Input
+            id="users-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Username or user ID"
+          />
+        </Field>
+        <Field className="sm:max-w-48">
+          <FieldLabel htmlFor="users-status">User status</FieldLabel>
+          <Select value={status} onValueChange={setStatus}>
+            <SelectTrigger id="users-status" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All statuses</SelectItem>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="pending">Pending</SelectItem>
+              <SelectItem value="disabled">Disabled</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+      </FieldGroup>
+      {loading && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Loading users…
+        </p>
+      )}
+      {loaded && visible && filtered.length === 0 && (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>
+              {users.length ? "No users match" : "No users available"}
+            </EmptyTitle>
+            <EmptyDescription>
+              {users.length
+                ? "Try another username or status."
+                : "Create a user, then issue an invitation to get them started."}
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
+      {filtered.length > 0 && (
+        <Table
+          className="block table-fixed @2xl:table"
+          aria-label="User accounts"
+        >
+          <TableHeader className="hidden @2xl:table-header-group">
+            <TableRow>
+              <TableHead className="w-1/4">User</TableHead>
+              <TableHead className="w-1/5">Access</TableHead>
+              {machines !== undefined && (
+                <TableHead className="w-24">Machines</TableHead>
+              )}
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody className="block @2xl:table-row-group">
+            {filtered.map((u) => (
+              <TableRow
+                key={u.id}
+                className="block py-3 @2xl:table-row @2xl:py-0"
+                aria-label={`${u.username} account`}
+              >
+                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                  <span className="block break-all font-medium">
+                    {u.username}
+                    {u.id === user?.id && (
+                      <span className="text-muted-foreground"> (you)</span>
+                    )}
+                  </span>
+                  <span className="mt-1 block break-all text-xs text-muted-foreground">
+                    {u.id}
+                  </span>
+                </TableCell>
+                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                  <span className="mb-2 block text-sm">
+                    {u.role === "admin" ? "Administrator" : "User"}
+                  </span>
+                  <Badge variant="outline" className="capitalize">
+                    {u.status}
+                  </Badge>
+                  {u.role === "admin" &&
+                    u.status === "active" &&
+                    activeAdmins === 1 && (
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Last active administrator
+                      </p>
+                    )}
+                </TableCell>
+                {machines !== undefined && (
+                  <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                    <span className="@2xl:hidden">Machines: </span>
+                    {
+                      machines.filter(
+                        (m) => "ownerId" in m && m.ownerId === u.id,
+                      ).length
+                    }
+                  </TableCell>
+                )}
+                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                  <div className="flex flex-wrap gap-2">
+                    {u.status === "pending" && (
+                      <>
+                        <Button
+                          size="sm"
+                          disabled={unavailable}
+                          aria-label={`Issue invitation for ${u.username}`}
+                          onClick={() =>
+                            void action({
+                              path: `users/${encodeURIComponent(u.id)}/invite`,
+                              body: {},
+                              claim: true,
+                              label: `Invitation for ${u.username}`,
+                              username: u.username,
+                            })
+                          }
+                        >
+                          Issue invitation
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={unavailable}
+                          aria-label={`Revoke invitation for ${u.username}`}
+                          onClick={() =>
+                            void action({
+                              path: `users/${encodeURIComponent(u.id)}/revoke-invite`,
+                              body: {},
+                              label: `Invitation revocation for ${u.username}`,
+                              username: u.username,
+                            })
+                          }
+                        >
+                          Revoke invitation
+                        </Button>
+                      </>
+                    )}
+                    {u.status === "active" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={unavailable}
+                        aria-label={`Reset password for ${u.username}`}
+                        onClick={() => confirm(u, "reset")}
+                      >
+                        Reset password
+                      </Button>
+                    )}
+                    {u.status === "disabled" ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={unavailable}
+                        aria-label={`Enable ${u.username}`}
+                        onClick={() =>
+                          void action({
+                            path: `users/${encodeURIComponent(u.id)}/update`,
+                            body: { status: "pending" },
+                            label: `Enabling ${u.username}`,
+                            username: u.username,
+                          })
+                        }
+                      >
+                        Enable
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={unavailable}
+                        aria-label={`Disable ${u.username}`}
+                        onClick={() => confirm(u, "disable")}
+                      >
+                        Disable
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={unavailable}
+                      aria-label={`Make ${u.username} ${u.role === "admin" ? "user" : "admin"}`}
+                      onClick={() => confirm(u, "role")}
+                    >
+                      {u.role === "admin" ? "Make user" : "Make admin"}
+                    </Button>
+                  </div>
+                  {u.status === "disabled" && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Enabling requires a new invitation and password.
+                    </p>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      <AlertDialog
+        open={!!confirmation && visible}
+        onOpenChange={(open) => {
+          if (!open) setConfirmation(null);
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (confirmationFocus.current?.isConnected)
+              confirmationFocus.current.focus();
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{confirmation?.title}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmation?.description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (confirmation) void action(confirmation.mutation);
+              }}
+            >
+              {confirmation?.button}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
   );
 }

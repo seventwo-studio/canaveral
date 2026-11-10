@@ -1,4 +1,11 @@
-import { LogOut, ChevronsUpDown, Rocket } from "lucide-react";
+import {
+  LogOut,
+  ChevronsUpDown,
+  Rocket,
+  LayoutDashboard,
+  Users,
+  KeyRound,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   DropdownMenu,
@@ -62,44 +69,90 @@ export function WorkspaceSidebar({
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel className="text-[10px] uppercase tracking-widest">
-            Workspace
-          </SidebarGroupLabel>
-          <SidebarGroupContent>
-            <nav aria-label="Main navigation">
-              <SidebarMenu>
-                {Object.entries(views).map(([key, { icon: Icon }]) => (
-                  <SidebarMenuItem key={key}>
-                    <SidebarMenuButton
-                      asChild
-                      isActive={view === key}
-                      tooltip={
-                        key === "templates"
-                          ? "Images"
-                          : key.charAt(0).toUpperCase() + key.slice(1)
-                      }
-                    >
-                      <a
-                        href={`#${key === "templates" ? "images" : key}`}
-                        aria-current={view === key ? "page" : undefined}
-                        onClick={() => setOpenMobile(false)}
+        {[
+          {
+            label: "Workspace",
+            name: "Main navigation",
+            entries: Object.entries(views).filter(
+              ([key]) => !["hosts", "orchestrators"].includes(key),
+            ),
+          },
+          ...(user.role === "admin"
+            ? [
+                {
+                  label: "Infrastructure",
+                  name: "Infrastructure navigation",
+                  entries: Object.entries(views).filter(([key]) =>
+                    ["hosts", "orchestrators"].includes(key),
+                  ),
+                },
+                {
+                  label: "Administration",
+                  name: "Administration navigation",
+                  entries: [
+                    ["admin", { icon: LayoutDashboard }],
+                    ["users", { icon: Users }],
+                    ["api-access", { icon: KeyRound }],
+                  ] as Array<[string, { icon: LucideIcon }]>,
+                },
+              ]
+            : []),
+        ].map(({ label, name, entries }) => (
+          <SidebarGroup key={label}>
+            <SidebarGroupLabel className="text-[10px] uppercase tracking-widest">
+              {label}
+            </SidebarGroupLabel>
+            <SidebarGroupContent>
+              <nav aria-label={name}>
+                <SidebarMenu>
+                  {entries.map(([key, { icon: Icon }]) => (
+                    <SidebarMenuItem key={key}>
+                      <SidebarMenuButton
+                        asChild
+                        isActive={view === key}
+                        tooltip={
+                          key === "admin"
+                            ? "Overview"
+                            : key === "api-access"
+                              ? "API access"
+                              : key === "templates"
+                                ? "Images"
+                                : key.charAt(0).toUpperCase() + key.slice(1)
+                        }
                       >
-                        <Icon aria-hidden="true" />
-                        <span>
-                          {key === "templates"
-                            ? "Images"
-                            : key.charAt(0).toUpperCase() + key.slice(1)}
-                        </span>
-                      </a>
-                    </SidebarMenuButton>
-                    <SidebarMenuBadge>{counts[key]}</SidebarMenuBadge>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </nav>
-          </SidebarGroupContent>
-        </SidebarGroup>
+                        <a
+                          href={
+                            key === "users"
+                              ? "#admin/users"
+                              : key === "api-access"
+                                ? "#admin/tokens"
+                                : `#${key === "templates" ? "images" : key}`
+                          }
+                          aria-current={view === key ? "page" : undefined}
+                          onClick={() => setOpenMobile(false)}
+                        >
+                          <Icon aria-hidden="true" />
+                          <span>
+                            {key === "admin"
+                              ? "Overview"
+                              : key === "api-access"
+                                ? "API access"
+                                : key === "templates"
+                                  ? "Images"
+                                  : key.charAt(0).toUpperCase() + key.slice(1)}
+                          </span>
+                        </a>
+                      </SidebarMenuButton>
+                      {counts[key] !== undefined && (
+                        <SidebarMenuBadge>{counts[key]}</SidebarMenuBadge>
+                      )}
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </nav>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>

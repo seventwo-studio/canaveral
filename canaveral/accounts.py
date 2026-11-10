@@ -292,6 +292,18 @@ class Accounts:
     def _token_public(self,row):
         return {'id':row['id'],'name':row['name'],'scopes':json.loads(row['scopes']),'createdAt':row['created'],'expiresAt':row['expires'],'lastUsedAt':row['last_used'],'revokedAt':row['revoked'],'prefix':row['prefix']}
 
+    def admin_tokens(self, token, revoke=None, operator=False):
+        from .model import identifier
+        with self.store.transaction() as db:
+            self._admin(db,token,operator)
+            if revoke is None:
+                return {'tokens':[{**self._token_public(row),'userId':row['user']} for row in db.execute('SELECT * FROM api_tokens ORDER BY created,id')]}
+            tid=identifier(revoke)
+            if not db.execute('SELECT 1 FROM api_tokens WHERE id=?',(tid,)).fetchone():raise Error('Unknown token.',404)
+            db.execute('UPDATE api_tokens SET revoked=COALESCE(revoked,?) WHERE id=?',(self.store.clock(),tid))
+            row=db.execute('SELECT * FROM api_tokens WHERE id=?',(tid,)).fetchone()
+            return {**self._token_public(row),'userId':row['user']}
+
     def tokens(self, token, value=None, revoke=None):
         from .model import identifier
         if value is not None and revoke is None:

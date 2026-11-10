@@ -1,5 +1,40 @@
 # Optional web dashboard
 
+## Administration
+
+Administrators have a visible Administration group in the sidebar. Open `#admin`
+for current machine, user, API-token and infrastructure counts, machine/connection
+attention states and links to the existing operational controls. Counts use the
+current inventory and credential snapshots. Unavailable data stays unavailable;
+these are not historical utilization or audit charts.
+
+`#admin/users` provides user search and status filters, machine ownership counts,
+invitations, recovery and role/status controls. Disable, password reset and role
+changes require a confirmation naming the account and consequences. Invitations
+and recovery links last 24 hours and are delivered manually. Re-enabling an account
+requires a fresh invitation and password; the controller protects the last active
+administrator. The old `#users` route remains usable.
+
+`#admin/tokens` lists personal API-token metadata across all users: owner,
+permissions, prefix, expiry, last use and revocation. Revocation requires explicit
+confirmation, checks the returned token/owner identity and refreshes the list.
+Unknown replies trigger a status refresh without replaying the mutation. Revoked
+records remain visible. Creating a token remains a personal account action; no
+administrator receives another user's secret. The controller and gateway enforce
+current administrator authority independently of navigation.
+
+The machine inventory shows owner names and an owner filter to administrators.
+`No user owner` means an explicit null owner; it does not establish whether the
+machine was created by an operator or an application lease. Older responses that
+omit ownership show `Owner unavailable`. Ownership is not reassigned here.
+Infrastructure, images, budgets and guest controls keep their existing contracts.
+
+Ordinary-user admin deep links return to the machine workspace without fetching
+privileged collections. Administrative caches belong to the active identity;
+late replies cannot restore a prior identity's data, and 401/403 responses clear
+the affected collection. Transport failures retain a labeled last snapshot where
+available. New admin endpoints require a matching controller and gateway version.
+
 ## TypeScript migration
 
 The React dashboard uses TypeScript. The entrypoint, all shared UI primitives, sidebar,

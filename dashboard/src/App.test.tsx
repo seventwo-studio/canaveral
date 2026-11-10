@@ -137,6 +137,65 @@ async function login() {
   return user;
 }
 describe("dashboard contracts", () => {
+  it.each(["admin", "admin/users", "admin/tokens"])(
+    "blocks ordinary-user deep link %s before requesting admin data",
+    async (hash) => {
+      const original = handler;
+      handler = (p) =>
+        ["auth/login", "auth/session"].includes(p)
+          ? json({
+              user: {
+                id: "alice",
+                username: "alice",
+                role: "user",
+                status: "active",
+              },
+            })
+          : original(p);
+      location.hash = hash;
+      await login();
+      expect(
+        calls.some((c) => ["hosts", "users", "admin/tokens"].includes(c.path)),
+      ).toBe(false);
+      expect(
+        screen.queryByRole("navigation", { name: "Administration navigation" }),
+      ).toBeNull();
+      expect(screen.getByRole("heading", { name: "Machines" })).toBeTruthy();
+    },
+  );
+  it("shows fleet ownership and filters without changing lifecycle controls", async () => {
+    const original = handler;
+    handler = (p) =>
+      p === "users"
+        ? json({
+            users: [
+              {
+                id: "alice",
+                username: "alice",
+                role: "user",
+                status: "active",
+              },
+            ],
+          })
+        : p === "machines"
+          ? json({
+              machines: [
+                { ...machine, ownerId: "alice" },
+                { ...machine, id: "m2", name: "Unassigned", ownerId: null },
+              ],
+            })
+          : original(p);
+    const actor = await login();
+    expect(
+      await screen.findByText("No user owner", { selector: "dd" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Administration navigation" }),
+    ).toBeTruthy();
+    await actor.selectOptions(screen.getByLabelText("Machine owner"), "alice");
+    expect(screen.queryByRole("button", { name: /^Unassigned$/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Stop Voyager" })).toBeTruthy();
+  });
   it("keeps ordinary users in their workspace without requesting administrator inventory", async () => {
     const original = handler;
     handler = (p) =>

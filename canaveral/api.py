@@ -125,6 +125,11 @@ def server(store, address, admin_token, enrollment_token):
                 elif len(parts)==5 and parts[:3]==['v1','auth','tokens'] and parts[4]=='revoke' and self.command=='POST':
                     fields(value,())
                     result=accounts.tokens(token,revoke=parts[3])
+                elif self.command=='GET' and parts==['v1','admin','tokens']:
+                    result=accounts.admin_tokens(token,operator=operator)
+                elif self.command=='POST' and len(parts)==5 and parts[:3]==['v1','admin','tokens'] and parts[4]=='revoke':
+                    fields(value,())
+                    result=accounts.admin_tokens(token,revoke=parts[3],operator=operator)
                 elif parts==['v1','users'] and self.command in ('GET','POST'):
                     result=accounts.users(token,operator) if self.command=='GET' else accounts.create_user(token,value,operator)
                 elif len(parts)==4 and parts[:2]==['v1','users'] and self.command=='POST':

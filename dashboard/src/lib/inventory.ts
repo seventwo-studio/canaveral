@@ -11,6 +11,7 @@ import type { HostAvailability } from "./types";
 import type { WorkspaceMachine } from "./workspace";
 
 export interface Machine extends WorkspaceMachine {
+  ownerId?: string | null;
   hostId: string;
   templateId: string;
   resources: Resources;
@@ -254,6 +255,8 @@ export function machinesResponse(value: unknown): Machine[] {
     requiredStrings(record(m.preparation), ["state"]);
     booleans(m, ["ready"], true);
     optionalStrings(m, ["detail"]);
+    if (m.ownerId != null && (!string(m.ownerId) || !m.ownerId))
+      throw new Error("Invalid machine owner.");
     optionalNumbers(m, ["updatedAt"]);
     if (m.powerOffRequest != null && !string(m.powerOffRequest))
       throw new Error("Invalid power-off request.");

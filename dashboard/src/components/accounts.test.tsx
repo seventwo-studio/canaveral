@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AccountPage, TokensPage, UsersPage } from "./accounts";
 import { ClaimScreen, takeClaim } from "./claim-screen";
@@ -24,6 +31,7 @@ const token = {
 let requests: { path: string; body?: Record<string, unknown> }[];
 let route: (path: string, body?: Record<string, unknown>) => unknown;
 beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   requests = [];
   route = (path) => (path === "auth/tokens" ? { tokens: [token] } : {});
   vi.stubGlobal(
@@ -284,7 +292,7 @@ it("creates pending ordinary accounts, issues and revokes links, and surfaces la
         : {};
   const actor = userEvent.setup();
   render(<UsersPage />);
-  await screen.findByText("alice · user · pending");
+  await screen.findByRole("row", { name: "alice account" });
   await actor.type(screen.getByLabelText("New username"), "bob");
   await actor.click(screen.getByRole("button", { name: "Create user" }));
   await waitFor(() =>
@@ -313,7 +321,14 @@ it("creates pending ordinary accounts, issues and revokes links, and surfaces la
     return { users: [pending] };
   };
   await actor.click(screen.getByRole("button", { name: "Disable admin" }));
-  await screen.findByText(/Last active administrator/);
+  const dialog = screen.getByRole("alertdialog", { name: "Disable admin?" });
+  expect(requests.filter((r) => r.path === "users/admin/update")).toHaveLength(
+    0,
+  );
+  await actor.click(
+    within(dialog).getByRole("button", { name: "Disable account" }),
+  );
+  await screen.findByText("Last active administrator cannot be disabled");
 });
 
 it("offers reset links and explicit role updates for existing accounts", async () => {
@@ -328,8 +343,28 @@ it("offers reset links and explicit role updates for existing accounts", async (
   await actor.click(
     await screen.findByRole("button", { name: "Reset password for alice" }),
   );
+  const reset = screen.getByRole("alertdialog", {
+    name: "Reset password for alice?",
+  });
+  expect(
+    within(reset).getByText(/immediately blocks alice's current password/),
+  ).toBeTruthy();
+  await actor.click(
+    within(reset).getByRole("button", { name: "Reset password" }),
+  );
   await screen.findByDisplayValue(/#claim=fixture-reset/);
   await actor.click(screen.getByRole("button", { name: "Make alice admin" }));
+  const promotion = screen.getByRole("alertdialog", {
+    name: "Make alice an administrator?",
+  });
+  expect(
+    within(promotion).getByText(/manage all users, machines/),
+  ).toBeTruthy();
+  await actor.click(
+    within(promotion).getByRole("button", {
+      name: "Grant administrator access",
+    }),
+  );
   await waitFor(() =>
     expect(
       requests.some(
@@ -366,6 +401,197 @@ it("re-enables a disabled user to pending before issuing a fresh invitation", as
     ),
   ).toBe(true);
 });
+it("filters users by username or identity and status and shows owned-machine counts", async () => {
+  const pending: User = {
+    ...account,
+    id: "pending-id",
+    username: "bob",
+    status: "pending",
+  };
+  const disabled: User = {
+    ...account,
+    id: "disabled-id",
+    username: "carol",
+    status: "disabled",
+  };
+  route = () => ({ users: [account, pending, disabled] });
+  const actor = userEvent.setup();
+  const fixture = {
+    id: "m1",
+    name: "Fixture",
+    hostId: "h1",
+    templateId: "t1",
+    ownerId: account.id,
+    resources: { cpu: 1, memoryMiB: 1024, diskGiB: 8 },
+    desired: "running",
+    observed: "running",
+    preparation: { state: "notRequired" },
+    template: { os: "linux", arch: "arm64", mode: "headless" },
+  };
+  render(<UsersPage machines={[fixture, { ...fixture, id: "m2" }]} />);
+  const alice = await screen.findByRole("row", { name: "alice account" });
+  expect(within(alice).getByRole("cell", { name: "Machines: 2" })).toBeTruthy();
+  await actor.type(screen.getByLabelText("Search users"), "PENDING-ID");
+  expect(screen.queryByRole("row", { name: "alice account" })).toBeNull();
+  expect(screen.getByRole("row", { name: "bob account" })).toBeTruthy();
+  await actor.clear(screen.getByLabelText("Search users"));
+  screen.getByRole("combobox", { name: "User status" }).focus();
+  await actor.keyboard("{ArrowDown}{End}{Enter}");
+  expect(screen.getByRole("row", { name: "carol account" })).toBeTruthy();
+  expect(screen.queryByRole("row", { name: "bob account" })).toBeNull();
+  await actor.type(screen.getByLabelText("Search users"), "alice");
+  expect(screen.getByText("No users match")).toBeTruthy();
+});
+
+it("confirms self-demotion, explains the last administrator and restores focus on cancel", async () => {
+  const admin: User = { ...account, role: "admin" };
+  route = () => ({ users: [admin] });
+  const actor = userEvent.setup();
+  render(<UsersPage user={admin} />);
+  const trigger = await screen.findByRole("button", {
+    name: "Make alice user",
+  });
+  expect(screen.getByText("Last active administrator")).toBeTruthy();
+  await actor.click(trigger);
+  const dialog = screen.getByRole("alertdialog", {
+    name: "Remove administrator access from alice?",
+  });
+  expect(within(dialog).getByText(/This is your account/)).toBeTruthy();
+  expect(
+    within(dialog).getByText(/limited to their own machines/),
+  ).toBeTruthy();
+  expect(requests.filter((r) => r.body)).toHaveLength(0);
+  await actor.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  expect(requests.filter((r) => r.body)).toHaveLength(0);
+});
+
+it.each([401, 403])(
+  "clears cached users and one-time links after access is denied (%s)",
+  async (status) => {
+    route = (path) =>
+      path === "users"
+        ? { users: [{ ...account, status: "pending" }] }
+        : { token: "fixture-visible" };
+    const denied = vi.fn(),
+      actor = userEvent.setup();
+    render(<UsersPage onDenied={denied} />);
+    await actor.click(
+      await screen.findByRole("button", { name: "Issue invitation for alice" }),
+    );
+    await screen.findByDisplayValue(/fixture-visible/);
+    route = () =>
+      Promise.reject(Object.assign(new Error("Denied"), { status }));
+    await actor.click(screen.getByRole("button", { name: "Refresh users" }));
+    await screen.findByText(
+      status === 401
+        ? /Your session has ended/
+        : /Administrator access is required/,
+    );
+    expect(screen.queryByRole("row", { name: "alice account" })).toBeNull();
+    expect(screen.queryByDisplayValue(/fixture-visible/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Create user" }).matches(":disabled"),
+    ).toBe(true);
+    expect(denied).toHaveBeenCalledOnce();
+  },
+);
+
+it("requires an explicit refresh after an unknown mutation without replaying creation", async () => {
+  let created = false;
+  route = (path, body) => {
+    if (path === "users" && body) {
+      created = true;
+      return Promise.reject(new Error("Lost response"));
+    }
+    return {
+      users: created
+        ? [
+            account,
+            { ...account, id: "new", username: "bob", status: "pending" },
+          ]
+        : [account],
+    };
+  };
+  const actor = userEvent.setup();
+  render(<UsersPage />);
+  await screen.findByRole("row", { name: "alice account" });
+  await actor.type(screen.getByLabelText("New username"), "bob");
+  await actor.click(screen.getByRole("button", { name: "Create user" }));
+  await screen.findByText(/Creation of bob could not be confirmed/);
+  expect(
+    screen.getByRole("button", { name: "Create user" }).matches(":disabled"),
+  ).toBe(true);
+  expect(screen.queryByRole("row", { name: "bob account" })).toBeNull();
+  await actor.click(screen.getByRole("button", { name: "Refresh users" }));
+  await screen.findByRole("row", { name: "bob account" });
+  expect(
+    screen.getByRole("button", { name: "Create user" }).matches(":disabled"),
+  ).toBe(false);
+  expect(requests.filter((r) => r.path === "users" && r.body)).toHaveLength(1);
+});
+
+it("ignores an earlier identity's delayed user list", async () => {
+  let complete!: (value: unknown) => void;
+  const delayed = new Promise((resolve) => {
+    complete = resolve;
+  });
+  route = () => delayed;
+  const admin: User = { ...account, role: "admin" };
+  const view = render(<UsersPage user={admin} />);
+  const replacement: User = { ...admin, id: "other", username: "replacement" };
+  route = () => ({ users: [replacement] });
+  view.rerender(<UsersPage user={replacement} />);
+  await screen.findByRole("row", { name: "replacement account" });
+  await act(async () => {
+    complete({ users: [account] });
+    await delayed;
+  });
+  expect(screen.queryByRole("row", { name: "alice account" })).toBeNull();
+  expect(screen.getByRole("row", { name: "replacement account" })).toBeTruthy();
+});
+
+it("drops a delayed invitation after unmount without fetching or exposing it", async () => {
+  let complete!: (value: unknown) => void;
+  const delayed = new Promise((resolve) => {
+    complete = resolve;
+  });
+  route = (path) =>
+    path === "users" ? { users: [{ ...account, status: "pending" }] } : delayed;
+  const denied = vi.fn(),
+    actor = userEvent.setup();
+  const view = render(<UsersPage onDenied={denied} />);
+  await actor.click(
+    await screen.findByRole("button", { name: "Issue invitation for alice" }),
+  );
+  view.unmount();
+  await act(async () => {
+    complete({ token: "fixture-late-secret" });
+    await delayed;
+  });
+  expect(requests.filter((r) => r.path === "users")).toHaveLength(1);
+  render(<UsersPage onDenied={denied} />);
+  await screen.findByRole("row", { name: "alice account" });
+  expect(screen.queryByDisplayValue(/fixture-late-secret/)).toBeNull();
+  expect(denied).not.toHaveBeenCalled();
+});
+
+it("ignores a delayed access-denial callback after unmount", async () => {
+  let reject!: (reason: unknown) => void;
+  const delayed = new Promise((_resolve, fail) => {
+    reject = fail;
+  });
+  route = () => delayed;
+  const denied = vi.fn();
+  const view = render(<UsersPage onDenied={denied} />);
+  view.unmount();
+  await act(async () => {
+    reject(Object.assign(new Error("Denied"), { status: 403 }));
+    await delayed.catch(() => undefined);
+  });
+  expect(denied).not.toHaveBeenCalled();
+});
+
 it("offers sign-in and reissue instructions for expired links", async () => {
   route = () =>
     Promise.reject(Object.assign(new Error("Expired"), { status: 410 }));
