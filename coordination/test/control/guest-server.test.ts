@@ -116,7 +116,8 @@ test("guest address and recipe ports preserve ownership and never mutate capture
   assert.equal(guestReady({ ready: true }, { mode: "headless" }), false); assert.equal(guestReady({ ready: true }, { mode: "desktop" }), true); assert.equal(guestReady({ ready: true, mode: "headless" }, { mode: "headless" }), true);
   const files = [{ path: "/opt/canaveral/server.mjs", content: "import './guest-service.mjs';", mode: "0644" }], recipe = guestRecipe("ssh-ed25519 Zml4dHVyZQ==", "headless", files), original = structuredClone(recipe);
   const prepared = prepareRecipe(recipe, id, "x".repeat(43), "private fixture", "ssh-ed25519 public fixture", files);
-  assert.deepEqual(recipe, original); assert.ok(prepared.commands.at(-1)!.includes(`/var/lib/canaveral/${id}/complete`)); assert.ok(recipe.files.some(f => f.content.includes("/usr/bin/node /opt/canaveral/server.mjs")));
+  assert.deepEqual(recipe, original); assert.ok(prepared.commands.at(-1)!.includes(`/var/lib/canaveral/${id}/complete`)); assert.ok(recipe.files.some(f => f.content.includes("/usr/local/bin/node /opt/canaveral/server.mjs")));
+  assert.ok(recipe.commands[0]!.includes("parseInt(process.versions.node,10)<24"));
   assert.throws(() => guestRecipe("ssh-ed25519 Zml4dHVyZQ==", "headless", []));
   const legacy = structuredClone(recipe);
   legacy.files.push({ path: "/opt/canaveral/server.py", content: "legacy fixture", mode: "0644" });

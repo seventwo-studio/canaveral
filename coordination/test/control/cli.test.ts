@@ -265,5 +265,5 @@ test("local Linux configuration embeds the supplied TypeScript bundle without ge
   assert.equal(result.status, 0, result.stderr);
   const config = JSON.parse(await fs.readFile(join(root, "linux-host.json"), "utf8")) as { guestHelperManifest: string; templates: Array<{ prepare: { files: Array<{ path: string; content: string }> } }> };
   assert.equal(config.guestHelperManifest, manifest); assert.ok(config.templates[0]!.prepare.files.some(file => file.path === "/opt/canaveral/server.mjs"));
-  assert.ok(JSON.stringify(config).includes("/usr/bin/node"));
+  assert.ok(JSON.stringify(config).includes("/usr/local/bin/node"));
 }));

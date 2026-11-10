@@ -1,4 +1,4 @@
-import { createHash, createPublicKey } from 'node:crypto';
+import { createPublicKey } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { hostOffer, hostTransport, HostRunner } from '../host.ts';
@@ -73,7 +73,9 @@ export function readManagedRunnerIdentity(config: HostConfig): HostIdentity {
     credential = secret(readFileSync(native.credentialFile, 'utf8').trim());
   } else if (typeof native.identity === 'string' && isAbsolute(native.identity)) {
     const envelope = updateObject(readUpdateJSON(join(native.identity, 'identity.json'))), record = updateObject(envelope.record), approval = updateObject(record.approval);
-    if (envelope.sha256 !== createHash('sha256').update(JSON.stringify(record)).digest('hex') || record.origin !== config.url.replace(/\/+$/, '') || Object.entries(binding).some(([key, value]) => approval[key] !== value)) throw new Error('Saved native identity binding changed');
+    // Rust validates its typed-envelope checksum at startup and each positive idle probe.
+    // Its struct/f64 serialization is not JavaScript JSON canonicalization.
+    if (typeof envelope.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(envelope.sha256) || record.version !== 1 || !['Consumed', 'Authenticated'].includes(String(record.phase)) || record.credential === approval.enrollmentToken || record.origin !== config.url.replace(/\/+$/, '') || Object.entries(binding).some(([key, value]) => approval[key] !== value)) throw new Error('Saved native identity binding changed');
     credential = secret(record.credential);
   } else throw new Error('Native credential location is unavailable');
   return { id: binding.runnerId, credential, binding };
@@ -154,6 +156,10 @@ export async function startManagedHost(config: HostConfig, timeoutMs = 30_000): 
     await runner.start();
     await phase(context, 'canaveral-update-started', 'canaveral-update-committed', timeoutMs);
     unbind = bindManagedHost(runner); runner.resumeUpdateAdmission();
+    // Commit has been processed and admission has an owner before acknowledging it.
+    // A lost ACK fences new work but never aborts already authorized operations.
+    try { await send({ type: 'canaveral-update-committed-ack', version: 1, ...context }); }
+    catch { runner.fenceUpdateAdmission(); }
     const close = runner.close.bind(runner); runner.close = async () => { unbind(); await close(); };
     return runner;
   } catch (error) { unbind(); await runner.close(); throw error; }

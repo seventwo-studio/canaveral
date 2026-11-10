@@ -36,6 +36,7 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 - [orchestration](orchestration.md)
 - [power and recovery](power-and-recovery.md)
 - [running](running.md)
+- [managed runtime updates](runtime-updates.md)
 - [runner enrollment](runner-enrollment.md)
 - [Rust runner identity client](../crates/runner-client/README.md)
 - [Rust Apple satellite](../crates/apple-satellite/README.md)

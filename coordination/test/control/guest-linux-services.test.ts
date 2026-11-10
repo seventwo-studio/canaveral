@@ -124,7 +124,7 @@ test("deterministic guest bundle contains runnable composition and checksum-pinn
     }
     const emitted = await import(pathToFileURL(join(dir, "modules/guest/linux-services.mjs")).href) as { createLinuxServices?: unknown };
     assert.equal(typeof emitted.createLinuxServices, "function");
-    const recipe = desktopRecipe("ssh-ed25519 Zml4dHVyZQ==", first.artifacts); assert.ok(recipe.commands.includes("node /opt/canaveral/install.mjs"));
+    const recipe = desktopRecipe("ssh-ed25519 Zml4dHVyZQ==", first.artifacts); assert.ok(recipe.commands.includes("/usr/local/bin/node /opt/canaveral/install.mjs"));
     assert.throws(() => builder.buildGuestBundle({ ...options, arch: "amd64" }), /architecture/);
     await assert.rejects(startLinuxGuest([]));
   } finally { rmSync(dir, { recursive: true, force: true }); }

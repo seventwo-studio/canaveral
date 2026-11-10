@@ -299,3 +299,7 @@ Closing simultaneous PTYs signals them as a batch and waits outside the session
 manager lock, so another terminal can continue reading and writing during the
 termination grace period. A process whose termination is uncertain remains in
 the closing registry for retry; it is not reported as successfully closed.
+
+## Guest service bundle prerequisites
+
+Prepared Linux bases must provide Node.js 24 or later at `/usr/local/bin/node`. Guest recipes verify that interpreter before service readiness; distribution `nodejs` packages are not used as an implicit version source. Build the TypeScript service bundle with `node script/build_guest_bundle.mjs`, supplying Linux ELF helpers for the target architecture. The private operator bundle supports up to 4096 files and 128 MiB; public preparation payload limits remain 100 files and 200 KB. Native AT-SPI requires a glibc-linked helper, libatspi, GLib/GObject and the desktop session bus.

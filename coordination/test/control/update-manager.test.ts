@@ -82,3 +82,15 @@ test('runner requests pin current binding and refuse credential or incarnation c
   const updater = new ManagedUpdater({ ...f.options, targetKind: 'runner', request, identity: () => ({ id: c.hostId, credential: token, binding: { ...binding } }), lifecycle: unused }); t.after(() => updater.close());
   await updater.poll(); await updater.step(); token = 'b'.repeat(43); await assert.rejects(updater.step(), /credential/); assert.equal(c.downloads.length, 0);
 });
+
+test('verified bootstrap rejects hardlinked or symlinked code and unexpected signed-tree entries', async t => {
+  for (const kind of ['hardlink', 'symlink', 'extra'] as const) {
+    const f = fixture(); t.after(f.cleanup); const store = new UpdateStore(f.options), release = f.release(1), source = join(f.root, 'unsafe-source');
+    mkdirSync(source, { mode: 0o700 }); const original = join(f.root, 'original.mjs'); writeFileSync(original, release.bytes['host.mjs'], { mode: 0o600 });
+    if (kind === 'hardlink') linkSync(original, join(source, 'host.mjs'));
+    else if (kind === 'symlink') symlinkSync(original, join(source, 'host.mjs'));
+    else { writeFileSync(join(source, 'host.mjs'), release.bytes['host.mjs'], { mode: 0o600 }); writeFileSync(join(source, 'unexpected'), 'extra', { mode: 0o600 }); }
+    await assert.rejects(store.installInitial(release.envelope, source), /linked|symlink|Unexpected/);
+    assert.equal(store.active(), undefined); assert.equal(store.highwater().sequence, 0);
+  }
+});

@@ -1,6 +1,6 @@
 #[cfg(unix)]
 fn run() -> Result<(), &'static str> {
-    use canaveral_model_execution::controller::{RunnerConfig, run_once, run_once_with_ready};
+    use canaveral_model_execution::controller::{run_once, run_once_with_ready, RunnerConfig};
     let args: Vec<_> = std::env::args().skip(1).collect();
     let managed = args.first().is_some_and(|v| v == "--update-managed");
     let check = args.first().is_some_and(|v| v == "--update-check");
@@ -74,33 +74,51 @@ fn run() -> Result<(), &'static str> {
     }
     if status {
         let idle = canaveral_model_execution::controller::update_status(&config).unwrap_or(false);
-        println!("{}", serde_json::json!({"type":"canaveral-update-status","version":1,"binding":config.binding,"idle":idle,"workloadsStopped":idle,"quiesced":idle}));
+        println!(
+            "{}",
+            serde_json::json!({"type":"canaveral-update-status","version":1,"binding":config.binding,"idle":idle,"workloadsStopped":idle,"quiesced":idle})
+        );
         return Ok(());
     }
     if check {
         println!("{{\"type\":\"canaveral-update-check\",\"version\":1,\"runtime\":\"model\"}}");
         return Ok(());
     }
+    let pinned_config = private_bytes(std::path::Path::new(path))?;
     let mut channel = Managed::open()?;
     channel.phase("canaveral-update-ready", "canaveral-update-activate")?;
     let mut service = None;
+    let mut committed = false;
     let _result = run_once_with_ready(config, || {
         channel.phase("canaveral-update-started", "canaveral-update-committed")?;
-        service = Some(channel.service(std::path::PathBuf::from(path))?);
+        service = Some(channel.service(std::path::PathBuf::from(path), pinned_config.clone())?);
+        channel.ack()?;
+        committed = true;
         Ok(())
     });
     let service = service.ok_or("managed startup did not reach authenticated readiness")?;
+    if !committed {
+        service.gate.lock().unwrap().fenced = true;
+    }
     service.finished();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
-        if !service.begin() { continue; }
+        if !service.begin() {
+            continue;
+        }
         // Each iteration reloads the same external operator config; durable run-once receipts
         // retain uncertain outcomes and never replay an unowned effect.
         let result = (|| {
-            let config = serde_json::from_slice(&private_bytes(std::path::Path::new(path))?).map_err(|_| "invalid configuration")?;
-            canaveral_model_execution::controller::run_once(config)
+            if private_bytes(std::path::Path::new(path))? != pinned_config {
+                return Err("managed operator config changed");
+            }
+            let config = serde_json::from_slice(&private_bytes(std::path::Path::new(path))?)
+                .map_err(|_| "invalid configuration")?;
+            canaveral_model_execution::controller::run_once_with_ready(config, || Ok(()))
         })();
-        if result.is_err() { eprintln!("managed runner iteration requires contact or retained-state reconciliation"); }
+        if result.is_err() {
+            eprintln!("managed runner iteration requires contact or retained-state reconciliation");
+        }
         service.finished();
     }
 }
@@ -175,6 +193,13 @@ impl Managed {
             installation: id("CANAVERAL_UPDATE_INSTALLATION")?,
         })
     }
+    fn ack(&mut self) -> Result<(), &'static str> {
+        use std::io::Write;
+        let value = serde_json::json!({"type":"canaveral-update-committed-ack","version":1,"releaseId":self.release,"installationId":self.installation});
+        writeln!(self.output, "{value}")
+            .and_then(|_| self.output.flush())
+            .map_err(|_| "managed commit acknowledgment lost")
+    }
     fn phase(&mut self, outgoing: &str, incoming: &str) -> Result<(), &'static str> {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
@@ -222,36 +247,94 @@ impl Managed {
 
 #[cfg(unix)]
 #[derive(Default)]
-struct Admission { busy: bool, fenced: bool }
+struct Admission {
+    busy: bool,
+    fenced: bool,
+}
 #[cfg(unix)]
-struct Service { gate: std::sync::Arc<std::sync::Mutex<Admission>> }
+struct Service {
+    gate: std::sync::Arc<std::sync::Mutex<Admission>>,
+}
 #[cfg(unix)]
 impl Service {
-    fn begin(&self) -> bool { let mut gate = self.gate.lock().unwrap(); if gate.fenced { return false; } gate.busy = true; true }
-    fn finished(&self) { self.gate.lock().unwrap().busy = false; }
+    fn begin(&self) -> bool {
+        let mut gate = self.gate.lock().unwrap();
+        if gate.fenced {
+            return false;
+        }
+        gate.busy = true;
+        true
+    }
+    fn finished(&self) {
+        self.gate.lock().unwrap().busy = false;
+    }
 }
 #[cfg(unix)]
 impl Managed {
-    fn service(&self, config_path: std::path::PathBuf) -> Result<Service, &'static str> {
+    fn service(
+        &self,
+        config_path: std::path::PathBuf,
+        pinned_config: Vec<u8>,
+    ) -> Result<Service, &'static str> {
         use std::io::{BufRead, Write};
-        let mut input = std::io::BufReader::new(self.input.try_clone().map_err(|_| "managed command pipe lost")?);
-        let mut output = self.output.try_clone().map_err(|_| "managed reply pipe lost")?;
-        let gate = std::sync::Arc::new(std::sync::Mutex::new(Admission { busy: true, fenced: false }));
+        let mut input = std::io::BufReader::new(
+            self.input
+                .try_clone()
+                .map_err(|_| "managed command pipe lost")?,
+        );
+        let mut output = self
+            .output
+            .try_clone()
+            .map_err(|_| "managed reply pipe lost")?;
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(Admission {
+            busy: true,
+            fenced: false,
+        }));
         let commands = gate.clone();
         std::thread::spawn(move || {
             loop {
                 let mut bytes = Vec::new();
                 // take limits allocation even when a peer omits the newline.
-                if std::io::Read::take(&mut input, 4097).read_until(b'\n', &mut bytes).ok().is_none_or(|n| n == 0 || n > 4096) || !bytes.ends_with(b"\n") { break; }
-                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { break; };
-                let Some(request_id) = value["requestId"].as_str().filter(|s| uuid::Uuid::parse_str(s).ok().is_some_and(|u| !u.is_nil() && u.to_string() == *s)) else { break; };
-                let Some(kind) = value["type"].as_str() else { break; };
-                if value.as_object().is_none_or(|v| v.len() != 2) || !["canaveral-update-status", "canaveral-update-quiesce"].contains(&kind) { break; }
+                if std::io::Read::take(&mut input, 4097)
+                    .read_until(b'\n', &mut bytes)
+                    .ok()
+                    .is_none_or(|n| n == 0 || n > 4096)
+                    || !bytes.ends_with(b"\n")
+                {
+                    break;
+                }
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                    break;
+                };
+                let Some(request_id) = value["requestId"].as_str().filter(|s| {
+                    uuid::Uuid::parse_str(s)
+                        .ok()
+                        .is_some_and(|u| !u.is_nil() && u.to_string() == *s)
+                }) else {
+                    break;
+                };
+                let Some(kind) = value["type"].as_str() else {
+                    break;
+                };
+                if value.as_object().is_none_or(|v| v.len() != 2)
+                    || !["canaveral-update-status", "canaveral-update-quiesce"].contains(&kind)
+                {
+                    break;
+                }
                 let mut admission = commands.lock().unwrap();
-                if kind == "canaveral-update-quiesce" { admission.fenced = true; }
-                let idle = !admission.busy && native_status(&config_path).unwrap_or(false);
+                if kind == "canaveral-update-quiesce" {
+                    admission.fenced = true;
+                }
+                let idle = !admission.busy
+                    && private_bytes(&config_path).is_ok_and(|bytes| bytes == pinned_config)
+                    && native_status(&config_path).unwrap_or(false);
                 let reply = serde_json::json!({"type":"canaveral-update-status","requestId":request_id,"idle":idle,"workloadsStopped":idle,"quiesced":admission.fenced && idle});
-                if writeln!(output, "{reply}").and_then(|_| output.flush()).is_err() { break; }
+                if writeln!(output, "{reply}")
+                    .and_then(|_| output.flush())
+                    .is_err()
+                {
+                    break;
+                }
             }
             commands.lock().unwrap().fenced = true;
         });
@@ -261,6 +344,52 @@ impl Managed {
 
 #[cfg(unix)]
 fn native_status(path: &std::path::Path) -> Result<bool, &'static str> {
-    let config = serde_json::from_slice(&private_bytes(path)?).map_err(|_| "invalid configuration")?;
+    let config =
+        serde_json::from_slice(&private_bytes(path)?).map_err(|_| "invalid configuration")?;
     canaveral_model_execution::controller::update_status(&config)
+}
+
+#[cfg(all(test, unix))]
+mod managed_tests {
+    use super::*;
+    #[test]
+    fn pipe_quiesce_fences_next_turn_and_does_not_claim_busy_work_is_stopped() {
+        use std::io::{BufRead, Write};
+        use std::os::{
+            fd::{FromRawFd, IntoRawFd},
+            unix::net::UnixStream,
+        };
+        let (output, peer_output) = UnixStream::pair().unwrap();
+        let (input, mut peer_input) = UnixStream::pair().unwrap();
+        peer_output
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let channel = Managed {
+            output: unsafe { std::fs::File::from_raw_fd(output.into_raw_fd()) },
+            input: unsafe { std::fs::File::from_raw_fd(input.into_raw_fd()) },
+            release: uuid::Uuid::from_u128(1).to_string(),
+            installation: uuid::Uuid::from_u128(2).to_string(),
+        };
+        let service = channel
+            .service("/nonexistent/canaveral-fixture/config".into(), Vec::new())
+            .unwrap();
+        let id = uuid::Uuid::from_u128(3).to_string();
+        writeln!(
+            peer_input,
+            "{}",
+            serde_json::json!({"type":"canaveral-update-quiesce","requestId":id})
+        )
+        .unwrap();
+        let mut reader = std::io::BufReader::new(peer_output);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["idle"], false);
+        assert_eq!(reply["workloadsStopped"], false);
+        assert_eq!(reply["quiesced"], false);
+        assert!(service.gate.lock().unwrap().busy); // No cancellation of the current turn.
+        service.finished();
+        assert!(!service.begin()); // No next claim after the fence.
+        drop(peer_input);
+    }
 }

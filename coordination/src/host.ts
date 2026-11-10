@@ -100,13 +100,13 @@ export function hostTransport(config: HostConfig): HostTransport {
   return { request: async (method, path, body, token, signal) => {
     if (!path.startsWith("/v1/") || path.includes("?") && !(method === "GET" && /^\/v1\/updates\/artifacts\/[a-f0-9]{64}\?jobId=[a-f0-9-]{36}&offset=(0|[1-9][0-9]*)&length=[1-9][0-9]*$/.test(path))) throw new ServiceError("Invalid host API path.", 400);
     secret(token);
-    const data = Buffer.from(JSON.stringify(body));
-    if (data.length > 8 * 1_048_576) throw new ServiceError("Host report exceeds the request bound.", 413);
+    const data = method === "GET" ? undefined : Buffer.from(JSON.stringify(body));
+    if (data && data.length > 8 * 1_048_576) throw new ServiceError("Host report exceeds the request bound.", 413);
     return new Promise((accept, reject) => {
       let settled = false;
       const finish = (error: Error | undefined, result?: RecordValue): void => { if (settled) return; settled = true; clearTimeout(deadline); if (error) reject(error); else accept(result!); };
       const invoke = base.protocol === "https:" ? httpsRequest : httpRequest;
-      const request = invoke(new URL(path, base), { method, ...(ca ? { ca } : {}), ...(signal ? { signal } : {}), headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Content-Length": data.length } }, response => {
+      const request = invoke(new URL(path, base), { method, ...(ca ? { ca } : {}), ...(signal ? { signal } : {}), headers: { Authorization: `Bearer ${token}`, ...(data ? { "Content-Type": "application/json", "Content-Length": data.length } : {}) } }, response => {
         const chunks: Buffer[] = []; let size = 0;
         response.on("data", (chunk: Buffer) => {
           size += chunk.length;
@@ -423,7 +423,7 @@ export class HostRunner {
       if (report.leaseCleanup && object(report.leaseCleanup).state === "complete") { const cleanup = object(report.leaseCleanup); this.guard.retire(id, String(cleanup.leaseId), String(cleanup.id)); }
       this.reports.delete(id);
     }
-    this.updateEpoch++;
+    if (legacyDigest({ machines: this.assignments, queues: this.queues }) !== legacyDigest({ machines, queues })) this.updateEpoch++;
     for (const machine of machines) this.updateAssignments.set(String(machine.id), structuredClone(machine));
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });

@@ -246,7 +246,8 @@ try {
   copyFileSync(pem('ca.pem'), join(unsafeParent, 'ca.pem'));
   for (const [index, ca] of [unsafeCa, linkedCa, join(unsafeParent, 'ca.pem')].entries()) {
     const result = await run(configure({ca, state: join(dir, `state-unsafe-ca-${index}`)}, `unsafe-ca-${index}.json`));
-    assert.equal(result.code, 1); assert.match(result.errors, /invalid CA trust file/);
+    // CA reads now use the shared descriptor-based private-file validator.
+    assert.equal(result.code, 1); assert.match(result.errors, /unsafe executor state/);
     assert.equal(log.length, 0, 'unsafe CA contacted the controller');
   }
   // An unrelated CA fails TLS verification before any request is delivered.

@@ -19,7 +19,7 @@ interface Launched {
   committed: boolean; send(value: object): Promise<void>;
 }
 interface LaunchTransaction extends ActivationRequest {
-  previousReleaseId?: string; phase: 'stopping' | 'starting' | 'restoring' | 'finished' | 'unknown'; receipt?: ActivationReceipt;
+  previousReleaseId?: string; phase: 'stopping' | 'starting' | 'restoring' | 'committing' | 'finished' | 'unknown'; receipt?: ActivationReceipt;
 }
 export interface ReadyMessage { type: 'canaveral-update-ready'; version: 1; releaseId: string; installationId: string }
 const MAX_HANDSHAKE_BYTES = 4096;
@@ -56,7 +56,7 @@ export class StableLauncher implements ActivationDriver {
     if (!existsSync(this.journalPath)) return undefined;
     const saved = updateObject(readUpdateJSON(this.journalPath));
     for (const key of ['jobId', 'attemptId', 'releaseId', 'installationId']) updateUUID(saved[key]);
-    if (saved.installationId !== this.store.installationId || !['stopping', 'starting', 'restoring', 'finished', 'unknown'].includes(String(saved.phase))) throw new Error('Invalid launcher transaction');
+    if (saved.installationId !== this.store.installationId || !['stopping', 'starting', 'restoring', 'committing', 'finished', 'unknown'].includes(String(saved.phase))) throw new Error('Invalid launcher transaction');
     return saved as unknown as LaunchTransaction;
   }
   private save(tx: LaunchTransaction): void { atomicUpdateJSON(this.journalPath, tx); }
@@ -75,7 +75,6 @@ export class StableLauncher implements ActivationDriver {
         CANAVERAL_UPDATE_RELEASE: releaseId, CANAVERAL_UPDATE_CANDIDATE: '1', CANAVERAL_UPDATE_ROOT: this.store.installationRoot,
         CANAVERAL_UPDATE_STATE: this.store.stateDirectory, ...(node ? {} : { CANAVERAL_UPDATE_READY_FD: '3', CANAVERAL_UPDATE_COMMIT_FD: '4' }) },
     });
-    atomicUpdateJSON(this.runtimePath, { installationId: this.store.installationId, bootId, releaseId, state: 'running', pid: child.pid ?? null });
     let observedExit = false;
     const exited = new Promise<void>(done => {
       const stopped = (): void => {
@@ -122,13 +121,33 @@ export class StableLauncher implements ActivationDriver {
     });
     const ready = timeout(rawReady, this.readinessTimeoutMs, 'Candidate startup readiness deadline ended').finally(() => cleanup());
     void ready.catch(() => {});
-    return { child, native: !node, releaseId, ready, exited, messages, send, committed: false };
+    const launched: Launched = { child, native: !node, releaseId, ready, exited, messages, send, committed: false };
+    // Retain ownership before the first post-spawn filesystem operation. If it
+    // fails, callers still receive the owned child and must prove its exit.
+    this.pending = launched;
+    try { atomicUpdateJSON(this.runtimePath, { installationId: this.store.installationId, bootId, releaseId, state: 'running', pid: child.pid ?? null }); }
+    catch (error) { cleanup(); launched.ready = Promise.reject(error); void launched.ready.catch(() => {}); }
+    return launched;
   }
   private async commit(process: Launched): Promise<void> {
     if (!process.child.pid || process.child.exitCode !== null || process.child.signalCode !== null) throw new Error('Ready candidate exited');
-    // After attempting this send its workload admission may be live; never auto-stop or roll back it.
+    let cleanup = (): void => {};
+    const acknowledged = new Promise<void>((accept, reject) => {
+      const message = (value: unknown): void => {
+        if (matches(value, 'canaveral-update-committed-ack', process.releaseId, this.store.installationId)) accept();
+      };
+      const exited = (): void => reject(new Error('Candidate exited before commit acknowledgement'));
+      cleanup = () => { process.messages.removeListener('message', message); process.child.removeListener('exit', exited); };
+      process.messages.on('message', message); process.child.once('exit', exited);
+    });
+    void acknowledged.catch(() => {});
+    // Admission may be live after this send. A missing ACK must not stop or
+    // replace this process, even if command delivery itself appears to fail.
     process.committed = true;
-    await process.send({ type: 'canaveral-update-committed', version: 1, releaseId: process.releaseId, installationId: this.store.installationId });
+    try {
+      await process.send({ type: 'canaveral-update-committed', version: 1, releaseId: process.releaseId, installationId: this.store.installationId });
+      await timeout(acknowledged, this.readinessTimeoutMs, 'Candidate commit acknowledgement deadline ended');
+    } finally { cleanup(); }
   }
   private async status(quiesce: boolean): Promise<QuiesceReceipt> {
     const active = this.current;
@@ -222,15 +241,15 @@ export class StableLauncher implements ActivationDriver {
         this.pending = undefined; tx.phase = 'restoring'; this.save(tx);
         try { this.store.verifyInstalled(previousReleaseId); this.pending = this.launch(previousReleaseId); await this.pending.ready; }
         catch { if (this.pending) await this.stop(this.pending); return this.finish(tx, 'unknown'); }
-        this.store.setActive(previousReleaseId); const receipt = this.finish(tx, 'rolledBack', previousReleaseId);
+        this.store.setActive(previousReleaseId); tx.phase = 'committing'; this.save(tx);
         this.current = this.pending; this.pending = undefined;
         try { await this.commit(this.current); } catch { return this.finish(tx, 'unknown'); }
-        return receipt;
+        return this.finish(tx, 'rolledBack', previousReleaseId);
       }
-      this.store.setActive(request.releaseId); const receipt = this.finish(tx, 'succeeded', request.releaseId);
+      this.store.setActive(request.releaseId); tx.phase = 'committing'; this.save(tx);
       this.current = this.pending; this.pending = undefined;
       try { await this.commit(this.current); } catch { return this.finish(tx, 'unknown'); }
-      return receipt;
+      return this.finish(tx, 'succeeded', request.releaseId);
     } finally { this.busy = false; this.events.emit('settled'); }
   }
   private finish(tx: LaunchTransaction, state: ActivationReceipt['state'], installedReleaseId?: string): ActivationReceipt {
@@ -271,6 +290,7 @@ export async function announceUpdateReady(releaseId = process.env.CANAVERAL_UPDA
     try { await timeout(received, deadlineMs, 'Launcher startup deadline ended'); } finally { remove(); }
   };
   await phase('canaveral-update-ready', 'canaveral-update-activate'); await start(); await phase('canaveral-update-started', 'canaveral-update-committed');
+  await new Promise<void>((accept, reject) => process.send!({ type: 'canaveral-update-committed-ack', version: 1, releaseId, installationId }, error => error ? reject(error) : accept()));
 }
 
 async function main(): Promise<void> {

@@ -15,7 +15,7 @@ import { saveRecord } from '../../src/runtime-process.ts';
 import { UpdateStore } from '../../src/updates/manager.ts';
 import { canonicalManifest } from '../../src/updates/protocol.ts';
 import type { Manifest, SignedRelease } from '../../src/updates/protocol.ts';
-import { preflightManagedHost, startManagedUpdateRuntime } from '../../src/updates/runtime.ts';
+import { preflightManagedHost, readManagedRunnerIdentity, startManagedUpdateRuntime } from '../../src/updates/runtime.ts';
 const keys = generateKeyPairSync('ed25519');
 const pem = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const token = 'a'.repeat(43);
@@ -78,7 +78,8 @@ test('real child waits activation before runtime startup and commit before admis
   let reply = next(child); child.send({ type: 'canaveral-update-activate', ...context });
   assert.deepEqual(await reply, { type: 'canaveral-update-started', ...context });
   assert.equal(existsSync(join(config.stateDir, 'host-runner.sqlite')), true);
-  child.send({ type: 'canaveral-update-committed', ...context });
+  reply = next(child); child.send({ type: 'canaveral-update-committed', ...context });
+  assert.deepEqual(await reply, { type: 'canaveral-update-committed-ack', ...context });
   await new Promise(resolve => setTimeout(resolve, 50));
   const requestId = randomUUID(); reply = next(child); child.send({ type: 'canaveral-update-quiesce', requestId });
   assert.deepEqual(await reply, { type: 'canaveral-update-status', requestId, idle: true, workloadsStopped: true, quiesced: true });
@@ -119,10 +120,46 @@ test('production parent transport downloads only assigned artifact queries and r
   const runtime = startManagedUpdateRuntime({ config, intervalMs: 10, launcher: { store, idle: async () => ({ idle: true, workloadsStopped: true }), quiesce: async () => ({ idle: true, workloadsStopped: true, quiesced: true }), activate: async request => { store.setActive(request.releaseId); return { ...request, state: 'succeeded', installedReleaseId: request.releaseId }; }, recover: async () => undefined } });
   t.after(() => runtime.close());
   const end = Date.now() + 5000;
-  while (store.job()?.phase !== 'succeeded' && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+  while ((!reports.includes('succeeded') || store.job()?.pending) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
   await runtime.close(); assert.equal(store.active(), candidate.manifest.releaseId); assert.notEqual(store.active(), baseline.manifest.releaseId);
   assert.equal(downloads, 1); assert.deepEqual(reports, ['draining', 'downloading', 'staged', 'activating', 'verifying', 'succeeded']);
   assert.equal(store.job()?.componentStatus.guest, 'pendingGuestReceipt'); assert.equal(store.job()?.componentStatus['native-helper'], 'pendingNativeReceipt');
   const transport = hostTransport(config);
   await assert.rejects(transport.request('GET', '/v1/updates/artifacts/' + 'a'.repeat(64) + '?jobId=bad&offset=0&length=1', {}, token));
+});
+
+
+test('parent reads exact native binding and external credential without forwarding to another controller', t => {
+  const { config, dir } = setup(t), nativeConfigFile = join(dir, 'native.json'), credentialFile = join(dir, 'runner-token');
+  writeFileSync(credentialFile, token, { mode: 0o600 });
+  const binding = { controllerId: randomUUID(), runnerId: randomUUID(), generation: 3, incarnationId: randomUUID() };
+  config.updates = { trustedKeys: { fixture: pem }, targetKind: 'runner', nativeConfigFile };
+  saveRecord(nativeConfigFile, { controller: config.url, credentialFile, binding, execution: { stateDir: config.stateDir } });
+  assert.deepEqual(readManagedRunnerIdentity(config), { id: binding.runnerId, credential: token, binding });
+  assert.throws(() => readManagedRunnerIdentity({ ...config, url: 'http://127.0.0.1:2' }), /origin/);
+  assert.throws(() => readManagedRunnerIdentity({ ...config, stateDir: join(dir, 'other') }), /state/);
+});
+
+test('quiesce preserves an in-flight effect and heartbeat while fencing the next dispatch', async t => {
+  const { config } = setup(t); const task = { id: randomUUID() }; let calls = 0, polls = 0, aborted = false;
+  let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  let jobs = [task];
+  const runner = new HostRunner(config, { transport: { request: async () => { polls++; return { machines: [], inferenceJobs: jobs }; } },
+    inference: { execute: async (_task, context) => { calls++; context.signal.addEventListener('abort', () => { aborted = true; }); await pending; return { state: 'succeeded', stopped: true, cleanup: 'complete' }; } } });
+  t.after(() => runner.close()); await runner.connect(); await runner.poll(); await runner.step(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1); assert.deepEqual(await runner.quiesceForUpdate(), { ...no, quiesced: false });
+  await runner.poll(); await runner.step(); assert.equal(polls, 2); assert.equal(aborted, false); assert.equal(calls, 1);
+  release(); await new Promise(resolve => setImmediate(resolve)); jobs = []; await runner.poll();
+  assert.deepEqual(await runner.quiesceForUpdate(), { idle: true, workloadsStopped: true, quiesced: true }); assert.equal(aborted, false);
+});
+
+test('unchanged heartbeats permit slow stop proof but assignment changes invalidate it', async t => {
+  const { config } = setup(t); const image = { id: 'fixture', revision: '1', os: 'linux', arch: 'amd64', mode: 'headless', minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 8 } };
+  const machine = { id: randomUUID(), templateId: 'fixture', template: normalizeTemplate(image), resources: image.minimum, desired: 'stopped' };
+  let assigned = [machine]; let runner: HostRunner;
+  runner = new HostRunner({ ...config, provider: 'libvirt', templates: [image] }, { clock: { now: () => 10, wall: () => 1000, suspendAware: true }, transport: { request: async () => ({ machines: assigned }) }, providerFactory: () => ({ kind: 'libvirt', check: async () => ({}), reconcile: async () => ({ state: 'stopped' }), updateStopped: async () => { await runner.poll(); return true; } }) });
+  t.after(() => runner.close()); await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  assert.deepEqual(await runner.updateIdle(), { idle: true, workloadsStopped: true });
+  assigned = [{ ...machine, desired: 'running' }];
+  assert.deepEqual(await runner.updateIdle(), no);
 });

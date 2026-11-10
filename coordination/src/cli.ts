@@ -277,8 +277,8 @@ async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<Hos
       } else { await fs.mkdir(dirname(saved), { recursive: true, mode: 0o700 }); await privateOutput(saved, async write => write(JSON.stringify(config) + "\n")); }
     }
   }
-  return { config, configDirectory: dirname(file), stateDirectory: resolve(expandPath(option(args, "state"))), controllerUrl: url, allowHttp: args.allowHttp, signal,
-    ...(enrollment ? { enrollmentToken: enrollment } : {}), ...(args.options["ca-file"] ? { caFile: resolve(expandPath(option(args, "ca-file"))) } : {}) };
+  return { config, configDirectory: dirname(file), stateDirectory: resolve(expandPath(option(args, "state"))), controllerUrl: url, allowHttp: managed ? (args.allowHttp || config.allowHTTP === true) : args.allowHttp, signal,
+    ...(enrollment ? { enrollmentToken: enrollment } : {}), ...(args.options["ca-file"] ? { caFile: resolve(expandPath(option(args, "ca-file"))) } : managed && typeof config.caFile === "string" ? { caFile: config.caFile } : {}) };
 }
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";

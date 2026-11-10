@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants, closeSync, existsSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statfsSync, writeFileSync } from 'node:fs';
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statfsSync, writeFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { StateLock } from '../runtime-process.ts';
@@ -82,7 +82,7 @@ export function readUpdateJSON(path: string): unknown {
   noUpdateLinks(path);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const info = lstatSync(path); owned(info);
+    const info = fstatSync(fd); owned(info);
     if (!info.isFile() || info.nlink !== 1 || info.size > 8 * 1024 * 1024) throw new Error('Invalid private update state file');
     return JSON.parse(readFileSync(fd, 'utf8')) as unknown;
   } finally { closeSync(fd); }
@@ -126,6 +126,7 @@ export class UpdateStore {
     for (const path of [this.releases, this.staging, join(this.stateDirectory, 'manifests'), join(this.stateDirectory, 'jobs')]) updateDirectory(path);
     const allowed = new Set(['releases', 'staging']);
     if (readdirSync(this.installationRoot).some(name => !allowed.has(name))) throw new Error('Unexpected entries in installation root');
+    for (const root of [this.releases, this.staging]) for (const name of readdirSync(root)) { updateUUID(name); updateDirectory(join(root, name), false); }
     // The SQLite lock releases on process loss and serializes first initialization.
     const lock = new StateLock(join(this.stateDirectory, 'initialize.sqlite'));
     try {
