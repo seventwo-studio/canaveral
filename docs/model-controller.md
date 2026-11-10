@@ -173,7 +173,7 @@ The other errors:
 resources})` holds an amount only if it fits within the domain capacity. `release(db,
 id, owner)` requires the recorded owner. Both run inside the caller's transaction.
 Model assignments and [Linux lease admission](linux-lease-controller.md#reservations-and-limits) reserve here.
-These domains are separate from the legacy `hosts`/`resource_budgets`/`inference_jobs`
+These domains are separate from the legacy `hosts`/`host_limits`/`inference_jobs`
 ledger. Do not offer the same physical capacity to both.
 
 Only additive tables are created: `resource_domains`, `resource_reservations`,

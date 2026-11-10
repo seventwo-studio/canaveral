@@ -65,44 +65,43 @@ test("image aliases share one hash/format charge; unresolved tasks and active in
   assert.deepEqual(store.transaction(db => ledger.used(db, host)), { cpu: 2, memoryMiB: 1024, diskGiB: 15 });
 });
 
-test("overlapping budgets and reductions constrain new capacity without deleting existing reservations", t => {
+test("host limits constrain only their host, survive reloads and preserve existing reservations", t => {
   const { store, ledger, hosts, machine } = fixture(t);
   machine(hosts[0]!, "running", "unknown"); machine(hosts[1]!, "running", "running");
-  const id = randomUUID();
-  ledger.save({ id, name: "Shared", capacity: { ...capacity, cpu: 3 }, hostIds: hosts });
-  ledger.save({ id: randomUUID(), name: "Disk", capacity: { ...capacity, diskGiB: 10 }, hostIds: hosts });
-  assert.deepEqual(store.transaction(db => ledger.remaining(db, hosts[0]!)), { cpu: 0, memoryMiB: 6144, diskGiB: 0 });
-  const reduced = ledger.save({ id, name: "Shared", capacity: { ...capacity, cpu: 1 }, hostIds: hosts });
-  assert.equal(reduced.overcommitted, true); assert.equal(reduced.reserved.cpu, 4);
+  const limits = { ...capacity, cpu: 1, diskGiB: 5 };
+  ledger.save(hosts[0]!, { limits });
+  assert.deepEqual(store.transaction(db => ledger.remaining(db, hosts[0]!)), { cpu: 0, memoryMiB: 7168, diskGiB: 0 });
+  assert.deepEqual(store.transaction(db => ledger.remaining(db, hosts[1]!)), { cpu: 6, memoryMiB: 7168, diskGiB: 92 });
   assert.equal(store.transaction(db => db.prepare("SELECT count(*) AS n FROM machines").get()!.n), 2);
-  ledger.save({ id, name: "Disabled", capacity, hostIds: [] });
-  assert.deepEqual(new CapacityLedger(new SqliteStore(store.path)).list().find(b => b.id === id)?.hostIds, []);
+  const restored = new SqliteStore(store.path), restoredLedger = new CapacityLedger(restored);
+  assert.deepEqual(restored.transaction(db => restoredLedger.hostLimits(db, hosts[0]!)), limits);
 });
 
-test("invalid membership changes roll back and UUID aliases cannot duplicate a member", t => {
-  const { ledger, hosts } = fixture(t), id = randomUUID();
-  const original = ledger.save({ id, name: "Original", capacity, hostIds: [hosts[0]] });
-  assert.throws(() => ledger.save({ id, name: "Changed", capacity, hostIds: [randomUUID()] }), (e: unknown) => e instanceof ServiceError && e.status === 404);
-  assert.deepEqual(ledger.list(), [original]);
-  assert.throws(() => ledger.save({ id, name: "Dup", capacity, hostIds: [hosts[0], hosts[0]!.toUpperCase()] }));
+test("invalid host limit changes are rejected atomically", t => {
+  const { store, ledger, hosts } = fixture(t), host = hosts[0]!;
+  ledger.save(host, { limits: capacity });
+  assert.throws(() => ledger.save(randomUUID(), { limits: capacity }), (e: unknown) => e instanceof ServiceError && e.status === 404);
+  assert.throws(() => ledger.save(host, { limits: { ...capacity, cpu: 0 } }));
+  assert.throws(() => ledger.save(host, { limits: capacity, extra: true }));
+  assert.deepEqual(store.transaction(db => ledger.hostLimits(db, host)), capacity);
 });
 
-test("TypeScript and Python share budget rows, usage and exclusion semantics bidirectionally", t => {
-  const { path, store, ledger, hosts, machine } = fixture(t);
-  const id = machine(hosts[0]!, "running", "unknown"); machine(hosts[1]!);
-  const spec = { id: randomUUID(), name: "Shared 😀", capacity, hostIds: hosts };
-  assert.deepEqual(ledger.save(spec), python("save", path, spec));
-  assert.deepEqual(ledger.list(), python("list", path));
-  assert.deepEqual(store.transaction(db => ledger.used(db, hosts[0]!, id)), python("used", path, { host: hosts[0], exclude: id }));
-  assert.deepEqual(store.transaction(db => ledger.remaining(db, hosts[1]!)), python("remaining", path, { host: hosts[1] }));
-  python("save", path, { ...spec, hostIds: [hosts[1]], capacity: { ...capacity, diskGiB: 5 } });
-  assert.deepEqual(new CapacityLedger(new SqliteStore(path)).list(), python("list", path));
+test("TypeScript and Python share host limits, usage and exclusion semantics bidirectionally", t => {
+  const { path, store, ledger, hosts, machine } = fixture(t), host = hosts[0]!;
+  const id = machine(host, "running", "unknown"); machine(hosts[1]!);
+  const limits = { ...capacity, cpu: 3 };
+  assert.deepEqual(ledger.save(host, { limits }), python("save", path, { host, limits }));
+  assert.deepEqual(store.transaction(db => ledger.hostLimits(db, host)), python("limits", path, { host }));
+  assert.deepEqual(store.transaction(db => ledger.used(db, host, id)), python("used", path, { host, exclude: id }));
+  assert.deepEqual(store.transaction(db => ledger.remaining(db, host)), python("remaining", path, { host }));
+  python("save", path, { host, limits: { ...limits, diskGiB: 5 } });
+  assert.deepEqual(store.transaction(db => ledger.hostLimits(db, host)), python("limits", path, { host }));
 });
 
-test("two independent SQLite admission workers cannot spend the same shared capacity", { timeout: 30_000 }, async t => {
+test("two independent SQLite admission workers cannot spend the same host capacity", { timeout: 30_000 }, async t => {
   const { path, ledger, hosts, store } = fixture(t);
-  ledger.save({ id: randomUUID(), name: "Shared", capacity: { ...capacity, cpu: 2 }, hostIds: hosts });
-  const workers = hosts.map(host => {
+  ledger.save(hosts[0]!, { limits: { ...capacity, cpu: 2 } });
+  const workers = [hosts[0]!, hosts[0]!].map(host => {
     const worker = new Worker(new URL("./capacity-worker.js", import.meta.url), { workerData: { path, host, id: randomUUID() } });
     t.after(async () => { await worker.terminate(); });
     let ready!: () => void, rejectReady!: (error: Error) => void, done!: (value: string) => void, fail!: (error: Error) => void;
@@ -131,12 +130,12 @@ test("invalid persisted amounts fail closed and accounting cannot run outside a 
   assert.throws(() => store.transaction(db => ledger.used(db, host)), (e: unknown) => e instanceof ServiceError && e.status === 503);
 });
 
-test("budget name whitespace and code-point limits preserve Python validation", t => {
-  const { path, ledger } = fixture(t);
-  for (const name of ["\u0085", "\u001c", "\ufeff", "😀".repeat(100), "😀".repeat(101)]) {
-    const spec = { id: randomUUID(), name, capacity, hostIds: [] };
+test("host limit input validation preserves Python resource validation", t => {
+  const { path, ledger, hosts } = fixture(t), host = hosts[0]!;
+  for (const cpu of [0, -1, 0.5, 1, 1_048_577]) {
+    const limits = { ...capacity, cpu };
     let status = 200;
-    try { ledger.save(spec); } catch (error) { if (!(error instanceof ServiceError)) throw error; status = error.status; }
-    assert.deepEqual({ status }, python("validate", path, spec));
+    try { ledger.save(host, { limits }); } catch (error) { if (!(error instanceof ServiceError)) throw error; status = error.status; }
+    assert.deepEqual({ status }, python("validate", path, { host, limits }));
   }
 });

@@ -226,7 +226,7 @@ jobs, once, at admission, with `kind: "linux-lease"` and the lease as owner. A c
 adopts that reservation and refuses to hand out a lease whose reservation is not
 held. Release requires the lease owner. Model-job claims see lease reservations and
 vice versa, so one physical budget is never offered twice. The lease ledger does not
-read the legacy `hosts`/`resource_budgets`/`leases` tables; do not offer the same
+read the legacy `hosts`/`host_limits`/`leases` tables; do not offer the same
 physical capacity to both.
 
 Only additive tables are created: `linux_lease_images`, `linux_lease_grants`,

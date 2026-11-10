@@ -139,7 +139,7 @@ automatic deletion. Existing administrative machines are never adopted. Their
 capacity remains in the same host/shared ledgers. Lease-owned machine identities
 cannot be restarted through the administrative desired-state endpoint.
 
-Single-member admission, host/shared budgets and aggregate application quotas run
+Single-member admission, per-host limits and aggregate application quotas run
 inside the same SQLite transaction. Failed admission rolls back the machine too.
 Stopped and terminal-but-unreclaimed leased CPU, memory and disks still count
 against application and host/shared reservation limits until matching cleanup

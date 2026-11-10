@@ -35,7 +35,7 @@ can manage every user's machines.
 For a Linux server with KVM/libvirt, copy `examples/host-libvirt.json` to
 `host.json`. Keep only installed templates. Set the actual architecture,
 absolute image and disk paths, libvirt network, immutable template revision and
-a capacity budget that leaves room for the operating system and hypervisor.
+a host capacity limit that leaves room for the operating system and hypervisor.
 Install libvirt, `virsh`, `qemu-img`, EFI firmware and `genisoimage` or `mkisofs`
 when using cloud-init. Give the runner account the required libvirt/disk access.
 Then enroll a native runner on that same server:
@@ -114,7 +114,7 @@ adapt `deploy/kubernetes/worker-kubevirt.json` with:
 - The released `images.kubevirt` image, or your own build of Docker's `kubevirt`
   target with kubectl compatible with the cluster.
 - The actual guest namespace, architecture, template PVCs and storage class.
-- One deliberate pool budget and persistent worker identity.
+- One deliberate pool capacity limit and persistent worker identity.
 - An enrollment-only Secret, namespace-scoped VM/clone/secret permissions and
   your network policies. Guests must reach the configured preparation endpoint.
 
@@ -132,7 +132,7 @@ not need an inbound Canaveral listener. Use private HTTPS when the API leaves
 loopback. Network discovery and certificate issuance are supplied by your own
 networking setup. See [native prerequisites](running.md#native-controller-and-hosts).
 
-Advertise each physical resource budget once. VM and embedded inference work can
+Advertise each physical capacity once. VM and embedded inference work can
 share one Mac/Linux host identity and capacity ledger. Inference uses explicitly
 installed pinned local models; it is optional and needs neither a VM backend nor
 a separate inference service. See [inference.md](inference.md).

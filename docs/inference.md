@@ -13,7 +13,7 @@ an explicit operator action. Do not use an untrusted executable.
 
 `provider: native` offers inference without requiring a VM backend. To share a host
 with VMs, add the same `inference` section to its existing `apple` or `libvirt`
-configuration. Keep one agent identity and one capacity budget for that physical
+configuration. Keep one agent identity and one set of host limits for that physical
 host. Enrolling the same physical capacity twice would bypass shared accounting.
 KubeVirt and Hyper-V do not support this initial embedded runner.
 

@@ -176,7 +176,7 @@ before initial positive stop remains unproven rather than adopted.
 
 The controller now holds CPU/RAM as well as disk reservations for unreclaimed
 leases. A stopped runtime report cannot bypass application quotas or host/shared
-admission budgets; only matching cleanup completion releases the reservation.
+host limits; only matching cleanup completion releases the reservation.
 Physical usage samples and administrative stop behavior remain distinct.
 
 Twenty-two additional fixtures cover publishing, child setup and provider wiring,

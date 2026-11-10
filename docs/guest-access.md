@@ -37,7 +37,7 @@ python3 -m venv .venv
 The controller and dashboard remain bound to loopback on 8875 and 8876. The Linux
 runner has separate state and storage under `state/local/`; the original Android
 identity and devices are retained. The generated Linux image uses 2 vCPUs, 4 GiB
-memory and at least 32 GiB disk. Review the generated host budget alongside any
+memory and at least 32 GiB disk. Review the generated host limits alongside any
 other runners on the same physical machine. Installed images and runtimes are not
 downloaded by the launcher. Guest preparation installs XFCE, TigerVNC, AT-SPI,
 screenshot tools and Python packages through the guest's package manager.
