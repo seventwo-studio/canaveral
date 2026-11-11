@@ -117,6 +117,14 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build && git diff --exit-code -- ../canaveral/web
+      - name: Use official Ubuntu mirrors for browser dependencies
+        # The runner's Azure mirror repeatedly failed DNS resolution. Keep Ubuntu
+        # package signatures, suites and keyrings; replace only its mirror URIs.
+        run: |
+          sudo sed -i \
+            -e 's|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: https://archive.ubuntu.com/ubuntu|' \
+            -e 's|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: https://security.ubuntu.com/ubuntu|' \
+            /etc/apt/sources.list.d/ubuntu.sources
       - run: npx playwright install --with-deps chromium --only-shell
       - run: npm run test:browser
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
