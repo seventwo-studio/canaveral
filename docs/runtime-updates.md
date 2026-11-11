@@ -142,8 +142,40 @@ The launcher verifies the candidate immediately before execution and retains the
 
 Route guest assets through the existing provision/update mechanism after a separately confirmed idle/stop boundary. Never rewrite a running guest or reinterpret a host receipt as guest adoption. Registered Rust runner protocol support likewise requires each runtime's real lifecycle and readiness integration. An unsupported adapter stays pending/disabled and drained when uncertain; it must not manufacture readiness or no-workload proofs.
 
+## Preserve state before installation or rollback
+
+Take a consistent SQLite backup using the database's supported backup mechanism or a stopped-controller copy; copying only a live database file can omit WAL state. Record the controller identity, schema/version, image digest and independently pinned update keys with that backup. Protect backups like the originals: they contain credential authority and recovery data.
+
+On each target preserve the existing host/runner configuration, saved credentials, installation ID, update journal, sequence high-water, active/previous release manifests, provider ownership receipts and retained disks. Keep a recoverable copy of the exact previous release. Never copy a live installation's identity into another target. A mutable-state backup must be consistent with workload/provider ownership; restoring old receipts over still-running resources is not a safe rollback.
+
+A runtime rollback selects the verified previous code through the saved attempt; it does not roll back SQLite, credentials, VM disks, reservations or the sequence high-water. Do not edit the active pointer, delete an uncertain journal, lower the sequence or re-enroll to clear a failed update. If the previous release no longer passes verification/readiness, leave admission fenced and investigate. Controller schema rollback and service/bootstrap replacement are separate operator decisions.
+
 ## Update the Docker controller externally
 
 Back up the SQLite database consistently, its controller identity and private operator/enrollment credentials. Review schema and trust-map compatibility, then use the existing Docker/GitOps/operator workflow to select an immutable controller image digest and replace the container while retaining those volumes and configuration. Keep controller secrets and database outside runtime bundles. Never reinitialize credentials or reseed persistent state during an image update. Refer to [self-hosting](self-hosting.md) and [running](running.md) for the deployment layout.
 
 Portable tests cover protocol/schema/path rejection, deterministic offline signing, artifact integrity, authenticated controller upload, exact replay after committed replies are lost, queued cancellation, post-spawn persistence failure and missing commit acknowledgement. A disposable real-controller test uploads and activates an actual signed TypeScript CLI release. These checks do not establish native host/guest boot acceptance, service-manager installation, platform code-signing admission, Windows ACL enforcement or live guest rollout. Those remain separately authorized platform checks. Building, uploading a bundle or staging code is not authorization to update a fleet.
+
+## Operator acceptance (prepare only; separate authorization required)
+
+Record the exact source commit, signed release ID/digest, target installation ID, current credential revision and baseline before each run. Use a disposable owned target first; production rollout needs its own authorization. Keep private receipts and logs out of release artifacts.
+
+1. Verify CLI help/imports locally, then inspect the existing target and rollout with the same protected operator token:
+
+   ```sh
+   node coordination/dist/src/cli.js --help
+   node coordination/dist/src/updates/cli.js --help
+   node --input-type=module -e 'await import("./coordination/dist/src/updates/launcher.js")'
+   node coordination/dist/src/updates/cli.js --url https://controller.example.internal \
+     --token-file /private/operator/admin.token rollouts status \
+     --id 3d482642-edf1-4fb7-8b92-30e6fb279acb
+   ```
+
+2. On the authorized service target, validate account ownership, private configuration, Node/module closure and baseline readiness. Restart through the installed service manager and confirm the same installation and saved host/runner credentials return. Record the exact service command selected for that machine; this document does not authorize starting it.
+3. For a VM target, record workload, disk and reservation identities. Confirm an active VM prevents replacement. After an independently confirmed idle/closed boundary, run one signed candidate and verify host commit and each applicable component acknowledgement separately. Confirm retained disks and current credentials are unchanged. Exercise lost acknowledgement/restart recovery without issuing a new attempt or blindly replaying application.
+4. For a device/helper target, verify the admitted executable's actual identity and the owned service/process instance. Keep an unrelated device/workload running to check isolation. Require positive closure before selection and a current-identity acknowledgement after selection. Unconfirmed stop or adoption must retain uncertainty.
+5. For inference, use the explicitly configured supported runtime and real model weights. Start a bounded request with a saved request UUID, verify active execution prevents activation, then verify idle update and the same model/credential binding. A lost running receipt stays unknown and must not cause generation replay. Portable HTTP fixtures do not establish model quality, accelerator fit or native cancellation.
+6. In the disposable lane, exercise candidate startup failure and verify readiness of the exact baseline before declaring rollback. Exercise process loss around dispatch and commit; record drain, attempt ID and pending/partial/unknown component state after restart. Do not simulate failure on production workloads.
+7. Only after target-specific acceptance, select a small explicit host/runner list for a canary rollout. Inspect each rollout receipt before widening the list. Queued cancellation does not undo delivered work. Fleet completion requires evidence for every intended component/target, not merely host success.
+
+Record native VM boot, launch-medium delivery, device control, inference and fleet results independently from portable tests. Missing provider fencing, Windows ACL acceptance or platform admission remains a failed/open gate; never change eligibility to make an acceptance run pass.
