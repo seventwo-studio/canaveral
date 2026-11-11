@@ -99,6 +99,10 @@ jobs:
       - run: kubectl kustomize deploy/orchestrator && kubectl kustomize deploy/dashboard
   dashboard:
     runs-on: ubuntu-24.04
+    container:
+      # Keep the image version/digest aligned with dashboard/package-lock.json.
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+      options: --user 1001 --init --shm-size=1g
     timeout-minutes: 10
     defaults:
       run:
@@ -113,19 +117,12 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
       - run: npm ci --ignore-scripts
+      - name: Verify the installed Playwright matches the browser image
+        run: node -e "if (require('@playwright/test/package.json').version !== '1.64.1') throw new Error('Update the pinned Playwright CI image with the dependency')"
       - run: npm audit --audit-level=moderate
       - run: npm run typecheck
       - run: npm test
       - run: npm run build && git diff --exit-code -- ../canaveral/web
-      - name: Use official Ubuntu mirrors for browser dependencies
-        # The runner's Azure mirror repeatedly failed DNS resolution. Keep Ubuntu
-        # package signatures, suites and keyrings; replace only its mirror URIs.
-        run: |
-          sudo sed -i \
-            -e 's|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: https://archive.ubuntu.com/ubuntu|' \
-            -e 's|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: https://security.ubuntu.com/ubuntu|' \
-            /etc/apt/sources.list.d/ubuntu.sources
-      - run: npx playwright install --with-deps chromium --only-shell
       - run: npm run test:browser
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: failure()
