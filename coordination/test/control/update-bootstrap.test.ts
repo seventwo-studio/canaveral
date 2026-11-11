@@ -5,6 +5,7 @@ import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, lstatSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { bootstrapInstall, unixBootstrapPlatform, MAX_ARTIFACT_BYTES } from '../../src/updates/bootstrap.ts';
 import { UpdateStore } from '../../src/updates/manager.ts';
 import { canonicalManifest } from '../../src/updates/protocol.ts';
@@ -86,7 +87,9 @@ test('actual offline builder output expands and installs with signed build evide
   const { files: _files, schema: _schema, ...header } = f.manifest;
   writeFileSync(recipe, JSON.stringify({ ...header, schema: 'canaveral-runtime-build-v1', toolchain: { node: '24.11.0', rust: '1.99.1' }, sourceRevision: '1'.repeat(40), files: [{ source: 'main.mjs', path: 'src/main.mjs', component: 'host', executable: false }] }));
   const built = join(f.root, 'built');
-  const build = spawnSync(process.execPath, ['script/build_runtime_release.mjs', '--recipe', recipe, '--inputs', inputs, '--output', built, '--key-file', key, '--key-id', 'test'], { encoding: 'utf8', timeout: 10000 });
+  const builder = fileURLToPath(new URL('../../../../script/build_runtime_release.mjs', import.meta.url));
+  // The builder must work independently of the test runner's working directory.
+  const build = spawnSync(process.execPath, [builder, '--recipe', recipe, '--inputs', inputs, '--output', built, '--key-file', key, '--key-id', 'test'], { cwd: f.root, encoding: 'utf8', timeout: 10000 });
   assert.equal(build.status, 0, build.stderr);
   const result = await bootstrapInstall({ ...f.options, bundleDirectory: built });
   const store = new UpdateStore(f.options);

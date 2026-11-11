@@ -84,6 +84,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.11.0'
+      - run: npm --prefix coordination ci --ignore-scripts
+      - run: npm --prefix coordination run build
       - run: npm run check:no-python
       - run: npm run test:tools
       - run: node fixtures/migration/verify_lease_guard.mjs
