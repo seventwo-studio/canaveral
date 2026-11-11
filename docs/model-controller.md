@@ -56,6 +56,7 @@ replay. A changed definition is a 409; entries are immutable in this slice.
 | --- | --- | --- |
 | `/v1/model-catalog` | `{model, digest, adapter: "ollama", resources: {cpu, memoryMiB, diskGiB}}` | Pins a model label and digest with a per-job reservation size |
 | `/v1/resource-domains` | `{id, name, capacity: {cpu, memoryMiB, diskGiB}}` | Defines one physical capacity budget. This activates nothing on its own |
+| `/v1/resource-domain-hosts` | `{hostId, domainId}` | Immutably binds one existing host identity to one domain, after verifying combined reservations fit |
 | `GET /v1/resource-domains/{id}` | — | `{id, name, capacity, reserved, available, reservations}` |
 | `/v1/model-grants` | `{applicationId, model, digest, maxUnfinished}` | Lets one unrevoked application submit one catalogued model. `maxUnfinished` is 1–1024 |
 | `/v1/model-grants/revoke` | `{applicationId, model, digest}` | Blocks new submissions and claims of that application's unclaimed jobs for that model |
@@ -175,12 +176,41 @@ The other errors:
 resources})` holds an amount only if it fits within the domain capacity. `release(db,
 id, owner)` requires the recorded owner. Both run inside the caller's transaction.
 Model assignments and [Linux lease admission](linux-lease-controller.md#reservations-and-limits) reserve here.
-These domains are separate from the legacy `hosts`/`host_limits`/`inference_jobs`
-ledger. Do not offer the same physical capacity to both.
+Without an explicit binding, these domains remain separate from the host ledger.
+When both kinds of runner serve one physical machine, the administrator must bind
+its authoritative host UUID to its resource domain using
+`POST /v1/resource-domain-hosts`. One host belongs to one domain, and one domain
+has at most one host identity. Multiple approved Rust runners can share that domain.
+A runner identity (controller UUID plus runner UUID) also keeps one domain across
+model and Linux approvals, including revoked approvals and older generations.
+Reenrollment cannot move its unresolved reservations to another budget. Conflicting
+retained approvals block new claims and Linux placement; assignment replay,
+reporting and owned cleanup retain their authority. Explicit conflict recovery is
+not implemented, and the controller never silently repairs those rows.
+The mapping is immutable: identical requests replay, changed mappings return 409.
+Binding requires a current accepting host and rejects combined overcommit without
+changing existing reservations. It does not discover or prove physical identity.
+Do not duplicate the same machine under independent unbound identities.
 
-Only additive tables are created: `resource_domains`, `resource_reservations`,
+Both admission paths then sum host VM, inference, image and pending-image-task
+reservations with held domain reservations in the same SQLite transaction. Each
+allocation stays in its original ledger and is counted once. Effective CPU, memory
+and disk capacity is the minimum of the domain budget, advertised host capacity and
+operator host limits. A missing, stale, disabled, unhealthy, retired or updating
+bound host blocks new domain reservations. Existing reports and owned release
+remain available; lost liveness never frees capacity. No-report health follows the
+existing host policy. Lowered capacity preserves overcommitted reservations.
+
+For a bound domain, inspection adds `host: {id, reserved, accepting}` and
+`runnerReserved`; their sum is `reserved`. The existing `reservations` count
+counts held runner-domain rows only, not host machines or image records. Host
+inventory exposes `resourceDomainId`. Local runtime consolidation rejects any
+bound source or target: a local host lock does not fence independent Rust workers,
+and domain identity migration is not implemented.
+
+Only additive tables are created: `resource_domains`, `resource_reservations`, `resource_domain_hosts`,
 `model_catalog`, `model_grants`, `model_runner_approvals`, `model_jobs` and
-`model_assignments`. Legacy rows are not read, converted or adopted.
+`model_assignments`. Binding reads host reservations but never converts or adopts their ownership.
 
 The controller has no background timer, retry, relocation or reassignment. Elapsed time
 or a lost connection never changes a job. The following are not implemented:

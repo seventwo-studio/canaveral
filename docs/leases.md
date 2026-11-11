@@ -113,6 +113,11 @@ Return 201 for new admission, 200 for an identical retry. Example response shape
 {"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
 ```
 
+Member readiness also requires a current enabled host, running desired state and
+an exact eligible image offer. Eligibility withdrawal removes current readiness
+without reversing an already-ready lifecycle or releasing reservations; restoring
+the offer can restore readiness while the lease remains active.
+
 Capabilities describe the pinned template contract, not current readiness. Each
 member exposes its own capabilities and file scopes; pair readiness requires both
 members and pairing. Never infer a device shell from host process access. iOS

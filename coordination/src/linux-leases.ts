@@ -132,17 +132,20 @@ function canonical(r: Receipt): string {
  * are held until positive bound stop, storage removal and guest-credential erasure evidence.
  */
 export class LinuxLeases {
-  readonly domains = new ResourceDomains();
+  readonly domains = new ResourceDomains(() => this.store.clock());
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities, readonly runners: RunnerEnrollment | undefined) {
     store.transaction(db => {
       ResourceDomains.schema(db);
       db.exec(`CREATE TABLE IF NOT EXISTS linux_operations (
         id TEXT PRIMARY KEY, lease TEXT NOT NULL, assignment TEXT NOT NULL, request TEXT NOT NULL, argv TEXT NOT NULL,
         credential TEXT NOT NULL, state TEXT NOT NULL, updated REAL NOT NULL, start_before REAL NOT NULL,
-        dispatched REAL, deadline REAL, result TEXT);
+        dispatched REAL, deadline REAL, result TEXT, timeout_ms INTEGER NOT NULL DEFAULT 30000);
         CREATE INDEX IF NOT EXISTS linux_operations_lane ON linux_operations(assignment,state);
         CREATE TABLE IF NOT EXISTS linux_operation_boots (assignment TEXT PRIMARY KEY, boot TEXT NOT NULL, digest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS linux_operation_polls (id TEXT PRIMARY KEY, assignment TEXT NOT NULL, boot TEXT NOT NULL, digest TEXT NOT NULL, operation TEXT NOT NULL);`);
+      if (!db.prepare("PRAGMA table_info(linux_operations)").all().some(column => column.name === "timeout_ms")) {
+        db.exec("ALTER TABLE linux_operations ADD COLUMN timeout_ms INTEGER NOT NULL DEFAULT 30000");
+      }
       db.exec(`CREATE TABLE IF NOT EXISTS linux_lease_images (id TEXT NOT NULL, revision TEXT NOT NULL, arch TEXT NOT NULL, backend TEXT NOT NULL, digest TEXT NOT NULL, resources TEXT NOT NULL, capabilities TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(id,revision,arch));
         CREATE TABLE IF NOT EXISTS linux_lease_grants (application TEXT NOT NULL, image_id TEXT NOT NULL, image_revision TEXT NOT NULL, arch TEXT NOT NULL, digest TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(application,image_id,image_revision,arch));
         CREATE TABLE IF NOT EXISTS linux_lease_runner_approvals (controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, backend TEXT NOT NULL, images TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(controller,runner,generation));
@@ -239,6 +242,7 @@ export class LinuxLeases {
       const binding = runners.current(db, input.binding);
       if (!binding) throw new ServiceError("Approve only the current unrevoked runner binding.", 409);
       if (!this.domains.exists(db, domain)) throw new ServiceError("Unknown resource domain.", 404);
+      this.domains.assertRunnerDomain(db, binding, domain);
       for (const image of images) {
         const row = this.imageRow(db, image.id, image.revision, image.arch);
         if (!row || row.digest !== image.digest) throw new ServiceError("Approved images require exact catalog entries.", 404);
@@ -388,6 +392,7 @@ export class LinuxLeases {
       }
       const approval = this.approval(db, b);
       if (!approval) throw new ServiceError("This runner binding has no Linux lease approval.", 403);
+      this.domains.assertRunnerDomain(db, b, approval.domain);
       if (updateDraining(db, b.runnerId, "runner")) return { assignment: null };
       const open = db.prepare("SELECT count(*) AS n FROM linux_lease_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(open.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };
@@ -503,9 +508,11 @@ export class LinuxLeases {
   }
   createOperation(token: string, leaseId: string, value: unknown): unknown {
     const r = operationObject(value, ["id", "member", "action", "arguments"]);
-    const id = identifier(r.id), args = operationObject(r.arguments, ["argv"]), argv = operationArgv(args.argv);
+    const id = identifier(r.id), args = operationObject(r.arguments, ["argv"], ["timeoutMs"]), argv = operationArgv(args.argv);
+    const timeoutMs = Object.hasOwn(args, "timeoutMs") ? positive(args.timeoutMs, 3600000, "timeoutMs") : 30000;
     if (r.member !== "primary" || r.action !== "shell") throw new ServiceError("Only primary shell operations are supported.", 400);
-    const request = JSON.stringify({ id, member: "primary", action: "shell", arguments: { argv } });
+    // Omit the normalized default to preserve exact replay of pre-migration intents.
+    const request = JSON.stringify({ id, member: "primary", action: "shell", arguments: { argv, ...(timeoutMs === 30000 ? {} : { timeoutMs }) } });
     return this.transaction((db, now) => {
       const lease = this.operationAccess(db, leaseId, token), old = this.operationRow(db, id);
       if (old) {
@@ -516,8 +523,8 @@ export class LinuxLeases {
       const a = db.prepare("SELECT * FROM linux_lease_assignments WHERE lease=?").get(lease.id) as unknown as AssignmentRow | undefined;
       if (!a || !this.commandEligible(db, lease, a)) throw new ServiceError("Command execution is not ready or authorized.", 409);
       if (db.prepare("SELECT 1 FROM linux_operations WHERE assignment=? AND state IN ('queued','unknown')").get(a.id)) throw new ServiceError("Assignment command lane is occupied.", 429);
-      db.prepare("INSERT INTO linux_operations VALUES (?,?,?,?,?,?,'queued',?,?,NULL,NULL,NULL)")
-        .run(id, lease.id, a.id, request, JSON.stringify(argv), lease.credential!, now, Math.min(now + 120, lease.expires));
+      db.prepare("INSERT INTO linux_operations (id,lease,assignment,request,argv,credential,state,updated,start_before,timeout_ms) VALUES (?,?,?,?,?,?,'queued',?,?,?)")
+        .run(id, lease.id, a.id, request, JSON.stringify(argv), lease.credential!, now, Math.min(now + 120, lease.expires), timeoutMs);
       return { created: true, operation: this.operationView(this.operationRow(db, id)!) };
     });
   }
@@ -551,13 +558,14 @@ export class LinuxLeases {
         db.prepare("INSERT OR IGNORE INTO linux_operation_boots VALUES (?,?,?)").run(a.id, boot, digest);
         op = db.prepare("SELECT * FROM linux_operations WHERE assignment=? AND state='queued' AND dispatched IS NULL ORDER BY rowid LIMIT 1").get(a.id) as unknown as OperationRow | undefined;
         if (op) {
-          db.prepare("UPDATE linux_operations SET dispatched=?,deadline=?,updated=? WHERE id=?").run(now, Math.min(now + 35, lease.expires, op.start_before + 35), now, op.id);
+          const duration = op.timeout_ms / 1000 + 5;
+          db.prepare("UPDATE linux_operations SET dispatched=?,deadline=?,updated=? WHERE id=?").run(now, Math.min(now + duration, lease.expires, op.start_before + duration), now, op.id);
           db.prepare("INSERT INTO linux_operation_polls VALUES (?,?,?,?,?)").run(poll, a.id, boot, digest, op.id);
           op = this.operationRow(db, op.id)!;
         }
       }
       return { command: op ? { id: op.id, leaseId: lease.id, memberId: lease.member, assignmentId: a.id, bootAttempt: boot, bundleDigest: digest,
-        arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: 30000, state: op.state } : null,
+        arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: op.timeout_ms, state: op.state } : null,
         lease: this.authorization(lease, now), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
     });
   }
@@ -607,6 +615,7 @@ export class LinuxLeases {
   private placements(db: DatabaseSync, image: ImageRow): string[] {
     const wanted = imageKey(image), domains = new Set<string>();
     for (const row of db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE revoked=0 AND backend=? ORDER BY domain,runner").all(image.backend) as unknown as ApprovalRow[]) {
+      if (!this.domains.runnerDomainMatches(db, bindingOf(row), row.domain)) continue;
       if (updateDraining(db, row.runner, "runner")) continue;
       if ((JSON.parse(row.images) as string[]).includes(wanted) && this.runners?.current(db, bindingOf(row))) domains.add(row.domain);
     }

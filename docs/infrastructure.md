@@ -260,6 +260,17 @@ capacity when the controller opens the database. Do not advertise the same
 physical capacity under multiple identities: each host's limits are independent,
 and there is no combined limit across hosts or overlapping pools.
 
+An administrator can explicitly bind the authoritative host identity to a Rust
+runner resource domain with `POST /v1/resource-domain-hosts` and
+`{hostId, domainId}`. This is a one-to-one immutable mapping, not an overlapping
+pool: both ledgers then share the minimum host/domain/operator budget and count all
+held allocations once. Existing combined overcommit rejects binding; changing or
+removing a binding is unsupported. Host inventory exposes `resourceDomainId`.
+[Domain inspection](model-controller.md#reservations-and-limits) gives the host and
+runner reservation breakdown. Native readiness and hardware identity are still
+operator acceptance requirements. Local runtime consolidation refuses every bound
+source or target, even when local host locks are held.
+
 Direct runners on the same physical machine report the same opaque resource
 domain. Their observed usage must not be summed. The domain is a discovery hint,
 not additional capacity or an automatic grouping rule. KubeVirt measurements have

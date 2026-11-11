@@ -146,7 +146,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   }
   assert.equal((await post("/v1/model-catalog", { model: MODEL, digest: DIGEST, adapter: "ollama", resources: JOB_RESOURCES }, admin)).status, 200);
   return {
-    admin, controllerId, start, port, post, get, application, enroll, domain, approve, grant, submission, receipt, success, claim, report, inspectDomain, rows,
+    statePath, admin, controllerId, start, port, post, get, application, enroll, domain, approve, grant, submission, receipt, success, claim, report, inspectDomain, rows,
     async restart() { await primary.kill(); primary = await start(); },
   };
 }
@@ -342,4 +342,25 @@ test("cross-application, cross-runner, role and stale-generation authority are d
   assert.equal((await f.post("/v1/model-grants/revoke", { applicationId: a.id, model: MODEL, digest: DIGEST }, f.admin)).status, 200);
   await f.post(`/v1/model-jobs/${job.id}/cancel`, { version: 1, applicationId: a.id, id: job.id, message: { type: "cancel" } }, a.credential);
   assert.equal((await f.post("/v1/model-jobs", f.submission(a.id), a.credential)).status, 403);
+});
+
+test("resource-domain host binding is administrator-only, immutable and survives restart", async t => {
+  const f = await fixture(t), domainId = await f.domain(JOB_RESOURCES), hostId = randomUUID();
+  const body = { hostId, domainId };
+  assert.equal((await f.post("/v1/resource-domain-hosts", body)).status, 401);
+  const app = await f.application();
+  assert.equal((await f.post("/v1/resource-domain-hosts", body, app.credential)).status, 401);
+  const runner = await f.enroll();
+  assert.equal((await f.post("/v1/resource-domain-hosts", body, runner.credential)).status, 401);
+  assert.equal((await f.post("/v1/resource-domain-hosts", body, f.admin)).status, 404);
+  const db = new DatabaseSync(f.statePath);
+  try { db.prepare("INSERT INTO hosts VALUES (?,?,?,?,1)").run(hostId, "fixture-hash", JSON.stringify({ capacity: JOB_RESOURCES }), Date.now() / 1000); }
+  finally { db.close(); }
+  assert.deepEqual(await f.post("/v1/resource-domain-hosts", body, f.admin), { status: 200, body });
+  assert.deepEqual((await f.get(`/v1/resource-domains/${domainId}`, f.admin)).body.host,
+    { id: hostId, reserved: { cpu: 0, memoryMiB: 0, diskGiB: 0 }, accepting: true });
+  await f.restart();
+  assert.deepEqual(await f.post("/v1/resource-domain-hosts", body, f.admin), { status: 200, body });
+  const second = await f.domain(JOB_RESOURCES);
+  assert.equal((await f.post("/v1/resource-domain-hosts", { hostId, domainId: second }, f.admin)).status, 409);
 });

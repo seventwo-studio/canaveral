@@ -41,7 +41,7 @@ export interface ReleaseRequest { id: string }
 /** Fresh lease-scoped key. Store privately and never log it. */
 export interface LeaseCredential { id: string; credential: string }
 
-export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[] } }
+export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[]; timeoutMs?: number } }
 export interface Operation {
   id: string; leaseId: string; member: "primary"; state: "queued" | "succeeded" | "failed" | "unknown"; updatedAt: string;
   result?: Record<string, unknown>;
@@ -100,6 +100,8 @@ export class ConsumerTransportError extends ConsumerError {
     super("ConsumerTransportError", message, code, options);
   }
 }
+
+export interface ReadOptions { timeoutMs?: number; signal?: AbortSignal }
 
 export interface ClientOptions {
   /** `https://host[:port][/prefix]`. Plain HTTP requires `allowLoopbackHttp` and an IP-literal loopback host. */
@@ -245,7 +247,10 @@ export class Transport {
   }
 
   /** `mutating` makes every uncertain failure carry `outcome: "unknown"`. `requestId` is the caller-owned body UUID. */
-  async call(method: "GET" | "POST", path: string, body: unknown, accepted: number[], mutating: boolean, requestId?: string): Promise<{ status: number; json: unknown }> {
+  async call(method: "GET" | "POST", path: string, body: unknown, accepted: number[], mutating: boolean, requestId?: string, readOptions: ReadOptions = {}): Promise<{ status: number; json: unknown }> {
+    if (mutating && (readOptions.signal !== undefined || readOptions.timeoutMs !== undefined)) throw new ConsumerConfigurationError("Read controls cannot be used for mutations.");
+    const requestTimeout = readOptions.timeoutMs === undefined ? this.#timeoutMs : Math.min(this.#timeoutMs, positive(readOptions.timeoutMs, "timeoutMs", 300000));
+    if (readOptions.signal?.aborted) throw new ConsumerError("ConsumerReadError", "Read cancelled.", "read_aborted");
     const unknownOutcome = mutating ? { outcome: "unknown" as const } : {};
     const identity = requestId === undefined ? {} : { requestId };
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
@@ -257,6 +262,7 @@ export class Transport {
     const options: https.RequestOptions = {
       protocol: this.#base.protocol, hostname: this.#base.hostname.replace(/^\[|\]$/g, ""), port: this.#base.port || undefined,
       method, path: this.#prefix + path, headers, agent: false,
+      ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
       ...(this.#secure ? { minVersion: "TLSv1.2" as const, rejectUnauthorized: true, ...(this.#ca !== undefined ? { ca: this.#ca } : {}) } : {}),
     };
     const reply = await new Promise<{ response: IncomingMessage; chunks: Buffer[] }>((resolve, reject) => {
@@ -269,8 +275,9 @@ export class Transport {
       const timer = setTimeout(() => {
         timedOut = true;
         fail(new ConsumerTransportError("The request timed out.", "timeout", { ...unknownOutcome, ...identity }));
-      }, this.#timeoutMs);
+      }, requestTimeout);
       request.on("error", (error: NodeJS.ErrnoException) => {
+        if (readOptions.signal?.aborted) { fail(new ConsumerError("ConsumerReadError", "Read cancelled.", "read_aborted")); return; }
         if (timedOut) return;
         const code = typeof error.code === "string" ? error.code : "";
         // Certificate failures end the handshake before any request bytes are sent.
@@ -393,8 +400,8 @@ function page(value: unknown): LeasePage {
 }
 
 async function parsed<T>(transport: Transport, method: "GET" | "POST", path: string, body: unknown, accepted: number[],
-  mutating: boolean, requestId: string | undefined, validate: (value: unknown) => T): Promise<{ status: number; value: T }> {
-  const { status, json } = await transport.call(method, path, body, accepted, mutating, requestId);
+  mutating: boolean, requestId: string | undefined, validate: (value: unknown) => T, readOptions?: ReadOptions): Promise<{ status: number; value: T }> {
+  const { status, json } = await transport.call(method, path, body, accepted, mutating, requestId, readOptions);
   try { return { status, value: validate(json) }; }
   catch {
     // A syntactically valid but unrecognised success still leaves a mutation's effect unconfirmed.
@@ -437,9 +444,9 @@ function releaseBody(request: ReleaseRequest): Record<string, unknown> {
 
 class LeaseOperations {
   constructor(protected readonly transport: Transport) {}
-  protected async inspectById(leaseId: string): Promise<Lease> {
+  protected async inspectById(leaseId: string, options?: ReadOptions): Promise<Lease> {
     const id = uuid(leaseId, "leaseId");
-    const { value } = await parsed(this.transport, "GET", `/v1/leases/${id}`, undefined, [200], false, undefined, lease);
+    const { value } = await parsed(this.transport, "GET", `/v1/leases/${id}`, undefined, [200], false, undefined, lease, options);
     if (!sameId(value.id, id)) throw new ConsumerProtocolError("The reply describes a different lease.", "response_invalid", 200, {});
     return value;
   }
@@ -504,12 +511,12 @@ export class LeaseClient extends LeaseOperations {
   }
   async createOperation(request: OperationRequest): Promise<CreateOperationResult> {
     const r = exact(request, ["id", "member", "action", "arguments"], "Operation request"), id = uuid(r.id, "id");
-    const args = exact(r.arguments, ["argv"], "Operation arguments"), argv = args.argv;
+    const args = exact(r.arguments, ["argv", "timeoutMs"], "Operation arguments"), argv = args.argv;
     if (r.member !== "primary" || r.action !== "shell" || !Array.isArray(argv) || !argv.length || argv[0] === "" ||
         argv.some(v => typeof v !== "string" || v.includes("\0")) || Buffer.byteLength(JSON.stringify(argv)) > 65536) {
       throw new ConsumerConfigurationError("Invalid shell operation.", "invalid_request");
     }
-    const body = { id, member: "primary", action: "shell", arguments: { argv } };
+    const body = { id, member: "primary", action: "shell", arguments: { argv, ...(args.timeoutMs === undefined ? {} : { timeoutMs: positive(args.timeoutMs, "timeoutMs", 3600000) }) } };
     const { status, value } = await parsed(this.transport, "POST", `/v1/leases/${this.leaseId}/operations`, body, [200, 201], true, id,
       value => boundOperation(value, this.leaseId, id));
     return { created: status === 201, operation: value };
@@ -519,7 +526,7 @@ export class LeaseClient extends LeaseOperations {
     return (await parsed(this.transport, "GET", `/v1/leases/${this.leaseId}/operations/${id}`, undefined, [200], false, undefined,
       value => boundOperation(value, this.leaseId, id))).value;
   }
-  inspect(): Promise<Lease> { return this.inspectById(this.leaseId); }
+  inspect(options?: ReadOptions): Promise<Lease> { return this.inspectById(this.leaseId, options); }
   renew(request: RenewRequest): Promise<MutationResult> { return this.renewById(this.leaseId, request); }
   release(request: ReleaseRequest): Promise<MutationResult> { return this.releaseById(this.leaseId, request); }
 }

@@ -2649,6 +2649,13 @@
                       "maxLength": 4096,
                       "pattern": "^[^\\u0000]*$"
                     }
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3600000,
+                    "default": 30000,
+                    "description": "Bounded Linux command timeout in milliseconds; shortened by remaining lease authority. Omission and explicit 30000 have the same replay intent."
                   }
                 },
                 "required": [

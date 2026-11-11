@@ -74,7 +74,7 @@ function canonicalResult(result: GenerationResult | undefined): string | null {
  * receipt releases a reservation.
  */
 export class ModelJobs {
-  readonly domains = new ResourceDomains();
+  readonly domains = new ResourceDomains(() => this.store.clock());
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities, readonly runners: RunnerEnrollment | undefined) {
     store.transaction(db => {
       ResourceDomains.schema(db);
@@ -98,6 +98,9 @@ export class ModelJobs {
 
   defineDomain(value: unknown): unknown {
     return this.store.transaction(db => this.domains.define(db, value, this.now()));
+  }
+  bindDomainHost(value: unknown): unknown {
+    return this.store.transaction(db => this.domains.bindHost(db, value, this.now()));
   }
   inspectDomain(id: string): unknown {
     return this.store.transaction(db => this.domains.view(db, identifier(id)));
@@ -156,6 +159,7 @@ export class ModelJobs {
       const binding = runners.current(db, input.binding);
       if (!binding) throw new ServiceError("Approve only the current unrevoked runner binding.", 409);
       if (!this.domains.exists(db, domain)) throw new ServiceError("Unknown resource domain.", 404);
+      this.domains.assertRunnerDomain(db, binding, domain);
       for (const [model, digest] of models) {
         if (!db.prepare("SELECT 1 FROM model_catalog WHERE model=? AND digest=?").get(model, digest)) throw new ServiceError("Approved models require operator catalog entries.", 404);
       }
@@ -246,6 +250,7 @@ export class ModelJobs {
       const approval = db.prepare("SELECT * FROM model_runner_approvals WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND revoked=0")
         .get(b.controllerId, b.runnerId, b.generation, b.incarnationId) as unknown as ApprovalRow | undefined;
       if (!approval) throw new ServiceError("This runner binding has no model approval.", 403);
+      this.domains.assertRunnerDomain(db, b, approval.domain);
       if (updateDraining(db, b.runnerId, "runner")) return { assignment: null };
       const active = db.prepare("SELECT count(*) AS n FROM model_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(active.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };

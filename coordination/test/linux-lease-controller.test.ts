@@ -170,6 +170,53 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   };
 }
 
+test("one runner identity keeps one domain across adapters, revocation and enrollment generations", async t => {
+  const f = await fixture(t), first = await f.domain(VM), other = await f.domain(VM);
+  await f.ok(f.post("/v1/model-catalog", { model: MODEL, digest: MODEL_DIGEST, adapter: "ollama", resources: VM }, f.admin));
+  const model = (runner: Runner, domainId: string) => f.post("/v1/model-runner-approvals", {
+    binding: runner.binding, domainId, models: [{ model: MODEL, digest: MODEL_DIGEST }],
+  }, f.admin);
+  const linuxFirst = await f.enroll();
+  await f.ok(f.approve(linuxFirst, first));
+  assert.equal((await model(linuxFirst, other)).status, 409);
+  await f.ok(model(linuxFirst, first));
+  const modelFirst = await f.enroll();
+  await f.ok(model(modelFirst, first));
+  assert.equal((await f.approve(modelFirst, other)).status, 409);
+  await f.ok(f.approve(modelFirst, first));
+  await f.ok(f.post("/v1/model-runner-approvals/revoke", { binding: modelFirst.binding }, f.admin));
+  await f.ok(f.post("/v1/linux-lease-runner-approvals/revoke", { binding: modelFirst.binding }, f.admin));
+  await f.ok(f.post("/v1/runners/revoke", modelFirst.binding, f.admin));
+  const replacement = await f.enroll(modelFirst.binding.runnerId, 2);
+  assert.equal((await model(replacement, other)).status, 409);
+  assert.equal((await f.approve(replacement, other)).status, 409);
+  await f.ok(model(replacement, first));
+  await f.ok(f.approve(replacement, first));
+});
+
+test("retained contradictory approvals deny new work without losing claim replay or cleanup", async t => {
+  const f = await fixture(t), domain = await f.domain(VM), other = await f.domain(VM);
+  const runner = await f.enroll(), app = await f.application();
+  await f.grant(app.id); await f.ok(f.approve(runner, domain));
+  await f.ok(f.post("/v1/model-catalog", { model: MODEL, digest: MODEL_DIGEST, adapter: "ollama", resources: VM }, f.admin));
+  await f.ok(f.post("/v1/model-runner-approvals", { binding: runner.binding, domainId: domain, models: [{ model: MODEL, digest: MODEL_DIGEST }] }, f.admin));
+  const request = f.acquire(); await app.client().acquireLease(request);
+  const claimId = randomUUID(), claimed = await f.claim(runner, claimId);
+  assert.equal(claimed.status, 200); assert.ok(claimed.assignment);
+  // A retained pre-upgrade contradictory declaration must not admit new effects.
+  const db = new DatabaseSync(f.statePath);
+  try { db.prepare("UPDATE model_runner_approvals SET domain=? WHERE runner=?").run(other, runner.binding.runnerId); }
+  finally { db.close(); }
+  assert.equal((await f.claim(runner)).status, 409);
+  assert.equal((await f.post("/v1/runners/model-jobs/claim", { binding: runner.binding, claimId: randomUUID() }, runner.credential)).status, 409);
+  await rejectsWith(app.client().acquireLease(f.acquire()), 503, "capacity_unavailable");
+  assert.equal((await f.claim(runner, claimId)).assignment!.id, claimed.assignment.id);
+  await app.client().releaseLease(request.id, { id: randomUUID() });
+  assert.equal((await f.inspectDomain(domain)).reservations, 1);
+  await f.ok(f.report(runner, claimed.assignment.id, 1, f.receipt(claimed.assignment, f.stoppedClean)));
+  assert.equal((await f.inspectDomain(domain)).reservations, 0);
+});
+
 test("catalog, grants and approvals pin headless Linux images per backend and deny unsupported capabilities", async t => {
   const f = await fixture(t);
   const [a, b] = [await f.application(), await f.application()];

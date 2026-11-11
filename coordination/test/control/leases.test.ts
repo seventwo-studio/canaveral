@@ -111,6 +111,55 @@ test("eligibility compares full pinned definitions and separate architecture/run
   f.store.transaction(db => refreshLegacyLeases(db, f.now()));
 });
 
+test("lease readiness follows current image eligibility without releasing held capacity", async t => {
+  const f = leaseFixture(t), lease = await f.request("POST", "/v1/leases", f.acquire());
+  const route = `/v1/leases/${lease.id}`, selectors = f.offer().leaseImages;
+  f.changeOffer({ leaseImages: [] });
+  f.ready(lease);
+  let view = await f.request("GET", route);
+  assert.equal(view.runtimeState, "running");
+  assert.equal(view.state, "provisioning");
+  assert.equal(view.members[0].ready, false);
+  f.changeOffer({ leaseImages: selectors }); f.beat();
+  view = await f.request("GET", route);
+  assert.equal(view.state, "ready"); assert.equal(view.members[0].ready, true);
+  const revision = view.revision;
+  f.changeOffer({ leaseImages: [] }); f.beat();
+  view = await f.request("GET", route);
+  assert.equal(view.state, "ready"); assert.equal(view.revision, revision);
+  assert.equal(view.members[0].ready, false);
+  assert.equal(view.cleanup.state, "notRequested");
+  assert.equal((await f.request("GET", "/v1/leases")).leases[0].members[0].ready, false);
+  f.store.transaction(db => assert.deepEqual(f.leases.machines.used(db, f.host), { cpu: 1, memoryMiB: 1024, diskGiB: 4 }));
+  f.changeOffer({ leaseImages: selectors }); f.beat();
+  assert.equal((await f.request("GET", route)).members[0].ready, true);
+  f.advance(30);
+  view = await f.request("GET", route);
+  assert.equal(view.runtimeState, "unknown"); assert.equal(view.members[0].ready, false);
+});
+
+test("disabled hosts and stopped intent cannot promote a lease from a running report", async t => {
+  for (const condition of ["disabled", "stopped"] as const) {
+    const f = leaseFixture(t), lease = await f.request("POST", "/v1/leases", f.acquire());
+    const route = `/v1/leases/${lease.id}`;
+    f.store.transaction(db => {
+      if (condition === "disabled") db.prepare("UPDATE hosts SET enabled=0 WHERE id=?").run(f.host);
+      else db.prepare("UPDATE machines SET desired='stopped' WHERE id=?").run(lease.members[0].machineId);
+    });
+    f.ready(lease);
+    const view = await f.request("GET", route);
+    assert.equal(view.state, "provisioning", condition);
+    assert.equal(view.members[0].ready, false, condition);
+    f.store.transaction(db => {
+      if (condition === "disabled") db.prepare("UPDATE hosts SET enabled=1 WHERE id=?").run(f.host);
+      else db.prepare("UPDATE machines SET desired='running' WHERE id=?").run(lease.members[0].machineId);
+    });
+    const restored = await f.request("GET", route);
+    assert.equal(restored.state, "ready", condition);
+    assert.equal(restored.members[0].ready, true, condition);
+  }
+});
+
 test("UUID pagination and generic/Linux route ownership never depend on credential success", async t => {
   const f = leaseFixture(t), ids: string[] = [];
   for (let i = 0; i < 101; ++i) ids.push((await f.request("POST", "/v1/leases", f.acquire())).id);

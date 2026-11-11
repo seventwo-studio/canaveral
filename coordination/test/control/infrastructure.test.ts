@@ -1,3 +1,4 @@
+import { ResourceDomains } from "../../src/resource-domains.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -247,6 +248,29 @@ test("every protected infrastructure route rechecks current authority inside its
       assert.throws(() => module.handle(req), (error: unknown) => error instanceof Error && "status" in error && (error.status === 401 || error.status === 403));
       const after = original(db => ({ setups: db.prepare("SELECT * FROM connection_setups ORDER BY id").all(), checks: db.prepare("SELECT * FROM host_health").all(), limits: db.prepare("SELECT * FROM host_limits").all() }));
       assert.deepEqual(after, before);
+    });
+  }
+});
+
+test("consolidation refuses a bound source or target without moving held work", t => {
+  for (const bindTarget of [false, true]) {
+    const f = fixture(t), source = randomUUID(), domain = randomUUID();
+    const targetOffer = { name: "Linux host", provider: "linux", capacity, runtimes: { libvirt: {} }, templates: [template()] };
+    f.enroll(String(f.infrastructure.createSetup({ id: randomUUID(), ...offer() }).enrollmentToken));
+    const machine = f.machine();
+    f.store.transaction(db => {
+      db.prepare("INSERT INTO hosts VALUES (?,?,?,?,1)").run(source, legacyDigest("s".repeat(43)), JSON.stringify(offer()), f.now());
+      db.prepare("UPDATE machines SET host=? WHERE id=?").run(source, machine);
+      ResourceDomains.schema(db); const domains = new ResourceDomains(f.now);
+      domains.define(db, { id: domain, name: "bound", capacity }, f.now());
+      domains.bindHost(db, { hostId: bindTarget ? f.host : source, domainId: domain }, f.now());
+      assert.equal(domains.reserve(db, { id: randomUUID(), domain, kind: "model-job", owner: randomUUID(), resources: size }, f.now()), true);
+    });
+    assert.throws(() => consolidateLocalRuntimes(f.store, f.host, [source], targetOffer, () => {}), /explicit identity migration/);
+    f.store.transaction(db => {
+      assert.equal(db.prepare("SELECT host FROM machines WHERE id=?").get(machine)!.host, source);
+      assert.equal(db.prepare("SELECT count(*) AS n FROM retired_runners").get()!.n, 0);
+      assert.equal(new ResourceDomains(f.now).view(db, domain).reservations, 1);
     });
   }
 });

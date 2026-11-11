@@ -2,7 +2,7 @@ import { object, ServiceError } from "./errors.ts";
 
 export interface OperationRow {
   id: string; lease: string; assignment: string; request: string; argv: string; credential: string;
-  state: string; updated: number; start_before: number; dispatched: number | null; deadline: number | null; result: string | null;
+  state: string; updated: number; start_before: number; dispatched: number | null; deadline: number | null; result: string | null; timeout_ms: number;
 }
 export function operationObject(value: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
   const r = object(value);

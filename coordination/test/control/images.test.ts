@@ -1,3 +1,4 @@
+import { ResourceDomains } from "../../src/resource-domains.ts";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -133,4 +134,21 @@ test("public routes preserve administrator boundary; capture checks current mach
   hostRequest.principal = () => { throw new Error("Host route must not use human auth"); };
   fails(() => module.handle(hostRequest), 404);
   assert.equal(module.handle(request("/v1/unowned")), undefined);
+});
+
+test("image download reservations share disk headroom with bound runner jobs", t => {
+  for (const imageFirst of [true, false]) {
+    const f = fixture(t), domains = new ResourceDomains(() => 100), domain = randomUUID();
+    f.store.transaction(db => {
+      db.exec("ALTER TABLE hosts ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
+      ResourceDomains.schema(db); domains.define(db, { id: domain, name: "shared", capacity: { cpu: 8, memoryMiB: 16384, diskGiB: 11 } }, 100);
+      domains.bindHost(db, { hostId: f.host, domainId: domain }, 100);
+    });
+    const id = randomUUID(); f.controller.createRegistryImport({ id, hostId: f.host, registryId: "ubuntu-noble-cloud-amd64" });
+    const source = { url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img", sha256: "a".repeat(64), bytes: 512, version: "fixture" };
+    const reserve = () => f.store.transaction(db => domains.reserve(db, { id: randomUUID(), domain, kind: "model-job", owner: randomUUID(), resources: { cpu: 1, memoryMiB: 1, diskGiB: 1 } }, 100));
+    if (imageFirst) { f.controller.resolveRegistryImport(f.host, f.token, id, source); assert.equal(reserve(), false); }
+    else { assert.equal(reserve(), true); fails(() => f.controller.resolveRegistryImport(f.host, f.token, id, source), 409); }
+    assert.equal(f.store.transaction(db => domains.view(db, domain).reserved.diskGiB), 11);
+  }
 });

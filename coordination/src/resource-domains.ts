@@ -4,10 +4,14 @@ import type { Resources } from "./consumers.ts";
 import { object, ServiceError } from "./errors.ts";
 import { comparePlacementScore, placementScore } from './placement.ts';
 
+import { boundHostState, combineResources, hostReservations } from "./capacity.ts";
+
 const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 
 export interface ResourceDomain {
   id: string; name: string; capacity: Resources; reserved: Resources; available: Resources; reservations: number;
+  host?: { id: string; reserved: Resources; accepting: boolean };
+  runnerReserved?: Resources;
 }
 interface DomainRow { id: string; name: string; capacity: string }
 
@@ -41,9 +45,28 @@ function stored(value: unknown): Resources {
  * Linux lease admission are its claimants; both see every held reservation in a domain.
  */
 export class ResourceDomains {
+  /** A runner identity retains one budget across adapters and enrollment generations.
+   * Old approvals still anchor unknown held work; revocation cannot create fresh capacity.
+   */
+  runnerDomainMatches(db: DatabaseSync, binding: { controllerId: string; runnerId: string }, domain: string): boolean {
+    requireTransaction(db);
+    for (const table of ["model_runner_approvals", "linux_lease_runner_approvals"] as const) {
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
+      if (db.prepare(`SELECT 1 FROM ${table} WHERE controller=? AND runner=? AND domain!=? LIMIT 1`)
+        .get(binding.controllerId, binding.runnerId, domain)) return false;
+    }
+    return true;
+  }
+
+  assertRunnerDomain(db: DatabaseSync, binding: { controllerId: string; runnerId: string }, domain: string): void {
+    if (!this.runnerDomainMatches(db, binding, domain)) throw new ServiceError("Runner identity is already bound to a different resource domain.", 409);
+  }
+
+  constructor(readonly clock: () => number = () => Date.now() / 1000) {}
   static schema(db: DatabaseSync): void {
     db.exec(`CREATE TABLE IF NOT EXISTS resource_domains (id TEXT PRIMARY KEY, name TEXT NOT NULL, capacity TEXT NOT NULL, created REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS resource_reservations (id TEXT PRIMARY KEY, domain TEXT NOT NULL, kind TEXT NOT NULL, owner TEXT NOT NULL, resources TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('held','released')), created REAL NOT NULL, released REAL);
+      CREATE TABLE IF NOT EXISTS resource_domain_hosts (host TEXT PRIMARY KEY, domain TEXT NOT NULL UNIQUE, created REAL NOT NULL);
       CREATE INDEX IF NOT EXISTS resource_reservations_held ON resource_reservations(domain,state);`);
   }
 
@@ -72,15 +95,45 @@ export class ResourceDomains {
     requireTransaction(db);
     const row = db.prepare("SELECT * FROM resource_domains WHERE id=?").get(id) as unknown as DomainRow | undefined;
     if (!row) throw new ServiceError("Unknown resource domain.", 404);
-    const capacity = stored(row.capacity), reserved = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
+    const capacity = stored(row.capacity); let reserved = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
     const held = db.prepare("SELECT resources FROM resource_reservations WHERE domain=? AND state='held'").all(id);
     for (const reservation of held) {
       const amount = stored(reservation.resources);
-      for (const key of keys) reserved[key] += amount[key];
+      reserved = combineResources(reserved, amount);
+    }
+    const runnerReserved = { ...reserved };
+    const host = boundHostState(db, id, this.clock());
+    if (host) {
+      reserved = combineResources(reserved, hostReservations(db, host.host));
+      for (const key of keys) capacity[key] = Math.min(capacity[key], host.capacity[key]);
     }
     const available = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
-    for (const key of keys) available[key] = Math.max(0, capacity[key] - reserved[key]);
-    return { id: row.id, name: row.name, capacity, reserved, available, reservations: held.length };
+    for (const key of keys) available[key] = host && !host.available ? 0 : Math.max(0, capacity[key] - reserved[key]);
+    return { id: row.id, name: row.name, capacity, reserved, available, reservations: held.length,
+      ...(host ? { host: { id: host.host, reserved: hostReservations(db, host.host), accepting: host.available }, runnerReserved } : {}) };
+  }
+
+  /** Bind once without moving or rewriting any existing reservation. */
+  bindHost(db: DatabaseSync, value: unknown, now: number): { hostId: string; domainId: string } {
+    requireTransaction(db);
+    const input = object(value);
+    if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "hostId") || !Object.hasOwn(input, "domainId")) throw new ServiceError("Specify hostId and domainId.", 400);
+    const hostId = identifier(input.hostId), domainId = identifier(input.domainId);
+    const existing = db.prepare("SELECT host,domain FROM resource_domain_hosts WHERE host=? OR domain=?").all(hostId, domainId);
+    if (existing.length) {
+      if (existing.length === 1 && existing[0]!.host === hostId && existing[0]!.domain === domainId) return { hostId, domainId };
+      throw new ServiceError("Host or domain already has a different immutable binding.", 409);
+    }
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts'").get() || !db.prepare("SELECT 1 FROM hosts WHERE id=?").get(hostId)) throw new ServiceError("Unknown host.", 404);
+    this.view(db, domainId);
+    db.exec("SAVEPOINT bind_resource_host");
+    try {
+      db.prepare("INSERT INTO resource_domain_hosts VALUES (?,?,?)").run(hostId, domainId, now);
+      const view = this.view(db, domainId), host = boundHostState(db, domainId, now)!;
+      if (!host.available || keys.some(key => view.reserved[key] > view.capacity[key])) throw new ServiceError("Binding requires an accepting host and fitting existing reservations.", 409);
+      db.exec("RELEASE SAVEPOINT bind_resource_host");
+    } catch (error) { db.exec("ROLLBACK TO SAVEPOINT bind_resource_host; RELEASE SAVEPOINT bind_resource_host"); throw error; }
+    return { hostId, domainId };
   }
 
   /** Hold `amount` only if it fits beside every held reservation in the domain. */

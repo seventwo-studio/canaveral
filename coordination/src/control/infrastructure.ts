@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Accounts } from "../accounts.ts";
-import { CapacityLedger } from "../capacity.ts";
+import { CapacityLedger, hostDomain } from "../capacity.ts";
 import { identifier } from "../consumers.ts";
 import type { Resources } from "../consumers.ts";
 import { object, secret, ServiceError } from "../errors.ts";
@@ -410,6 +410,7 @@ export function consolidateLocalRuntimes(store: SqliteStore, targetId: string, s
   assertLocallyFenced(ids);
   return store.transaction(db => {
     inTransaction(db); assertLocallyFenced(ids);
+    if (ids.some(id => hostDomain(db, id))) throw new ServiceError("Bound resource domains require an explicit identity migration; local consolidation is unavailable.", 409);
     for (const id of ids) {
       const row = db.prepare("SELECT * FROM hosts WHERE id=?").get(id);
       if (!row) throw new ServiceError("Runtime identity is missing; do not adopt another host.", 404);

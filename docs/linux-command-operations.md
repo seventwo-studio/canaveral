@@ -20,7 +20,7 @@ after rotation or lease termination; the previous key cannot.
 {"id":"<UUID>","member":"primary","action":"shell","arguments":{"argv":["printf","hello"]}}
 ```
 
-The UUID, member, action and argv form the canonical intent. argv is a nonempty
+The optional `arguments.timeoutMs` is an integer from 1 to 3600000; omission defaults to 30000. The UUID, member, action, argv and normalized timeout form the canonical intent. Omission and explicit 30000 replay identically, including intents retained before the additive timeout-column migration. Different timeouts conflict. argv is a nonempty
 string array, without NULs, with a nonempty executable and at most 65536 bytes in
 its JSON encoding. New intent returns 201; identical replay returns 200; changed
 intent returns 409. Another lease's operation UUID is hidden with 404.
@@ -84,7 +84,7 @@ New poll UUIDs cannot claim already dispatched work.
 
 `startBefore` is persisted at submission as `min(submitTime + 120s, lease expiry)`;
 renewal never extends it. Dispatch records a server deadline of
-`min(dispatchTime + 35s, lease expiry, startBefore + 35s)`. Dispatch requires current
+`min(dispatchTime + timeoutMs/1000 + 5s, lease expiry, startBefore + timeoutMs/1000 + 5s)`. Dispatch requires current
 readiness, backend/image eligibility, approval, binding, application and the key
 generation that submitted the operation. Ended/closed assignments dispatch no new
 work. Existing handoffs remain retrievable by their current owner for cancellation
@@ -131,8 +131,11 @@ required: all lease and operation interactions refresh validity conservatively.
 
 Runner execution must durably record received intent before effects, map public
 UUIDs to separate increasing guest exec UUIDs, and never repeat exec after crash.
-Use `/workspace`, empty supplied environment, closed stdin and at most 30000ms
-bounded by remaining authority. Drain output with bounded credit after the shared
+Use `/workspace`, empty supplied environment, closed stdin and the requested timeout
+(up to 3600000ms), shortened by remaining authority at dispatch. Renewal never
+extends an already dispatched command deadline. Older runners that require the
+fixed 30000ms value refuse longer requests; deploy a compatible runner before
+requesting them. Drain output with bounded credit after the shared
 256KiB capture limit and report truncation/counts explicitly. Controller I/O must
 not block guest pumping, renewal, cancellation or local expiry. Lost reports retain
 and retry the exact receipt. Unknown execution fences the lease. The native

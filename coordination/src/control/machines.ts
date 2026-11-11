@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { ServiceError, object, secret } from "../errors.ts";
 import { SqliteStore } from "../sqlite.ts";
+import { hostDomain, hostReservations, boundDomainReservations, combineResources, effectiveHostCapacity } from "../capacity.ts";
 import { updateDraining } from "../updates/drain.ts";
 import { comparePlacementScore, placementScore } from '../placement.ts';
 import type { PlacementScore } from '../placement.ts';
@@ -243,29 +244,13 @@ export class MachineStore implements ControlModule {
   }
   private healthReady(db: DatabaseSync, id: string): boolean { return !updateDraining(db, id) && healthReady(db, id, this.store.clock()); }
   used(db: DatabaseSync, hostId: string, exclude?: string): Resources {
-    const used: Resources = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
-    for (const row of db.prepare("SELECT * FROM machines WHERE host=?").all(hostId)) {
-      if (row.id === exclude || isDeleted(db, String(row.id))) continue;
-      const size = machineResources(JSON.parse(String(row.request)).resources);
-      used.diskGiB += size.diskGiB;
-      if (computeReserved(db, { id: String(row.id), desired: String(row.desired), observed: String(row.observed) })) { used.cpu += size.cpu; used.memoryMiB += size.memoryMiB; }
-    }
-    if (table(db, "inference_jobs")) for (const row of db.prepare("SELECT definition FROM inference_jobs WHERE host=? AND state NOT IN ('succeeded','failed','cancelled')").all(hostId)) {
-      const size = machineResources(JSON.parse(String(row.definition)).resources);
-      for (const key of resourceKeys) used[key] += size[key];
-    }
-    if (table(db, "images")) {
-      const artifacts = new Map<string, number>();
-      for (const row of db.prepare("SELECT metadata FROM images WHERE host=?").all(hostId)) { const value = JSON.parse(String(row.metadata)); artifacts.set(`${value.sha256}:${value.format}`, value.bytes); }
-      for (const size of artifacts.values()) used.diskGiB += Math.ceil(size / 1073741824);
-    }
-    if (table(db, "image_tasks")) used.diskGiB += Number(db.prepare("SELECT COALESCE(SUM(reserved_disk),0) AS n FROM image_tasks WHERE host=? AND state IN ('queued','running','unknown')").get(hostId)!.n);
+    const used = combineResources(hostReservations(db, hostId, exclude), boundDomainReservations(db, hostId));
     for (const hook of this.hooks) { const size = hook.additionalReservations?.(db, hostId); if (size) for (const key of resourceKeys) used[key] += size[key] ?? 0; }
     return used;
   }
   private limits(db: DatabaseSync, host: MachineRow): Resources {
     const row = table(db, "host_limits") ? db.prepare("SELECT limits FROM host_limits WHERE host=?").get(host.id!) : undefined;
-    return row ? JSON.parse(String(row.limits)) : JSON.parse(String(host.offer)).capacity;
+    return effectiveHostCapacity(db, String(host.id), row ? JSON.parse(String(row.limits)) : JSON.parse(String(host.offer)).capacity);
   }
   remainingCapacity(db: DatabaseSync, hostId: string, exclude?: string): Resources {
     const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(hostId);
@@ -298,7 +283,7 @@ export class MachineStore implements ControlModule {
         const system = report?.environment?.system;
         const platforms: Record<string, string> = { Darwin: "macos", Linux: "linux", Windows: "windows", apple: "macos", ios: "macos", hyperv: "windows", libvirt: "linux", macos: "macos", linux: "linux", windows: "windows" };
         const reserved = this.used(db, String(row.id)), limits = this.limits(db, row);
-        return { ...offer, id: row.id, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
+        return { ...offer, id: row.id, resourceDomainId: hostDomain(db, String(row.id)) ?? null, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
           platform: platforms[system] ?? platforms[offer.provider] ?? null, runtimes: offer.runtimes ?? (offer.provider === "kubevirt" ? [] : [offer.provider]), placementReady: online && Boolean(row.enabled) && this.healthReady(db, String(row.id)),
           usage: sample ? { ...JSON.parse(String(sample.report)), receivedAt: sample.captured, fresh: online && this.store.clock() - Number(sample.captured) < 30 } : null,
           available: this.remainingCapacity(db, String(row.id)), limits, overcommitted: resourceKeys.some(key => reserved[key] > Math.min(offer.capacity[key], limits[key])) };

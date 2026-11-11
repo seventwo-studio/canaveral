@@ -60,6 +60,7 @@ const leaseBody: Record<string, IdentityCommand["type"]> = {
 const leaseMutation: Record<string, IdentityCommand["type"]> = { credential: "leases.credential", renew: "leases.renew", release: "leases.release" };
 const LEASE_ID = "[0-9A-Fa-f-]{36}";
 const modelAdministration: Record<string, IdentityCommand["type"]> = {
+  "/v1/resource-domain-hosts": "models.domainHost",
   "/v1/model-catalog": "models.catalog", "/v1/resource-domains": "models.domain",
   "/v1/model-grants": "models.grant", "/v1/model-grants/revoke": "models.grantRevoke",
   "/v1/model-runner-approvals": "models.approve", "/v1/model-runner-approvals/revoke": "models.approvalRevoke",

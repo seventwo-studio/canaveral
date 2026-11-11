@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ConsumerClient, ConsumerServiceError, LeaseClient } from "../src/consumer-client.ts";
 import type { AcquireRequest, Lease } from "../src/consumer-client.ts";
+import { consumerApiSchema } from "../src/contracts.ts";
 
 type Body = Record<string, unknown>;
 type Reply = { status: number; body: Body };
@@ -110,7 +111,10 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   // Retained Python lease rows that this slice must neither adopt nor alter.
   const legacy = new DatabaseSync(statePath);
   legacy.exec(`CREATE TABLE leases (id TEXT PRIMARY KEY, consumer TEXT, request TEXT, state TEXT, revision INTEGER, created REAL, expires REAL, provision_deadline REAL, credential TEXT, cleanup TEXT);
-    INSERT INTO leases VALUES ('legacy-lease','legacy-app','{}','ready',3,1,2,2,'legacy-hash','notRequested');`);
+    INSERT INTO leases VALUES ('legacy-lease','legacy-app','{}','ready',3,1,2,2,'legacy-hash','notRequested');
+    CREATE TABLE linux_operations (id TEXT PRIMARY KEY, lease TEXT NOT NULL, assignment TEXT NOT NULL, request TEXT NOT NULL, argv TEXT NOT NULL,
+      credential TEXT NOT NULL, state TEXT NOT NULL, updated REAL NOT NULL, start_before REAL NOT NULL,
+      dispatched REAL, deadline REAL, result TEXT);`);
   legacy.close();
   const controllers: Controller[] = [];
   const start = async () => { const c = await Controller.start(config, clockFile); controllers.push(c); return c; };
@@ -166,7 +170,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
     inspectDomain, acquire, rows,
     clock(seconds: number) { writeFileSync(clockFile, String(seconds)); },
     leaseClient(leaseId: string, leaseKey: string) { return new LeaseClient({ baseUrl: `http://127.0.0.1:${port()}`, leaseId, leaseKey, allowLoopbackHttp: true }); },
-    async restart() { await primary.kill(); primary = await start(); },
+    async restart(beforeStart?: () => void) { await primary.kill(); beforeStart?.(); primary = await start(); },
   };
 }
 
@@ -188,6 +192,54 @@ async function ready(t: Parameters<typeof fixture>[0], ttlSeconds = 300) {
 }
 const intent = () => ({ id: randomUUID(), member: "primary" as const, action: "shell" as const, arguments: { argv: ["printf", "private argument"] } });
 const success = { stdoutBase64: "b2s=", stderrBase64: "", exitCode: 0, signal: null, timedOut: false, durationMs: 1, stdoutBytes: 2, stderrBytes: 0, truncated: false, terminationConfirmed: true };
+
+test("bounded command timeouts survive restart and expire without extending execution", async t => {
+  const schema = consumerApiSchema() as { components: { schemas: { CreateOperation: { oneOf: { properties: {
+    action: { const: string }; arguments: { properties: { timeoutMs?: { type: string; minimum: number; maximum: number; default: number } } };
+  } }[] } } } };
+  const timeoutSchema = schema.components.schemas.CreateOperation.oneOf.find(value => value.properties.action.const === "shell")!.properties.arguments.properties.timeoutMs;
+  assert.equal(timeoutSchema?.type, "integer");
+  assert.deepEqual([timeoutSchema.minimum, timeoutSchema.maximum, timeoutSchema.default], [1, 3600000, 30000]);
+  const x = await ready(t, 150), req = intent();
+  for (const timeoutMs of [0, -1, 1.5, 3600001, "30000", null]) {
+    assert.equal((await x.f.post(x.route, { ...req, arguments: { ...req.arguments, timeoutMs } }, x.credential)).status, 400);
+  }
+  assert.equal(x.f.rows("SELECT count(*) AS n FROM linux_operations")[0]!.n, 0);
+  const bounded = { ...req, arguments: { ...req.arguments, timeoutMs: 120000 } };
+  assert.equal((await x.client.createOperation(bounded)).created, true);
+  await rejectsWith(x.client.createOperation({ ...bounded, arguments: { ...req.arguments, timeoutMs: 120001 } }), 409);
+  await x.f.restart();
+  const client = x.f.leaseClient(x.lease.id, x.credential);
+  assert.equal((await client.createOperation(bounded)).created, false);
+  assert.equal(((await x.f.ok(x.poll())).command as Body).timeoutMs, 120000);
+  assert.equal(x.f.rows("SELECT deadline FROM linux_operations")[0]!.deadline, T0 + 125);
+  x.f.clock(T0 + 40);
+  assert.equal((await client.operation(req.id)).state, "queued");
+  await client.renew({ id: randomUUID(), expectedRevision: 2, ttlSeconds: 250 });
+  assert.equal(x.f.rows("SELECT deadline FROM linux_operations")[0]!.deadline, T0 + 125);
+  x.f.clock(T0 + 125);
+  assert.equal((await client.operation(req.id)).state, "unknown");
+  assert.equal((await x.f.ok(x.poll())).cancelRequested, true);
+});
+
+test("default timeout preserves legacy intent and maximum timeout stays lease bounded", async t => {
+  const x = await ready(t), req = intent();
+  await x.client.createOperation(req);
+  // Reopen a real retained intent using the schema that predates timeout support.
+  await x.f.restart(() => {
+    const db = new DatabaseSync(x.f.statePath);
+    try { db.exec("ALTER TABLE linux_operations DROP COLUMN timeout_ms"); } finally { db.close(); }
+  });
+  const client = x.f.leaseClient(x.lease.id, x.credential);
+  assert.equal((await client.createOperation({ ...req, arguments: { ...req.arguments, timeoutMs: 30000 } })).created, false);
+  assert.equal(x.f.rows("SELECT timeout_ms FROM linux_operations")[0]!.timeout_ms, 30000);
+  await x.f.ok(x.poll());
+  await x.f.ok(x.reportOp(req.id, { state: "succeeded", result: success }));
+  const longer = { ...intent(), arguments: { argv: ["build"], timeoutMs: 3600000 } };
+  await client.createOperation(longer);
+  assert.equal(((await x.f.ok(x.poll({ ...x.pollBody, pollId: randomUUID() }))).command as Body).timeoutMs, 3600000);
+  assert.equal(x.f.rows(`SELECT deadline FROM linux_operations WHERE id='${longer.id}'`)[0]!.deadline, T0 + 300);
+});
 
 test("operation roles, canonical replay, bound handoff, terminal replay and result checks", async t => {
   const x = await ready(t), { f, client, app, runner, route, credential } = x;

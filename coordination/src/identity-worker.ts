@@ -86,6 +86,7 @@ function model(command: Extract<IdentityCommand, { type: `models.${string}` }>):
   }
   return administratorTransaction(command.token, () => { switch (command.type) {
     case "models.catalog": return jobs.catalog(command.body);
+    case "models.domainHost": return jobs.bindDomainHost(command.body);
     case "models.domain": return jobs.defineDomain(command.body);
     case "models.domainInspect": return jobs.inspectDomain(command.id);
     case "models.grant": return jobs.grant(command.body);

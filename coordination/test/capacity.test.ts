@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { ResourceDomains } from "../src/resource-domains.ts";
 import { CapacityLedger } from "../src/capacity.ts";
 import { SqliteStore } from "../src/sqlite.ts";
 import { ServiceError } from "../src/errors.ts";
@@ -137,5 +138,35 @@ test("host limit input validation matches fixed resource boundary expectations",
     let status = 200;
     try { ledger.save(host, { limits }); } catch (error) { if (!(error instanceof ServiceError)) throw error; status = error.status; }
     assert.equal(status, expected);
+  }
+});
+
+test("independent host and runner admission workers serialize one bound budget", { timeout: 30_000 }, async t => {
+  for (const reverse of [false, true]) {
+    const { path, ledger, hosts, store } = fixture(t), host = hosts[0]!, domain = randomUUID();
+    ledger.save(host, { limits: { ...capacity, cpu: 2 } });
+    store.transaction(db => {
+      ResourceDomains.schema(db); const domains = new ResourceDomains(() => 80000);
+      domains.define(db, { id: domain, name: "shared", capacity }, 80000);
+      domains.bindHost(db, { hostId: host, domainId: domain }, 80000);
+    });
+    const workers = (reverse ? [domain, undefined] : [undefined, domain]).map(domain => {
+      const worker = new Worker(new URL("./capacity-worker.js", import.meta.url), { workerData: { path, host, id: randomUUID(), domain } });
+      t.after(async () => { await worker.terminate(); });
+      let ready!: () => void, done!: (value: string) => void;
+      const started = new Promise<void>(resolve => { ready = resolve; });
+      const result = new Promise<string>((resolve, reject) => { done = resolve; worker.on("error", reject); });
+      worker.on("message", (message: string) => message === "ready" ? ready() : done(message));
+      return { worker, started, result };
+    });
+    await Promise.all(workers.map(w => w.started));
+    for (const { worker } of workers) worker.postMessage("admit");
+    assert.deepEqual((await Promise.all(workers.map(w => w.result))).sort(), ["full", "reserved"]);
+    store.transaction(db => {
+      assert.deepEqual(ledger.used(db, host), size);
+      const view = new ResourceDomains(() => 80000).view(db, domain);
+      assert.deepEqual(view.reserved, size);
+      assert.equal(Number(db.prepare("SELECT count(*) AS n FROM machines").get()!.n) + view.reservations, 1);
+    });
   }
 });

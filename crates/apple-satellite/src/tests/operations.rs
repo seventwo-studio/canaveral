@@ -415,6 +415,54 @@ fn old_journal_without_operation_fields_loads_and_restart_cannot_dispatch() {
     assert!(w.requests.iter().all(|(name, _)| *name == "report"));
 }
 #[test]
+fn configurable_timeout_is_bound_to_lease_and_immutable_on_replay() {
+    for timeout in [1, 120_000, 3_600_000] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        s.state.direct = Some(Direct {
+            boot_attempt: uuid::Uuid::from_u128(3),
+            revision: 1,
+            bundle_digest: "a".repeat(64),
+            artifacts: vec![],
+            medium: None,
+            agent_socket: None,
+            ready: true,
+            withdrawn: false,
+            timings: Timings::default(),
+        });
+        let mut cmd = command();
+        cmd.assignment_id = s.assignment().unwrap().id;
+        cmd.lease_id = s.assignment().unwrap().lease_id;
+        cmd.member_id = s.assignment().unwrap().member_id;
+        cmd.timeout_ms = timeout;
+        let poll = |cmd: &OperationCommand| json!({"command":cmd,"lease":{"state":"ready","revision":1,"expiresAt":200.0,"controllerNow":100.0},"cancelRequested":false});
+        let start = clock::now().as_secs_f64();
+        assert_eq!(
+            s.accept_poll(poll(&cmd), start, None).unwrap_err(),
+            "missing guest session"
+        );
+        let operation = s.state.operations.current.as_ref().unwrap();
+        assert_eq!(operation.command.timeout_ms, timeout);
+        assert!(operation.deadline <= s.state.deadline + 0.001);
+        if timeout > 30_000 {
+            assert!(operation.deadline > start + 30.0);
+        }
+        s.accept_poll(poll(&cmd), start, None).unwrap();
+        cmd.timeout_ms = if timeout == 1 { 2 } else { timeout - 1 };
+        assert_eq!(
+            s.accept_poll(poll(&cmd), start, None).unwrap_err(),
+            "operation replay changed immutable request"
+        );
+        for invalid in [0, 3_600_001] {
+            cmd.timeout_ms = invalid;
+            assert_eq!(
+                s.accept_poll(poll(&cmd), start, None).unwrap_err(),
+                "operation launch binding mismatch"
+            );
+        }
+    }
+}
+#[test]
 fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
     let (_tmp, c) = fixture();
     let mut s = seeded(&c);

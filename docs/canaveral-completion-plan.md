@@ -27,7 +27,14 @@ A macOS workspace and an iOS simulator may be separately leased resources. The d
 - Complete fair waiting/admission behavior without allowing a busy agent to monopolize the pool or silently moving an existing lease. Queued requests must have a defined deadline, cancellation and idempotent recovery contract.
 - Keep reservations until positive owned cleanup. Expiry revokes access and stops owned execution; an unavailable host or unknown stop cannot prove capacity is free.
 
-The embedded host ledger already shares VM/image/inference reservations. The Rust runner domain ledger shares Linux leases and model jobs. Binding both to one physical inventory, rather than relying on duplicate operator declarations, remains delivery work.
+The embedded host ledger shares VM/image/inference reservations. The Rust runner
+domain ledger shares Linux leases and model jobs. An explicit immutable
+[host/domain binding](model-controller.md#reservations-and-limits) makes both ledgers
+enforce one effective CPU/RAM/disk budget, including existing held reservations and
+host headroom. A runner identity keeps its domain across adapters and enrollment
+generations. Operators must still identify shared physical hardware correctly:
+this binding does not discover duplicate enrollment, attest hardware identity or
+provide accelerator accounting.
 
 ## Delivery sequence
 
@@ -37,7 +44,52 @@ The embedded host ledger already shares VM/image/inference reservations. The Rus
 4. Validate the supported paths on specifically authorized disposable targets, including recovery and concurrency under mixed workloads.
 5. Ship the supported matrix and precise remaining gates. Keep the Docker controller externally updated and avoid interrupting active work during runtime updates.
 
-## Current gates
+## Work packages and dependencies
+
+Implement and review each package on the integration branch before moving to its
+dependent acceptance work. Track delivery under [ST-279](https://linear.app/seventwo/issue/ST-279);
+the linked issues retain native acceptance rather than closing when fixtures pass.
+
+1. **One budget for mixed workloads** ([ST-397](https://linear.app/seventwo/issue/ST-397)).
+   Bind the host and runner accounting domains explicitly, include existing held
+   reservations in both directions, retain host headroom, and prove concurrent
+   VM/image/inference/lease admission cannot overspend. Duplicate physical enrollment
+   and accelerator accounting still need explicit treatment; a binding is an
+   operator declaration, not hardware attestation.
+2. **Usable bounded builds** ([ST-406](https://linear.app/seventwo/issue/ST-406),
+   [ST-407](https://linear.app/seventwo/issue/ST-407),
+   [ST-408](https://linear.app/seventwo/issue/ST-408)). Keep readiness dependent on
+   current execution eligibility, bound guest probes even when descendants retain
+   output pipes, and permit explicit build timeouts within remaining lease authority.
+   Provide cancellable read-only SDK waits for readiness, command receipts and
+   positive cleanup. Unknown receipts must stay distinct from success or safe retry.
+3. **Workspace data and interactive execution** ([ST-383](https://linear.app/seventwo/issue/ST-383)).
+   Extend the Linux runner wire and satellite together for streamed files/artifacts
+   and PTYs, with scoped paths, bounded buffers, durable operation identity and
+   interruption recovery. Existing generic session APIs do not establish this
+   runner binding. Qualify macOS workspace execution separately against its native
+   bridge and signing/toolchain requirements.
+4. **Mobile and real models** ([ST-385](https://linear.app/seventwo/issue/ST-385),
+   [ST-367](https://linear.app/seventwo/issue/ST-367)). Connect exact owned device
+   identities and independently enforced deadlines before admitting ordinary
+   consumer execution. Prove model fit, cancellation and shared headroom with real
+   workloads; add accelerator admission before advertising GPU guarantees.
+5. **Distributed recovery and release** ([ST-392](https://linear.app/seventwo/issue/ST-392),
+   [ST-394](https://linear.app/seventwo/issue/ST-394)). On authorized disposable
+   targets, exercise two independent runners through TLS, mixed-workload contention,
+   partition past expiry, restart, retained unknown reservations and fresh-lease
+   isolation. Verify install, upgrade, rollback and restore before advertising the
+   supported matrix. Queue fairness remains a separate admission contract with
+   cancellation, deadline and durable recovery; placement balancing alone cannot
+   satisfy it.
+
+Packages 1 and 2 can progress independently. Package 3 needs the lifecycle and SDK
+contracts in package 2; packages 3 and 4 need the accounting in package 1 for mixed
+workload acceptance. Package 5 depends on the specific paths it advertises, not on
+fixture counts. Prepare exact target identities, resource limits, commands and
+cleanup procedures before requesting native execution authorization.
+
+## Execution gates
 
 Ordinary TypeScript hosts still reject consumer execution declarations. Mobile providers reject leased execution pending independent deadline/cleanup support. The Linux runner controller and generic host lease paths have different execution bindings and must not be enabled through a permissive configuration flag. The embedded inference API is an administrator API; scoped application model jobs are a separate path, not a general model-session lease.
 

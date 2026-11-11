@@ -1,3 +1,4 @@
+import { ResourceDomains } from "../../src/resource-domains.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -306,4 +307,19 @@ test("two independent SQLite admission workers cannot spend one remaining budget
   }));
   assert.deepEqual((await Promise.all(runs)).sort(), [200, 409]);
   assert.deepEqual(f.used(), { cpu: 4, memoryMiB: 4096, diskGiB: 2 });
+});
+
+test("inference admission and runner domain reservations share the bound physical budget", t => {
+  for (const inferenceFirst of [true, false]) {
+    const f = fixture(t), domains = new ResourceDomains(() => 1000), domain = randomUUID();
+    f.store.transaction(db => {
+      ResourceDomains.schema(db); domains.define(db, { id: domain, name: "shared", capacity: size }, 1000);
+      domains.bindHost(db, { hostId: f.hostId, domainId: domain }, 1000);
+    });
+    const reserve = () => f.store.transaction(db => domains.reserve(db, { id: randomUUID(), domain, kind: "model-job", owner: randomUUID(), resources: size }, 1000));
+    if (inferenceFirst) { f.create(); assert.equal(reserve(), false); }
+    else { assert.equal(reserve(), true); assert.throws(() => f.create(), status(409)); }
+    assert.deepEqual(f.used(), size);
+    assert.deepEqual(f.store.transaction(db => domains.view(db, domain).reserved), size);
+  }
 });

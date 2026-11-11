@@ -218,8 +218,9 @@ the lease, and never reconnects or executes. Existing journals default to an emp
 operation lane; their existing launch-intent recovery still prevents execution.
 
 Commands use `/workspace`, empty supplied environment, closed stdin, no PTY and a
-maximum 30000ms timeout shortened by remaining guest authority (including its 2s
-margin). The controller start window is checked against request-send time, so reply
+requested timeout from 1 to 3600000ms (default 30000ms), shortened by remaining
+guest authority at dispatch (including its 2s margin). The timeout is immutable
+on replay, and later lease renewal does not extend an active command deadline. The controller start window is checked against request-send time, so reply
 latency cannot extend it. Output sequence and final observed byte counts must agree.
 Capture totals at most 262144 bytes across stdout/stderr. Initial credit is 65536
 bytes; consumed output replenishes equal credit even after capture fills. Receipts

@@ -28,7 +28,7 @@ const { created, lease } = await client.acquireLease(request);
 ## Identity and mutations
 
 The caller owns every mutation UUID and persists the complete request before dispatch.
-The SDK generates no identifiers and never retries, polls, rotates or renews. Request
+The low-level HTTP SDK generates no identifiers and never retries, polls, rotates or renews implicitly. Request
 bodies are serialized deterministically, so an explicit replay with the same object sends
 identical bytes (`created` is false for a 200 replay). For renewal, replay with the original
 `expectedRevision`. Unknown request fields, malformed UUIDs and bodies over 1 MiB are
@@ -104,3 +104,61 @@ evidence. Application clients have no operation methods; only the current scoped
 key may submit or inspect, including old receipts after lease termination. Treat
 command arguments and returned output as private. These methods have controller
 and fake-peer fixture coverage, without native execution acceptance.
+
+## Explicit bounded observation
+
+The higher-level `LeaseClient` from `canaveral-machines/sdk` adds opt-in,
+read-only waits. Existing acquisition, inspection and mutation methods still
+make one request and never poll implicitly.
+
+- `waitUntilReady({ timeoutMs, member?, requiredCapabilities?, intervalMs?, signal? })`
+  requires lifecycle `ready`, one matching member with `ready: true`, and every
+  requested capability on both the lease and member. Inventory alone is insufficient.
+  Request those capabilities during acquisition too: member readiness reflects the
+  acquisition contract, while capability flags describe supported access.
+  A failed, released or expired lease raises `lease_terminal`.
+- `waitForOperation(operationId, options)` returns the first non-queued receipt.
+  Check its state: `failed` and `unknown` are terminal observations, not successful
+  builds. It never submits or replays the operation.
+- `waitForCleanup(options)` requires a terminal lease and `cleanup.state: "complete"`.
+  A released lease with pending cleanup continues waiting; blocked cleanup raises
+  `cleanup_blocked`. This method does not initiate release.
+
+`timeoutMs` is a required total observation budget, up to 300000 ms. Each HTTP
+read is capped by the remaining budget and the client's request timeout. The
+poll interval defaults to 1000 ms and must be at least 100 ms. Read failures stop
+immediately, including service errors marked retryable. An AbortSignal interrupts
+both a pending read and the interval delay. `wait_timeout` and `wait_aborted` stop
+observation only; they neither stop remote work nor prove cleanup. These errors
+retain the lease or operation UUID and expose no mutation outcome claim.
+
+A Linux build workflow can compose these methods with caller-persisted requests:
+
+```ts
+// All IDs and complete mutation requests below must already be persisted.
+const { lease: acquired } = await application.acquireLease(acquireRequest);
+const scoped = await application.scopedLease(acquired.id);
+// For cross-process recovery, explicitly rotate and privately save the credential
+// before constructing LeaseClient, instead of using this convenience exchange.
+try {
+  await scoped.waitUntilReady({ timeoutMs: 120000, requiredCapabilities: ["command"] });
+  await scoped.createOperation(buildRequest); // e.g. shell argv plus timeoutMs: 300000
+  const receipt = await scoped.waitForOperation(buildRequest.id, { timeoutMs: 300000 });
+  if (receipt.state !== "succeeded") throw new Error("Build completion was not confirmed");
+  // On a provider with accepted files support, use downloadToFile with a persisted
+  // session UUID to retrieve and verify the artifact before releasing the lease.
+} finally {
+  await scoped.release(releaseRequest);
+  await scoped.waitForCleanup({ timeoutMs: 120000 });
+}
+```
+
+Persist acquisition and release intent before acquiring. Credential rotation has
+its own unknown-outcome contract: if `scopedLease` fails, recover through the
+application client, which can inspect or release the known lease. Never repeat
+rotation automatically. A release failure also requires inspection of the original
+mutation; the example does not retry it. The bounded Linux shell accepts an optional
+integer `arguments.timeoutMs` from 1 to 3600000; omission uses 30000 ms. The lease's
+authorization deadline still limits execution. Generic providers may reject this
+Linux-specific argument. Observations and loopback tests do not establish native
+build, file-transfer or reclamation acceptance.

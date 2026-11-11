@@ -1013,7 +1013,7 @@ impl Satellite {
             || c.boot_attempt != d.boot_attempt
             || c.bundle_digest != d.bundle_digest
             || !c.start_before.is_finite()
-            || c.timeout_ms != 30000
+            || !(1..=3_600_000).contains(&c.timeout_ms)
             || !d.ready
             || d.withdrawn
             || a.image.backend != "appleVirtualization"
@@ -1028,7 +1028,10 @@ impl Satellite {
             .as_ref()
             .filter(|o| o.command.id == c.id)
         {
-            if op.command.arguments != c.arguments || op.command.start_before != c.start_before {
+            if op.command.arguments != c.arguments
+                || op.command.start_before != c.start_before
+                || op.command.timeout_ms != c.timeout_ms
+            {
                 return Err("operation replay changed immutable request");
             }
             return Ok(());
@@ -1047,7 +1050,7 @@ impl Satellite {
         if remaining_start <= 0.0 {
             return Err("operation start expired");
         }
-        let timeout = guest::remaining_ms(self.state.deadline, now)?.min(30000);
+        let timeout = guest::remaining_ms(self.state.deadline, now)?.min(c.timeout_ms);
         self.state
             .operations
             .receive(c, now + timeout as f64 / 1000.0 + 2.0)?;

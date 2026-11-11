@@ -2,6 +2,7 @@
  * No method retries input, reconnects, renews a lease implicitly, or rotates a key implicitly.
  */
 import { createHash, randomBytes } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { constants, openSync, fstatSync, readSync, closeSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import type { Duplex } from 'node:stream';
@@ -9,7 +10,7 @@ import {
   ConsumerClient as HttpConsumerClient, LeaseClient as HttpLeaseClient, Transport,
   ConsumerError, ConsumerConfigurationError, ConsumerProtocolError,
 } from './consumer-client.ts';
-import type { ApplicationClientOptions, LeaseClientOptions, ClientOptions, RenewRequest, ReleaseRequest } from './consumer-client.ts';
+import type { ApplicationClientOptions, LeaseClientOptions, ClientOptions, RenewRequest, ReleaseRequest, ReadOptions, Lease, Capability } from './consumer-client.ts';
 import { TerminalClient } from './terminal-sdk.ts';
 import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
@@ -306,11 +307,12 @@ export function operationRequest(request: DurableOperationRequest): DurableOpera
   if (!record(request) || Object.keys(request).sort().join(',') !== 'action,arguments,id,member' || !validText(request.member) || !request.member || request.member.length > 100 || !record(request.arguments)) throw new ConsumerConfigurationError('Invalid durable operation.');
   if (typeof request.action !== 'string' || !Object.hasOwn(fields, request.action)) throw new ConsumerConfigurationError('Unsupported operation action.');
   const id = identifier(request.id), expected = fields[request.action], args = request.arguments;
-  const allowed = [...(expected ?? []), ...(['push', 'pull', 'list-files'].includes(request.action) ? ['app'] : [])];
+  const allowed = [...(expected ?? []), ...(request.action === 'shell' ? ['timeoutMs'] : []), ...(['push', 'pull', 'list-files'].includes(request.action) ? ['app'] : [])];
   if (!expected || !expected.every(k => Object.hasOwn(args, k)) || Object.keys(args).some(k => !allowed.includes(k))) throw new ConsumerConfigurationError('Invalid operation arguments.');
   const invalid = () => { throw new ConsumerConfigurationError('Invalid operation argument.'); };
   for (const [key, value] of Object.entries(args)) {
-    if (key === 'session') identifier(value);
+    if (key === 'timeoutMs') { if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 3600000) invalid(); }
+    else if (key === 'session') identifier(value);
     else if (key === 'offset') { if (!Number.isSafeInteger(value) || Number(value) < 0) invalid(); }
     else if (['rows', 'cols', 'durationMs', 'x', 'y', 'toX', 'toY'].includes(key)) {
       const dimensions = ['rows', 'cols'].includes(key), duration = key === 'durationMs';
@@ -337,6 +339,49 @@ function boundSession(value: unknown, leaseId: string, id: string): AccessSessio
       !['pty', 'upload', 'download', 'display', 'accessibility'].includes(String(value.capability))) throw new Error('session');
   identifier(value.generation); return value as AccessSession;
 }
+export interface WaitOptions {
+  /** Total observation budget, including each HTTP read. Required; at most five minutes. */
+  timeoutMs: number;
+  /** Delay between successful nonterminal observations. Default 1000 ms, minimum 100 ms. */
+  intervalMs?: number;
+  signal?: AbortSignal;
+}
+export interface ReadyOptions extends WaitOptions { member?: string; requiredCapabilities?: Capability[] }
+/** Observation stopped; this never asserts that a lease or command was cancelled. */
+export class ConsumerWaitError extends ConsumerError {
+  constructor(code: 'wait_timeout' | 'wait_aborted' | 'lease_terminal' | 'cleanup_blocked', requestId: string) {
+    const messages = {
+      wait_timeout: 'Observation deadline reached. Inspect the original resource before taking further action.',
+      wait_aborted: 'Observation cancelled. The remote resource was not cancelled.',
+      lease_terminal: 'The lease terminated before readiness was observed.',
+      cleanup_blocked: 'Owned cleanup is blocked; capacity reclamation is not confirmed.',
+    };
+    super('ConsumerWaitError', messages[code], code, { requestId });
+  }
+}
+async function observe<T>(id: string, options: WaitOptions, read: (options: ReadOptions) => Promise<T>, done: (value: T) => boolean): Promise<T> {
+  timeout(options.timeoutMs);
+  const interval = options.intervalMs ?? 1000;
+  if (!Number.isInteger(interval) || interval < 100 || interval > 300000) throw new ConsumerConfigurationError('Polling interval must be 100 to 300000 milliseconds.');
+  if (options.signal?.aborted) throw new ConsumerWaitError('wait_aborted', id);
+  const deadline = performance.now() + options.timeoutMs, controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  const stopped = () => {
+    if (options.signal?.aborted) throw new ConsumerWaitError('wait_aborted', id);
+    if (controller.signal.aborted || performance.now() >= deadline) throw new ConsumerWaitError('wait_timeout', id);
+  };
+  try {
+    for (;;) {
+      stopped();
+      const value = await read({ timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), signal });
+      stopped();
+      if (done(value)) return value;
+      await delay(Math.min(interval, Math.max(1, deadline - performance.now())), undefined, { signal });
+    }
+  } catch (error) { stopped(); throw error; }
+  finally { clearTimeout(timer); }
+}
 export class LeaseClient {
   readonly leaseId: string;
   readonly transport: Transport;
@@ -346,7 +391,29 @@ export class LeaseClient {
   }
   constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); }
   get id(): string { return this.leaseId; }
-  inspect() { return this.#http.inspect(); }
+  inspect(options?: ReadOptions) { return this.#http.inspect(options); }
+  /** Explicit read-only polling; never acquires, renews, releases or rotates. */
+  waitUntilReady(options: ReadyOptions): Promise<Lease> {
+    const member = options.member ?? 'primary', required = options.requiredCapabilities ?? [];
+    if (!validText(member) || !member || member.length > 100 || !Array.isArray(required) || required.some(c => !['command', 'pty', 'files', 'screenshot', 'displayStream', 'input', 'hierarchy'].includes(c)) || new Set(required).size !== required.length) throw new ConsumerConfigurationError('Invalid readiness requirements.');
+    return observe(this.id, options, read => this.inspect(read), lease => {
+      if (['failed', 'released', 'expired'].includes(lease.state)) throw new ConsumerWaitError('lease_terminal', this.id);
+      const selected = lease.members.filter(m => m.name === member);
+      return lease.state === 'ready' && selected.length === 1 && selected[0]!.ready === true && record(selected[0]!.capabilities) && required.every(c => lease.capabilities[c] === true && (selected[0]!.capabilities as Record<string, unknown>)[c] === true);
+    });
+  }
+  /** Returns only after a terminal lease has positive cleanup completion. Does not release it. */
+  waitForCleanup(options: WaitOptions): Promise<Lease> {
+    return observe(this.id, options, read => this.inspect(read), lease => {
+      if (lease.cleanup.state === 'blocked') throw new ConsumerWaitError('cleanup_blocked', this.id);
+      return ['failed', 'released', 'expired'].includes(lease.state) && lease.cleanup.state === 'complete';
+    });
+  }
+  /** Returns a terminal receipt, including failed or unknown; callers must inspect state. */
+  waitForOperation(operationId: string, options: WaitOptions): Promise<DurableOperation> {
+    const id = identifier(operationId);
+    return observe(id, options, read => this.operation(id, read), operation => operation.state !== 'queued');
+  }
   renew(request: RenewRequest) { return this.#http.renew(request); }
   release(request: ReleaseRequest) { return this.#http.release(request); }
   #operation(value: unknown, id: string): DurableOperation {
@@ -363,8 +430,8 @@ export class LeaseClient {
     try { const operation = this.#operation(json, body.id); if (operation.member !== body.member) throw new Error('member'); return { created: status === 201, operation }; }
     catch { throw new ConsumerProtocolError('Invalid operation receipt.', 'response_invalid', status, { requestId: body.id, outcome: 'unknown' }); }
   }
-  async operation(operationId: string): Promise<DurableOperation> {
-    const id = identifier(operationId), { status, json } = await this.transport.call('GET', `/v1/leases/${this.id}/operations/${id}`, undefined, [200], false);
+  async operation(operationId: string, options?: ReadOptions): Promise<DurableOperation> {
+    const id = identifier(operationId), { status, json } = await this.transport.call('GET', `/v1/leases/${this.id}/operations/${id}`, undefined, [200], false, undefined, options);
     try { return this.#operation(json, id); } catch { throw new ConsumerProtocolError('Invalid operation receipt.', 'response_invalid', status, { requestId: id }); }
   }
   async #sessionCall(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string, capability?: string, member?: string): Promise<AccessSession> {

@@ -111,9 +111,9 @@ export function refreshLegacyLeases(db: DatabaseSync, now: number): void {
     const consumer = db.prepare("SELECT revoked FROM consumers WHERE id=?").get(row.consumer);
     if (!consumer || consumer.revoked) { endLegacyLease(db, row, "released", now); continue; }
     if (now >= row.expires) { endLegacyLease(db, row, "expired", now); continue; }
-    const members = db.prepare("SELECT m.*,h.seen FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=?").all(row.id);
+    const members = db.prepare("SELECT m.*,h.seen,h.enabled,h.offer AS host_offer FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=?").all(row.id);
     if (members.some(m => m.observed === "error" || m.preparation_state === "failed") || (row.state === "provisioning" && now >= row.provision_deadline)) { endLegacyLease(db, row, "failed", now); continue; }
-    if (row.state === "provisioning" && members.length && members.every(m => observedReady(db, m, now))) db.prepare("UPDATE leases SET state='ready',revision=revision+1 WHERE id=?").run(row.id);
+    if (row.state === "provisioning" && members.length && members.every(m => legacyMachineReady(db, m, now))) db.prepare("UPDATE leases SET state='ready',revision=revision+1 WHERE id=?").run(row.id);
   }
   refreshLeaseCleanup(db, now);
   refreshConsumerOperations(db, now);
@@ -124,10 +124,10 @@ export function legacyLeaseAssignment<T extends { id: string }>(db: DatabaseSync
   return row ? { ...machine, lease: { id: row.id, state: row.state, revision: row.revision, authorizationDeadline: row.expires, controllerNow: now, cleanup: row.cleanup } } : machine;
 }
 export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: number) {
-  const members = db.prepare("SELECT m.*,h.seen,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
+  const members = db.prepare("SELECT m.*,h.seen,h.enabled,h.offer AS host_offer,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
     const cleanup = leaseCleanup(db, String(m.id));
     return { name: String(m.member_name), machineId: String(m.id), state: now - Number(m.seen) < 30 ? String(m.observed) : "unknown",
-      ready: ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
+      ready: ACTIVE.includes(row.state) && legacyMachineReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
       ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
   });
   return { id: row.id, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,

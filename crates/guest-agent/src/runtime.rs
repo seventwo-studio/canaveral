@@ -237,6 +237,51 @@ const TOOL_PROBES: [(&str, &str, &[&str]); 3] = [
     ("git", "/usr/bin/git", &["--version"]),
     ("node", "/usr/local/bin/node", &["--version"]),
 ];
+/// Both leader completion and pipe EOF must arrive within the probe budget.
+/// A descendant retaining stdout must not turn readiness into an unbounded read.
+fn collect_probe_output(
+    mut stdout: impl Read + AsRawFd,
+    mut exited: impl FnMut() -> Result<Option<bool>>,
+    timeout_ms: u64,
+) -> Result<String> {
+    nonblock(stdout.as_raw_fd())?;
+    let deadline = now().saturating_add(timeout_ms);
+    let mut output = Vec::new();
+    let mut eof = false;
+    let mut success = false;
+    loop {
+        if now() >= deadline {
+            return Err("tool probe timed out".into());
+        }
+        if !success {
+            match exited()? {
+                Some(false) => return Err("tool probe failed".into()),
+                Some(true) => success = true,
+                None => {}
+            }
+        }
+        if !eof {
+            let mut buffer = [0; 1024];
+            match stdout.read(&mut buffer) {
+                Ok(0) => eof = true,
+                Ok(n) => {
+                    if output.len() + n > 4096 {
+                        return Err("tool probe output exceeds limit".into());
+                    }
+                    output.extend_from_slice(&buffer[..n]);
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if success && eof {
+            return Ok(String::from_utf8(output)?);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
 fn probe_tools(launch: &Launch) -> Result<()> {
     for (name, path, args) in TOOL_PROBES {
         let mut child = Command::new(path)
@@ -246,34 +291,20 @@ fn probe_tools(launch: &Launch) -> Result<()> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        let start = now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                if !status.success() {
-                    return Err("tool probe failed".into());
-                }
-                let mut output = String::new();
-                child
-                    .stdout
-                    .take()
-                    .unwrap()
-                    .take(4096)
-                    .read_to_string(&mut output)?;
-                if !probe_matches(
-                    status.success(),
-                    &output,
-                    &launch.manifest.tool_versions[name],
-                ) {
-                    return Err("tool version mismatch".into());
-                }
-                break;
-            }
-            if now() - start >= 2000 {
-                child.kill()?;
-                child.wait()?;
-                return Err("tool probe timed out".into());
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        let stdout = child.stdout.take().ok_or("missing probe stdout")?;
+        let output = collect_probe_output(
+            stdout,
+            || Ok(child.try_wait()?.map(|status| status.success())),
+            2000,
+        );
+        if output.is_err() {
+            // An exited leader may already be reaped; Child::kill will not signal
+            // a reused PID. PID1 exits on probe failure, fencing the guest.
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
+        if !probe_matches(true, &output?, &launch.manifest.tool_versions[name]) {
+            return Err("tool version mismatch".into());
         }
     }
     Ok(())
@@ -755,6 +786,58 @@ mod tests {
         }
         assert_eq!(writer.bytes, frame);
         assert!(write_pending(&mut std::io::sink(), &[], &mut 0).is_err());
+    }
+    #[test]
+    fn probe_capture_requires_exit_and_eof() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"v24.11.0\n").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(
+            collect_probe_output(reader, || Ok(Some(true)), 1000).unwrap(),
+            "v24.11.0\n"
+        );
+
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+        assert_eq!(
+            collect_probe_output(reader, || Ok(None), 25)
+                .unwrap_err()
+                .to_string(),
+            "tool probe timed out"
+        );
+    }
+    #[test]
+    fn probe_exited_leader_with_inherited_stdout_is_bounded() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"v24.11.0\n").unwrap();
+        // Model an exited leader whose descendant still holds its stdout open.
+        assert_eq!(
+            collect_probe_output(reader, || Ok(Some(true)), 25)
+                .unwrap_err()
+                .to_string(),
+            "tool probe timed out"
+        );
+    }
+    #[test]
+    fn probe_drains_before_exit_and_rejects_excess_output() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(&[b'x'; 4097]).unwrap();
+        assert_eq!(
+            collect_probe_output(reader, || Ok(None), 1000)
+                .unwrap_err()
+                .to_string(),
+            "tool probe output exceeds limit"
+        );
+    }
+    #[test]
+    fn probe_rejects_failed_exit_without_waiting_for_stdout() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            collect_probe_output(reader, || Ok(Some(false)), 1000)
+                .unwrap_err()
+                .to_string(),
+            "tool probe failed"
+        );
     }
     #[test]
     fn exact_probe_lines() {
