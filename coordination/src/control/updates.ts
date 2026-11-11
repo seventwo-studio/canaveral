@@ -4,6 +4,8 @@ import { ServiceError, object, secret } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import { canonicalManifest, parseSignedRelease, verifyRelease } from "../updates/protocol.ts";
 import type { SignedRelease, Target } from "../updates/protocol.ts";
+import { componentFileSetDigest, componentTargetKey, parseComponentReport, parseComponentTarget } from '../updates/components.ts';
+import type { ComponentContext, ComponentReport, ComponentTarget } from '../updates/components.ts';
 import { RunnerEnrollment } from "../enrollment.ts";
 import { machineDigest } from "./machines.ts";
 import { requireAdmin } from "./contracts.ts";
@@ -17,7 +19,13 @@ const maxStorageBytes = 8 * 1024 * 1024 * 1024;
 const maxArtifactChunks = 8192;
 const terminal = ["succeeded", "rolledBack", "failed", "cancelled"] as const;
 export type UpdateState = "queued" | "draining" | "downloading" | "staged" | "activating" | "verifying" | "succeeded" | "rolledBack" | "failed" | "unknown" | "cancelled";
-export interface UpdateOptions extends ControlOptions { updatePublicKeys?: Record<string, string> }
+export interface ComponentEvidence {
+  /** Current complete target inventory from independently owned assignment/process records. */
+  targets(db: DatabaseSync, owner: { id: string; kind: TargetKind }, context: ComponentContext): readonly ComponentTarget[] | undefined;
+  /** Verify the positive acknowledgement through independent owned transport evidence. */
+  acknowledged(db: DatabaseSync, owner: { id: string; kind: TargetKind }, report: ComponentReport): boolean;
+}
+export interface UpdateOptions extends ControlOptions { updatePublicKeys?: Record<string, string>; componentEvidence?: ComponentEvidence }
 type TargetKind = "host" | "runner";
 type Row = Record<string, SQLOutputValue>;
 const refuse = (status = 400): never => { throw new ServiceError("Update request rejected.", status); };
@@ -40,7 +48,7 @@ function table(db: DatabaseSync, name: string): boolean { return !!db.prepare("S
 function authenticate(db: DatabaseSync, host: string, token: string): string {
   secret(token);
   if (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host)) return refuse(403);
-  const row = table(db, "hosts") ? db.prepare("SELECT credential FROM hosts WHERE id=?").get(host) : undefined;
+  const row = table(db, "hosts") ? db.prepare("SELECT credential FROM hosts WHERE id=? AND enabled=1").get(host) : undefined;
   const hash = machineDigest(token);
   if (!row || !equalSecret(String(row.credential), hash)) return refuse(401);
   return hash;
@@ -54,14 +62,21 @@ function envelope(db: DatabaseSync, id: string): SignedRelease {
 function wireRelease(release: SignedRelease): string {
   return JSON.stringify({ manifest: JSON.parse(canonicalManifest(release.manifest).toString("utf8")), keyId: release.keyId, signature: release.signature });
 }
-function jobView(row: Row) {
+function jobView(row: Row, db?: DatabaseSync) {
+  const plan = db?.prepare("SELECT request FROM update_component_plans WHERE job=?").get(row.id!);
+  const targets = plan ? (JSON.parse(String(plan.request)) as { targets: ComponentTarget[] }).targets : [];
+  const receipts = db?.prepare("SELECT target,state,request FROM update_component_reports WHERE job=? AND sequence IN (SELECT MAX(sequence) FROM update_component_reports WHERE job=? GROUP BY target)").all(row.id!, row.id!) ?? [];
   return { id: row.id, ...(row.target_kind === "host" ? { hostId: row.host } : { runnerId: row.host }), targetKind: row.target_kind, attemptId: row.attempt, state: row.phase, sequence: row.sequence,
     previousReleaseId: row.previous_release, installedReleaseId: row.installed_release, detail: row.detail,
-    components: JSON.parse(String(row.components)), createdAt: row.created, updatedAt: row.updated };
+    ...(db ? { componentTargets: targets.map(target => {
+      const receipt = receipts.find(r => r.target === componentTargetKey(target));
+      return { target, state: receipt?.state ?? 'pending', ...(receipt ? { receipt: JSON.parse(String(receipt.request)) } : {}) };
+    }) } : {}),
+    hostState: JSON.parse(String(row.components)).host === "ready" ? "succeeded" : row.phase, components: JSON.parse(String(row.components)), createdAt: row.created, updatedAt: row.updated };
 }
 function rolloutView(db: DatabaseSync, row: Row) {
   const request = JSON.parse(String(row.request)) as { id: string; releaseId: string; hostIds: string[]; runnerIds?: string[] };
-  return { ...request, jobs: db.prepare("SELECT * FROM host_update_jobs WHERE rollout=? ORDER BY host").all(row.id!).map(jobView) };
+  return { ...request, jobs: db.prepare("SELECT * FROM host_update_jobs WHERE rollout=? ORDER BY host").all(row.id!).map(job => jobView(job, db)) };
 }
 
 /** Every nonterminal phase, including queued and unknown, drains NEW placements.
@@ -88,6 +103,8 @@ export function initializeUpdates(db: DatabaseSync): void {
       UNIQUE(rollout,host,target_kind));
     CREATE UNIQUE INDEX IF NOT EXISTS host_update_one_active ON host_update_jobs(host,target_kind)
       WHERE phase NOT IN ('succeeded','rolledBack','failed','cancelled');
+    CREATE TABLE IF NOT EXISTS update_component_plans (job TEXT PRIMARY KEY, request TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS update_component_reports (job TEXT NOT NULL, sequence INTEGER NOT NULL, target TEXT NOT NULL, state TEXT NOT NULL, request TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(job,sequence));
     CREATE TABLE IF NOT EXISTS host_update_reports (
       job TEXT NOT NULL,sequence INTEGER NOT NULL,request TEXT NOT NULL,response TEXT NOT NULL,PRIMARY KEY(job,sequence));`);
 }
@@ -142,7 +159,7 @@ export function createModule(store: SqliteStore, options: UpdateOptions): Contro
     for (const job of db.prepare("SELECT * FROM host_update_jobs WHERE phase NOT IN ('succeeded','rolledBack','failed','cancelled','unknown')").all()) {
       let current = false;
       if (job.target_kind === "host") {
-        current = table(db, "hosts") && !!db.prepare("SELECT 1 FROM hosts WHERE id=? AND credential=?").get(job.host!, job.credential!);
+        current = table(db, "hosts") && !!db.prepare("SELECT 1 FROM hosts WHERE id=? AND credential=? AND enabled=1").get(job.host!, job.credential!);
         if (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(job.host!)) current = false;
       } else {
         const b = JSON.parse(String(job.binding)) as { controllerId: string; runnerId: string; generation: number; incarnationId: string };
@@ -319,6 +336,83 @@ export function createModule(store: SqliteStore, options: UpdateOptions): Contro
     db.prepare("INSERT INTO host_update_reports VALUES (?,?,?,?)").run(id, sequence, request, JSON.stringify(response));
     return response;
   }
+  function componentJob(db: DatabaseSync, req: ControlRequest, host: string, kind: TargetKind, context: ComponentContext) {
+    const authority = authorize(db, kind, host, req.token, req.body.binding);
+    const job = db.prepare("SELECT * FROM host_update_jobs WHERE id=? AND host=? AND target_kind=?").get(context.jobId, host, kind);
+    const registration = db.prepare("SELECT * FROM host_update_registrations WHERE host=? AND target_kind=?").get(host, kind);
+    if (!job || !registration || job.credential !== authority.credential || job.binding !== authority.binding || job.credential_revision !== authority.revision || job.installation !== registration.installation || registration.credential !== authority.credential || job.attempt !== context.attemptId || job.installation !== context.installationId || job.release !== context.releaseId || job.delivered !== 1 || JSON.parse(String(job.components)).host !== "ready") return refuse(409);
+    const other = active(db, host, kind);
+    if (other && other.id !== job.id) return refuse(409);
+    return job;
+  }
+  function inventory(db: DatabaseSync, host: string, kind: TargetKind, context: ComponentContext): ComponentTarget[] | undefined {
+    const values = options.componentEvidence?.targets(db, { id: host, kind }, context);
+    if (!values) return undefined;
+    const targets = values.map(parseComponentTarget);
+    if (targets.length > 1000 || new Set(targets.map(componentTargetKey)).size !== targets.length) return refuse(409);
+    return targets.sort((a,b) => componentTargetKey(a).localeCompare(componentTargetKey(b)));
+  }
+  function componentPlan(db: DatabaseSync, req: ControlRequest, host: string, kind: TargetKind) {
+    fields(req.body, ["jobId", "attemptId", "installationId", "releaseId", "targets", ...(kind === "runner" ? ["binding"] : [])]);
+    const context = { jobId: uuid(req.body.jobId), attemptId: uuid(req.body.attemptId), installationId: uuid(req.body.installationId), releaseId: uuid(req.body.releaseId) };
+    componentJob(db, req, host, kind, context);
+    if (!Array.isArray(req.body.targets) || req.body.targets.length > 1000) return refuse();
+    let targets: ComponentTarget[]; try { targets = req.body.targets.map(parseComponentTarget).sort((a,b) => componentTargetKey(a).localeCompare(componentTargetKey(b))); } catch { return refuse(); }
+    const current = inventory(db, host, kind, context);
+    if (!current) return { accepted: false, pending: true };
+    if (JSON.stringify(current) !== JSON.stringify(targets)) return refuse(409);
+    const release = verified(db, context.releaseId);
+    for (const t of targets) { try { componentFileSetDigest(release.manifest, t.component); } catch { return refuse(409); } }
+    const request = JSON.stringify({ ...context, targets });
+    const old = db.prepare("SELECT request FROM update_component_plans WHERE job=?").get(context.jobId);
+    if (old && old.request !== request) return refuse(409);
+    if (!old) {
+      db.prepare("INSERT INTO update_component_plans VALUES (?,?)").run(context.jobId, request);
+      if (targets.length) db.prepare("UPDATE host_update_jobs SET phase='unknown',updated=? WHERE id=?").run(store.clock(), context.jobId);
+    }
+    return { accepted: true };
+  }
+  function componentReport(db: DatabaseSync, req: ControlRequest, host: string, kind: TargetKind) {
+    const { binding: _binding, ...body } = req.body;
+    if (kind === "host" && _binding !== undefined) return refuse();
+    let receipt: ComponentReport; try { receipt = parseComponentReport(body); } catch { return refuse(); }
+    const job = componentJob(db, req, host, kind, receipt);
+    const plan = db.prepare("SELECT request FROM update_component_plans WHERE job=?").get(job.id!);
+    if (!plan) return refuse(409);
+    const planned = JSON.parse(String(plan.request)) as ComponentContext & { targets: ComponentTarget[] };
+    const current = inventory(db, host, kind, receipt);
+    if (!current || JSON.stringify(current) !== JSON.stringify(planned.targets)) return refuse(409);
+    const key = componentTargetKey(receipt.target);
+    if (!current.some(t => componentTargetKey(t) === key)) return refuse(409);
+    const release = verified(db, String(job.release));
+    if (componentFileSetDigest(release.manifest, receipt.target.component) !== receipt.fileSetDigest) return refuse(409);
+    const componentTarget = receipt.target;
+    if (componentTarget.component === "native-helper" && !release.manifest.files.some(f => f.component === "native-helper" && f.path === componentTarget.executable && f.executable)) return refuse(409);
+    const serialized = JSON.stringify(receipt);
+    const old = db.prepare("SELECT request,response FROM update_component_reports WHERE job=? AND sequence=?").get(job.id!, receipt.sequence);
+    if (old) { if (old.request !== serialized) return refuse(409); return JSON.parse(String(old.response)); }
+    const last = db.prepare("SELECT sequence FROM update_component_reports WHERE job=? ORDER BY sequence DESC LIMIT 1").get(job.id!);
+    if (receipt.sequence !== Number(last?.sequence ?? 0) + 1) return refuse(409);
+    const prior = db.prepare("SELECT state FROM update_component_reports WHERE job=? AND target=? ORDER BY sequence DESC LIMIT 1").get(job.id!, key);
+    if (receipt.state === "intent" ? !!prior : !prior || !["intent", "unknown"].includes(String(prior.state))) return refuse(409);
+    if (receipt.state === "adopted" && options.componentEvidence?.acknowledged(db, { id: host, kind }, receipt) !== true) return refuse(409);
+    // All effects and current authority checks occur under this same transaction.
+    db.prepare("INSERT INTO update_component_reports VALUES (?,?,?,?,?,?)").run(job.id!, receipt.sequence, key, receipt.state, serialized, '{}');
+    const components = JSON.parse(String(job.components)) as Record<string,string>;
+    let uncertain = false;
+    for (const component of ["guest", "native-helper"] as const) {
+      if (!release.manifest.files.some(f => f.component === component)) continue;
+      const targets = planned.targets.filter(t => t.component === component);
+      const states = targets.map(t => db.prepare("SELECT state FROM update_component_reports WHERE job=? AND target=? ORDER BY sequence DESC LIMIT 1").get(job.id!, componentTargetKey(t))?.state);
+      const adopted = states.filter(s => s === "adopted").length;
+      if (states.some(s => s !== "adopted")) uncertain = true;
+      components[component] = states.some(s => s === "unknown") ? "unknown" : targets.length && adopted === targets.length ? "ready" : adopted ? "partial" : states.includes("intent") ? "adopting" : component === "guest" ? "pendingGuestReceipt" : "pendingNativeReceipt";
+    }
+    db.prepare("UPDATE host_update_jobs SET components=?,phase=?,updated=? WHERE id=?").run(JSON.stringify(components), uncertain ? "unknown" : "succeeded", store.clock(), job.id!);
+    const response = { accepted: true, job: jobView(db.prepare("SELECT * FROM host_update_jobs WHERE id=?").get(job.id!)!, db) };
+    db.prepare("UPDATE update_component_reports SET response=? WHERE job=? AND sequence=?").run(JSON.stringify(response), job.id!, receipt.sequence);
+    return response;
+  }
   function download(db: DatabaseSync, req: ControlRequest, sha: string) {
     const allowed = new Set(["offset", "length", "jobId"]);
     for (const key of req.query.keys()) if (!allowed.has(key) || req.query.getAll(key).length !== 1) return refuse();
@@ -355,6 +449,8 @@ export function createModule(store: SqliteStore, options: UpdateOptions): Contro
       if (hostRoute) {
         const host = uuid(p[2]);
         if (req.method === "POST" && p.length === 5 && p[4] === "poll") return { body: poll(db, req, host, p[1] === "hosts" ? "host" : "runner") };
+        if (req.method === "POST" && p.length === 5 && p[4] === "component-plan") return { body: componentPlan(db, req, host, p[1] === "hosts" ? "host" : "runner") };
+        if (req.method === "POST" && p.length === 5 && p[4] === "component-report") return { body: componentReport(db, req, host, p[1] === "hosts" ? "host" : "runner") };
         if (req.method === "POST" && p.length === 5 && p[4] === "report") return { body: report(db, req, host, p[1] === "hosts" ? "host" : "runner") };
         return refuse(404);
       }
