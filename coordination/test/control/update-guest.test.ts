@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSy
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { signedGuestProvision, createGuestAdoptionService, createGuestAdoptionDriver } from '../../src/updates/guest.ts';
 import { canonicalManifest } from '../../src/updates/protocol.ts';
 import type { SignedRelease } from '../../src/updates/protocol.ts';
@@ -13,10 +14,10 @@ import { componentFileSetDigest } from '../../src/updates/components.ts';
 import { GuestAccess } from '../../src/guest/access.ts';
 import { createGuestServer } from '../../src/guest/server.ts';
 const hash = (v: Buffer) => createHash('sha256').update(v).digest('hex');
-function fixture() {
+function fixture(bundleArtifacts?: Array<{ path: string; content: string; mode: string }>) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'canaveral-update-guest-')));
   const source = join(root, 'source'), guest = join(root, 'guest'); mkdirSync(join(source, 'guest'), { recursive: true });
-  const artifacts = [
+  const artifacts = bundleArtifacts ?? [
     { path: '/opt/canaveral/server.mjs', content: 'server', mode: '0644' },
     { path: '/opt/canaveral/install.mjs', content: 'installer', mode: '0644' },
     ...['canaveral-mobile-native', 'canaveral-guest-agent'].map(name => ({ path: `/opt/canaveral/payload/${name}.0000.b64`, content: Buffer.from(name).toString('base64'), mode: '0644' })),
@@ -35,6 +36,28 @@ function fixture() {
   const request = { ...context, fileSetDigest: componentFileSetDigest(manifest, 'guest'), target };
   return { root, source, guest, request, target, release, keys, context, identity, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+test('signed guest provisioning accepts the actual builder module, schema and native payload closure', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'canaveral-built-guest-')));
+  try {
+    const helper = join(root, 'inert-helper.elf'), bytes = Buffer.alloc(64);
+    bytes.set([127, 69, 76, 70, 2, 1]); bytes.writeUInt16LE(2, 16); bytes.writeUInt16LE(183, 18);
+    writeFileSync(helper, bytes);
+    const builder = pathToFileURL(fileURLToPath(new URL('../../../../script/build_guest_bundle.mjs', import.meta.url))).href;
+    const { buildGuestBundle } = await import(builder);
+    const bundle = buildGuestBundle({ nativeHelper: helper, atspiHelper: helper, arch: 'arm64' });
+    const f = fixture(bundle.artifacts);
+    try {
+      for (const name of ['canaveral-mobile-native', 'canaveral-guest-agent']) writeFileSync(join(f.guest, 'bin', name), bytes, { mode: 0o755 });
+      const files = signedGuestProvision(f.release, f.keys, f.source, f.context, f.identity);
+      for (const name of ['consumer-api.openapi.json', 'session-control.schema.json', 'accessibility-snapshot.schema.json']) {
+        const path = '/opt/canaveral/schemas/' + name;
+        assert.equal(files.find(file => file.path === path)?.content, bundle.artifacts.find((file: { path: string }) => file.path === path).content);
+      }
+      const receipt = await createGuestAdoptionService(f.guest, f.target.bootId, () => true)!.acknowledge(f.request, false);
+      assert.equal(receipt?.state, 'adopted');
+    } finally { f.cleanup(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 test('real authenticated loopback acknowledges current provision; recovery never dispatches', async () => {
   const f = fixture(); const adoption = createGuestAdoptionService(f.guest, f.target.bootId, () => true)!;
   let dispatches = 0;

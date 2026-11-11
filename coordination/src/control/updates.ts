@@ -308,6 +308,10 @@ export function createModule(store: SqliteStore, options: UpdateOptions): Contro
     const request = JSON.stringify({ jobId: id, attemptId: attempt, sequence, state, ...(installed === undefined ? {} : { installedReleaseId: installed }), ...(body.detail === undefined ? {} : { detail: body.detail }) });
     const old = db.prepare("SELECT request,response FROM host_update_reports WHERE job=? AND sequence=?").get(id, sequence);
     if (old) { if (old.request !== request) return refuse(409); return JSON.parse(String(old.response)) as unknown; }
+    // Host readiness is final even while component uncertainty retains the job drain.
+    // Exact historical report replay above remains valid; only component receipts
+    // may resolve the remaining drain after the host has committed readiness.
+    if (JSON.parse(String(job.components)).host === "ready") return refuse(409);
     if (terminal.includes(job.phase as typeof terminal[number]) || sequence !== Number(job.sequence) + 1) return refuse(409);
     const next: Partial<Record<UpdateState, UpdateState>> = { queued: "draining", draining: "downloading", downloading: "staged", staged: "activating", activating: "verifying", verifying: "succeeded" };
     if (state === "succeeded") {

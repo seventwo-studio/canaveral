@@ -21,7 +21,7 @@ function artifacts(bytes: Buffer): HelperArtifact[] {
   if (!Array.isArray(values) || !values.length || values.length > 4096) throw new Error('Invalid guest bundle');
   const seen = new Set<string>();
   const result = values.map((v): HelperArtifact => {
-    if (!v || Object.keys(v).sort().join() !== 'content,mode,path' || typeof v.path !== 'string' || !/^\/opt\/canaveral\/(?:server\.mjs|install\.mjs|modules\/[a-zA-Z0-9_./-]+\.mjs|payload\/[a-zA-Z0-9_.-]+\.b64)$/.test(v.path) || v.path.split('/').some((p: string) => p === '.' || p === '..') || typeof v.content !== 'string' || !['0644', '0755'].includes(v.mode) || seen.has(v.path)) throw new Error('Unsupported guest bundle artifact');
+    if (!v || Object.keys(v).sort().join() !== 'content,mode,path' || typeof v.path !== 'string' || !/^\/opt\/canaveral\/(?:server\.mjs|install\.mjs|modules\/[a-zA-Z0-9_./-]+\.mjs|payload\/[a-zA-Z0-9_.-]+\.b64|schemas\/(?:consumer-api\.openapi|session-control\.schema|accessibility-snapshot\.schema)\.json)$/.test(v.path) || v.path.split('/').some((p: string) => p === '.' || p === '..') || typeof v.content !== 'string' || !['0644', '0755'].includes(v.mode) || seen.has(v.path)) throw new Error('Unsupported guest bundle artifact');
     seen.add(v.path); return { path: v.path, content: v.content, mode: v.mode };
   });
   if (!seen.has('/opt/canaveral/server.mjs') || !seen.has('/opt/canaveral/install.mjs')) throw new Error('Incomplete Linux provisioning bundle');

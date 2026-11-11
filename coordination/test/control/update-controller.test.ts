@@ -347,6 +347,16 @@ test('component ledger requires independent evidence, exact inventory, ordered r
   ack = false; await assert.rejects(send(2, 'adopted'), status(409));
   ack = true; const partial = await send(2, 'adopted'); assert.equal(partial.job.components.guest, 'partial'); assert.equal(partial.job.components['native-helper'], 'pendingNativeReceipt');
   await send(3, 'intent', two); await send(4, 'unknown', two); assert.equal(f.drainCount(), 1);
+  const held = f.phase(job.id);
+  for (const [state, installedReleaseId] of [['rolledBack', f.previous], ['unknown', undefined], ['verifying', undefined], ['succeeded', release.manifest.releaseId]] as const) {
+    await assert.rejects(f.report(job, n + 1, state, installedReleaseId === undefined ? {} : { installedReleaseId }), status(409));
+    assert.deepEqual(f.phase(job.id), held);
+    assert.equal(f.drainCount(), 1);
+  }
+  const replay = await f.report(job, n, 'succeeded', { installedReleaseId: release.manifest.releaseId });
+  assert.equal(replay.accepted, true);
+  assert.deepEqual(f.phase(job.id), held);
+  assert.equal(f.drainCount(), 1);
   targets = [one, { ...two, generation: 2 }]; await assert.rejects(send(5, 'adopted', two), status(409));
   targets = [one, two]; const done = await send(5, 'adopted', two); assert.equal(done.job.components.guest, 'ready'); assert.equal(done.job.componentTargets.length, 2); assert.equal(f.drainCount(), 0);
   f.store.transaction(db => db.prepare('UPDATE hosts SET credential=? WHERE id=?').run('c'.repeat(64), f.host));
