@@ -15,6 +15,7 @@ export interface GuestServerServices {
   control(action: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
   download(path: string): Promise<VerifiedDownload & { identity: string }>;
   upload(path: string, reader: ByteReader, size: number, authorized: () => boolean): Promise<{ uploaded: number; durable: true }>;
+  adoption?: import("../updates/guest.ts").GuestAdoptionService;
   ready(): boolean;
   close?(): Promise<void>;
 }
@@ -150,13 +151,21 @@ export function createGuestServer(options: GuestServerOptions): Server {
         if (typeof value.action !== "string") throw new ServiceError("Invalid guest action.", 400);
         const args = object(value.arguments ?? {}), action = value.action;
         if (options.mode === "headless" && GRAPHICAL.has(action)) throw new ServiceError("This headless guest has no graphical service.", 409, { code: "capability_unsupported" });
-        if (action === "health") { reply(response, { ready: options.services.ready(), durableWrites: true, mode: options.mode }); return; }
+        if (action === "update-acknowledge" || action === "update-inspect") {
+          const adoption = options.services.adoption;
+          if (!adoption) throw new ServiceError("Guest provision adoption is unavailable.", 409, { code: "capability_unsupported" });
+          const result = await adoption.acknowledge(args, action === "update-inspect");
+          reply(response, result ? { ...result } : { absent: true }); return;
+        }
+        if (action !== "health" && options.services.adoption && !options.services.adoption.admitted()) throw new ServiceError("Guest provision admission is fenced.", 409);
+        if (action === "health") { reply(response, { ready: options.services.ready() && (!options.services.adoption || options.services.adoption.admitted()), durableWrites: true, mode: options.mode }); return; }
         const execute = async () => { if (!live()) throw new ServiceError("Guest request ended before dispatch.", 410); dispatched = true; return options.services.control(action, args); };
         // Every terminal has its own worker lane. UI capture cannot hold terminal traffic.
         const work = action.startsWith("shell-") ? execute() : effects.then(execute);
         if (!action.startsWith("shell-")) effects = work.catch(() => {});
         const result = await work; if (live()) reply(response, result); return;
       }
+      if (raw === "/file" && options.services.adoption && !options.services.adoption.admitted()) throw new ServiceError("Guest provision admission is fenced.", 409);
       if (raw === "/file" && request.method === "PUT") {
         const size = length(request), path = pathHeader(request); dispatched = true;
         const result = await options.services.upload(path, new BodyReader(request, size), size, live);
