@@ -23,7 +23,7 @@ The protocol limits canonical manifest bytes to 512 KiB and files to 10,000. Con
 
 ## Build a release offline
 
-Use the repository's installed Node 24.11+ tooling and the pinned Rust 1.99.1 toolchain to compile and admit the runtime first. Assembly executes no compiler, downloaded binary or packaged code. The recipe records declared toolchain/source evidence; assembly alone does not establish dependency provenance, a complete runtime dependency closure or native acceptance.
+Use the repository's installed Node 24.11+ tooling and the pinned Rust 1.99.1 toolchain to compile and admit the runtime first. Assembly executes no compiler, downloaded binary or packaged code. The recipe records declared toolchain/source evidence; assembly checks literal JavaScript module references against the exact packaged file set, but does not establish dependency provenance, computed-import closure or native acceptance. JavaScript sources are bounded to 16 MiB per module and 128 MiB aggregate. Builtins are allowed; unbundled bare dependencies and missing relative modules are rejected. Computed imports require separate entrypoint smoke tests and operator review. See [package checks](../script/package_checks.mjs) and [release assembly](../script/build_runtime_release.mjs).
 
 An explicit recipe lists every required module, package metadata, dependency, guest binary and native helper. Sources are relative to a dedicated input directory; output paths are relative to the release root. This minimal shape illustrates the recipe:
 
@@ -109,7 +109,26 @@ Use disjoint private locations, for example:
 
 List every credential, VM/provider and mutable state root in `protectedPaths`; the manager rejects overlap with either code or update-state roots. Unix update storage must be owned by the service account and private. Windows requires equivalent operator-provisioned account isolation/ACLs; portable mode checks do not establish Windows ACL acceptance.
 
-The operator's first-install adapter must expand the verified bundle into a fresh private tree at the exact manifest paths, with executable modes matching the manifest. It can then construct `UpdateStore({installationRoot,stateDirectory,trustedKeys,target,protectedPaths})` and call `await store.installInitial(signedRelease, expandedDirectory)`. That API verifies the signature, exact directory entries and each digest, stages/seals code, records the sequence and selects the initial active release. The upload bundle's content-addressed `artifacts/` directory is not an expanded release tree. No cross-platform service installer or standalone expansion/install command is supplied by the release CLI.
+The Unix bootstrap installer verifies the signed content-addressed bundle, rejects an inexact entry set, expands files with their declared executable modes and calls `UpdateStore.installInitial` to seal/select the baseline. It matches the current Linux/Darwin amd64/arm64 target; Windows installation is refused because ACL acceptance is unproven. Both installation and update-state roots must be absent, disjoint and below already private, owned parents. Existing or interrupted roots are retained and refused, never adopted or overwritten.
+
+Supply the protected existing host configuration with its current controller URL, persistent `stateDir` (or `agentStateDirectory`), pinned `updates.trustedKeys` and explicit `updates.protectedPaths`. Supply Node and the complete stable launcher module closure separately; bootstrap neither installs nor executes them. The stable tree must be private and owned by the invoking account; the Node executable must be protected, regular and owned by root or that account. Use normalized absolute paths without symlink ancestors, including the actual resolved path of Node.
+
+The `canaveral install` command accepts only the local flags below; controller/token flags are refused. From the built checkout:
+
+```sh
+node coordination/dist/src/cli.js install \
+  --bundle /private/build/new-release \
+  --host-config /etc/canaveral/host.json \
+  --installation /var/lib/canaveral-code \
+  --state /var/lib/canaveral-update-state \
+  --node /opt/canaveral-node/bin/node \
+  --launcher /opt/canaveral-bootstrap/updates/launcher.js \
+  --stable-root /opt/canaveral-bootstrap
+```
+
+Run only after the one-time service migration is authorized. Output is JSON containing installation/release IDs, roots and `service: {filename, content}`: a Linux systemd unit or Darwin launchd plist. Review it and install it separately under the owning service account. No service is installed, enabled or started; no credentials are minted and no enrollment/network request occurs. Generated definitions clear Node injection variables and disable automatic restart/keepalive and forced child killing. Service ownership, boot policy, shutdown and native admission still require operator acceptance. Failed/interrupted installation preserves reserved roots and identity for inspection; do not rerun with new identities or delete uncertain state.
+
+For embedding, the import-safe `installMain(argv)` API takes arguments excluding `install` and returns a process-style status. The lower-level `bootstrapInstall` API is in [bootstrap.ts](../coordination/src/updates/bootstrap.ts); argument/service behavior is in [install-cli.ts](../coordination/src/updates/install-cli.ts). The upload bundle's `artifacts/` directory is not itself an expanded runtime tree.
 
 Preserve the existing host identity and stop/idle proof during this one-time service migration. Verify that all workloads are positively stopped and no host operations remain in flight before changing process ownership. Do not use service termination as evidence that VMs stopped. Initialize a baseline whose entrypoint implements the launcher readiness contract. The shipped TypeScript CLI recognizes managed launch arguments and starts its fenced host mode; custom entrypoints must implement that contract themselves.
 
@@ -140,6 +159,14 @@ The launcher verifies the candidate immediately before execution and retains the
 | `guest` | Verified files staged; `pendingGuestReceipt` until guest application is positively acknowledged |
 | `native-helper` | Verified files staged; `pendingNativeReceipt` until the specific native adapter acknowledges adoption |
 
+Component plans and ordered receipts bind job, attempt, installation, release, signed component file-set digest and each concrete target. Guest identity includes machine, assignment, boot and generation; helper identity includes helper, signed executable path, instance and generation. The manager persists intent before dispatch and uses inspection-only recovery for interrupted/unknown adoption. The controller independently verifies the current target inventory and acknowledgement; a caller-supplied receipt alone cannot establish adoption.
+
+Rollout job views expose `hostState`, `components` and `componentTargets` separately. Target states are `pending`, `intent`, `adopted` or `unknown`. Component summaries can be `pendingGuestReceipt`/`pendingNativeReceipt`, `adopting`, `partial`, `ready` or `unknown`. Partial means some planned targets acknowledged; unknown means at least one uncertain target. Neither is fleet completion. Host `succeeded` does not establish component adoption. The default production controller has no guest/helper evidence verifier: those components remain pending. Fixture-injected drivers/verifiers do not enable live adoption. See the [strict component contract](../coordination/src/updates/components.ts), [durable manager](../coordination/src/updates/manager.ts) and [controller ledger](../coordination/src/control/updates.ts).
+
+The [guest mechanism](../coordination/src/updates/guest.ts) supports the signed headless Linux fresh/stopped cloud-init provisioning path, with exactly one nonexecutable signed guest file at `guest/bundle.json` in the existing helper-bundle format. It verifies provisioned modules and decoded helpers, binds the actual guest boot and persists an acknowledgement before admitting work. It does not rewrite a live guest or an existing stopped disk. Production wiring still needs an independent current machine/assignment/boot/generation inventory and controller evidence verifier; without them adoption remains pending.
+
+The [helper mechanism](../coordination/src/updates/native-helper.ts) selects a signed executable through a shared scoped transport selection at a confirmed closed boundary. Its owned local process/pipe nonce exchange establishes a local acknowledgement; spawning or exit alone does not. All external helper consumers must be stopped before using this mechanism. It does not establish remote controller evidence, platform code-signing admission or Windows support. After process loss, saved receipts alone cannot prove the current helper instance; inspection without proof retains uncertainty and never respawns/replays the attempt.
+
 Route guest assets through the existing provision/update mechanism after a separately confirmed idle/stop boundary. Never rewrite a running guest or reinterpret a host receipt as guest adoption. Registered Rust runner protocol support likewise requires each runtime's real lifecycle and readiness integration. An unsupported adapter stays pending/disabled and drained when uncertain; it must not manufacture readiness or no-workload proofs.
 
 ## Preserve state before installation or rollback
@@ -165,6 +192,7 @@ Record the exact source commit, signed release ID/digest, target installation ID
    ```sh
    node coordination/dist/src/cli.js --help
    node coordination/dist/src/updates/cli.js --help
+   node coordination/dist/src/cli.js install --help
    node --input-type=module -e 'await import("./coordination/dist/src/updates/launcher.js")'
    node coordination/dist/src/updates/cli.js --url https://controller.example.internal \
      --token-file /private/operator/admin.token rollouts status \

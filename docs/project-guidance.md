@@ -36,7 +36,7 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 - [orchestration](orchestration.md)
 - [power and recovery](power-and-recovery.md)
 - [running](running.md)
-- [managed runtime updates](runtime-updates.md)
+- [managed runtime updates](runtime-updates.md) (Unix offline bootstrap, generated service definitions, separate component receipts and operator acceptance; no automatic service installation)
 - [runner enrollment](runner-enrollment.md)
 - [Rust runner identity client](../crates/runner-client/README.md)
 - [Rust Apple satellite](../crates/apple-satellite/README.md)
@@ -54,6 +54,6 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 
 - [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
 
-- [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core, deterministic local bundle/initrd assembly and bootstrap source; satellite readiness and consumer commands fixture-covered; kernel/rootfs construction and native acceptance remain outstanding)
+- [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core, deterministic local bundle/initrd assembly, read-only digest preflight and bootstrap source; satellite readiness and consumer commands fixture-covered; kernel/rootfs construction and native acceptance remain outstanding)
 
 - [Native direct Linux boot](../VirtualMachines/Documentation/DirectBoot.md) (direct-kernel helper and relay fixtures; satellite integration and initrd assembly fixture-covered; production kernel/rootfs builds, artifact installation and native acceptance remain open)

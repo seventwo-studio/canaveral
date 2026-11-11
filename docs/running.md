@@ -9,6 +9,7 @@ Keep the production controller in Docker and update its immutable image through 
 | Target/path | Required boundary |
 | --- | --- |
 | Docker controller | Persistent SQLite/identity/credentials; externally selected image; no runtime self-update |
+| Unix initial managed installation | Offline verified expansion on current Linux/Darwin amd64/arm64; fresh private roots; generated service definition only |
 | Linux host, libvirt | Native KVM/libvirt and prepared images; service account owns its private state and authorized storage |
 | macOS host, Apple VM | Apple hardware and admitted native runner; native boot/stop/cleanup acceptance remains backend-specific |
 | Windows host, Hyper-V | Supported host edition and Hyper-V authority; operator-provisioned private ACLs require Windows acceptance |

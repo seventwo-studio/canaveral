@@ -1,6 +1,6 @@
 # Canaveral
 
-Run the controller in Docker and replace its image through your external deployment workflow. Connected host agents and registered runners use [signed, managed runtime updates](docs/runtime-updates.md), with separate private state, idle checks, staged activation and rollback. Guest and native-helper adoption remains separately acknowledged; staging a bundle does not establish a live guest update.
+Run the controller in Docker and replace its image through your external deployment workflow. Connected host agents and registered runners use [signed, managed runtime updates](docs/runtime-updates.md), with separate private state, idle checks, staged activation and rollback. The offline Unix bootstrap expands a verified baseline and generates a service definition for separate operator installation. Guest and native-helper adoption remains separately acknowledged; staging a bundle does not establish a live guest update.
 
 Canaveral provides a TypeScript controller, outbound TypeScript hosts, Rust execution components and an optional web dashboard for machine and local-model execution. The controller stores ownership, placements and capacity reservations in SQLite. Hosts advertise installed templates, pull assignments and report state. Lost hosts remain unknown; their machines are never silently duplicated.
 

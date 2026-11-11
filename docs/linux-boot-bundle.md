@@ -30,7 +30,7 @@ Initial workspace: disposable tmpfs, uid/gid 1000, explicit byte bound, nosuid/n
 
 The agent owns the guest PID namespace. Commands get separate process groups; production PID1 also kills all its namespace descendants on termination, including escaped groups, and reaps children before confirming a receipt. Unconfirmed termination or lost receipts require native fencing and recovery. Guest receipts cannot authorize VM release or replacement. While a command runs, PID1 enumerates its direct children and reaps each adopted orphan by PID, excluding the retained command leader. It never uses waitid(P_ALL, WNOWAIT), where a waitable leader could hide other zombies. The leader remains unreaped until after final group/namespace signals.
 
-## Operator kernel/rootfs build contract (not implemented)
+## Operator kernel/rootfs build contract (construction remains external)
 
 A release builder must supply all these inputs, without defaults: Debian snapshot timestamp and signed Release digest/trust root; exact arm64 package versions and SHA256 values for bash, coreutils, git, ca-certificates and transitive packages; official Node `v24.11.0` linux-arm64 tarball SHA256 and signature verification material; Rust `1.99.1` toolchain/target archive SHA256 values; kernel source version/archive SHA256, committed config and patch digests; EROFS tool version/digest; bootstrap source/digest and trusted configuration-medium contract. Unknown checksums are **required inputs**, not placeholder pins or floating defaults. Fixture version values in unit tests are synthetic, never release inputs.
 
@@ -45,7 +45,7 @@ A release builder must supply all these inputs, without defaults: Debian snapsho
 
 `canaveral-boot-bundle assemble --recipe FILE --inputs DIR --output NEW_DIR` consumes an operator-built uncompressed ARM64 Linux Image, EROFS rootfs and static AArch64 bootstrap ELF. Authoring requires a Unix host; Windows binaries refuse the operation explicitly. It never executes these files, probes tools, downloads packages, builds a kernel/rootfs or verifies package signatures. Provenance declarations are required evidence fields; they do not establish signature trust, the transitive package closure or rootfs contents. The controller and host runtime use TypeScript, with Rust execution components.
 
-The version 1 recipe is strict JSON (at most 1 MiB): duplicate keys at every depth and unknown fields are errors. Required top-level fields are `version=1`, `id`, `revision`, `commandLine`, `toolVersions` (the manifest's four exact probe lines), `epoch` (unsigned 32-bit seconds), `kernel`, `rootfs`, `bootstrap`, `provenance`. Each artifact is `{path,sha256,size}` with the manifest's relative path and lowercase SHA256 rules. Bounds are kernel 256 MiB, rootfs 8 GiB, bootstrap 64 MiB. Root arguments must include exactly one each of `root=/dev/vda rootfstype=erofs ro` and no `rw`. All release digests must come from the operator; synthetic test pins are not release inputs.
+The version 1 recipe is strict JSON (at most 1 MiB): duplicate keys at every depth and unknown fields are errors. Required top-level fields are `version=1`, `id`, `revision`, `commandLine`, `toolVersions` (the manifest's three exact probe lines), `epoch` (unsigned 32-bit seconds), `kernel`, `rootfs`, `bootstrap`, `provenance`. Each artifact is `{path,sha256,size}` with the manifest's relative path and lowercase SHA256 rules. Bounds are kernel 256 MiB, rootfs 8 GiB, bootstrap 64 MiB. Root arguments must include exactly one each of `root=/dev/vda rootfstype=erofs ro` and no `rw`. All release digests must come from the operator; synthetic test pins are not release inputs.
 
 Every provenance pin is `{identity,sha256}`: a nonempty trimmed printable ASCII identity (up to 512 bytes) and an explicit lowercase SHA256. `provenance` requires:
 
@@ -59,6 +59,23 @@ The assembler walks input/output ancestry with no-follow directory descriptors, 
 Output contains `Image`, `rootfs.erofs`, `initrd.cpio`, canonical `manifest.json`, no-newline `image.digest`, and normalized `recipe.json`. Manifest canonicalization/digest reuse guest-protocol. The uncompressed newc archive has sorted entries `dev`, `etc`, `etc/canaveral`, `init`, `newroot`, `proc`, `sys`, then trailer; uid/gid 0, fixed inode sequence, explicit epoch, directory mode 0700, init mode 0500, zero padding and a 512-byte archive boundary. Identical pinned input bytes and recipe produce identical artifact bytes across source paths and umasks. This is artifact assembly determinism, not distro build reproducibility.
 
 Files are flushed, then a private staging directory is published atomically using rename-without-replacement, and the parent is flushed. Existing outputs, including incomplete directories, are never adopted/replaced. Error cleanup removes only known files in the owned staging directory. A crash may leave private staging; there is no scavenger or automatic recovery. If publication succeeds but the final directory flush fails, the command reports an error and leaves the complete output in place for operator inspection. Mode 0400 does **not** set filesystem immutable flags: separate authorized operator installation and helper admission are still required.
+
+## Read-only production-input preflight
+
+The [wrapper](../script/verify_linux_boot_inputs.mjs) invokes the Rust `verify-inputs` command with locked, offline dependencies and at most two Cargo jobs:
+
+```sh
+node script/verify_linux_boot_inputs.mjs \
+  --recipe /private/build/recipe.json \
+  --inputs /private/build/inputs \
+  --evidence /private/build/evidence.json
+```
+
+The argument order shown is required. Rust/toolchain and cached dependencies must already be installed; the wrapper does not provision them. Evidence is strict JSON `{"version":1,"files":[{"role":"debian.release","path":"Release","size":123}]}`. This fragment illustrates one entry only: enumerate every provenance pin using dotted roles and zero-based indices, such as `debian.signingKey`, `debian.packages[0]`, `node`, `nodeSignature`, `rust[0]`, `kernelSource` and `kernelPatches[0]`. Paths are relative to inputs, sizes are exact bytes and hashes come from the recipe. Missing, duplicate or unknown roles fail. Kernel/rootfs/bootstrap artifacts are also checked against recipe hashes and bounded format rules.
+
+Exit zero proves local byte equality only. JSON reports recipe/evidence digests, checked file count and `localDigestsVerified: true`; `cryptographicSignaturesVerified`, `debianTransitiveClosureVerified` and `productionBuildReady` remain **false**. Matching key or signature file bytes does not verify a signature. Review `missingBuildInputs` and independently authorize trust roots, signature validation, package closure, reproducible construction and native boot acceptance. No output bundle is assembled or installed by preflight.
+
+Wrapper fixtures establish argv/error handling only, not execution of Rust validation or production readiness. Report actual Rust check results separately for the delivered revision.
 
 ## Minimal bootstrap source and handoff
 
