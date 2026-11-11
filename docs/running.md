@@ -23,7 +23,9 @@ This matrix describes configured paths and prerequisites, not platform parity or
 Hosts preparing for qualified Linux/macOS lease execution may set
 `leaseClockHelper` to an absolute installed `canaveral-mobile-native` executable.
 It must be a nonsymlink, single-link regular file, executable, owned by root or
-the service account and not writable by group/others. This selects the
+the service account and not writable by group/others. Its ancestors must also be
+root/service-owned and not writable by group/others; root-owned sticky temporary
+directories are allowed. This selects the
 [boot-bound native deadline clock](leases.md) before runner state is created;
 it does not enable consumer execution or replace native fencing/cleanup checks.
 

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { ServiceError } from './errors.ts';
 import { noLinks } from './runtime-process.ts';
 import type { ExecutionClock } from './runtime-process.ts';
@@ -14,11 +14,19 @@ const unavailable = (): ServiceError => new ServiceError('Native lease clock is 
 export function nativeExecutionClock(helper: string): ExecutionClock {
   if (typeof helper !== 'string' || !isAbsolute(helper) || !['linux', 'darwin'].includes(process.platform)) throw new ServiceError('Configure an absolute Unix native clock helper.', 400);
   const options = { env: {}, encoding: 'utf8' as const, timeout: 1000, killSignal: 'SIGKILL' as const, maxBuffer: 1024, stdio: 'pipe' as const, windowsHide: true };
+  const uid = BigInt(process.getuid!());
   const fingerprint = (): string => {
     noLinks(helper);
+    for (let parent = dirname(helper); ; parent = dirname(parent)) {
+      const directory = lstatSync(parent, { bigint: true });
+      // A root-owned sticky temporary directory protects its owned child entry.
+      const stickyRoot = directory.uid === 0n && (directory.mode & 0o1000n) !== 0n;
+      if (!directory.isDirectory() || directory.uid !== 0n && directory.uid !== uid || (directory.mode & 0o022n) !== 0n && !stickyRoot) throw unavailable();
+      if (dirname(parent) === parent) break;
+    }
     const info = lstatSync(helper, { bigint: true });
     if (!info.isFile() || info.nlink !== 1n || (info.mode & 0o111n) === 0n || (info.mode & 0o022n) !== 0n ||
-        (info.uid !== 0n && info.uid !== BigInt(process.getuid!()))) throw unavailable();
+        (info.uid !== 0n && info.uid !== uid)) throw unavailable();
     return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode, info.uid].join(':');
   };
   let identity: string, bootId: string;

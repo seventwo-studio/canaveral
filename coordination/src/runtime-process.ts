@@ -97,6 +97,7 @@ export interface LeaseAuthorization { leaseID: string; revision: number; remaini
 export class LeaseGuard {
   readonly records = new Map<string, GuardRecord>();
   private deadlines = new Map<string, number>();
+  private checkpointDirty = false;
   private historyKnown: boolean;
   readonly path: string;
   constructor(state: string, readonly clock: ExecutionClock = executionClock()) {
@@ -124,12 +125,16 @@ export class LeaseGuard {
       if (changed) this.save();
     }
   }
-  private save(): void { saveRecord(this.path, Object.fromEntries(this.records)); }
+  private save(): void {
+    this.checkpointDirty = true;
+    saveRecord(this.path, Object.fromEntries(this.records));
+    this.checkpointDirty = false;
+  }
   private sample(): number | undefined {
     try { const value = this.clock.now(); if (Number.isFinite(value) && value >= 0) return value; } catch { /* Native fencing remains responsible for stopping execution. */ }
     let changed = false;
     for (const record of this.records.values()) if (!record.fenced) { record.fenced = true; changed = true; }
-    if (changed) this.save();
+    if (changed || this.checkpointDirty) this.save();
     return undefined;
   }
   observe(machines: RecordValue[], roundTrip: number): void {
@@ -155,6 +160,8 @@ export class LeaseGuard {
     this.save(); this.historyKnown = true;
   }
   allowed(id: string): boolean {
+    // A failed fence write stays uncertain until its checkpoint is synchronized.
+    if (this.checkpointDirty) this.save();
     const record = this.records.get(id);
     if (!record) return true;
     if (!record.fenced) {

@@ -166,7 +166,10 @@ failure, replacement or backwards time permanently fails that clock instance.
 Its boot ID and absolute elapsed deadline are recorded together. Same-boot
 recovery cannot extend that deadline through a wall-clock change. Recovery fences
 records from another boot or older records without a complete boot binding. Clock failure durably
-fences retained leases and still permits their stop reconciliation. It does not
+fences retained leases and still permits their stop reconciliation. A failed
+journal write remains uncertain and must be retried before reporting a durable
+fence; a record that was never successfully written cannot attest that failure
+after process loss. The original boot-bound deadline still limits recovery. It does not
 release reservations or certify execution stopped. The portable clock remains
 the default when this option is absent. Selecting a native clock does not enable
 ordinary-host lease declarations or establish provider fencing/cleanup acceptance.

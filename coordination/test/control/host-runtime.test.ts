@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -63,6 +63,21 @@ test('same-boot restart cannot extend the native deadline when wall time lags el
   assert.equal(new LeaseGuard(root, c).allowed(id), false);
   const earlier = { ...c, mono: 66 };
   assert.equal(new LeaseGuard(root, earlier).allowed(id), false);
+});
+
+test('failed fence checkpoints retry after storage repair before reporting authorization', t => {
+  const root = fixture(t), c = clock(), guard = new LeaseGuard(root, c), m = lease(), id = String(m.id);
+  guard.observe([m], 0);
+  // Invalid private-directory permissions deterministically block journal writes, even as root.
+  chmodSync(root, 0o755); c.now = () => { throw new Error('Clock lost'); };
+  assert.throws(() => guard.allowed(id));
+  assert.equal((readRecord(guard.path)[id] as RecordValue).fenced, false);
+  c.now = () => 11;
+  assert.throws(() => guard.authorization(id, String((m.lease as RecordValue).id)));
+  chmodSync(root, 0o700);
+  assert.equal(guard.authorization(id, String((m.lease as RecordValue).id)).fenced, true);
+  assert.equal((readRecord(guard.path)[id] as RecordValue).fenced, true);
+  assert.equal(new LeaseGuard(root, c).allowed(id), false);
 });
 
 test('expiry between authorization observations produces a durable fence rather than a zero-length grant', t => {

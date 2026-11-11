@@ -67,3 +67,17 @@ test('a stalled clock helper cannot ignore its bounded termination', { skip: !un
   assert.throws(() => nativeExecutionClock(f.helper), unavailable);
   assert.equal(readFileSync(f.calls, 'utf8'), 'sample\n');
 });
+
+test('writable helper ancestors cannot substitute the executed clock', { skip: !unix }, t => {
+  const f = fixture(t);
+  chmodSync(f.root, 0o777);
+  assert.throws(() => nativeExecutionClock(f.helper), unavailable);
+  assert.equal(existsSync(f.calls), false);
+  chmodSync(f.root, 0o700);
+  const clock = nativeExecutionClock(f.helper), before = readFileSync(f.calls);
+  chmodSync(f.root, 0o777);
+  assert.throws(() => clock.now(), unavailable);
+  assert.deepEqual(readFileSync(f.calls), before);
+  chmodSync(f.root, 0o700);
+  assert.throws(() => clock.now(), unavailable);
+});
