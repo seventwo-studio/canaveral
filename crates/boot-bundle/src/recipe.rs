@@ -188,7 +188,7 @@ fn valid_snapshot(s: &str) -> bool {
             .enumerate()
             .all(|(i, b)| i == 8 || i == 15 || b.is_ascii_digit())
 }
-struct Unique;
+pub(crate) struct Unique;
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         struct Visitor;

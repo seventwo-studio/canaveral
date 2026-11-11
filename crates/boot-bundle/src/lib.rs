@@ -3,7 +3,9 @@
 pub mod bootstrap;
 mod files;
 mod formats;
+mod inputs;
 mod recipe;
+pub use inputs::{verify_inputs, InputReport};
 use canaveral_guest_protocol::{
     bundle::{Artifact, Manifest},
     Result,
