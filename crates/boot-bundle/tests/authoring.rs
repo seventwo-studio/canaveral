@@ -339,7 +339,11 @@ fn local_evidence(t: &Temp, recipe: &mut Value) -> Value {
             entries.push(json!({"role":role,"path":path,"size":content.len()}));
         } else if let Some(object) = value.as_object_mut() {
             for (key, child) in object {
-                let next = if role.is_empty() { key.clone() } else { format!("{role}.{key}") };
+                let next = if role.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{role}.{key}")
+                };
                 walk(t, child, next, entries);
             }
         } else if let Some(array) = value.as_array_mut() {
@@ -357,23 +361,45 @@ fn local_inputs_match_but_signature_trust_and_build_remain_unverified() {
     let t = Temp::new();
     let mut recipe = fixture(&t);
     let evidence = local_evidence(&t, &mut recipe);
-    let report = canaveral_boot_bundle::verify_inputs(&bytes(&recipe), &bytes(&evidence), &t.0).unwrap();
+    let report =
+        canaveral_boot_bundle::verify_inputs(&bytes(&recipe), &bytes(&evidence), &t.0).unwrap();
     assert!(report.local_digests_verified);
     assert!(!report.cryptographic_signatures_verified);
     assert!(!report.debian_transitive_closure_verified);
     assert!(!report.production_build_ready);
-    assert_eq!(report.checked_files, evidence["files"].as_array().unwrap().len() + 3);
-    assert_eq!(report.recipe_sha256, format!("{:x}", Sha256::digest(bytes(&recipe))));
-    assert_eq!(report.evidence_sha256, format!("{:x}", Sha256::digest(bytes(&evidence))));
-    assert!(report.missing_build_inputs.iter().any(|s| s.contains("gpgv")));
+    assert_eq!(
+        report.checked_files,
+        evidence["files"].as_array().unwrap().len() + 3
+    );
+    assert_eq!(
+        report.recipe_sha256,
+        format!("{:x}", Sha256::digest(bytes(&recipe)))
+    );
+    assert_eq!(
+        report.evidence_sha256,
+        format!("{:x}", Sha256::digest(bytes(&evidence)))
+    );
+    assert!(report
+        .missing_build_inputs
+        .iter()
+        .any(|s| s.contains("gpgv")));
     assert!(!t.0.join("out").exists());
     fs::write(t.0.join("recipe.json"), bytes(&recipe)).unwrap();
     fs::write(t.0.join("evidence.json"), bytes(&evidence)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_canaveral-boot-bundle"))
-        .args(["verify-inputs", "--recipe"]).arg(t.0.join("recipe.json"))
-        .arg("--inputs").arg(&t.0).arg("--evidence").arg(t.0.join("evidence.json"))
-        .output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        .args(["verify-inputs", "--recipe"])
+        .arg(t.0.join("recipe.json"))
+        .arg("--inputs")
+        .arg(&t.0)
+        .arg("--evidence")
+        .arg(t.0.join("evidence.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["cryptographicSignaturesVerified"], false);
     assert_eq!(report["productionBuildReady"], false);
@@ -386,7 +412,9 @@ fn local_input_missing_duplicate_path_size_and_trust_negatives() {
         let mut evidence = local_evidence(&t, &mut recipe);
         let path = evidence["files"][0]["path"].as_str().unwrap().to_owned();
         match case {
-            0 => { evidence["files"].as_array_mut().unwrap().remove(0); }
+            0 => {
+                evidence["files"].as_array_mut().unwrap().remove(0);
+            }
             1 => {
                 let entry = evidence["files"][0].clone();
                 evidence["files"].as_array_mut().unwrap().push(entry);
@@ -411,19 +439,34 @@ fn local_input_missing_duplicate_path_size_and_trust_negatives() {
             13 => evidence["files"][0]["signatureVerified"] = true.into(),
             14 => {
                 // Even key bytes must match the pin: a replacement key is not accepted.
-                let entry = evidence["files"].as_array().unwrap().iter()
-                    .find(|e| e["role"] == "debian.signingKey").unwrap();
-                fs::write(t.0.join(entry["path"].as_str().unwrap()), b"unauthorized key").unwrap();
+                let entry = evidence["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e["role"] == "debian.signingKey")
+                    .unwrap();
+                fs::write(
+                    t.0.join(entry["path"].as_str().unwrap()),
+                    b"unauthorized key",
+                )
+                .unwrap();
             }
             15 => evidence["files"][1]["path"] = path.into(),
             16 => recipe["provenance"]["debian"]["signature"]["sha256"] = "0".repeat(64).into(),
             _ => unreachable!(),
         }
-        assert!(canaveral_boot_bundle::verify_inputs(&bytes(&recipe), &bytes(&evidence), &t.0).is_err(), "case {case}");
+        assert!(
+            canaveral_boot_bundle::verify_inputs(&bytes(&recipe), &bytes(&evidence), &t.0).is_err(),
+            "case {case}"
+        );
     }
     let t = Temp::new();
     let mut recipe = fixture(&t);
     let evidence = local_evidence(&t, &mut recipe);
-    let duplicate = String::from_utf8(bytes(&evidence)).unwrap().replace("\"role\":", "\"role\":\"bad\",\"role\":");
-    assert!(canaveral_boot_bundle::verify_inputs(&bytes(&recipe), duplicate.as_bytes(), &t.0).is_err());
+    let duplicate = String::from_utf8(bytes(&evidence))
+        .unwrap()
+        .replace("\"role\":", "\"role\":\"bad\",\"role\":");
+    assert!(
+        canaveral_boot_bundle::verify_inputs(&bytes(&recipe), duplicate.as_bytes(), &t.0).is_err()
+    );
 }

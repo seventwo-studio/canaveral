@@ -42,7 +42,9 @@ mod unix {
         for key in ["nonce", "binding"] {
             let value = field(v, key)?;
             if value.len() != 64
-                || !value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             {
                 return fail("Invalid update identity challenge");
             }

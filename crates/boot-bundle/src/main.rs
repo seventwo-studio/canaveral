@@ -12,8 +12,10 @@ fn run() -> canaveral_guest_protocol::Result<()> {
     if a.len() != 7
         || a[1] != "--recipe"
         || a[3] != "--inputs"
-        || !matches!((a[0].as_str(), a[5].as_str()),
-            ("assemble", "--output") | ("verify-inputs", "--evidence"))
+        || !matches!(
+            (a[0].as_str(), a[5].as_str()),
+            ("assemble", "--output") | ("verify-inputs", "--evidence")
+        )
     {
         return Err(usage().into());
     }
