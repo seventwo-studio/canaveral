@@ -1,8 +1,9 @@
+import { once } from "node:events";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,13 +14,21 @@ import type { HostConfig } from "../../src/host.ts";
 import { canonicalManifest } from "../../src/updates/protocol.ts";
 import type { Manifest, SignedRelease, Target } from "../../src/updates/protocol.ts";
 import { ManagedUpdater, UpdateStore } from "../../src/updates/manager.ts";
+import { componentFileSetDigest } from "../../src/updates/components.ts";
+import { GuestAccess } from "../../src/guest/access.ts";
+import { createGuestServer } from "../../src/guest/server.ts";
+import { createGuestAdoptionDriver, createGuestAdoptionService, signedGuestProvision } from "../../src/updates/guest.ts";
+import { NativeHelperAdoptionDriver } from "../../src/updates/native-helper.ts";
+import { NodeNativeHelperSelection } from "../../src/providers/mobile-native.ts";
+import type { ComponentTarget } from "../../src/updates/components.ts";
+import { bootstrapInstall } from "../../src/updates/bootstrap.ts";
 import { StableLauncher } from "../../src/updates/launcher.ts";
 
-test("signed CLI rollout survives lost completion reply, restart and exact rollback with protected state intact", { timeout: 90_000 }, async t => {
+test("installed signed CLI rollout survives lost completion reply, restart and exact rollback with protected state intact", { timeout: 90_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "canaveral-update-completion-")));
   const disks = join(root, "disks");
   const hostState = join(root, "host-state"), updateState = join(root, "update-state"), installationRoot = join(root, "installation");
-  for (const directory of [hostState, updateState, installationRoot, disks]) mkdirSync(directory, { mode: 0o700 });
+  for (const directory of [hostState, disks]) mkdirSync(directory, { mode: 0o700 });
   const pair = generateKeyPairSync("ed25519");
   const keys = { fixture: pair.publicKey.export({ type: "spki", format: "pem" }).toString() };
   const target: Target = { os: process.platform as Target["os"], arch: process.arch === "x64" ? "amd64" : "arm64" };
@@ -59,7 +68,7 @@ test("signed CLI rollout survives lost completion reply, restart and exact rollb
   writeFileSync(join(hostState, "identity.json"), identity, { mode: 0o600 });
   const transport = hostTransport(config);
   await transport.request("POST", "/v1/hosts/enroll", { id: hostId, credential, offer: hostOffer(config) }, enrollment);
-  const source = join(root, "source"); mkdirSync(source, { mode: 0o700 });
+
   const payload = new Map<string, Buffer>();
   const emitted = fileURLToPath(new URL("../../src/", import.meta.url));
   function collect(directory: string, relative = ""): void {
@@ -70,24 +79,66 @@ test("signed CLI rollout survives lost completion reply, restart and exact rollb
     }
   }
   collect(emitted);
-  payload.set("guest/agent", Buffer.from("inactive portable guest asset"));
-  payload.set("native/helper", Buffer.from("inactive portable helper asset"));
+  const guestArtifacts = [
+    { path: '/opt/canaveral/server.mjs', content: '// portable provisioned server', mode: '0644' },
+    { path: '/opt/canaveral/install.mjs', content: '// portable provisioned installer', mode: '0644' },
+    ...['canaveral-mobile-native', 'canaveral-guest-agent'].map(name => ({ path: '/opt/canaveral/payload/' + name + '.0000.b64', content: Buffer.from(name).toString('base64'), mode: '0644' })),
+  ];
+  payload.set('guest/bundle.json', Buffer.from(JSON.stringify(guestArtifacts)));
+  const helperEvents = join(hostState, 'helper-events');
+  payload.set('native/canaveral-mobile-native', Buffer.from(String.raw`#!${process.execPath}
+import readline from 'node:readline';
+import fs from 'node:fs';
+fs.appendFileSync(${JSON.stringify(helperEvents)}, 'spawn\n');
+for await (const line of readline.createInterface({input:process.stdin})) {
+  const v=JSON.parse(line);
+  fs.appendFileSync(${JSON.stringify(helperEvents)}, v.op+'\n');
+  const body=v.op==='updateIdentity'?{protocol:v.protocol,nonce:v.nonce,binding:v.binding,pid:process.pid}:{};
+  process.stdout.write(JSON.stringify({seq:v.seq,ok:true,body})+'\n');
+  if(v.op==='shutdown') break;
+}
+`));
   payload.set("coordination/package.json", Buffer.from('{"type":"module"}'));
-  for (const [path, data] of payload) { mkdirSync(dirname(join(source, path)), { recursive: true, mode: 0o700 }); writeFileSync(join(source, path), data, { mode: 0o600 }); }
+
   function release(sequence: number, files = payload, entrypoint = "coordination/dist/src/cli.js"): SignedRelease {
     const manifest: Manifest = { schema: "canaveral-update-v1", releaseId: randomUUID(), version: `1.0.${sequence}`, sequence, createdAt: 1000, target,
       minimumLauncherVersion: 1, entrypoint, files: [...files].map(([path, bytes]) => ({ path, bytes: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex"), executable: false, component: path.startsWith("guest/") ? "guest" as const : path.startsWith("native/") ? "native-helper" as const : "host" as const })) };
+        sha256: createHash("sha256").update(bytes).digest("hex"), executable: path.startsWith("native/"), component: path.startsWith("guest/") ? "guest" as const : path.startsWith("native/") ? "native-helper" as const : "host" as const })) };
     return { manifest, keyId: "fixture", signature: sign(null, canonicalManifest(manifest), pair.privateKey).toString("base64") };
   }
   const baseline = release(1), candidate = release(2), settings = { installationRoot, stateDirectory: updateState, trustedKeys: keys, target, protectedPaths: [hostState, configFile, disks], minimumFreeBytes: 0 };
-  const initial = new UpdateStore(settings);
+  function bundle(envelope: SignedRelease, files: Map<string, Buffer>, name = 'bundle-' + envelope.manifest.sequence) {
+    const directory = join(root, name);
+    mkdirSync(directory, { mode: 0o700 }); mkdirSync(join(directory, 'artifacts'), { mode: 0o700 });
+    writeFileSync(join(directory, 'release.json'), JSON.stringify(envelope), { mode: 0o600 });
+    for (const file of envelope.manifest.files) writeFileSync(join(directory, 'artifacts', file.sha256), files.get(file.path)!, { mode: 0o600 });
+    return directory;
+  }
   const tampered = { ...baseline, manifest: { ...baseline.manifest, version: '99.0.0' } };
-  await assert.rejects(initial.installInitial(tampered, source), /signature/i);
-  assert.equal(initial.active(), undefined, 'untrusted bootstrap must not select a release');
-  assert.equal(readFileSync(configFile, 'utf8'), savedConfig);
-  assert.deepEqual(readFileSync(join(disks, 'retained.img')), disk);
-  await initial.installInitial(baseline, source);
+  const badBundle = bundle(tampered, payload, 'tampered-bootstrap');
+  await assert.rejects(bootstrapInstall({ ...settings, bundleDirectory: badBundle }), /signature/i);
+  assert.equal(existsSync(installationRoot), false); assert.equal(existsSync(updateState), false);
+  const stableRoot = join(root, 'stable'), nodePath = join(root, 'node');
+  mkdirSync(stableRoot, { mode: 0o700 });
+  for (const [path, bytes] of payload) if (path.startsWith('coordination/')) {
+    mkdirSync(dirname(join(stableRoot, path)), { recursive: true, mode: 0o700 });
+    writeFileSync(join(stableRoot, path), bytes, { mode: 0o600 });
+  }
+  copyFileSync(realpathSync(process.execPath), nodePath); chmodSync(nodePath, 0o700);
+  const stableLauncher = join(stableRoot, 'coordination/dist/src/updates/launcher.js');
+  const rootCli = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
+  const installArgs = ['--bundle', bundle(baseline, payload), '--host-config', configFile, '--installation', installationRoot,
+    '--state', updateState, '--node', nodePath, '--launcher', stableLauncher, '--stable-root', stableRoot];
+  const installation = await promisify(execFile)(process.execPath, [rootCli, 'install', ...installArgs], { timeout: 20_000 });
+  const installed = JSON.parse(installation.stdout) as { installationId: string; releaseId: string; service: { filename: string; content: string } };
+  assert.equal(installed.releaseId, baseline.manifest.releaseId);
+  assert.ok(installed.service.content.includes(stableLauncher));
+  assert.equal(existsSync(join(root, installed.service.filename)), false, 'installer generates service text only');
+  const initial = new UpdateStore(settings);
+  assert.equal(initial.active(), baseline.manifest.releaseId); assert.equal(initial.installationId, installed.installationId);
+  const installationIdentity = readFileSync(join(updateState, 'installation.json'));
+  await assert.rejects(promisify(execFile)(process.execPath, [rootCli, 'install', ...installArgs], { timeout: 20_000 }), 'reinstall must not adopt existing roots');
+  assert.deepEqual(readFileSync(join(updateState, 'installation.json')), installationIdentity);
   launcher = new StableLauncher({ ...settings, hostConfigPath: configFile, hostStateDirectory: hostState, readinessTimeoutMs: 10_000, stopTimeoutMs: 10_000 });
   await launcher.start();
   let dropped = false, activations = 0, currentCredential = credential;
@@ -111,14 +162,11 @@ test("signed CLI rollout survives lost completion reply, restart and exact rollb
   writeFileSync(trustFile, JSON.stringify(keys), { mode: 0o600 });
   const cli = fileURLToPath(new URL('../../src/updates/cli.js', import.meta.url));
   async function upload(envelope: SignedRelease, files: Map<string, Buffer>) {
-    const bundle = join(root, 'bundle-' + envelope.manifest.sequence);
-    mkdirSync(bundle, { mode: 0o700 }); mkdirSync(join(bundle, 'artifacts'), { mode: 0o700 });
-    writeFileSync(join(bundle, 'release.json'), JSON.stringify(envelope), { mode: 0o600 });
-    for (const file of envelope.manifest.files) writeFileSync(join(bundle, 'artifacts', file.sha256), files.get(file.path)!, { mode: 0o600 });
+    const directory = bundle(envelope, files);
     const result = await promisify(execFile)(process.execPath, [cli, '--url', config.url!, '--token-file', adminFile,
-      'releases', 'upload', '--bundle', bundle, '--trusted-keys', trustFile], { timeout: 20_000 });
+      'releases', 'upload', '--bundle', directory, '--trusted-keys', trustFile], { timeout: 20_000 });
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(credential + '|' + admin));
-    return bundle;
+    return directory;
   }
   async function rollout(envelope: SignedRelease) {
     const id = randomUUID();
@@ -138,6 +186,8 @@ test("signed CLI rollout survives lost completion reply, restart and exact rollb
     assert.equal(readFileSync(join(hostState, 'identity.json'), 'utf8'), identity);
     assert.equal(readFileSync(join(hostState, 'recovery.json'), 'utf8'), recovery);
     assert.deepEqual(readFileSync(join(disks, 'retained.img')), disk);
+    assert.deepEqual(readFileSync(join(updateState, 'installation.json')), installationIdentity);
+    assert.deepEqual(readFileSync(stableLauncher), payload.get('coordination/dist/src/updates/launcher.js'));
   }
   await upload(candidate, payload);
   const rolloutId = await rollout(candidate);
@@ -162,14 +212,97 @@ test("signed CLI rollout survives lost completion reply, restart and exact rollb
   assert.deepEqual(updater.store.job()!.componentStatus, { host: 'ready', guest: 'pendingGuestReceipt', 'native-helper': 'pendingNativeReceipt' });
   const components = (view.jobs as Array<{ components: Record<string, string> }>)[0]!.components;
   assert.deepEqual(components, { host: 'ready', guest: 'pendingGuestReceipt', 'native-helper': 'pendingNativeReceipt' });
+  // A host credential and a structurally valid ACK cannot replace independent evidence.
+  const completed = updater.store.job()!;
+  const context = { jobId: completed.id, attemptId: completed.attemptId, installationId: completed.installationId, releaseId: candidate.manifest.releaseId };
+  const targets: ComponentTarget[] = [
+    { component: 'guest', machineId: randomUUID(), assignmentId: randomUUID(), bootId: randomUUID(), generation: 1 },
+    { component: 'native-helper', helperId: 'portable-helper', executable: 'native/canaveral-mobile-native', instanceId: randomUUID(), generation: 1 },
+  ];
+  for (const inventory of [[], targets]) assert.deepEqual(await transport.request('POST', '/v1/hosts/' + hostId + '/updates/component-plan', { ...context, targets: inventory }, credential), { accepted: false, pending: true });
+  for (const target of targets) await assert.rejects(transport.request('POST', '/v1/hosts/' + hostId + '/updates/component-report', {
+    ...context, target, fileSetDigest: componentFileSetDigest(candidate.manifest, target.component), sequence: 1,
+    state: 'adopted', evidence: { boundary: 'idle-closed', acknowledgement: 'a'.repeat(64) },
+  }, credential));
+  // Current production configuration has no independent owned adapter evidence.
+  for (let count = 0; count < 3; count++) await updater.step();
+  assert.equal(updater.store.job()!.adoption, undefined);
+  assert.equal(existsSync(helperEvents), false, 'production path must not launch an unverified helper');
+  const stillPending = await transport.request('GET', '/v1/updates/rollouts/' + rolloutId, {}, admin);
+  assert.deepEqual((stillPending.jobs as Array<{ components: Record<string, string> }>)[0]!.components, components);
+  // Exercise real owned adapters against this installed signed release. No live provider is involved.
+  const guestRoot = join(root, 'provisioned-guest'), machineId = randomUUID(), assignmentId = randomUUID(), bootId = randomUUID();
+  const provision = signedGuestProvision(candidate, keys, updater.store.releasePath(candidate.manifest.releaseId), context, { machineId, assignmentId, generation: 1 });
+  for (const artifact of provision) {
+    const path = join(guestRoot, artifact.path.slice('/opt/canaveral/'.length));
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); writeFileSync(path, artifact.content, { mode: parseInt(artifact.mode, 8) });
+  }
+  mkdirSync(join(guestRoot, 'bin'), { mode: 0o700 });
+  for (const name of ['canaveral-mobile-native', 'canaveral-guest-agent']) writeFileSync(join(guestRoot, 'bin', name), name, { mode: 0o755 });
+  let idle = true;
+  const service = createGuestAdoptionService(guestRoot, bootId, () => idle)!;
+  const guestToken = randomBytes(32).toString('base64url');
+  const server = createGuestServer({ token: guestToken, mode: 'headless', services: { ready: () => true, adoption: service,
+    control: async () => { throw new Error('No workload dispatch in adoption fixture'); }, upload: async () => { throw new Error(); }, download: async () => { throw new Error(); } } });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  const access = new GuestAccess(async () => ({ port, credential: guestToken, authorized: () => true, close: async () => {} }));
+  const guestTarget = { component: 'guest' as const, machineId, assignmentId, bootId, generation: 1 };
+  let inventoryTarget = { ...guestTarget, bootId: randomUUID() };
+  const guestDriver = createGuestAdoptionDriver(access, async () => [{ target: inventoryTarget, machine: { id: machineId }, image: { os: 'linux', guestAccess: true }, folder: guestRoot }]);
+  const guestRequest = { ...context, target: guestTarget, fileSetDigest: componentFileSetDigest(candidate.manifest, 'guest') };
+  try {
+    // Inventory agrees with the caller, but the authenticated owned service is a different boot.
+    const stale = { ...guestRequest, target: inventoryTarget };
+    await assert.rejects(guestDriver.adopt(stale));
+    assert.equal(service.admitted(), false); assert.equal(existsSync(join(guestRoot, 'state/update-adoption.json')), false);
+    inventoryTarget = guestTarget; idle = false;
+    assert.equal((await guestDriver.adopt(guestRequest)).state, 'unknown');
+    idle = true;
+    const receipt = await guestDriver.adopt(guestRequest); assert.equal(receipt.state, 'adopted');
+    const saved = readFileSync(join(guestRoot, 'state/update-adoption.json'));
+    assert.deepEqual(await guestDriver.recover(guestRequest), receipt);
+    assert.deepEqual(readFileSync(join(guestRoot, 'state/update-adoption.json')), saved);
+    // A service restart on a different boot cannot reuse a durable old-boot receipt.
+    const rebooted = createGuestAdoptionService(guestRoot, randomUUID(), () => true)!;
+    assert.equal(rebooted.admitted(), false); await assert.rejects(rebooted.acknowledge(guestRequest, true));
+    assert.doesNotMatch(saved.toString(), new RegExp(guestToken));
+  } finally { await access.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  const helperPath = join(updater.store.releasePath(candidate.manifest.releaseId), 'native/canaveral-mobile-native');
+  const selection = new NodeNativeHelperSelection(helperPath), helper = new NativeHelperAdoptionDriver(updater.store, selection);
+  let helperRequest: import('../../src/updates/components.ts').ComponentAdoptionRequest;
+  try {
+    const [target] = await helper.targets(context, candidate);
+    helperRequest = { ...context, target: target!, fileSetDigest: componentFileSetDigest(candidate.manifest, 'native-helper') };
+    const wrong = { ...helperRequest, target: { ...target!, instanceId: randomUUID() } as ComponentTarget };
+    await assert.rejects(helper.adopt(wrong), /instance mismatch/);
+    assert.equal(existsSync(helperEvents), false, 'wrong instance must not launch a process');
+    const receipt = await helper.adopt(helperRequest); assert.equal(receipt.state, 'adopted');
+    const events = readFileSync(helperEvents, 'utf8'); assert.equal(events, 'spawn\nupdateIdentity\n');
+    assert.equal(helper.verifyAcknowledgement(wrong, receipt.evidence!.acknowledgement), false);
+    await assert.rejects(helper.recover(wrong), /identity mismatch/);
+    assert.deepEqual(await helper.recover(helperRequest), receipt);
+    assert.deepEqual(await helper.adopt(helperRequest), receipt);
+    assert.equal(readFileSync(helperEvents, 'utf8'), events, 'lost helper receipt must not repeat handshake or spawn');
+  } finally { helper.close(); await selection.close(); }
+  const restartedSelection = new NodeNativeHelperSelection(helperPath), restartedHelper = new NativeHelperAdoptionDriver(updater.store, restartedSelection);
+  try {
+    const events = readFileSync(helperEvents, 'utf8');
+    assert.equal((await restartedHelper.recover(helperRequest!))?.state, 'unknown');
+    assert.equal((await restartedHelper.adopt(helperRequest!)).state, 'unknown');
+    assert.equal(readFileSync(helperEvents, 'utf8'), events, 'owner restart must not replay an uncertain helper');
+  } finally { restartedHelper.close(); await restartedSelection.close(); }
+  // Fixture-owned receipts do not bypass the controller's absent independent verifier.
+  const unverified = await transport.request('GET', '/v1/updates/rollouts/' + rolloutId, {}, admin);
+  assert.deepEqual((unverified.jobs as Array<{ components: Record<string, string> }>)[0]!.components, components);
   preserved();
   // A positive close permits a fresh parent; it must select the committed candidate.
   await updater.close(); await launcher.close(await launcher.quiesce());
   launcher = new StableLauncher({ ...settings, hostConfigPath: configFile, hostStateDirectory: hostState, readinessTimeoutMs: 10_000, stopTimeoutMs: 10_000 });
   await launcher.start(); updater = makeUpdater();
   assert.equal(updater.store.active(), candidate.manifest.releaseId);
-  const idle = await launcher.idle();
-  assert.equal(idle.idle, true); assert.equal(idle.workloadsStopped, true);
+  const hostIdle = await launcher.idle();
+  assert.equal(hostIdle.idle, true); assert.equal(hostIdle.workloadsStopped, true);
   await updater.poll();
   // A signed but invalid runtime is not a new baseline. Roll back to sequence 2, never sequence 1.
   const brokenFiles = new Map(payload); brokenFiles.set('broken.mjs', Buffer.from('process.exit(17);'));
