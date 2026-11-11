@@ -25,7 +25,7 @@ function typecheck() { npm('coordination', 'run', 'typecheck'); npm('dashboard',
 function test() {
   npm('coordination', 'run', 'build'); npm('coordination', 'test'); npm('dashboard', 'test');
   run(process.execPath, ['--test', 'crates/guest-agent/worker.test.ts', 'VirtualMachines/GuestHelpers/linux_desktop.test.ts']);
-  run(process.execPath, ['--test', 'script/tooling.test.mjs']);
+  run(process.execPath, ['--test', 'script/tooling.test.mjs', 'script/package_checks.test.mjs']);
   run('cargo', ['test', '--workspace', '--locked', '-j', '2']);
 }
 export function main(action) {

@@ -84,6 +84,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.11.0'
+      - run: npm --prefix coordination ci --ignore-scripts
+      - run: npm --prefix coordination run build
       - run: npm run check:no-python
       - run: npm run test:tools
       - run: node fixtures/migration/verify_lease_guard.mjs
@@ -97,6 +99,10 @@ jobs:
       - run: kubectl kustomize deploy/orchestrator && kubectl kustomize deploy/dashboard
   dashboard:
     runs-on: ubuntu-24.04
+    container:
+      # Keep the image version/digest aligned with dashboard/package-lock.json.
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+      options: --user 1001 --init --shm-size=1g
     timeout-minutes: 10
     defaults:
       run:
@@ -111,11 +117,12 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
       - run: npm ci --ignore-scripts
+      - name: Verify the installed Playwright matches the browser image
+        run: node -e "if (require('@playwright/test/package.json').version !== '1.64.1') throw new Error('Update the pinned Playwright CI image with the dependency')"
       - run: npm audit --audit-level=moderate
       - run: npm run typecheck
       - run: npm test
       - run: npm run build && git diff --exit-code -- ../canaveral/web
-      - run: npx playwright install --with-deps chromium --only-shell
       - run: npm run test:browser
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: failure()

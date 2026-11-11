@@ -1,3 +1,4 @@
+import { createGuestAdoptionService } from "../updates/guest.ts";
 /** Linux guest service composition. Native effects occur only through the installed Rust adapters. */
 import { randomUUID } from "node:crypto";
 import { constants, existsSync, promises as fs, readFileSync } from "node:fs";
@@ -22,6 +23,8 @@ export interface LinuxServiceOptions {
   stateDirectory?: string;
   preparedFile?: string;
   mode?: "desktop" | "headless";
+  adoptionRoot?: string;
+  bootId?: string;
   /** Fixture seams preserve the same protocol and never activate a native fallback. */
   files?: ContainerFiles;
   shells?: ShellAdapter;
@@ -218,7 +221,8 @@ export function createLinuxServices(options: LinuxServiceOptions = {}): GuestSer
       terminal.blocked = true; const work = terminal.tail.then(() => closeTerminal(id, terminal)); terminal.tail = work.catch(() => {});
     }
   }, 5000); sweep.unref();
-  return { ...services, async close() {
+  const adoption = options.adoptionRoot ? createGuestAdoptionService(options.adoptionRoot, options.bootId ?? readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), () => services.ready() && options.mode === "headless" && !closed && !pendingOpens.size && !sessions.size && !store.transaction(db => db.prepare("SELECT id FROM guest_linux_terminals LIMIT 1").get())) : undefined;
+  return { ...services, ...(adoption ? { adoption } : {}), async close() {
     closed = true; clearInterval(sweep);
     await Promise.allSettled([...pendingOpens]);
     const results = await Promise.allSettled([...sessions].map(([id, t]) => { t.blocked = true; return t.tail.then(() => closeTerminal(id, t)); }));
@@ -236,7 +240,7 @@ export async function startLinuxGuest(argv: string[] = process.argv.slice(2)): P
   const root = dirname(tokenPath);
   // Preparation may only acknowledge readiness after both mandatory native helpers exist.
   for (const executable of [join(root, "bin/canaveral-mobile-native"), ...(mode === "desktop" ? [join(root, "bin/canaveral-guest-agent")] : [])]) await fs.access(executable, constants.X_OK);
-  const services = createLinuxServices({ mode, stateDirectory: join(root, "state"), preparedFile: join(root, "prepared"), nativeHelper: join(root, "bin/canaveral-mobile-native"), atspiHelper: join(root, "bin/canaveral-guest-agent") });
+  const services = createLinuxServices({ mode, adoptionRoot: root, stateDirectory: join(root, "state"), preparedFile: join(root, "prepared"), nativeHelper: join(root, "bin/canaveral-mobile-native"), atspiHelper: join(root, "bin/canaveral-guest-agent") });
   const server = createGuestServer({ mode, token, services });
   try { await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(8769, "127.0.0.1", () => { server.off("error", reject); resolve(); }); }); }
   catch (error) { await services.close?.(); throw error; }

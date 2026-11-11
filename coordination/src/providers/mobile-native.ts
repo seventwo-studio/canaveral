@@ -1,4 +1,5 @@
 /** Production process boundary. No command is invoked at module load or provider construction. */
+import { createHash, randomBytes } from "node:crypto";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
@@ -96,7 +97,7 @@ export function mobileNativeHelper(config: RecordValue): string {
   }
   return "canaveral-mobile-native"; // Normal installed binary on the operator's PATH.
 }
-export function createNodeMobileTransport(config: RecordValue): MobileTransport {
+export function createNodeMobileTransport(config: RecordValue, selection?: NodeNativeHelperSelection): MobileTransport {
   return {
     async run(argv, options): Promise<CommandResult> {
       const pipe = new NodeMobilePipe(argv, options), output: Buffer[] = [];
@@ -134,7 +135,7 @@ export function createNodeMobileTransport(config: RecordValue): MobileTransport 
       try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
     },
     portPairAvailable, executableAvailable,
-    ...nativeAdapters(config),
+    ...nativeAdapters(config, selection),
   };
 }
 /** Freshness uses a suspend-aware native clock, never civil time or awake-only hrtime. */
@@ -157,8 +158,15 @@ class NativeRpc {
   private references = 1;
   private failed = false;
   private readonly pipe: NodeMobilePipe;
-  constructor(helper: string, args: string[], env: Record<string, string>) {
+  constructor(helper: string, args: string[], env: Record<string, string>, private readonly onClosed?: () => void) {
     this.pipe = new NodeMobilePipe([helper, ...args], { env, timeoutMs: 30000, maxBytes: 1048576 });
+  }
+  alive(): boolean { return !this.failed && this.pipe.child.exitCode === null && this.pipe.child.signalCode === null && this.pipe.child.pid !== undefined; }
+  async identity(binding: string): Promise<string> {
+    const nonce = randomBytes(32).toString("hex"), protocol = "canaveral-mobile-native-update-v1";
+    const body = object(await this.call("updateIdentity", { protocol, nonce, binding }));
+    if (!this.alive() || Object.keys(body).sort().join(",") !== "binding,nonce,pid,protocol" || body.protocol !== protocol || body.nonce !== nonce || body.binding !== binding || body.pid !== this.pipe.child.pid) throw new Error("Native helper identity acknowledgement mismatch");
+    return createHash("sha256").update(JSON.stringify({ protocol, nonce, binding, pid: body.pid })).digest("hex");
   }
   retain(): void { this.references++; }
   call(op: string, args: RecordValue = {}): Promise<unknown> {
@@ -190,7 +198,13 @@ class NativeRpc {
   }
   async release(): Promise<void> {
     if (--this.references > 0) return;
-    try { if (!this.failed) { await this.call("shutdown"); await this.pipe.end(); await this.pipe.wait(3000); } }
+    try {
+      if (this.failed) { if (this.onClosed) throw new Error("Native helper stop is uncertain"); return; }
+      await this.call("shutdown"); await this.pipe.end();
+      const code = await this.pipe.wait(3000);
+      if (this.onClosed && code !== 0) throw new Error("Native helper stop is unconfirmed");
+      this.onClosed?.();
+    }
     finally { await this.pipe.close(); }
   }
 }
@@ -247,17 +261,17 @@ class NativeDirectory implements ContainerDirectory {
   }
   async close(): Promise<void> { if (!this.closed) { this.closed = true; try { await this.rpc.call("closeDirectory", { directory: this.id }); } finally { await this.rpc.release(); } } }
 }
-export function nativeContainerFiles(helper: string): ContainerFiles {
+export function nativeContainerFiles(helper: string | NodeNativeHelperSelection): ContainerFiles {
   return { async openRoot(root) {
-    const rpc = new NativeRpc(helper, ["files", root], process.env as Record<string, string>);
+    const rpc = helper instanceof NodeNativeHelperSelection ? helper.open(["files", root], process.env as Record<string, string>) : new NativeRpc(helper, ["files", root], process.env as Record<string, string>);
     // Verify that the helper actually opened its pinned root before returning it.
     try { await rpc.call("syncDirectory", { directory: 0 }); return new NativeDirectory(rpc, 0); }
     catch (error) { await rpc.release().catch(() => {}); throw error; }
   } };
 }
-export function nativeShells(helper: string): ShellAdapter {
+export function nativeShells(helper: string | NodeNativeHelperSelection): ShellAdapter {
   return { async open(argv, env) {
-    const rpc = new NativeRpc(helper, ["pty"], env);
+    const rpc = helper instanceof NodeNativeHelperSelection ? helper.open(["pty"], env) : new NativeRpc(helper, ["pty"], env);
     try { await rpc.call("ptyOpen", { argv: [...argv] }); } catch (error) { await rpc.release().catch(() => {}); throw error; }
     let buffer = Buffer.alloc(0), base = 0, cursor = 0, exited = false, exitCode: unknown = null, closed = false, failure: unknown, polling: Promise<void> | undefined;
     const poll = async () => {
@@ -280,7 +294,51 @@ export function nativeShells(helper: string): ShellAdapter {
     };
   } };
 }
-function nativeAdapters(config: RecordValue): Pick<MobileTransport, "files" | "shells"> {
-  const helper = mobileNativeHelper(config);
+function nativeAdapters(config: RecordValue, selection?: NodeNativeHelperSelection): Pick<MobileTransport, "files" | "shells"> {
+  const helper = selection ?? mobileNativeHelper(config);
   return { files: nativeContainerFiles(helper), shells: nativeShells(helper) };
+}
+
+/** One host-owned selection shared by every scoped files/PTY adapter using this helper.
+ * A lost scoped connection remains counted: process exit alone cannot prove workload cleanup.
+ */
+export class NodeNativeHelperSelection {
+  private active = 0;
+  private fenced = false;
+  private probe: NativeRpc | undefined;
+  private proof: { binding: string; acknowledgement: string } | undefined;
+  constructor(private helper: string, readonly helperId = "mobile-native") {}
+  open(args: string[], env: Record<string, string>): NativeRpc {
+    if (this.fenced) throw new Error("Native helper admission is fenced");
+    this.active++;
+    try { return new NativeRpc(this.helper, args, env, () => { this.active--; }); }
+    catch (error) { this.active--; throw error; }
+  }
+  block(): void { this.fenced = true; }
+  async fence(): Promise<void> {
+    if (this.fenced) throw new Error("Native helper admission is already fenced");
+    this.fenced = true;
+    if (this.active !== 0) throw new Error("Native helper has active or uncertain handles");
+    if (this.probe) { await this.probe.release(); this.probe = undefined; this.proof = undefined; }
+  }
+  async acknowledge(executable: string, binding: string): Promise<string> {
+    if (!this.fenced || this.active !== 0 || this.probe) throw new Error("Native helper boundary is not closed");
+    this.probe = new NativeRpc(executable, ["pty"], {}, () => {});
+    const acknowledgement = await this.probe.identity(binding);
+    this.proof = { binding, acknowledgement };
+    return acknowledgement;
+  }
+  inspect(binding: string): string | undefined {
+    return !this.fenced && this.probe?.alive() && this.proof?.binding === binding ? this.proof.acknowledgement : undefined;
+  }
+  commit(executable: string, binding: string): void {
+    if (!this.probe?.alive() || this.proof?.binding !== binding) throw new Error("Native helper instance is no longer owned");
+    this.helper = executable; this.fenced = false;
+  }
+  /** Does not stop active handles; only closes the idle identity probe. */
+  async close(): Promise<void> {
+    if (this.active) throw new Error("Native helper has active or uncertain handles");
+    this.fenced = true;
+    if (this.probe) { await this.probe.release(); this.probe = undefined; this.proof = undefined; }
+  }
 }

@@ -6,6 +6,9 @@ import { StateLock } from '../runtime-process.ts';
 import { parseTarget, verifyRelease } from './protocol.ts';
 import type { ReleaseFile, SignedRelease, Target, TrustedKeys } from './protocol.ts';
 
+import { componentFileSetDigest, componentTargetKey, parseComponentReport, parseComponentTarget } from './components.ts';
+import type { ComponentAdoptionDriver, ComponentAdoptionRequest, ComponentAdoptionReceipt, ComponentReport, ComponentTarget } from './components.ts';
+
 export const LAUNCHER_VERSION = 1;
 export const ARTIFACT_CHUNK_BYTES = 524288;
 export type UpdatePhase = 'draining' | 'downloading' | 'staged' | 'activating' | 'verifying' | 'succeeded' | 'rolledBack' | 'failed' | 'unknown' | 'cancelled';
@@ -37,6 +40,7 @@ export interface UpdateStoreOptions {
 }
 export interface ManagedUpdaterOptions extends UpdateStoreOptions {
   targetKind?: 'host' | 'runner';
+  components?: ComponentAdoptionDriver;
   request: ControllerRequest; identity(): HostIdentity | Promise<HostIdentity>; lifecycle: UpdateLifecycle;
 }
 export interface UpdateReport {
@@ -46,7 +50,8 @@ export interface UpdateJob {
   id: string; attemptId: string; installationId: string; hostId: string; credentialHash: string;
   release: SignedRelease; previousReleaseId?: string; targetKind?: 'host' | 'runner'; binding?: RunnerUpdateBinding; activationReported?: boolean; phase: 'queued' | UpdatePhase;
   sequence: number; pending?: UpdateReport; gate?: QuiesceReceipt;
-  componentStatus: { host: 'pending' | 'ready'; guest: 'pendingGuestReceipt'; 'native-helper': 'pendingNativeReceipt' };
+  componentStatus: { host: 'pending' | 'ready'; guest: string; 'native-helper': string };
+  adoption?: { targets: ComponentTarget[]; planned: boolean; sequence: number; entries: Array<{ request: ComponentAdoptionRequest; state: 'intent' | 'adopted' | 'unknown' }>; pending?: ComponentReport };
 }
 const TERMINAL = new Set(['succeeded', 'rolledBack', 'failed', 'cancelled']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -254,7 +259,28 @@ export class UpdateStore {
     updateUUID(value.hostId); if (typeof value.credentialHash !== 'string' || !/^[0-9a-f]{64}$/.test(value.credentialHash)) throw new Error('Invalid saved credential binding');
     if (!['queued', 'draining', 'downloading', 'staged', 'activating', 'verifying', 'succeeded', 'rolledBack', 'failed', 'unknown', 'cancelled'].includes(String(value.phase))) throw new Error('Invalid saved update phase');
     if (value.previousReleaseId !== undefined) updateUUID(value.previousReleaseId);
-    return { ...value, release: this.validate(value.release) } as unknown as UpdateJob;
+    const job = { ...value, release: this.validate(value.release) } as unknown as UpdateJob;
+    if (job.adoption !== undefined) {
+      const journal = updateObject(job.adoption);
+      if (Object.keys(journal).some(k => !['targets', 'planned', 'sequence', 'entries', 'pending'].includes(k)) || typeof journal.planned !== 'boolean' || !Number.isSafeInteger(journal.sequence) || Number(journal.sequence) < 0 || !Array.isArray(journal.targets) || journal.targets.length > 1000 || !Array.isArray(journal.entries) || journal.entries.length > journal.targets.length) throw new Error('Invalid saved adoption journal');
+      const targets = journal.targets.map(parseComponentTarget), keys = new Set(targets.map(componentTargetKey));
+      if (keys.size !== targets.length) throw new Error('Duplicate saved adoption targets');
+      const seen = new Set<string>();
+      for (const raw of journal.entries) {
+        const entry = updateObject(raw);
+        if (Object.keys(entry).length !== 2 || !['intent', 'adopted', 'unknown'].includes(String(entry.state))) throw new Error('Invalid saved adoption entry');
+        const request = updateObject(entry.request);
+        const parsed = parseComponentReport({ ...request, sequence: 1, state: 'intent', evidence: null });
+        const key = componentTargetKey(parsed.target);
+        if (!keys.has(key) || seen.has(key) || parsed.jobId !== job.id || parsed.attemptId !== job.attemptId || parsed.installationId !== job.installationId || parsed.releaseId !== job.release.manifest.releaseId || parsed.fileSetDigest !== componentFileSetDigest(job.release.manifest, parsed.target.component)) throw new Error('Saved adoption binding mismatch');
+        seen.add(key);
+      }
+      if (journal.pending !== undefined) {
+        const pending = parseComponentReport(journal.pending);
+        if (pending.sequence !== journal.sequence || !seen.has(componentTargetKey(pending.target)) || pending.jobId !== job.id || pending.attemptId !== job.attemptId || pending.installationId !== job.installationId || pending.releaseId !== job.release.manifest.releaseId || pending.fileSetDigest !== componentFileSetDigest(job.release.manifest, pending.target.component)) throw new Error('Invalid saved component report');
+      }
+    }
+    return job;
   }
   saveJob(job: UpdateJob): void {
     if (job.installationId !== this.installationId) throw new Error('Job installation mismatch');
@@ -304,7 +330,7 @@ export class ManagedUpdater {
     return this.exclusive(async () => {
       const existing = this.store.job(); if (existing?.pending) await this.flush(existing);
       // An unknown operation is never replaced or repolled into a fresh attempt.
-      if (existing && !TERMINAL.has(existing.phase)) return existing;
+      if (existing && (!TERMINAL.has(existing.phase) || ((this.options.components || existing.adoption) && existing.phase === 'succeeded' && !this.componentsComplete(existing)))) return existing;
       const identity = await this.identity(), currentReleaseId = this.store.active(); if (currentReleaseId) this.store.verifyInstalled(currentReleaseId);
       const reply = await this.options.request('POST', `/v1/${this.options.targetKind === 'runner' ? 'runners' : 'hosts'}/${identity.id}/updates/poll`, { ...(identity.binding ? { binding: identity.binding } : {}), installationId: this.store.installationId, target: this.store.target, launcherVersion: LAUNCHER_VERSION, ...(currentReleaseId ? { currentReleaseId } : {}) }, identity.credential, this.abort.signal);
       if (reply.job === null) return undefined;
@@ -319,7 +345,7 @@ export class ManagedUpdater {
   async step(): Promise<UpdateJob | undefined> {
     return this.exclusive(async () => {
       const job = this.store.job(); if (!job) return undefined; await this.identity(job); await this.flush(job);
-      if (TERMINAL.has(job.phase)) return job;
+      if (TERMINAL.has(job.phase)) { if (job.phase === 'succeeded') await this.adoptComponents(job); return job; }
       if (job.phase === 'unknown') {
         if (job.activationReported) {
           const receipt = await this.options.lifecycle.activation.recover(this.activation(job));
@@ -375,6 +401,67 @@ export class ManagedUpdater {
       }
       return job;
     });
+  }
+  private componentsComplete(job: UpdateJob): boolean {
+    return !!job.adoption?.planned && !job.adoption.pending && job.adoption.targets.every(t => job.adoption!.entries.some(e => componentTargetKey(e.request.target) === componentTargetKey(t) && e.state === 'adopted'));
+  }
+  private async componentCall(job: UpdateJob, action: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const identity = await this.identity(job);
+    return this.options.request('POST', `/v1/${this.options.targetKind === 'runner' ? 'runners' : 'hosts'}/${identity.id}/updates/${action}`, { ...body, ...(identity.binding ? { binding: identity.binding } : {}) }, identity.credential, this.abort.signal);
+  }
+  private async flushComponent(job: UpdateJob): Promise<void> {
+    const journal = job.adoption!;
+    if (!journal.pending) return;
+    const response = await this.componentCall(job, 'component-report', { ...journal.pending });
+    if (response.accepted !== true) throw new Error('Controller did not acknowledge component report');
+    const view = response.job as { components?: Record<string,string> } | undefined;
+    if (view?.components) for (const c of ['guest', 'native-helper'] as const) if (typeof view.components[c] === 'string') job.componentStatus[c] = view.components[c];
+    delete journal.pending; this.store.saveJob(job);
+  }
+  private async adoptionReport(job: UpdateJob, request: ComponentAdoptionRequest, state: ComponentReport['state'], evidence: ComponentReport['evidence']): Promise<void> {
+    const journal = job.adoption!;
+    journal.pending = parseComponentReport({ ...request, sequence: ++journal.sequence, state, evidence });
+    this.store.saveJob(job); await this.flushComponent(job);
+  }
+  private async adoptComponents(job: UpdateJob): Promise<void> {
+    const driver = this.options.components; if (!driver) return;
+    this.store.verifyInstalled(job.release.manifest.releaseId);
+    const context = this.activation(job);
+    if (!job.adoption) {
+      const targets = (await driver.targets(context, job.release)).map(parseComponentTarget);
+      if (targets.length > 1000 || new Set(targets.map(componentTargetKey)).size !== targets.length) throw new Error('Invalid adoption target inventory');
+      for (const target of targets) componentFileSetDigest(job.release.manifest, target.component);
+      job.adoption = { targets, planned: false, sequence: 0, entries: [] }; this.store.saveJob(job);
+    }
+    const journal = job.adoption;
+    if (!journal.planned) {
+      const response = await this.componentCall(job, 'component-plan', { ...context, targets: journal.targets });
+      if (response.accepted !== true) return;
+      journal.planned = true; this.store.saveJob(job);
+    }
+    await this.flushComponent(job);
+    for (const target of journal.targets) {
+      const request: ComponentAdoptionRequest = { ...context, target, fileSetDigest: componentFileSetDigest(job.release.manifest, target.component) };
+      let entry = journal.entries.find(e => componentTargetKey(e.request.target) === componentTargetKey(target));
+      if (entry?.state === 'adopted') continue;
+      let receipt: ComponentAdoptionReceipt | undefined;
+      if (entry) {
+        await this.identity(job);
+        receipt = await driver.recover(request);
+        if (!receipt) return;
+      } else {
+        entry = { request, state: 'intent' }; journal.entries.push(entry);
+        await this.adoptionReport(job, request, 'intent', null);
+        await this.identity(job);
+        try { receipt = await driver.adopt(request); } catch { receipt = { ...request, state: 'unknown', evidence: null }; }
+      }
+      const parsed = parseComponentReport({ ...receipt, sequence: journal.sequence + 1 });
+      if (parsed.jobId !== request.jobId || parsed.attemptId !== request.attemptId || parsed.releaseId !== request.releaseId || parsed.installationId !== request.installationId || parsed.fileSetDigest !== request.fileSetDigest || componentTargetKey(parsed.target) !== componentTargetKey(target)) throw new Error('Component receipt binding changed');
+      entry.state = parsed.state === 'adopted' ? 'adopted' : 'unknown';
+      await this.adoptionReport(job, request, entry.state, parsed.evidence);
+      if (entry.state === 'unknown') return;
+      return; // Bound one effect per manager step.
+    }
   }
   private activation(job: UpdateJob): ActivationRequest { return { jobId: job.id, attemptId: job.attemptId, releaseId: job.release.manifest.releaseId, installationId: job.installationId }; }
   private async complete(job: UpdateJob, receipt: ActivationReceipt): Promise<void> {

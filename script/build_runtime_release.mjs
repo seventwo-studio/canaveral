@@ -6,6 +6,7 @@ import { dirname, join, resolve, parse } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { canonicalManifest, parseManifest, parseSignedRelease, releasePath, verifyRelease } from '../coordination/src/updates/protocol.ts';
+import { checkModuleClosure } from './package_checks.mjs';
 
 const METADATA = '.canaveral-build.json';
 function exact(value, fields, name) {
@@ -115,6 +116,15 @@ export async function buildRuntimeRelease({ recipe: recipePath, inputs, output, 
         files.push({ path: file.path, component: file.component, executable: file.executable, bytes, sha256 });
       } finally { await input.handle.close(); if (temporary) await fs.unlink(temporary).catch(() => {}); }
     }
+    // Inspect staged bytes rather than changing input paths. No packaged code is run.
+    const modules = new Map(files.map(file => [file.path, '']));
+    let moduleBytes = 0;
+    for (const file of files.filter(file => /\.(?:mjs|cjs|js)$/.test(file.path))) {
+      moduleBytes += file.bytes;
+      if (file.bytes > 16 * 1024 ** 2 || moduleBytes > 128 * 1024 ** 2) throw new Error('Emitted module source exceeds package-check bounds.');
+      modules.set(file.path, new TextDecoder('utf-8', { fatal: true }).decode(await fs.readFile(join(artifacts, file.sha256))));
+    }
+    checkModuleClosure(modules);
     const metadata = Buffer.from(JSON.stringify({ schema: 'canaveral-runtime-build-v1', sourceRevision: recipe.sourceRevision, toolchain: { node: toolchain.node, rust: toolchain.rust }, target: validated.target, version: recipe.version }) + '\n');
     const sha256 = createHash('sha256').update(metadata).digest('hex');
     try { await outputFile(join(artifacts, sha256), metadata); } catch (error) { if (error.code !== 'EEXIST') throw error; }

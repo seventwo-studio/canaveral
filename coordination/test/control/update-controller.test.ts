@@ -323,3 +323,57 @@ test("independent SQLite workers arbitrate overlapping rollouts and exact replay
   } finally { await Promise.all(competing.map(w => w.worker.terminate())); }
   assert.equal(f.drainCount(), 1);
 });
+
+test('component ledger requires independent evidence, exact inventory, ordered receipts and retains uncertain drains', async t => {
+  const f = fixture(t), { release, job } = await f.assigned();
+  let n = 0;
+  for (const state of ['draining', 'downloading', 'staged', 'activating', 'verifying', 'succeeded']) await f.report(job, ++n, state, state === 'succeeded' ? { installedReleaseId: release.manifest.releaseId } : {});
+  const { componentFileSetDigest } = await import('../../src/updates/components.ts');
+  const one = { component: 'guest' as const, machineId: randomUUID(), assignmentId: randomUUID(), bootId: randomUUID(), generation: 1 };
+  const two = { ...one, machineId: randomUUID(), assignmentId: randomUUID() };
+  let targets = [one, two], ack = true;
+  const context = { jobId: job.id, attemptId: job.attemptId, installationId: f.installationId, releaseId: release.manifest.releaseId };
+  const plan = () => f.call('POST', `/v1/hosts/${f.host}/updates/component-plan`, { ...context, targets }, f.credential);
+  assert.deepEqual(await plan(), { accepted: false, pending: true });
+  f.options.componentEvidence = { targets: () => targets, acknowledged: () => ack }; f.restart();
+  assert.equal((await plan()).accepted, true);
+  const send = (sequence: number, state: string, target = one, patch: Json = {}) => f.call('POST', `/v1/hosts/${f.host}/updates/component-report`, { ...context, target, fileSetDigest: componentFileSetDigest(release.manifest, 'guest'), sequence, state, evidence: state === 'adopted' ? { boundary: 'idle-closed', acknowledgement: 'a'.repeat(64) } : null, ...patch }, f.credential);
+  await assert.rejects(send(2, 'intent'), status(409));
+  await assert.rejects(send(1, 'intent', { ...one, bootId: randomUUID() }), status(409));
+  await assert.rejects(send(1, 'intent', one, { fileSetDigest: 'b'.repeat(64) }), status(409));
+  const intent = await send(1, 'intent'); assert.equal(intent.job.state, 'unknown'); assert.equal(intent.job.hostState, 'succeeded'); assert.equal(f.drainCount(), 1);
+  f.restart(); assert.deepEqual(await send(1, 'intent'), intent);
+  await assert.rejects(send(1, 'unknown'), status(409));
+  ack = false; await assert.rejects(send(2, 'adopted'), status(409));
+  ack = true; const partial = await send(2, 'adopted'); assert.equal(partial.job.components.guest, 'partial'); assert.equal(partial.job.components['native-helper'], 'pendingNativeReceipt');
+  await send(3, 'intent', two); await send(4, 'unknown', two); assert.equal(f.drainCount(), 1);
+  const held = f.phase(job.id);
+  for (const [state, installedReleaseId] of [['rolledBack', f.previous], ['unknown', undefined], ['verifying', undefined], ['succeeded', release.manifest.releaseId]] as const) {
+    await assert.rejects(f.report(job, n + 1, state, installedReleaseId === undefined ? {} : { installedReleaseId }), status(409));
+    assert.deepEqual(f.phase(job.id), held);
+    assert.equal(f.drainCount(), 1);
+  }
+  const replay = await f.report(job, n, 'succeeded', { installedReleaseId: release.manifest.releaseId });
+  assert.equal(replay.accepted, true);
+  assert.deepEqual(f.phase(job.id), held);
+  assert.equal(f.drainCount(), 1);
+  targets = [one, { ...two, generation: 2 }]; await assert.rejects(send(5, 'adopted', two), status(409));
+  targets = [one, two]; const done = await send(5, 'adopted', two); assert.equal(done.job.components.guest, 'ready'); assert.equal(done.job.componentTargets.length, 2); assert.equal(f.drainCount(), 0);
+  f.store.transaction(db => db.prepare('UPDATE hosts SET credential=? WHERE id=?').run('c'.repeat(64), f.host));
+  await assert.rejects(send(5, 'adopted', two), status(401));
+});
+
+test('component evidence and credentials are checked inside the effect transaction', async t => {
+  const f = fixture(t), { release, job } = await f.assigned();
+  let n = 0; for (const state of ['draining','downloading','staged','activating','verifying','succeeded']) await f.report(job, ++n, state, state === 'succeeded' ? { installedReleaseId: release.manifest.releaseId } : {});
+  const target = { component: 'guest' as const, machineId: randomUUID(), assignmentId: randomUUID(), bootId: randomUUID(), generation: 1 };
+  f.options.componentEvidence = { targets: db => { assert.equal(db.isTransaction, true); return [target]; }, acknowledged: () => true }; f.restart();
+  const body = { jobId: job.id, attemptId: job.attemptId, installationId: f.installationId, releaseId: release.manifest.releaseId, targets: [target] };
+  await f.call('POST', `/v1/hosts/${f.host}/updates/component-plan`, body, f.credential);
+  const currentModule = createModule(f.store, f.options);
+  f.store.transaction(db => {
+    db.prepare('UPDATE hosts SET enabled=0 WHERE id=?').run(f.host);
+    assert.throws(() => currentModule.handle(request('POST', `/v1/hosts/${f.host}/updates/component-plan`, body, f.credential)), status(401));
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM update_component_reports').get()!.n, 0);
+  });
+});

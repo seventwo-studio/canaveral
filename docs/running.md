@@ -2,6 +2,33 @@
 
 Run the TypeScript control plane on Node.js 24 or later, directly or in a matching container image. Native host agents run where their hypervisor is installed. macOS guests stay on Apple hardware. A Linux container does not add Hyper-V or Apple Virtualization to its host; Docker Desktop on a Mac is not the Apple host backend.
 
+## Installation and target boundaries
+
+Keep the production controller in Docker and update its immutable image through the external deployment workflow. Direct controller commands below remain available for development and existing operator-managed layouts. Managed host updates do not replace the controller, Node, stable bootstrap, service manager or trust roots; see [installation and recovery](runtime-updates.md#install-the-stable-bootstrap-once).
+
+| Target/path | Required boundary |
+| --- | --- |
+| Docker controller | Persistent SQLite/identity/credentials; externally selected image; no runtime self-update |
+| Unix initial managed installation | Offline verified expansion on current Linux/Darwin amd64/arm64; fresh private roots; generated service definition only |
+| Linux host, libvirt | Native KVM/libvirt and prepared images; service account owns its private state and authorized storage |
+| macOS host, Apple VM | Apple hardware and admitted native runner; native boot/stop/cleanup acceptance remains backend-specific |
+| Windows host, Hyper-V | Supported host edition and Hyper-V authority; operator-provisioned private ACLs require Windows acceptance |
+| Kubernetes worker, KubeVirt | Separate KubeVirt/CDI installation and scoped resource ownership; bounded execution creation remains gated on independent fencing |
+| Android/iOS runners | Installed native SDKs and explicit adapter configuration; helper staging does not prove adoption or device acceptance |
+| Linux direct-boot guest | ARM64 Image/EROFS/bootstrap inputs and trusted per-launch medium; native handoff acceptance remains open |
+| Model runner | Existing enrollment and configured model runtime; real inference and accelerator acceptance are separate |
+
+This matrix describes configured paths and prerequisites, not platform parity or consumer lease eligibility. Ordinary hosts still reject experimental lease declarations; retain the [eligibility gates](lease-eligibility.md). Follow the [operator acceptance steps](runtime-updates.md#operator-acceptance-prepare-only-separate-authorization-required) before claiming an installation or rollout accepted.
+
+Hosts preparing for qualified Linux/macOS lease execution may set
+`leaseClockHelper` to an absolute installed `canaveral-mobile-native` executable.
+It must be a nonsymlink, single-link regular file, executable, owned by root or
+the service account and not writable by group/others. Its ancestors must also be
+root/service-owned and not writable by group/others; root-owned sticky temporary
+directories are allowed. This selects the
+[boot-bound native deadline clock](leases.md) before runner state is created;
+it does not enable consumer execution or replace native fencing/cleanup checks.
+
 ## Native controller and hosts
 
 Install dependencies with `npm --prefix coordination ci --ignore-scripts`, build

@@ -27,6 +27,35 @@ mod unix {
             .as_u64()
             .ok_or_else(|| format!("Invalid integer {key}").into())
     }
+    fn update_identity(v: &Value) -> Result<Value> {
+        let fields = ["seq", "op", "protocol", "nonce", "binding"];
+        let object = v.as_object().ok_or("Invalid update identity request")?;
+        if object.len() != fields.len() || fields.iter().any(|key| !object.contains_key(*key)) {
+            return fail("Invalid update identity fields");
+        }
+        number(v, "seq")?;
+        if field(v, "op")? != "updateIdentity"
+            || field(v, "protocol")? != "canaveral-mobile-native-update-v1"
+        {
+            return fail("Invalid update identity protocol");
+        }
+        for key in ["nonce", "binding"] {
+            let value = field(v, key)?;
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return fail("Invalid update identity challenge");
+            }
+        }
+        Ok(json!({
+            "protocol": "canaveral-mobile-native-update-v1",
+            "nonce": field(v, "nonce")?,
+            "binding": field(v, "binding")?,
+            "pid": std::process::id()
+        }))
+    }
     fn name(value: &str) -> Result<CString> {
         if value.is_empty()
             || value == "."
@@ -468,6 +497,9 @@ mod unix {
             if mode == "process" {
                 return self.process.handle(v);
             }
+            if op == "updateIdentity" {
+                return update_identity(v);
+            }
             if mode == "pty" {
                 return match op {
                     "ptyOpen" => {
@@ -746,6 +778,39 @@ mod unix {
         use super::*;
         use std::os::unix::fs::symlink;
         use std::path::PathBuf;
+        #[test]
+        fn update_identity_is_readonly_and_bound_to_this_process() {
+            let request = json!({
+                "seq": 1,
+                "op": "updateIdentity",
+                "protocol": "canaveral-mobile-native-update-v1",
+                "nonce": "ab".repeat(32),
+                "binding": "cd".repeat(32)
+            });
+            for mode in ["files", "pty"] {
+                let mut server = Server::default();
+                let reply = server.handle(&request, mode).unwrap();
+                assert_eq!(reply["nonce"], request["nonce"]);
+                assert_eq!(reply["binding"], request["binding"]);
+                assert_eq!(reply["pid"], std::process::id());
+                assert_eq!(server.next, 0);
+                assert!(server.dirs.is_empty());
+                assert!(server.stages.is_empty());
+                assert!(server.downloads.is_empty());
+                assert!(server.pty.is_none());
+            }
+            for (key, value) in [
+                ("extra", json!(true)),
+                ("protocol", json!("other")),
+                ("nonce", json!("AB".repeat(32))),
+                ("binding", json!("cd".repeat(31))),
+                ("seq", json!(-1)),
+            ] {
+                let mut invalid = request.clone();
+                invalid[key] = value;
+                assert!(update_identity(&invalid).is_err());
+            }
+        }
         fn temporary() -> PathBuf {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let p = std::env::temp_dir().join(format!(

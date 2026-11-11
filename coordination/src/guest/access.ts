@@ -1,3 +1,7 @@
+import { signedGuestProvision } from "../updates/guest.ts";
+import type { SignedGuestPreparation } from "../updates/guest.ts";
+import { componentTargetKey, parseComponentReport } from "../updates/components.ts";
+import type { ComponentAdoptionRequest, ComponentAdoptionReceipt } from "../updates/components.ts";
 import { request as httpRequest } from "node:http";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { isIP } from "node:net";
@@ -146,6 +150,17 @@ export class GuestAccess {
       return value;
     } catch (error) { if (error instanceof InputDenied) throw error; throw transportError(method === "POST"); }
     finally { clearTimeout(timer); request.destroy(); }
+  }
+  /** Fixed adoption protocol over the current assignment-owned authenticated SSH tunnel. */
+  async adoption(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, request: ComponentAdoptionRequest, inspect: boolean): Promise<ComponentAdoptionReceipt | undefined> {
+    if (request.target.component !== "guest" || request.target.machineId !== machine.id || image.os !== "linux") throw new ServiceError("Guest adoption ownership differs.", 409);
+    const b = await this.binding(machine, image, folder);
+    const value = await this.json(b, "POST", "/control", jsonBytes({ action: inspect ? "update-inspect" : "update-acknowledge", arguments: request }, 1048576));
+    if (value.absent === true && inspect) return undefined;
+    const parsed = parseComponentReport({ ...value, sequence: 1 });
+    const { sequence: _sequence, ...receipt } = parsed;
+    if (receipt.state === "intent" || componentTargetKey(receipt.target) !== componentTargetKey(request.target) || (["jobId", "attemptId", "installationId", "releaseId", "fileSetDigest"] as const).some(k => receipt[k] !== request[k])) throw transportError(true);
+    return receipt as ComponentAdoptionReceipt;
   }
   async control(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, request: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (image.mode === "headless" && ["screenshot", "hierarchy", "accessibility", "accessibility-action", "tap", "swipe", "text", "key"].includes(request.action as string)) throw new InputDenied("This headless guest has no graphical control or accessibility service.", 409, { code: "capability_unsupported" });
@@ -301,7 +316,7 @@ function processConnection(child: ChildProcessWithoutNullStreams): DisplayConnec
   };
 }
 /** Default host adapter. SSH destinations and keys come from the assignment, never consumer request bodies. */
-export function createGuestAccess(config: Record<string, unknown>, state: string): GuestAccess & { prepare(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string): Promise<Record<string, unknown>> } {
+export function createGuestAccess(config: Record<string, unknown>, state: string): GuestAccess & { prepare(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, provision?: SignedGuestPreparation): Promise<Record<string, unknown>> } {
   const connections = new Map<string, { binding: GuestBinding; child: ChildProcessWithoutNullStreams; folder: string }>();
   const opening = new Map<string, Promise<GuestBinding>>();
   const processes = new ProcessSupervisor();
@@ -375,11 +390,13 @@ export function createGuestAccess(config: Record<string, unknown>, state: string
   }, new SqliteStore(join(state, "guest-access.sqlite")));
   return Object.assign(access, {
     async close(): Promise<void> { await GuestAccess.prototype.close.call(access); await processes.close(); },
-    async prepare(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string): Promise<Record<string, unknown>> {
+    async prepare(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, provision?: SignedGuestPreparation): Promise<Record<string, unknown>> {
       if (access.isClosed()) throw new ServiceError("Guest access is stopping.", 410);
       const options = settings(image), manifest = options.helperManifest ?? config.guestHelperManifest ?? process.env.CANAVERAL_GUEST_BUNDLE;
-      if (typeof manifest !== "string") throw new ServiceError("A runnable TypeScript guest service bundle is required before preparation.", 409, { code: "capability_unsupported", retryable: false });
-      const helpers = loadHelperArtifacts(manifest);
+      if (!provision && typeof manifest !== "string") throw new ServiceError("A runnable TypeScript guest service bundle is required before preparation.", 409, { code: "capability_unsupported", retryable: false });
+      if (provision && (image.mode !== "headless" || image.os !== "linux" || provision.identity.machineId !== machine.id)) throw new ServiceError("Signed guest preparation requires the matching headless Linux assignment.", 409, { code: "capability_unsupported" });
+      // This prepares cloud-init data only. The provider must establish fresh/stopped ownership before applying it.
+      const helpers = provision ? signedGuestProvision(provision.release, provision.trustedKeys, provision.directory, provision.context, provision.identity) : loadHelperArtifacts(manifest as string);
       if (image.mode !== "headless" && image.mode !== "desktop") throw new ServiceError("Invalid Linux guest profile.", 400);
       uuid(machine.id); privateDirectory(folder);
       const tokenPath = join(folder, "access-token.json");

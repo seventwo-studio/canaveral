@@ -7,6 +7,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { Accounts } from "../accounts.ts";
 import { CapacityLedger } from "../capacity.ts";
 import { identifier } from "../consumers.ts";
+import { comparePlacementScore, placementScore } from '../placement.ts';
+import type { PlacementScore } from '../placement.ts';
 import type { Resources } from "../consumers.ts";
 import { object, ServiceError } from "../errors.ts";
 import { modelIdentity, modelJobCanRelease, modelReceiptMatches, parseModelJob } from "../model-job.ts";
@@ -22,6 +24,8 @@ const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 const placeholderDigest = `sha256:${"0".repeat(64)}`;
 export const MiB = 1024 ** 2, GiB = 1024 ** 3;
 export const INFERENCE_LEASE_SECONDS = 30;
+/** Physical Linux/Mac hosts may share their budget with VM and simulator runtimes. */
+export const INFERENCE_HOST_PROVIDERS: readonly string[] = ['native', 'apple', 'libvirt', 'macos', 'linux'];
 
 export interface InferenceModel { id: string; digest: string; capability: "generation"; resources: Resources }
 export interface InferenceOffer { runtime: "ollama"; models: InferenceModel[] }
@@ -269,25 +273,26 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
             if (JSON.stringify(inferenceRequest(JSON.parse(old.request))) !== JSON.stringify(input)) throw new ServiceError("Request identity is already used for another inference specification.", 409);
             return { body: jobView(db, old, store.clock()) };
           }
-          const candidates: Array<{ score: number; host: string; model: InferenceModel }> = [];
+          const candidates: Array<{ score: PlacementScore; host: string; model: InferenceModel }> = [];
           const hosts = db.prepare("SELECT * FROM hosts WHERE enabled=1 AND id NOT IN (SELECT id FROM retired_runners) ORDER BY id").all() as unknown as Array<{ id: string; offer: string; seen: number }>;
           for (const host of hosts) {
             if (updateDraining(db, host.id)) continue;
             if (store.clock() - host.seen >= INFERENCE_LEASE_SECONDS || (input.hostId !== undefined && input.hostId !== host.id)) continue;
             const offer = object(JSON.parse(host.offer));
             if (offer.inference === undefined) continue;
-            if (!["native", "apple", "libvirt"].includes(String(offer.provider))) throw new ServiceError("Embedded inference requires a native Mac or Linux host offer.", 409);
+            if (!INFERENCE_HOST_PROVIDERS.includes(String(offer.provider))) throw new ServiceError("Embedded inference requires a native Mac or Linux host offer.", 409);
             if (Number(db.prepare("SELECT count(*) AS n FROM inference_jobs WHERE host=? AND state NOT IN ('succeeded','failed','cancelled')").get(host.id)!.n) >= 32) continue;
-            const remaining = ledger.remaining(db, host.id), used = ledger.used(db, host.id), capacity = resources(offer.capacity);
+            const remaining = ledger.remaining(db, host.id), used = ledger.used(db, host.id), physical = resources(offer.capacity), limits = ledger.hostLimits(db, host.id);
+            const capacity = Object.fromEntries(keys.map(key => [key, Math.min(physical[key], limits[key])])) as unknown as Resources;
             for (const model of inferenceOffer(offer.inference).models) {
               if (model.id === input.model && (input.digest === undefined || input.digest === model.digest) && keys.every(key => model.resources[key] <= remaining[key])) {
-                candidates.push({ score: used.memoryMiB / capacity.memoryMiB, host: host.id, model });
+                candidates.push({ score: placementScore(capacity, used, model.resources), host: host.id, model });
               }
             }
           }
           if (!candidates.length) throw new ServiceError("No online accepting host offers this model and enough unreserved capacity.", 409);
           if (input.digest === undefined && new Set(candidates.map(candidate => candidate.model.digest)).size > 1) throw new ServiceError("Multiple model digests are available; choose digest explicitly.", 409);
-          candidates.sort((a, b) => a.score - b.score || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
+          candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
           const chosen = candidates[0]!, now = store.clock();
           db.prepare("INSERT INTO inference_jobs VALUES (?,?,?,?,'running','queued','',NULL,?,?)").run(input.id, JSON.stringify(input), chosen.host, JSON.stringify(chosen.model), now, now);
           const row = db.prepare("SELECT j.*,h.seen FROM inference_jobs j JOIN hosts h ON h.id=j.host WHERE j.id=?").get(input.id) as unknown as JobRow;

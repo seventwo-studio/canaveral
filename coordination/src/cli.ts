@@ -32,6 +32,7 @@ operation ID [--output FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
 image capture --request-file FILE | image-task ID
 updates [options] COMMAND                Manage signed runtime releases and rollouts
+install [options]                        Verify a fresh Unix installation; generate service config
 
 serve flags: --bind IP --port PORT --database FILE --admin-token-file FILE
              --enrollment-token-file FILE --controller-id UUID [--tls-cert-file FILE --tls-key-file FILE]
@@ -386,6 +387,10 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
     if (argv[boundary] === "updates") {
       const { updateMain } = await import("./updates/cli.ts");
       return updateMain([...argv.slice(0, boundary), ...argv.slice(boundary + 1)], { stdout: io.stdout, stderr: io.stderr });
+    }
+    if (argv[boundary] === "install") {
+      const { installMain } = await import("./updates/install-cli.ts");
+      return installMain([...argv.slice(0, boundary), ...argv.slice(boundary + 1)], { stdout: io.stdout, stderr: io.stderr });
     }
     if (argv.includes("--help") || argv.includes("-h")) { io.stdout(HELP); return 0; }
     const args = parseCli(argv);
