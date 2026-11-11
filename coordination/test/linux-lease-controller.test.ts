@@ -400,6 +400,27 @@ test("exact expiry boundary, renewal, release replay, provisioning failure and p
   assert.equal((await f.inspectDomain(domain)).reservations, 0);
 });
 
+test('Linux placement balances approved domains and never moves a replayed lease', async t => {
+  const f = await fixture(t), app = await f.application();
+  await f.grant(app.id);
+  const capacity = { cpu: 16, memoryMiB: 32768, diskGiB: 200 };
+  const first = await f.domain(capacity), second = await f.domain(capacity);
+  await f.domain({ cpu: 64, memoryMiB: 131072, diskGiB: 1000 }); // No approved runner: never a candidate.
+  const one = await f.enroll(), two = await f.enroll();
+  await f.ok(f.approve(one, first));
+  const client = app.client();
+  await client.acquireLease(f.acquire({ resources: { cpu: 10, memoryMiB: 8192, diskGiB: 20 } }));
+  await f.ok(f.approve(two, second));
+  await client.acquireLease(f.acquire({ resources: { cpu: 4, memoryMiB: 16384, diskGiB: 20 } }));
+  const request = f.acquire(), { lease } = await client.acquireLease(request);
+  const domain = () => f.rows(`SELECT domain FROM linux_leases WHERE id='${lease.id}'`)[0]!.domain;
+  assert.equal(domain(), second, 'lower memory use cannot hide the first domain CPU pressure');
+  assert.deepEqual([await f.inspectDomain(first), await f.inspectDomain(second)].map(view => view.reserved.cpu), [10, 8]);
+  await f.ok(f.post('/v1/linux-lease-runner-approvals/revoke', { binding: two.binding }, f.admin));
+  assert.equal((await client.acquireLease(request)).lease.id, lease.id);
+  assert.equal(domain(), second);
+});
+
 test("lost replies replay across restart; stale bindings keep unknown reservations; fresh leases are isolated", async t => {
   const f = await fixture(t), proxy = await lossyProxy(f.port);
   t.after(proxy.close);

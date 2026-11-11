@@ -83,6 +83,23 @@ test("durable admission shares VM, inference, image and configured host budgets"
   assert.throws(() => f.create(), status(409));
 });
 
+test('models share multi-runtime Linux/Mac budgets and avoid CPU-saturated hosts', t => {
+  const f = fixture(t), budget = { cpu: 10, memoryMiB: 16384, diskGiB: 100 };
+  const mac = f.host(model().digest, budget, { provider: 'macos' });
+  const linux = f.host(model().digest, budget, { provider: 'linux' });
+  f.store.transaction(db => {
+    db.prepare('UPDATE hosts SET enabled=0 WHERE id=?').run(f.hostId);
+    for (const [host, resources] of [[mac, { cpu: 7, memoryMiB: 1024, diskGiB: 1 }], [linux, { cpu: 1, memoryMiB: 4096, diskGiB: 1 }]] as const) {
+      db.prepare("INSERT INTO machines VALUES (?,?,?,'{}','running','unknown','',1000)").run(randomUUID(), JSON.stringify({ resources }), host);
+    }
+  });
+  const first = f.create();
+  assert.equal(first.hostId, linux);
+  f.ledger.save(linux, { limits: { cpu: 3, memoryMiB: 8192, diskGiB: 100 } });
+  assert.equal(f.create().hostId, mac, 'the Linux VM and first model already consume its CPU limit');
+  assert.deepEqual(f.store.transaction(db => f.ledger.used(db, linux)), { cpu: 3, memoryMiB: 6144, diskGiB: 2 });
+});
+
 test("request replay survives restart, cancellation and stale hosts without releasing capacity", t => {
   const f = fixture(t), value = submit(), first = f.create(value);
   assert.deepEqual(f.create(value), first);

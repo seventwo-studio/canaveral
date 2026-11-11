@@ -12,7 +12,7 @@ import { createProvider } from "./providers/index.ts";
 import type { NativeProvider } from "./providers/index.ts";
 import { ImageLibrary, prepareImage, specification } from "./control/images.ts";
 import type { CaptureProvider, ImageReader, ImportOptions } from "./control/images.ts";
-import { inferenceOffer } from "./control/inference.ts";
+import { inferenceOffer, INFERENCE_HOST_PROVIDERS } from "./control/inference.ts";
 import { InferenceRunner, ResourceGuard } from "./control/inference.ts";
 import type { InferenceAssignment, InferenceExecutor } from "./control/inference.ts";
 import { RunnerSessions, SessionConnection, SqliteSessionReceipts } from "./control/sessions.ts";
@@ -148,7 +148,7 @@ export function hostOffer(config: RecordValue): RecordValue {
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
   if (config.inference !== undefined) {
-    if (!["native", "apple", "libvirt"].includes(provider)) throw new ServiceError("Embedded inference requires a native Mac or Linux host.", 400);
+    if (!INFERENCE_HOST_PROVIDERS.includes(provider)) throw new ServiceError("Embedded inference requires a native Mac or Linux host.", 400);
     offer.inference = inferenceOffer(config.inference);
   }
   return offer;

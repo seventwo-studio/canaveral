@@ -71,10 +71,12 @@ transaction:
    to and is bounded by the application's limits (400).
 4. Active leases and held reservations (including terminal but unreclaimed ones) are
    bounded by the application's limits (429).
-5. Placement reserves the VM size in the first domain, in ID order, that has a
-   current approval serving the image and room beside every held reservation,
-   including model-job reservations (503 `capacity_unavailable` otherwise). The
-   lease is pinned to that domain.
+5. Placement considers only domains with a current approval serving the image
+   and room beside every held reservation, including model-job reservations
+   (503 `capacity_unavailable` otherwise). It minimizes the highest CPU, memory
+   or disk reservation fraction after adding the request, then total fractions,
+   then domain ID. Selection and reservation share the same transaction. The
+   lease remains pinned to that domain even when later load or approvals change.
 
 **Credentials.** Acquisition returns no key. The owner obtains one through the
 explicit credential route; each call mints a fresh opaque key and revokes the

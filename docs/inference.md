@@ -12,10 +12,11 @@ Canaveral neither installs the runtime nor pulls weights. Model preparation stay
 an explicit operator action. Do not use an untrusted executable.
 
 `provider: native` offers inference without requiring a VM backend. To share a host
-with VMs, add the same `inference` section to its existing `apple` or `libvirt`
-configuration. Keep one agent identity and one set of host limits for that physical
-host. Enrolling the same physical capacity twice would bypass shared accounting.
-KubeVirt and Hyper-V do not support this initial embedded runner.
+with VMs or simulators, add the same `inference` section to its existing `apple`,
+`libvirt`, physical `macos` or physical `linux` configuration. Physical hosts keep
+their existing enabled runtimes. Keep one agent identity and one set of host limits
+for that physical host. Enrolling the same physical capacity twice would bypass
+shared accounting. KubeVirt, Windows and Hyper-V do not support this embedded runner.
 
 The model's `resources` reserve CPU, RAM and temporary disk for each admitted job.
 Set a conservative RAM budget covering weights, the bounded 8,192-token context,
@@ -76,7 +77,10 @@ expiry or deletion. Protect backups accordingly. All administrators share access
 
 VMs and inference share one transactional CPU/RAM/disk ledger. A job is admitted
 only to a fresh, accepting host with the exact offered model and enough unreserved
-capacity. Up to 32 unfinished jobs can be assigned to a host. Queued jobs reserve
+capacity. Placement minimizes the largest CPU, RAM or disk reservation fraction
+after adding the job, relative to the smaller of advertised capacity and configured
+limits. Total fractions and then host ID break ties. This is reservation balancing,
+not GPU placement or cross-application fair queueing. Up to 32 unfinished jobs can be assigned to a host. Queued jobs reserve
 their full budgets; submission fails when capacity is unavailable instead of
 creating an unbounded backlog. Draining blocks new assignments; existing jobs
 continue. This remains the single-controller SQLite deployment contract.

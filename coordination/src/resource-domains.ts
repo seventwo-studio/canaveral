@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { identifier } from "./consumers.ts";
 import type { Resources } from "./consumers.ts";
 import { object, ServiceError } from "./errors.ts";
+import { comparePlacementScore, placementScore } from './placement.ts';
 
 const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 
@@ -91,6 +92,19 @@ export class ResourceDomains {
     db.prepare("INSERT INTO resource_reservations VALUES (?,?,?,?,?,'held',?,NULL)")
       .run(request.id, request.domain, request.kind, request.owner, JSON.stringify(amount), now);
     return true;
+  }
+
+  /** Filter and rank caller-approved domains under the same admission lock.
+   * Held Linux and model reservations both contribute; released ones do not.
+   */
+  placements(db: DatabaseSync, domains: readonly string[], request: Resources): string[] {
+    requireTransaction(db);
+    const amount = resources(request);
+    return [...new Set(domains)].map(id => this.view(db, id))
+      .filter(domain => keys.every(key => amount[key] <= domain.available[key]))
+      .map(domain => ({ id: domain.id, score: placementScore(domain.capacity, domain.reserved, amount) }))
+      .sort((a, b) => comparePlacementScore(a.score, b.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map(domain => domain.id);
   }
 
   /** Release requires the exact owner recorded at reservation. Already released is a no-op. */

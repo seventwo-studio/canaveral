@@ -310,9 +310,9 @@ export class LinuxLeases {
       if (required.some(c => !offered.includes(c))) unsupported();
       for (const key of keys) if (amount[key] < minimum[key]) throw new ServiceError(`Requested ${key} is below the image minimum.`, 400);
       this.quota(db, application, amount);
-      // Pinned placement: the first approved domain serving this exact image where the VM fits.
+      // Balance only approved, fitting domains; the resulting placement stays pinned.
       const reservation = randomUUID();
-      const domain = this.placements(db, image).find(d => this.domains.reserve(db, { id: reservation, domain: d, kind: "linux-lease", owner: id, resources: amount }, now));
+      const domain = this.domains.placements(db, this.placements(db, image), amount).find(d => this.domains.reserve(db, { id: reservation, domain: d, kind: "linux-lease", owner: id, resources: amount }, now));
       if (!domain) throw new ServiceError("No approved runner domain serving this image has capacity.", 503, { code: "capacity_unavailable", retryable: true });
       db.prepare(`INSERT INTO linux_leases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL)`).run(
         id, application.id, frozen, imageId, revision, a, image.backend, image.digest, JSON.stringify(amount), image.capabilities, JSON.stringify(required),

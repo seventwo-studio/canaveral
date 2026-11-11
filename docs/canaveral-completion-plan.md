@@ -1,51 +1,55 @@
-# Canaveral completion plan
+# Canaveral development platform plan
 
-Finish the operator installation and managed component-update paths on top of the merged TypeScript/Rust implementation. Keep the controller in Docker, updated externally. Preserve existing credentials, workloads, reservations and recovery records. Keep the repository free of Python code.
+The first priority is to let development agents acquire Linux and macOS workspaces, run app/backend builds, collect artifacts and release their resources. iOS simulators, Android emulators and local models use the same resource-control principles. Managed updates support that platform; expanding updater coverage is secondary.
 
-This is an implementation plan, not a claim of native acceptance. The starting main revision is `d49283bd07599c06da7baf4cadb3779c0b6c85fb`. Every work chat starts from the same committed plan revision in its own T3-managed worktree.
+This plan describes remaining delivery work. Passing fixtures, controller routes or a configurable adapter do not establish a usable native development environment.
 
-## Delivery order
+## Agent workflow
 
-1. Freeze the component-adoption interface and binding rules. Start installation, packaging, boot-input validation, test preparation and documentation independently.
-2. Implement guest and helper adoption against that interface. Deliver small local commits and focused portable checks; report interface needs immediately.
-3. The lead integrates commits in dependency order and owns shared entrypoint wiring. Run combined checks once the graph is complete, then fix failures with the owning chat.
-4. Start a separately briefed ChatGPT reviewer on the exact integrated revision. Resolve material findings before presenting the code as complete.
-5. Hand back tested code and exact commands for any remaining operator-authorized acceptance. Do not claim deployment or platform support from fixtures.
+An agent selects a pinned template/model and required capabilities, supplies a stable request UUID and bounded resource/time requirements, then waits for actual readiness. It receives access scoped to that lease or job, performs work through owned command/file/session transports, retrieves results and releases its reservation. Renewal is explicit. Lost replies reuse the original identity; reconnecting never blindly replays a command.
 
-The requested two-hour window is a prioritization target. The first checkpoint is interface agreement; the next is one complete install/update/recovery path. Add platform breadth only after that path works. Stop expanding scope when it threatens integration and review.
+| Resource | Required working outcome |
+| --- | --- |
+| Linux workspace | Isolated repo/working directory, scoped command execution, file transfer, build/test output and artifacts |
+| macOS workspace | Apple-backed isolated development environment, scoped command/files, native app build tools and retained artifact access |
+| iOS simulator | Exact owned runtime/device identity on Apple hardware, app install/launch, logs, screenshots and bounded controls |
+| Android emulator | Private AVD and pinned system image, owned serial/ports, app install/launch, logs and bounded controls |
+| Model execution | Pinned installed model, bounded inference, scoped results and positive stop/cleanup before releasing capacity |
 
-## Exclusive write ownership
+A macOS workspace and an iOS simulator may be separately leased resources. The design must not assume nested virtualization or expose unrestricted host device access. Agent-provider credentials are supplied through an explicit secret boundary, never baked into shared images.
 
-| Chat | Deliverable | Owned paths |
-| --- | --- | --- |
-| Lead, this chat | Integration, CLI dispatch, host wiring and final verification | `coordination/src/cli.ts`, `coordination/src/host.ts`, `coordination/src/updates/runtime.ts`, this plan; unassigned shared integration files only after explicit allocation |
-| Component contracts and ledger | Strict adoption identity, durable component reports, manager/controller coordination | `coordination/src/updates/components.ts`, `coordination/src/updates/manager.ts`, `coordination/src/control/updates.ts`, `coordination/test/control/update-components.test.ts`, `coordination/test/control/update-controller.test.ts`, `coordination/test/control/update-manager*.test.ts` |
-| Guest adoption | Existing Linux guest update/provision path, positive application acknowledgement and recovery | `coordination/src/updates/guest.ts`, `coordination/src/guest/{access,linux-services,server}.ts`, `coordination/test/control/update-guest.test.ts`; existing guest tests only after notifying lead |
-| Native-helper adoption | Signed helper selection at a positively closed boundary, identity/version acknowledgement | `coordination/src/updates/native-helper.ts`, `coordination/src/providers/mobile-native.ts`, `coordination/test/control/update-native-helper.test.ts`; request any other platform file before editing |
-| Bootstrap installer | Verify and expand the existing release format, initial installation, generated service configuration | `coordination/src/updates/bootstrap.ts`, `coordination/src/updates/install-cli.ts`, `coordination/test/control/update-bootstrap.test.ts`, `coordination/test/control/update-install-cli.test.ts` |
-| Release packaging | Dependency closure, native/guest assets, build/package verification | `script/{tasks,prepare_cli,prepare_native,build_runtime_release,build_guest_bundle}.mjs`, related `script/*.test.mjs`, root `package.json`, `coordination/package.json`, `.github/workflows/*`; lockfiles only for justified dependency changes |
-| Linux boot inputs | Close bounded production-input validation/assembly gaps without inventing trust or release pins | `crates/boot-bundle/**`, new `script/verify_linux_boot_inputs.mjs` and matching test; request any other crate before editing |
-| System verification | Cross-component recovery tests and read-only acceptance prerequisites | `coordination/test/control/update-completion-system.test.ts`, `script/check_canaveral_acceptance.mjs` and matching test; no production source writes |
-| Operator documentation | Installation, component status, supported paths and precise remaining gates | `docs/{runtime-updates,running,linux-boot-bundle,project-guidance}.md`, `README.md` |
+## Shared pool and scheduling
 
-No worker edits an unowned shared file, fixes another worker's compile error, merges another branch, pushes, opens a PR, or changes a live service. Request a transfer from the lead. New files are owned by the chat named here, not implicitly shared.
+- Give each physical machine one authoritative capacity domain, even when it runs VMs, simulators and models through different adapters. Do not enroll the same hardware twice or count host and runner ledgers as separate physical capacity.
+- Reserve CPU, RAM, disk and, where applicable, accelerator slots/memory before dispatch. GPU scheduling is not implemented by a CPU/RAM/disk placement score.
+- Respect operator headroom, per-application resource/concurrency limits, exact image/model grants, current runner identity, host health and update drains.
+- Rank already-approved fitting candidates using the largest reservation fraction after admission, then total fractions and stable identity. This balances CPU, RAM and disk pressure; it is not cross-tenant fair queueing.
+- Complete fair waiting/admission behavior without allowing a busy agent to monopolize the pool or silently moving an existing lease. Queued requests must have a defined deadline, cancellation and idempotent recovery contract.
+- Keep reservations until positive owned cleanup. Expiry revokes access and stops owned execution; an unavailable host or unknown stop cannot prove capacity is free.
 
-## Component contract before wiring
+The embedded host ledger already shares VM/image/inference reservations. The Rust runner domain ledger shares Linux leases and model jobs. Binding both to one physical inventory, rather than relying on duplicate operator declarations, remains delivery work.
 
-The contracts chat publishes the exported TypeScript interface first and notifies the lead. Guest/helper chats may inspect their current adapters and write independent tests while that interface is prepared; they must not invent competing controller endpoints or schemas.
+## Delivery sequence
 
-Reuse the signed `canaveral-update-v1` manifest, existing release directories, attempts and ordered reports. An adoption receipt binds the exact job, attempt, installation, release, component file-set digest and concrete current guest/helper target. Guest binding includes the existing machine/assignment identity and boot or generation evidence where available. Helper binding includes the exact executable and owned process/service instance. Missing binding or proof remains pending.
+1. Finish the shared-pool substrate: Linux/macOS multi-runtime model offers, CPU/RAM/disk placement, accounting across runtime types and tenant quota regression coverage.
+2. Make Linux and macOS workspace leases usable end to end: acquire, verified readiness, repo/build operations, artifacts, renewal, expiry, controller/host loss and owned release. Native deadline and cleanup proof must precede enabling ordinary host lease execution.
+3. Apply the same ownership, accounting and expiry contract to iOS/Android simulator leases and scoped model work. Add explicit accelerator admission where needed; do not treat simulator/model inventory as readiness.
+4. Validate the supported paths on specifically authorized disposable targets, including recovery and concurrency under mixed workloads.
+5. Ship the supported matrix and precise remaining gates. Keep the Docker controller externally updated and avoid interrupting active work during runtime updates.
 
-Staging, spawning, host readiness, process exit, and a caller-supplied `ready` flag are insufficient adoption proof. Require a positive current-identity acknowledgement through the owned transport, and a confirmed idle/closed boundary before replacement. Persist intent before effects. Recover an existing attempt after interruption; never blindly replay an uncertain application. Authority loss, lost acknowledgements and unconfirmed stop retain uncertainty and any necessary drain. Keep host phase and per-target component status distinct, including partial adoption.
+## Current gates
 
-Do not replace a running guest, force-stop work, update the stable launcher/Node/trust roots through a runtime manifest, adopt unrelated installations, or expand provider eligibility without its established proof.
+Ordinary TypeScript hosts still reject consumer execution declarations. Mobile providers reject leased execution pending independent deadline/cleanup support. The Linux runner controller and generic host lease paths have different execution bindings and must not be enabled through a permissive configuration flag. The embedded inference API is an administrator API; scoped application model jobs are a separate path, not a general model-session lease.
 
-## Verification and delivery boundaries
+Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish Linux/macOS build acceptance, native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
 
-- Per owner: relevant strict TypeScript or Rust checks, meaningful focused tests, staged-diff and whitespace checks. Avoid repeated whole-repository builds. Cargo jobs at most two per worker; do not run broad builds concurrently with the lead's final verification.
-- Integrated: build/typecheck, TypeScript/Rust portable suites, packaging smoke tests, zero-Python check, install-to-update-to-recovery scenarios, exact-diff independent review.
-- Failure cases: bad signature/hash/path/link, changed current identity or credentials, duplicate/reordered receipts, crash before/after dispatch, lost reply, failed stop, failed publication, exact-baseline rollback and preserved mutable state.
-- Native VM/device/inference tests, real service installation, signing, production boot artifact construction and fleet rollout require a concrete operator-authorized target under `AGENTS.md`. Prepare commands and prerequisites without executing them. Unsupported adapters remain explicitly gated.
-- Prefer TypeScript/Rust and existing dependencies. Add no Python, unnecessary Bash, generic updater framework, controller self-update endpoint or unrelated enterprise CI changes.
+## Acceptance before completion
 
-Each work chat returns its branch/commit, exact changed paths, checks, remaining limits and integration instructions. Only the lead integrates and publishes. A final independent review is a new assignment against the resulting immutable commit.
+- Linux and macOS: acquire a workspace, clone a test repository, run its build/tests, retrieve artifacts and release; a second tenant cannot access it.
+- Mobile: acquire each supported simulator/emulator, install/launch a fixture app, retrieve logs/screenshots, exercise scoped input and positively reclaim the exact instance.
+- Models: run a pinned real model while development/simulator work exists, preserve headroom and prove cancellation/cleanup before reservation release.
+- Scheduling: concurrent requests cannot overspend the same physical budget; constrained and busy hosts are avoided; quotas, draining and fair waiting have observable outcomes.
+- Recovery: expiry, disconnected clients, worker/controller restart and lost receipts do not resurrect a lease, replay effects or release unknown resources.
+- Run relevant portable checks for every change. Native experiments, signing, service installation and deployment require concrete operator authorization under `AGENTS.md`.
+
+Keep implementation in TypeScript/Rust, preserve scoped credentials and recovery records, and keep the repository free of Python code. Consolidate changes on one integration branch, with focused verification and independent review before release.

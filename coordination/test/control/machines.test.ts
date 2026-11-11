@@ -24,17 +24,41 @@ function req(method = "GET", path = "/v1/machines", body: Json = {}, principal: 
 const image = (extra: Json = {}): Json => ({ id: "linux", revision: "1", os: "linux", arch: "amd64", mode: "headless", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, ...extra });
 const offered = (extra: Json = {}): Json => ({ name: "host", provider: "libvirt", capacity: { cpu: 4, memoryMiB: 4096, diskGiB: 40 }, templates: [image()], ...extra });
 const request = (extra: Json = {}): Json => ({ id: randomUUID(), name: "computer", templateId: "linux", resources: { cpu: 2, memoryMiB: 2048, diskGiB: 10 }, ...extra });
-function fixture(t: TestContext) {
+function fixture(t: TestContext, changes: Json = {}) {
   const folder = mkdtempSync(join(tmpdir(), "canaveral-machines-")); t.after(() => rmSync(folder, { recursive: true, force: true }));
   let now = 1000;
   const store = new SqliteStore(join(folder, "state.sqlite"), () => now);
   const options = { adminToken: token(), enrollmentToken: token(), controllerId: randomUUID() };
-  const machines = new MachineStore(store, options), id = randomUUID(), credential = token(), offer = offered();
+  const machines = new MachineStore(store, options), id = randomUUID(), credential = token(), offer = offered(changes);
   machines.enroll({ id, credential, offer }, options.enrollmentToken);
   const heartbeat = (reports: Json = {}, extra: Json = {}) => machines.heartbeat(id, credential, { offer, reports, ...extra });
   return { store, machines, options, id, credential, offer, heartbeat, advance: (seconds: number) => { now += seconds; } };
 }
 function error(status: number) { return (value: unknown) => value instanceof ServiceError && value.status === status; }
+
+test('placement balances CPU pressure as well as memory and keeps replay pinned', t => {
+  const f = fixture(t, { capacity: { cpu: 10, memoryMiB: 16384, diskGiB: 100 } });
+  const other = randomUUID();
+  f.machines.enroll({ id: other, credential: token(), offer: f.offer }, f.options.enrollmentToken);
+  f.machines.create(request({ hostId: f.id, resources: { cpu: 7, memoryMiB: 1024, diskGiB: 4 } }), req());
+  f.machines.create(request({ hostId: other, resources: { cpu: 1, memoryMiB: 4096, diskGiB: 4 } }), req());
+  const value = request({ resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 } });
+  const placed = f.machines.create(value, req());
+  assert.equal(placed.hostId, other, 'less RAM use must not hide CPU saturation');
+  f.machines.enable(other, false, req());
+  assert.equal(f.machines.create(value, req()).hostId, other, 'replay cannot move an existing assignment');
+});
+
+test('placement normalizes by configured limits rather than raw hardware capacity', t => {
+  const f = fixture(t, { capacity: { cpu: 16, memoryMiB: 16384, diskGiB: 100 } });
+  const other = randomUUID();
+  f.machines.enroll({ id: other, credential: token(), offer: f.offer }, f.options.enrollmentToken);
+  f.store.transaction(db => {
+    db.exec('CREATE TABLE IF NOT EXISTS host_limits (host TEXT PRIMARY KEY,limits TEXT NOT NULL)');
+    db.prepare('INSERT INTO host_limits VALUES (?,?) ON CONFLICT(host) DO UPDATE SET limits=excluded.limits').run(f.id, JSON.stringify({ cpu: 2, memoryMiB: 2048, diskGiB: 20 }));
+  });
+  assert.equal(f.machines.create(request({ resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 } }), req()).hostId, other);
+});
 
 test("create replay pins defaults and allocation through new revisions and restart", t => {
   const f = fixture(t), value = request({ resources: {} });

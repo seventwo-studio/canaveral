@@ -3,6 +3,8 @@ import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { ServiceError, object, secret } from "../errors.ts";
 import { SqliteStore } from "../sqlite.ts";
 import { updateDraining } from "../updates/drain.ts";
+import { comparePlacementScore, placementScore } from '../placement.ts';
+import type { PlacementScore } from '../placement.ts';
 import { owns, requireAdmin, requireScope } from "./contracts.ts";
 import type { ControlModule, ControlOptions, ControlRequest } from "./contracts.ts";
 
@@ -350,21 +352,23 @@ export class MachineStore implements ControlModule {
       const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(old.host!);
       return this.machine(db, old, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
     }
-    const candidates: { score: number; host: MachineRow; image: Json; size: Resources }[] = [];
+    const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
     for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
       if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
       const advertised = persistedOffer(host.offer); if (!advertised) continue;
       const used = this.used(db, String(host.id)), remaining = this.remainingCapacity(db, String(host.id));
+      const limits = this.limits(db, host);
+      const capacity = Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
       for (const image of advertised.templates) {
         if (leased && !machineLeaseEligible(advertised, image)) continue;
         if (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision) continue;
         const size: Resources = { ...(image.defaults ?? image.minimum), ...request.resources };
-        if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => image.minimum[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: used.memoryMiB / advertised.capacity.memoryMiB, host, image, size });
+        if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => image.minimum[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
       }
     }
     if (!candidates.length) failure("No online accepting host offers this template and enough unreserved capacity.", 409);
     if (!request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
-    candidates.sort((a, b) => a.score - b.score || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
+    candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
     const selected = candidates[0]!;
 
     db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);

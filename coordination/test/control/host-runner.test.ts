@@ -24,6 +24,18 @@ function fakeTransport(reply: () => RecordValue = () => ({ machines: [] })): Hos
 const providerFactory: NonNullable<HostDependencies["providerFactory"]> = () => ({ kind: "libvirt", check: async () => ({}), reconcile: async m => ({ state: m.desired }) });
 async function drain(): Promise<void> { await new Promise(r => setTimeout(r, 20)); }
 
+test('physical Linux and Mac offers include models beside VM and simulator runtimes', t => {
+  const { config } = setup(t);
+  const inference = { runtime: 'ollama', executable: '/private/ollama', modelsDirectory: '/private/models', models: [{ id: 'fixture:1', digest: 'sha256:' + 'a'.repeat(64), resources: { cpu: 2, memoryMiB: 2048, diskGiB: 8 } }] };
+  for (const [provider, runtimes] of [['macos', { apple: {}, ios: {} }], ['linux', { libvirt: {}, android: {} }]] as const) {
+    const offer = hostOffer({ ...config, provider, templates: [], runtimes, inference });
+    assert.deepEqual((offer.inference as { models: unknown[] }).models, inference.models.map(model => ({ ...model, capability: 'generation' })));
+    assert.equal(JSON.stringify(offer).includes('/private/'), false);
+    assert.throws(() => hostOffer({ ...config, provider, templates: [], runtimes, inference, leaseProtocol: 1 }));
+  }
+  assert.throws(() => hostOffer({ ...config, provider: 'windows', templates: [], runtimes: { hyperv: {} }, inference }));
+});
+
 test("enrollment persists one private identity before lost response, retries exactly, and reconnects without enrollment", async t => {
   const { config, clock } = setup(t); let attempts = 0; const enrollments: RecordValue[] = [];
   const transport: HostTransport = { request: async (_m, path, body) => { if (path.endsWith("enroll")) { enrollments.push(body); attempts++; if (attempts === 1) throw new Error("lost reply"); } return { machines: [] }; } };
