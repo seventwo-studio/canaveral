@@ -6,6 +6,7 @@ import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, writeFileSync 
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { checkModuleClosure, moduleReferences } from './package_checks.mjs';
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SOURCE = join(ROOT, 'coordination/src');
 const require = createRequire(join(ROOT, 'coordination/package.json'));
@@ -29,16 +30,25 @@ export function buildGuestBundle({ nativeHelper, atspiHelper, arch }) {
     const result = ts.transpileModule(readFileSync(source, 'utf8'), { fileName: source, reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext, removeComments: true, verbatimModuleSyntax: true } });
     if (result.diagnostics?.some(d => d.category === ts.DiagnosticCategory.Error)) throw new Error('Guest module transpilation failed.');
     const dependencies = new Set();
-    const output = result.outputText.replace(/\b(from\s*|import\s*\(|import\s*)(["'])(\.[^"']+)(["'])/g, (full, prefix, quote, specifier, end) => {
-      if (quote !== end || !/\.(?:ts|js)$/.test(specifier)) throw new Error('Unsupported guest module dependency.');
-      dependencies.add(resolve(dirname(source), specifier.replace(/\.js$/, '.ts')));
-      return prefix + quote + specifier.replace(/\.(?:ts|js)$/, '.mjs') + end;
-    });
+    let output = result.outputText;
+    for (const ref of moduleReferences(output, source).reverse()) {
+      if (ref.computed) throw new Error('Computed guest module dependency.');
+      if (ref.specifier.startsWith('.')) {
+        if (!/\.(?:ts|js)$/.test(ref.specifier)) throw new Error('Unsupported guest module dependency.');
+        dependencies.add(resolve(dirname(source), ref.specifier.replace(/\.js$/, '.ts')));
+        output = output.slice(0, ref.start) + JSON.stringify(ref.specifier.replace(/\.(?:ts|js)$/, '.mjs')) + output.slice(ref.end);
+      }
+    }
     put('/opt/canaveral/modules/' + relative(SOURCE, source).replaceAll('\\', '/').replace(/\.ts$/, '.mjs'), output);
     [...dependencies].sort().forEach(module);
   }
   module(join(SOURCE, 'guest/linux-services.ts'));
   put('/opt/canaveral/server.mjs', "import { startLinuxGuest } from './modules/guest/linux-services.mjs';\nawait startLinuxGuest();\n");
+  // Schema readers resolve ../../canaveral/schemas from modules/*.mjs.
+  for (const name of ['consumer-api.openapi.json', 'session-control.schema.json', 'accessibility-snapshot.schema.json']) {
+    put('/opt/canaveral/schemas/' + name, readFileSync(join(ROOT, 'canaveral/schemas', name), 'utf8'));
+  }
+  checkModuleClosure(new Map([...artifacts].map(([path, artifact]) => [path, artifact.content])), { rejectComputed: true });
   const helpers = [];
   for (const [name, file] of [['canaveral-mobile-native', nativeHelper], ['canaveral-guest-agent', atspiHelper]]) {
     if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('Supply absolute --native-helper and --atspi-helper paths.');

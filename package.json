@@ -59,7 +59,8 @@
     "test:tools": "node --test script/*.test.mjs",
     "check:no-python": "node script/check_no_python.mjs",
     "check": "node script/tasks.mjs check",
-    "test:remote-tls": "node script/check_remote_tls.mjs"
+    "test:remote-tls": "node script/check_remote_tls.mjs",
+    "test:package": "node --test script/package_checks.test.mjs"
   },
   "license": "MIT"
 }
