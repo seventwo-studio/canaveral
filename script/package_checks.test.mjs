@@ -13,6 +13,12 @@ import { prepareNative } from './prepare_native.mjs';
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 function directory(t) { const root = realpathSync(mkdtempSync(join(tmpdir(), 'canaveral-package-'))); t.after(() => rmSync(root, { recursive: true, force: true })); return root; }
 function run(command, args, cwd = ROOT) { const r = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_PATH: '' } }); assert.equal(r.status, 0, r.stderr || r.error?.message); return r.stdout; }
+function installerHelp(root) {
+  const entry = pathToFileURL(join(root, 'coordination/dist/src/updates/install-cli.js')).href;
+  const output = run(process.execPath, ['--input-type=module', '--eval', 'const { installMain } = await import(process.argv[1]); process.exitCode = await installMain(process.argv.slice(2));', entry, '--help'], root);
+  assert.match(output, /^Usage: canaveral install /);
+  assert.match(output, /never installs\/enables it or enrolls/);
+}
 function tree(root, current = root, files = new Map()) { for (const name of readdirSync(current)) { const path = join(current, name); if (lstatSync(path).isDirectory()) tree(root, path, files); else files.set(relative(root, path).replaceAll('\\', '/'), /\.(?:mjs|cjs|js)$/.test(name) ? readFileSync(path, 'utf8') : ''); } return files; }
 function helpers(root) { const target = join(root, 'target/debug'); mkdirSync(target, { recursive: true }); for (const name of ['canaveral-mobile-native', 'apple-native-helper']) writeFileSync(join(target, name + (process.platform === 'win32' ? '.exe' : '')), 'inert packaging fixture: ' + name); prepareNative(root); }
 
@@ -38,10 +44,11 @@ test('actual emitted npm and signed release trees close imports and ship helper 
   checkModuleClosure(files);
   const manifest = JSON.parse(readFileSync(join(installed, 'package.json')));
   const imports = [...new Set(Object.values(manifest.exports).map(value => value.default))];
-  imports.push('./coordination/dist/src/updates/launcher.js', './coordination/dist/src/updates/cli.js', './coordination/dist/src/host.js', './coordination/dist/src/guest/windows/native.js');
+  imports.push('./coordination/dist/src/updates/install-cli.js', './coordination/dist/src/updates/bootstrap.js', './coordination/dist/src/updates/launcher.js', './coordination/dist/src/updates/cli.js', './coordination/dist/src/host.js', './coordination/dist/src/guest/windows/native.js');
   const program = `import assert from 'node:assert/strict';\nfor(const path of ${JSON.stringify(imports)}) await import(new URL(path, import.meta.url));\nconst c=await import('./coordination/dist/src/contracts.js'); assert.ok(c.consumerApiSchema().openapi); assert.ok(c.sessionProtocolSchema());\nconst a=await import('./coordination/dist/src/accessibility-sdk.js'); assert.ok(a.snapshotSchema());\nconst m=await import('./coordination/dist/src/providers/mobile-native.js'); assert.equal(m.mobileNativeHelper({}),new URL('./native/canaveral-mobile-native', import.meta.url).pathname);`;
   writeFileSync(join(installed, 'smoke.mjs'), program);
   if (process.platform !== 'win32') run(process.execPath, ['smoke.mjs'], installed);
+  installerHelp(installed);
   assert.match(run(process.execPath, [join(installed, manifest.bin.canaveral), '--help'], root), /Canaveral/);
   for (const name of ['native.ps1', 'native.cs']) assert.ok(files.has('coordination/dist/src/guest/windows/' + name));
   const native = JSON.parse(readFileSync(join(installed, 'native/runtime.json')));
@@ -58,6 +65,7 @@ test('actual emitted npm and signed release trees close imports and ship helper 
   for (const file of release.manifest.files) { const path = join(expanded, file.path); mkdirSync(dirname(path), { recursive: true }); cpSync(join(bundlePath, 'artifacts', file.sha256), path); }
   writeFileSync(join(expanded, 'smoke.mjs'), program);
   if (process.platform !== 'win32') run(process.execPath, ['smoke.mjs'], expanded);
+  installerHelp(expanded);
   assert.match(run(process.execPath, [join(expanded, manifest.bin.canaveral), '--help'], root), /Canaveral/);
   // Source examples intentionally import emitted SDKs; --help performs no requests.
   assert.match(run(process.execPath, ['examples/lease_lifecycle.ts', '--help']), /Acquire, inspect and release/);
