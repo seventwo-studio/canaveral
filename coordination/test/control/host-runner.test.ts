@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkHost, HostRunner, hostOffer, hostTransport, startHost } from "../../src/host.ts";
@@ -85,6 +85,26 @@ test("lease configuration cannot enable unaccepted execution; offline only recon
   const requests: RecordValue[] = [];
   const runner = new HostRunner(config, { clock, transport: fakeTransport(() => ({ machines: [m, machine(image)] })), providerFactory: () => ({ kind: "libvirt", check: async () => ({}), reconcile: async current => { requests.push(current); return { state: "stopped" }; } }) });
   await runner.initializeProviders(); await runner.connect(); await runner.poll(); clock.mono = 70; await runner.step(); await drain(); assert.equal(requests.length, 1); assert.equal(requests[0]!.desired, "stopped"); assert.equal(requests[0]!.id, m.id); await runner.close();
+});
+
+test('failed clock contact denies new work while retained leased stops still reconcile', async t => {
+  const { config, image, clock } = setup(t), id = randomUUID();
+  const m: RecordValue = { ...machine(image), lease: { id, revision: 1, state: 'ready', controllerNow: 1000, authorizationDeadline: 1060 } };
+  const requests: RecordValue[] = [];
+  const runner = new HostRunner(config, { clock, transport: fakeTransport(() => ({ machines: [m, machine(image)] })), providerFactory: () => ({ kind: 'libvirt', check: async () => ({}), reconcile: async current => { requests.push(current); return { state: 'stopped' }; } }) });
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  clock.now = () => { throw new Error('Clock lost'); };
+  assert.equal(runner.fresh(), false);
+  await runner.step(); await drain();
+  assert.equal(requests.length, 1); assert.equal(requests[0]!.id, m.id); assert.equal(requests[0]!.desired, 'stopped');
+  await runner.close();
+});
+
+test('invalid native clock configuration is refused before creating runner state', t => {
+  const { config } = setup(t), stateDir = join(config.stateDir, 'new-runner');
+  assert.throws(() => new HostRunner({ ...config, stateDir, leaseClockHelper: join(config.stateDir, 'missing') }, { transport: fakeTransport() }));
+  assert.throws(() => new HostRunner({ ...config, stateDir, leaseClockHelper: process.execPath, leaseProtocol: 1 }, { transport: fakeTransport() }), error => error instanceof ServiceError && error.status === 400 && /cannot advertise lease execution/.test(error.message));
+  assert.equal(existsSync(stateDir), false);
 });
 test("failed provider startup closes earlier providers and releases runner lock", async t => {
   const { config } = setup(t); let closed = 0;

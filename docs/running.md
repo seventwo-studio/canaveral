@@ -20,6 +20,13 @@ Keep the production controller in Docker and update its immutable image through 
 
 This matrix describes configured paths and prerequisites, not platform parity or consumer lease eligibility. Ordinary hosts still reject experimental lease declarations; retain the [eligibility gates](lease-eligibility.md). Follow the [operator acceptance steps](runtime-updates.md#operator-acceptance-prepare-only-separate-authorization-required) before claiming an installation or rollout accepted.
 
+Hosts preparing for qualified Linux/macOS lease execution may set
+`leaseClockHelper` to an absolute installed `canaveral-mobile-native` executable.
+It must be a nonsymlink, single-link regular file, executable, owned by root or
+the service account and not writable by group/others. This selects the
+[boot-bound native deadline clock](leases.md) before runner state is created;
+it does not enable consumer execution or replace native fencing/cleanup checks.
+
 ## Native controller and hosts
 
 Install dependencies with `npm --prefix coordination ci --ignore-scripts`, build

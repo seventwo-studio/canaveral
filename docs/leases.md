@@ -158,6 +158,19 @@ Offline reconciliation processes those stop intents while administrative VMs
 survive controller loss. Local stream callbacks and new discrete operations reject
 fenced assignments; a fenced report ends a still-active controller lease.
 
+An explicit host `leaseClockHelper` can select an installed absolute path to
+`canaveral-mobile-native` on Linux or macOS. The host uses its bounded readonly
+`clock` command, with a cleared environment, to sample `CLOCK_BOOTTIME` or
+continuous Mach time. Each observation verifies the executable identity; helper
+failure, replacement or backwards time permanently fails that clock instance.
+Its boot ID and absolute elapsed deadline are recorded together. Same-boot
+recovery cannot extend that deadline through a wall-clock change. Recovery fences
+records from another boot or older records without a complete boot binding. Clock failure durably
+fences retained leases and still permits their stop reconciliation. It does not
+release reservations or certify execution stopped. The portable clock remains
+the default when this option is absent. Selecting a native clock does not enable
+ordinary-host lease declarations or establish provider fencing/cleanup acceptance.
+
 A separate runner watcher checks persisted lease deadlines every 100 ms and
 revokes host-owned PTYs independently of the VM reconciliation worker. Revocation
 is sticky for the lifetime of the shell manager: that assignment cannot open

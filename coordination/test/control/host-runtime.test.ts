@@ -27,6 +27,52 @@ test("lease replay, wall rollback, exact deadline and late renewal retain sticky
   c.wallTime = 1010; guard.observe([renewed], 0); assert.equal(guard.allowed(String(m.id)), false);
   assert.equal(new LeaseGuard(root, c).allowed(String(m.id)), false);
 });
+
+test('restored lease deadlines bind the host boot and refuse unbound history', t => {
+  const root = fixture(t), original = { ...clock(), bootId: randomUUID() }, m = lease(), id = String(m.id);
+  new LeaseGuard(root, original).observe([m], 0);
+  assert.equal(readRecord(join(root, 'lease-execution.json'))[id] && new LeaseGuard(root, original).allowed(id), true);
+  const rebooted = { ...original, bootId: randomUUID() }, restored = new LeaseGuard(root, rebooted);
+  assert.equal(restored.allowed(id), false);
+  restored.observe([{ ...m, lease: { ...(m.lease as RecordValue), revision: 2, authorizationDeadline: 1200 } }], 0);
+  assert.equal(restored.allowed(id), false);
+  const old = fixture(t), unbound = lease(); new LeaseGuard(old, clock()).observe([unbound], 0);
+  assert.equal(new LeaseGuard(old, original).allowed(String(unbound.id)), false);
+});
+
+test('clock failure fences every retained lease durably and yields zero native authorization', t => {
+  const root = fixture(t), c = clock(), guard = new LeaseGuard(root, c), one = lease(), two = lease();
+  guard.observe([one, two], 0);
+  c.now = () => { throw new Error('Clock lost'); };
+  assert.equal(guard.allowed(String(one.id)), false);
+  assert.equal(guard.authorization(String(two.id), String((two.lease as RecordValue).id)).remainingSeconds, 0);
+  for (const value of Object.values(readRecord(join(root, 'lease-execution.json')))) assert.equal((value as RecordValue).fenced, true);
+  c.now = () => 11;
+  const restarted = new LeaseGuard(root, c);
+  assert.equal(restarted.allowed(String(one.id)), false);
+  assert.equal(restarted.allowed(String(two.id)), false);
+});
+
+test('same-boot restart cannot extend the native deadline when wall time lags elapsed time', t => {
+  const root = fixture(t), c = { ...clock(), bootId: randomUUID() }, m = lease(), id = String(m.id);
+  new LeaseGuard(root, c).observe([m], 0);
+  c.mono = 65; c.wallTime = 1000;
+  const restored = new LeaseGuard(root, c);
+  assert.equal(restored.authorization(id, String((m.lease as RecordValue).id)).remainingSeconds, 5);
+  c.mono = 70;
+  assert.equal(new LeaseGuard(root, c).allowed(id), false);
+  const earlier = { ...c, mono: 66 };
+  assert.equal(new LeaseGuard(root, earlier).allowed(id), false);
+});
+
+test('expiry between authorization observations produces a durable fence rather than a zero-length grant', t => {
+  const root = fixture(t), c = clock(), guard = new LeaseGuard(root, c), m = lease();
+  guard.observe([m], 0);
+  let observations = 0; c.now = () => ++observations === 1 ? 69 : 70;
+  const auth = guard.authorization(String(m.id), String((m.lease as RecordValue).id));
+  assert.equal(auth.fenced, true); assert.equal(auth.remainingSeconds, 0);
+  assert.equal(new LeaseGuard(root, clock()).allowed(String(m.id)), false);
+});
 test("lease ownership change and omission fence while ordinary machines remain separate", t => {
   const root = fixture(t), c = clock(), guard = new LeaseGuard(root, c), m = lease(); guard.observe([m], 0);
   assert.equal(guard.neverStarted(String(m.id), String((m.lease as RecordValue).id)), true);

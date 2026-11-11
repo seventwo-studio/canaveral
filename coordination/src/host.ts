@@ -29,6 +29,7 @@ import { createGuestAccess, guestReady, guestRecipe, loadHelperArtifacts } from 
 import { createInferenceExecutor } from "./inference-runtime.ts";
 import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
+import { nativeExecutionClock } from './native-clock.ts';
 
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
@@ -84,7 +85,7 @@ interface Runtime extends NativeProvider {
 }
 interface DurableWork { fingerprint: string; state: string; report?: RecordValue }
 const TERMINAL = new Set(["succeeded", "failed", "unknown", "cancelled"]);
-const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile"]);
+const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile", "leaseClockHelper"]);
 
 /** Bounded JSON HTTP, no redirects or ambient proxy, optional host-scoped trust bundle. */
 export function hostTransport(config: HostConfig): HostTransport {
@@ -129,8 +130,11 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-export function hostOffer(config: RecordValue): RecordValue {
+function rejectUnsupportedLeases(config: RecordValue): void {
   if ("leaseProtocol" in config || "leaseImages" in config) throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400);
+}
+export function hostOffer(config: RecordValue): RecordValue {
+  rejectUnsupportedLeases(config);
   const provider = text(config.provider, "provider");
   if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
@@ -205,6 +209,8 @@ export class HostRunner {
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config);
+    rejectUnsupportedLeases(config);
+    const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir); privateDirectory(this.state);
     this.library = new ImageLibrary(this.state);
@@ -218,7 +224,7 @@ export class HostRunner {
     this.pollInterval = Number(config.pollIntervalSeconds ?? 5);
     this.concurrency = Number(config.concurrency ?? 2);
     if (!Number.isFinite(this.pollInterval) || this.pollInterval < .25 || this.pollInterval > 5 || !Number.isSafeInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 32) throw new ServiceError("Invalid host poll interval or concurrency.", 400);
-    this.clock = dependencies.clock ?? executionClock();
+    this.clock = clock;
     this.guard = new LeaseGuard(this.state, this.clock);
     this.transport = dependencies.transport ?? transport; this.log = dependencies.log ?? (() => {}); this.guest = dependencies.guest;
     this.loadReports();
@@ -435,7 +441,10 @@ export class HostRunner {
     if (typeof response.checksRequestedAt === "number" && response.checksRequestedAt > this.lastCheckRequest) { this.lastCheckRequest = response.checksRequestedAt; this.checkRequested = true; }
     this.saveReports(); this.cancelUnauthorized();
   }
-  fresh(): boolean { return !this.stopController.signal.aborted && contactFresh(this.lastContact, this.clock.now()); }
+  fresh(): boolean {
+    try { return !this.stopController.signal.aborted && contactFresh(this.lastContact, this.clock.now()); }
+    catch { return false; }
+  }
   private cancelUnauthorized(): void { for (const item of this.active.values()) if (!item.authorized()) item.controller.abort(); }
   private publish(target: Map<string, RecordValue>, id: string, report: RecordValue): void { target.set(id, report); this.saveReports(); }
   private launch(key: string, authorized: () => boolean, work: (context: HostWorkContext) => Promise<void>): void {

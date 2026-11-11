@@ -78,7 +78,7 @@ export async function assignmentAccess<T>(machine: RecordValue, folder: string, 
   } finally { lock.close(); }
 }
 
-export interface ExecutionClock { now(): number; wall(): number; readonly suspendAware: boolean }
+export interface ExecutionClock { now(): number; wall(): number; readonly suspendAware: boolean; readonly bootId?: string }
 /** hrtime covers awake elapsed time. Wall advances also expire contact across sleep.
  * Node has no portable continuous Darwin clock; leased starts require an injected native clock.
  */
@@ -92,7 +92,7 @@ export function executionClock(): ExecutionClock {
   } };
 }
 export function contactFresh(last: number, now: number): boolean { return Number.isFinite(last) && last > 0 && now >= last && now - last < 20; }
-interface GuardRecord { machine: RecordValue; receivedAt: number; fenced: boolean; executionStarted: boolean; retired?: boolean; cleanupId?: string }
+interface GuardRecord { machine: RecordValue; receivedAt: number; fenced: boolean; executionStarted: boolean; bootId?: string; elapsedDeadline?: number; retired?: boolean; cleanupId?: string }
 export interface LeaseAuthorization { leaseID: string; revision: number; remainingSeconds: number; fenced: boolean }
 export class LeaseGuard {
   readonly records = new Map<string, GuardRecord>();
@@ -104,23 +104,38 @@ export class LeaseGuard {
     this.historyKnown = present(this.path) || !present(join(state, "identity.json"));
     if (present(this.path)) {
       const saved = readRecord(this.path); let changed = false;
+      let recoveredAt: number | undefined;
+      try { const value = clock.now(); if (Number.isFinite(value) && value >= 0) recoveredAt = value; } catch { /* Load every record fenced before persisting. */ }
       for (const [id, value] of Object.entries(saved)) {
         identifier(id); const raw = object(value), machine = object(raw.machine), lease = object(machine.lease);
         if (machine.id !== id || typeof raw.fenced !== "boolean" || typeof raw.receivedAt !== "number" || !Number.isFinite(raw.receivedAt)) throw unknownOutcome("Invalid persisted lease guard.");
         validateLease(lease);
         const remaining = Number(lease.authorizationDeadline) - clock.wall() - 5;
-        const fenced = raw.fenced || clock.wall() < raw.receivedAt - 5 || remaining <= 0 || !clock.suspendAware;
+        const boundDeadline = typeof raw.elapsedDeadline === 'number' && Number.isFinite(raw.elapsedDeadline) && raw.elapsedDeadline >= 0 && raw.elapsedDeadline <= Number.MAX_SAFE_INTEGER ? raw.elapsedDeadline : undefined;
+        const deadline = Math.min((recoveredAt ?? 0) + Math.max(0, remaining), boundDeadline ?? Infinity);
+        const fenced = raw.fenced || clock.wall() < raw.receivedAt - 5 || remaining <= 0 || !clock.suspendAware || recoveredAt === undefined ||
+          clock.bootId !== undefined && (raw.bootId !== clock.bootId || boundDeadline === undefined || recoveredAt >= deadline);
         this.records.set(id, { machine, receivedAt: raw.receivedAt, fenced, executionStarted: raw.executionStarted !== false,
+          ...(typeof raw.bootId === 'string' ? { bootId: raw.bootId } : {}),
+          ...(boundDeadline === undefined ? {} : { elapsedDeadline: boundDeadline }),
           ...(raw.retired === true ? { retired: true, cleanupId: identifier(raw.cleanupId) } : {}) });
-        this.deadlines.set(id, clock.now() + Math.max(0, remaining)); changed ||= fenced !== raw.fenced;
+        this.deadlines.set(id, deadline); changed ||= fenced !== raw.fenced;
       }
       if (changed) this.save();
     }
   }
   private save(): void { saveRecord(this.path, Object.fromEntries(this.records)); }
+  private sample(): number | undefined {
+    try { const value = this.clock.now(); if (Number.isFinite(value) && value >= 0) return value; } catch { /* Native fencing remains responsible for stopping execution. */ }
+    let changed = false;
+    for (const record of this.records.values()) if (!record.fenced) { record.fenced = true; changed = true; }
+    if (changed) this.save();
+    return undefined;
+  }
   observe(machines: RecordValue[], roundTrip: number): void {
     if (!Number.isFinite(roundTrip) || roundTrip < 0) throw new ServiceError("Invalid heartbeat timing.", 400);
-    const now = this.clock.now(), wall = this.clock.wall(), seen = new Set<string>();
+    const now = this.sample(); if (now === undefined) throw unknownOutcome('Lease clock failed; retained assignments remain fenced.');
+    const wall = this.clock.wall(), seen = new Set<string>();
     for (const machine of machines) {
       const id = identifier(machine.id), previous = this.records.get(id); seen.add(id);
       if (!machine.lease) { if (previous) previous.fenced = true; continue; }
@@ -132,7 +147,8 @@ export class LeaseGuard {
       if (previous && Number(lease.authorizationDeadline) <= Number(object(previous.machine.lease).authorizationDeadline)) deadline = Math.min(deadline, this.deadlines.get(id)!);
       const fenced = !!previous && (previous.fenced || now >= this.deadlines.get(id)!) ||
         !["provisioning", "ready"].includes(String(lease.state)) || Math.abs(wall - Number(lease.controllerNow)) > 5 + roundTrip || deadline <= now || !this.clock.suspendAware;
-      this.records.set(id, { machine: structuredClone(machine), receivedAt: wall, fenced, executionStarted: previous ? previous.executionStarted : !this.historyKnown });
+      this.records.set(id, { machine: structuredClone(machine), receivedAt: wall, fenced, executionStarted: previous ? previous.executionStarted : !this.historyKnown,
+        ...(this.clock.bootId === undefined ? {} : { bootId: this.clock.bootId, elapsedDeadline: deadline }) });
       this.deadlines.set(id, deadline);
     }
     for (const [id, record] of this.records) if (!seen.has(id) && !record.retired) record.fenced = true;
@@ -141,7 +157,11 @@ export class LeaseGuard {
   allowed(id: string): boolean {
     const record = this.records.get(id);
     if (!record) return true;
-    if (!record.fenced && this.clock.now() >= this.deadlines.get(id)!) { record.fenced = true; this.save(); }
+    if (!record.fenced) {
+      const now = this.sample();
+      if (now === undefined) return false;
+      if (now >= this.deadlines.get(id)!) { record.fenced = true; this.save(); }
+    }
     return !record.fenced && !record.retired;
   }
   assignments(current: RecordValue[]): RecordValue[] {
@@ -164,7 +184,10 @@ export class LeaseGuard {
     const record = this.records.get(identifier(id));
     if (!record || object(record.machine.lease).id !== identifier(leaseId)) throw new ServiceError("Native lease ownership is unavailable.", 409);
     const allowed = this.allowed(id);
-    return { leaseID: leaseId, revision: Number(object(record.machine.lease).revision), remainingSeconds: allowed ? Math.max(0, this.deadlines.get(id)! - this.clock.now()) : 0, fenced: !allowed };
+    const now = allowed ? this.sample() : undefined;
+    const current = allowed && now !== undefined && now < this.deadlines.get(id)!;
+    if (!current && !record.fenced) { record.fenced = true; this.save(); }
+    return { leaseID: leaseId, revision: Number(object(record.machine.lease).revision), remainingSeconds: current ? this.deadlines.get(id)! - now! : 0, fenced: !current };
   }
   retire(id: string, leaseId: string, cleanupId: string): void {
     const record = this.records.get(identifier(id));
