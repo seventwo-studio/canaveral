@@ -356,32 +356,52 @@ journal evidence. Restart never reconnects or replays uncertain file publication
 Cleanup requires workspaceRemoved/dataPlaneClosed plus existing positive evidence.
 See [egress gates](../../docs/linux-egress-policy.md) before claiming isolation.
 
-ST-535 currently adds portable `egress` policy decisions and a two-second live-ID
-revalidation scheduler, with table provenance in [policy/README.md](policy/README.md).
-These primitives have synthetic evidence tests, not a native route/interface
-provider or TCP reactor. Bundle-v2 admission is explicitly refused before claim.
-Data/transfer poll-report clients and journaling, joined data cleanup evidence,
-and native egress enforcement remain unimplemented. The gated v2 prepare path
-implements durable owned raw-disk intent/inode journaling, Darwin all-or-nothing
-preallocation, exact-length flush, identity recheck before prepare, launch-v2
-bootstrap construction and helper workspace attachment JSON. Disk cleanup checks
-identity, journals deletion intent and flushes the parent before workspaceRemoved.
-Missing identity or an unexplained missing disk holds cleanup for reconciliation.
-The data relay connector verifies the exact private sibling and same-uid peer.
-The gated supervision path now starts a single-use data handshake alongside
-control using the initial launch binding and nonce, and requires the helper's
-explicit dataSocketPath. Initial command readiness waits for both exact echoes.
-Data EOF, timeout or protocol violation closes only data; control renewal and
-already established command readiness continue. Each data pump reads/writes at
-most 64 KiB, preserving partial-frame offsets. Until the proxy/transfer reactor
-lands, post-handshake frames close data and files readiness remains false.
-`WORKSPACE_V2_ADMISSION_ENABLED` is the single inventory/assignment gate and
-remains false. Handshake descriptor closure alone does not establish the complete
-dataPlaneClosed cleanup evidence, which remains false for launched v2 leases.
-Long-command parsing/dispatch bounds timeout by requested duration, the frozen
-execution deadline and local lease authority, charging poll transport elapsed time
-and the guest safety margin. Replay pins both timing fields. Workspace environment
-variables come from the trusted satellite; proxy variables require the grant.
-These paths remain unreachable from v2 inventory until PID1 mounting,
-data/file/egress reactors and worker teardown are complete. No new satellite
-dependency was introduced; guest-protocol reuses the existing base64 0.22 crate.
+ST-535 has portable policy decisions and a host data reactor in `reactor.rs`.
+The authenticated single-use data handshake and reactor run on their own thread;
+control heartbeat, renewal and fencing do not join that thread. Initial command
+readiness waits for both control and data echoes; later data loss leaves control
+and established command readiness running. Socket relays enforce credits,
+sequences, 16 live flows, decoded/encoded budgets, rotating 64 KiB flow turns,
+half-close, 10-second connect and 120-second idle deadlines. Connect workers are
+bounded separately, including retired requests. Live route evidence is checked
+before payload turns on a two-second schedule. Synchronous evidence queries can
+exceed that interval under provider stalls; a hard interval under slow native
+evidence remains an integration gap behind the disabled admission gate.
+
+`reactor::Egress: HostEvidence + Clone + Send + 'static` supplies bounded DNS and
+address-only connection operations. Each clone must have independent query state;
+evidence queries must return promptly. The gated production lane installs the `Native` adapter to `native_egress`;
+`Deny` remains available for offline callers.
+Native providers must retain the default peer-address verification and honor the
+combined DNS/connect deadline. Portable loopback fixtures explicitly override peer
+matching to map a vetted public address to a local echo server. They establish
+byte relay behavior, not native destination isolation.
+
+Private operator configuration accepts optional `operatorDenyCidrs` (default `[]`).
+Every entry must parse as a canonical network CIDR; at most 4096 entries are
+allowed. The config remains part of the pinned local journal, and the SHA-256 of
+its JSON-encoded deny list is saved in the direct-launch journal before workspace
+creation/launch. Guest and controller fields cannot supply this list.
+
+The internal transfer seam accepts one request and one reserved cancellation
+command, clamps request authority to the live lease, and routes matching receipts
+to a bounded handler. Controller transfer polling, durable receipts and replay
+validation remain separate work; files readiness remains false. There is no local
+consumer transfer listener.
+
+Fencing revokes data authority before native stop requests. Shutdown waits at most
+two seconds, after issuing the fence, and records positive socket/worker/relay
+closure evidence only after all reactor workers join and the provider attests
+closure of its nested workers. The native adapter currently cannot attest the
+lifetime of timed-out resolver workers, so its complete closure evidence stays
+false until that provider interface is added. A provider that ignores its deadline
+can outlive this wait; cleanup reports remain conservative and reconciliation is
+required. Process restart cannot infer closure of a previously unproven data plane.
+
+The gated v2 prepare path retains owned raw-disk intent/inode journaling,
+preallocation, exact-length flush, identity checks, launch-v2 bootstrap construction
+and helper workspace attachment. `WORKSPACE_V2_ADMISSION_ENABLED` remains false.
+Guest integration, transfer poll/report durability,
+route-change/hairpin adversarial checks and actual Git/npm workloads remain
+acceptance gates. Portable tests and the legacy public API fixture do not establish
+native acceptance. No additional crate dependencies were introduced.

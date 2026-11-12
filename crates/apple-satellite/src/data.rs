@@ -58,7 +58,7 @@ impl Lane {
                     if let Ok(policy) = crate::egress::Policy::new(denied) {
                         self.worker = Some(crate::reactor::spawn(
                             session,
-                            crate::reactor::Deny,
+                            crate::reactor::Native,
                             policy,
                             *enabled,
                             crate::reactor::Authority::new(*deadline),
@@ -110,7 +110,7 @@ impl Session {
     pub fn open(agent_path: &str, binding: Binding, nonce: String) -> Result<Self> {
         Self::new(guest::connect_data(agent_path)?, binding, nonce)
     }
-    fn new(stream: UnixStream, binding: Binding, nonce: String) -> Result<Self> {
+    pub(crate) fn new(stream: UnixStream, binding: Binding, nonce: String) -> Result<Self> {
         let output = encode(
             &Frame::DataHello {
                 version: 1,
@@ -202,7 +202,10 @@ impl Session {
                     {
                         match frame {
                             Frame::DataReady { binding, nonce, .. }
-                                if !self.ready && binding == self.hello && nonce == self.nonce =>
+                                if !self.ready
+                                    && self.output.is_empty()
+                                    && binding == self.hello
+                                    && nonce == self.nonce =>
                             {
                                 self.ready = true;
                                 if self.handoff {

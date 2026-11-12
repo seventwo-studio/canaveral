@@ -738,15 +738,15 @@ impl Satellite {
                             .and_then(|d| d.workspace_disk.as_ref())
                             .is_some_and(|d| d.removed))
             );
-            // Until a joined data reactor supplies positive evidence, launched v2
-            // assignments must retain their reservation even after disk deletion.
+            // Launched v2 assignments retain their reservation unless all data
+            // sockets, workers and relay descriptors were positively closed.
             report["receipt"]["dataPlaneClosed"] = json!(
                 (s.abandoned && s.cleaned)
                     || self
                         .state
                         .direct
                         .as_ref()
-                        .is_some_and(|d| d.data_closed == Some(true))
+                        .is_some_and(|d| s.stopped && d.data_closed == Some(true))
             );
         }
         Ok(report)

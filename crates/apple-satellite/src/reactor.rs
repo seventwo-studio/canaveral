@@ -27,6 +27,10 @@ type Result<T> = canaveral_guest_protocol::Result<T>;
 const TURN: usize = 65536;
 /// Clone must create an independent evidence/query context. No ambient proxy or DNS at connect.
 pub trait Egress: HostEvidence + Clone + Send + 'static {
+    /// Includes nested resolver workers; absence of evidence must remain false.
+    fn workers_closed(&self) -> bool {
+        false
+    }
     fn resolve(
         &mut self,
         name: &str,
@@ -45,7 +49,36 @@ pub trait Egress: HostEvidence + Clone + Send + 'static {
             .is_ok_and(|p| p.ip() == address && p.port() == port)
     }
 }
-/// Production remains denied until a native provider is explicitly installed.
+/// Native query adapter; construction performs no network operations.
+#[derive(Clone, Copy)]
+pub struct Native;
+impl HostEvidence for Native {
+    fn evidence(
+        &mut self,
+        address: IpAddr,
+    ) -> std::result::Result<crate::egress::Evidence, ErrorCode> {
+        crate::native_egress::NativeHost.evidence(address)
+    }
+}
+impl Egress for Native {
+    fn resolve(
+        &mut self,
+        name: &str,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<IpAddr>, ErrorCode> {
+        crate::native_egress::resolve(name, timeout)
+    }
+    fn connect(
+        &mut self,
+        address: IpAddr,
+        port: u16,
+        timeout: Duration,
+    ) -> std::result::Result<TcpStream, ErrorCode> {
+        crate::native_egress::connect(address, port, timeout)
+    }
+}
+/// Explicit fail-closed provider for offline callers and transport fixtures.
+
 #[derive(Clone)]
 pub struct Deny;
 impl HostEvidence for Deny {
@@ -54,6 +87,9 @@ impl HostEvidence for Deny {
     }
 }
 impl Egress for Deny {
+    fn workers_closed(&self) -> bool {
+        true
+    }
     fn resolve(&mut self, _: &str, _: Duration) -> std::result::Result<Vec<IpAddr>, ErrorCode> {
         Err(ErrorCode::EgressDenied)
     }
@@ -89,6 +125,14 @@ impl Authority {
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::Release);
     }
+    fn remaining_ms(&self) -> u64 {
+        if !self.permits() {
+            return 0;
+        }
+        self.deadline_ms
+            .load(Ordering::Acquire)
+            .saturating_sub(clock::now().as_millis().min(u64::MAX as u128) as u64)
+    }
     pub fn permits(&self) -> bool {
         !self.revoked.load(Ordering::Acquire)
             && clock::now().as_millis() < self.deadline_ms.load(Ordering::Acquire) as u128
@@ -116,7 +160,10 @@ pub struct Handle {
 }
 impl Handle {
     /// Internal assignment routing seam; no local consumer listener is exposed.
-    pub fn send_transfer(&self, frame: Frame) -> Result<()> {
+    pub fn send_transfer(&self, mut frame: Frame) -> Result<()> {
+        if let Frame::TransferRequest { remaining_ms, .. } = &mut frame {
+            *remaining_ms = (*remaining_ms).min(self.authority.remaining_ms());
+        }
         frame.validate(Sender::Host)?;
         match frame {
             Frame::TransferCancel { .. } => self
@@ -163,6 +210,7 @@ struct Socket {
     progress: clock::Clock,
 }
 struct Output {
+    reserved: bool,
     bytes: Vec<u8>,
     offset: usize,
     decoded: u64,
@@ -184,6 +232,7 @@ pub struct Reactor<E: Egress> {
     workers: Vec<JoinHandle<()>>,
     workers_ok: bool,
     turn: usize,
+    retired: VecDeque<Uuid>,
     connected_tx: SyncSender<Connected>,
     connected: Receiver<Connected>,
 }
@@ -198,7 +247,7 @@ impl<E: Egress> Reactor<E> {
         relay.set_nonblocking(true)?;
         let (connected_tx, connected) = mpsc::sync_channel(16);
         let mut budget = Budget::default();
-        budget.reserve(TURN as u64, data::MAX_FRAME + 4)?; // bounded receipt lane and parser
+        budget.reserve(2 * TURN as u64, data::MAX_FRAME + 4)?; // bounded request/receipt lanes and parser
         Ok(Self {
             relay,
             decoder: Default::default(),
@@ -216,6 +265,7 @@ impl<E: Egress> Reactor<E> {
             workers: Vec::new(),
             workers_ok: true,
             turn: 0,
+            retired: VecDeque::new(),
             connected_tx,
             connected,
         })
@@ -224,11 +274,12 @@ impl<E: Egress> Reactor<E> {
         let bytes = data::encode(&frame, Sender::Host)?;
         // Leave a complete control frame available independently of payload accounting.
         let used: usize = self.output.iter().map(|o| o.bytes.len()).sum();
-        if used + bytes.len() > data::ENCODED_BUDGET - data::MAX_FRAME - 4 {
+        if used + bytes.len() > data::ENCODED_BUDGET - 2 * (data::MAX_FRAME + 4) {
             return Err("encoded queue full".into());
         }
         self.budget.reserve(decoded, bytes.len())?;
         self.output.push_back(Output {
+            reserved: false,
             bytes,
             offset: 0,
             decoded,
@@ -237,6 +288,10 @@ impl<E: Egress> Reactor<E> {
     }
     fn retire(&mut self, id: Uuid, error: Option<ErrorCode>) -> Result<()> {
         if self.flows.close(id, &mut self.budget)? {
+            if self.retired.len() == 16 {
+                self.retired.pop_front();
+            }
+            self.retired.push_back(id);
             if let Some(s) = self.sockets.remove(&id).and_then(|s| s.stream) {
                 let _ = s.shutdown(Shutdown::Both);
             }
@@ -259,6 +314,7 @@ impl<E: Egress> Reactor<E> {
         match frame {
             Frame::Open { id, host, port, .. } => {
                 self.flows.open(id)?;
+                self.retired.clear();
                 self.sockets.insert(
                     id,
                     Socket {
@@ -319,6 +375,9 @@ impl<E: Egress> Reactor<E> {
                 }
             }
             Frame::HalfClose { id, .. } => {
+                if self.retired.contains(&id) {
+                    return Ok(());
+                }
                 self.flows.direction(id, Sender::Guest)?;
                 self.flows
                     .direction(id, Sender::Guest)?
@@ -423,6 +482,9 @@ impl<E: Egress> Reactor<E> {
             self.turn = self.turn.wrapping_add(1);
         }
         for id in ids {
+            if !self.authority.permits() {
+                return Err("authority lost".into());
+            }
             let s = self.sockets.get_mut(&id).unwrap();
             if s.progress.elapsed()
                 >= Duration::from_secs(if s.stream.is_some() { 120 } else { 10 })
@@ -560,7 +622,7 @@ impl<E: Egress> Reactor<E> {
         while self.connected.try_recv().is_ok() {}
         Closed {
             sockets: true,
-            workers: self.workers_ok,
+            workers: self.workers_ok && self.provider.workers_closed(),
             relay: true,
         }
     }
@@ -649,7 +711,11 @@ pub fn spawn<E: Egress>(
 
         reactor.receipt_tx = Some(tx);
         loop {
-            if let Ok(f) = cx.try_recv() {
+            if let Ok(f) = if reactor.output.iter().any(|o| o.reserved) {
+                Err(mpsc::TryRecvError::Empty)
+            } else {
+                cx.try_recv()
+            } {
                 let bytes = match data::encode(&f, Sender::Host) {
                     Ok(b) => b,
                     Err(_) => break,
@@ -662,13 +728,17 @@ pub fn spawn<E: Egress>(
                 reactor.output.insert(
                     pos,
                     Output {
+                        reserved: true,
                         bytes,
                         offset: 0,
                         decoded: 0,
                     },
                 );
             }
-            if let Ok(f) = rx.try_recv() {
+            if let Ok(mut f) = rx.try_recv() {
+                if let Frame::TransferRequest { remaining_ms, .. } = &mut f {
+                    *remaining_ms = (*remaining_ms).min(reactor.authority.remaining_ms());
+                }
                 if reactor.transfer.is_some() {
                     break;
                 }
@@ -722,6 +792,9 @@ mod tests {
         }
     }
     impl Egress for Fake {
+        fn workers_closed(&self) -> bool {
+            true
+        }
         fn resolve(&mut self, _: &str, _: Duration) -> std::result::Result<Vec<IpAddr>, ErrorCode> {
             self.resolves.fetch_add(1, Ordering::Relaxed);
             Ok(vec!["8.8.8.8".parse().unwrap()])
@@ -953,5 +1026,194 @@ mod tests {
         drop(peer);
         assert!(r.step().is_err());
         assert!(r.close().complete());
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+    use canaveral_guest_protocol::{
+        data::{CancelReason, Request},
+        Binding,
+    };
+    fn start<E: Egress>(provider: E) -> (Handle, UnixStream) {
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let binding = Binding {
+            lease_id: Uuid::from_u128(1),
+            member_id: Uuid::from_u128(2),
+            revision: 1,
+            boot_attempt: Uuid::from_u128(3),
+            bundle_digest: "a".repeat(64),
+        };
+        let session = crate::data::Session::new(host, binding.clone(), "b".repeat(64)).unwrap();
+        let handle = spawn(
+            session,
+            provider,
+            Policy::new(&[]).unwrap(),
+            true,
+            Authority::new(clock::now() + Duration::from_secs(60)),
+        );
+        let mut prefix = [0; 4];
+        guest.read_exact(&mut prefix).unwrap();
+        let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+        guest.read_exact(&mut body).unwrap();
+        guest
+            .write_all(
+                &data::encode(
+                    &Frame::DataReady {
+                        version: 1,
+                        binding,
+                        nonce: "b".repeat(64),
+                    },
+                    Sender::Guest,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        for _ in 0..100 {
+            if handle.ready.load(Ordering::Acquire) {
+                return (handle, guest);
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("worker not ready");
+    }
+    fn receive(guest: &mut UnixStream) -> Frame {
+        let mut prefix = [0; 4];
+        guest.read_exact(&mut prefix).unwrap();
+        let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+        guest.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+    #[test]
+    fn transfer_receipt_routing_cancel_and_shutdown_evidence() {
+        let (mut h, mut guest) = start(Deny);
+        let id = Uuid::from_u128(22);
+        h.send_transfer(Frame::TransferRequest {
+            version: 1,
+            id,
+            step: 1,
+            request: Request::Abort,
+            remaining_ms: 90_000,
+        })
+        .unwrap();
+        assert!(
+            matches!(receive(&mut guest), Frame::TransferRequest { remaining_ms, .. } if remaining_ms <= 60_000)
+        );
+        let receipt = Frame::TransferReceipt {
+            version: 1,
+            id,
+            step: 1,
+            receipt: data::Receipt::Aborted,
+        };
+        guest
+            .write_all(&data::encode(&receipt, Sender::Guest).unwrap())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(h.receipts.recv_timeout(Duration::from_secs(1)).unwrap()).unwrap(),
+            serde_json::to_value(receipt).unwrap()
+        );
+        h.send_transfer(Frame::TransferCancel {
+            version: 1,
+            id,
+            reason: CancelReason::Stop,
+        })
+        .unwrap();
+        assert!(matches!(receive(&mut guest), Frame::TransferCancel { .. }));
+        let start = std::time::Instant::now();
+        assert!(h.shutdown().complete());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+    #[derive(Clone)]
+    struct Stalled {
+        gate: Arc<AtomicBool>,
+        entered: Arc<AtomicBool>,
+    }
+    impl HostEvidence for Stalled {
+        fn evidence(
+            &mut self,
+            _: IpAddr,
+        ) -> std::result::Result<crate::egress::Evidence, ErrorCode> {
+            Err(ErrorCode::RouteDenied)
+        }
+    }
+    impl Egress for Stalled {
+        fn workers_closed(&self) -> bool {
+            true
+        }
+        fn resolve(&mut self, _: &str, _: Duration) -> std::result::Result<Vec<IpAddr>, ErrorCode> {
+            self.entered.store(true, Ordering::Release);
+            while self.gate.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(ErrorCode::ConnectTimeout)
+        }
+        fn connect(
+            &mut self,
+            _: IpAddr,
+            _: u16,
+            _: Duration,
+        ) -> std::result::Result<TcpStream, ErrorCode> {
+            Err(ErrorCode::ConnectFailed)
+        }
+    }
+    #[test]
+    fn stalled_provider_cannot_delay_control_or_assert_closed() {
+        let provider = Stalled {
+            gate: Arc::new(AtomicBool::new(true)),
+            entered: Arc::new(AtomicBool::new(false)),
+        };
+        let (mut h, mut guest) = start(provider.clone());
+        guest
+            .write_all(
+                &data::encode(
+                    &Frame::Open {
+                        version: 1,
+                        id: Uuid::from_u128(1),
+                        host: "example.com".into(),
+                        port: 443,
+                    },
+                    Sender::Guest,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        for _ in 0..100 {
+            if provider.entered.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(provider.entered.load(Ordering::Acquire));
+        let (mut control, mut peer) = crate::guest::tests::session_pair();
+        crate::guest::tests::send_ready(&control, &mut peer);
+        assert!(control.pump(100.0).unwrap());
+        let start = std::time::Instant::now();
+        let closed = h.shutdown();
+        provider.gate.store(false, Ordering::Release);
+        assert!(!closed.complete());
+        assert!(start.elapsed() < Duration::from_millis(2100));
+        let start = std::time::Instant::now();
+        drop(h);
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(control.ready(101.0));
+    }
+    #[test]
+    fn invalid_wire_closes_only_data_and_joins_descriptors() {
+        let (mut h, mut guest) = start(Deny);
+        guest.write_all(&0u32.to_be_bytes()).unwrap();
+        for _ in 0..100 {
+            if h.worker.as_ref().unwrap().is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(h.worker.as_ref().unwrap().is_finished());
+        assert!(h.shutdown().complete());
+        let mut b = [0];
+        assert_eq!(guest.read(&mut b).unwrap(), 0);
     }
 }
