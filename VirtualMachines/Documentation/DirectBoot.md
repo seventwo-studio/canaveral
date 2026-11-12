@@ -79,3 +79,8 @@ data worker failure does not close control/VM or disable the native deadline
 guard. Stop initiates fencing immediately, then allows data workers at most 2s to
 close. Unconfirmed worker/descriptor closure blocks cleanup evidence. No native
 acceptance follows from this contract or existing one-relay socketpair tests.
+
+Direct-kernel configurations now attach no network device. EFI Linux and macOS
+retain NAT; unit tests exercise all three configuration decisions. Workspace-v2
+disk attachment and the independent port-1025 relay are still unimplemented;
+no native networking-isolation acceptance is implied by configuration tests.

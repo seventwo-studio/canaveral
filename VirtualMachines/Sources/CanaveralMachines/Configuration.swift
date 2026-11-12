@@ -26,6 +26,17 @@ import CanaveralVMCore
         try MachineStore.save(machine, directory: directory)
         _ = try build(machine: machine, directory: directory)
     }
+    /// Direct-kernel guests have no NIC. EFI and macOS retain their NAT device.
+    static func networkDevices(machine: Machine) throws -> [VZNetworkDeviceConfiguration] {
+        if machine.directBoot != nil { return [] }
+        let network = VZVirtioNetworkDeviceConfiguration()
+        network.attachment = VZNATNetworkDeviceAttachment()
+        guard let address = VZMACAddress(string: machine.macAddress) else {
+            throw CanaveralError.invalid("Invalid guest network identity.")
+        }
+        network.macAddress = address
+        return [network]
+    }
     public static func build(machine: Machine, directory: URL, serialAttachment: VZSerialPortAttachment? = nil) throws -> VZVirtualMachineConfiguration {
         try machine.validate()
         try machine.directBoot?.validate(machine: machine)
@@ -46,9 +57,7 @@ import CanaveralVMCore
             c.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: seed, readOnly: true)))
         }
         }
-        let network = VZVirtioNetworkDeviceConfiguration(); network.attachment = VZNATNetworkDeviceAttachment()
-        guard let address = VZMACAddress(string: machine.macAddress) else { throw CanaveralError.invalid("Invalid guest network identity.") }
-        network.macAddress = address; c.networkDevices = [network]
+        c.networkDevices = try networkDevices(machine: machine)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         if machine.mode == .desktop {
             c.keyboards = [VZUSBKeyboardConfiguration()]

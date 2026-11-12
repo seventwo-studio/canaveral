@@ -1,6 +1,7 @@
 import XCTest
 import CryptoKit
 import Darwin
+import Virtualization
 @testable import CanaveralMachines
 
 final class DirectBootTests: XCTestCase {
@@ -11,6 +12,16 @@ final class DirectBootTests: XCTestCase {
         let artifact: [String: Any] = ["path": "/operator/Image", "size": 1, "sha256": String(repeating: "a", count: 64)]
         let json: [String: Any] = ["version": 1, "revision": 1, "kernel": artifact, "initrd": artifact, "rootfs": artifact, "launchMedium": artifact, "launchFilesystemUUID": UUID().uuidString, "bundleDigest": String(repeating: "b", count: 64), "commandLine": "root=/dev/vda rootfstype=erofs ro", "leaseID": lease.uuidString, "memberID": member.uuidString, "bootSessionID": UUID().uuidString, "bootAttempt": attempt.uuidString, "workspaceBytes": 16777216]
         return (m, try JSONDecoder().decode(DirectBoot.self, from: JSONSerialization.data(withJSONObject: json)))
+    }
+    @MainActor func testDirectBootHasNoNetworkDevice() throws {
+        let (machine, boot) = try fixture()
+        var direct = machine; direct.directBoot = boot
+        XCTAssertTrue(try MachineConfiguration.networkDevices(machine: direct).isEmpty)
+        let efi = try MachineConfiguration.networkDevices(machine: machine)
+        XCTAssertEqual(efi.count, 1)
+        XCTAssertTrue(efi[0].attachment is VZNATNetworkDeviceAttachment)
+        var mac = machine; mac.os = .macOS
+        XCTAssertEqual(try MachineConfiguration.networkDevices(machine: mac).count, 1)
     }
     func testShapeAndNonce() throws {
         let (m, boot) = try fixture()
