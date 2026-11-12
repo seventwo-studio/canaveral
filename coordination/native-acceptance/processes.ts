@@ -1,3 +1,4 @@
+import {dirname} from 'node:path';
 export interface ProcessRow {pid:number; ppid:number; command:string}
 export function processRows(ps:string):ProcessRow[] {
   return ps.split('\n').flatMap(line => {
@@ -6,11 +7,13 @@ export function processRows(ps:string):ProcessRow[] {
   });
 }
 export function ownedProcesses(rows:ProcessRow[], helperPids:number[], machine:string, files:string, previous:number[]=[]):number[] {
+  // Native disks and launch media sit beside the helper's machine directory.
+  const workspace=dirname(machine);
   const owned=new Set([...helperPids,...previous]);
   let pid=0;
   for(const line of files.split('\n')) {
     if(line.startsWith('p')) pid=Number(line.slice(1));
-    if(line.startsWith('n') && (line.slice(1)===machine || line.slice(1).startsWith(machine+'/'))) owned.add(pid);
+    if(line.startsWith('n') && (line.slice(1)===workspace || line.slice(1).startsWith(workspace+'/'))) owned.add(pid);
   }
   let changed=true;
   while(changed) {
