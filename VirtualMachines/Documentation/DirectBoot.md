@@ -50,12 +50,11 @@ pending console bytes on close and persists a final transcript, including guests
 that stop before the periodic snapshot. See the [native evidence record](../../coordination/native-acceptance/README.md)
 for the narrower full-lease results and remaining production gates.
 
-## ST-535 direct boot v2 contract (unimplemented)
+## ST-535 direct boot v2 helper
 
 For workspace-v2 preparation, directBoot.version becomes 2. Replace workspaceBytes
-with `workspace:{path,serial,bytes,overheadBytes}`; path is canonical absolute and
-host-resolved under satellite-owned state, never consumer input. Add
-`dataVsockPort:1025`; the helper accepts no other data port. Kernel/rootfs/initrd/
+with `workspace:{path,serial,bytes}`; path is canonical absolute and
+host-resolved under satellite-owned state, never consumer input. The data port is fixed at 1025; no data port inventory field is accepted. Kernel/rootfs/initrd/
 launchMedium pins and existing boot binding stay unchanged. Swift does not parse
 launch egress/nonce; the satellite binds them in the immutable v2 medium. Writable
 workspace admission checks one-link regular inode, mode 0600, trusted ancestry,
@@ -82,5 +81,26 @@ acceptance follows from this contract or existing one-relay socketpair tests.
 
 Direct-kernel configurations now attach no network device. EFI Linux and macOS
 retain NAT; unit tests exercise all three configuration decisions. Workspace-v2
-disk attachment and the independent port-1025 relay are still unimplemented;
+disk attachment and the independent port-1025 relay are implemented;
 no native networking-isolation acceptance is implied by configuration tests.
+
+The v2 workspace path must have no symlink components or unsafe writable ancestors.
+The helper checks current uid, mode 0600, regular-file type, single link, exact
+length, 4096-byte alignment and a distinct 20-lowercase-hex serial. It rechecks
+inode identity around VZ attachment. Satellite-owned path entries must remain
+stable throughout prepare/run; same-uid malicious replacement is outside this
+trust boundary. The helper neither allocates nor copies, resizes, formats or
+removes workspace media. VZ attaches it with `.uncached` caching and `.full`
+synchronization, read-write, after the root and launch disks. Physical reservation
+remains the satellite's responsibility, not established by helper metadata checks.
+
+V1 retains its existing JSON fields and tmpfs bounds; v2 omits `workspaceBytes`.
+Both channel listeners use mode 0600 and the same getpeereid uid check, and each
+consumes one authorized local stream. Data setup/connect/pump failure affects only
+data. A setup failure leaves the published data path unavailable and cannot yield
+guest data readiness. Both channels stop on VM stop. Unix fixture tests cover
+single accept, fixed port selection, mode, data stop with live control, and the
+shared pump's backpressure/half-close behavior. They do not run a VM. Native
+acceptance must verify writable-disk sysfs serial and exact size, preallocation,
+format/mount, VZ flush/caching and descriptor lifetime, both vsock handshakes and
+independent data-loss/control renewal behavior.

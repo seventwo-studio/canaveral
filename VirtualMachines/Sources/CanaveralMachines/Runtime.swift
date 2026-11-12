@@ -76,8 +76,9 @@ import CanaveralVMCore
             }
             phase = "Starting"; try await vm.start()
             if let boot = m.directBoot {
-                directRelay = try DirectBootRelay(vm: vm)
-                let event: [String: Any] = ["event": "started", "version": 1, "continuous": NativeLeaseClock.now(), "memberID": m.id.uuidString, "leaseID": boot.leaseID.uuidString, "bootSessionID": boot.bootSessionID.uuidString, "bootAttempt": boot.bootAttempt.uuidString, "agentSocket": directRelay!.socketPath]
+                directRelay = try DirectBootRelay(vm: vm, version: boot.version)
+                var event: [String: Any] = ["event": "started", "version": 1, "continuous": NativeLeaseClock.now(), "memberID": m.id.uuidString, "leaseID": boot.leaseID.uuidString, "bootSessionID": boot.bootSessionID.uuidString, "bootAttempt": boot.bootAttempt.uuidString, "agentSocket": directRelay!.socketPath]
+                if boot.version == 2 { event["dataSocketPath"] = directRelay!.dataSocketPath }
                 let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
                 try data.write(to: directory.appendingPathComponent("direct-started.json"), options: .atomic)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: directory.appendingPathComponent("direct-started.json").path)

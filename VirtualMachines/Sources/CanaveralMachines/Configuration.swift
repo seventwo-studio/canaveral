@@ -37,6 +37,13 @@ import CanaveralVMCore
         network.macAddress = address
         return [network]
     }
+static func workspaceDevice(_ workspace: DirectBootWorkspace) throws -> VZVirtioBlockDeviceConfiguration {
+    try workspace.verify()
+    let attachment = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: workspace.path), readOnly: false, cachingMode: .uncached, synchronizationMode: .full)
+    let disk = VZVirtioBlockDeviceConfiguration(attachment: attachment)
+    disk.blockDeviceIdentifier = workspace.serial
+    return disk
+}
     public static func build(machine: Machine, directory: URL, serialAttachment: VZSerialPortAttachment? = nil) throws -> VZVirtualMachineConfiguration {
         try machine.validate()
         try machine.directBoot?.validate(machine: machine)
@@ -48,6 +55,7 @@ import CanaveralVMCore
             let launch = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: boot.launchMedium.path), readOnly: true))
             launch.blockDeviceIdentifier = boot.serial
             c.storageDevices = [root, launch]
+            if let workspace = boot.workspace { c.storageDevices.append(try workspaceDevice(workspace)) }
             c.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         } else {
         let disk = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: directory.appendingPathComponent("disk.img"), readOnly: false, cachingMode: .uncached, synchronizationMode: .full))
