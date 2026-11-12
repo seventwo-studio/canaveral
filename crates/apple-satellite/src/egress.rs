@@ -158,7 +158,7 @@ impl Policy {
 }
 /// Called from the data reactor at least every two seconds. Returned IDs must be
 /// closed before another payload turn; any evidence failure closes the affected flow.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Live {
     flows: BTreeMap<Uuid, IpAddr>,
     next: u64,
@@ -170,6 +170,9 @@ impl Live {
         }
         self.flows.insert(id, address);
         Ok(())
+    }
+    pub fn ids(&self) -> Vec<Uuid> {
+        self.flows.keys().copied().collect()
     }
     pub fn remove(&mut self, id: Uuid) {
         self.flows.remove(&id);

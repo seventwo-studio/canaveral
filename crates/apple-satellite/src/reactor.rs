@@ -27,7 +27,7 @@ type Result<T> = canaveral_guest_protocol::Result<T>;
 const TURN: usize = 65536;
 /// Clone must create an independent evidence/query context. No ambient proxy or DNS at connect.
 pub trait Egress: HostEvidence + Clone + Send + 'static {
-    /// Includes nested resolver workers; absence of evidence must remain false.
+    /// Covers socket-owning workers. Timed-out, capped resolver threads are excluded.
     fn workers_closed(&self) -> bool {
         false
     }
@@ -61,6 +61,9 @@ impl HostEvidence for Native {
     }
 }
 impl Egress for Native {
+    fn workers_closed(&self) -> bool {
+        true
+    }
     fn resolve(
         &mut self,
         name: &str,
@@ -225,6 +228,8 @@ pub struct Reactor<E: Egress> {
     flows: Flows,
     sockets: BTreeMap<Uuid, Socket>,
     live: Live,
+    recheck: Option<(clock::Clock, Receiver<Vec<(Uuid, ErrorCode)>>)>,
+    next_recheck: Duration,
     receipt_tx: Option<SyncSender<Frame>>,
     transfer: Option<(Uuid, u64)>,
     budget: Budget,
@@ -258,6 +263,8 @@ impl<E: Egress> Reactor<E> {
             flows: Default::default(),
             sockets: BTreeMap::new(),
             live: Default::default(),
+            recheck: None,
+            next_recheck: clock::now(),
             receipt_tx: None,
             transfer: None,
             budget,
@@ -411,18 +418,51 @@ impl<E: Egress> Reactor<E> {
             }
         }
     }
+    fn revalidate(&mut self) -> Result<()> {
+        if let Some((started, rx)) = &self.recheck {
+            let invalid = match rx.try_recv() {
+                Ok(invalid) if started.elapsed() < Duration::from_secs(2) => Some(invalid),
+                Err(mpsc::TryRecvError::Empty) if started.elapsed() < Duration::from_secs(2) => {
+                    None
+                }
+                _ => Some(
+                    self.live
+                        .ids()
+                        .into_iter()
+                        .map(|id| (id, ErrorCode::RouteDenied))
+                        .collect(),
+                ),
+            };
+            if let Some(invalid) = invalid {
+                for (id, code) in invalid {
+                    self.retire(id, Some(code))?;
+                }
+                // Keep a stalled query pinned: no unbounded replacement workers.
+                if self.workers.iter().all(JoinHandle::is_finished) {
+                    self.recheck = None;
+                }
+            }
+        }
+        if self.recheck.is_none() && clock::now() >= self.next_recheck {
+            self.next_recheck = clock::now() + Duration::from_secs(2);
+            let mut snapshot = self.live.clone();
+            let policy = self.policy.clone();
+            let mut provider = self.provider.clone();
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.recheck = Some((clock::Clock::now(), rx));
+            self.workers.push(thread::spawn(move || {
+                let invalid = snapshot.revalidate(u64::MAX, &policy, &mut provider);
+                let _ = tx.send(invalid);
+            }));
+        }
+        Ok(())
+    }
     pub fn step(&mut self) -> Result<()> {
         if !self.authority.permits() {
             return Err("authority lost".into());
         }
         self.reap();
-        for (id, code) in self.live.revalidate(
-            clock::now().as_millis().min(u64::MAX as u128) as u64,
-            &self.policy,
-            &mut self.provider,
-        ) {
-            self.retire(id, Some(code))?;
-        }
+        self.revalidate()?;
         while let Ok((id, result)) = self.connected.try_recv() {
             if !self.sockets.contains_key(&id) {
                 continue;
@@ -755,6 +795,7 @@ pub fn spawn<E: Egress>(
             flag.store(true, Ordering::Release);
             thread::sleep(Duration::from_millis(2));
         }
+        flag.store(false, Ordering::Release);
         reactor.close()
     });
     Handle {
@@ -776,10 +817,16 @@ mod tests {
     struct Fake {
         listener: Arc<TcpListener>,
         denied: Arc<AtomicBool>,
+        evidence_gate: Arc<AtomicBool>,
+        evidence_entered: Arc<AtomicBool>,
         resolves: Arc<AtomicU64>,
     }
     impl HostEvidence for Fake {
         fn evidence(&mut self, _: IpAddr) -> std::result::Result<Evidence, ErrorCode> {
+            self.evidence_entered.store(true, Ordering::Release);
+            while self.evidence_gate.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
             if self.denied.load(Ordering::Acquire) {
                 return Err(ErrorCode::RouteDenied);
             }
@@ -818,6 +865,8 @@ mod tests {
         let fake = Fake {
             listener: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
             denied: Arc::new(AtomicBool::new(false)),
+            evidence_gate: Arc::new(AtomicBool::new(false)),
+            evidence_entered: Arc::new(AtomicBool::new(false)),
             resolves: Arc::new(AtomicU64::new(0)),
         };
         let r = Reactor::new(
@@ -970,7 +1019,13 @@ mod tests {
         open(&mut r, 2);
         fake.denied.store(true, Ordering::Release);
         clock::advance(Duration::from_secs(2));
-        r.step().unwrap();
+        for _ in 0..100 {
+            r.step().unwrap();
+            if r.sockets.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
         clock::advance(Duration::ZERO);
         assert!(r.sockets.is_empty());
         assert!(collect(&mut peer).iter().any(|f| matches!(
@@ -981,6 +1036,81 @@ mod tests {
             }
         )));
         assert!(r.close().complete());
+    }
+    #[test]
+    fn periodic_evidence_timeout_closes_all_flows_without_blocking() {
+        let (mut r, mut peer, fake) = setup(true);
+        open(&mut r, 1);
+        open(&mut r, 2);
+        // Complete any previous periodic snapshot before pinning the blocked query.
+        for _ in 0..100 {
+            r.reap();
+            r.revalidate().unwrap();
+            if r.recheck.is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        fake.evidence_entered.store(false, Ordering::Release);
+        fake.evidence_gate.store(true, Ordering::Release);
+        clock::advance(Duration::from_secs(2));
+        r.revalidate().unwrap();
+        for _ in 0..100 {
+            if fake.evidence_entered.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(fake.evidence_entered.load(Ordering::Acquire));
+        let started = std::time::Instant::now();
+        r.step().unwrap();
+        assert_eq!(r.sockets.len(), 2);
+        clock::advance(Duration::from_secs(4));
+        r.step().unwrap();
+        assert!(r.sockets.is_empty());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(
+            collect(&mut peer)
+                .iter()
+                .filter(|f| matches!(
+                    f,
+                    Frame::Error {
+                        code: ErrorCode::RouteDenied,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        // No replacement evidence thread while this one remains blocked.
+        let workers = r.workers.len();
+        r.step().unwrap();
+        assert_eq!(r.workers.len(), workers);
+        fake.evidence_gate.store(false, Ordering::Release);
+        clock::advance(Duration::ZERO);
+        assert!(r.close().complete());
+    }
+    #[test]
+    fn native_worker_evidence_excludes_socketless_resolvers() {
+        assert!(Native.workers_closed());
+        assert!(!Closed {
+            sockets: false,
+            workers: true,
+            relay: true
+        }
+        .complete());
+        assert!(!Closed {
+            sockets: true,
+            workers: false,
+            relay: true
+        }
+        .complete());
+        assert!(!Closed {
+            sockets: true,
+            workers: true,
+            relay: false
+        }
+        .complete());
     }
     #[test]
     fn fairness_credit_stall_idle_retired_and_disconnect() {

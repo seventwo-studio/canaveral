@@ -125,3 +125,16 @@ implemented. The guest loopback listener, resolver worker, native route/interfac
 evidence provider and satellite TCP/data reactor are not connected. Egress
 remains unavailable; these primitives do not establish enforcement or acceptance.
 Transfers move at most 64 KiB per serialized step, a known throughput limit.
+
+### ST-535 data closure and bounded route evidence (2026-11-12)
+
+`dataPlaneClosed` requires every outbound flow socket, relay descriptor,
+data reactor thread and transfer worker to be closed/joined. Timed-out
+getaddrinfo threads are excluded: they hold no guest-reachable socket and
+are capped at four. This exclusion does not cover route-evidence workers.
+
+Periodic live-flow revalidation is hard-bounded by its two-second period.
+If getifaddrs/RTM_GET evidence has not completed within that period, the
+satellite closes all live flows with `route_denied`. A stalled evidence
+worker prevents positive joined cleanup evidence; it is never replaced by
+an unbounded series of workers. Native acceptance remains required.

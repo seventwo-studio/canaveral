@@ -82,6 +82,12 @@ impl Lane {
             }
         }
     }
+    pub(crate) fn files_ready(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|w| w.ready.load(std::sync::atomic::Ordering::Acquire))
+            || self.session.as_ref().is_some_and(Session::ready)
+    }
     pub(crate) fn commands_ready(&self, required: bool) -> bool {
         !required || self.initial_ready
     }
@@ -345,9 +351,11 @@ mod tests {
         lane.session = Some(s);
         lane.pump();
         assert!(lane.commands_ready(true));
+        assert!(lane.files_ready());
         drop(peer);
         lane.pump();
         assert!(lane.session.is_none());
+        assert!(!lane.files_ready());
         assert!(lane.commands_ready(true));
         lane.start(
             "/invalid/agent.sock",

@@ -457,6 +457,7 @@ pub struct Satellite {
     dir: private::Directory,
     state: Journal,
     data_authority: Option<reactor::Authority>,
+    files_ready: bool,
 }
 impl Satellite {
     /// Completes artifact, signature and binding-local preflight before any claim.
@@ -481,6 +482,7 @@ impl Satellite {
             dir,
             state,
             data_authority: None,
+            files_ready: false,
         };
         if !s.state.operations.completed.is_empty() {
             let assignment = s.assignment()?.id;
@@ -727,7 +729,7 @@ impl Satellite {
             "leaseId":a.lease_id,"memberId":a.member_id,"backend":a.image.backend,"imageDigest":a.image.digest,
             "observedRevision":s.revision,"runtimeState":runtime,
             // EFI boot never implies readiness; PTY and files have no guest transport yet.
-            "ready":{"command":command,"pty":false,"files":false},
+            "ready":{"command":command,"pty":false,"files":guest_ready && self.files_ready && a.capabilities.iter().any(|c| c == "files")},
             "failure":failure,"executionStopped":s.stopped,"storageRemoved":s.cleaned,
             "credentialsErased":s.cleaned,"cleanup":cleanup}});
         if a.workspace_io_version == Some(1) {
@@ -1157,6 +1159,11 @@ impl Satellite {
         // Data errors are permanently local to data, including initial mismatch.
         // Keep control pumping for renewal/expiry even if readiness never arrives.
         data.pump();
+        let files_ready = data.files_ready();
+        if self.files_ready != files_ready {
+            self.files_ready = files_ready;
+            *last = None;
+        }
         let d = self.state.direct.as_ref().ok_or("no direct launch")?;
         if !d.ready && s.ready(now) && data.commands_ready(d.data_nonce.is_some()) {
             let d = self.state.direct.as_mut().ok_or("no direct launch")?;
