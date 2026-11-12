@@ -22,7 +22,9 @@ function view(row: Row): RequestView {
 export class Requests {
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities,
     readonly acquire: (kind: RequestKind, application: string, intent: Record<string, unknown>) => void,
-    readonly release: (db: DatabaseSync, row: { kind: RequestKind; id: string }, token: string) => void) {
+    readonly release: (db: DatabaseSync, row: { kind: RequestKind; id: string }, token: string) => void,
+    /** Pure shape check shared with direct acquisition, so malformed intent is refused before it consumes a UUID. */
+    readonly validate: (kind: RequestKind, intent: Record<string, unknown>) => void = () => {}) {
     store.transaction(db => db.exec(`CREATE TABLE IF NOT EXISTS requests (
       application TEXT NOT NULL,id TEXT NOT NULL,kind TEXT NOT NULL,intent TEXT NOT NULL,resources TEXT NOT NULL,priority INTEGER NOT NULL,
       deadline REAL,source TEXT,state TEXT NOT NULL,sequence INTEGER NOT NULL,created REAL NOT NULL,admitted_at REAL,target TEXT,reason TEXT,PRIMARY KEY(application,id));
@@ -39,6 +41,7 @@ export class Requests {
     if (input.kind !== "lease" && input.kind !== "linux-lease") throw new ServiceError("Use kind lease or linux-lease; model jobs use /v1/model-jobs.",400,{code:"request_kind_unsupported"});
     const kind = input.kind, intent: Record<string, unknown> = { ...object(input.intent), id };
     if (Object.hasOwn(input.intent as object,"id")) throw new ServiceError("Put the UUID on the request envelope, not in intent.",400);
+    this.validate(kind, intent);
     // Normalize defaults without freezing capacity, credentials or a placement.
     return this.store.transaction(db => {
       const app = this.applications.verify(db,token);
@@ -64,7 +67,7 @@ export class Requests {
         return { created:false,request:view(old) };
       }
       if (db.prepare("SELECT 1 FROM requests WHERE id=?").get(id)) throw new ServiceError("Unknown request.",404);
-      const count = Number(db.prepare("SELECT COUNT(*) AS n FROM requests WHERE application=? AND state='waiting'").get(app.id)!.n);
+      const count = Number(db.prepare("SELECT COUNT(*) AS n FROM requests WHERE application=? AND state='waiting' AND (deadline IS NULL OR deadline>?)").get(app.id,this.store.clock())!.n);
       if (count >= (app.limits.maxWaitingRequests ?? 100)) throw new ServiceError("Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",429,{code:"request_waiting_limit",retryable:true});
       db.prepare("UPDATE request_scheduler SET sequence=sequence+1 WHERE id=1").run();
       db.prepare("INSERT INTO requests VALUES(?,?,?,?,?,?,?,?, 'waiting', (SELECT sequence FROM request_scheduler WHERE id=1),?,NULL,NULL,NULL)").run(app.id,id,kind,frozen,resources,priority,deadline,source,this.store.clock());
@@ -96,6 +99,13 @@ export class Requests {
       return view(this.row(db,row.application,row.id));
     });
   }
+  /** Rejects an invalid application credential before any admission work is done on its behalf. */
+  authenticate(token: string): void { this.store.transaction(db => { this.applications.verify(db,token); }); }
+  /** Timer and post-request entry: a busy database or unexpected failure must not take the worker or a committed reply down. */
+  wake(): boolean {
+    try { this.pass(); return true; }
+    catch { return false; }
+  }
   pass(): void {
     // Empty queues need no write boundary or lifecycle refresh. This is only a hint;
     // all expiry, authorization and admission decisions remain inside the transaction.
@@ -105,9 +115,8 @@ export class Requests {
     finally { probe.close(); }
     if (!waiting) return;
     this.store.transaction(db => {
-      const now = this.store.clock();
       db.prepare("UPDATE requests SET state='cancelled',reason='application_revoked' WHERE state='waiting' AND application NOT IN (SELECT id FROM consumers WHERE revoked=0)").run();
-      db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE state='waiting' AND deadline<=?").run(now);
+      db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE state='waiting' AND deadline<=?").run(this.store.clock());
       let turn = String(db.prepare("SELECT turn FROM request_scheduler WHERE id=1").get()!.turn);
 
       // At most 256 savepoint-isolated attempts; failed fits do not occupy an application turn twice in a round.
@@ -118,13 +127,19 @@ export class Requests {
         db.prepare("INSERT OR IGNORE INTO request_scan VALUES(?)").run(row.sequence);
         turn = row.application;
         db.prepare("UPDATE request_scheduler SET turn=? WHERE id=1").run(turn);
+        // Earlier attempts take time: decide expiry against the clock immediately before this acquisition.
+        if (row.deadline !== null && this.store.clock() >= row.deadline) {
+          db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE application=? AND id=?").run(row.application,row.id);
+          continue;
+        }
         try {
           this.store.transaction(() => this.acquire(row.kind,row.application,JSON.parse(row.intent)));
-          db.prepare("UPDATE requests SET state='admitted',admitted_at=?,target=?,reason=NULL WHERE application=? AND id=?").run(now,row.id,row.application,row.id);
+          db.prepare("UPDATE requests SET state='admitted',admitted_at=?,target=?,reason=NULL WHERE application=? AND id=?").run(this.store.clock(),row.id,row.application,row.id);
         } catch (error) {
-          if (!(error instanceof ServiceError)) throw error;
-          const temporary = error.status === 429 || error.status === 503;
-          db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(temporary ? "waiting" : "rejected",error.code,row.application,row.id);
+          // The savepoint already rolled this attempt back. An unexpected failure stays waiting with a
+          // visible reason and is not retried until the next round, so it cannot stall other requests.
+          const temporary = !(error instanceof ServiceError) || error.status === 429 || error.status === 503;
+          db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(temporary ? "waiting" : "rejected",error instanceof ServiceError ? error.code : "admission_error",row.application,row.id);
         }
       }
     });

@@ -179,6 +179,7 @@ function memberId(leaseId: string): string {
   return machineIdentifier(bytes.toString("hex"));
 }
 
+const ACQUISITION_FIELDS = ["id", "name", "templateId", "templateRevision", "arch", "resources", "ttlSeconds", "requiredCapabilities"];
 export class LegacyLeases implements ControlModule {
   readonly applications: ConsumerIdentities;
   readonly machines: MachineStore;
@@ -198,6 +199,10 @@ export class LegacyLeases implements ControlModule {
     }, (db, row, token) => {
       if (row.kind === "lease") this.mutation(db, row.id, token, "release", { id: row.id });
       else this.linux.mutate(token, row.id, "release", { id: row.id });
+    }, (kind, intent) => {
+      if (kind === "linux-lease") { this.linux.validateAcquisition(intent); return; }
+      if (Object.keys(intent).some(k => !ACQUISITION_FIELDS.includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
+      if (Object.hasOwn(intent, "resources")) object(intent.resources);
     });
     this.operations = operationModule(store, options);
     registerMachineHooks(store, {
@@ -224,7 +229,7 @@ export class LegacyLeases implements ControlModule {
   }
   private acquireAuthorized(value: unknown, authorize: (db: DatabaseSync) => Application) {
     const input = object(value);
-    if (Object.keys(input).some(k => !["id", "name", "templateId", "templateRevision", "arch", "resources", "ttlSeconds", "requiredCapabilities"].includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
+    if (Object.keys(input).some(k => !ACQUISITION_FIELDS.includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
     const id = machineIdentifier(input.id);
     return this.store.transaction(db => {
       const app = authorize(db), limits = app.limits;
@@ -304,6 +309,8 @@ export class LegacyLeases implements ControlModule {
   handle(req: ControlRequest): ControlResponse | undefined | Promise<ControlResponse | undefined> {
     if (req.parts[0] === "v1" && req.parts[1] === "requests") {
       if ([...req.query.keys()].some(k => k !== "after") || req.query.getAll("after").length > 1) throw new ServiceError("Only an after cursor is supported.",400);
+      // Authenticate before any admission work so an invalid credential cannot drive passes.
+      this.requests.authenticate(req.token);
       if (req.parts.length === 2 && req.method === "POST") {
         this.requests.pass();
         const result = this.requests.submit(req.token, req.body);

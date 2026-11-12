@@ -52,11 +52,12 @@ function principal(token: string): Principal {
   return accounts.principal(token);
 }
 
-leases.requests.pass();
-setInterval(() => { leases.requests.pass(); }, 1000).unref();
+// wake() contains failures: a busy database must not terminate this worker or its unrelated routes.
+leases.requests.wake();
+setInterval(() => { leases.requests.wake(); }, 1000).unref();
 
 async function dispatch(command: ControlCommand): Promise<unknown> {
-  if (command.type === "requests.wake") { leases.requests.pass(); return { ok: true }; }
+  if (command.type === "requests.wake") return { ok: leases.requests.wake() };
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);
     return { authenticated: true };
@@ -69,7 +70,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
   };
   for (const module of modules) {
     const result = await module.handle(request);
-    if (result !== undefined) { leases.requests.pass(); return result; }
+    if (result !== undefined) { leases.requests.wake(); return result; }
   }
   // Account URLs must never fall through to the legacy administrator-only router.
   if (/^\/v1\/(?:auth(?:\/|$)|users(?:\/|$)|admin\/tokens(?:\/|$))/.test(command.path)) {

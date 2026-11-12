@@ -80,8 +80,12 @@ and Retry-After. Cancel outstanding intent or wait before submitting more. This
 cap is distinct from admission quota: acquisition 429 and 503 leave intent waiting
 for a later pass. Other acquisition ServiceErrors reject only that request; the
 stable code appears in `reason`. Missing or removed grants are permanent rejection.
-An unexpected storage failure rolls back the pass; retry by inspection or exact
-replay after recovery. Ordinary structured errors retain the consumer error and
+An unexpected failure inside one attempt rolls back only that attempt: the request
+stays `waiting` with reason `admission_error` and is tried again in a later round.
+A busy database skips the pass; the next timer or event wake retries it. Malformed
+intent (unknown or mistyped acquisition fields) returns 400 at submission and does
+not consume the UUID; checks that depend on current limits or grants run at
+admission and reject with a reason. Ordinary structured errors retain the consumer error and
 uncertain-operation contracts. The SDK never automatically retries or polls.
 
 ## Upgrade and backup boundary

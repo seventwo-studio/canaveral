@@ -133,3 +133,48 @@ test("cancellation at the waiting deadline expires intent; normalized defaults r
   f.setNow(1001);
   assert.equal((await f.request("POST",`/v1/requests/${req.id}/cancel`)).state,"expired");
 });
+
+test("malformed intent is refused at submission and does not consume the UUID",async t=>{
+  const f=leaseFixture(t);f.changeOffer({leaseProtocol:undefined});f.beat();
+  const req=envelope(f);
+  await assert.rejects(f.request("POST","/v1/requests",{...req,intent:{...req.intent,unexpected:1}}),failure(400));
+  await assert.rejects(f.request("POST","/v1/requests",{id:randomUUID(),kind:"linux-lease",intent:{templateId:"runner-linux",unexpected:1}}),failure(400));
+  await assert.rejects(f.request("GET",`/v1/requests/${req.id}`),failure(404));
+  assert.equal((await f.raw("POST","/v1/requests",req))!.status,201);
+});
+
+test("a deadline crossed during the pass expires instead of admitting; admission time is current",t=>{
+  const f=leaseFixture(t), app=f.application({maxWaitingRequests:10}), start=f.now();
+  const admitted:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,_app,intent)=>{admitted.push(String(intent.id));f.setNow(start+2);},()=>{});
+  const first=envelope(f), late=envelope(f,{deadline:new Date((start+1)*1000).toISOString()});
+  queue.submit(app.credential,first);queue.submit(app.credential,late);
+  queue.pass();
+  assert.deepEqual(admitted,[first.id]);
+  assert.equal(queue.inspect(app.credential,late.id).state,"expired");
+  assert.equal(queue.inspect(app.credential,first.id).admittedAt,new Date((start+2)*1000).toISOString());
+});
+
+test("an unexpected failure in one attempt neither stalls others nor escapes wake",t=>{
+  const f=leaseFixture(t), app=f.application({maxWaitingRequests:10});
+  let poisoned="";const admitted:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,_app,intent)=>{if(intent.id===poisoned)throw new TypeError("corrupt");admitted.push(String(intent.id));},()=>{});
+  const bad=envelope(f), good=envelope(f);poisoned=bad.id;
+  queue.submit(app.credential,bad);queue.submit(app.credential,good);
+  assert.equal(queue.wake(),true);
+  assert.deepEqual(admitted,[good.id]);
+  const stuck=queue.inspect(app.credential,bad.id);
+  assert.equal(stuck.state,"waiting");assert.equal(stuck.reason,"admission_error");
+  const broken=new Requests(f.store,f.apps,()=>{},()=>{});
+  broken.pass=()=>{throw new Error("database is locked");};
+  assert.equal(broken.wake(),false);
+});
+
+test("an invalid credential is refused before any admission pass runs",async t=>{
+  const f=leaseFixture(t);f.changeOffer({leaseProtocol:undefined});f.beat();
+  await f.request("POST","/v1/requests",envelope(f));
+  let passes=0;const original=f.leases.requests.pass.bind(f.leases.requests);
+  f.leases.requests.pass=()=>{passes++;original();};
+  await assert.rejects(Promise.resolve().then(()=>f.leases.handle({method:"GET",path:"/v1/requests",parts:["v1","requests"],query:new URLSearchParams(),body:{},token:"not-a-credential",principal:()=>{throw new Error("unused");}} as never)));
+  assert.equal(passes,0);
+});
