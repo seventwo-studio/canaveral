@@ -336,61 +336,69 @@ topology and host power-loss durability remain separate native gates.
 
 ### Qualified-clone full rerun
 
-Private run `/private/tmp/canaveral-native-integration-st535/canaveral-native-YVunMd`
-passed every harness case on 2026-11-12: `result.json` records
-`nativeAcceptance:true` and no case failures. Host implementation is
-`add485c`; the guest bundle uses source `8736e79` and digest
-`f8c56d8b4ae9645b2ca20cac0585fdc988730ae8c12ae87bafe58de6f641834c`.
-One 2 CPU / 4096 MiB / approximately 8 GiB guest ran at a time through the signed
-helper. Full production readiness and topology acceptance remain false.
+The final ST-535 integration run on 2026-11-12 supersedes the earlier passing
+`canaveral-native-YVunMd` run. Private evidence is
+`/private/tmp/canaveral-st535-final-13bb46b/canaveral-native-Vpsi5K`;
+`result.json` records `nativeAcceptance:true` and no case failures.
+Host and guest source is `13bb46b`, integrating `e9e1fc8`, `7fa4bd8` and
+`13bb46b`. The rebuilt bundle digest is
+`f0b9f6d5d46afbaabf544f9295b3077b496c79dbfb072adbe114ee8466e48fc0`.
+The same private configuration and signed helper ran one 2 CPU / 4096 MiB /
+approximately 8 GiB guest at a time. Full production and topology acceptance
+remain false.
 
-- Qualified current-default clone evidence passed CONNECT 200
-  (`proxy-allowed.json`). Git cloned and verified HEAD at
-  `67f3f118c7d8bf535280cf0b61697b1898f6567b` (`workspace-build.json`).
-- npm ci/test succeeded in 137506/536 ms of guest command time, respectively
-  (138050/1303 ms including dispatch/polling; `workspace-npm-{ci,test}.json`).
-  Downloaded `build.log` begins with the verified commit and has SHA256
-  `b7514fa04cdde25c2b38d8178638dbb8dc9ba5b458503dcbeb554e525c0c6969`
-  (`workspace-build-log.json`).
-- Empty, binary and 307200-byte round trips, replace:true over an existing
-  regular file with verified download, replace:false conflict and durable
-  disk_full passed (`roundtrip-*-verified.json`, `workspace-replace-true.json`,
+- Public CONNECT returned 200; Git cloned and verified HEAD at
+  `67f3f118c7d8bf535280cf0b61697b1898f6567b`
+  (`proxy-allowed.json`, `workspace-build.json`).
+- npm ci/test passed in 139413/516 ms of guest execution, respectively
+  (140044/1074 ms including dispatch/polling). Downloaded build.log begins with
+  the verified commit and has SHA256
+  `532a42550e33c3869647449bc854920372fb570c65bd6cd3b736a3dffd2d2211`
+  (`workspace-npm-{ci,test}.json`, `workspace-build-log.json`).
+- Empty, binary and 307200-byte round trips; replace:true with verified
+  download; replace:false conflict; and disk_full refusal passed
+  (`roundtrip-*-verified.json`, `workspace-replace-true.json`,
   `workspace-destination_exists.json`, `workspace-disk_full.json`).
-- Host LAN/tailnet/loopback, metadata and RFC1918 targets, port 80, foreign
-  application and egress-off denials passed. Expiry interrupted a dispatched
-  command (unknown) and opened upload (failed/authorization_lost), with independent
-  stop/cleanup proof (`proxy-*.json`, `workspace-expiry-*.json`).
-- All existing v1 lifecycle cases against this v2 bundle passed: readiness,
-  command/output, ownership refusal, renewal, release and ordinary expiry.
-  Renewal's command succeeded 3008 ms after original expiry. Capacity release
-  required workspaceRemoved and dataPlaneClosed; no checks were relaxed
-  (`*-independent-stop.json`, `runner-reports.json`).
-- After satellite loss, the helper was alive 70 ms before deadline and absent
-  132 ms after it, before recovery. Recovery retained the unknown reservation
+- Host LAN/tailnet/loopback, metadata/RFC1918, port 80, foreign application and
+  egress-off denials passed. Expiry interrupted the dispatched command and
+  opened upload: command unknown, upload unknown/authorization_lost, preserving
+  uncertain outcomes (`proxy-*.json`, `workspace-expiry-*.json`).
+- All v1 lifecycle cases against the v2 bundle passed: readiness, command/output,
+  ownership refusal, renewal, explicit release and ordinary expiry. Renewal's
+  successful command was observed 2515 ms after original expiry. All five normal
+  cleanup cases proved helper/VZ absence and machine/workspace/relay removal;
+  capacity release required workspaceRemoved and dataPlaneClosed
+  (`*-independent-stop.json`, `runner-reports.json`,
+  `renewal-post-deadline-command.json`).
+- Satellite-loss fencing passed: helper alive 33 ms before deadline, absent
+  168 ms after it, before recovery. Recovery retained one unknown reservation
   (`loss-independent-fence.json`, `loss-held.json`).
 
-Two additional native defects were fixed: missing PL031 RTC support left the
-guest clock in 1970, correctly failing TLS; premature local proxy retirement
-rejected already credited in-flight data and withdrew files readiness. The RTC
-is now built in and checked against host time. Closing flows retain their bounded
-credit/sequence state until Close acknowledgement, with a fixed 10-second bound.
-Linux guest tests cover valid in-flight data, sequence-gap rejection and close
-expiry. The 60-second active-transfer expiry case allows setup before expiry;
-it still proves both operations active and interrupted at the real deadline.
+The conflict resolution preserves bounded crossed credit after local half-close
+on both endpoints and drains already credited data until ordered Close
+acknowledgement. Sequence/credit checks, flow accounting and the fixed 10-second
+close deadline remain. Both regression groups pass; restoring the old EOF guard
+rejects crossed credit, while restoring immediate retirement rejects valid
+in-flight data and bypasses the expected sequence/deadline errors. Controller
+restart retains opened transfer lanes with cancellation requested; command
+timeouts no longer subtract the lease margin or fence an expired-before-exec
+command.
 
-All owned VMs, processes, workspace and relay storage were removed after PID,
-VZ, helper-lock and lsof checks. Both disposable builders and intermediate build
-copies were deleted; unrelated VMs were untouched. The loss journal is unchanged
-and its private database retains one unknown reservation without a fabricated
-cleanup receipt (`loss-post-run-owned-cleanup.json`). A separate pre-launch
-serial-attachment refusal in `canaveral-native-81Nw7d` also retains a private
-logical reservation after physical cleanup; its data-closure reporting defect
-is fixed for future launches. Aggregate proof is `owned-route-cleanup.json`
-in the parent evidence directory.
+Portable validation passed: coordination typecheck/build and 1024 tests
+(concurrency 2), 238 serial Rust tests (2 build jobs), satellite/guest clippy
+with warnings denied, guest AArch64 MUSL clippy, v1 public API fixture,
+standalone harness typecheck, seven signature-gate tests and no-Python checks.
+Swift was unchanged. The disposable pinned Lima builder authenticated all inputs
+and the package closure; bundle preflight and duplicate assembly comparison
+passed. Build/check evidence is in the parent private directory.
 
-Portable validation passed: coordination typecheck/build and 1020 tests, full
-serial Rust suite, satellite/guest clippy, 156 Swift tests, standalone harness
-typecheck, signature-gate regressions and no-Python checks. Both rebuilt bundles
-passed input authentication and deterministic assembly. Route-change monitoring,
-router hairpin/operator deny CIDRs, data-only disconnect, power-loss durability,
-PTY, concurrency, reconciliation and macOS workspaces remain open.
+All owned VMs, controller/satellite/helper processes, runtime workspace and relay
+storage were removed after PID, VZ, helper-lock, inode and lsof checks. The builder
+and temporary build/Git copies were deleted; unrelated VMs were untouched.
+The loss journal is unchanged; its stopped private database retains one unknown
+2 CPU / 4096 MiB / 8 GiB reservation pending operator reconciliation, without a
+fabricated cleanup receipt (`loss-post-run-owned-cleanup.json`). Earlier retained
+logical reservations and their cleanup proofs in the previous evidence directory
+remain unchanged. Route-change monitoring, router hairpin/operator deny CIDRs,
+data-only disconnect, power-loss durability, PTY, concurrency, reconciliation
+and macOS workspaces remain open.
