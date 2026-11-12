@@ -1277,13 +1277,15 @@ impl Satellite {
             self.state.transfers.event(frame)?;
             self.save()?; // Receipt is durable before any report.
         }
-        // Local terminal receipts do not prove closure of earlier guest steps.
+        // A controller terminal does not prove closure of an opened guest transfer.
+        // The durable blocked flag keeps retrying until cancellation is queued.
         if self.state.transfers.current.as_ref().is_some_and(|s| {
             s.guest_open()
-                && matches!(
-                    s.receipt,
-                    Some(canaveral_guest_protocol::data::Receipt::Unknown { .. })
-                )
+                && (self.state.transfers.blocked
+                    || matches!(
+                        s.receipt,
+                        Some(canaveral_guest_protocol::data::Receipt::Unknown { .. })
+                    ))
         }) {
             self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
         }

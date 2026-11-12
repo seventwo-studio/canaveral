@@ -212,8 +212,11 @@ impl Lane {
         }
         let receipt = step.receipt.as_ref().ok_or("missing transfer receipt")?;
         // The stored controller terminal can win before cancellation arrives.
-        // Preserve local uncertainty and never replay the guest effect.
-        self.blocked |= reply["state"] == "unknown" || matches!(receipt, Receipt::Unknown { .. });
+        // Preserve the local receipt; block opened work invalidated by the controller.
+        self.blocked |= reply["state"] == "unknown"
+            || matches!(receipt, Receipt::Unknown { .. })
+            || (reply["state"] == "failed"
+                && matches!(receipt, Receipt::Writing { .. } | Receipt::Reading { .. }));
         step.acknowledged = true;
         self.poll_id = None;
         Ok(())

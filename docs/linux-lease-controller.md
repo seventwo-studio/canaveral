@@ -418,6 +418,11 @@ its enqueue is not evidence that descriptors/staging are closed. The controller
 already accepts unknown as blocking, including after restart; definite failed
 receipts for an opened transfer must come from guest-confirmed step failure and
 cleanup, never a local refusal.
+If the controller acknowledges unknown, or failed against a local writing/reading
+receipt, the satellite preserves that receipt, blocks the lane and queues
+transferCancel for the opened guest transfer. It retries until cancellation is
+queued; the blocked lane and unsent cancellation survive journal replay. A
+successful step acknowledgment alone does not end guest ownership.
 An abort of a created transfer may be completed in the controller without a guest
 effect; otherwise it is a serialized guest step, not cancellation of unknown work.
 Further steps on a completed transfer are

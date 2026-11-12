@@ -117,6 +117,11 @@ journal persistence), it sends transferCancel and reports unknown, preserving th
 lane for the rest of the boot. Idle transferCancel queues descriptor closure but
 has no closure acknowledgement, so sending it cannot justify a definite failure.
 A local receipt must not suppress cancellation of the still-open guest transfer.
+If the controller acknowledges unknown, or failed against a local writing/reading
+receipt, the satellite preserves that receipt, blocks the lane and queues
+transferCancel for the opened guest transfer. It retries until cancellation is
+queued; the blocked lane and unsent cancellation survive journal replay. A
+successful step acknowledgment alone does not end guest ownership.
 
 All unsuccessful steps return `{state:"failed",code}` or
 `{state:"unknown",code}`; codes are defined in the consumer contract. Finish

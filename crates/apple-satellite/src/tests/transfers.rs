@@ -433,3 +433,103 @@ fn transfer_acknowledges_first_terminal_without_replacing_local_receipt() {
         assert!(s.state.transfers.blocked);
     }
 }
+
+#[test]
+fn writing_controller_unknown_cancels_once_and_blocks_successors() {
+    controller_terminal_cancels_opened_transfer(true, false);
+}
+#[test]
+fn reading_controller_unknown_cancels_once_and_blocks_successors() {
+    controller_terminal_cancels_opened_transfer(false, false);
+}
+#[test]
+fn controller_unknown_journal_replay_retries_unsent_cancel() {
+    for upload in [true, false] {
+        controller_terminal_cancels_opened_transfer(upload, true);
+    }
+}
+fn controller_terminal_cancels_opened_transfer(upload: bool, replay: bool) {
+    for state in ["unknown", "failed"] {
+        let (_tmp, mut s, mut data, mut guest) = setup();
+        let request = if upload {
+            json!({"action":"beginUpload","path":"file","bytes":3,"sha256":"a".repeat(64),"replace":false})
+        } else {
+            json!({"action":"beginDownload","path":"file"})
+        };
+        s.accept_transfer_poll(
+            poll(&s, request, 1, false),
+            clock::now().as_secs_f64(),
+            &data,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_frame(&mut guest),
+            Frame::TransferRequest { .. }
+        ));
+        let receipt = if upload {
+            Receipt::Writing { offset: 0 }
+        } else {
+            Receipt::Reading {
+                offset: 0,
+                bytes: Some(3),
+                data: None,
+            }
+        };
+        s.state
+            .transfers
+            .event(Frame::TransferReceipt {
+                version: 1,
+                id: uuid::Uuid::from_u128(42),
+                step: 1,
+                receipt: receipt.clone(),
+            })
+            .unwrap();
+        s.state
+            .transfers
+            .acknowledge(json!({"transferId":uuid::Uuid::from_u128(42),"step":1,"state":state}))
+            .unwrap();
+        s.save().unwrap();
+        if replay {
+            // No transport: enqueue fails and must leave the durable retry pending.
+            s.transfer_events(&data::Lane::default()).unwrap();
+            assert!(!s.state.transfers.current.as_ref().unwrap().cancel_sent);
+            let saved: Value =
+                serde_json::from_slice(&std::fs::read(s.config.state.join("state.json")).unwrap())
+                    .unwrap();
+            s.state.transfers = serde_json::from_value(saved["transfers"].clone()).unwrap();
+            s.state.transfers.recover();
+        }
+        s.transfer_events(&data).unwrap();
+        assert!(
+            matches!(read_frame(&mut guest), Frame::TransferCancel { id, .. } if id == uuid::Uuid::from_u128(42))
+        );
+        for _ in 0..3 {
+            s.transfer_events(&data).unwrap();
+        }
+        let step = s.state.transfers.current.as_ref().unwrap();
+        assert!(step.cancel_sent);
+        assert!(step.acknowledged);
+        assert_eq!(step.receipt, Some(receipt));
+        assert!(s.state.transfers.blocked);
+        let mut successor = poll(
+            &s,
+            json!({"action":"beginDownload","path":"next"}),
+            1,
+            false,
+        );
+        successor["transfer"]["id"] = json!(uuid::Uuid::from_u128(43));
+        assert!(s
+            .accept_transfer_poll(successor, clock::now().as_secs_f64(), &data)
+            .is_err());
+        guest
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut byte = [0];
+        let error = guest.read(&mut byte).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(data.shutdown().complete());
+    }
+}
