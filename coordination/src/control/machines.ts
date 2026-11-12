@@ -16,6 +16,8 @@ import { recordPreparation } from "./preparation.ts";
 import { reportImageTasks, assignedImageTasks, acknowledgedImages, validateCatalogueOffer } from "./images.ts";
 import { reportInferenceJobs, assignedInferenceJobs } from "./inference.ts";
 
+import { PhysicalDomains, physicalBudget } from "../physical-domains.ts";
+
 type Json = Record<string, any>;
 export type MachineRow = Record<string, SQLOutputValue>;
 export interface Resources { cpu: number; memoryMiB: number; diskGiB: number }
@@ -196,10 +198,19 @@ export interface MachineHooks {
   afterHeartbeat?(db: DatabaseSync, hostId: string, body: Json): void;
   assignment?(db: DatabaseSync, machine: Json, forHost: boolean): Json;
   heartbeatResponse?(db: DatabaseSync, hostId: string): Json;
+  /** SQL SELECT returning cpu, memoryMiB, diskGiB; one positional host parameter.
+   * Required for mapped hosts; use a stable id across restarts. */
+  additionalReservationsSql?: { id: string; query: string };
   additionalReservations?(db: DatabaseSync, hostId: string): Partial<Resources>;
 }
 const registeredHooks = new WeakMap<SqliteStore, MachineHooks[]>();
 export function registerMachineHooks(store: SqliteStore, hooks: MachineHooks): void {
+  if (hooks.additionalReservations) store.transaction(db => {
+    PhysicalDomains.schema(db);
+    const source = hooks.additionalReservationsSql;
+    db.prepare("INSERT INTO physical_reservation_sources VALUES (?,?) ON CONFLICT(id) DO UPDATE SET query=excluded.query")
+      .run(source?.id ?? "unsupported-hook", source?.query ?? null);
+  });
   const current = registeredHooks.get(store) ?? []; current.push(hooks); registeredHooks.set(store, current);
 }
 export interface MachineStoreOptions { leaseSeconds?: number; hooks?: MachineHooks[] }
@@ -210,7 +221,7 @@ export class MachineStore implements ControlModule {
     this.leaseSeconds = settings.leaseSeconds ?? 30;
     if (options.enrollmentToken !== undefined && secureEqual(options.adminToken, options.enrollmentToken)) failure("Admin and enrollment credentials must be different.");
     for (const hook of settings.hooks ?? []) registerMachineHooks(store, hook);
-    store.transaction(db => { initializeMachines(db); initializeLifecycle(db); initializeInfrastructure(db); });
+    store.transaction(db => { initializeMachines(db); initializeLifecycle(db); initializeInfrastructure(db); PhysicalDomains.schema(db); });
   }
   private get hooks(): MachineHooks[] { return registeredHooks.get(this.store) ?? []; }
   private transaction<T>(operation: (db: DatabaseSync) => T): T {
@@ -243,6 +254,8 @@ export class MachineStore implements ControlModule {
   }
   private healthReady(db: DatabaseSync, id: string): boolean { return !updateDraining(db, id) && healthReady(db, id, this.store.clock()); }
   used(db: DatabaseSync, hostId: string, exclude?: string): Resources {
+    const physical = physicalBudget(db, { hostId }, exclude);
+    if (physical) return physical.reserved;
     const used: Resources = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
     for (const row of db.prepare("SELECT * FROM machines WHERE host=?").all(hostId)) {
       if (row.id === exclude || isDeleted(db, String(row.id))) continue;
@@ -268,6 +281,8 @@ export class MachineStore implements ControlModule {
     return row ? JSON.parse(String(row.limits)) : JSON.parse(String(host.offer)).capacity;
   }
   remainingCapacity(db: DatabaseSync, hostId: string, exclude?: string): Resources {
+    const physical = physicalBudget(db, { hostId }, exclude);
+    if (physical) return physical.available;
     const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(hostId);
     if (!host) return failure("Unknown host.", 404);
     if (!persistedOffer(host.offer)) return { cpu: 0, memoryMiB: 0, diskGiB: 0 };
@@ -297,11 +312,11 @@ export class MachineStore implements ControlModule {
         const report = health?.report ? JSON.parse(String(health.report)) : null;
         const system = report?.environment?.system;
         const platforms: Record<string, string> = { Darwin: "macos", Linux: "linux", Windows: "windows", apple: "macos", ios: "macos", hyperv: "windows", libvirt: "linux", macos: "macos", linux: "linux", windows: "windows" };
-        const reserved = this.used(db, String(row.id)), limits = this.limits(db, row);
-        return { ...offer, id: row.id, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
+        const reserved = this.used(db, String(row.id)), limits = this.limits(db, row), physical = physicalBudget(db, { hostId: String(row.id) });
+        return { ...offer, id: row.id, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, ...(physical ? { physicalDomainId: physical.domainId, effectiveCapacity: physical.capacity } : {}), kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
           platform: platforms[system] ?? platforms[offer.provider] ?? null, runtimes: offer.runtimes ?? (offer.provider === "kubevirt" ? [] : [offer.provider]), placementReady: online && Boolean(row.enabled) && this.healthReady(db, String(row.id)),
           usage: sample ? { ...JSON.parse(String(sample.report)), receivedAt: sample.captured, fresh: online && this.store.clock() - Number(sample.captured) < 30 } : null,
-          available: this.remainingCapacity(db, String(row.id)), limits, overcommitted: resourceKeys.some(key => reserved[key] > Math.min(offer.capacity[key], limits[key])) };
+          available: this.remainingCapacity(db, String(row.id)), limits, overcommitted: resourceKeys.some(key => reserved[key] > (physical?.capacity[key] ?? Math.min(offer.capacity[key], limits[key]))) };
       });
     });
   }
@@ -358,7 +373,7 @@ export class MachineStore implements ControlModule {
       const advertised = persistedOffer(host.offer); if (!advertised) continue;
       const used = this.used(db, String(host.id)), remaining = this.remainingCapacity(db, String(host.id));
       const limits = this.limits(db, host);
-      const capacity = Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
+      const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
       for (const image of advertised.templates) {
         if (leased && !machineLeaseEligible(advertised, image)) continue;
         if (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision) continue;
@@ -465,6 +480,10 @@ export class MachineStore implements ControlModule {
     const { method, parts, body, token } = req;
     if (method === "POST" && req.path === "/v1/hosts/enroll") return { body: this.enroll(body, token) };
     if (parts.length === 4 && parts[0] === "v1" && parts[1] === "hosts" && method === "POST") {
+      if (parts[3] === "physical-domain") return { body: this.transaction(db => {
+        requireAdmin(req); fields(body, ["domainId"]);
+        return new PhysicalDomains().map(db, machineIdentifier(parts[2]!), machineIdentifier(body.domainId));
+      }) };
       if (parts[3] === "heartbeat") return { body: this.heartbeat(parts[2]!, token, body) };
       if (parts[3] === "accepting") return { body: this.enable(parts[2]!, body.enabled, req) };
     }

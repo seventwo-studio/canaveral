@@ -4,9 +4,12 @@ import type { Resources } from "./consumers.ts";
 import { object, ServiceError } from "./errors.ts";
 import { comparePlacementScore, placementScore } from './placement.ts';
 
+import { PhysicalDomains, physicalBudget } from "./physical-domains.ts";
+
 const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 
 export interface ResourceDomain {
+  hostId?: string; physicalDomainId?: string; effectiveCapacity?: Resources;
   id: string; name: string; capacity: Resources; reserved: Resources; available: Resources; reservations: number;
 }
 interface DomainRow { id: string; name: string; capacity: string }
@@ -42,6 +45,7 @@ function stored(value: unknown): Resources {
  */
 export class ResourceDomains {
   static schema(db: DatabaseSync): void {
+    PhysicalDomains.schema(db);
     db.exec(`CREATE TABLE IF NOT EXISTS resource_domains (id TEXT PRIMARY KEY, name TEXT NOT NULL, capacity TEXT NOT NULL, created REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS resource_reservations (id TEXT PRIMARY KEY, domain TEXT NOT NULL, kind TEXT NOT NULL, owner TEXT NOT NULL, resources TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('held','released')), created REAL NOT NULL, released REAL);
       CREATE INDEX IF NOT EXISTS resource_reservations_held ON resource_reservations(domain,state);`);
@@ -80,7 +84,9 @@ export class ResourceDomains {
     }
     const available = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
     for (const key of keys) available[key] = Math.max(0, capacity[key] - reserved[key]);
-    return { id: row.id, name: row.name, capacity, reserved, available, reservations: held.length };
+    const physical = physicalBudget(db, { domainId: id });
+    return { id: row.id, name: row.name, capacity, reserved: physical?.reserved ?? reserved, available: physical?.available ?? available, reservations: held.length,
+      ...(physical ? { hostId: physical.hostId, physicalDomainId: id, effectiveCapacity: physical.capacity } : {}) };
   }
 
   /** Hold `amount` only if it fits beside every held reservation in the domain. */
@@ -102,7 +108,7 @@ export class ResourceDomains {
     const amount = resources(request);
     return [...new Set(domains)].map(id => this.view(db, id))
       .filter(domain => keys.every(key => amount[key] <= domain.available[key]))
-      .map(domain => ({ id: domain.id, score: placementScore(domain.capacity, domain.reserved, amount) }))
+      .map(domain => ({ id: domain.id, score: placementScore(domain.effectiveCapacity ?? domain.capacity, domain.reserved, amount) }))
       .sort((a, b) => comparePlacementScore(a.score, b.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map(domain => domain.id);
   }

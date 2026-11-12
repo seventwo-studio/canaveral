@@ -1,3 +1,4 @@
+import { physicalMapping } from "../physical-domains.ts";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Accounts } from "../accounts.ts";
@@ -366,9 +367,17 @@ export class InfrastructureStore {
         else images.push({ ...definition, offered: offeredKeys.has(k), origin: "runtime" });
       }
       for (const record of records.values()) images.push({ ...record, offered: false, origin: "library" });
-      const reserved = this.capacity.used(db, id);
+      const reserved = this.capacity.used(db, id), mapping = physicalMapping(db, { hostId: id });
+      if (mapping) {
+        const shared = { id: "physicalShared", label: "Shared runner and extension reservations", ...zero() };
+        for (const resource of keys) {
+          shared[resource] = reserved[resource] - [...categories.values()].reduce((n, group) => n + group[resource], 0);
+          if (!Number.isSafeInteger(shared[resource]) || shared[resource] < 0) throw new ServiceError("Invalid shared reservation categories.", 503);
+        }
+        categories.set(shared.id, shared);
+      }
       for (const resource of keys) if ([...categories.values()].reduce((n, g) => n + g[resource], 0) !== reserved[resource]) throw new ServiceError("Reservation category accounting is unavailable.", 503);
-      return { hostId: id, capacity: offer.capacity, limits: this.capacity.hostLimits(db, id), reserved, images, categories: [...categories.values()], available: this.capacity.remaining(db, id), samples: db.prepare("SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 360").all(id).map(r => ({ receivedAt: r.captured, ...parse(r.report) })), allocations };
+      return { hostId: id, ...(mapping ? { physicalDomainId: mapping.domainId } : {}), capacity: offer.capacity, limits: this.capacity.hostLimits(db, id), reserved, images, categories: [...categories.values()], available: this.capacity.remaining(db, id), samples: db.prepare("SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 360").all(id).map(r => ({ receivedAt: r.captured, ...parse(r.report) })), allocations };
     });
   }
 }
