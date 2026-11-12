@@ -31,7 +31,7 @@ test('console evidence allowlists milestones and discards adversarial payloads',
 test('workspace receipts retain outcomes while refusing raw logs, paths and probe targets', async () => {
   const {receiptEvidence}=await import('./evidence.ts');
   const privateValues=['192.168.1.4','2001:db8::1','/Users/private','secret identity'];
-  const raw={state:'succeeded',durationMs:12,sha256:'a'.repeat(64),arguments:{argv:privateValues},result:{stdoutBase64:Buffer.from(privateValues.join(' ')).toString('base64')},path:privateValues[2],target:privateValues[0],caught:privateValues[3]};
+  const raw={state:'succeeded',durationMs:12,sha256:'a'.repeat(64),'192.168.1.4':'ready',arguments:{argv:privateValues},result:{stdoutBase64:Buffer.from(privateValues.join(' ')).toString('base64')},path:privateValues[2],target:privateValues[0],caught:privateValues[3]};
   const clean=JSON.stringify(receiptEvidence(raw));
   assert(clean.includes('succeeded'));assert(clean.includes('a'.repeat(64)));
   for(const value of [...privateValues,raw.result.stdoutBase64]) assert(!clean.includes(value));

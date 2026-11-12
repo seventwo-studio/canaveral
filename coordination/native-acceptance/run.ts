@@ -364,7 +364,7 @@ try {
     await snapshot('loss-held', lost);
     active = undefined;
     if(caseFailures.length) process.exitCode=1;
-    save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
+    save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, caseFailureCount:caseFailures.length, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
   }
 } catch (e: any) { writeFileSync(join(privateDir, 'failure.txt'), String(e.stack ?? e)); save('failure.json', {state:'failed', activeLease:active?.id}); process.exitCode = 1; }
 finally {
