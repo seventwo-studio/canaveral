@@ -1,7 +1,6 @@
 //! Nonblocking, single-use host data handshake. A data failure never owns control fencing.
 //!
-//! This transport deliberately rejects post-handshake traffic until the proxy/transfer
-//! reactor is installed. The workspace admission gate must remain closed meanwhile.
+//! Authenticated streams move to the independent reactor after dataReady.
 use crate::{clock::Clock, guest, Result};
 use canaveral_guest_protocol::{
     data::{encode, Decoder, Frame, Sender},
@@ -24,15 +23,57 @@ pub(crate) struct Lane {
     attempted: bool,
     initial_ready: bool,
     session: Option<Session>,
+    worker: Option<crate::reactor::Handle>,
+    options: Option<(bool, Vec<String>, Duration)>,
 }
 impl Lane {
+    pub(crate) fn authority(&self) -> Option<crate::reactor::Authority> {
+        self.worker.as_ref().map(|w| w.authority.clone())
+    }
+    pub(crate) fn configure(&mut self, enabled: bool, denied: Vec<String>, deadline: Duration) {
+        if let Some(worker) = &self.worker {
+            worker.authority.renew(deadline);
+        }
+        self.options = Some((enabled, denied, deadline));
+    }
+    pub(crate) fn shutdown(&mut self) -> crate::reactor::Closed {
+        if let Some(mut worker) = self.worker.take() {
+            worker.shutdown()
+        } else {
+            if let Some(mut s) = self.session.take() {
+                s.close();
+            }
+            crate::reactor::Closed {
+                sockets: true,
+                workers: true,
+                relay: true,
+            }
+        }
+    }
     pub(crate) fn start(&mut self, path: &str, binding: Binding, nonce: String) {
         if !self.attempted {
             self.attempted = true;
-            self.session = Session::open(path, binding, nonce).ok();
+            if let Ok(session) = Session::open(path, binding, nonce) {
+                if let Some((enabled, denied, deadline)) = &self.options {
+                    if let Ok(policy) = crate::egress::Policy::new(denied) {
+                        self.worker = Some(crate::reactor::spawn(
+                            session,
+                            crate::reactor::Deny,
+                            policy,
+                            *enabled,
+                            crate::reactor::Authority::new(*deadline),
+                        ));
+                    }
+                } else {
+                    self.session = Some(session);
+                }
+            }
         }
     }
     pub(crate) fn pump(&mut self) {
+        if let Some(worker) = &self.worker {
+            self.initial_ready |= worker.ready.load(std::sync::atomic::Ordering::Acquire);
+        }
         if let Some(session) = self.session.as_mut() {
             if session.pump().is_err() {
                 self.session = None;
@@ -46,6 +87,12 @@ impl Lane {
     }
 }
 
+impl Drop for Lane {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
 pub struct Session {
     stream: Option<UnixStream>,
     decoder: Decoder,
@@ -55,6 +102,7 @@ pub struct Session {
     sent: usize,
     started: Clock,
     ready: bool,
+    handoff: bool,
 }
 impl Session {
     /// Connect once, after control connection begins, using the launch binding,
@@ -84,7 +132,18 @@ impl Session {
             sent: 0,
             started: Clock::now(),
             ready: false,
+            handoff: false,
         })
+    }
+    pub(crate) fn enable_handoff(&mut self) {
+        self.handoff = true;
+    }
+    pub(crate) fn take_ready_stream(&mut self) -> Option<UnixStream> {
+        if self.ready {
+            self.stream.take()
+        } else {
+            None
+        }
     }
     pub fn ready(&self) -> bool {
         self.ready && self.stream.is_some()
@@ -146,6 +205,9 @@ impl Session {
                                 if !self.ready && binding == self.hello && nonce == self.nonce =>
                             {
                                 self.ready = true;
+                                if self.handoff {
+                                    return Ok(());
+                                }
                             }
                             _ => return Err("unexpected data frame"),
                         }

@@ -462,6 +462,8 @@ fn recovered_ready_launch_reports_unknown_and_never_relaunches_or_execs() {
         agent_socket: None,
         workspace_disk: None,
         data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),

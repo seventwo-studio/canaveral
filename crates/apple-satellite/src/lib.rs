@@ -18,6 +18,7 @@ pub mod data;
 pub mod guest;
 mod operations;
 mod private;
+pub mod reactor;
 pub mod workspace;
 
 /// Keep v2 refused until proxy execution, transfers and joined cleanup land.
@@ -66,6 +67,8 @@ pub struct Installed {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_deny_cidrs: Vec<String>,
     pub origin: String,
     pub identity: PathBuf,
     pub binding: Binding,
@@ -192,6 +195,10 @@ struct Direct {
     workspace_disk: Option<workspace::Disk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     data_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_deny_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_closed: Option<bool>,
 }
 /// Continuous-clock milestones (seconds). Fixture values are not performance evidence.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -356,6 +363,7 @@ fn host_arch() -> &'static str {
 }
 /// Local artifact pins. Everything here runs before any claim is sent.
 fn validate_local(c: &Config) -> Result<()> {
+    egress::Policy::new(&c.operator_deny_cidrs).map_err(|_| "invalid operator deny CIDRs")?;
     if c.identity.starts_with(&c.state)
         || c.state.starts_with(&c.identity)
         || !c.identity.is_absolute()
@@ -448,6 +456,7 @@ pub struct Satellite {
     config: Config,
     dir: private::Directory,
     state: Journal,
+    data_authority: Option<reactor::Authority>,
 }
 impl Satellite {
     /// Completes artifact, signature and binding-local preflight before any claim.
@@ -467,7 +476,12 @@ impl Satellite {
         } else {
             Journal::fresh(fingerprint)?
         };
-        let mut s = Self { config, dir, state };
+        let mut s = Self {
+            config,
+            dir,
+            state,
+            data_authority: None,
+        };
         if !s.state.operations.completed.is_empty() {
             let assignment = s.assignment()?.id;
             for id in &s.state.operations.completed {
@@ -647,6 +661,9 @@ impl Satellite {
             || session.is_some_and(|s| s.authority_expired(now))
     }
     fn fence_for(&mut self, cause: StopCause) -> Result<()> {
+        if let Some(authority) = &self.data_authority {
+            authority.revoke();
+        }
         // Old fenced journals have no recorded cause: retain their runtime classification.
         if self.state.stop_cause.is_none() {
             self.state.stop_cause = Some(if self.state.fenced {
@@ -723,7 +740,14 @@ impl Satellite {
             );
             // Until a joined data reactor supplies positive evidence, launched v2
             // assignments must retain their reservation even after disk deletion.
-            report["receipt"]["dataPlaneClosed"] = json!(s.abandoned && s.cleaned);
+            report["receipt"]["dataPlaneClosed"] = json!(
+                (s.abandoned && s.cleaned)
+                    || self
+                        .state
+                        .direct
+                        .as_ref()
+                        .is_some_and(|d| d.data_closed == Some(true))
+            );
         }
         Ok(report)
     }
@@ -997,6 +1021,19 @@ impl Satellite {
             .as_mut()
             .ok_or("no direct launch")?
             .data_nonce = Some(nonce.clone());
+        let digest = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&self.config.operator_deny_cidrs)
+                    .map_err(|_| "invalid deny list")?
+            )
+        );
+        self.state
+            .direct
+            .as_mut()
+            .ok_or("no direct launch")?
+            .operator_deny_digest = Some(digest);
+        self.save()?;
         workspace::create(&self.workspace(), &mut disk, |disk| {
             self.state
                 .direct
@@ -1065,6 +1102,14 @@ impl Satellite {
         last: &mut Option<clock::Clock>,
     ) -> Result<()> {
         let now = clock::now().as_secs_f64();
+        data.configure(
+            self.assignment()?
+                .egress
+                .as_ref()
+                .is_some_and(|e| e.enabled),
+            self.config.operator_deny_cidrs.clone(),
+            Duration::from_secs_f64(self.state.deadline.max(0.0)),
+        );
         if session.is_none() {
             let d = self.state.direct.as_ref().ok_or("no direct launch")?;
             if d.agent_socket.is_some() || d.withdrawn {
@@ -1104,6 +1149,7 @@ impl Satellite {
                 .and_then(|d| d.data_nonce.clone())
             {
                 data.start(&path, self.guest_binding(launch_revision)?, nonce);
+                self.data_authority = data.authority();
             }
         }
         let s = session.as_mut().ok_or("no guest session")?;
@@ -1455,6 +1501,8 @@ impl Satellite {
                 agent_socket: None,
                 workspace_disk: None,
                 data_nonce: None,
+                operator_deny_digest: None,
+                data_closed: None,
                 ready: false,
                 withdrawn: false,
                 timings: Timings {
@@ -1641,6 +1689,11 @@ impl Satellite {
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
             let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
+            let closed = data.shutdown();
+            if let Some(d) = self.state.direct.as_mut() {
+                d.data_closed = Some(closed.complete());
+            }
+            self.save()?;
             drop(data);
             drop(session);
             drop(worker);
@@ -1791,6 +1844,7 @@ mod tests {
         std::fs::write(&image, b"fixture installed disk").unwrap();
         std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o400)).unwrap();
         let mut c = Config {
+            operator_deny_cidrs: Vec::new(),
             origin: "https://localhost".into(),
             identity: root.join("identity"),
             binding: Binding {
