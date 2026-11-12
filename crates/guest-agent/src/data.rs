@@ -937,6 +937,10 @@ mod tests {
         for _ in 0..2 {
             assert!(matches!(receive(&mut host), Frame::Credit { .. }));
         }
+        // Queue both producers before credit permits the reactor to read either.
+        // TCP may split each write across several Data frames on Linux.
+        a.write_all(&[1; 65536]).unwrap();
+        b.write_all(&[2; 65536]).unwrap();
         for id in &ids {
             send(
                 &mut host,
@@ -947,19 +951,33 @@ mod tests {
                 },
             );
         }
-        a.write_all(&[1; 65536]).unwrap();
-        b.write_all(&[2; 65536]).unwrap();
-        let mut seen = std::collections::BTreeSet::new();
-        for _ in 0..2 {
+        let mut received = [0usize; 2];
+        let mut sequences = [0u64; 2];
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        // Every Data frame contains at least one byte, bounding the frame count.
+        for _ in 0..131072 {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("both producers must progress before the deadline");
+            host.set_read_timeout(Some(remaining)).unwrap();
             match receive(&mut host) {
-                Frame::Data { id, data, .. } => {
-                    assert!(data::payload(&data, false).unwrap().len() <= 65536);
-                    seen.insert(id);
+                Frame::Data { id, seq, data, .. } => {
+                    let index = ids.iter().position(|candidate| *candidate == id).unwrap();
+                    let payload = data::payload(&data, false).unwrap();
+                    assert!(!payload.is_empty() && payload.len() <= 65536);
+                    assert!(payload.iter().all(|byte| *byte == index as u8 + 1));
+                    assert_eq!(seq, sequences[index]);
+                    sequences[index] += 1;
+                    received[index] += payload.len();
+                    assert!(received[index] <= 65536);
                 }
-                _ => panic!(),
+                frame => panic!("expected producer data, got {frame:?}"),
+            }
+            if received == [65536; 2] {
+                break;
             }
         }
-        assert_eq!(seen.len(), 2);
+        assert_eq!(received, [65536; 2]);
         host.shutdown(std::net::Shutdown::Write).unwrap();
         assert!(worker.join().unwrap().contains("disconnected"));
     }
