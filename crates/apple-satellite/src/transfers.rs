@@ -26,6 +26,8 @@ pub struct Poll {
     pub transfer: Option<Work>,
     pub lease: Lease,
     pub cancel_requested: bool,
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

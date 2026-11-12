@@ -578,3 +578,253 @@ fn expired_command_before_exec_reports_timeout_without_fencing_lease() {
         assert!(!s.state.fenced);
     }
 }
+
+#[test]
+fn active_operation_cancellation_cancels_guest_without_fencing() {
+    for state in ["failed", "unknown", "queued"] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let mut cmd = command();
+        let a = s.assignment().unwrap();
+        cmd.assignment_id = a.id;
+        cmd.lease_id = a.lease_id;
+        cmd.member_id = a.member_id;
+        s.state.direct = Some(Direct {
+            boot_attempt: cmd.boot_attempt,
+            revision: 1,
+            bundle_digest: cmd.bundle_digest.clone(),
+            artifacts: vec![],
+            medium: None,
+            agent_socket: None,
+            workspace_disk: None,
+            data_nonce: None,
+            operator_deny_digest: None,
+            data_closed: None,
+
+            ready: true,
+            withdrawn: false,
+            timings: Timings::default(),
+        });
+        s.state.operations.receive(cmd.clone(), 200.0).unwrap();
+        let id = uuid::Uuid::from_u128(99);
+        s.state.operations.current.as_mut().unwrap().guest_id = Some(id);
+        let (mut session, mut peer) = ready();
+        cmd.state = state.into();
+        let poll = json!({"command":cmd,"cancelRequested":true,"stopRequested":false,
+            "lease":{"state":"ready","revision":1,"expiresAt":200.0,"controllerNow":100.0}});
+        s.accept_poll(poll.clone(), clock::now().as_secs_f64(), Some(&mut session))
+            .unwrap();
+        session.pump(100.0).unwrap();
+        let mut decoder = Decoder::default();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = peer.read(&mut buf[..decoder.needed().min(4096)]).unwrap();
+            if let Some(frame) = decoder.feed(&buf[..n]).unwrap() {
+                assert!(matches!(frame, Host::Cancel { id: actual, .. } if actual == id));
+                break;
+            }
+        }
+        assert!(s.state.operations.current.as_ref().unwrap().cancel_sent);
+        // A cancelled handoff that never reached local intent must not launch either.
+        let current = s.state.operations.current.take();
+        s.accept_poll(poll.clone(), clock::now().as_secs_f64(), None)
+            .unwrap();
+        assert!(s.state.operations.current.is_none());
+        s.state.operations.current = current;
+        // Replays do not need another cancellation or another exec.
+        s.accept_poll(poll, clock::now().as_secs_f64(), None)
+            .unwrap();
+        s.state
+            .operations
+            .current
+            .as_mut()
+            .unwrap()
+            .event(
+                Guest::Exit {
+                    version: 1,
+                    id,
+                    status: None,
+                    signal: Some(15),
+                    timed_out: false,
+                    duration_ms: 1,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    termination_confirmed: true,
+                },
+                &mut session,
+            )
+            .unwrap();
+        s.acknowledge_operation(
+            json!({"operationId":cmd.id,"state":if state == "failed" {"failed"} else {"unknown"}}),
+        )
+        .unwrap();
+        assert!(!s.state.fenced && !s.state.terminal);
+        assert!(s.state.operations.current.as_ref().unwrap().acknowledged);
+    }
+}
+
+#[test]
+fn active_assignment_stop_reports_runtime_failure_and_terminal_stops_remain_clean() {
+    for state in ["ready", "released", "expired", "failed"] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        s.accept_poll(
+            json!({"command":null,"cancelRequested":true,"stopRequested":true,
+            "lease":{"state":state,"revision":1,"expiresAt":200.0,"controllerNow":100.0}}),
+            clock::now().as_secs_f64(),
+            None,
+        )
+        .unwrap();
+        assert!(s.state.fenced);
+        assert_eq!(s.state.terminal, state != "ready");
+        assert_eq!(
+            s.receipt().unwrap()["receipt"]["failure"],
+            if state == "ready" {
+                json!("runtime")
+            } else {
+                Value::Null
+            }
+        );
+    }
+}
+
+#[test]
+fn exit_then_rotation_acknowledges_unknown_without_cancel_delivery() {
+    for confirmed in [true, false] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let cmd = command();
+        s.state.operations.receive(cmd.clone(), 200.0).unwrap();
+        let id = uuid::Uuid::from_u128(99);
+        s.state.operations.current.as_mut().unwrap().guest_id = Some(id);
+        let (mut session, _peer) = ready();
+        s.state
+            .operations
+            .current
+            .as_mut()
+            .unwrap()
+            .event(
+                Guest::Exit {
+                    version: 1,
+                    id,
+                    status: Some(0),
+                    signal: None,
+                    timed_out: false,
+                    duration_ms: 1,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    termination_confirmed: confirmed,
+                },
+                &mut session,
+            )
+            .unwrap();
+        assert!(!s.state.operations.current.as_ref().unwrap().cancel_sent);
+        if !confirmed {
+            assert!(s.operation_events(&mut session).is_err());
+            s.fence_for(StopCause::Runtime).unwrap();
+        }
+        // The controller rotated authority before it received the exit report.
+        s.acknowledge_operation(json!({"operationId":cmd.id,"state":"unknown"}))
+            .unwrap();
+        assert!(s.state.operations.current.as_ref().unwrap().acknowledged);
+        assert_eq!(s.state.fenced, !confirmed);
+        let mut w = wire(s.assignment().unwrap().clone());
+        s.retry_operation_report(&mut w).unwrap();
+        assert!(w.requests.is_empty());
+    }
+}
+
+#[test]
+fn lost_starting_report_flushes_current_readiness_before_polling() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.direct = Some(Direct {
+        boot_attempt: uuid::Uuid::from_u128(3),
+        revision: 1,
+        bundle_digest: "a".repeat(64),
+        artifacts: vec![],
+        medium: None,
+        agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
+        ready: false,
+        withdrawn: false,
+        timings: Timings::default(),
+    });
+    let mut w = wire(s.assignment().unwrap().clone());
+    w.lose = true;
+    assert!(s.report(&mut w).is_err());
+    let original = w.requests[0].clone();
+    s.state.direct.as_mut().unwrap().ready = true;
+    let mut last = Some(clock::Clock::now());
+    w.lose = false;
+    let reply = w
+        .request(LeaseRoute::Report, s.state.pending.clone().unwrap())
+        .unwrap();
+    s.accept_runtime_report(reply, clock::now().as_secs_f64(), &mut last)
+        .unwrap();
+    assert_eq!(original, w.requests[1]);
+    assert!(
+        last.is_none(),
+        "fresh readiness must precede an operation poll"
+    );
+    s.report(&mut w).unwrap();
+    assert_eq!(w.requests[2].1["receipt"]["ready"]["command"], true);
+    assert!(!s.state.fenced);
+}
+
+#[test]
+fn scheduler_tick_replays_pending_then_fresh_readiness_before_poll() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.direct = Some(Direct {
+        boot_attempt: uuid::Uuid::from_u128(3),
+        revision: 1,
+        bundle_digest: "a".repeat(64),
+        artifacts: vec![],
+        medium: None,
+        agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
+        ready: false,
+        withdrawn: false,
+        timings: Timings::default(),
+    });
+    let mut w = wire(s.assignment().unwrap().clone());
+    w.lose = true;
+    assert!(s.report(&mut w).is_err());
+    let pending = s.state.pending.clone().unwrap();
+    s.state.direct.as_mut().unwrap().ready = true;
+    let mut last = Some(clock::Clock::now());
+    let mut polled = None;
+    w.lose = false;
+    // A ready guest and a recent report make polling eligible, but the lost
+    // starting receipt must be replayed first, followed by current readiness.
+    let (route, body) = s
+        .runtime_request_tick(&mut last, &mut polled, true)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(route, LeaseRoute::Report));
+    assert_eq!(body, pending);
+    let reply = w.request(route, body).unwrap();
+    s.accept_runtime_report(reply, clock::now().as_secs_f64(), &mut last)
+        .unwrap();
+    let (route, body) = s
+        .runtime_request_tick(&mut last, &mut polled, true)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(route, LeaseRoute::Report));
+    assert_eq!(body["receipt"]["ready"]["command"], true);
+    let reply = w.request(route, body).unwrap();
+    s.accept_runtime_report(reply, clock::now().as_secs_f64(), &mut last)
+        .unwrap();
+    let (route, _) = s
+        .runtime_request_tick(&mut last, &mut polled, true)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(route, LeaseRoute::OperationPoll));
+}

@@ -9,8 +9,9 @@ rm -f authenticated-inputs.json
 export GNUPGHOME="$INPUTS/signature-keyring"
 mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
 fetch() { test -f "$2" || curl -fLS --retry 2 --max-time 600 "$1" -o "$2"; }
+require_pinned_keyring "$INPUTS/debian-apt-keyring.gpg"
 INPUTS="$INPUTS" bash "$RECIPE_DIR/verify-source-inputs.sh"
-gpgv --keyring "$INPUTS/debian-archive-keyring.gpg" --status-fd 3 Release.gpg Release 3>debian-release.status
+gpgv --keyring "$INPUTS/debian-apt-keyring.gpg" --status-fd 3 Release.gpg Release 3>debian-release.status
 require_primary_signature debian-release.status "$DEBIAN_PRIMARIES"
 fetch https://snapshot.debian.org/archive/debian/20261101T000000Z/dists/bookworm/main/binary-arm64/Packages.xz debian-Packages.xz
 awk '$3=="main/binary-arm64/Packages.xz" && length($1)==64 {print $1 "  debian-Packages.xz"; found=1} END {if(!found) exit 1}' Release | shasum -a256 -c -

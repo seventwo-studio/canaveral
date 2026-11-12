@@ -7,7 +7,7 @@ import {LeaseClient} from '../src/consumer-client.ts';
 export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:Buffer;app:Record<string,any>;other:Record<string,any>;api:Function;ok:Function;until:Function;save:Function;start:Function;stopped:Function}) {
   const {cfg,ok,until,save}=o;
   const failures:string[]=[];
-  const check=(label:string,fn:()=>void)=>{try{fn();}catch(e){failures.push(label+': '+String(e));save('workspace-case-failures.json',failures);}};
+  const check=(label:string,fn:()=>void)=>{try{fn();}catch(e){failures.push(label);save('workspace-case-failures.json',failures);}};
   assert.match(cfg.cloneRepo,/^https:\/\//);assert.match(cfg.cloneCommit,/^[0-9a-f]{40}$/);
   for(const name of ['hostLanTarget','hostTailnetTarget','hostLoopbackTarget']) assert.equal(typeof cfg[name],'string',`${name} required in private config`);
   const id=await o.start('workspace',300), key=(await ok('POST',`/v1/leases/${id}/credential`,{},o.app.credential)).credential;
@@ -26,8 +26,8 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
   const tools=await shell('for tool in git node npm sh dd sync; do command -v "$tool" >/dev/null || { echo "Missing required guest tool: $tool" >&2; exit 1; }; done');
   assert.equal(tools.state,'succeeded','guest requires git, node, npm, sh, dd, sync: '+JSON.stringify(tools));
   const denials: Array<{result:any;code:string}>=[];
-  for(const [target,code] of [[cfg.hostLanTarget,'destination_denied'],[cfg.hostTailnetTarget,'destination_denied'],[cfg.hostLoopbackTarget,'destination_denied'],['169.254.169.254:443','destination_denied'],['10.0.0.1:443','destination_denied'],['example.com:80','port_denied']]) {
-    const result=await command(proxyProbe(target));save('proxy-'+target.replaceAll(':','_')+'.json',result);
+  for(const [label,target,code] of [['host-lan',cfg.hostLanTarget,'destination_denied'],['host-tailnet',cfg.hostTailnetTarget,'destination_denied'],['host-loopback',cfg.hostLoopbackTarget,'destination_denied'],['metadata','169.254.169.254:443','destination_denied'],['private','10.0.0.1:443','destination_denied'],['port','example.com:80','port_denied']]) {
+    const result=await command(proxyProbe(target));save('proxy-'+label+'.json',result);
     denials.push({result,code});
   }
   const allowed=await command(proxyProbe('github.com:443'));save('proxy-allowed.json',allowed);

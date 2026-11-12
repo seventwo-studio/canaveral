@@ -30,7 +30,7 @@ CANAVERAL_NATIVE_ACCEPTANCE=operator-authorized \
   node coordination/native-acceptance/run.ts /ABS/private-config.json
 ```
 
-Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. The printed directory is unique per invocation. Keep it private: it contains local CA keys, administrator and enrolled identity credentials, the isolated SQLite state, command output and detailed signature evidence. Never commit it. There is no evidence upload.
+Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. The printed directory is unique per invocation. Keep it private: raw configuration, credentials, operational output and receipts stay under `private/`. Files outside `private/` contain allow-listed outcomes, numeric attributed process metadata, console milestones and digests. Proxy evidence filenames use role labels. Never commit native evidence. There is no evidence upload.
 
 For setup without boot artifacts, set `setupOnly: true`, supply a nonexistent manifest path and an explicitly unverified expected `bundleDigest`; `builder` may be omitted. This exercises actual controller startup, fresh state, TLS, application creation, enrollment, domain/image/grant/approval configuration and catalog reads, then stops without acquiring or claiming anything. The expected digest is catalog configuration only: `artifactVerified: false` and `nativeAcceptance: false` prevent treating this as image verification. Setup-only stops before native execution even when artifacts exist.
 

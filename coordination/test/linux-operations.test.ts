@@ -207,7 +207,7 @@ test("operation roles, canonical replay, bound handoff, terminal replay and resu
   assert.equal((await client.operation(req.id)).dispatchedAt, undefined);
   const handoff = await f.ok(x.poll());
   assert.equal((await client.operation(req.id)).dispatchedAt, new Date(T0 * 1000).toISOString());
-  assert.deepEqual(Object.keys(handoff).sort(), ["cancelRequested", "command", "lease"]);
+  assert.deepEqual(Object.keys(handoff).sort(), ["cancelRequested", "command", "lease", "stopRequested"]);
   assert.deepEqual(handoff.command, { id: req.id, leaseId: x.lease.id, memberId: x.a.memberId, assignmentId: x.a.id, bootAttempt: x.boot.bootAttempt,
     bundleDigest: x.boot.bundleDigest, arguments: req.arguments, startBefore: T0 + 120, timeoutMs: 30000, state: "queued" });
   assert.equal((await f.ok(x.poll({ ...x.pollBody, pollId: randomUUID() }))).command, null);
@@ -286,7 +286,11 @@ for (const dispatched of [false, true]) for (const invalidation of ["rotation", 
       case "release": await x.client.release({ id: randomUUID() }); break;
     }
     if (invalidation !== "application") assert.equal((await current.operation(req.id)).state, dispatched ? "unknown" : "failed");
-    if (invalidation !== "runner") assert.equal((await x.f.ok(x.poll())).cancelRequested, dispatched || invalidation !== "rotation");
+    if (invalidation !== "runner") {
+      const poll = await x.f.ok(x.poll());
+      assert.equal(poll.cancelRequested, dispatched || invalidation !== "rotation");
+      assert.equal(poll.stopRequested, invalidation !== "rotation");
+    }
     assert.equal((await x.f.inspectDomain(x.domain)).reservations, 1);
     if (invalidation === "readiness") {
       await x.f.ok(x.f.report(x.runner, x.a.id, 3, x.f.receipt(x.a, x.f.running)));
@@ -499,4 +503,81 @@ test('queued admission entry snapshots current grant and replay never updates it
   assert.deepEqual(JSON.parse(f.rows(`SELECT egress FROM linux_leases WHERE id='${request.id}'`)[0]!.egress as string),{enabled:true,policy:'public-https-v1'});
   const second=f.acquire();leases.acquireForApplication(app.id,second);
   assert.deepEqual(JSON.parse(f.rows(`SELECT egress FROM linux_leases WHERE id='${second.id}'`)[0]!.egress as string),{enabled:false,policy:'public-https-v1'});
+});
+
+for (const reason of ["failed", "unknown", "rotation"] as const) {
+  test(`operation-only ${reason} cancellation keeps a ready lease eligible`, async t => {
+    const x = await ready(t), req = intent();
+    await x.client.createOperation(req); await x.f.ok(x.poll());
+    if (reason === "failed") await x.f.ok(x.reportOp(req.id, { state: "failed" }));
+    else if (reason === "unknown") x.f.clock(T0 + 35);
+    else await x.app.client().rotateLeaseCredential(x.lease.id);
+    const poll = await x.f.ok(x.poll());
+    assert.equal(poll.cancelRequested, true);
+    assert.equal(poll.stopRequested, false);
+    assert.equal((poll.lease as Body).state, "ready");
+    assert.equal((await x.f.inspectDomain(x.domain)).reservations, 1);
+  });
+}
+
+test("revoked approval requests a failure-bearing stop and releases only after cleanup", async t => {
+  const x = await ready(t), req = intent();
+  await x.client.createOperation(req); await x.f.ok(x.poll());
+  await x.f.ok(x.f.post("/v1/linux-lease-runner-approvals/revoke", { binding: x.runner.binding }, x.f.admin));
+  const poll = await x.f.ok(x.poll());
+  assert.equal(poll.cancelRequested, true);
+  assert.equal(poll.stopRequested, true);
+  assert.equal((poll.lease as Body).state, "ready");
+  const stopped = await x.f.ok(x.f.report(x.runner, x.a.id, 2, x.f.receipt(x.a, { runtimeState: "stopped", failure: "runtime" })));
+  assert.equal((stopped.lease as Body).state, "failed");
+  assert.equal(stopped.released, false);
+  assert.equal((await x.f.inspectDomain(x.domain)).reservations, 1);
+  const clean = await x.f.ok(x.f.report(x.runner, x.a.id, 3, x.f.receipt(x.a, { ...x.f.stoppedClean, failure: "runtime" })));
+  assert.equal(clean.released, true);
+  assert.equal((await x.f.inspectDomain(x.domain)).reservations, 0);
+});
+
+test('starting report replay before initial readiness never requests a stop', async t => {
+  const f = await fixture(t), app = await f.application();
+  await f.grant(app.id);
+  const domain = await f.domain(VM), runner = await f.enroll();
+  await f.ok(f.approve(runner, domain));
+  await app.client().acquireLease(f.acquire({requiredCapabilities: ['command']}));
+  const a = (await f.claim(runner)).assignment!;
+  const body = {binding: runner.binding, assignmentId: a.id, bootAttempt: randomUUID(), bundleDigest: DIGEST.slice(7), pollId: randomUUID()};
+  const poll = () => f.ok(f.post('/v1/runners/linux-leases/operations/poll', body, runner.credential));
+  for (const replay of [false, true]) {
+    if (replay) {
+      const starting = f.receipt(a);
+      await f.ok(f.report(runner, a.id, 1, starting));
+      await f.ok(f.report(runner, a.id, 1, starting));
+    }
+    const reply = await poll();
+    assert.equal(reply.command, null); assert.equal(reply.stopRequested, false);
+  }
+  await f.ok(f.report(runner, a.id, 2, f.receipt(a, f.running)));
+  assert.equal((await poll()).stopRequested, false);
+  await f.ok(f.report(runner, a.id, 3, f.receipt(a, {runtimeState: 'running'})));
+  assert.equal((await poll()).stopRequested, true);
+});
+
+test('exit report after rotation acknowledges the stored terminal outcome', async t => {
+  const x = await ready(t), req = intent();
+  await x.client.createOperation(req); await x.f.ok(x.poll());
+  await x.app.client().rotateLeaseCredential(x.lease.id);
+  const ack = await x.f.ok(x.reportOp(req.id, {state: 'succeeded', result: success}));
+  assert.equal(ack.state, 'unknown');
+  assert.deepEqual(await x.f.ok(x.reportOp(req.id, {state: 'succeeded', result: success})), ack);
+  assert.equal((await x.f.ok(x.poll())).stopRequested, false);
+});
+
+for (const loss of ['rotation','restart'] as const) test(`transfer ${loss} cancellation does not stop active lease`, async t => {
+  const {f,app,lease,client,poll}=await workspaceReady(t);
+  const id=randomUUID();
+  await client.createTransfer({id,member:'primary',direction:'download',path:'file'});
+  await client.createTransferStep(id,1,{action:'beginDownload',path:'file'}); await f.ok(poll());
+  if(loss==='rotation') await app.client().rotateLeaseCredential(lease.id); else await f.restart();
+  const reply=await f.ok(poll());
+  assert.equal(reply.cancelRequested,true); assert.equal(reply.stopRequested,false);
+  assert.equal((reply.lease as Body).state,'ready');
 });

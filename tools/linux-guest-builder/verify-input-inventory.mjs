@@ -14,6 +14,7 @@ assert.deepEqual(archiveEntries(source),archiveEntries(readFileSync(inputs+'/sou
 const packageEvidence = JSON.parse(readFileSync(inputs+'/debian-packages-verified.json','utf8'));
 assert(packageEvidence.formatterClosure?.some(p=>p.identity.startsWith('e2fsprogs=')), 'missing authenticated formatter closure');
 const records = [
+ ['debian-apt-keyring.gpg','exported Debian primary allowlist, re-inspected before apt and complete acceptance'],
  ['linux-6.12.117.tar.xz','pinned kernel primary signature and SHA256'],
  ['node-v24.11.0-linux-arm64.tar.xz','pinned Node primary signature and SHA256'],
  ['rust-1.99.1-aarch64-unknown-linux-gnu.tar.xz','pinned Rust primary signature and SHA256'],

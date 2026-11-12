@@ -81,6 +81,8 @@ pub struct Poll {
     pub command: Option<Command>,
     pub lease: Lease,
     pub cancel_requested: bool,
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -141,7 +143,7 @@ impl Lane {
     }
     pub fn validate_acknowledgment(&self, reply: &Value) -> Result<()> {
         let op = self.current.as_ref().ok_or("missing operation")?;
-        let receipt = op.receipt.as_ref().ok_or("missing operation receipt")?;
+        op.receipt.as_ref().ok_or("missing operation receipt")?;
         if reply["operationId"] != json!(op.command.id)
             || !matches!(
                 reply["state"].as_str(),
@@ -150,10 +152,8 @@ impl Lane {
         {
             return Err("operation acknowledgment mismatch");
         }
-        // Server may already have conservatively marked a dispatched operation unknown.
-        if reply["state"] != receipt["state"] {
-            return Err("operation outcome differs; fence");
-        }
+        // First-terminal-wins can precede cancellation delivery. Local receipt evidence
+        // remains intact so an uncertain guest termination still fences the lease.
         Ok(())
     }
     pub fn acknowledge(&mut self, reply: Value) -> Result<()> {

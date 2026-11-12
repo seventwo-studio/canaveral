@@ -385,3 +385,27 @@ fn opened_transfer_local_refusal(persisted: bool) {
         assert!(data.shutdown().complete());
     }
 }
+
+#[test]
+fn transfer_stop_distinguishes_runtime_failure_from_terminal_lease() {
+    for state in ["ready", "released", "expired", "failed"] {
+        let (_tmp, mut s, data, _peer) = setup();
+        s.accept_transfer_poll(
+            json!({"transfer":null,"cancelRequested":true,"stopRequested":true,
+            "lease":{"state":state,"revision":1,"expiresAt":1300.0,"controllerNow":1000.0}}),
+            clock::now().as_secs_f64(),
+            &data,
+        )
+        .unwrap();
+        assert!(s.state.fenced);
+        assert_eq!(s.state.terminal, state != "ready");
+        assert_eq!(
+            s.receipt().unwrap()["receipt"]["failure"],
+            if state == "ready" {
+                json!("runtime")
+            } else {
+                Value::Null
+            }
+        );
+    }
+}
