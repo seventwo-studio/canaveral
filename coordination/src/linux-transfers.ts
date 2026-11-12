@@ -154,7 +154,7 @@ export class LinuxTransfers {
         db.prepare('INSERT INTO linux_transfer_polls VALUES (?,?,?,?,?,?)').run(poll,owner.id,boot,bundle,t.id,s.step); s=this.step(db,t.id,s.step)!;
       }
     }
-    return {transfer:t&&s?{id:t.id,leaseId:t.lease,memberId:t.member,assignmentId:owner.id,bootAttempt:boot,bundleDigest:bundle,step:s.step,request:s.request?JSON.parse(s.request):null,startBefore:s.start_before,deadlineAt:s.deadline,state:s.state==='dispatched'?'queued':s.state}:null,cancelRequested:!eligible||!!db.prepare("SELECT 1 FROM linux_transfers WHERE assignment=? AND state IN ('failed','unknown')").get(owner.id)};
+    return {transfer:t&&s?{id:t.id,leaseId:t.lease,memberId:t.member,assignmentId:owner.id,bootAttempt:boot,bundleDigest:bundle,step:s.step,request:s.request?JSON.parse(s.request):null,startBefore:s.start_before,deadlineAt:s.deadline,state:s.state==='dispatched'?'queued':s.state}:null,cancelRequested:!eligible||(t && s ? ['failed','unknown'].includes(s.state) : !!db.prepare("SELECT 1 FROM linux_transfers WHERE assignment=? AND state='unknown'").get(owner.id))};
   }
   report(db:DatabaseSync,assignment:string,id:string,n:number,value:unknown,now:number):unknown {
     const t=this.row(db,transferUUID(id)),s=this.step(db,id,integer(n,1));

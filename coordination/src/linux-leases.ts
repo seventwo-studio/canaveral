@@ -539,6 +539,7 @@ export class LinuxLeases {
   }
   private operationView(row: OperationRow): unknown {
     return { id: row.id, leaseId: row.lease, member: "primary", state: row.state, updatedAt: utc(row.updated),
+      ...(row.dispatched === null ? {} : { dispatchedAt: utc(row.dispatched) }),
       ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
   }
   private commandEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {

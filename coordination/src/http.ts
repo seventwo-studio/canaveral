@@ -11,19 +11,19 @@ function countHeader(request: IncomingMessage, name: string): number {
   return count;
 }
 
-async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function body(request: IncomingMessage, maximum = 1_048_576): Promise<Record<string, unknown>> {
   if (request.headers["transfer-encoding"] !== undefined || countHeader(request, "content-length") !== 1) {
     throw new ServiceError("A single Content-Length is required.", 400);
   }
   const length = request.headers["content-length"]!;
   if (!/^[0-9]+$/.test(length)) throw new ServiceError("Invalid body length.", 400);
   const size = Number(length);
-  if (!Number.isSafeInteger(size) || size < 1 || size > 1_048_576) throw new ServiceError("Request body exceeds the endpoint's size limit.", 413);
+  if (!Number.isSafeInteger(size) || size < 1 || size > maximum) throw new ServiceError("Request body exceeds the endpoint's size limit.", 413);
   const chunks: Buffer[] = []; let received = 0;
   for await (const chunk of request) {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
     received += data.length;
-    if (received > size) throw new ServiceError("Request body exceeds its declared size.", 413);
+    if (received > maximum || received > size) throw new ServiceError("Request body exceeds its declared size.", 413);
     chunks.push(data);
   }
   if (received !== size || !request.complete) throw new ServiceError("Incomplete request.", 400);
@@ -132,7 +132,8 @@ export function createIdentityHandler(identities: IdentityClient, parsedBody?: (
         if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction && !operationCreate && !transferRoute) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
-        const value = parsedBody?.(request) ?? await body(request);
+        if (transferRoute && Number(request.headers["content-length"]) > 131072) throw new ServiceError("Transfer body too large.",413,{code:"chunk_too_large"});
+        const value = parsedBody?.(request) ?? await body(request, transferRoute ? 131072 : 1_048_576);
         if (transferRoute && Buffer.byteLength(JSON.stringify(value)) > 131072) throw new ServiceError("Transfer body too large.",413,{code:"chunk_too_large"});
         const modelType = modelAdministration[path] ?? modelRunner[path] ?? leaseAdministration[path] ?? leaseBody[path];
         const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);

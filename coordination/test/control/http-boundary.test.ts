@@ -160,3 +160,10 @@ test("explicit pre-effect refusals keep their status and do not invent uncertain
   const result = await f.post("/v1/machines", {});
   assert.equal(result.status, 401); assert.equal(result.body.outcome, undefined);
 });
+
+test('transfer fallback rejects padded JSON before dispatch',async t=>{
+  const {raw,controls,identityCommands}=await fixture(t);
+  const data=Buffer.from('{}'+' '.repeat(131071));
+  const result=await raw(`/v1/leases/${randomUUID()}/transfers`,'POST',data,{'Content-Length':data.length});
+  assert.equal(result.status,413);assert.equal(controls.length,0);assert.equal(identityCommands.length,0);
+});

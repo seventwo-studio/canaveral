@@ -43,3 +43,36 @@ test('SDK persists exact intent and step then stops on unknown without repeating
   await assert.rejects(uploadWorkspaceFile(client,intent,(async function*(){})(),{async save(v){saved.push(v);}},{async wait(){throw Error('must not wait');}}),/unknown/);
   assert.equal(creates,1);assert.equal(steps,1);
 });
+
+test('a definite not_found frees the lane without cancelling its successor',()=>{
+  const {db,owner,transfers:t}=ledger();
+  try {
+    const missing=randomUUID(),id=randomUUID();
+    for(const transferId of [missing,id]) {
+      t.create(db,owner,{id:transferId,member:'primary',direction:'download',path:'file'},0);
+      t.submit(db,t.row(db,transferId)!,{step:1,request:{action:'beginDownload',path:'file'}},0,300);
+      const reply=t.poll(db,owner,'boot','digest',randomUUID(),1,300,true) as {cancelRequested:boolean;transfer:{id:string}};
+      assert.equal(reply.cancelRequested,false);assert.equal(reply.transfer.id,transferId);
+      t.report(db,owner.id,transferId,1,transferId===missing?{state:'failed',code:'not_found'}:{state:'reading',offset:0,bytes:0},2);
+    }
+    const sha256='e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    t.submit(db,t.row(db,id)!,{step:2,request:{action:'finish',bytes:0,sha256}},3,300);
+    const poll=randomUUID();
+    assert.equal((t.poll(db,owner,'boot','digest',poll,4,300,true) as {cancelRequested:boolean}).cancelRequested,false);
+    t.report(db,owner.id,id,2,{state:'verified',bytes:0,sha256},5);
+    assert.equal(t.row(db,id)!.state,'verified');
+    assert.equal((t.poll(db,owner,'boot','digest',poll,6,300,true) as {cancelRequested:boolean}).cancelRequested,false);
+  } finally { db.close(); }
+});
+
+test('unknown dispatched work still requests cancellation on a fresh poll',()=>{
+  const {db,owner,transfers:t}=ledger(),id=randomUUID(),poll=randomUUID();
+  try {
+    t.create(db,owner,{id,member:'primary',direction:'download',path:'file'},0);
+    t.submit(db,t.row(db,id)!,{step:1,request:{action:'beginDownload',path:'file'}},0,300);
+    t.poll(db,owner,'boot','digest',poll,1,300,true);
+    t.fail(db,t.row(db,id)!,t.step(db,id,1),'deadline',122);
+    for(const p of [poll,randomUUID()]) assert.equal((t.poll(db,owner,'boot','digest',p,123,300,true) as {cancelRequested:boolean}).cancelRequested,true);
+    assert.throws(()=>t.create(db,owner,{id:randomUUID(),member:'primary',direction:'download',path:'next'},124),error('transfer_busy'));
+  } finally {db.close();}
+});

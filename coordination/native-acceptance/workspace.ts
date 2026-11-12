@@ -1,3 +1,4 @@
+import {proxyProbe,assertProxy} from './proxy.ts';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash,randomBytes} from 'node:crypto';
 import {uploadWorkspaceFile,downloadWorkspaceFile} from '../src/linux-transfer-sdk.ts';
@@ -11,11 +12,14 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
   const client=new LeaseClient({baseUrl:o.origin,ca:o.ca,leaseId:id,leaseKey:key,timeoutMs:20000});
   const journal={save:async(value:unknown)=>save('workspace-intent-'+randomUUID()+'.json',value)};
   const wait={wait:()=>new Promise<void>(r=>setTimeout(r,100))};
-  async function shell(script:string,timeoutMs=120000) {
-    const request={id:randomUUID(),member:'primary' as const,action:'shell' as const,arguments:{argv:['/bin/sh','-c',script],timeoutMs}};
+  async function command(argv:string[],timeoutMs=120000) {
+    const request={id:randomUUID(),member:'primary' as const,action:'shell' as const,arguments:{argv,timeoutMs}};
     await client.createOperation(request);
     return until(async()=>{const r=await client.operation(request.id);return ['succeeded','failed','unknown'].includes(r.state)&&r;},'workspace command',timeoutMs+30000);
   }
+  const shell=(script:string,timeoutMs=120000)=>command(['/bin/sh','-c',script],timeoutMs);
+  const tools=await shell('for tool in git node npm sh dd sync; do command -v "$tool" >/dev/null || { echo "Missing required guest tool: $tool" >&2; exit 1; }; done');
+  assert.equal(tools.state,'succeeded','guest requires git, node, npm, sh, dd, sync: '+JSON.stringify(tools));
   const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
   const build=await shell(`git clone ${quote(cfg.cloneRepo)} source && cd source && git checkout --detach ${quote(cfg.cloneCommit)} && test "$(git rev-parse HEAD)" = ${quote(cfg.cloneCommit)} && { npm ci && npm test; } > /workspace/build.log 2>&1`,180000);
   save('workspace-build.json',build);assert.equal(build.state,'succeeded');
@@ -36,18 +40,26 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
   await failure('roundtrip-0',Buffer.alloc(0),'destination_exists');
   const denied=await o.api('POST',`/v1/leases/${id}/transfers`,{id:randomUUID(),member:'primary',direction:'download',path:'build.log'},o.other.credential);assert([401,403,404].includes(denied.status));
   for(const [target,code] of [[cfg.hostLanTarget,'destination_denied'],[cfg.hostTailnetTarget,'destination_denied'],[cfg.hostLoopbackTarget,'destination_denied'],['169.254.169.254:443','destination_denied'],['10.0.0.1:443','destination_denied'],['example.com:80','port_denied']]) {
-    const r=await shell(`printf 'CONNECT %s HTTP/1.1\\r\\nHost: %s\\r\\n\\r\\n' ${quote(target)} ${quote(target)} | nc -w 10 127.0.0.1 18080`);
-    const out=Buffer.from(r.result.stdoutBase64,'base64').toString();assert.match(out,/403/);assert(out.includes(code));
+    assertProxy(await command(proxyProbe(target)), 'HTTP/1.1 403 Forbidden', code);
   }
+  assertProxy(await command(proxyProbe('github.com:443')), 'HTTP/1.1 200 Connection Established');
   // Fill workspace through a command, then require a durable failed file receipt.
-  const full=await shell('dd if=/dev/zero of=/workspace/fill bs=1048576; sync',120000);assert.equal(full.state,'failed');
+  const full=await shell('dd if=/dev/zero of=/workspace/fill bs=1048576; status=$?; sync; exit "$status"',120000);assert.equal(full.state,'failed');
+  assert.match(Buffer.from(full.result.stderrBase64,'base64').toString(),/No space left on device/);
   await failure('disk-full',randomBytes(65536),'disk_full');
   const released=await client.release({id:randomUUID()});save('workspace-release.json',released);await o.stopped('workspace',id);
   const exp=await o.start('workspace-expiry',30),expKey=(await ok('POST',`/v1/leases/${exp}/credential`,{},o.app.credential)).credential;
   const expClient=new LeaseClient({baseUrl:o.origin,ca:o.ca,leaseId:exp,leaseKey:expKey});
   const expOp=randomUUID();
   await expClient.createOperation({id:expOp,member:'primary',action:'shell',arguments:{argv:['/bin/sleep','120'],timeoutMs:180000}});
+  const dispatched=await until(async()=>{const r=await expClient.operation(expOp);return r.dispatchedAt&&r;},'expiry command dispatch',20000);
+  save('workspace-expiry-command-dispatch.json',dispatched);
   const tid=randomUUID();await expClient.createTransfer({id:tid,member:'primary',direction:'upload',path:'expiry',bytes:0,sha256:createHash('sha256').digest('hex'),replace:false});
   await expClient.createTransferStep(tid,1,{action:'beginUpload',path:'expiry',bytes:0,sha256:createHash('sha256').digest('hex'),replace:false});
-  await o.stopped('workspace-expiry',exp);assert(['failed','unknown'].includes((await expClient.operation(expOp)).state));assert(['failed','unknown'].includes((await expClient.transfer(tid)).state));
+  const step=await until(async()=>{const r=await expClient.transferStep(tid,1);return r.state==='dispatched'&&r;},'expiry transfer dispatch',20000);
+  save('workspace-expiry-transfer-dispatch.json',step);
+  await o.stopped('workspace-expiry',exp);assert(['failed','unknown'].includes((await expClient.operation(expOp)).state));const operation=await expClient.operation(expOp);assert.equal(operation.dispatchedAt,dispatched.dispatchedAt);
+  const transfer=await expClient.transfer(tid);assert(['failed','unknown'].includes(transfer.state));
+  assert(['deadline','authorization_lost','lease_ended'].includes(transfer.error?.code ?? ''));
+  save('workspace-expiry-terminal.json',{operation,transfer});
 }

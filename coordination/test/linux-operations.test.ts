@@ -204,7 +204,9 @@ test("operation roles, canonical replay, bound handoff, terminal replay and resu
   await rejectsWith(client.createOperation(intent()), 429);
   await rejectsWith(client.operation(randomUUID()), 404);
   assert.equal((await f.post(route, { ...req, id: randomUUID(), extra: true }, credential)).status, 400);
+  assert.equal((await client.operation(req.id)).dispatchedAt, undefined);
   const handoff = await f.ok(x.poll());
+  assert.equal((await client.operation(req.id)).dispatchedAt, new Date(T0 * 1000).toISOString());
   assert.deepEqual(Object.keys(handoff).sort(), ["cancelRequested", "command", "lease"]);
   assert.deepEqual(handoff.command, { id: req.id, leaseId: x.lease.id, memberId: x.a.memberId, assignmentId: x.a.id, bootAttempt: x.boot.bootAttempt,
     bundleDigest: x.boot.bundleDigest, arguments: req.arguments, startBefore: T0 + 120, timeoutMs: 30000, state: "queued" });

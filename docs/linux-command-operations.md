@@ -198,3 +198,8 @@ forwarding: only CONNECT to 443 is accepted. Package installers must use HTTPS.
 A compromised command may ignore proxy settings but has no NIC or host listener.
 Loss of data makes networking/files unavailable while commands and control remain
 usable; it does not itself cancel an otherwise authorized command.
+
+Public operation receipts include `dispatchedAt` (UTC timestamp) once the runner
+has received the command. It remains present on terminal receipts. This proves
+handoff, not successful guest execution; native expiry acceptance requires this
+receipt before expiry plus independent native cleanup evidence.

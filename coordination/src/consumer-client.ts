@@ -65,7 +65,7 @@ export interface LeaseCredential { id: string; credential: string }
 export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[]; timeoutMs?: number } }
 export interface Operation {
   id: string; leaseId: string; member: "primary"; state: "queued" | "succeeded" | "failed" | "unknown"; updatedAt: string;
-  result?: Record<string, unknown>;
+  dispatchedAt?: string; result?: Record<string, unknown>;
 }
 export interface CreateOperationResult { created: boolean; operation: Operation }
 function boundOperation(value: unknown, leaseId: string, id: string): Operation {
@@ -457,7 +457,8 @@ function releaseBody(request: ReleaseRequest): Record<string, unknown> {
 }
 
 class LeaseOperations {
-  constructor(protected readonly transport: Transport) {}
+  protected readonly transport: Transport;
+  constructor(transport: Transport) { this.transport = transport; }
   protected async inspectById(leaseId: string): Promise<Lease> {
     const id = uuid(leaseId, "leaseId");
     const { value } = await parsed(this.transport, "GET", `/v1/leases/${id}`, undefined, [200], false, undefined, lease);

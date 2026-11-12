@@ -7,10 +7,12 @@ export class ServiceError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly outcome: "unknown" | undefined;
-  constructor(message: string, readonly status = 409, options: {
+  readonly status: number;
+  constructor(message: string, status = 409, options: {
     code?: string; retryable?: boolean; outcome?: "unknown";
   } = {}) {
     super(message);
+    this.status = status;
     this.name = "ServiceError";
     this.code = options.code ?? codes[status] ?? "request_failed";
     this.retryable = options.retryable ?? (status === 429 || status === 503);

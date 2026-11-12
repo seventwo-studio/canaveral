@@ -470,3 +470,8 @@ disconnect, positive raw-disk removal and held capacity on uncertain cleanup.
 Route-change monitoring, router-public-IP hairpin denial, physical preallocation
 and guest/host flush semantics remain explicit gates. No native experiment or
 acceptance evidence is supplied by this documentation.
+
+Transfer poll cancellation applies to the returned step, or to unresolved unknown
+work when no step is returned. A definite failed transfer releases the assignment's
+transfer lane and must not cancel a later transfer. Unknown outcomes retain the
+lane and continue requesting cancellation.

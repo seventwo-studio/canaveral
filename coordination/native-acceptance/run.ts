@@ -1,3 +1,4 @@
+import {proxyProbe,assertProxy} from './proxy.ts';
 import {workspaceCases} from './workspace.ts';
 // Operator-only native acceptance. Run directly with Node >=24; never imported by tests.
 import assert from 'node:assert/strict';
@@ -229,9 +230,9 @@ try {
       app=await ok('POST','/v1/consumers',{...appBody('workspace offline'),linuxEgress:{enabled:false}});
       await ok('POST','/v1/linux-lease-grants',{applicationId:app.id,imageId:image.id,revision:image.revision,arch:image.arch,digest:image.digest});
       const offline=await start('workspace-offline',120),key=(await ok('POST',`/v1/leases/${offline}/credential`,{},app.credential)).credential,op=randomUUID();
-      await ok('POST',`/v1/leases/${offline}/operations`,{id:op,member:'primary',action:'shell',arguments:{argv:['/bin/sh','-c',"printf 'CONNECT example.com:443 HTTP/1.1\\r\\nHost: example.com:443\\r\\n\\r\\n' | nc -w 10 127.0.0.1 18080"],timeoutMs:30000}},key);
-      const result=await until(async()=>{const r=await ok('GET',`/v1/leases/${offline}/operations/${op}`,undefined,key);return r.state!=='queued'&&r;},'offline proxy denial');
-      assert(Buffer.from(result.result.stdoutBase64,'base64').toString().includes('egress_denied'));
+      await ok('POST',`/v1/leases/${offline}/operations`,{id:op,member:'primary',action:'shell',arguments:{argv:proxyProbe('github.com:443'),timeoutMs:30000}},key);
+      const result=await until(async()=>{const r=await ok('GET',`/v1/leases/${offline}/operations/${op}`,undefined,key);return ['succeeded','failed','unknown'].includes(r.state)&&r;},'offline proxy denial');
+      assertProxy(result,'HTTP/1.1 403 Forbidden','egress_denied');
       await ok('POST',`/v1/leases/${offline}/release`,{id:randomUUID()},key);await stopped('workspace-offline',offline);app=granted;
     }
     const id = await start('release');
