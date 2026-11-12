@@ -1,4 +1,4 @@
-# Experimental native Linux artifacts (ST-534)
+# Experimental native Linux artifacts (ST-534 / ST-535)
 
 This recipe builds arm64 direct-boot inputs for Apple Virtualization. It does not
 qualify an image for production or run a lease. All pins are experimental operator
@@ -224,3 +224,32 @@ A disposable Linux verifier can instead import an operator-provided Git bundle
 and invoke the recipe under that checkout. Delete that verifier and bundle after
 retaining signature evidence. The source-only guest build gates do not need a
 Git object database. No missing verification dependency is silently skipped.
+
+### Workspace bundle v2 (ST-535)
+
+The maintained recipe emits version 2 and adds `toolVersions.mkfsExt4`, the exact
+first line of `/usr/sbin/mkfs.ext4 -V` (stderr, captured together with stdout).
+The rootfs includes e2fsprogs from the same bookworm `20261101T000000Z` snapshot.
+Exact package versions and hashes are not known offline and are not fabricated:
+the authorized builder resolves them through apt's signed index, retains every
+installed archive, and exports exact `package=version:architecture` identities
+and SHA256 pins into `packages.tsv` and recipe provenance. The installed package
+set must equal the retained archive set, including the transitive closure.
+
+The complete signature gate authenticates Release under the existing Debian
+primary-key pins, then Packages and every archive. `verify-debian-packages.mjs`
+also requires e2fsprogs and its recursively retained Depends/Pre-Depends closure,
+recording exact identities and hashes in `formatterClosure` in
+`debian-packages-verified.json`; apt enforces dependency version constraints.
+`verify-input-inventory.mjs` refuses absent formatter evidence and authenticates
+that report in the input inventory. Run the complete gate before generating the
+recipe or assembling it; recipe pin generation alone is not authentication.
+
+Kernel construction still uses allnoconfig plus the fragment. NET/INET provide
+loopback TCP, vsock and ext4 are built in, and virtio-net is explicitly disabled.
+The build checks Linux 6.12.117's unconditional openat2 implementation and generic
+arm64 syscall-table entry; there is no openat2 Kconfig switch to enable.
+`productionBuildReady` stays false. Native acceptance must still build and verify
+the actual closure/probe, boot the v2 PID1 implementation, confirm no NIC and both
+vsock listeners, format/mount the separately reserved disk once, observe its
+serial/size, and test filesystem/VZ flush and independent data/control behavior.

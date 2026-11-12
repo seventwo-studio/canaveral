@@ -470,3 +470,25 @@ fn local_input_missing_duplicate_path_size_and_trust_negatives() {
         canaveral_boot_bundle::verify_inputs(&bytes(&recipe), duplicate.as_bytes(), &t.0).is_err()
     );
 }
+
+#[test]
+fn v2_recipe_requires_formatter_pin_and_emits_data_manifest() {
+    let t = Temp::new();
+    let mut r = fixture(&t);
+    r["version"] = json!(2);
+    assert!(Recipe::parse(&bytes(&r)).is_err());
+    r["toolVersions"]["mkfsExt4"] = json!("mke2fs 1.47.0 (5-Feb-2023)");
+    assert!(Recipe::parse(&bytes(&r)).is_err());
+    r["provenance"]["debian"]["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"identity":"e2fsprogs=fixture:arm64","sha256":"b".repeat(64)}));
+    let recipe = Recipe::parse(&bytes(&r)).unwrap();
+    let manifest = recipe.manifest();
+    assert_eq!(manifest.version, 2);
+    assert_eq!(manifest.data_vsock_port, Some(1025));
+    assert_eq!(manifest.data_protocol, Some(1));
+    let published = assemble(&bytes(&r), &t.0, &t.0.join("v2-out")).unwrap();
+    published.validate().unwrap();
+    assert!(published.initrd.is_some());
+}

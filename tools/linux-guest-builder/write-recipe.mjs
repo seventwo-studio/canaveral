@@ -16,10 +16,11 @@ const packages = readFileSync(join(dir, 'packages.tsv'), 'utf8').trim().split('\
 });
 const probe = name => readFileSync(join(dir, `probe-${name}.txt`), 'utf8').trim().split('\n')[0].trim();
 if (probe('shell') !== 'canaveral-shell-v1' || probe('node') !== 'v24.11.0' || !probe('git').startsWith('git version ')) throw Error('tool probes differ');
+if (!probe('mkfsExt4').startsWith('mke2fs ')) throw Error('mkfs.ext4 probe differs');
 const recipe = {
-  version: 1, id: 'linux-native-experimental', revision: 1,
+  version: 2, id: 'linux-native-experimental', revision: 1,
   commandLine: 'console=hvc0 root=/dev/vda rootfstype=erofs ro',
-  toolVersions: { shell: probe('shell'), git: probe('git'), node: probe('node') },
+  toolVersions: { shell: probe('shell'), git: probe('git'), node: probe('node'), mkfsExt4: probe('mkfsExt4') },
   epoch: 1793491200, kernel: artifact('Image'), rootfs: artifact('rootfs.erofs'), bootstrap: artifact('bootstrap'),
   provenance: {
     debian: { snapshot: '20261101T000000Z',
