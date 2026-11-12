@@ -75,6 +75,18 @@ fn relay_directory_for(path: &str, socket: &str) -> Option<PathBuf> {
 }
 /// `Ok(None)` until the helper publishes VMM start; any binding mismatch is an error.
 pub fn read_started(machine: &Path, e: &Expected, now: f64) -> Result<Option<String>> {
+    read_started_inner(machine, e, now, false)
+}
+/// Workspace launches must publish the data relay explicitly; no inferred fallback.
+pub fn read_started_with_data(machine: &Path, e: &Expected, now: f64) -> Result<Option<String>> {
+    read_started_inner(machine, e, now, true)
+}
+fn read_started_inner(
+    machine: &Path,
+    e: &Expected,
+    now: f64,
+    require_data: bool,
+) -> Result<Option<String>> {
     let Some(bytes) = private::read_owned(&machine.join("direct-started.json"), 4096)
         .map_err(|_| "unsafe direct start record")?
     else {
@@ -91,6 +103,7 @@ pub fn read_started(machine: &Path, e: &Expected, now: f64) -> Result<Option<Str
         || s.boot_session_id != e.boot_session_id
         || s.boot_attempt != e.boot_attempt
         || relay_directory(&s.agent_socket).is_none()
+        || (require_data && s.data_socket_path.is_none())
         || s.data_socket_path.as_ref().is_some_and(|path| {
             relay_directory_for(path, "data.sock") != relay_directory(&s.agent_socket)
         })

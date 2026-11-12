@@ -41,8 +41,10 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
     let (tmp, mut c) = fixture_with(|m| {
         let root = m.ancestors().nth(3).unwrap().display().to_string();
         let m = m.display();
-        format!("#!/bin/sh\necho \"$1\" >> '{root}/calls'\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\nprepare) cat > '{root}/prepare.json'; mkdir -m 700 '{m}' ;;\nrun) while [ ! -f '{m}/power-off.request' ]; do sleep 0.01; done ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\nesac\n",
-            clock_json())
+        format!(
+            "#!/bin/sh\necho \"$1\" >> '{root}/calls'\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\nprepare) cat > '{root}/prepare.json'; mkdir -m 700 '{m}' ;;\nrun) while [ ! -f '{m}/power-off.request' ]; do sleep 0.01; done ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\nesac\n",
+            clock_json()
+        )
     });
     let root = tmp.path().to_owned();
     let bundle = root.join("bundle");
@@ -514,6 +516,7 @@ fn started_record_must_bind_this_launch_and_private_relay() {
         guest::read_started(&machine, &e, now).unwrap(),
         Some(sock.clone())
     );
+    assert!(guest::read_started_with_data(&machine, &e, now).is_err());
     for (key, value) in [
         ("bootAttempt", json!(uuid::Uuid::from_u128(6))),
         ("memberID", json!(uuid::Uuid::from_u128(1))),
@@ -529,7 +532,7 @@ fn started_record_must_bind_this_launch_and_private_relay() {
     workspace["dataSocketPath"] = json!(sock.replace("agent.sock", "data.sock"));
     std::fs::write(&file, workspace.to_string()).unwrap();
     assert_eq!(
-        guest::read_started(&machine, &e, now).unwrap(),
+        guest::read_started_with_data(&machine, &e, now).unwrap(),
         Some(sock.clone())
     );
     workspace["dataSocketPath"] = json!("/private/tmp/consumer.sock");

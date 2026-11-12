@@ -190,7 +190,7 @@ impl Bundle {
         let bytes = private::trust_file(path, false).map_err(|_| "unsafe boot bundle manifest")?;
         let manifest: Manifest =
             serde_json::from_slice(&bytes).map_err(|_| "invalid boot bundle manifest")?;
-        if manifest.version != 1 {
+        if manifest.version != 1 && !crate::WORKSPACE_V2_ADMISSION_ENABLED {
             return Err("workspace-v2 runtime integration is not available");
         }
 

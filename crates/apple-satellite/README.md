@@ -368,10 +368,20 @@ bootstrap construction and helper workspace attachment JSON. Disk cleanup checks
 identity, journals deletion intent and flushes the parent before workspaceRemoved.
 Missing identity or an unexplained missing disk holds cleanup for reconciliation.
 The data relay connector verifies the exact private sibling and same-uid peer.
+The gated supervision path now starts a single-use data handshake alongside
+control using the initial launch binding and nonce, and requires the helper's
+explicit dataSocketPath. Initial command readiness waits for both exact echoes.
+Data EOF, timeout or protocol violation closes only data; control renewal and
+already established command readiness continue. Each data pump reads/writes at
+most 64 KiB, preserving partial-frame offsets. Until the proxy/transfer reactor
+lands, post-handshake frames close data and files readiness remains false.
+`WORKSPACE_V2_ADMISSION_ENABLED` is the single inventory/assignment gate and
+remains false. Handshake descriptor closure alone does not establish the complete
+dataPlaneClosed cleanup evidence, which remains false for launched v2 leases.
 Long-command parsing/dispatch bounds timeout by requested duration, the frozen
 execution deadline and local lease authority, charging poll transport elapsed time
 and the guest safety margin. Replay pins both timing fields. Workspace environment
 variables come from the trusted satellite; proxy variables require the grant.
-These paths remain unreachable from v2 inventory until PID1 mounting and both
-handshakes, data/file/egress reactors and worker teardown are complete. No new satellite
+These paths remain unreachable from v2 inventory until PID1 mounting,
+data/file/egress reactors and worker teardown are complete. No new satellite
 dependency was introduced; guest-protocol reuses the existing base64 0.22 crate.

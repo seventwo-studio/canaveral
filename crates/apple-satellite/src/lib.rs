@@ -14,10 +14,15 @@ use std::{
 mod bootstrap;
 pub mod bundle;
 pub mod clock;
+pub mod data;
 pub mod guest;
 mod operations;
 mod private;
 pub mod workspace;
+
+/// Keep v2 refused until proxy execution, transfers and joined cleanup land.
+/// Both inventory and assignment admission consult this single switch.
+pub const WORKSPACE_V2_ADMISSION_ENABLED: bool = false;
 pub type Result<T> = std::result::Result<T, &'static str>;
 /// Interval between heartbeat reports while a guest runs; replies carry renewals and stop intent.
 const REPORT_EVERY: Duration = Duration::from_secs(1);
@@ -511,7 +516,9 @@ impl Satellite {
     }
     /// Pre-launch admission. Any failure has had no local effect and is declined.
     fn validate_assignment(&self, a: &Assignment) -> Result<&Installed> {
-        if a.workspace_io_version.is_some() || a.workspace.is_some() || a.egress.is_some() {
+        if !WORKSPACE_V2_ADMISSION_ENABLED
+            && (a.workspace_io_version.is_some() || a.workspace.is_some() || a.egress.is_some())
+        {
             return Err("workspace-v2 runtime integration is not available");
         }
         let r = &a.resources;
@@ -1054,6 +1061,7 @@ impl Satellite {
     fn guest_step(
         &mut self,
         session: &mut Option<guest::Session>,
+        data: &mut data::Lane,
         last: &mut Option<clock::Clock>,
     ) -> Result<()> {
         let now = clock::now().as_secs_f64();
@@ -1070,7 +1078,12 @@ impl Satellite {
                 boot_attempt: d.boot_attempt,
                 boot: self.state.boot,
             };
-            let Some(path) = guest::read_started(&self.machine()?, &expected, now)? else {
+            let path = if d.data_nonce.is_some() {
+                guest::read_started_with_data(&self.machine()?, &expected, now)?
+            } else {
+                guest::read_started(&self.machine()?, &expected, now)?
+            };
+            let Some(path) = path else {
                 return Ok(());
             };
             let d = self.state.direct.as_mut().ok_or("no direct launch")?;
@@ -1084,9 +1097,22 @@ impl Satellite {
                 self.state.deadline,
                 now,
             )?);
+            if let Some(nonce) = self
+                .state
+                .direct
+                .as_ref()
+                .and_then(|d| d.data_nonce.clone())
+            {
+                data.start(&path, self.guest_binding(launch_revision)?, nonce);
+            }
         }
         let s = session.as_mut().ok_or("no guest session")?;
-        if s.pump(now)? {
+        s.pump(now)?;
+        // Data errors are permanently local to data, including initial mismatch.
+        // Keep control pumping for renewal/expiry even if readiness never arrives.
+        data.pump();
+        let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+        if !d.ready && s.ready(now) && data.commands_ready(d.data_nonce.is_some()) {
             let d = self.state.direct.as_mut().ok_or("no direct launch")?;
             d.ready = true;
             d.timings.guest_ready = Some(now);
@@ -1487,6 +1513,7 @@ impl Satellite {
             let mut last: Option<clock::Clock> = None;
             let mut polled: Option<clock::Clock> = None;
             let mut session: Option<guest::Session> = None;
+            let mut data = data::Lane::default();
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
                     // Observe process loss before the deadline margin can mask it.
@@ -1497,7 +1524,7 @@ impl Satellite {
                         break;
                     }
                     if self.state.direct.is_some()
-                        && self.guest_step(&mut session, &mut last).is_err()
+                        && self.guest_step(&mut session, &mut data, &mut last).is_err()
                     {
                         self.withdraw()?;
                         self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
@@ -1569,6 +1596,7 @@ impl Satellite {
                         } else if session
                             .as_ref()
                             .is_some_and(|s| s.ready(clock::now().as_secs_f64()))
+                            && self.state.direct.as_ref().is_some_and(|d| d.ready)
                             && self
                                 .assignment()?
                                 .capabilities
@@ -1613,6 +1641,7 @@ impl Satellite {
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
             let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
+            drop(data);
             drop(session);
             drop(worker);
             fenced?;
