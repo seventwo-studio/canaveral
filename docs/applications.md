@@ -100,7 +100,12 @@ All these methods require a supported controller route and a bound, eligible
 provider. Portable SDK fixtures do not enable consumer placement on ordinary native
 runners, qualify detached-command cancellation or establish live platform parity.
 
-## ST-535 application egress grant (unimplemented contract)
+<a id="st-535-application-egress-grant-unimplemented-contract"></a>
+
+## ST-535 application egress grant (controller implementation)
+
+Controller status: implemented in TypeScript, with additive legacy-compatible
+storage and portable tests. Runtime and native acceptance remain separate gates.
 
 Add optional administrator creation field
 `linuxEgress:{enabled:false}`; if supplied, this object has exactly the one

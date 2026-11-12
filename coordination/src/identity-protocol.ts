@@ -1,4 +1,7 @@
 export type IdentityCommand =
+  | { type: "leases.createTransfer" | "leases.createTransferStep"; token:string; id:string; transferId?:string; body:unknown }
+  | { type: "leases.transfer"; token:string; id:string; transferId:string; step?:number }
+  | { type: "leases.pollTransfer" | "leases.reportTransfer"; token:string; body:unknown }
   | { type: "runner.issue" | "runner.consume" | "runner.authenticate" | "runner.rotate" | "runner.revoke"; token: string; body: unknown }
   | { type: "runner.inspect" | "runner.revokeEnrollment"; token: string; id: string }
   | { type: "status" }

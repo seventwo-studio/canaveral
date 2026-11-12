@@ -83,10 +83,15 @@ portable release acceptance remain open. Provider acceptance must be recorded se
 
 The additive [durable waiting request API](requests.md) accepts over-requested lease intent through `/v1/requests`; direct lease acquisition retains its existing errors.
 
-## ST-535 Linux file routes (unimplemented contract)
+<a id="st-535-linux-file-routes-unimplemented-contract"></a>
 
-These routes are a documentation contract; they are absent from the packaged
-OpenAPI/runtime today. Implement schemas and SDK alongside the controller.
+## ST-535 Linux file routes (controller implementation)
+
+Controller status: implemented in TypeScript, with additive legacy-compatible
+storage and portable tests. Runtime and native acceptance remain separate gates.
+
+These routes are implemented by the TypeScript Linux controller and included in
+the packaged OpenAPI and TypeScript lease-key client.
 They apply only to a workspace-v2 direct-boot Linux `primary` member with latest
 `ready.files:true`. No session/WebSocket or absolute guest path is accepted.
 Existing session binary framing remains unchanged. Reuse the transfer library's

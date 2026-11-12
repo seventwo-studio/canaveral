@@ -1,3 +1,4 @@
+import {workspaceCases} from './workspace.ts';
 // Operator-only native acceptance. Run directly with Node >=24; never imported by tests.
 import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
@@ -94,6 +95,7 @@ try {
             reports.push({at: new Date().toISOString(), body, response, before, after: await api('GET', '/v1/resource-domains/' + domainForReports)});
             save('runner-reports.json', reports);
             if (response.released === true) {
+              if(cfg.workspaceIOVersion===1) {assert.equal(body.receipt.workspaceRemoved,true);assert.equal(body.receipt.dataPlaneClosed,true);}
               assert.equal(body.receipt.cleanup, 'complete', 'reservation released before cleanup report');
               assert.equal(reports.at(-1).after.body.reservations, 0);
             } else assert.equal(reports.at(-1).after.body.reservations, 1, 'reservation disappeared before cleanup');
@@ -118,7 +120,7 @@ try {
   });
   const ok = async (m: string, r: string, b?: unknown, token?: string) => { const v = await api(m, r, b, token); assert(v.status < 300, `${r}: ${JSON.stringify(v)}`); return v.body; };
   const appBody = (name: string) => ({id: randomUUID(), name, templates: [], limits: {resources, activeLeases: 1, defaultTTLSeconds: 120, maxTTLSeconds: 300, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 180}});
-  const app = await ok('POST', '/v1/consumers', appBody('native acceptance application 1'));
+  let app = await ok('POST', '/v1/consumers', {...appBody('native acceptance application 1'),...(cfg.workspaceIOVersion===1?{linuxEgress:{enabled:true}}:{})});
   const app2 = await ok('POST', '/v1/consumers', appBody('native acceptance application 2 (no grant)'));
   const domainId = randomUUID(); domainForReports = domainId;
   await ok('POST', '/v1/resource-domains', {id: domainId, name: 'native acceptance: one guest', capacity: resources});
@@ -129,9 +131,9 @@ try {
     const result = await c.done; assert.equal(result.code, 0, 'runner enrollment failed (see stderr)');
   }
   const image = {id: 'native-linux', revision: '1', arch: 'arm64', backend: 'appleVirtualization', digest: cfg.bundleDigest};
-  await ok('POST', '/v1/linux-lease-images', {...image, os: 'linux', mode: 'headless', resources, capabilities: ['command']});
+  await ok('POST', '/v1/linux-lease-images', {...image, os: 'linux', mode: 'headless', resources, capabilities: cfg.workspaceIOVersion===1?['command','files']:['command'],...(cfg.workspaceIOVersion===1?{workspaceIOVersion:1}:{})});
   await ok('POST', '/v1/linux-lease-grants', {applicationId: app.id, imageId: image.id, revision: image.revision, arch: image.arch, digest: image.digest});
-  await ok('POST', '/v1/linux-lease-runner-approvals', {binding, domainId, backend: image.backend, images: [{id:image.id, revision:image.revision, arch:image.arch, digest:image.digest}]});
+  await ok('POST', '/v1/linux-lease-runner-approvals', {binding, domainId, backend: image.backend, images: [{id:image.id, revision:image.revision, arch:image.arch, digest:image.digest}],...(cfg.workspaceIOVersion===1?{workspaceIOVersion:1}:{})});
   save('setup.json', {binding, domainId, image, artifactVerified: false, application1: app.id, application2: app2.id,
     domain: await ok('GET', '/v1/resource-domains/' + domainId), catalog: await ok('GET', '/v1/environments/templates', undefined, app.credential)});
   // Setup is real controller/TLS/enrollment evidence, never VM acceptance. No lease or claim yet.
@@ -220,6 +222,17 @@ try {
       assert(journal.stopped && journal.cleaned && journal.released);
       save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noVZProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal});
       await snapshot(label + '-after', id); active = undefined;
+    }
+    if(cfg.workspaceIOVersion===1) {
+      await workspaceCases({cfg,origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped});
+      const granted=app;
+      app=await ok('POST','/v1/consumers',{...appBody('workspace offline'),linuxEgress:{enabled:false}});
+      await ok('POST','/v1/linux-lease-grants',{applicationId:app.id,imageId:image.id,revision:image.revision,arch:image.arch,digest:image.digest});
+      const offline=await start('workspace-offline',120),key=(await ok('POST',`/v1/leases/${offline}/credential`,{},app.credential)).credential,op=randomUUID();
+      await ok('POST',`/v1/leases/${offline}/operations`,{id:op,member:'primary',action:'shell',arguments:{argv:['/bin/sh','-c',"printf 'CONNECT example.com:443 HTTP/1.1\\r\\nHost: example.com:443\\r\\n\\r\\n' | nc -w 10 127.0.0.1 18080"],timeoutMs:30000}},key);
+      const result=await until(async()=>{const r=await ok('GET',`/v1/leases/${offline}/operations/${op}`,undefined,key);return r.state!=='queued'&&r;},'offline proxy denial');
+      assert(Buffer.from(result.result.stdoutBase64,'base64').toString().includes('egress_denied'));
+      await ok('POST',`/v1/leases/${offline}/release`,{id:randomUUID()},key);await stopped('workspace-offline',offline);app=granted;
     }
     const id = await start('release');
     for (const [m, route, body] of [ ['GET', `/v1/leases/${id}`, undefined], ['POST', `/v1/leases/${id}/credential`, {}], ['POST', `/v1/leases/${id}/operations`, {id: randomUUID(), member:'primary', action:'shell', arguments:{argv:['printf','denied']}}] ] as [string,string,unknown][]) {

@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import {randomUUID,createHash,randomBytes} from 'node:crypto';
+import {uploadWorkspaceFile,downloadWorkspaceFile} from '../src/linux-transfer-sdk.ts';
+import {LeaseClient} from '../src/consumer-client.ts';
+/** Public API only. The enclosing harness owns native launch and independent cleanup evidence. */
+export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:Buffer;app:Record<string,any>;other:Record<string,any>;api:Function;ok:Function;until:Function;save:Function;start:Function;stopped:Function}) {
+  const {cfg,ok,until,save}=o;
+  assert.match(cfg.cloneRepo,/^https:\/\//);assert.match(cfg.cloneCommit,/^[0-9a-f]{40}$/);
+  for(const name of ['hostLanTarget','hostTailnetTarget','hostLoopbackTarget']) assert.equal(typeof cfg[name],'string',`${name} required in private config`);
+  const id=await o.start('workspace',300), key=(await ok('POST',`/v1/leases/${id}/credential`,{},o.app.credential)).credential;
+  const client=new LeaseClient({baseUrl:o.origin,ca:o.ca,leaseId:id,leaseKey:key,timeoutMs:20000});
+  const journal={save:async(value:unknown)=>save('workspace-intent-'+randomUUID()+'.json',value)};
+  const wait={wait:()=>new Promise<void>(r=>setTimeout(r,100))};
+  async function shell(script:string,timeoutMs=120000) {
+    const request={id:randomUUID(),member:'primary' as const,action:'shell' as const,arguments:{argv:['/bin/sh','-c',script],timeoutMs}};
+    await client.createOperation(request);
+    return until(async()=>{const r=await client.operation(request.id);return ['succeeded','failed','unknown'].includes(r.state)&&r;},'workspace command',timeoutMs+30000);
+  }
+  const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
+  const build=await shell(`git clone ${quote(cfg.cloneRepo)} source && cd source && git checkout --detach ${quote(cfg.cloneCommit)} && test "$(git rev-parse HEAD)" = ${quote(cfg.cloneCommit)} && { npm ci && npm test; } > /workspace/build.log 2>&1`,180000);
+  save('workspace-build.json',build);assert.equal(build.state,'succeeded');
+  const logs:Buffer[]=[];
+  await downloadWorkspaceFile(client,{id:randomUUID(),member:'primary',direction:'download',path:'build.log'},async b=>{save('workspace-build-chunk-'+logs.length+'.json',{base64:Buffer.from(b).toString('base64')});logs.push(Buffer.from(b));},journal,wait);
+  save('workspace-build-log.json',{base64:Buffer.concat(logs).toString('base64')});
+  for(const bytes of [Buffer.alloc(0),Buffer.from([0,255,1,128]),randomBytes(300*1024)]) {
+    const path='roundtrip-'+bytes.length,sha256=createHash('sha256').update(bytes).digest('hex');
+    await uploadWorkspaceFile(client,{id:randomUUID(),member:'primary',direction:'upload',path,bytes:bytes.length,sha256,replace:false},(async function*(){yield bytes;})(),journal,wait);
+    const chunks:Buffer[]=[];
+    await downloadWorkspaceFile(client,{id:randomUUID(),member:'primary',direction:'download',path},async b=>{save('roundtrip-'+bytes.length+'-chunk-'+chunks.length+'.json',{base64:Buffer.from(b).toString('base64')});chunks.push(Buffer.from(b));},journal,wait);
+    assert.deepEqual(Buffer.concat(chunks),bytes);
+  }
+  async function failure(path:string,bytes:Buffer,code:string) {
+    const id=randomUUID(),sha256=createHash('sha256').update(bytes).digest('hex');
+    try {await uploadWorkspaceFile(client,{id,member:'primary',direction:'upload',path,bytes:bytes.length,sha256,replace:false},(async function*(){yield bytes;})(),journal,wait);assert.fail('expected '+code);} catch(e) {assert.equal((await client.transfer(id)).error?.code,code);}
+  }
+  await failure('roundtrip-0',Buffer.alloc(0),'destination_exists');
+  const denied=await o.api('POST',`/v1/leases/${id}/transfers`,{id:randomUUID(),member:'primary',direction:'download',path:'build.log'},o.other.credential);assert([401,403,404].includes(denied.status));
+  for(const [target,code] of [[cfg.hostLanTarget,'destination_denied'],[cfg.hostTailnetTarget,'destination_denied'],[cfg.hostLoopbackTarget,'destination_denied'],['169.254.169.254:443','destination_denied'],['10.0.0.1:443','destination_denied'],['example.com:80','port_denied']]) {
+    const r=await shell(`printf 'CONNECT %s HTTP/1.1\\r\\nHost: %s\\r\\n\\r\\n' ${quote(target)} ${quote(target)} | nc -w 10 127.0.0.1 18080`);
+    const out=Buffer.from(r.result.stdoutBase64,'base64').toString();assert.match(out,/403/);assert(out.includes(code));
+  }
+  // Fill workspace through a command, then require a durable failed file receipt.
+  const full=await shell('dd if=/dev/zero of=/workspace/fill bs=1048576; sync',120000);assert.equal(full.state,'failed');
+  await failure('disk-full',randomBytes(65536),'disk_full');
+  const released=await client.release({id:randomUUID()});save('workspace-release.json',released);await o.stopped('workspace',id);
+  const exp=await o.start('workspace-expiry',30),expKey=(await ok('POST',`/v1/leases/${exp}/credential`,{},o.app.credential)).credential;
+  const expClient=new LeaseClient({baseUrl:o.origin,ca:o.ca,leaseId:exp,leaseKey:expKey});
+  const expOp=randomUUID();
+  await expClient.createOperation({id:expOp,member:'primary',action:'shell',arguments:{argv:['/bin/sleep','120'],timeoutMs:180000}});
+  const tid=randomUUID();await expClient.createTransfer({id:tid,member:'primary',direction:'upload',path:'expiry',bytes:0,sha256:createHash('sha256').digest('hex'),replace:false});
+  await expClient.createTransferStep(tid,1,{action:'beginUpload',path:'expiry',bytes:0,sha256:createHash('sha256').digest('hex'),replace:false});
+  await o.stopped('workspace-expiry',exp);assert(['failed','unknown'].includes((await expClient.operation(expOp)).state));assert(['failed','unknown'].includes((await expClient.transfer(tid)).state));
+}

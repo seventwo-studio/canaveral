@@ -292,10 +292,15 @@ These fixtures are source evidence only. They do not show VM execution on either
 backend, image ingestion, guest access, native stop or cleanup, TLS deployment or
 release acceptance.
 
-## ST-535 assignment and transfer wire (unimplemented contract)
+<a id="st-535-assignment-and-transfer-wire-unimplemented-contract"></a>
 
-This extension is specified for the direct-boot Apple adapter only; KubeVirt has
-no dispatch implementation. It does not change the implementation claims above.
+## ST-535 assignment and transfer wire (controller implementation)
+
+Controller status: implemented in TypeScript, with additive legacy-compatible
+storage and portable tests. Runtime and native acceptance remain separate gates.
+
+This controller extension is for the direct-boot Apple adapter only; KubeVirt has
+no dispatch implementation. Native acceptance is still required.
 The [consumer transfer routes](consumer-api.md#st-535-linux-file-routes-unimplemented-contract),
 [guest data frames](guest-wire.md#st-535-data-protocol-contract-unimplemented)
 and [egress policy](linux-egress-policy.md) form the same contract.

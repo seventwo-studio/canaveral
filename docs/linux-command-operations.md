@@ -154,7 +154,12 @@ protocol receipts; it starts no VM and executes no guest program. Portable Rust
 tests separately cover truncation, output sequence/count validation and local
 fencing while controller I/O stalls. Neither fixture establishes native execution.
 
-## ST-535 long commands and environment (unimplemented contract)
+<a id="st-535-long-commands-and-environment-unimplemented-contract"></a>
+
+## ST-535 long commands and environment (controller implementation)
+
+Controller status: implemented in TypeScript, with additive legacy-compatible
+storage and portable tests. Runtime and native acceptance remain separate gates.
 
 Workspace-v2 extends public `arguments` to `{argv,timeoutMs?}`. timeoutMs is an
 integer 1..1800000 (30 minutes); omitted means 30000. Normalize the default before

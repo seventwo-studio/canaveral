@@ -43,6 +43,7 @@ function respond(response: ServerResponse, value: unknown, status = 200): void {
 
 // POST routes whose proof is checked by the worker rather than the administrator pre-check.
 const selfAuthenticated = [
+  "/v1/runners/linux-leases/transfers/poll", "/v1/runners/linux-leases/transfers/report",
   "/v1/runners/linux-leases/operations/poll", "/v1/runners/linux-leases/operations/report",
   "/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate",
   "/v1/model-jobs", "/v1/runners/model-jobs/claim", "/v1/runners/model-jobs/assignments", "/v1/runners/model-jobs/report",
@@ -53,6 +54,7 @@ const leaseAdministration: Record<string, IdentityCommand["type"]> = {
   "/v1/linux-lease-runner-approvals": "leases.approve", "/v1/linux-lease-runner-approvals/revoke": "leases.approvalRevoke",
 };
 const leaseBody: Record<string, IdentityCommand["type"]> = {
+  "/v1/runners/linux-leases/transfers/poll": "leases.pollTransfer", "/v1/runners/linux-leases/transfers/report": "leases.reportTransfer",
   "/v1/runners/linux-leases/operations/poll": "leases.pollOperation", "/v1/runners/linux-leases/operations/report": "leases.reportOperation",
   "/v1/leases": "leases.acquire", "/v1/runners/linux-leases/claim": "leases.claim",
   "/v1/runners/linux-leases/assignments": "leases.assignments", "/v1/runners/linux-leases/report": "leases.report",
@@ -105,6 +107,7 @@ export function createIdentityHandler(identities: IdentityClient, parsedBody?: (
       const path = "/" + (request.url ?? "").split(/[?#]/, 1)[0]!.replace(/^\/+|\/+$/g, "");
       const query = new URLSearchParams((request.url ?? "").split("#", 1)[0]!.split("?").slice(1).join("?"));
       if (request.method === "GET" && path === "/healthz") { respond(response, { ok: true }); return; }
+      const transferRoute = /^\/v1\/leases\/([0-9a-f-]+)\/transfers(?:\/([0-9a-f-]+)(?:\/steps(?:\/([0-9]+))?)?)?$/.exec(path);
       let command: IdentityCommand;
       if (request.method === "GET" && path === "/v1/auth/status") command = { type: "status" };
       else if (request.method === "GET" && path === "/v1/auth/session") command = { type: "session", token };
@@ -119,19 +122,22 @@ export function createIdentityHandler(identities: IdentityClient, parsedBody?: (
         const after = query.get("after");
         command = after === null ? { type: "leases.list", token } : { type: "leases.list", token, after };
       }
+      else if (request.method === "GET" && transferRoute?.[2] && (!path.endsWith("/steps"))) command = {type:"leases.transfer",token,id:transferRoute[1]!,transferId:transferRoute[2],...(transferRoute[3] ? {step:Number(transferRoute[3])} : {})};
       else if (request.method === "GET" && new RegExp(`^/v1/leases/${LEASE_ID}/operations/${LEASE_ID}$`).test(path)) command = { type: "leases.operation", id: path.split("/")[3]!, operationId: path.split("/")[5]!, token };
       else if (request.method === "GET" && new RegExp(`^/v1/leases/${LEASE_ID}$`).test(path)) command = { type: "leases.inspect", id: path.split("/")[3]!, token };
       else if (request.method === "POST") {
         const operationCreate = new RegExp(`^/v1/leases/(${LEASE_ID})/operations$`).exec(path);
         const modelCancel = /^\/v1\/model-jobs\/([^/]+)\/cancel$/.exec(path);
         const leaseAction = new RegExp(`^/v1/leases/(${LEASE_ID})/(credential|renew|release)$`).exec(path);
-        if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction && !operationCreate) {
+        if (!selfAuthenticated.includes(path) && !modelCancel && !leaseAction && !operationCreate && !transferRoute) {
           await identities.request({ type: "authorize", token, setup: path === "/v1/auth/setup" });
         }
         const value = parsedBody?.(request) ?? await body(request);
+        if (transferRoute && Buffer.byteLength(JSON.stringify(value)) > 131072) throw new ServiceError("Transfer body too large.",413,{code:"chunk_too_large"});
         const modelType = modelAdministration[path] ?? modelRunner[path] ?? leaseAdministration[path] ?? leaseBody[path];
         const enrollmentRevoke = /^\/v1\/runner-enrollments\/([^/]+)\/revoke$/.exec(path);
-        if (operationCreate) command = { type: "leases.createOperation", id: operationCreate[1]!, token, body: value };
+        if (transferRoute && !transferRoute[3] && (!transferRoute[2] || path.endsWith("/steps"))) command = {type:transferRoute[2] ? "leases.createTransferStep" : "leases.createTransfer",token,id:transferRoute[1]!,...(transferRoute[2] ? {transferId:transferRoute[2]} : {}),body:value};
+        else if (operationCreate) command = { type: "leases.createOperation", id: operationCreate[1]!, token, body: value };
         else if (modelCancel) command = { type: "models.cancel", id: modelCancel[1]!, token, body: value };
         else if (leaseAction) command = { type: leaseMutation[leaseAction[2]!], id: leaseAction[1]!, token, body: value } as IdentityCommand;
         else if (modelType) command = { type: modelType, token, body: value } as IdentityCommand;
@@ -157,6 +163,12 @@ export function createIdentityHandler(identities: IdentityClient, parsedBody?: (
       if (response.destroyed) return;
       const value = await identities.request(command);
       // A new durable model job or lease is 201; an exact replay of the same submission is 200.
+      if (command.type === "leases.createTransfer") {
+        const r=value as {created:boolean;transfer:unknown}; respond(response,r.transfer,r.created?201:200);return;
+      }
+      if (command.type === "leases.createTransferStep") {
+        const r=value as {completed:boolean;step:unknown};respond(response,r.step,r.completed?200:202);return;
+      }
       if (command.type === "leases.createOperation") {
         const result = value as { created: boolean; operation: unknown };
         respond(response, result.operation, result.created ? 201 : 200); return;

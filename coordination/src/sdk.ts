@@ -1,3 +1,4 @@
+import type { TransferIntent, FileRequest } from './linux-transfer-sdk.ts';
 /** Scoped consumer SDK. Persist every caller-owned UUID and intent before dispatch.
  * No method retries input, reconnects, renews a lease implicitly, or rotates a key implicitly.
  */
@@ -306,11 +307,12 @@ export function operationRequest(request: DurableOperationRequest): DurableOpera
   if (!record(request) || Object.keys(request).sort().join(',') !== 'action,arguments,id,member' || !validText(request.member) || !request.member || request.member.length > 100 || !record(request.arguments)) throw new ConsumerConfigurationError('Invalid durable operation.');
   if (typeof request.action !== 'string' || !Object.hasOwn(fields, request.action)) throw new ConsumerConfigurationError('Unsupported operation action.');
   const id = identifier(request.id), expected = fields[request.action], args = request.arguments;
-  const allowed = [...(expected ?? []), ...(['push', 'pull', 'list-files'].includes(request.action) ? ['app'] : [])];
+  const allowed = [...(expected ?? []), ...(request.action === 'shell' ? ['timeoutMs'] : []), ...(['push', 'pull', 'list-files'].includes(request.action) ? ['app'] : [])];
   if (!expected || !expected.every(k => Object.hasOwn(args, k)) || Object.keys(args).some(k => !allowed.includes(k))) throw new ConsumerConfigurationError('Invalid operation arguments.');
   const invalid = () => { throw new ConsumerConfigurationError('Invalid operation argument.'); };
   for (const [key, value] of Object.entries(args)) {
-    if (key === 'session') identifier(value);
+    if (key === 'timeoutMs') { if (!Number.isSafeInteger(value) || Number(value)<1 || Number(value)>1800000) invalid(); }
+    else if (key === 'session') identifier(value);
     else if (key === 'offset') { if (!Number.isSafeInteger(value) || Number(value) < 0) invalid(); }
     else if (['rows', 'cols', 'durationMs', 'x', 'y', 'toX', 'toY'].includes(key)) {
       const dimensions = ['rows', 'cols'].includes(key), duration = key === 'durationMs';
@@ -345,6 +347,10 @@ export class LeaseClient {
     return new LeaseClient({ ...options, leaseKey: credentialFile(options.credentialFile) });
   }
   constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); }
+  createTransfer(intent:TransferIntent) { return this.#http.createTransfer(intent); }
+  transfer(id:string) { return this.#http.transfer(id); }
+  createTransferStep(id:string,step:number,request:FileRequest) { return this.#http.createTransferStep(id,step,request); }
+  transferStep(id:string,step:number) { return this.#http.transferStep(id,step); }
   get id(): string { return this.leaseId; }
   inspect() { return this.#http.inspect(); }
   renew(request: RenewRequest) { return this.#http.renew(request); }

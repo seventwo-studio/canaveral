@@ -32,6 +32,7 @@ function administratorTransaction<T>(token: string, operation: () => T): T {
 }
 
 async function dispatch(command: IdentityCommand): Promise<unknown> {
+  if (['leases.createTransfer','leases.createTransferStep','leases.transfer'].includes(command.type) && 'token' in command && (operator(command.token) || accounts.authorized(command.token))) throw new ServiceError('Only the current lease key may access transfers.',403,{code:'credential_role'});
   if (command.type.startsWith("runner.")) {
     const runnerProof = command.type === "runner.consume" || command.type === "runner.authenticate";
     if (!runnerProof && "token" in command) requireAdministrator(command.token);
@@ -101,6 +102,11 @@ function isLease(command: IdentityCommand): command is Extract<IdentityCommand, 
 }
 function lease(command: Extract<IdentityCommand, { type: `leases.${string}` }>): unknown {
   switch (command.type) {
+    case "leases.createTransfer": return leases.createTransfer(command.token,command.id,command.body);
+    case "leases.createTransferStep": return leases.createTransferStep(command.token,command.id,command.transferId!,command.body);
+    case "leases.transfer": return leases.transfer(command.token,command.id,command.transferId,command.step);
+    case "leases.pollTransfer": return leases.pollTransfer(command.token,command.body);
+    case "leases.reportTransfer": return leases.reportTransfer(command.token,command.body);
     case "leases.operation": return leases.operation(command.token, command.id, command.operationId);
     case "leases.createOperation": return leases.createOperation(command.token, command.id, command.body);
     case "leases.pollOperation": return leases.pollOperation(command.token, command.body);

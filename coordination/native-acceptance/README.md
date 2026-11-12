@@ -240,3 +240,17 @@ coordination typecheck/build and 998 tests, the full serial Rust suite, satellit
 clippy with warnings denied, standalone harness typecheck, six signature-gate
 regressions and shell syntax checks. These results retain the experimental scope
 and all previously listed production acceptance gaps.
+
+For a separately authorized workspace-v2 run, set `workspaceIOVersion:1` in the
+private configuration. Supply `cloneRepo` (public HTTPS repository), `cloneCommit`
+(full pinned commit), `hostLanTarget`, `hostTailnetTarget`, and
+`hostLoopbackTarget` (CONNECT authorities including `:443`). Keep all values in
+that private file. The bundle must include git, npm, nc, dd and the pinned CA
+store; the repository must include its npm lockfile and tests. This mode adds
+public-route build/log retrieval, empty/binary/300 KiB file round trips,
+no-replace/disk-full failures, foreign application denial, fixed proxy denial
+codes, egress-off refusal and simultaneous command/transfer expiry. Cleanup
+interception requires both workspaceRemoved and dataPlaneClosed before capacity
+release. Existing v1 cases also run. This harness is unexecuted implementation;
+actual native acceptance, data disconnect, route-change/hairpin topology,
+physical allocation and flush durability remain operator gates.
