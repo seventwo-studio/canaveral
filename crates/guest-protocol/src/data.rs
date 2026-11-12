@@ -589,7 +589,6 @@ pub struct Flow {
 #[derive(Default)]
 pub struct Flows {
     live: std::collections::BTreeMap<Uuid, Flow>,
-    retired: Vec<Uuid>,
     last: Uuid,
 }
 impl Flows {
@@ -598,7 +597,6 @@ impl Flows {
             return Err("invalid flow ID or limit".into());
         }
         self.last = id;
-        self.retired.clear();
         self.live.insert(
             id,
             Flow {
@@ -623,19 +621,19 @@ impl Flows {
         }
         Ok(&mut flow.directions[if matches!(sender, Sender::Host) { 0 } else { 1 }])
     }
-    /// Returns false for the bounded set of recently retired terminal frames.
+    /// IDs below the high-water mark are no longer reusable in this boot.
+    /// Gaps are retired too: strictly increasing Open makes them impossible to open.
+    pub fn is_retired(&self, id: Uuid) -> bool {
+        !id.is_nil() && id <= self.last && !self.live.contains_key(&id)
+    }
     pub fn close(&mut self, id: Uuid, budget: &mut Budget) -> Result<bool> {
-        if self.retired.contains(&id) {
+        if self.is_retired(id) {
             return Ok(false);
         }
         let mut flow = self.live.remove(&id).ok_or("unknown flow")?;
         for d in &mut flow.directions {
             d.discard(budget)?;
         }
-        if self.retired.len() == 16 {
-            self.retired.remove(0);
-        }
-        self.retired.push(id);
         Ok(true)
     }
 }

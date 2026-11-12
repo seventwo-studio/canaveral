@@ -79,8 +79,13 @@ ordered Close acknowledgement. Already granted payload is sequence/credit checke
 and discarded, without new credit or reopening TCP. Closing flows retain their
 budget and count toward the 16-flow ceiling, with a fixed 10-second close deadline
 independent of payload progress. Acknowledgement releases the remaining credit.
-Terminal frames already queued for a just-retired ID may be discarded; retain at
-most 16 such IDs until the next open, then reject stale traffic.
+Late opened/error/close/credit/data/halfClose frames for retired proxy IDs are
+discarded after frame validation. Each endpoint retains only the highest opened
+ID and at most 16 live flows: a nonzero ID at or below that high-water mark
+which is not live is retired (including skipped IDs, which can never be opened).
+Nil and IDs above the high-water mark remain protocol errors. Live flow
+sequence, credit and phase checks remain strict. Close acknowledges a peer
+Close once; an acknowledgement of a locally initiated Close is never echoed.
 
 Transfers share the data connection, not proxy IDs or proxy credit. Exactly one
 transfer step is in flight per assignment, each carrying at most 65536 decoded

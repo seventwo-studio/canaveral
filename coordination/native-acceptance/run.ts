@@ -1,3 +1,4 @@
+import {ownedProcesses,processRows,vzPids} from './processes.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
 import {workspaceCases} from './workspace.ts';
 // Operator-only native acceptance. Run directly with Node >=24; never imported by tests.
@@ -155,7 +156,22 @@ try {
     }
     // Capture process tree and console while the helper exists, before cleanup removes its directory.
     const journalVersions = new Set<string>();
-    const observed = new Map<string, {pids: number[], machine: string, relay?: string}>();
+    const observed = new Map<string, {pids: number[], owned: number[], machine: string, relay?: string}>();
+    async function attributed(ps: string, pids: number[], machine: string, previous: number[] = []) {
+      const rows = processRows(ps);
+      const vz = vzPids(rows);
+      let files = '';
+      if (vz.length) {
+        try { files = (await exec('/usr/sbin/lsof', ['-nP', '-Fpn', '-p', vz.join(',')])).stdout; }
+        catch (e: any) {
+          // lsof exits 1 when a process races exit. Other failures are not proof of absence.
+          assert.equal(e.code, 1);
+          files = e.stdout ?? '';
+        }
+      }
+      return ownedProcesses(rows, pids, machine, files, previous);
+    }
+
     async function observe(id: string) {
       if (!existsSync(join(state, 'state.json'))) return;
       const journalBytes = readFileSync(join(state, 'state.json'));
@@ -171,7 +187,7 @@ try {
       const rows = ps.split('\n').map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean) as RegExpMatchArray[];
       const pids = rows.filter(r => Number(r[2]) === currentRun?.c.pid && r[3]!.includes(cfg.helper + ' run ' + machine)).map(r => Number(r[1]));
       const old = observed.get(id);
-      observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], machine, relay: j.direct?.agentSocket ?? old?.relay});
+      observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], owned: await attributed(ps, [...(old?.pids ?? []), ...pids], machine, old?.owned), machine, relay: j.direct?.agentSocket ?? old?.relay});
       save(id + '-observed-processes.json', observed.get(id));
       for (const name of ['boot.log', 'console.log', 'direct-started.json']) if (existsSync(join(machine, name))) copyFileSync(join(machine, name), pem(id + '-' + name));
       if (existsSync(join(machine, 'console.log'))) copyFileSync(join(machine, 'console.log'), pem(id + '-boot.log'));
@@ -215,13 +231,13 @@ try {
       const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { assert.equal(e.code, 'ESRCH'); return false; } };
       for (const pid of record.pids) assert(!alive(pid), 'helper still alive');
       const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
-      // Fail conservatively on any VZ service still present: process names alone cannot attribute a VM.
-      assert(!ps.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains; VM attribution requires operator inspection');
+      const owned = await attributed(ps, record.pids, record.machine, record.owned);
+      assert(!processRows(ps).some(r => owned.includes(r.pid)), 'owned VM process remains');
       assert(!existsSync(record.machine)); assert(!existsSync(join(state, 'workspace')));
       assert(record.relay, 'no published relay evidence'); assert(!existsSync(dirname(record.relay)));
       const journal = JSON.parse(readFileSync(join(state, 'state.json'), 'utf8'));
       assert(journal.stopped && journal.cleaned && journal.released);
-      save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noVZProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal});
+      save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noOwnedVMProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal});
       await snapshot(label + '-after', id); active = undefined;
     }
     const caseFailures:string[]=[];
@@ -320,10 +336,11 @@ try {
     for (const pid of record.pids) { try { process.kill(pid, 0); throw Error('orphan helper still alive'); } catch (e: any) { assert.equal(e.code, 'ESRCH'); } }
     const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
     writeFileSync(pem('loss-final-processes.txt'), lossProcesses);
-    assert(!lossProcesses.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains after loss deadline');
+    const owned = await attributed(lossProcesses, record.pids, record.machine, record.owned);
+    assert(!processRows(lossProcesses).some(r => owned.includes(r.pid)), 'owned VM process remains after loss deadline');
     assert(!existsSync(join(record.machine, 'power-off.request')), 'controller recovery contaminated autonomous fence');
 
-    save('loss-independent-fence.json', {lossDeadline, killedAt, lastAliveAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noVZProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
+    save('loss-independent-fence.json', {lossDeadline, killedAt, lastAliveAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noOwnedVMProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
     // Recovery must report unknown, never relaunch; native deadline independently fences execution.
     assert(!existsSync(join(record.machine, 'power-off.request')), 'recovery request before restart');
     assert.equal(JSON.parse(readFileSync(join(record.machine, 'lease-authorization.json'), 'utf8')).fenced, false, 'recovery authorization before restart');

@@ -236,6 +236,17 @@ pub(crate) fn session(
                             output.queue(handshake(frame, launch)?)?;
                             hello = true;
                         } else {
+                            if let Frame::Opened { id, .. }
+                            | Frame::Error { id, .. }
+                            | Frame::Data { id, .. }
+                            | Frame::Credit { id, .. }
+                            | Frame::HalfClose { id, .. }
+                            | Frame::Close { id, .. } = &frame
+                            {
+                                if flows.is_retired(*id) {
+                                    continue;
+                                }
+                            }
                             match frame {
                                 Frame::TransferRequest { .. } | Frame::TransferCancel { .. } => {
                                     if let Some(receipt) = files.dispatch(frame)? {
@@ -255,8 +266,12 @@ pub(crate) fn session(
                                                 &mut budget,
                                             )?;
                                         }
+                                        let acknowledging =
+                                            clients.iter().any(|c| c.id == Some(id) && c.closing);
                                         clients.retain(|c| c.id != Some(id));
-                                        output.queue(Frame::Close { version: 1, id })?;
+                                        if !acknowledging {
+                                            output.queue(Frame::Close { version: 1, id })?;
+                                        }
                                     }
                                 }
                                 Frame::Error { id, code, .. } => {
@@ -911,6 +926,94 @@ mod tests {
         let error = worker.join().unwrap();
         assert!(error.contains("disconnected"), "{error}");
     }
+    #[test]
+    fn socketpair_guest_churn_has_no_redundant_close() {
+        let (mut host, address, ready, worker) = pair(true);
+        hello(&mut host);
+        let mut retired = Vec::new();
+        for n in 0..200 {
+            let client = tunnel(address);
+            let id = match receive(&mut host) {
+                Frame::Open { id, .. } => id,
+                other => panic!("redundant frame before Open: {other:?}"),
+            };
+            send(&mut host, Frame::Opened { version: 1, id });
+            assert!(matches!(receive(&mut host), Frame::Credit { .. }));
+            send(
+                &mut host,
+                Frame::Credit {
+                    version: 1,
+                    id,
+                    bytes: 65536,
+                },
+            );
+            if n % 2 == 0 {
+                drop(client);
+                loop {
+                    if matches!(receive(&mut host), Frame::Close { .. }) {
+                        break;
+                    }
+                }
+                send(
+                    &mut host,
+                    Frame::Credit {
+                        version: 1,
+                        id,
+                        bytes: 1,
+                    },
+                );
+                send(&mut host, Frame::Close { version: 1, id });
+            } else {
+                send(&mut host, Frame::HalfClose { version: 1, id });
+                send(&mut host, Frame::Close { version: 1, id });
+                loop {
+                    if matches!(receive(&mut host), Frame::Close { .. }) {
+                        break;
+                    }
+                }
+                drop(client);
+            }
+            retired.push(id);
+            if n > 20 {
+                let old = retired[n - 20];
+                send(
+                    &mut host,
+                    Frame::Credit {
+                        version: 1,
+                        id: old,
+                        bytes: 1,
+                    },
+                );
+                send(
+                    &mut host,
+                    Frame::Data {
+                        version: 1,
+                        id: old,
+                        seq: 0,
+                        data: STANDARD.encode(b"x"),
+                    },
+                );
+                send(
+                    &mut host,
+                    Frame::HalfClose {
+                        version: 1,
+                        id: old,
+                    },
+                );
+                send(
+                    &mut host,
+                    Frame::Close {
+                        version: 1,
+                        id: old,
+                    },
+                );
+            }
+        }
+        assert!(ready.files.load(Ordering::Acquire));
+        host.shutdown(Shutdown::Write).unwrap();
+        assert!(worker.join().unwrap().contains("disconnected"));
+    }
+
     #[test]
     fn two_ready_producers_both_progress() {
         let (mut host, address, _, worker) = pair(true);

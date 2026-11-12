@@ -247,7 +247,6 @@ pub struct Reactor<E: Egress> {
     workers: Vec<JoinHandle<()>>,
     workers_ok: bool,
     turn: usize,
-    retired: VecDeque<Uuid>,
     connected_tx: SyncSender<Connected>,
     connected: Receiver<Connected>,
 }
@@ -283,7 +282,6 @@ impl<E: Egress> Reactor<E> {
             workers: Vec::new(),
             workers_ok: true,
             turn: 0,
-            retired: VecDeque::new(),
             connected_tx,
             connected,
         })
@@ -307,10 +305,6 @@ impl<E: Egress> Reactor<E> {
     }
     fn retire(&mut self, id: Uuid, error: Option<ErrorCode>) -> Result<()> {
         if self.flows.close(id, &mut self.budget)? {
-            if self.retired.len() == 16 {
-                self.retired.pop_front();
-            }
-            self.retired.push_back(id);
             if let Some(s) = self.sockets.remove(&id).and_then(|s| s.stream) {
                 let _ = s.shutdown(Shutdown::Both);
             }
@@ -330,10 +324,18 @@ impl<E: Egress> Reactor<E> {
         Ok(())
     }
     fn frame(&mut self, frame: Frame) -> Result<()> {
+        if let Frame::Data { id, .. }
+        | Frame::Credit { id, .. }
+        | Frame::HalfClose { id, .. }
+        | Frame::Close { id, .. } = &frame
+        {
+            if self.flows.is_retired(*id) {
+                return Ok(());
+            }
+        }
         match frame {
             Frame::Open { id, host, port, .. } => {
                 self.flows.open(id)?;
-                self.retired.clear();
                 self.sockets.insert(
                     id,
                     Socket {
@@ -392,9 +394,6 @@ impl<E: Egress> Reactor<E> {
                 // Keep accounting bounded, but EOF prevents this credit being spent.
             }
             Frame::HalfClose { id, .. } => {
-                if self.retired.contains(&id) {
-                    return Ok(());
-                }
                 self.flows.direction(id, Sender::Guest)?;
                 self.flows
                     .direction(id, Sender::Guest)?
@@ -1224,6 +1223,70 @@ mod tests {
         }
         .complete());
     }
+    #[test]
+    fn socketpair_churn_tolerates_retired_frames() {
+        let (mut r, mut peer, fake) = setup(true);
+        for n in 1..=300 {
+            open(&mut r, n);
+            let (tcp, _) = fake.listener.accept().unwrap();
+            collect(&mut peer);
+            if n % 2 == 0 {
+                r.retire(id(n), None).unwrap();
+            } else {
+                peer.write_all(
+                    &data::encode(
+                        &Frame::Close {
+                            version: 1,
+                            id: id(n),
+                        },
+                        Sender::Guest,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            r.step().unwrap();
+            collect(&mut peer);
+            drop(tcp);
+            if n > 20 {
+                for frame in [
+                    Frame::Close {
+                        version: 1,
+                        id: id(n - 20),
+                    },
+                    Frame::Credit {
+                        version: 1,
+                        id: id(n - 20),
+                        bytes: 1,
+                    },
+                    Frame::HalfClose {
+                        version: 1,
+                        id: id(n - 20),
+                    },
+                    Frame::Data {
+                        version: 1,
+                        id: id(n - 20),
+                        seq: 0,
+                        data: "eA==".into(),
+                    },
+                ] {
+                    peer.write_all(&data::encode(&frame, Sender::Guest).unwrap())
+                        .unwrap();
+                    r.step().unwrap();
+                }
+            }
+        }
+        for unknown in [Uuid::nil(), id(301)] {
+            assert!(r
+                .frame(Frame::Close {
+                    version: 1,
+                    id: unknown
+                })
+                .is_err());
+        }
+        assert!(r.close().complete());
+    }
+
     #[test]
     fn fairness_credit_stall_idle_retired_and_disconnect() {
         let (mut r, mut peer, fake) = setup(true);
