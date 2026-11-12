@@ -39,12 +39,21 @@ final class DirectBootTests: XCTestCase {
     XCTAssertNoThrow(try v2.validateShape(machine: m))
     var machine = m; machine.directBoot = v2
     XCTAssertTrue(try MachineConfiguration.networkDevices(machine: machine).isEmpty)
+    let identity = try v2.workspace!.verify()
+    try v2.workspace!.verify(identity: identity)
+    XCTAssertThrowsError(try v2.workspace!.verify(identity: (identity.0, identity.1 + 1)))
     let disk = try MachineConfiguration.workspaceDevice(v2.workspace!)
     XCTAssertEqual(disk.blockDeviceIdentifier, v2.workspace!.serial)
     let attachment = try XCTUnwrap(disk.attachment as? VZDiskImageStorageDeviceAttachment)
     XCTAssertFalse(attachment.isReadOnly)
     XCTAssertEqual(attachment.cachingMode, .uncached)
     XCTAssertEqual(attachment.synchronizationMode, .full)
+    XCTAssertThrowsError(try MachineConfiguration.workspaceDevice(v2.workspace!, afterAttachment: {
+        try FileManager.default.moveItem(atPath: path, toPath: path + ".old")
+        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]))
+        let replacement = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try replacement.truncate(atOffset: 16777216); try replacement.close()
+    }))
     let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(v2)) as! [String: Any]
     XCTAssertNil(encoded["workspaceBytes"])
     XCTAssertNotNil(encoded["workspace"])

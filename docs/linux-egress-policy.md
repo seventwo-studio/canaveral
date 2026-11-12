@@ -1,8 +1,7 @@
 # Linux public HTTPS egress policy
 
 ST-535 experimental implementation. This defines `public-https-v1` for
-workspace-v2 Linux direct boot. Full native acceptance is false; the required
-cloned-route refusal blocks public CONNECT on the tested Mac. The guest has
+workspace-v2 Linux direct boot. Full production acceptance remains false. The guest has
 **no NIC**; direct boot attaches no NAT device, without changing EFI or macOS
 guest networking. Missing guest drivers or guest firewall
 rules are not the boundary. Only loopback HTTP CONNECT → data vsock 1025 → Rust
@@ -75,12 +74,29 @@ The following denials are cumulative and cannot be relaxed by application policy
   site public addresses and router public/hairpin destinations where applicable.
 
 Immediately before connect, ask the host kernel for the selected route to the
-pinned address. Permit only a route whose actual prefix is default (`0/0` or
-`::/0`), with a gateway and no on-link/direct flag. Deny any more specific route,
-including VPN/tailnet/tunnel/utun-specific routes and public LAN prefixes. A
-tunnel/utun selected **default** may pass the route rule but all address/interface
-and operator denials still apply. A cached/cloned specific host route does not
-count as default by inference; inability to identify the real route fails closed.
+pinned address. Permit a route whose actual prefix is default (0/0 or ::/0),
+with a gateway and no on-link/direct flag. The only specific-route exception
+is a kernel-cloned host route meeting all of these requirements:
+
+- Flags include RTF_UP, RTF_GATEWAY, RTF_HOST and RTF_WASCLONED. Only RTF_DONE,
+  RTF_IFREF, RTF_ROUTER, RTF_IFSCOPE and RTF_GLOBAL may additionally appear.
+  IFSCOPE records the interface scope and GLOBAL marks an Internet destination;
+  neither replaces the exact interface/default proof. LLINFO, LOCAL, REJECT,
+  BLACKHOLE, STATIC, redirected and unknown flags deny.
+- A separate RTM_GET in the same evidence query obtains the current same-family
+  default using destination 0.0.0.0 or :: and an explicit zero netmask. Both queries
+  share one one-second deadline. Unrelated routing broadcasts are skipped until
+  the matching sequence and PID arrive, without extending that deadline.
+- The clone's gateway sockaddr bytes and nonzero outgoing interface index exactly
+  equal the default's. If RTA_IFP is present, its AF_LINK index must also equal
+  rtm_index. The default itself must pass the existing prefix-zero, gateway and
+  non-direct rules. An interface-only default, including utun without a gateway,
+  remains denied.
+
+All other specific routes deny, including VPN/tailnet/tunnel-specific and public
+LAN prefixes. Address, interface and operator CIDR denials apply cumulatively.
+Unavailable, malformed or mismatched evidence denies; a clone is never accepted
+solely by inference from its cache flags.
 Repeat this check for each attempted vetted address, at connect time, and verify
 peer/address/interface evidence after connect before `opened`. A race or query
 error refuses the flow. Errors reveal only fixed codes, never local interfaces,
@@ -122,9 +138,8 @@ behavior. Host firewall changes and deployment are outside this contract.
 
 Rust connects the strict target/CONNECT grammar, no-NIC configuration, guest
 loopback listener, bounded resolver, native route/interface evidence and
-satellite TCP/data reactor. Native denial cases passed; public CONNECT failed
-the required post-connect route check. These observations do not establish full
-egress or isolation acceptance.
+satellite TCP/data reactor. Native observations are recorded in the acceptance
+summary; they do not establish full egress or isolation acceptance.
 Transfers move at most 64 KiB per serialized step, a known throughput limit.
 
 ### ST-535 data closure and bounded route evidence (2026-11-12)
@@ -140,18 +155,15 @@ satellite closes all live flows with `route_denied`. A stalled evidence
 worker prevents positive joined cleanup evidence; it is never replaced by
 an unbounded series of workers. Native acceptance remains required.
 
-### Native route incompatibility observed (ST-535, 2026-11-12)
+### Native cloned-route evidence (ST-535, 2026-11-12)
 
-On the authorized Mac, an RTM_GET query before TCP connect reported a default
-route with a gateway. Immediately after connect, the kernel reported a cloned
-/32 host route (HOST and WASCLONED). The unchanged policy correctly refused it
-with `route_denied` before opening the guest tunnel. Thus allowed CONNECT, git
-clone and npm installation did not pass native acceptance. Treating that clone
-as a default route by inference would violate this contract; no such exception
-is implemented. Public HTTPS acceptance needs a separately reviewed policy and
-route-evidence design. This observation does not authorize host route changes.
+The earlier run reported a default route before connect and a cloned /32 after
+connect. The former contract refused that clone. The qualified clone rule above
+supersedes that blanket refusal and is used before connect, after connect and
+for periodic revalidation. Native results are recorded in the
+[acceptance summary](../coordination/native-acceptance/README.md).
 
 Static reserved/operator-denied destinations are classified before requesting
 route evidence, so unavailable route evidence cannot hide a known
 `destination_denied` refusal. Darwin's compact all-ones IPv4 host netmask is
-recognized as /32; it remains a specific/direct route and is still denied.
+recognized as /32; it gains no exception without the complete clone/default proof.

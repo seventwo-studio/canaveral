@@ -846,7 +846,8 @@ pub fn spawn<E: Egress>(
                     break;
                 }
             }
-            if reactor.step().is_err() {
+            if let Err(error) = reactor.step() {
+                eprintln!("data reactor stopped: {error}");
                 break;
             }
             flag.store(true, Ordering::Release);

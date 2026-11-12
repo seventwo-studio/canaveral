@@ -304,6 +304,20 @@ fn assert_cleaned(d: &Direct, w: &Wire) {
     assert_eq!(last["receipt"]["cleanup"], "complete");
 }
 #[test]
+fn failed_prepare_proves_data_closed_without_starting_a_reactor() {
+    let mut d = direct_fixture(|_| {});
+    install_helper(&mut d.c, &format!("#!/bin/sh\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\nprepare) cat >/dev/null; exit 1 ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\nesac\n", clock_json()));
+    let mut s = seeded(&d.c);
+    let mut w = wire(s.assignment().unwrap().clone());
+    assert!(s.run_once(&mut w).is_err());
+    assert!(!s.state.prepared);
+    assert!(s.state.stopped && s.state.cleaned && s.state.released);
+    assert_eq!(s.state.direct.as_ref().unwrap().data_closed, Some(true));
+    assert!(!d.c.state.join("workspace").exists());
+    let (_, last) = w.requests.last().unwrap();
+    assert_eq!(last["receipt"]["cleanup"], "complete");
+}
+#[test]
 fn ready_only_after_bound_guest_ready_then_release_cleans_owned_state() {
     let d = direct_fixture(|_| {});
     validate_local(&d.c).unwrap();

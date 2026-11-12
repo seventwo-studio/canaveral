@@ -7,16 +7,30 @@ import Darwin
 
 // The reader drains even when no window exists. Bounded storage avoids queued
 // UI work or a full pipe blocking a noisy server's boot.
-private final class SerialBuffer: @unchecked Sendable {
+final class SerialBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes = Data()
     private var active = true
+    private var receivedBytes = 0
+    private var truncated = false
+    static let byteLimit = 16 * 1024 * 1024
+    private func append(_ chunk: Data) {
+        let remaining = Self.byteLimit - receivedBytes
+        bytes.append(chunk.prefix(remaining))
+        receivedBytes += min(remaining, chunk.count)
+        if chunk.count > remaining && !truncated {
+            bytes.append(Data("\n[serial output truncated at 16 MiB]\n".utf8))
+            truncated = true
+        }
+        if bytes.count > 65536 { bytes = Data(bytes.suffix(65536)) }
+    }
+    func receiveForTesting(_ chunk: Data) { lock.lock(); defer { lock.unlock() }; append(chunk) }
     func receive(_ fd: Int32) {
         lock.lock(); defer { lock.unlock() }
         guard active else { return }
         var chunk = [UInt8](repeating: 0, count: 8192)
         let count = Darwin.read(fd, &chunk, chunk.count)
-        if count > 0 { bytes.append(contentsOf: chunk.prefix(count)) }
+        if count > 0 { append(Data(chunk.prefix(count))) }
         if bytes.count > 65536 { bytes = Data(bytes.suffix(65536)) }
     }
     func stop(_ fd: Int32) {
@@ -28,7 +42,7 @@ private final class SerialBuffer: @unchecked Sendable {
         for _ in 0..<128 {
             let count = Darwin.read(fd, &chunk, chunk.count)
             guard count > 0 else { break }
-            bytes.append(contentsOf: chunk.prefix(count))
+            append(Data(chunk.prefix(count)))
             if bytes.count > 65536 { bytes = Data(bytes.suffix(65536)) }
         }
     }

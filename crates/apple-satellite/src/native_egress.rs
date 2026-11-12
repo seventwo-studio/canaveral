@@ -383,21 +383,36 @@ fn route(_: IpAddr) -> Result<(u8, bool, bool), ErrorCode> {
 
 #[cfg(target_os = "macos")]
 fn route(address: IpAddr) -> Result<(u8, bool, bool), ErrorCode> {
-    route_query(address).map_err(|_| ErrorCode::RouteDenied)
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let selected = route_query(address, false, deadline).map_err(|_| ErrorCode::RouteDenied)?;
+    if selected.policy.0 == 0
+        || selected.flags & (libc::RTF_GATEWAY | libc::RTF_WASCLONED)
+            != (libc::RTF_GATEWAY | libc::RTF_WASCLONED)
+    {
+        return Ok(selected.policy);
+    }
+    let default_address = if address.is_ipv4() {
+        Ipv4Addr::UNSPECIFIED.into()
+    } else {
+        Ipv6Addr::UNSPECIFIED.into()
+    };
+    let default =
+        route_query(default_address, true, deadline).map_err(|_| ErrorCode::RouteDenied)?;
+    qualify_clone(&selected, &default)
 }
 #[cfg(target_os = "macos")]
-fn route_query(address: IpAddr) -> Result<(u8, bool, bool), ErrorCode> {
+fn route_query(address: IpAddr, default: bool, deadline: Instant) -> Result<Route, ErrorCode> {
     static SEQUENCE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
-    let deadline = Instant::now() + Duration::from_secs(1);
     let fd = socket(libc::PF_ROUTE, libc::SOCK_RAW, 0)?;
     let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = unsafe { libc::getpid() };
     let (sa, len) = sockaddr(address, 0);
     let mut header: libc::rt_msghdr = unsafe { zeroed() };
-    header.rtm_msglen = (size_of::<libc::rt_msghdr>() + len as usize) as _;
+    header.rtm_msglen =
+        (size_of::<libc::rt_msghdr>() + len as usize + if default { len as usize } else { 0 }) as _;
     header.rtm_version = libc::RTM_VERSION as _;
     header.rtm_type = libc::RTM_GET as _;
-    header.rtm_addrs = libc::RTA_DST;
+    header.rtm_addrs = libc::RTA_DST | if default { libc::RTA_NETMASK } else { 0 };
     header.rtm_seq = seq;
     header.rtm_pid = pid;
     let mut request = Vec::new();
@@ -413,27 +428,111 @@ fn route_query(address: IpAddr) -> Result<(u8, bool, bool), ErrorCode> {
             len as usize,
         )
     });
+    if default {
+        // A zero destination alone can select a covering route. Supply /0 explicitly.
+        let mut mask = vec![0u8; len as usize];
+        mask[0] = len as u8;
+        request.extend_from_slice(&mask);
+    }
     if unsafe { libc::send(fd.as_raw_fd(), request.as_ptr().cast(), request.len(), 0) }
         != request.len() as isize
     {
         return Err(ErrorCode::RouteDenied);
     }
-    wait(&fd, libc::POLLIN, deadline)?;
-    let mut reply = [0u8; 8192];
-    let n = unsafe { libc::recv(fd.as_raw_fd(), reply.as_mut_ptr().cast(), reply.len(), 0) };
-    if n <= 0 || n as usize == reply.len() {
-        return Err(ErrorCode::RouteDenied);
+    let bytes = receive_route(&fd, seq, pid, deadline)?;
+    parse_route_details(&bytes, address, seq, pid)
+}
+#[cfg(target_os = "macos")]
+fn receive_route(
+    fd: &OwnedFd,
+    seq: i32,
+    pid: i32,
+    deadline: Instant,
+) -> Result<Vec<u8>, ErrorCode> {
+    loop {
+        wait(fd, libc::POLLIN, deadline)?;
+        let mut reply = [0u8; 8192];
+        let n = unsafe { libc::recv(fd.as_raw_fd(), reply.as_mut_ptr().cast(), reply.len(), 0) };
+        if n < 0
+            && matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR | libc::EAGAIN)
+            )
+        {
+            continue;
+        }
+        if n <= 0 || n as usize == reply.len() {
+            return Err(ErrorCode::RouteDenied);
+        }
+        let bytes = &reply[..n as usize];
+        if !matching_reply(bytes, seq, pid) {
+            continue;
+        }
+        return Ok(bytes.to_vec());
     }
-    parse_route(&reply[..n as usize], address, seq, pid)
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct Route {
+    policy: (u8, bool, bool),
+    flags: i32,
+    gateway: Vec<u8>,
+    index: u16,
+}
+#[cfg(target_os = "macos")]
+fn qualify_clone(selected: &Route, default: &Route) -> Result<(u8, bool, bool), ErrorCode> {
+    // Allowlist kernel cache flags; configured, redirected or unknown
+    // specific routes cannot acquire authority from a coincidentally equal gateway.
+    let required = libc::RTF_UP | libc::RTF_GATEWAY | libc::RTF_HOST | libc::RTF_WASCLONED;
+    let allowed = required
+        | libc::RTF_DONE
+        | libc::RTF_IFREF
+        | libc::RTF_ROUTER
+        | libc::RTF_IFSCOPE
+        | libc::RTF_GLOBAL;
+    if selected.flags & required == required
+        && selected.flags & !allowed == 0
+        && selected.policy.0
+            == if selected.gateway.len() == size_of::<libc::sockaddr_in>() {
+                32
+            } else {
+                128
+            }
+        && default.policy == (0, true, false)
+        && selected.index != 0
+        && selected.index == default.index
+        && selected.gateway == default.gateway
+    {
+        Ok((0, true, false))
+    } else {
+        Err(ErrorCode::RouteDenied)
+    }
+}
+#[cfg(target_os = "macos")]
+fn matching_reply(bytes: &[u8], seq: i32, pid: i32) -> bool {
+    if bytes.len() < size_of::<libc::rt_msghdr>() {
+        return false;
+    }
+    let h = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<libc::rt_msghdr>()) };
+    h.rtm_seq == seq && h.rtm_pid == pid
+}
+#[cfg(all(test, target_os = "macos"))]
 fn parse_route(
     bytes: &[u8],
     address: IpAddr,
     seq: i32,
     pid: i32,
 ) -> Result<(u8, bool, bool), ErrorCode> {
+    parse_route_details(bytes, address, seq, pid).map(|r| r.policy)
+}
+#[cfg(target_os = "macos")]
+fn parse_route_details(
+    bytes: &[u8],
+    address: IpAddr,
+    seq: i32,
+    pid: i32,
+) -> Result<Route, ErrorCode> {
     let deny = ErrorCode::RouteDenied;
     if bytes.len() < size_of::<libc::rt_msghdr>() {
         return Err(deny);
@@ -509,7 +608,21 @@ fn parse_route(
         || header.rtm_flags
             & (libc::RTF_HOST | libc::RTF_LLINFO | libc::RTF_WASCLONED | libc::RTF_LOCAL)
             != 0;
-    Ok((prefix, gateway, direct))
+    let index = header.rtm_index;
+    if let Some(ifp) = slots[libc::RTAX_IFP as usize] {
+        if ifp.len() < 4
+            || ifp[1] as i32 != libc::AF_LINK
+            || u16::from_ne_bytes([ifp[2], ifp[3]]) != index
+        {
+            return Err(deny);
+        }
+    }
+    Ok(Route {
+        policy: (prefix, gateway, direct),
+        flags: header.rtm_flags,
+        gateway: slots[libc::RTAX_GATEWAY as usize].unwrap_or(&[]).to_vec(),
+        index,
+    })
 }
 #[cfg(target_os = "macos")]
 fn route_ip(bytes: &[u8], address: IpAddr) -> Result<IpAddr, ErrorCode> {
@@ -774,6 +887,82 @@ mod tests {
         header.rtm_msglen = bytes.len() as _;
         unsafe { std::ptr::write_unaligned(bytes.as_mut_ptr().cast::<libc::rt_msghdr>(), header) };
         bytes
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cloned_route_requires_exact_current_default_gateway_interface_and_flags() {
+        for (host, zero) in [("1.1.1.1", "0.0.0.0"), ("2606:4700:4700::1111", "::")] {
+            let ip = host.parse().unwrap();
+            let default = reply(zero.parse().unwrap(), &[], libc::RTF_GATEWAY);
+            let mut default = parse_route_details(&default, ip, 7, 9).unwrap();
+            default.index = 4;
+            let mut selected = default.clone();
+            selected.policy = (if ip.is_ipv4() { 32 } else { 128 }, true, true);
+            selected.flags =
+                libc::RTF_UP | libc::RTF_GATEWAY | libc::RTF_HOST | libc::RTF_WASCLONED;
+            assert_eq!(qualify_clone(&selected, &default), Ok((0, true, false)));
+            let mut scoped = selected.clone();
+            scoped.flags |= libc::RTF_IFSCOPE | libc::RTF_GLOBAL | libc::RTF_IFREF | libc::RTF_DONE;
+            assert_eq!(qualify_clone(&scoped, &default), Ok((0, true, false)));
+            for flag in [
+                libc::RTF_STATIC,
+                libc::RTF_LLINFO,
+                libc::RTF_LOCAL,
+                libc::RTF_REJECT,
+                libc::RTF_BLACKHOLE,
+                libc::RTF_DYNAMIC,
+                libc::RTF_MODIFIED,
+            ] {
+                let mut bad = selected.clone();
+                bad.flags |= flag;
+                assert!(qualify_clone(&bad, &default).is_err());
+            }
+            for flag in [
+                libc::RTF_UP,
+                libc::RTF_GATEWAY,
+                libc::RTF_HOST,
+                libc::RTF_WASCLONED,
+            ] {
+                let mut bad = selected.clone();
+                bad.flags &= !flag;
+                assert!(qualify_clone(&bad, &default).is_err());
+            }
+            let mut bad = default.clone();
+            bad.index += 1;
+            assert!(qualify_clone(&selected, &bad).is_err());
+            bad = default.clone();
+            bad.gateway[3] ^= 1;
+            assert!(qualify_clone(&selected, &bad).is_err());
+            for policy in [(1, true, false), (0, false, true), (0, true, true)] {
+                bad = default.clone();
+                bad.policy = policy;
+                assert!(qualify_clone(&selected, &bad).is_err());
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unrelated_routing_broadcasts_are_skipped_before_matching_reply() {
+        let ip = "1.1.1.1".parse().unwrap();
+        let reply = reply("0.0.0.0".parse().unwrap(), &[], libc::RTF_GATEWAY);
+        let (rx, tx) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let rx: OwnedFd = rx.into();
+        let unrelated = super::tests::reply("0.0.0.0".parse().unwrap(), &[], libc::RTF_GATEWAY);
+        tx.send(&[0; 4]).unwrap();
+        tx.send(&unrelated).unwrap();
+        let expected = receive_route(&rx, 7, 9, Instant::now() + Duration::from_secs(1)).unwrap();
+        assert_eq!(expected, reply);
+        tx.send(&unrelated).unwrap();
+        assert_eq!(
+            receive_route(&rx, 8, 9, Instant::now() + Duration::from_millis(20)),
+            Err(ErrorCode::ConnectTimeout)
+        );
+        assert!(!matching_reply(&reply, 8, 9));
+        assert!(!matching_reply(&reply, 7, 10));
+        assert!(!matching_reply(&[0; 4], 7, 9));
+        assert!(matching_reply(&reply, 7, 9));
+        assert_eq!(parse_route(&reply, ip, 7, 9), Ok((0, true, false)));
     }
 
     #[cfg(target_os = "macos")]

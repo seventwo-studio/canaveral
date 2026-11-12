@@ -24,7 +24,7 @@ done < <(grep '^# CONFIG_.* is not set$' "$recipe_dir/arm64.config")
 # Check the syscall implementation and arm64's generic syscall table explicitly.
 grep -q 'SYSCALL_DEFINE4(openat2,' fs/open.c
 grep -q '__SYSCALL(__NR_openat2, sys_openat2)' include/uapi/asm-generic/unistd.h
-for option in NET INET VSOCKETS VIRTIO_VSOCKETS EXT4_FS; do
+for option in NET INET VSOCKETS VIRTIO_VSOCKETS EXT4_FS ARM_AMBA RTC_CLASS RTC_HCTOSYS RTC_DRV_PL031; do
   grep -qx "CONFIG_${option}=y" .config || { echo "missing workspace support: $option" >&2; exit 1; }
 done
 export KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=canaveral KBUILD_BUILD_VERSION=1

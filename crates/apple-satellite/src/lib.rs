@@ -1748,6 +1748,10 @@ impl Satellite {
         }
         if prepared.is_err() || self.expired() {
             // The prepare process has exited (or was killed and reaped); no run was started.
+            // No data reactor or worker has been constructed on this branch.
+            if let Some(d) = self.state.direct.as_mut() {
+                d.data_closed = Some(true);
+            }
             self.fence_for(if self.expired() {
                 StopCause::Deadline
             } else {
@@ -1960,6 +1964,8 @@ impl Satellite {
                 }
                 Ok(())
             })();
+            // Revoke data authority and request native fencing before cancellation or journal work.
+            let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
             if let Some(op) = self.state.operations.current.as_mut() {
                 if op.receipt.is_none() {
                     if let (Some(s), Some(id)) = (session.as_mut(), op.guest_id) {
@@ -1974,7 +1980,6 @@ impl Satellite {
             self.state.transfers.loss("authorization_lost");
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
-            let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
             let closed = data.shutdown();
             if let Some(d) = self.state.direct.as_mut() {
                 d.data_closed = Some(false);
@@ -2359,6 +2364,18 @@ mod tests {
         s.state.deadline = clock::now().as_secs_f64() + 100.0;
         s.save().unwrap();
         s
+    }
+    #[test]
+    fn fence_revokes_live_authority_even_when_journal_save_fails() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let authority = reactor::Authority::new(clock::now() + Duration::from_secs(100));
+        s.data_authority = Some(authority.clone());
+        assert!(authority.permits());
+        // A directory at the journal staging path makes persistence fail.
+        std::fs::create_dir(c.state.join("state.next")).unwrap();
+        assert!(s.fence_for(StopCause::Runtime).is_err());
+        assert!(!authority.permits());
     }
     #[test]
     fn late_errors_recheck_deadline_but_observed_process_exit_wins() {

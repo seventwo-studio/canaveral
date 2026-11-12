@@ -133,6 +133,10 @@ public init(from decoder: Decoder) throws {
             throw CanaveralError.invalid("Invalid workspace disk identity or size.")
         }
     }
+    func verify(identity: (Int64, UInt64)) throws {
+        let current = try verify()
+        guard current == identity else { throw CanaveralError.invalid("Workspace identity changed during attachment.") }
+    }
     @discardableResult func verify() throws -> (Int64, UInt64) {
         try validateShape(launchSerial: "")
         #if os(macOS)

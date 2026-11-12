@@ -37,9 +37,11 @@ import CanaveralVMCore
         network.macAddress = address
         return [network]
     }
-static func workspaceDevice(_ workspace: DirectBootWorkspace) throws -> VZVirtioBlockDeviceConfiguration {
-    try workspace.verify()
+static func workspaceDevice(_ workspace: DirectBootWorkspace, afterAttachment: () throws -> Void = {}) throws -> VZVirtioBlockDeviceConfiguration {
+    let identity = try workspace.verify()
     let attachment = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: workspace.path), readOnly: false, cachingMode: .uncached, synchronizationMode: .full)
+    try afterAttachment()
+    try workspace.verify(identity: identity)
     let disk = VZVirtioBlockDeviceConfiguration(attachment: attachment)
     disk.blockDeviceIdentifier = workspace.serial
     return disk
@@ -70,9 +72,10 @@ static func workspaceDevice(_ workspace: DirectBootWorkspace) throws -> VZVirtio
         if machine.mode == .desktop {
             c.keyboards = [VZUSBKeyboardConfiguration()]
             c.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
-        } else {
+        } else if let serialAttachment {
+            // Preparation validates without a console; every runtime supplies SerialConsole.
             let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-            serial.attachment = try serialAttachment ?? VZFileSerialPortAttachment(url: directory.appendingPathComponent("boot.log"), append: true)
+            serial.attachment = serialAttachment
             c.serialPorts = [serial]
         }
         // No host directories, clipboard, microphones, cameras, or physical devices are shared.

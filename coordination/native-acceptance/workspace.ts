@@ -20,6 +20,9 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
     return until(async()=>{const r=await client.operation(request.id);return ['succeeded','failed','unknown'].includes(r.state)&&r;},'workspace command',timeoutMs+30000);
   }
   const shell=(script:string,timeoutMs=120000)=>command(['/bin/sh','-c',script],timeoutMs);
+  const clock=await shell('date +%s');save('workspace-trust-clock.json',clock);
+  assert.equal(clock.state,'succeeded');
+  assert(Math.abs(Number(Buffer.from(clock.result.stdoutBase64,'base64').toString().trim())-Date.now()/1000)<60,'guest RTC must match host wall clock before TLS');
   const tools=await shell('for tool in git node npm sh dd sync; do command -v "$tool" >/dev/null || { echo "Missing required guest tool: $tool" >&2; exit 1; }; done');
   assert.equal(tools.state,'succeeded','guest requires git, node, npm, sh, dd, sync: '+JSON.stringify(tools));
   const denials: Array<{result:any;code:string}>=[];
@@ -31,12 +34,18 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
   for(const {result,code} of denials) check('proxy denial '+code,()=>assertProxy(result,'HTTP/1.1 403 Forbidden',code));
   check('allowed CONNECT',()=>assertProxy(allowed, 'HTTP/1.1 200 Connection Established'));
   const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
-  const build=await shell(`git clone ${quote(cfg.cloneRepo)} source && cd source && git checkout --detach ${quote(cfg.cloneCommit)} && test "$(git rev-parse HEAD)" = ${quote(cfg.cloneCommit)} && { npm ci && npm test; } > /workspace/build.log 2>&1`,180000);
+  const build=await shell(`git clone ${quote(cfg.cloneRepo)} source && cd source && git checkout --detach ${quote(cfg.cloneCommit)} && test "$(git rev-parse HEAD)" = ${quote(cfg.cloneCommit)} && git rev-parse HEAD > /workspace/build.log`,180000);
   save('workspace-build.json',build);check('clone/npm build',()=>assert.equal(build.state,'succeeded'));
   if(build.state==='succeeded') {
+  for (const [name, script] of [['ci','npm ci'],['test','npm test']]) {
+    const startedAt=Date.now();
+    const result=await shell('cd source && '+script+' >> /workspace/build.log 2>&1',180000);
+    save('workspace-npm-'+name+'.json',{durationMs:Date.now()-startedAt,result});
+    check('npm '+name,()=>assert.equal(result.state,'succeeded'));
+  }
   const logs:Buffer[]=[];
   await downloadWorkspaceFile(client,{id:randomUUID(),member:'primary',direction:'download',path:'build.log'},async b=>{save('workspace-build-chunk-'+logs.length+'.json',{base64:Buffer.from(b).toString('base64')});logs.push(Buffer.from(b));},journal,wait);
-  save('workspace-build-log.json',{base64:Buffer.concat(logs).toString('base64')});
+  save('workspace-build-log.json',{base64:Buffer.concat(logs).toString('base64'),sha256:createHash('sha256').update(Buffer.concat(logs)).digest('hex')});
   }
   for(const bytes of [Buffer.alloc(0),Buffer.from([0,255,1,128]),randomBytes(300*1024)]) {
     const path='roundtrip-'+bytes.length,sha256=createHash('sha256').update(bytes).digest('hex');
@@ -53,6 +62,12 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
     const transfer=await client.transfer(id);save('workspace-'+code+'.json',{transfer,caught});
     assert.equal(transfer.error?.code,code);
   }
+  const replacement=Buffer.from('replacement over existing regular file');
+  await uploadWorkspaceFile(client,{id:randomUUID(),member:'primary',direction:'upload',path:'roundtrip-4',bytes:replacement.length,sha256:createHash('sha256').update(replacement).digest('hex'),replace:true},(async function*(){yield replacement;})(),journal,wait);
+  const replaced:Buffer[]=[];
+  await downloadWorkspaceFile(client,{id:randomUUID(),member:'primary',direction:'download',path:'roundtrip-4'},async b=>{replaced.push(Buffer.from(b));},journal,wait);
+  assert.deepEqual(Buffer.concat(replaced),replacement);
+  save('workspace-replace-true.json',{existingRegularFile:true,upload:'committed',download:'verified',sha256:createHash('sha256').update(replacement).digest('hex')});
   await failure('roundtrip-0',Buffer.alloc(0),'destination_exists');
   const denied=await o.api('POST',`/v1/leases/${id}/transfers`,{id:randomUUID(),member:'primary',direction:'download',path:'build.log'},o.other.credential);save('workspace-second-tenant-denial.json',denied);assert([401,403,404].includes(denied.status));
   // Fill workspace through a command, then require a durable failed file receipt.
@@ -60,7 +75,8 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
   assert.match(Buffer.from(full.result.stderrBase64,'base64').toString(),/No space left on device/);
   await failure('disk-full',randomBytes(65536),'disk_full');
   const released=await client.release({id:randomUUID()});save('workspace-release.json',released);await o.stopped('workspace',id);
-  const exp=await o.start('workspace-expiry',30),expKey=(await ok('POST',`/v1/leases/${exp}/credential`,{},o.app.credential)).credential;
+  // Leave time for disk preallocation and boot before opening both active operations.
+  const exp=await o.start('workspace-expiry',60),expKey=(await ok('POST',`/v1/leases/${exp}/credential`,{},o.app.credential)).credential;
   const expClient=new LeaseClient({baseUrl:o.origin,ca:o.ca,leaseId:exp,leaseKey:expKey});
   const expOp=randomUUID();
   await expClient.createOperation({id:expOp,member:'primary',action:'shell',arguments:{argv:['/bin/sleep','120'],timeoutMs:180000}});
