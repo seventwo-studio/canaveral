@@ -74,6 +74,7 @@ struct Client {
     response: Vec<u8>,
     response_sent: usize,
     terminal: bool,
+    closing: bool,
     received: Vec<u8>,
     delivered: usize,
     receive: Direction,
@@ -96,6 +97,7 @@ impl Client {
             response: Vec::new(),
             response_sent: 0,
             terminal: false,
+            closing: false,
             received: Vec::new(),
             delivered: 0,
             receive: Direction::default(),
@@ -274,6 +276,7 @@ pub(crate) fn session(
                                         c.received.clear();
                                         c.delivered = 0;
                                         c.id = None;
+                                        c.closing = false;
                                         if c.opened {
                                             c.terminal = true;
                                             c.response.clear();
@@ -298,7 +301,9 @@ pub(crate) fn session(
                                         .iter_mut()
                                         .find(|c| c.id == Some(id))
                                         .ok_or("unknown client")?;
-                                    if c.local_eof || c.send_credit + bytes > data::MAX_CREDIT {
+                                    if (!c.closing && c.local_eof)
+                                        || c.send_credit + bytes > data::MAX_CREDIT
+                                    {
                                         return Err("invalid send credit".into());
                                     }
                                     c.send_credit += bytes;
@@ -311,8 +316,14 @@ pub(crate) fn session(
                                         .ok_or("unknown client")?;
                                     let bytes = data::payload(&data, false)?;
                                     c.receive.receive(seq, bytes.len() as u64)?;
-                                    c.received.extend(bytes);
-                                    c.progress = now();
+                                    if c.closing {
+                                        c.receive.consumed(bytes.len() as u64, &mut budget)?;
+                                    } else {
+                                        c.received.extend(bytes);
+                                    }
+                                    if !c.closing {
+                                        c.progress = now();
+                                    }
                                 }
                                 Frame::HalfClose { id, .. } => {
                                     flows.direction(id, Sender::Host)?;
@@ -343,6 +354,13 @@ pub(crate) fn session(
         let turns = clients.len().min(1);
         for _ in 0..turns {
             let mut c = clients.pop_front().unwrap();
+            if c.closing {
+                if now() - c.progress >= 10000 {
+                    return Err("flow close deadline".into());
+                }
+                clients.push_back(c);
+                continue;
+            }
             let mut retire = false;
             c.send_turn = !c.send_turn;
             let mut moved = 0;
@@ -512,13 +530,18 @@ pub(crate) fn session(
                 clients.push_back(c);
             } else if retire {
                 if let Some(id) = c.id {
-                    if !c.remote_eof {
-                        c.receive.half_close(&mut budget)?;
-                    }
+                    // Keep the existing receive credit and sequence until the
+                    // peer's ordered Close acknowledges our Close. In-flight
+                    // payload remains bounded and validated, then discarded.
                     c.receive
                         .consumed((c.received.len() - c.delivered) as u64, &mut budget)?;
-                    flows.close(id, &mut budget)?;
+                    c.received.clear();
+                    c.delivered = 0;
                     output.queue(Frame::Close { version: 1, id })?;
+                    c.closing = true;
+                    c.progress = now();
+                    let _ = c.socket.shutdown(Shutdown::Both);
+                    clients.push_back(c);
                 }
             } else {
                 clients.push_back(c);
@@ -721,8 +744,9 @@ mod tests {
         );
         send(&mut host, Frame::HalfClose { version: 1, id });
         assert_eq!(client.read(&mut payload).unwrap(), 0);
-        drop(host);
-        assert!(worker.join().unwrap().contains("disconnected"));
+        host.shutdown(std::net::Shutdown::Write).unwrap();
+        let error = worker.join().unwrap();
+        assert!(error.contains("disconnected"), "{error}");
         assert!(!ready.files.load(Ordering::Acquire));
         assert!(ready.initial.load(Ordering::Acquire));
     }
@@ -754,6 +778,75 @@ mod tests {
         let mut bytes = [0; 2];
         control_peer.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"ok");
+    }
+    #[test]
+    fn local_tcp_close_drains_previously_credited_data_until_close_ack() {
+        closing_flow(false, true);
+    }
+    #[test]
+    fn closing_flow_still_rejects_sequence_gaps() {
+        closing_flow(true, true);
+    }
+    #[test]
+    fn closing_flow_acknowledgement_has_a_fixed_deadline() {
+        closing_flow(false, false);
+    }
+    fn closing_flow(invalid: bool, acknowledge: bool) {
+        let (mut host, address, ready, worker) = pair(true);
+        hello(&mut host);
+        let client = tunnel(address);
+        let id = match receive(&mut host) {
+            Frame::Open { id, .. } => id,
+            _ => panic!(),
+        };
+        send(&mut host, Frame::Opened { version: 1, id });
+        assert!(matches!(receive(&mut host), Frame::Credit { .. }));
+        send(
+            &mut host,
+            Frame::Credit {
+                version: 1,
+                id,
+                bytes: 65536,
+            },
+        );
+        drop(client);
+        // Drain the guest's terminal frame, then deliver data already allowed by
+        // its earlier credit, as a host may have queued it before seeing Close.
+        loop {
+            if matches!(receive(&mut host), Frame::Close { .. }) {
+                break;
+            }
+        }
+        send(
+            &mut host,
+            Frame::Data {
+                version: 1,
+                id,
+                seq: if invalid { 1 } else { 0 },
+                data: STANDARD.encode(b"in flight"),
+            },
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        if invalid {
+            let error = worker.join().unwrap();
+            assert!(error.contains("sequence"), "{error}");
+            assert!(!ready.files.load(Ordering::Acquire));
+            return;
+        }
+        assert!(ready.files.load(Ordering::Acquire));
+        if !acknowledge {
+            let started = std::time::Instant::now();
+            let error = worker.join().unwrap();
+            assert!(error.contains("close deadline"), "{error}");
+            assert!(started.elapsed() >= Duration::from_secs(9));
+            assert!(started.elapsed() < Duration::from_secs(11));
+            assert!(!ready.files.load(Ordering::Acquire));
+            return;
+        }
+        send(&mut host, Frame::Close { version: 1, id });
+        host.shutdown(std::net::Shutdown::Write).unwrap();
+        let error = worker.join().unwrap();
+        assert!(error.contains("disconnected"), "{error}");
     }
     #[test]
     fn two_ready_producers_both_progress() {
@@ -804,7 +897,7 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 2);
-        drop(host);
+        host.shutdown(std::net::Shutdown::Write).unwrap();
         assert!(worker.join().unwrap().contains("disconnected"));
     }
     #[test]
@@ -844,7 +937,7 @@ mod tests {
         client.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 403 "));
         assert!(response.ends_with("egress_denied"));
-        drop(host);
+        host.shutdown(std::net::Shutdown::Write).unwrap();
         assert!(worker.join().unwrap().contains("disconnected"));
     }
 }

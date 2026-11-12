@@ -71,6 +71,11 @@ Connect (including DNS) is limited to 10 seconds; a flow with no payload progres
 for 120 seconds closes, including credit stalls. Half-close is directional;
 both drained halves close and retire the flow. Unknown IDs, data before opened,
 excess credit, sequence gaps and data after halfClose are protocol violations.
+A guest-initiated Close retains the flow in a closing state until the host's
+ordered Close acknowledgement. Already granted payload is sequence/credit checked
+and discarded, without new credit or reopening TCP. Closing flows retain their
+budget and count toward the 16-flow ceiling, with a fixed 10-second close deadline
+independent of payload progress. Acknowledgement releases the remaining credit.
 Terminal frames already queued for a just-retired ID may be discarded; retain at
 most 16 such IDs until the next open, then reject stale traffic.
 
