@@ -106,6 +106,13 @@ Exact request variants (the `action` discriminator is required):
 | `finish` | `bytes,sha256` | `{state:"committed",bytes,sha256,durable:true}` for upload; `{state:"verified",bytes,sha256}` for download |
 | `abort` | none | `{state:"aborted"}` after closing descriptors and removing owned staging |
 
+The satellite retains guest ownership across successful begin/read/write steps.
+If it refuses a later step locally (including missed startBefore or expiry during
+journal persistence), it sends transferCancel and reports unknown, preserving the
+lane for the rest of the boot. Idle transferCancel queues descriptor closure but
+has no closure acknowledgement, so sending it cannot justify a definite failure.
+A local receipt must not suppress cancellation of the still-open guest transfer.
+
 All unsuccessful steps return `{state:"failed",code}` or
 `{state:"unknown",code}`; codes are defined in the consumer contract. Finish
 uses exact total bytes and lowercase SHA-256, including empty files. Read returns

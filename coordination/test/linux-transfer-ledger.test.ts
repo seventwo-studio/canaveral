@@ -100,3 +100,25 @@ for (const direction of ['upload','download'] as const) for (const queued of [fa
     } finally {db.close();}
   });
 }
+
+for (const direction of ['upload','download'] as const) {
+  test(`satellite refusal after ${direction} begin keeps successor admission blocked`,()=>{
+    const {db,owner,transfers:t}=ledger(),id=randomUUID(),sha256='a'.repeat(64);
+    try {
+      t.create(db,owner,{id,member:'primary',direction,path:'file',...(direction==='upload'?{bytes:3,sha256,replace:false}:{})},0);
+      t.submit(db,t.row(db,id)!,{step:1,request:direction==='upload'?{action:'beginUpload',path:'file',bytes:3,sha256,replace:false}:{action:'beginDownload',path:'file'}},0,300);
+      t.poll(db,owner,'boot','digest',randomUUID(),1,300,true);
+      t.report(db,owner.id,id,1,direction==='upload'?{state:'writing',offset:0}:{state:'reading',offset:0,bytes:3},2);
+      t.submit(db,t.row(db,id)!,{step:2,request:direction==='upload'?{action:'write',offset:0,data:'YWJj'}:{action:'read',offset:0,maxBytes:3}},3,300);
+      t.poll(db,owner,'boot','digest',randomUUID(),4,300,true);
+      // Local missed-start or post-journal expiry has no guest closure evidence.
+      const receipt={state:'unknown',code:'deadline'};
+      const reply=t.report(db,owner.id,id,2,receipt,5);
+      assert.deepEqual(reply,{transferId:id,step:2,state:'unknown'});
+      assert.deepEqual(t.report(db,owner.id,id,2,receipt,6),reply);
+      assert.throws(()=>t.create(db,owner,{id:randomUUID(),member:'primary',direction:'download',path:'next'},7),error('transfer_busy'));
+      const recovered=new LinuxTransfers(db,8);
+      assert.throws(()=>recovered.create(db,owner,{id:randomUUID(),member:'primary',direction:'download',path:'next'},9),error('transfer_busy'));
+    } finally {db.close();}
+  });
+}

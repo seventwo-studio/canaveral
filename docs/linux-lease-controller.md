@@ -402,6 +402,14 @@ so a shell can produce files while a transfer runs. Unknown transfer blocks that
 transfer lane for the rest of the boot; it does not block commands/control. Definite
 terminal transfers free the lane. A failed step ends the transfer as failed and
 closes/removes owned staging; unconfirmed cleanup is retained for lease cleanup.
+The satellite carries guest ownership across steps. A locally refused later step
+(missed startBefore, expiry during journal persistence, or pre-handoff transport/
+authorization loss) reports unknown and sends priority transferCancel where the
+data lane is available. Idle cancellation has no guest closure acknowledgement;
+its enqueue is not evidence that descriptors/staging are closed. The controller
+already accepts unknown as blocking, including after restart; definite failed
+receipts for an opened transfer must come from guest-confirmed step failure and
+cleanup, never a local refusal.
 An abort of a created transfer may be completed in the controller without a guest
 effect; otherwise it is a serialized guest step, not cancellation of unknown work.
 Further steps on a completed transfer are

@@ -263,3 +263,125 @@ fn launched_workspace_cleanup_requires_positive_joined_data_evidence() {
     s.state.direct.as_mut().unwrap().data_closed = Some(false);
     assert_eq!(s.receipt().unwrap()["receipt"]["dataPlaneClosed"], false);
 }
+
+#[test]
+fn opened_transfer_missed_start_cancels_and_blocks_successors() {
+    opened_transfer_local_refusal(false);
+}
+#[test]
+fn opened_transfer_expiry_after_persistence_cancels_and_blocks_successors() {
+    opened_transfer_local_refusal(true);
+}
+fn opened_transfer_local_refusal(persisted: bool) {
+    for upload in [false, true] {
+        let (_tmp, mut s, mut data, mut guest) = setup();
+        let begin = if upload {
+            json!({"action":"beginUpload","path":"file","bytes":3,"sha256":"a".repeat(64),"replace":false})
+        } else {
+            json!({"action":"beginDownload","path":"file"})
+        };
+        s.accept_transfer_poll(poll(&s, begin, 1, false), clock::now().as_secs_f64(), &data)
+            .unwrap();
+        read_frame(&mut guest);
+        guest
+            .write_all(
+                &wire::encode(
+                    &Frame::TransferReceipt {
+                        version: 1,
+                        id: uuid::Uuid::from_u128(42),
+                        step: 1,
+                        receipt: if upload {
+                            Receipt::Writing { offset: 0 }
+                        } else {
+                            Receipt::Reading {
+                                offset: 0,
+                                bytes: Some(3),
+                                data: None,
+                            }
+                        },
+                    },
+                    wire::Sender::Guest,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        for _ in 0..100 {
+            s.transfer_events(&data).unwrap();
+            if s.state
+                .transfers
+                .current
+                .as_ref()
+                .unwrap()
+                .receipt
+                .is_some()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        s.state
+            .transfers
+            .acknowledge(
+                json!({"transferId":uuid::Uuid::from_u128(42),"step":1,"state":"succeeded"}),
+            )
+            .unwrap();
+        let request = if upload {
+            json!({"action":"write","offset":0,"data":"YWJj"})
+        } else {
+            json!({"action":"read","offset":0,"maxBytes":3})
+        };
+        let sent = clock::now().as_secs_f64();
+        let mut reply = poll(&s, request, 2, false);
+        if !persisted {
+            reply["transfer"]["startBefore"] = json!(1001.0);
+        }
+        let mut calls = 0;
+        s.accept_transfer_poll_with_clock(reply, sent, &data, || {
+            calls += 1;
+            // First read admits work; the second occurs after both journal writes.
+            sent + if persisted && calls == 1 {
+                0.0
+            } else if persisted {
+                121.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, if persisted { 2 } else { 1 });
+        assert!(
+            matches!(read_frame(&mut guest), Frame::TransferCancel { id, .. } if id == uuid::Uuid::from_u128(42))
+        );
+        let body = s.state.transfers.report(json!({})).unwrap();
+        assert_eq!(
+            body["receipt"],
+            json!({"state":"unknown","code":"deadline"})
+        );
+        assert!(s.state.transfers.blocked);
+        s.state
+            .transfers
+            .acknowledge(json!({"transferId":uuid::Uuid::from_u128(42),"step":2,"state":"unknown"}))
+            .unwrap();
+        let mut successor = poll(
+            &s,
+            json!({"action":"beginDownload","path":"next"}),
+            1,
+            false,
+        );
+        successor["transfer"]["id"] = json!(uuid::Uuid::from_u128(43));
+        assert!(s.accept_transfer_poll(successor, sent, &data).is_err());
+        let mut recovered: crate::transfers::Lane = serde_json::from_value(
+            serde_json::from_slice::<Value>(
+                &std::fs::read(s.config.state.join("state.json")).unwrap(),
+            )
+            .unwrap()["transfers"]
+                .clone(),
+        )
+        .unwrap();
+        recovered.recover();
+        assert_eq!(recovered.report(json!({})).unwrap(), body);
+        assert!(data.files_ready());
+        assert!(!s.state.fenced);
+        assert!(data.shutdown().complete());
+    }
+}

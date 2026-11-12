@@ -41,9 +41,21 @@ pub struct Step {
     pub work: Work,
     pub deadline: f64,
     pub handed_off: bool,
+    // Earlier successful steps can still own guest descriptors.
+    #[serde(default)]
+    pub guest_open: bool,
     pub receipt: Option<Receipt>,
     pub acknowledged: bool,
     pub cancel_sent: bool,
+}
+impl Step {
+    pub fn guest_open(&self) -> bool {
+        self.guest_open
+            || matches!(
+                self.receipt,
+                Some(Receipt::Writing { .. } | Receipt::Reading { .. })
+            )
+    }
 }
 impl Lane {
     pub fn poll_id(&mut self) -> Result<Uuid> {
@@ -75,6 +87,10 @@ impl Lane {
             if !step.acknowledged || self.blocked {
                 return Err("transfer lane unresolved");
             }
+        }
+        let guest_open = self.current.as_ref().is_some_and(|s| s.guest_open());
+        if guest_open && self.current.as_ref().is_some_and(|s| s.work.id != work.id) {
+            return Err("transfer lane still guest-owned");
         }
         if work.state != "queued" {
             self.blocked = work.state == "unknown";
@@ -116,17 +132,19 @@ impl Lane {
             work,
             deadline,
             handed_off: false,
-            receipt: frame.is_none().then(|| Receipt::Failed {
-                code: "deadline".into(),
-            }),
+            guest_open,
+            receipt: None,
             acknowledged: false,
             cancel_sent: false,
         });
+        if frame.is_none() {
+            self.loss("deadline");
+        }
         Ok(frame)
     }
     pub fn loss(&mut self, code: &str) {
         if let Some(step) = self.current.as_mut().filter(|s| s.receipt.is_none()) {
-            step.receipt = Some(if step.handed_off {
+            step.receipt = Some(if step.handed_off || step.guest_open() {
                 self.blocked = true;
                 Receipt::Unknown { code: code.into() }
             } else {
@@ -159,6 +177,10 @@ impl Lane {
                     }
                 } else {
                     self.blocked |= matches!(receipt, Receipt::Unknown { .. });
+                    step.guest_open = matches!(
+                        receipt,
+                        Receipt::Writing { .. } | Receipt::Reading { .. } | Receipt::Unknown { .. }
+                    );
                     step.receipt = Some(receipt);
                 }
                 Ok(())

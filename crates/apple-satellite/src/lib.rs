@@ -1238,7 +1238,7 @@ impl Satellite {
             .transfers
             .current
             .as_mut()
-            .filter(|s| s.handed_off && !s.cancel_sent)
+            .filter(|s| (s.handed_off || s.guest_open()) && !s.cancel_sent)
         {
             if data
                 .send_transfer(canaveral_guest_protocol::data::Frame::TransferCancel {
@@ -1258,6 +1258,16 @@ impl Satellite {
         while let Some(frame) = data.receipt() {
             self.state.transfers.event(frame)?;
             self.save()?; // Receipt is durable before any report.
+        }
+        // Local terminal receipts do not prove closure of earlier guest steps.
+        if self.state.transfers.current.as_ref().is_some_and(|s| {
+            s.guest_open()
+                && matches!(
+                    s.receipt,
+                    Some(canaveral_guest_protocol::data::Receipt::Unknown { .. })
+                )
+        }) {
+            self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
         }
         if self
             .state
@@ -1285,6 +1295,15 @@ impl Satellite {
         self.save()
     }
     fn accept_transfer_poll(&mut self, reply: Value, sent: f64, data: &data::Lane) -> Result<()> {
+        self.accept_transfer_poll_with_clock(reply, sent, data, || clock::now().as_secs_f64())
+    }
+    fn accept_transfer_poll_with_clock(
+        &mut self,
+        reply: Value,
+        sent: f64,
+        data: &data::Lane,
+        mut now: impl FnMut() -> f64,
+    ) -> Result<()> {
         let poll: transfers::Poll =
             serde_json::from_value(reply).map_err(|_| "invalid transfer poll")?;
         let lease = &poll.lease;
@@ -1316,7 +1335,7 @@ impl Satellite {
                 work,
                 sent,
                 lease.controller_now,
-                clock::now().as_secs_f64(),
+                now(),
                 self.state.deadline,
             )?
         } else {
@@ -1345,7 +1364,7 @@ impl Satellite {
                 .current
                 .as_ref()
                 .ok_or("missing transfer")?;
-            let now = clock::now().as_secs_f64();
+            let now = now();
             let remaining = guest::remaining_ms(step.deadline, now)
                 .ok()
                 .filter(|_| sent + step.work.start_before - lease.controller_now > now);
@@ -1357,6 +1376,7 @@ impl Satellite {
                     .ok_or("missing transfer")?
                     .handed_off = false;
                 self.state.transfers.loss("deadline");
+                self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
                 return self.save();
             };
             if let canaveral_guest_protocol::data::Frame::TransferRequest { remaining_ms, .. } =
@@ -1374,6 +1394,7 @@ impl Satellite {
                 self.state.transfers.loss("data_channel_lost");
             }
         }
+        self.transfer_events(data)?;
         self.save()
     }
     fn operation_binding(&self) -> Result<Value> {
