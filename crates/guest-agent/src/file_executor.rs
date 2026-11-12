@@ -334,6 +334,20 @@ pub(crate) mod linux {
             }
         }
     }
+    // libc credential wrappers signal all threads, including PID1. Raw syscalls
+    // drop this worker's real/effective/saved IDs and capabilities permanently.
+    fn drop_worker_credentials() -> bool {
+        unsafe {
+            libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+                && libc::syscall(libc::SYS_setgroups, 0usize, std::ptr::null::<libc::gid_t>()) == 0
+                && libc::syscall(libc::SYS_setresgid, 1000u32, 1000u32, 1000u32) == 0
+                && libc::syscall(libc::SYS_setresuid, 1000u32, 1000u32, 1000u32) == 0
+                && libc::geteuid() == 1000
+                && libc::getegid() == 1000
+                && libc::setfsuid(!0) == 1000
+                && libc::setfsgid(!0) == 1000
+        }
+    }
     pub fn start(root: Root) -> Result<Lane> {
         // Raw syscalls affect only this dedicated thread. libc setgroups wrappers
         // can signal all threads; never use those in PID1. No fsuid restoration.
@@ -341,17 +355,7 @@ pub(crate) mod linux {
         let (go, jobs) = mpsc::sync_channel::<Job>(1);
         let (done, receive) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
-            let credentials = unsafe {
-                libc::syscall(libc::SYS_setgroups, 0usize, std::ptr::null::<libc::gid_t>()) == 0
-                    && {
-                        libc::setfsgid(1000);
-                        libc::setfsgid(!0) == 1000
-                    }
-                    && {
-                        libc::setfsuid(1000);
-                        libc::setfsuid(!0) == 1000
-                    }
-            };
+            let credentials = drop_worker_credentials();
             let _ = ready.send(credentials);
             if !credentials {
                 return;
@@ -809,6 +813,33 @@ pub(crate) mod linux {
             if system.metadata().unwrap().dev() != device.metadata().unwrap().dev() {
                 assert!(lookup(&system, "dev/null", libc::O_RDONLY, 0).is_err());
             }
+        }
+        #[test]
+        fn worker_credential_drop_is_permanent_and_thread_local() {
+            if unsafe { libc::getuid() } != 0 {
+                return; // Requires a root-capable Linux namespace; never elevate tests.
+            }
+            std::thread::spawn(|| {
+                assert!(drop_worker_credentials());
+                for syscall in [libc::SYS_getresuid, libc::SYS_getresgid] {
+                    let (mut real, mut effective, mut saved) = (0u32, 0u32, 0u32);
+                    assert_eq!(
+                        unsafe { libc::syscall(syscall, &mut real, &mut effective, &mut saved) },
+                        0
+                    );
+                    assert_eq!((real, effective, saved), (1000, 1000, 1000));
+                }
+                let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+                assert!(status.lines().any(|l| l == "CapEff:\t0000000000000000"));
+                assert!(status.lines().any(|l| l == "NoNewPrivs:\t1"));
+                assert_eq!(
+                    unsafe { libc::syscall(libc::SYS_setresuid, 0u32, 0u32, 0u32) },
+                    -1
+                );
+            })
+            .join()
+            .unwrap();
+            assert_eq!(unsafe { libc::geteuid() }, 0);
         }
         #[test]
         fn syscall_failure_codes_are_closed() {

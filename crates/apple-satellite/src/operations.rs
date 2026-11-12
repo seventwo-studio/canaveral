@@ -58,19 +58,10 @@ impl Command {
         Ok(remaining.min(self.timeout_ms))
     }
 }
-pub fn environment(egress: bool) -> std::collections::BTreeMap<String, String> {
-    let mut env = std::collections::BTreeMap::from([
-        ("HOME".into(), "/workspace/home".into()),
-        ("TMPDIR".into(), "/workspace/tmp".into()),
-        ("npm_config_cache".into(), "/workspace/.npm".into()),
-    ]);
-    if egress {
-        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-            env.insert(key.into(), "http://127.0.0.1:18080".into());
-        }
-        env.insert("NO_PROXY".into(), "localhost,127.0.0.1,::1".into());
-    }
-    env
+/// PID1 derives workspace variables from the immutable launch egress grant.
+/// The control frame must carry no overrides, including for an enabled grant.
+pub fn environment(_egress: bool) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

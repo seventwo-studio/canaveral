@@ -224,8 +224,9 @@ try {
       save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noVZProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal});
       await snapshot(label + '-after', id); active = undefined;
     }
+    const caseFailures:string[]=[];
     if(cfg.workspaceIOVersion===1) {
-      await workspaceCases({cfg,origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped});
+      caseFailures.push(...await workspaceCases({cfg,origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
       const granted=app;
       app=await ok('POST','/v1/consumers',{...appBody('workspace offline'),linuxEgress:{enabled:false}});
       await ok('POST','/v1/linux-lease-grants',{applicationId:app.id,imageId:image.id,revision:image.revision,arch:image.arch,digest:image.digest});
@@ -332,7 +333,8 @@ try {
     const capacity = await api('POST', '/v1/leases', acquireBody(120), app.credential); assert([429,503].includes(capacity.status));
     await snapshot('loss-held', lost);
     active = undefined;
-    save('result.json', {state:'cases-completed', nativeAcceptance:true, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
+    if(caseFailures.length) process.exitCode=1;
+    save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
   }
 } catch (e: any) { save('failure.json', {message:e.message, stack:e.stack, activeLease:active?.id}); process.exitCode = 1; }
 finally {

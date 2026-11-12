@@ -117,7 +117,11 @@ pub struct Assignment {
     required_capabilities: Vec<String>,
     lease: Lease,
     stop_requested: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "workspaceIOVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     workspace_io_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace: Option<WorkspaceAdmission>,
@@ -2221,6 +2225,20 @@ mod tests {
             "capabilities":["command","files"],"requiredCapabilities":["command"],
             "lease":{"state":"provisioning","revision":1,"expiresAt":101.0,"controllerNow":100.0},
             "stopRequested":false}).to_string().as_bytes()).unwrap()
+    }
+    #[test]
+    fn workspace_assignment_uses_controller_acronym_spelling() {
+        let (_tmp, c) = fixture();
+        let mut wire = serde_json::to_value(assignment(&c, uuid::Uuid::from_u128(42))).unwrap();
+        wire["workspaceIOVersion"] = json!(1);
+        wire["workspace"] = json!({"bytes": 16777216, "overheadBytes": 1048576});
+        wire["egress"] = json!({"enabled": true, "policy": "public-https-v1"});
+        let parsed: Assignment = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.workspace_io_version, Some(1));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        wire["workspaceIoVersion"] = wire["workspaceIOVersion"].take();
+        wire.as_object_mut().unwrap().remove("workspaceIOVersion");
+        assert!(serde_json::from_value::<Assignment>(wire).is_err());
     }
     /// Mirrors the controller's receipt rules that matter to the satellite.
     struct Wire {

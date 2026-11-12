@@ -94,19 +94,24 @@ impl Policy {
                 .collect::<Result<_, _>>()?,
         })
     }
-    pub fn address(&self, address: IpAddr, evidence: &Evidence) -> Result<(), ErrorCode> {
-        // Deny reserved holes as well as space outside allocated global unicast.
-        if evidence.interfaces.is_empty() {
-            return Err(ErrorCode::RouteDenied);
-        }
+    fn static_address(&self, address: IpAddr) -> Result<(), ErrorCode> {
         if matches!(address, IpAddr::V6(_)) && !self.allocated.iter().any(|c| c.contains(address))
             || self
                 .denied
                 .iter()
                 .chain(&self.operator)
                 .any(|c| c.contains(address))
-            || evidence.interfaces.contains(&address)
         {
+            return Err(ErrorCode::DestinationDenied);
+        }
+        Ok(())
+    }
+    pub fn address(&self, address: IpAddr, evidence: &Evidence) -> Result<(), ErrorCode> {
+        self.static_address(address)?;
+        if evidence.interfaces.is_empty() {
+            return Err(ErrorCode::RouteDenied);
+        }
+        if evidence.interfaces.contains(&address) {
             return Err(ErrorCode::DestinationDenied);
         }
         if evidence.prefix != 0 || !evidence.gateway || evidence.direct {
@@ -138,6 +143,11 @@ impl Policy {
             if answers != [ip] {
                 return Err(ErrorCode::DestinationDenied);
             }
+        }
+        // A known forbidden destination never needs a route lookup to deny it.
+        // Vet the entire answer set before collecting any native evidence.
+        for address in answers {
+            self.static_address(*address)?;
         }
         for address in answers {
             self.address(
@@ -265,6 +275,30 @@ mod tests {
         }
         assert!(Cidr::parse("0.0.0.0/0").unwrap().contains(ip("8.8.8.8")));
         assert!(!Cidr::parse("8.8.8.8/32").unwrap().contains(ip("8.8.8.9")));
+    }
+    #[test]
+    fn forbidden_destination_precedes_unavailable_route_evidence() {
+        let p = Policy::new(&[]).unwrap();
+        let mut h = Host {
+            addresses: vec![],
+            prefix: 0,
+            fail: true,
+        };
+        assert_eq!(
+            p.answers(
+                "169.254.169.254",
+                443,
+                true,
+                true,
+                &[ip("169.254.169.254")],
+                &mut h
+            ),
+            Err(ErrorCode::DestinationDenied)
+        );
+        assert_eq!(
+            p.answers("github.com.", 443, true, true, &[ip("1.1.1.1")], &mut h),
+            Err(ErrorCode::RouteDenied)
+        );
     }
     #[test]
     fn mixed_answers_interfaces_operator_route_and_revalidation() {

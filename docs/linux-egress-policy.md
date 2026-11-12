@@ -138,3 +138,19 @@ If getifaddrs/RTM_GET evidence has not completed within that period, the
 satellite closes all live flows with `route_denied`. A stalled evidence
 worker prevents positive joined cleanup evidence; it is never replaced by
 an unbounded series of workers. Native acceptance remains required.
+
+### Native route incompatibility observed (ST-535, 2026-11-12)
+
+On the authorized Mac, an RTM_GET query before TCP connect reported a default
+route with a gateway. Immediately after connect, the kernel reported a cloned
+/32 host route (HOST and WASCLONED). The unchanged policy correctly refused it
+with `route_denied` before opening the guest tunnel. Thus allowed CONNECT, git
+clone and npm installation did not pass native acceptance. Treating that clone
+as a default route by inference would violate this contract; no such exception
+is implemented. Public HTTPS acceptance needs a separately reviewed policy and
+route-evidence design. This observation does not authorize host route changes.
+
+Static reserved/operator-denied destinations are classified before requesting
+route evidence, so unavailable route evidence cannot hide a known
+`destination_denied` refusal. Darwin's compact all-ones IPv4 host netmask is
+recognized as /32; it remains a specific/direct route and is still denied.

@@ -230,9 +230,11 @@ Git object database. No missing verification dependency is silently skipped.
 The maintained recipe emits version 2 and adds `toolVersions.mkfsExt4`, the exact
 first line of `/usr/sbin/mkfs.ext4 -V` (stderr, captured together with stdout).
 The rootfs includes e2fsprogs from the same bookworm `20261101T000000Z` snapshot.
-Exact package versions and hashes are not known offline and are not fabricated:
-the authorized builder resolves them through apt's signed index, retains every
-installed archive, and exports exact `package=version:architecture` identities
+The authorized native build resolved e2fsprogs `1.47.0-2+b2:arm64` through
+the signed snapshot. [formatter-pins.json](formatter-pins.json) records its
+complete ten-package Depends/Pre-Depends closure and SHA256 pins, verified
+through the pinned Release → Packages → archive chain. The builder retains every
+installed archive and exports exact `package=version:architecture` identities
 and SHA256 pins into `packages.tsv` and recipe provenance. The installed package
 set must equal the retained archive set, including the transitive closure.
 
@@ -253,3 +255,8 @@ arm64 syscall-table entry; there is no openat2 Kconfig switch to enable.
 the actual closure/probe, boot the v2 PID1 implementation, confirm no NIC and both
 vsock listeners, format/mount the separately reserved disk once, observe its
 serial/size, and test filesystem/VZ flush and independent data/control behavior.
+
+The native v2 build disables `CONFIG_NETDEVICES` explicitly. Kconfig omits
+`CONFIG_VIRTIO_NET` when that parent is disabled, so checking for its literal
+“not set” line incorrectly rejected a kernel with no network device drivers.
+The rootfs includes `netcat-openbsd` alongside git, npm, dd and system CAs.

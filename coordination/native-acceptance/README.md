@@ -52,7 +52,7 @@ To typecheck the standalone harness without adding it to ordinary tests:
 
 ```sh
 coordination/node_modules/.bin/tsc --noEmit --target ES2023 --module NodeNext \
-  --moduleResolution NodeNext --strict --types node \
+  --moduleResolution NodeNext --allowImportingTsExtensions --strict --types node \
   --typeRoots coordination/node_modules/@types coordination/native-acceptance/run.ts
 ```
 

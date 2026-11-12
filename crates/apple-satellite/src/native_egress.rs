@@ -531,7 +531,11 @@ fn mask_prefix(bytes: &[u8], address: IpAddr) -> Result<u8, ErrorCode> {
         (libc::AF_INET6, 8, 16, size_of::<libc::sockaddr_in6>())
     };
     if !bytes.is_empty()
-        && (bytes.len() < 2 || bytes.len() > size || (bytes[1] != 0 && bytes[1] as i32 != family))
+        && (bytes.len() < 2
+            || bytes.len() > size
+            || (bytes[1] != 0
+                && bytes[1] as i32 != family
+                && !(address.is_ipv4() && bytes == [8, 255, 255, 255, 255, 255, 255, 255])))
     {
         return Err(ErrorCode::RouteDenied);
     }
@@ -803,6 +807,13 @@ mod tests {
             ip,
             &[8, 0, 0, 0, 255, 255, 255, 255],
             libc::RTF_HOST | libc::RTF_LLINFO | libc::RTF_WASCLONED,
+        );
+        assert_eq!(parse_route(&bytes, ip, 7, 9), Ok((32, false, true)));
+        // Darwin emits this all-ones compact sockaddr for a local IPv4 host mask.
+        let bytes = reply(
+            ip,
+            &[8, 255, 255, 255, 255, 255, 255, 255],
+            libc::RTF_LLINFO,
         );
         assert_eq!(parse_route(&bytes, ip, 7, 9), Ok((32, false, true)));
         let bytes = reply(ip, &[8, 0, 0, 0, 255, 0, 255, 0], libc::RTF_GATEWAY);

@@ -1,0 +1,57 @@
+{
+  "snapshot": "20261101T000000Z",
+  "architecture": "arm64",
+  "authentication": "Pinned Debian primary Release signature -> SHA256 Packages -> SHA256 archives",
+  "formatterClosure": [
+    {
+      "identity": "e2fsprogs=1.47.0-2+b2:arm64",
+      "sha256": "9842c31d32c897e3414168c4fab34cddd1633adacbc7858896e7a797d1be1b24",
+      "archive": "9842c31d32c897e3414168c4fab34cddd1633adacbc7858896e7a797d1be1b24.deb"
+    },
+    {
+      "identity": "gcc-12-base=12.2.0-14+deb12u1:arm64",
+      "sha256": "674cf6cba6d432bd200c45fe866c1652c7a53523cc2e7a613e05bc4abf7b5440",
+      "archive": "674cf6cba6d432bd200c45fe866c1652c7a53523cc2e7a613e05bc4abf7b5440.deb"
+    },
+    {
+      "identity": "libblkid1=2.38.1-5+deb12u3:arm64",
+      "sha256": "6c462ce69d08f1ddaa9a77bbdad4af8e289267095599eb8e92a9ab3ea21cdc41",
+      "archive": "6c462ce69d08f1ddaa9a77bbdad4af8e289267095599eb8e92a9ab3ea21cdc41.deb"
+    },
+    {
+      "identity": "libc6=2.36-9+deb12u14:arm64",
+      "sha256": "01f4330719fd4f65580e16ea5a0527f372fca750e8f588d26deaf09f2d3b1cf4",
+      "archive": "01f4330719fd4f65580e16ea5a0527f372fca750e8f588d26deaf09f2d3b1cf4.deb"
+    },
+    {
+      "identity": "libcom-err2=1.47.0-2+b2:arm64",
+      "sha256": "36c15f933a965b50f4c9558d792d9556934c84e532703935d8ae7e69dd3fa863",
+      "archive": "36c15f933a965b50f4c9558d792d9556934c84e532703935d8ae7e69dd3fa863.deb"
+    },
+    {
+      "identity": "libext2fs2=1.47.0-2+b2:arm64",
+      "sha256": "c1d2551a6238d6a1c64601a0d68183573ca2b5dbd213068d50eaa0747ac1b406",
+      "archive": "c1d2551a6238d6a1c64601a0d68183573ca2b5dbd213068d50eaa0747ac1b406.deb"
+    },
+    {
+      "identity": "libgcc-s1=12.2.0-14+deb12u1:arm64",
+      "sha256": "576926b283613db80168ddf76380a3bd877602778cf0d226caa7bfbfa71eacf3",
+      "archive": "576926b283613db80168ddf76380a3bd877602778cf0d226caa7bfbfa71eacf3.deb"
+    },
+    {
+      "identity": "libss2=1.47.0-2+b2:arm64",
+      "sha256": "e7e5f0cae495b330697b963f375e468130c2f39511d4cbcb4593e5944090f26a",
+      "archive": "e7e5f0cae495b330697b963f375e468130c2f39511d4cbcb4593e5944090f26a.deb"
+    },
+    {
+      "identity": "libuuid1=2.38.1-5+deb12u3:arm64",
+      "sha256": "3b2d19df0f3190108cf54228c4cfc822226c06d8f3615a5ab16a7dffb1f58aed",
+      "archive": "3b2d19df0f3190108cf54228c4cfc822226c06d8f3615a5ab16a7dffb1f58aed.deb"
+    },
+    {
+      "identity": "logsave=1.47.0-2+b2:arm64",
+      "sha256": "a1f985bedd57af42a53c95e1e85ab1663acdb3eabde240d6fc08345d30c1a102",
+      "archive": "a1f985bedd57af42a53c95e1e85ab1663acdb3eabde240d6fc08345d30c1a102.deb"
+    }
+  ]
+}

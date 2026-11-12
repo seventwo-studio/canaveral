@@ -18,7 +18,7 @@ require_primary_signature inputs/debian-release.status "$DEBIAN_PRIMARIES"
 mmdebstrap --mode=unshare --variant=minbase --architectures=arm64 --format=tar \
   --keyring="$BUILD/inputs/debian-archive-keyring.gpg" \
   --aptopt='Acquire::Check-Valid-Until "false"' \
-  --include=bash,coreutils,git,ca-certificates,e2fsprogs \
+  --include=bash,coreutils,git,ca-certificates,e2fsprogs,netcat-openbsd \
   --skip=essential/unlink --customize-hook='copy-out /var/cache/apt/archives '"$BUILD/inputs/debs" \
   --customize-hook="copy-in $BUILD/inputs/node-v24.11.0-linux-arm64.tar.xz /tmp/" \
   --customize-hook="copy-in $BUILD/repo/target/aarch64-unknown-linux-musl/release/canaveral-guest-agent /sbin/" \

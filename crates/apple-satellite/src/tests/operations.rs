@@ -500,18 +500,10 @@ fn workspace_command_deadline_is_fixed_and_conservative() {
     assert!(c.validate_timing(true).is_err());
 }
 #[test]
-fn workspace_environment_only_adds_proxy_with_grant() {
-    let offline = crate::operations::environment(false);
-    assert_eq!(offline.len(), 3);
-    assert_eq!(offline["HOME"], "/workspace/home");
-    assert_eq!(offline["TMPDIR"], "/workspace/tmp");
-    assert_eq!(offline["npm_config_cache"], "/workspace/.npm");
-    let online = crate::operations::environment(true);
-    assert_eq!(online.len(), 8);
-    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-        assert_eq!(online[key], "http://127.0.0.1:18080");
+fn workspace_exec_carries_no_environment_overrides() {
+    for enabled in [false, true] {
+        assert!(crate::operations::environment(enabled).is_empty());
     }
-    assert_eq!(online["NO_PROXY"], "localhost,127.0.0.1,::1");
 }
 
 #[test]
