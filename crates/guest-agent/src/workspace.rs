@@ -1,4 +1,4 @@
-//! Workspace discovery and confinement primitives. PID1 integration remains gated.
+//! Workspace discovery and confinement primitives. PID1 provisions workspace-v2; data readiness remains gated.
 use canaveral_guest_protocol::Result;
 /// Facts collected from kernel sysfs and a read-only signature scan, never /dev ordering.
 pub struct Candidate {
@@ -90,7 +90,7 @@ pub mod confined {
         /// Caller supplies the descriptor pinned immediately after mounting ext4.
         pub fn new(root: File) -> Result<Self> {
             let m = root.metadata()?;
-            if !m.is_dir() || m.uid() != 1000 || m.mode() & 0o777 != 0o700 {
+            if !m.is_dir() || m.uid() != 1000 || m.gid() != 1000 || m.mode() & 0o7777 != 0o700 {
                 return Err("unsafe workspace root".into());
             }
             // Probe syscall/resolve support before files readiness. No realpath fallback.
@@ -257,5 +257,56 @@ mod tests {
         assert!(i.unchanged(&j));
         j.ctime.1 = 1;
         assert!(!i.unchanged(&j));
+    }
+}
+
+/// A fresh satellite disk is zero-filled. Requiring every byte to be zero is
+/// deliberately stricter than recognizing a finite filesystem/signature list.
+/// It catches backup GPT/superblocks and unknown signatures without libblkid.
+pub fn require_blank(reader: &mut impl std::io::Read, expected_bytes: u64) -> Result<()> {
+    let mut buffer = [0; 65536];
+    let mut bytes = 0u64;
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            return if bytes == expected_bytes {
+                Ok(())
+            } else {
+                Err("short workspace signature scan".into())
+            };
+        }
+        bytes = bytes
+            .checked_add(n as u64)
+            .ok_or("workspace scan overflow")?;
+        if bytes > expected_bytes {
+            return Err("workspace size changed during scan".into());
+        }
+        if buffer[..n].iter().any(|b| *b != 0) {
+            return Err("workspace contains existing data or signatures".into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod blank_tests {
+    use super::*;
+    #[test]
+    fn rejects_primary_backup_and_unknown_signatures() {
+        let mut bytes = vec![0; 131072];
+        assert!(require_blank(&mut bytes.as_slice(), 131072).is_ok());
+        assert!(require_blank(&mut bytes.as_slice(), 131073).is_err());
+        assert!(require_blank(&mut bytes.as_slice(), 131071).is_err());
+        for offset in [0, 510, 512, 1024 + 56, 65536, 131071] {
+            bytes[offset] = 1;
+            assert!(require_blank(&mut bytes.as_slice(), 131072).is_err());
+            bytes[offset] = 0;
+        }
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::Other.into())
+            }
+        }
+        assert!(require_blank(&mut Broken, 1).is_err());
     }
 }

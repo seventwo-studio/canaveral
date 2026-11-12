@@ -1,4 +1,4 @@
-use crate::{runtime, Launch};
+use crate::{launch::BootLaunch, runtime};
 use canaveral_guest_protocol::Result;
 use std::{
     ffi::CString,
@@ -9,7 +9,13 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
 };
-fn mount(source: &str, target: &str, kind: &str, flags: libc::c_ulong, data: &str) -> Result<()> {
+pub(crate) fn mount(
+    source: &str,
+    target: &str,
+    kind: &str,
+    flags: libc::c_ulong,
+    data: &str,
+) -> Result<()> {
     fs::create_dir_all(target)?;
     let (source, target, kind, data) = (
         CString::new(source)?,
@@ -32,7 +38,7 @@ fn mount(source: &str, target: &str, kind: &str, flags: libc::c_ulong, data: &st
     Ok(())
 }
 pub(crate) fn run() -> Result<()> {
-    // Root is supplied as read-only EROFS; never remount or format a block device.
+    // Root is read-only EROFS; only the independently identified v2 workspace may be formatted.
     mount(
         "proc",
         "/proc",
@@ -69,16 +75,28 @@ pub(crate) fn run() -> Result<()> {
         libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
         "size=1048576,mode=0755",
     )?;
-    mount(
-        "tmpfs",
-        "/workspace",
-        "tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        &format!(
-            "size={},uid=1000,gid=1000,mode=0700",
-            launch.workspace_bytes
-        ),
-    )?;
+    let launch = match launch {
+        BootLaunch::Legacy(launch) => {
+            mount(
+                "tmpfs",
+                "/workspace",
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV,
+                &format!(
+                    "size={},uid=1000,gid=1000,mode=0700",
+                    launch.workspace_bytes
+                ),
+            )?;
+            launch
+        }
+        BootLaunch::Workspace(launch) => {
+            crate::workspace_boot::loopback()?;
+            let _workspace = crate::workspace_boot::prepare(&launch)?;
+            // Never enter the legacy reactor: command readiness requires both
+            // v2 handshakes. Retain this explicit gate until data integration.
+            return Err("workspace mounted; v2 data handshake is not implemented".into());
+        }
+    };
     runtime::probes(&launch)?;
     let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
@@ -135,7 +153,7 @@ pub(crate) fn run() -> Result<()> {
 }
 
 /// Kernel mountinfo and sysfs are mounted by PID1 above, never supplied by rootfs.
-fn read_launch() -> Result<Launch> {
+fn read_launch() -> Result<BootLaunch> {
     let device = launch_mount(&fs::read_to_string("/proc/self/mountinfo")?)?;
     let nonce = fs::read_to_string("/proc/cmdline")?
         .split_whitespace()
@@ -187,9 +205,8 @@ fn read_launch() -> Result<Launch> {
     if bytes.len() > 16384 {
         return Err("launch config too large".into());
     }
-    let launch: Launch = serde_json::from_slice(&bytes)?;
-    launch.validate()?;
-    if launch.binding.boot_attempt.to_string() != nonce[0] {
+    let launch = BootLaunch::parse(&bytes)?;
+    if launch.binding().boot_attempt.to_string() != nonce[0] {
         return Err("boot nonce mismatch".into());
     }
     Ok(launch)

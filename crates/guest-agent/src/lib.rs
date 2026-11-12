@@ -57,3 +57,8 @@ pub use classic::run as run_classic_worker;
 pub mod atspi;
 
 pub mod workspace;
+
+#[cfg(any(target_os = "linux", test))]
+mod launch;
+#[cfg(target_os = "linux")]
+mod workspace_boot;
