@@ -470,3 +470,78 @@ fmt; coordination typecheck/build and 1026 tests at concurrency two; standalone
 harness typecheck and process-attribution regression; seven signature-gate
 regressions; no-Python check; and the v1 public-API fixture. These results retain
 the experimental scope and previously listed production/topology acceptance gaps.
+
+### Main integration and full native acceptance (2026-11-13)
+
+PR 24 integrates PR 23's squash merge `e9fe93e` through merge commit `9caaabf`.
+Operation and transfer polls distinguish lane cancellation from a runtime stop:
+rotation, operation failure and transfer uncertainty leave an otherwise eligible
+lease running. Unservable active owners receive failure-bearing runtime stops;
+terminal leases retain a null failure. Pending runtime receipts and fresh readiness
+precede polls. Both acknowledgment paths accept the controller's first terminal
+outcome without replacing local uncertainty or replaying guest effects.
+
+The disposable Lima builder used 4 CPU / 8 GiB / 40 GiB and source `9caaabf`.
+All source signatures and all 119 Debian archives authenticated under unchanged
+pins, including the ten-package e2fsprogs closure. Apt received exact verified
+metadata and SHA256-checked archives through the loopback mirror, using only the
+pinned-primary keyring. No package bypassed that mirror. Authentication evidence
+is retained under `/private/tmp/canaveral-pr24-main/signature-authentication/`.
+Preflight and byte-for-byte duplicate bundle assembly passed. Installed immutable
+artifacts are in `~/.canaveral-native/artifacts/bundle-pr24-main`, bundle digest
+`1c9a1e93b7a4c3fe419c278f8cfaa79502165a03c7983c66068e30b663cc0216`.
+The production helper was rebuilt with full Xcode and signed through the local
+session wrapper; no identity details are exported.
+
+Rootfs SHA256 changed from
+`cbedf77aadd9291a3fc4c4864f1014fdd2401fce36688874e6cd39e04324ac46` to
+`a384225c087544447e357b015fe3bb1c994a74dc7bfbc9cffe7c23acba4d92fe`.
+Extracted non-agent file contents match; the rebuilt guest executable differs in
+symbol metadata and build ID. Removing symbols and the build-ID note produces
+identical executable payloads, SHA256
+`b450a066cb1fe2643fb85c06094f360dd771c7a2867cadd6e64fd5c81fcdc532`.
+Kernel and initrd digests are unchanged. This establishes the observed binary
+cause of the rootfs difference without claiming whole-build reproducibility.
+
+One full native run, `/private/tmp/canaveral-pr24-main/canaveral-native-vqpCrg`,
+records `nativeAcceptance:true`, zero case failures, using host `e151061` and
+one 2 CPU / 4096 MiB / approximately 8 GiB guest at a time:
+
+- Workspace discovery, ext4 format/mount, both vsock channels and readiness passed.
+  Public CONNECT, pinned clone, npm ci/test and build-log download passed. Guest
+  npm execution took 137391/517 ms; downloaded log SHA256 is
+  `0eee63df96489eaf6c76ca4a1e404942a323664219544436af8e4abf3da9dbd6`.
+- Empty, binary and 307200-byte round trips, replacement, no-replace conflict and
+  disk-full receipts passed. Host LAN/tailnet/loopback, metadata/private targets,
+  port 80, foreign application and egress-off denials passed.
+- Active command/upload expiry preserved unknown outcomes; the upload retained
+  `authorization_lost`. The v1 command/output, isolation, renewal, release and
+  ordinary expiry cases passed. Renewal's command completed 2999 ms after the
+  original deadline. All five normal cleanup groups required workspaceRemoved
+  and dataPlaneClosed before releasing capacity and independently proved owned
+  helper/VZ absence and workspace/machine/relay removal.
+- Satellite-loss fencing stopped the helper 316 ms after its deadline, before
+  recovery. Recovery retained one unknown reservation. Post-run PID attribution,
+  helper-lock and lsof checks preceded external removal of owned residual storage.
+  The journal remains unchanged; the stopped private database retains its unknown
+  reservation pending operator reconciliation. No cleanup receipt was fabricated.
+
+Raw configuration, process argv, receipts, probe output and build-log bytes stay
+under `private/`. Shared JSON uses fixed field/value allowlists; console output
+uses the milestone allowlist, and proxy filenames use roles rather than targets.
+The final exporter preserves typed cleanup flags and deadlines; shared evidence
+was regenerated from private receipts and all 463 files passed checks for IPs,
+configured deny targets, private paths and signing identity fields.
+
+Portable checks passed: coordination typecheck/build and 1034 tests at concurrency
+two; all 249 Rust tests with two jobs and one test thread; workspace/all-target
+clippy and guest AArch64 MUSL clippy with warnings denied; fmt; all 17 Swift tests
+selected by `DirectBoot|SerialConsoleTests` under Xcode 27.2.0; nine signature/mirror
+regressions; five evidence/process regressions; standalone harness typecheck;
+no-Python check; and the v1 public API fixture.
+
+All owned runtime processes and storage, the builder and temporary source/input
+and duplicate assembly copies were removed. Installed artifacts and private
+acceptance evidence remain. Unrelated VMs and untracked coordination dependencies
+were untouched. Production, topology and the previously listed acceptance gaps
+remain open.

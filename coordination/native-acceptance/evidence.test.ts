@@ -36,3 +36,9 @@ test('workspace receipts retain outcomes while refusing raw logs, paths and prob
   assert(clean.includes('succeeded'));assert(clean.includes('a'.repeat(64)));
   for(const value of [...privateValues,raw.result.stdoutBase64]) assert(!clean.includes(value));
 });
+
+test('evidence keeps cleanup flags and original deadline as typed fields', async () => {
+  const {receiptEvidence}=await import('./evidence.ts');
+  const flags={machineRemoved:true,relayRemoved:true,workspaceRemoved:true,dataPlaneClosed:true,requirementSatisfied:true,originalExpiresAt:123};
+  assert.deepEqual(receiptEvidence(flags),flags);
+});
