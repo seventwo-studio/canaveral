@@ -709,7 +709,6 @@ impl Satellite {
             });
         }
         self.state.fenced = true;
-        self.save()?;
         if self.state.prepared && !self.state.stopped && !self.state.cleaning {
             self.authorize()?;
             self.write_machine(
@@ -717,7 +716,9 @@ impl Satellite {
                 json!({"id":self.assignment()?.member_id,"boot":self.state.boot}),
             )?;
         }
-        Ok(())
+        // Fencing only removes authority. Publish it before journal persistence
+        // so a stalled journal cannot postpone the helper or data fence.
+        self.save()
     }
     fn expired(&self) -> bool {
         clock::now().as_secs_f64() >= self.state.deadline
@@ -2376,6 +2377,24 @@ mod tests {
         std::fs::create_dir(c.state.join("state.next")).unwrap();
         assert!(s.fence_for(StopCause::Runtime).is_err());
         assert!(!authority.permits());
+    }
+    #[test]
+    fn native_fence_is_published_before_a_failed_journal_write() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        s.dir.workspace().unwrap();
+        let machine = s.machine().unwrap();
+        std::fs::create_dir(&machine).unwrap();
+        std::fs::set_permissions(&machine, std::fs::Permissions::from_mode(0o700)).unwrap();
+        s.state.prepared = true;
+        std::fs::create_dir(c.state.join("state.next")).unwrap();
+        assert!(s.fence_for(StopCause::Runtime).is_err());
+        let native: Value = serde_json::from_slice(
+            &std::fs::read(machine.join("lease-authorization.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(native["fenced"], true);
+        assert!(machine.join("power-off.request").exists());
     }
     #[test]
     fn late_errors_recheck_deadline_but_observed_process_exit_wins() {
