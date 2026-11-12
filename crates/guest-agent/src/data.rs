@@ -1109,7 +1109,9 @@ mod tests {
         assert!(flows.close(id, &mut budget).unwrap());
         assert!(!flows.close(id, &mut budget).unwrap());
         flows.open(Uuid::from_u128(17)).unwrap();
-        assert!(flows.close(id, &mut budget).is_err());
+        assert!(!flows.close(id, &mut budget).unwrap());
+        assert!(flows.close(Uuid::nil(), &mut budget).is_err());
+        assert!(flows.close(Uuid::from_u128(18), &mut budget).is_err());
         assert!(flows.open(id).is_err());
     }
     #[test]
