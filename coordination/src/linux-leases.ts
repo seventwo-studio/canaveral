@@ -584,7 +584,7 @@ export class LinuxLeases {
       }
       return { command: op ? { id: op.id, leaseId: lease.id, memberId: lease.member, assignmentId: a.id, bootAttempt: boot, bundleDigest: digest,
         arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: 30000, state: op.state } : null,
-        lease: this.authorization(lease, now), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
+        lease: this.authorization(lease, now), stopRequested: !eligible, cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
     });
   }
   reportOperation(token: string, value: unknown): unknown {

@@ -1054,8 +1054,7 @@ impl Satellite {
             && lease.revision >= self.state.revision
             && lease.revision > 0
             && lease.revision <= canaveral_guest_protocol::MAX_SAFE
-            && (poll.cancel_requested
-                || matches!(lease.state.as_str(), "released" | "expired" | "failed"))
+            && matches!(lease.state.as_str(), "released" | "expired" | "failed")
         {
             self.state.terminal = true;
             self.fence_for(StopCause::Controller)?;
@@ -1078,6 +1077,11 @@ impl Satellite {
             self.save()?;
             self.authorize()?;
         }
+        if poll.stop_requested {
+            // The lease is active, so a failure-bearing stop must end it before cleanup.
+            self.fence_for(StopCause::Runtime)?;
+            return Ok(());
+        }
         let Some(c) = poll.command else {
             return Ok(());
         };
@@ -1097,6 +1101,21 @@ impl Satellite {
             || !a.capabilities.iter().any(|c| c == "command")
         {
             return Err("operation launch binding mismatch");
+        }
+        if poll.cancel_requested {
+            if let Some(op) = self.state.operations.current.as_mut() {
+                if op.command.id != c.id {
+                    return Err("operation cancellation binding mismatch");
+                }
+                if !op.cancel_sent {
+                    if let Some(id) = op.guest_id.filter(|_| op.receipt.is_none()) {
+                        session.ok_or("missing guest session")?.cancel(id)?;
+                    }
+                    op.cancel_sent = true;
+                    self.save()?;
+                }
+            }
+            return Ok(());
         }
         if let Some(op) = self
             .state

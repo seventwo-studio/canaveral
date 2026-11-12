@@ -33,6 +33,8 @@ pub struct Poll {
     pub command: Option<Command>,
     pub lease: Lease,
     pub cancel_requested: bool,
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -103,7 +105,11 @@ impl Lane {
             return Err("operation acknowledgment mismatch");
         }
         // Server may already have conservatively marked a dispatched operation unknown.
-        if reply["state"] != receipt["state"] {
+        if reply["state"] != receipt["state"]
+            && !(op.cancel_sent
+                && receipt["state"] != "unknown"
+                && matches!(reply["state"].as_str(), Some("failed" | "unknown")))
+        {
             return Err("operation outcome differs; fence");
         }
         Ok(())

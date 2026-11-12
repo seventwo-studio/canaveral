@@ -204,7 +204,7 @@ test("operation roles, canonical replay, bound handoff, terminal replay and resu
   await rejectsWith(client.operation(randomUUID()), 404);
   assert.equal((await f.post(route, { ...req, id: randomUUID(), extra: true }, credential)).status, 400);
   const handoff = await f.ok(x.poll());
-  assert.deepEqual(Object.keys(handoff).sort(), ["cancelRequested", "command", "lease"]);
+  assert.deepEqual(Object.keys(handoff).sort(), ["cancelRequested", "command", "lease", "stopRequested"]);
   assert.deepEqual(handoff.command, { id: req.id, leaseId: x.lease.id, memberId: x.a.memberId, assignmentId: x.a.id, bootAttempt: x.boot.bootAttempt,
     bundleDigest: x.boot.bundleDigest, arguments: req.arguments, startBefore: T0 + 120, timeoutMs: 30000, state: "queued" });
   assert.equal((await f.ok(x.poll({ ...x.pollBody, pollId: randomUUID() }))).command, null);
@@ -283,7 +283,11 @@ for (const dispatched of [false, true]) for (const invalidation of ["rotation", 
       case "release": await x.client.release({ id: randomUUID() }); break;
     }
     if (invalidation !== "application") assert.equal((await current.operation(req.id)).state, dispatched ? "unknown" : "failed");
-    if (invalidation !== "runner") assert.equal((await x.f.ok(x.poll())).cancelRequested, dispatched || invalidation !== "rotation");
+    if (invalidation !== "runner") {
+      const poll = await x.f.ok(x.poll());
+      assert.equal(poll.cancelRequested, dispatched || invalidation !== "rotation");
+      assert.equal(poll.stopRequested, invalidation !== "rotation");
+    }
     assert.equal((await x.f.inspectDomain(x.domain)).reservations, 1);
     if (invalidation === "readiness") {
       await x.f.ok(x.f.report(x.runner, x.a.id, 3, x.f.receipt(x.a, x.f.running)));
@@ -373,4 +377,36 @@ test("backend eligibility denies command admission on KubeVirt", async t => {
   const a = (await f.claim(runner)).assignment!; await f.ok(f.report(runner, a.id, 1, f.receipt(a, f.running)));
   const key = (await app.client().rotateLeaseCredential(lease.id)).credential;
   await rejectsWith(f.leaseClient(lease.id, key).createOperation(intent()), 409);
+});
+
+for (const reason of ["failed", "unknown", "rotation"] as const) {
+  test(`operation-only ${reason} cancellation keeps a ready lease eligible`, async t => {
+    const x = await ready(t), req = intent();
+    await x.client.createOperation(req); await x.f.ok(x.poll());
+    if (reason === "failed") await x.f.ok(x.reportOp(req.id, { state: "failed" }));
+    else if (reason === "unknown") x.f.clock(T0 + 35);
+    else await x.app.client().rotateLeaseCredential(x.lease.id);
+    const poll = await x.f.ok(x.poll());
+    assert.equal(poll.cancelRequested, true);
+    assert.equal(poll.stopRequested, false);
+    assert.equal((poll.lease as Body).state, "ready");
+    assert.equal((await x.f.inspectDomain(x.domain)).reservations, 1);
+  });
+}
+
+test("revoked approval requests a failure-bearing stop and releases only after cleanup", async t => {
+  const x = await ready(t), req = intent();
+  await x.client.createOperation(req); await x.f.ok(x.poll());
+  await x.f.ok(x.f.post("/v1/linux-lease-runner-approvals/revoke", { binding: x.runner.binding }, x.f.admin));
+  const poll = await x.f.ok(x.poll());
+  assert.equal(poll.cancelRequested, true);
+  assert.equal(poll.stopRequested, true);
+  assert.equal((poll.lease as Body).state, "ready");
+  const stopped = await x.f.ok(x.f.report(x.runner, x.a.id, 2, x.f.receipt(x.a, { runtimeState: "stopped", failure: "runtime" })));
+  assert.equal((stopped.lease as Body).state, "failed");
+  assert.equal(stopped.released, false);
+  assert.equal((await x.f.inspectDomain(x.domain)).reservations, 1);
+  const clean = await x.f.ok(x.f.report(x.runner, x.a.id, 3, x.f.receipt(x.a, { ...x.f.stoppedClean, failure: "runtime" })));
+  assert.equal(clean.released, true);
+  assert.equal((await x.f.inspectDomain(x.domain)).reservations, 0);
 });

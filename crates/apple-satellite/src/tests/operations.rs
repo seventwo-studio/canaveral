@@ -464,3 +464,107 @@ fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
     assert_eq!(reports[0].1["receipt"], json!({"state":"unknown"}));
     assert!(!w.requests.iter().any(|(name, _)| *name == "operationPoll"));
 }
+
+#[test]
+fn active_operation_cancellation_cancels_guest_without_fencing() {
+    for state in ["failed", "unknown", "queued"] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let mut cmd = command();
+        let a = s.assignment().unwrap();
+        cmd.assignment_id = a.id;
+        cmd.lease_id = a.lease_id;
+        cmd.member_id = a.member_id;
+        s.state.direct = Some(Direct {
+            boot_attempt: cmd.boot_attempt,
+            revision: 1,
+            bundle_digest: cmd.bundle_digest.clone(),
+            artifacts: vec![],
+            medium: None,
+            agent_socket: None,
+            ready: true,
+            withdrawn: false,
+            timings: Timings::default(),
+        });
+        s.state.operations.receive(cmd.clone(), 200.0).unwrap();
+        let id = uuid::Uuid::from_u128(99);
+        s.state.operations.current.as_mut().unwrap().guest_id = Some(id);
+        let (mut session, mut peer) = ready();
+        cmd.state = state.into();
+        let poll = json!({"command":cmd,"cancelRequested":true,"stopRequested":false,
+            "lease":{"state":"ready","revision":1,"expiresAt":200.0,"controllerNow":100.0}});
+        s.accept_poll(poll.clone(), clock::now().as_secs_f64(), Some(&mut session))
+            .unwrap();
+        session.pump(100.0).unwrap();
+        let mut decoder = Decoder::default();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = peer.read(&mut buf[..decoder.needed().min(4096)]).unwrap();
+            if let Some(frame) = decoder.feed(&buf[..n]).unwrap() {
+                assert!(matches!(frame, Host::Cancel { id: actual, .. } if actual == id));
+                break;
+            }
+        }
+        assert!(s.state.operations.current.as_ref().unwrap().cancel_sent);
+        // A cancelled handoff that never reached local intent must not launch either.
+        let current = s.state.operations.current.take();
+        s.accept_poll(poll.clone(), clock::now().as_secs_f64(), None)
+            .unwrap();
+        assert!(s.state.operations.current.is_none());
+        s.state.operations.current = current;
+        // Replays do not need another cancellation or another exec.
+        s.accept_poll(poll, clock::now().as_secs_f64(), None)
+            .unwrap();
+        s.state
+            .operations
+            .current
+            .as_mut()
+            .unwrap()
+            .event(
+                Guest::Exit {
+                    version: 1,
+                    id,
+                    status: None,
+                    signal: Some(15),
+                    timed_out: false,
+                    duration_ms: 1,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    termination_confirmed: true,
+                },
+                &mut session,
+            )
+            .unwrap();
+        s.acknowledge_operation(
+            json!({"operationId":cmd.id,"state":if state == "failed" {"failed"} else {"unknown"}}),
+        )
+        .unwrap();
+        assert!(!s.state.fenced && !s.state.terminal);
+        assert!(s.state.operations.current.as_ref().unwrap().acknowledged);
+    }
+}
+
+#[test]
+fn active_assignment_stop_reports_runtime_failure_and_terminal_stops_remain_clean() {
+    for state in ["ready", "released", "expired", "failed"] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        s.accept_poll(
+            json!({"command":null,"cancelRequested":true,"stopRequested":true,
+            "lease":{"state":state,"revision":1,"expiresAt":200.0,"controllerNow":100.0}}),
+            clock::now().as_secs_f64(),
+            None,
+        )
+        .unwrap();
+        assert!(s.state.fenced);
+        assert_eq!(s.state.terminal, state != "ready");
+        assert_eq!(
+            s.receipt().unwrap()["receipt"]["failure"],
+            if state == "ready" {
+                json!("runtime")
+            } else {
+                Value::Null
+            }
+        );
+    }
+}
