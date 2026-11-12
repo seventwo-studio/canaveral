@@ -417,7 +417,12 @@ A lost HTTP response permits replay of the identical stored request to retrieve
 its receipt, never re-execution. A caller may retry a pending step using the same
 step/body; the controller does not hand it out twice. Controller crash/restart
 fails undispatched steps with `controller_restarted` and makes dispatched steps
-without accepted receipts unknown. Even if the satellite later supplies success,
+without accepted receipts unknown. An acknowledged begin (writing/reading) also
+becomes unknown between steps, even with no pending step or only an undispatched
+next step: the guest still owns the transfer. Polls request cancellation, but
+the lane remains blocked for the rest of the boot, including after restart;
+cleanup is not inferred from an earlier step receipt. Even if the satellite later
+supplies success,
 first-terminal-wins preserves that unknown. Queued data bytes are erased on
 invalidation. The controller asks the still-running satellite to abort the
 transfer; it does not infer guest rollback from deletion of its spool.

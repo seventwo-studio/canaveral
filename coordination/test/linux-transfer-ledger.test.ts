@@ -76,3 +76,27 @@ test('unknown dispatched work still requests cancellation on a fresh poll',()=>{
     assert.throws(()=>t.create(db,owner,{id:randomUUID(),member:'primary',direction:'download',path:'next'},124),error('transfer_busy'));
   } finally {db.close();}
 });
+
+for (const direction of ['upload','download'] as const) for (const queued of [false,true]) {
+  test(`restart between ${direction} steps keeps guest-owned lane blocked (queued=${queued})`,()=>{
+    const {db,owner,transfers:t}=ledger(),id=randomUUID(),sha256='a'.repeat(64);
+    try {
+      t.create(db,owner,{id,member:'primary',direction,path:'file',...(direction==='upload'?{bytes:3,sha256,replace:false}:{})},0);
+      t.submit(db,t.row(db,id)!,{step:1,request:direction==='upload'?{action:'beginUpload',path:'file',bytes:3,sha256,replace:false}:{action:'beginDownload',path:'file'}},0,300);
+      const poll=randomUUID();t.poll(db,owner,'boot','digest',poll,1,300,true);
+      t.report(db,owner.id,id,1,direction==='upload'?{state:'writing',offset:0}:{state:'reading',offset:0,bytes:3},2);
+      if(direction==='upload') {
+        t.submit(db,t.row(db,id)!,{step:2,request:{action:'write',offset:0,data:'YWJj'}},3,300);
+        t.poll(db,owner,'boot','digest',randomUUID(),4,300,true);
+        t.report(db,owner.id,id,2,{state:'writing',offset:3},5);
+      }
+      if(queued) t.submit(db,t.row(db,id)!,{step:direction==='upload'?3:2,request:{action:'abort'}},6,300);
+      let recovered=new LinuxTransfers(db,7);
+      assert.equal(recovered.row(db,id)!.state,'unknown');
+      if(queued) assert.equal(recovered.step(db,id,direction==='upload'?3:2)!.state,'failed');
+      for(const p of [poll,randomUUID()]) assert.equal((recovered.poll(db,owner,'boot','digest',p,8,300,true) as {cancelRequested:boolean}).cancelRequested,true);
+      recovered=new LinuxTransfers(db,9);
+      assert.throws(()=>recovered.create(db,owner,{id:randomUUID(),member:'primary',direction:'download',path:'next'},10),error('transfer_busy'));
+    } finally {db.close();}
+  });
+}
