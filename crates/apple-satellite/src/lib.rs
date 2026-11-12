@@ -2420,3 +2420,4 @@ mod tests {
 }
 
 pub mod egress;
+pub mod native_egress;
