@@ -6,7 +6,6 @@ import {randomUUID, randomBytes, createHash} from 'node:crypto';
 import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync, copyFileSync} from 'node:fs';
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
-import {hostname, userInfo} from 'node:os';
 import {promisify} from 'node:util';
 import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence} from './evidence.ts';
 const exec = promisify(execFile);
@@ -182,7 +181,7 @@ try {
       for (const name of ['boot.log', 'console.log']) if (existsSync(join(machine, name))) {
         const raw = readFileSync(join(machine, name));
         writeFileSync(pem(id + '-' + name), raw);
-        writeFileSync(evidence(id + '-' + name), consoleEvidence(raw.toString('utf8'), [hostname(), hostname().split('.')[0]!, userInfo().username]));
+        writeFileSync(evidence(id + '-' + name), consoleEvidence(raw.toString('utf8')));
       }
       if (existsSync(join(machine, 'console.log'))) copyFileSync(evidence(id + '-console.log'), evidence(id + '-boot.log'));
       save(id + '-processes.json', processEvidence(ps, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));

@@ -31,18 +31,22 @@ export function journalEvidence(j: Record<string, any>) {
   return result;
 }
 
-/** Raw console stays private; export only text with host/network identifiers removed. */
-export function consoleEvidence(raw: string, identities: string[] = []) {
-  let text = raw.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-  // Paths may contain spaces; conservatively redact through the end of the line.
-  text = text.replace(/(?:\/[A-Za-z0-9_.-]+)+(?:\/[^\r\n]*)?/g, '[path]');
-  text = text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[ip]');
-  text = text.replace(/[a-fA-F0-9]*:[a-fA-F0-9:.%]+/g, value =>
-    value.includes('::') || value.split(':').length >= 3 ? '[ip]' : value);
-  text = text.replace(/\b[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+/g, '[user]@[host]');
-  text = text.replace(/\b(?:hostname|host|username|user|login)(\s*[:=]\s*)[^\s,;]+/gi, (_, separator) => 'identity' + separator + '[redacted]');
-  text = text.replace(/\b(?:[A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z0-9-]*\b/g, '[host]');
-  for (const identity of identities.filter(Boolean).sort((a,b) => b.length-a.length))
-    text = text.replaceAll(identity, '[identity]');
-  return text;
+/** Export fixed boot milestones only. Never copy arbitrary console fields. */
+export function consoleEvidence(raw: string) {
+  const milestones: string[] = [];
+  let omitted = 0;
+  for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+    // Kernel banners include build users and hosts after the numeric release.
+    const kernel = line.match(/^(?:\[\s*\d+\.\d+\] )?Linux version (\d+\.\d+(?:\.\d+)?)(?=[\s-]|$)/);
+    if (kernel) milestones.push('Linux version ' + kernel[1]);
+    // These prefixes come from boot-bundle/bin/bootstrap and guest-agent/main,
+    // boot.rs. Error/debug payloads are deliberately discarded in full.
+    else if (line.startsWith('bootstrap refused: ')) milestones.push('bootstrap refused');
+    else if (line.startsWith('guest agent fenced: ')) milestones.push('guest agent fenced');
+    else if (line.startsWith('guest session closed: ') && line.endsWith('; native fence required'))
+      milestones.push('guest session closed; native fence required');
+    else omitted++;
+  }
+  if (omitted) milestones.push(omitted + ' lines omitted');
+  return milestones.join('\n') + (milestones.length ? '\n' : '');
 }

@@ -12,10 +12,18 @@ test('native evidence excludes unrelated argv, signing identity and journal path
   for (const privateValue of ['FAKE_SECRET','/Users/','Private Operator','PRIVATE_TEAM','--token']) assert(!all.includes(privateValue));
 });
 
-test('console evidence retains boot milestones and redacts network and host identity', async () => {
+test('console evidence allowlists milestones and discards adversarial payloads', async () => {
   const {consoleEvidence} = await import('./evidence.ts');
-  const raw = 'Linux version 6.12\nBoot ready\n192.168.1.3 2001:db8::1 ::1 fe80::abcd%en0\n/Users/alice/vm/console /private/tmp/vm\nhostname=secret-mac username=alice\nalice@secret-mac.local\nSecretMac alice\n';
-  const clean = consoleEvidence(raw, ['SecretMac', 'alice']);
-  for (const value of ['192.168', '2001:db8', '::1', 'fe80', '/Users', '/private', 'alice', 'secret-mac', 'SecretMac']) assert(!clean.includes(value), clean);
-  assert(clean.includes('Linux version 6.12\nBoot ready'));
+  const secrets = ['token=FAKE_SECRET password=supersecret', '/Users/Alice Smith/private/file',
+    'DHCP hostname secret-host', 'username alice', '192.168.1.3', '2001:db8::1',
+    '::1', '::', 'fe80::abcd%en0', 'alice@secret-host.example'];
+  const milestones = ['Linux version 6.12.1 (alice@secret-host) token=FAKE_SECRET',
+    '[    0.000000] Linux version 6.12.1-private /Users/Alice Smith',
+    'bootstrap refused: password=supersecret', 'guest agent fenced: token=FAKE_SECRET',
+    'guest session closed: Err("alice@secret-host"); native fence required'];
+  const clean = consoleEvidence([...secrets, ...milestones].join('\n'));
+  assert.equal(clean, 'Linux version 6.12.1\nLinux version 6.12.1\nbootstrap refused\nguest agent fenced\nguest session closed; native fence required\n10 lines omitted\n');
+  for (const secret of secrets) assert(!clean.includes(secret));
+  for (const secret of ['FAKE_SECRET', 'supersecret', 'Alice', 'alice', 'secret-host', '/Users']) assert(!clean.includes(secret));
+  assert.equal(consoleEvidence('Boot ready\nLinux version secret-host\n'), '2 lines omitted\n');
 });

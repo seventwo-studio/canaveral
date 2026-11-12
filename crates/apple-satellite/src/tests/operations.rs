@@ -651,3 +651,53 @@ fn lost_starting_report_flushes_current_readiness_before_polling() {
     assert_eq!(w.requests[2].1["receipt"]["ready"]["command"], true);
     assert!(!s.state.fenced);
 }
+
+#[test]
+fn scheduler_tick_replays_pending_then_fresh_readiness_before_poll() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.direct = Some(Direct {
+        boot_attempt: uuid::Uuid::from_u128(3),
+        revision: 1,
+        bundle_digest: "a".repeat(64),
+        artifacts: vec![],
+        medium: None,
+        agent_socket: None,
+        ready: false,
+        withdrawn: false,
+        timings: Timings::default(),
+    });
+    let mut w = wire(s.assignment().unwrap().clone());
+    w.lose = true;
+    assert!(s.report(&mut w).is_err());
+    let pending = s.state.pending.clone().unwrap();
+    s.state.direct.as_mut().unwrap().ready = true;
+    let mut last = Some(clock::Clock::now());
+    let mut polled = None;
+    w.lose = false;
+    // A ready guest and a recent report make polling eligible, but the lost
+    // starting receipt must be replayed first, followed by current readiness.
+    let (route, body) = s
+        .runtime_request_tick(&mut last, &mut polled, true)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(route, LeaseRoute::Report));
+    assert_eq!(body, pending);
+    let reply = w.request(route, body).unwrap();
+    s.accept_runtime_report(reply, clock::now().as_secs_f64(), &mut last)
+        .unwrap();
+    let (route, body) = s
+        .runtime_request_tick(&mut last, &mut polled, true)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(route, LeaseRoute::Report));
+    assert_eq!(body["receipt"]["ready"]["command"], true);
+    let reply = w.request(route, body).unwrap();
+    s.accept_runtime_report(reply, clock::now().as_secs_f64(), &mut last)
+        .unwrap();
+    let (route, _) = s
+        .runtime_request_tick(&mut last, &mut polled, true)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(route, LeaseRoute::OperationPoll));
+}

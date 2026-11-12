@@ -1205,6 +1205,52 @@ impl Satellite {
         }
         self.save()
     }
+    /// Select the next request for the runtime loop, preserving report priority.
+    fn runtime_request_tick(
+        &mut self,
+        last: &mut Option<clock::Clock>,
+        polled: &mut Option<clock::Clock>,
+        guest_ready: bool,
+    ) -> Result<Option<(LeaseRoute, Value)>> {
+        let request =
+            if self.state.pending.is_some() || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
+                if self.state.pending.is_none() {
+                    self.state.pending = Some(self.receipt()?);
+                    self.save()?;
+                }
+                *last = Some(clock::Clock::now());
+                Some((
+                    LeaseRoute::Report,
+                    self.state.pending.clone().ok_or("missing report")?,
+                ))
+            } else if self
+                .state
+                .operations
+                .current
+                .as_ref()
+                .is_some_and(|o| o.receipt.is_some() && !o.acknowledged)
+            {
+                Some((LeaseRoute::OperationReport, self.operation_report()?))
+            } else if guest_ready
+                && self
+                    .assignment()?
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "command")
+                && polled.is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
+            {
+                let poll_id = self.state.operations.poll_id()?;
+                self.save()?;
+                let mut body = self.operation_binding()?;
+                body["pollId"] = json!(poll_id);
+                *polled = Some(clock::Clock::now());
+                Some((LeaseRoute::OperationPoll, body))
+            } else {
+                None
+            };
+        Ok(request)
+    }
+
     /// One durable claim per journal. Restart never repeats prepare/run after launch intent.
     pub fn run_once(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
         if self.state.released {
@@ -1395,45 +1441,13 @@ impl Satellite {
                         }
                     }
                     if !inflight && !self.state.fenced {
-                        let request = if self.state.pending.is_some()
-                            || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY)
-                        {
-                            if self.state.pending.is_none() {
-                                self.state.pending = Some(self.receipt()?);
-                                self.save()?;
-                            }
-                            last = Some(clock::Clock::now());
-                            Some((
-                                LeaseRoute::Report,
-                                self.state.pending.clone().ok_or("missing report")?,
-                            ))
-                        } else if self
-                            .state
-                            .operations
-                            .current
-                            .as_ref()
-                            .is_some_and(|o| o.receipt.is_some() && !o.acknowledged)
-                        {
-                            Some((LeaseRoute::OperationReport, self.operation_report()?))
-                        } else if session
-                            .as_ref()
-                            .is_some_and(|s| s.ready(clock::now().as_secs_f64()))
-                            && self
-                                .assignment()?
-                                .capabilities
-                                .iter()
-                                .any(|c| c == "command")
-                            && polled.is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
-                        {
-                            let poll_id = self.state.operations.poll_id()?;
-                            self.save()?;
-                            let mut body = self.operation_binding()?;
-                            body["pollId"] = json!(poll_id);
-                            polled = Some(clock::Clock::now());
-                            Some((LeaseRoute::OperationPoll, body))
-                        } else {
-                            None
-                        };
+                        let request = self.runtime_request_tick(
+                            &mut last,
+                            &mut polled,
+                            session
+                                .as_ref()
+                                .is_some_and(|s| s.ready(clock::now().as_secs_f64())),
+                        )?;
                         if let Some(request) = request {
                             worker
                                 .send
