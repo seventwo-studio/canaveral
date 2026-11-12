@@ -102,7 +102,9 @@ fn accounting_half_close_and_flow_retirement() {
     assert!(!flows.close(id(1), &mut budget).unwrap());
     assert!(flows.open(id(1)).is_err());
     flows.open(id(2)).unwrap();
-    assert!(flows.close(id(1), &mut budget).is_err());
+    assert!(!flows.close(id(1), &mut budget).unwrap());
+    assert!(flows.close(Uuid::nil(), &mut budget).is_err());
+    assert!(flows.close(id(18), &mut budget).is_err());
     for n in 3..18 {
         flows.open(id(n)).unwrap();
     }
