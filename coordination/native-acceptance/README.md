@@ -257,7 +257,7 @@ topology and host power-loss durability gates. Full production acceptance remain
 
 ## ST-535 native evidence (2026-11-12)
 
-Private run `/private/tmp/canaveral-native-integration-st535/canaveral-native-GcetDy`
+Private run GcetDy
 completed all harness groups using source `4e483db`, the signed production helper,
 one 2 CPU / 4096 MiB / 8 GiB workspace-v2 guest at a time, and bundle digest
 `af15f8ef1bc964874f939f2c7390de64ccd8717fba2d2aac24279b028a71ba11`.
@@ -338,7 +338,7 @@ topology and host power-loss durability remain separate native gates.
 
 The final ST-535 integration run on 2026-11-12 supersedes the earlier passing
 `canaveral-native-YVunMd` run. Private evidence is
-`/private/tmp/canaveral-st535-final-13bb46b/canaveral-native-Vpsi5K`;
+run Vpsi5K;
 `result.json` records `nativeAcceptance:true` and no case failures.
 Host and guest source is `13bb46b`, integrating `e9e1fc8`, `7fa4bd8` and
 `13bb46b`. The rebuilt bundle digest is
@@ -406,7 +406,7 @@ and macOS workspaces remain open.
 ### Connection-churn regression and native reruns (ST-535 / ST-539)
 
 The 2026-11-12–13 Mac reruns address the intermittent npm data-plane failure
-observed in `/private/tmp/canaveral-queue-9oKC6y/canaveral-native-xEPJmL`:
+observed in run xEPJmL:
 npm ci exited 1 after 70668 ms and satellite stderr recorded `unknown flow`.
 The old reactor cleared retired IDs on every Open; a late Close could therefore
 terminate the entire data channel. The guest also echoed the acknowledgement of
@@ -429,15 +429,14 @@ lsof evidence. Its portable regression covers unrelated VMs, sibling media,
 ancestry, reparenting and adjacent path prefixes. The final native run observed
 both helper and launchd-parented VZ PIDs and required their absence on cleanup.
 
-Private evidence root: `/private/tmp/canaveral-pr24-churn`. Guest runtime source
+Private evidence set: pr24-churn. Guest runtime source
 is `4ecd68e`; later guest/protocol commits only adjust test expectations. The
 final host/harness source is `2861955`. A unique disposable Lima VZ builder
 (4 CPU / 8 GiB / 40 GiB) rebuilt the guest and rootfs using unchanged pins and
 the authenticated unchanged kernel. Complete signature verification passed for
 all source inputs and all 119 Debian packages, including the ten-package formatter
 closure. Signature/key/chain evidence is in `signature-authentication/`.
-Duplicate bundle assemblies matched; installed immutable artifacts are in
-`~/.canaveral-native/artifacts/bundle-pr24-churn`, digest
+Duplicate bundle assemblies matched; installed immutable artifact set pr24-churn has digest
 `b8e56af2c3fc6db224b2bc6a272c2260c3a2217e9c8a6c007511b4b452014c14`.
 Swift and the signed helper were unchanged.
 
@@ -486,9 +485,9 @@ All source signatures and all 119 Debian archives authenticated under unchanged
 pins, including the ten-package e2fsprogs closure. Apt received exact verified
 metadata and SHA256-checked archives through the loopback mirror, using only the
 pinned-primary keyring. No package bypassed that mirror. Authentication evidence
-is retained under `/private/tmp/canaveral-pr24-main/signature-authentication/`.
+is retained in the signature-authentication records for evidence set pr24-main.
 Preflight and byte-for-byte duplicate bundle assembly passed. Installed immutable
-artifacts are in `~/.canaveral-native/artifacts/bundle-pr24-main`, bundle digest
+artifact set pr24-main has bundle digest
 `1c9a1e93b7a4c3fe419c278f8cfaa79502165a03c7983c66068e30b663cc0216`.
 The production helper was rebuilt with full Xcode and signed through the local
 session wrapper; no identity details are exported.
@@ -503,7 +502,7 @@ identical executable payloads, SHA256
 Kernel and initrd digests are unchanged. This establishes the observed binary
 cause of the rootfs difference without claiming whole-build reproducibility.
 
-One full native run, `/private/tmp/canaveral-pr24-main/canaveral-native-vqpCrg`,
+One full native run, vqpCrg,
 records `nativeAcceptance:true`, zero case failures, using host `e151061` and
 one 2 CPU / 4096 MiB / approximately 8 GiB guest at a time:
 
