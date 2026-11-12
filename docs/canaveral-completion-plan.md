@@ -33,7 +33,7 @@ The embedded host ledger already shares VM/image/inference reservations. The Rus
 
 ## Requests and waiting
 
-Accepted direction, 2026-11-11. Not implemented: a full pool currently returns `capacity_unavailable`.
+Durable `lease` and `linux-lease` requests wait when capacity or application limits are full. Linux workspace boxes share bounded admission with direct acquisition. Single-use jobs, previews and queued model calls remain open.
 
 Every consumer uses one request model. A request is a box, a job, a preview or a model call. It carries a caller UUID, pinned template or model, resources, priority, deadline and optional source context. Requests beyond current capacity are accepted and wait instead of failing. Admission is fair per application, bounded by its limits, and a waiting request can be cancelled or expire at its deadline. Replaying the same UUID and specification returns the same request. Admission and reservation happen in one transaction against the single per-machine ledger, so the two existing ledgers must be bound first.
 
@@ -41,10 +41,10 @@ Every consumer uses one request model. A request is a box, a job, a preview or a
 
 Accepted direction, 2026-11-11. Not implemented: the repository contains no GitHub integration or preview routing.
 
-- A GitHub App receives workflow-job and pull-request events. A queued job carrying a Canaveral label becomes a queued request. The box registers a single-use runner, runs that one job and is destroyed.
+- The controller polls the GitHub API for workflow jobs and pull-request state (no webhooks; the App is pending Luca, Linear ST-541). A queued job carrying a Canaveral label becomes a queued request. The box registers a single-use runner, runs that one job and is destroyed.
 - Source context is repository, pull request, commit and run. A new push supersedes older requests for the same pull request. Closing the pull request cancels waiting requests and reclaims running ones. Outcomes are reported as checks.
 - A preview is a request tied to one pull request. The controller routes a per-PR hostname to the declared port over the existing outbound host connection and posts the URL as a deployment. Previews are private-network only for now; public exposure needs separate authentication and fork rules.
-- App credentials, runner registration tokens and webhook secrets stay behind the explicit secret boundary and never enter images or request bodies.
+- App credentials and runner registration tokens stay behind the explicit secret boundary and never enter images or request bodies.
 
 ## Deployment boundary
 
@@ -55,7 +55,7 @@ Canaveral stays independent of any particular installation. This repository ship
 1. Finish the shared-pool substrate: one authoritative ledger per physical machine across both controller paths, Linux/macOS multi-runtime model offers, CPU/RAM/disk placement and tenant quota regression coverage.
 2. Add the request queue on that ledger: waiting, fair admission, priority, deadline, cancellation and idempotent recovery.
 3. Make Linux workspace leases usable end to end, then macOS: acquire, verified readiness, repo/build operations, artifacts, renewal, expiry, controller/host loss and owned release. Native deadline and cleanup proof must precede enabling ordinary host lease execution.
-4. Add the GitHub App with single-use runners and pull-request context. Drive steps 2–4 first as one thin slice: a labelled job queues, gets a Linux box, runs and is reclaimed.
+4. Add GitHub API polling through the pending App, single-use runners and pull-request context. Drive steps 2–4 first as one thin slice: a labelled job queues, gets a Linux box, runs and is reclaimed.
 5. Apply the same ownership, accounting and expiry contract to iOS/Android simulator leases and scoped model work. Add explicit accelerator or unified-memory admission; do not treat simulator/model inventory as readiness.
 6. Add preview services and an application-scoped model endpoint on the same queue.
 7. Validate the supported paths on specifically authorized disposable targets, including deliberate over-requesting, recovery and concurrency under mixed workloads.

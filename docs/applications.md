@@ -127,3 +127,7 @@ toggle in this tranche. Revocation ends subordinate authority and closes existin
 flows when observed by the satellite; loss of controller contact is bounded by
 local lease expiry, not instantaneous remote revocation. Admin enablement never
 relaxes [destination denials](linux-egress-policy.md).
+
+### Linux workspace box concurrency
+
+A box is a queued `linux-lease` request for an approved workspace image; it is not a new request kind. Administrator application `limits.maxConcurrentBoxes` is an optional positive safe integer, defaulting to `activeLeases` and normalized in administrator responses. Existing stored policies remain valid. It counts Linux workspace leases from admission until their held reservation is released, including released, expired or failed leases awaiting positive cleanup (`workspaceRemoved` and `dataPlaneClosed`). Direct acquisition and queued admission enforce it under the same write lock. Over-limit requests wait without a reservation; direct acquisition returns 429. `activeLeases` keeps its existing meaning.

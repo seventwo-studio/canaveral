@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync, copyFileSync} from 'node:fs';
+import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync, statSync} from 'node:fs';
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
@@ -19,6 +19,13 @@ process.umask(0o077);
 const input = process.argv[2];
 assert(input, 'usage: node coordination/native-acceptance/run.ts /absolute/config.json');
 const cfg: ObjectValue = JSON.parse(readFileSync(input, 'utf8'));
+assert(cfg.operatorDenyCidrsFile && resolve(cfg.operatorDenyCidrsFile) === cfg.operatorDenyCidrsFile, 'operatorDenyCidrsFile must be absolute');
+assert.equal(statSync(cfg.operatorDenyCidrsFile).mode & 0o777, 0o600, 'operator deny-list file must have mode 0600');
+const denyBytes = readFileSync(cfg.operatorDenyCidrsFile);
+const operatorDenyCidrs = JSON.parse(denyBytes.toString()).operatorDenyCidrs;
+assert(Array.isArray(operatorDenyCidrs) && operatorDenyCidrs.length > 0 && operatorDenyCidrs.every(x => typeof x === 'string'));
+const denyEvidence = { count: operatorDenyCidrs.length, digest: createHash('sha256').update(denyBytes).digest('hex') };
+
 // Check both names and embedded fixture markers, including renamed fixture executables.
 export function refuseFixture(path: string) {
   assert(!/fixture|simulated|fake[-_ ]?helper/i.test(path), `fixture path refused: ${path}`);
@@ -46,6 +53,7 @@ const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const children: ChildProcess[] = [];
 let proxy: https.Server | undefined;
 let active: {id: string, credential: string} | undefined;
+let queuedSuccessor: string | undefined;
 let api: (method: string, route: string, body?: unknown, token?: string) => Promise<any>;
 async function until(check: () => Promise<any>, label: string, ms = 180000): Promise<any> {
   const deadline = Date.now() + ms;
@@ -105,7 +113,8 @@ try {
             if (response.released === true) {
               if(cfg.workspaceIOVersion===1) {assert.equal(body.receipt.workspaceRemoved,true);assert.equal(body.receipt.dataPlaneClosed,true);}
               assert.equal(body.receipt.cleanup, 'complete', 'reservation released before cleanup report');
-              assert.equal(reports.at(-1).after.body.reservations, 0);
+              const successor = queuedSuccessor && (await api('GET','/v1/requests/'+queuedSuccessor,undefined,app.credential)).body;
+              assert.equal(reports.at(-1).after.body.reservations, successor?.state === 'admitted' ? 1 : 0);
             } else assert.equal(reports.at(-1).after.body.reservations, 1, 'reservation disappeared before cleanup');
           }
           res.writeHead(reply.statusCode!, reply.headers); res.end(bytes);
@@ -127,7 +136,7 @@ try {
     }); r.setTimeout(20000, () => r.destroy(Error('HTTP timeout'))); r.on('error', reject); r.end(bytes);
   });
   const ok = async (m: string, r: string, b?: unknown, token?: string) => { const v = await api(m, r, b, token); assert(v.status < 300, `${r}: ${JSON.stringify(v)}`); return v.body; };
-  const appBody = (name: string) => ({id: randomUUID(), name, templates: [], limits: {resources, activeLeases: 1, defaultTTLSeconds: 120, maxTTLSeconds: 300, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 180}});
+  const appBody = (name: string) => ({id: randomUUID(), name, templates: [], limits: {resources, maxConcurrentBoxes: 1, activeLeases: 1, defaultTTLSeconds: 120, maxTTLSeconds: 300, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 180}});
   let app = await ok('POST', '/v1/consumers', {...appBody('native acceptance application 1'),...(cfg.workspaceIOVersion===1?{linuxEgress:{enabled:true}}:{})});
   const app2 = await ok('POST', '/v1/consumers', appBody('native acceptance application 2 (no grant)'));
   const domainId = randomUUID(); domainForReports = domainId;
@@ -207,13 +216,13 @@ try {
       save(id + '-latest.journal.json', journalEvidence(j));
     }
     const acquireBody = (ttlSeconds: number) => ({id: randomUUID(), templateId: image.id, templateRevision: image.revision, arch: image.arch, ttlSeconds, requiredCapabilities: ['command']});
-    async function start(label: string, ttl = 120) {
-      const lease = await ok('POST', '/v1/leases', acquireBody(ttl), app.credential);
+    async function start(label: string, ttl = 120, admittedId?: string) {
+      const lease = admittedId ? await inspect(admittedId) : await ok('POST', '/v1/leases', acquireBody(ttl), app.credential);
       active = {id: lease.id, credential: app.credential};
       state = pem(label + '-satellite');
       writeFileSync(pem(label + '-satellite.json'), JSON.stringify( {origin, identity: pem('identity'), binding, state, helper: cfg.helper, helperSha256: sha(cfg.helper), signingRequirement: cfg.signingRequirement,
         ca: pem('ca.pem'), inventory: [{credentialFree: true, format: 'bootBundle', image, path: cfg.manifest}],
-        bootstrapBuilder: {path: cfg.builder, sha256: sha(cfg.builder)}, maxCpu: resources.cpu, maxMemoryMiB: resources.memoryMiB, maxDiskGiB: resources.diskGiB}));
+        bootstrapBuilder: {path: cfg.builder, sha256: sha(cfg.builder)}, maxCpu: resources.cpu, maxMemoryMiB: resources.memoryMiB, maxDiskGiB: resources.diskGiB, operatorDenyCidrs}), {mode:0o600});
       await snapshot(label + '-before', lease.id);
       currentRun = launch(cfg.satellite, ['run-once', pem(label + '-satellite.json')], label);
       await until(async () => { await observe(lease.id); const v = await inspect(lease.id); assert(!['failed','expired','released'].includes(v.state), 'guest failed before ready'); return v.state === 'ready' && v; }, 'real guest ready');
@@ -254,8 +263,36 @@ try {
       await snapshot(label + '-after', id); active = undefined;
     }
     const caseFailures:string[]=[];
+    if (cfg.workspaceIOVersion === 1) {
+      const events: {event:string;at:number}[]=[];
+      const mark=(event:string)=>{events.push({event,at:Date.now()});save('queue-sequence.json',events);};
+      const submit=async()=>{const {id,...intent}=acquireBody(300);return ok('POST','/v1/requests',{id,kind:'linux-lease',intent},app.credential);};
+      const first=await submit();assert.equal(first.state,'admitted');mark('first admitted');
+      const second=await submit();assert.equal(second.state,'waiting');queuedSuccessor=second.id;
+      assert.equal((await domain()).reservations,1);
+      assert.equal((await api('GET','/v1/leases/'+second.id,undefined,app.credential)).status,404);mark('second waiting without lease/reservation');
+      const one=await start('queue-first',300,first.target);mark('first ready and mountinfo command succeeded');
+      assert.equal((await ok('GET','/v1/requests/'+second.id,undefined,app.credential)).state,'waiting');
+      await ok('POST',`/v1/leases/${one}/release`,{id:randomUUID()},app.credential);mark('first release requested');
+      await stopped('queue-first',one);mark('first positive cleanup');
+      const admitted=await until(async()=>{const r=await ok('GET','/v1/requests/'+second.id,undefined,app.credential);return r.state==='admitted'&&r;},'second admission');mark('second admitted');
+      queuedSuccessor=undefined;
+      const two=await start('queue-second',300,admitted.target);mark('second ready and mountinfo command succeeded');
+      await ok('POST',`/v1/leases/${two}/release`,{id:randomUUID()},app.credential);
+      await stopped('queue-second',two);mark('second positive cleanup');
+      assert.equal((await domain()).reservations,0);
+    }
+
     if(cfg.workspaceIOVersion===1) {
-      caseFailures.push(...await workspaceCases({cfg,origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
+      try {
+        caseFailures.push(...await workspaceCases({cfg:{...cfg,operatorDenyCidrs,denyEvidence},origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
+      } catch (error) {
+        caseFailures.push('workspace: '+String(error));save('workspace-fatal-case.json',{error:String(error)});
+        if (active) {
+          await ok('POST',`/v1/leases/${active.id}/release`,{id:randomUUID()},active.credential);
+          await stopped('workspace-failed',active.id);
+        }
+      }
       const granted=app;
       app=await ok('POST','/v1/consumers',{...appBody('workspace offline'),linuxEgress:{enabled:false}});
       await ok('POST','/v1/linux-lease-grants',{applicationId:app.id,imageId:image.id,revision:image.revision,arch:image.arch,digest:image.digest});

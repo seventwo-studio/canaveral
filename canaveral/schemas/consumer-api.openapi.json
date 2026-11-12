@@ -2014,6 +2014,12 @@
             "minimum": 1,
             "maximum": 2147483647
           },
+          "maxConcurrentBoxes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Linux workspace leases with held reservations, including ended leases awaiting positive cleanup. Defaults to activeLeases; normalized in administrator responses."
+          },
           "maxWaitingRequests": {
             "type": "integer",
             "minimum": 1,

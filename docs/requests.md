@@ -114,3 +114,7 @@ const { request } = await client.submitRequest({
 // Later, explicitly inspect; the SDK does not poll.
 const current = await client.inspectRequest(request.id);
 ```
+
+### Linux workspace box concurrency
+
+A box is a queued `linux-lease` request for an approved workspace image; it is not a new request kind. Administrator application `limits.maxConcurrentBoxes` is an optional positive safe integer, defaulting to `activeLeases` and normalized in administrator responses. Existing stored policies remain valid. It counts Linux workspace leases from admission until their held reservation is released, including released, expired or failed leases awaiting positive cleanup (`workspaceRemoved` and `dataPlaneClosed`). Direct acquisition and queued admission enforce it under the same write lock. Over-limit requests wait without a reservation; direct acquisition returns 429. `activeLeases` keeps its existing meaning.

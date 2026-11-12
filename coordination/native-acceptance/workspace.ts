@@ -30,6 +30,16 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
     const result=await command(proxyProbe(target));save('proxy-'+label+'.json',result);
     denials.push({result,code});
   }
+  let deniedCount=0;
+  for (const cidr of cfg.operatorDenyCidrs) {
+    const address=cidr.split('/')[0];
+    const target=address.includes(':')?'['+address+']:443':address+':443';
+    const result=await command(proxyProbe(target));
+    // Persist only aggregate evidence: operation receipts contain the private argv.
+    try {assertProxy(result,'HTTP/1.1 403 Forbidden','destination_denied');deniedCount++;}
+    catch {throw Error('operator destination denial probe failed at index '+deniedCount);}
+  }
+  save('operator-hairpin-denial.json',{...cfg.denyEvidence,deniedCount,passed:deniedCount===cfg.operatorDenyCidrs.length});
   const allowed=await command(proxyProbe('github.com:443'));save('proxy-allowed.json',allowed);
   for(const {result,code} of denials) check('proxy denial '+code,()=>assertProxy(result,'HTTP/1.1 403 Forbidden',code));
   check('allowed CONNECT',()=>assertProxy(allowed, 'HTTP/1.1 200 Connection Established'));

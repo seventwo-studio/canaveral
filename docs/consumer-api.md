@@ -171,3 +171,7 @@ transport errors: `not_found`, `path_denied`, `not_regular`, `hardlink_denied`,
 inspected by UUID/step before further action. Never automatically allocate a new
 UUID to repeat an unknown upload. Unknown blocks the file lane until lease ends;
 release still requires positive cleanup, not an abort or failed transfer receipt.
+
+### Linux workspace box concurrency
+
+A box is a queued `linux-lease` request for an approved workspace image; it is not a new request kind. Administrator application `limits.maxConcurrentBoxes` is an optional positive safe integer, defaulting to `activeLeases` and normalized in administrator responses. Existing stored policies remain valid. It counts Linux workspace leases from admission until their held reservation is released, including released, expired or failed leases awaiting positive cleanup (`workspaceRemoved` and `dataPlaneClosed`). Direct acquisition and queued admission enforce it under the same write lock. Over-limit requests wait without a reservation; direct acquisition returns 429. `activeLeases` keeps its existing meaning.

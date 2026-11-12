@@ -19,9 +19,12 @@ From the repository root, create a private JSON configuration outside the checko
   "cpu": 2,
   "memoryMiB": 2048,
   "diskGiB": 4,
+  "operatorDenyCidrsFile": "/ABS/private-operator-deny-cidrs.json",
   "setupOnly": false
 }
 ```
+
+The operator deny-list file must have mode 0600 and contain `{ "operatorDenyCidrs": ["CIDR"] }`. The harness passes it to the satellite, probes each listed address on port 443 and requires `403 destination_denied`. Keep its contents in private runtime configuration; copied evidence contains only its count and SHA256 digest.
 
 `bundleDigest` is the Rust guest-protocol canonical manifest digest, not the hash of the JSON file. Artifacts must already satisfy the production immutable installation contract. The harness pins the exact helper and builder bytes; it does not build or repair artifacts, alter admission, or set flags to bypass installation checks. An optional `bootstrap` path is also screened for fixture markers when supplied. The builder and all boot artifacts are screened, including known embedded markers in renamed fixture binaries. This screen is an extra refusal boundary, not an attestation that arbitrary operator binaries are trustworthy. The satellite's full signature, pin, path, ownership and immutability checks remain authoritative.
 
@@ -34,7 +37,7 @@ Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production pr
 
 For setup without boot artifacts, set `setupOnly: true`, supply a nonexistent manifest path and an explicitly unverified expected `bundleDigest`; `builder` may be omitted. This exercises actual controller startup, fresh state, TLS, application creation, enrollment, domain/image/grant/approval configuration and catalog reads, then stops without acquiring or claiming anything. The expected digest is catalog configuration only: `artifactVerified: false` and `nativeAcceptance: false` prevent treating this as image verification. Setup-only stops before native execution even when artifacts exist.
 
-A full run uses one guest at a time: acquire/readiness, consumer command/output, renewal, explicit release, a second guest's real wall-clock expiry, then satellite crash/recovery and reservation retention. Application 2 has no grant; cross-application inspect/key issuance/operation submission and acquisition must fail. Renewal must include a successful consumer command after the original expiry plus
+A workspace run first submits two `linux-lease` box requests into a one-box domain. It proves the second waits without a lease or reservation, runs a command in each box in turn, and checks positive cleanup before starting the successor. A full run uses one guest at a time: acquire/readiness, consumer command/output, renewal, explicit release, a second guest's real wall-clock expiry, then satellite crash/recovery and reservation retention. Application 2 has no grant; cross-application inspect/key issuance/operation submission and acquisition must fail. Renewal must include a successful consumer command after the original expiry plus
 the two-second guest margin; helper authorization alone is insufficient. There is
 no synthetic guest response. The final loss case kills the satellite, waits past the lease deadline without
 restarting it, proves helper PID and VZ absence with no power-off request, records
@@ -544,3 +547,56 @@ and duplicate assembly copies were removed. Installed artifacts and private
 acceptance evidence remain. Unrelated VMs and untracked coordination dependencies
 were untouched. Production, topology and the previously listed acceptance gaps
 remain open.
+
+## Bounded workspace queue evidence (ST-542)
+
+The single full integration run 1RgYle records nativeAcceptance:true and zero
+case failures. It uses the installed pr24-main v2 artifact set
+unchanged (bundle digest
+`1c9a1e93b7a4c3fe419c278f8cfaa79502165a03c7983c66068e30b663cc0216`).
+It runs one 2 CPU / 4096 MiB / approximately 8 GiB guest at a time, with
+`maxConcurrentBoxes:1` and one box of physical capacity.
+
+- Request 2 waited without a lease or reservation at +16 ms. Box 1 was ready
+  and its mountinfo command succeeded at +24831 ms; release was requested at
+  +24881 ms and positive cleanup observed at +25714 ms. Request 2 was observed
+  admitted at +25719 ms. Its command succeeded at +50585 ms and positive cleanup
+  completed at +51456 ms. Both cleanup groups independently proved helper/VZ
+  absence and machine/workspace/relay removal (`queue-sequence.json`,
+  `queue-*-independent-stop.json`).
+- The operator hairpin/site-public-address probe returned 403 destination_denied
+  for the one configured target. Policy evidence exports count 1 and SHA256
+  `fe3345d9b3c626f6641d504e9b3c4f853ebd73acc2f0b77d5ed0805bc7f240e2`;
+  no policy values or probe argv are exported (`operator-hairpin-denial.json`).
+- Public CONNECT, pinned clone and npm ci/test passed. Guest npm execution took
+  133890/516 ms; including dispatch/polling, 134719/1304 ms. Downloaded build.log
+  SHA256 is `bc780bbce9cc05d2a63f67bd31bf018c15eaf5d90d128797c859322e21fa41d0`.
+- Empty, binary and 307200-byte file round trips, replacement, no-replace conflict,
+  disk-full refusal, workspace command/upload expiry and egress-off denial passed.
+  Renewal's consumer command succeeded 3114 ms after the original deadline;
+  explicit release proved positive cleanup.
+
+Ordinary expiry and autonomous satellite-loss fencing passed. The helper was
+observed alive 39 ms after the loss deadline and absent 241 ms after it, before
+recovery. All seven normal cleanup groups required workspaceRemoved and
+dataPlaneClosed before capacity release and independently proved owned helper/VZ
+absence and machine/workspace/relay removal.
+
+After the run, PID attribution, runtime-lock and empty lsof checks preceded
+removal of owned residual workspace/bootstrap and relay storage. The owned launch
+medium's user-immutable flag was cleared only after those checks and inode,
+ownership and link-count verification. The journal is unchanged and the stopped
+private database retains one unknown reservation for operator reconciliation;
+no cleanup receipt or capacity release was fabricated
+(`loss-post-run-owned-cleanup.json`). All owned runtime processes and storage
+are gone. Installed artifacts and private evidence remain; unrelated VMs were
+untouched. All 538 shareable files passed checks for configured private values,
+private paths and IP addresses; private process logs contain no operator policy
+values.
+
+Portable checks passed: coordination typecheck/build, 1037 tests passed and nine
+skipped at concurrency two; standalone harness typecheck; six evidence/process
+regressions; no-Python check; and the branch diff private-path scan. The full suite used the existing native inference helper configured
+explicitly. Rust and Swift are unchanged. Queue milestones and aggregate hairpin results pass the same evidence
+allowlist as other receipts; raw configuration and output remain under private/.
+Production and topology acceptance remain open.

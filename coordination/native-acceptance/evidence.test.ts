@@ -42,3 +42,12 @@ test('evidence keeps cleanup flags and original deadline as typed fields', async
   const flags={machineRemoved:true,relayRemoved:true,workspaceRemoved:true,dataPlaneClosed:true,requirementSatisfied:true,originalExpiresAt:123};
   assert.deepEqual(receiptEvidence(flags),flags);
 });
+
+ test('queue and operator probe evidence retain only milestones and aggregate policy', async () => {
+  const {receiptEvidence}=await import('./evidence.ts');
+  const events=[{event:'first admitted',at:123},{event:'second positive cleanup',at:456}];
+  assert.deepEqual(receiptEvidence(events),events);
+  const policy={count:1,deniedCount:1,passed:true,digest:'a'.repeat(64)};
+  assert.deepEqual(receiptEvidence({...policy,operatorDenyCidrs:['private-address'],target:'private-address'}),policy);
+  assert.deepEqual(receiptEvidence({event:'private-address'}),{});
+});
