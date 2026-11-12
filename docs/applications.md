@@ -99,3 +99,26 @@ require a durable finish; downloads require count/digest and source verification
 All these methods require a supported controller route and a bound, eligible
 provider. Portable SDK fixtures do not enable consumer placement on ordinary native
 runners, qualify detached-command cancellation or establish live platform parity.
+
+## ST-535 application egress grant (unimplemented contract)
+
+Add optional administrator creation field
+`linuxEgress:{enabled:false}`; if supplied, this object has exactly the one
+boolean field. Absence normalizes to false. Administrative list/get returns the
+normalized object. It applies to Linux workspace-v2 leases across this
+application's image grants; image grant routes do not get an independent egress
+switch. Consumers cannot supply or override it on acquisition, waiting requests,
+operations, sessions or transfers. Reject such unexpected fields with 400.
+Policy `public-https-v1` is enforced by the satellite and is not a consumer choice.
+
+Persist the normalized grant in the existing application specification JSON;
+read older stored specifications lacking it as false. Existing application
+creation replay/conflict rules remain. Snapshot into each new lease/assignment
+atomically at admission, not when the runner eventually claims it. Old active
+leases remain unchanged and cannot gain network access by renewal. The current
+immutable-policy model remains: to change egress, create a replacement application
+and revoke the old one under an explicit migration plan. Do not add an in-place
+toggle in this tranche. Revocation ends subordinate authority and closes existing
+flows when observed by the satellite; loss of controller contact is bounded by
+local lease expiry, not instantaneous remote revocation. Admin enablement never
+relaxes [destination denials](linux-egress-policy.md).

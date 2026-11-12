@@ -339,3 +339,19 @@ authority and known controller terminal state when selecting the first stop caus
 A terminal or cancel reply records the controller cause (null failure), even after
 the local deadline, unless an earlier fence already recorded a cause. Legacy
 fenced journals without a cause replay as runtime loss. Renewal cannot clear a fence.
+
+## ST-535 workspace I/O contract (unimplemented)
+
+The [assignment/transfer extension](../../docs/linux-lease-controller.md#st-535-assignment-and-transfer-wire-unimplemented-contract)
+requires workspace-v2 bundles, a preallocated owned raw disk, an independently
+relayed data connection on guest port 1025, public-HTTPS enforcement and durable
+controller-issued file steps. Current tmpfs/command fixtures do not implement or
+accept these interfaces. Implement [launch identity](../../docs/linux-boot-bundle.md#st-535-workspace-launch-contract-unimplemented)
+and [data frames](../../docs/guest-wire.md#st-535-data-protocol-contract-unimplemented)
+together; never downgrade if v2 fields or physical allocation are unsupported.
+Data workers/payloads must be bounded separately from heartbeat/control; a stalled
+transfer cannot delay lease expiry. No controller token crosses into the guest.
+Both relay paths, outbound sockets, disk inode and allocation intent need owned
+journal evidence. Restart never reconnects or replays uncertain file publication.
+Cleanup requires workspaceRemoved/dataPlaneClosed plus existing positive evidence.
+See [egress gates](../../docs/linux-egress-policy.md) before claiming isolation.

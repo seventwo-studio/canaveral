@@ -49,3 +49,33 @@ ST-534's 2026-11-12 operator-authorized arm64 diagnostic boot observed the actua
 pending console bytes on close and persists a final transcript, including guests
 that stop before the periodic snapshot. See the [native evidence record](../../coordination/native-acceptance/README.md)
 for the narrower full-lease results and remaining production gates.
+
+## ST-535 direct boot v2 contract (unimplemented)
+
+For workspace-v2 preparation, directBoot.version becomes 2. Replace workspaceBytes
+with `workspace:{path,serial,bytes,overheadBytes}`; path is canonical absolute and
+host-resolved under satellite-owned state, never consumer input. Add
+`dataVsockPort:1025`; the helper accepts no other data port. Kernel/rootfs/initrd/
+launchMedium pins and existing boot binding stay unchanged. Swift does not parse
+launch egress/nonce; the satellite binds them in the immutable v2 medium. Writable
+workspace admission checks one-link regular inode, mode 0600, trusted ancestry,
+exact size and distinct identity from immutable media. Satellite guarantees
+physical reservation; helper must preserve and recheck its pinned inode when
+attaching it read-write with the fresh 20-byte serial. No format/copy/resize occurs
+in Swift. Attach after the read-only rootfs and launch medium; the guest discovers
+by serial, never device order. Preparation journal must retain mutable disk
+identity; cleanup cannot infer removal from a missing guessed path.
+
+Direct-boot v2 and v1 configurations must explicitly have **zero network devices**;
+remove the NAT attachment from direct boot only. EFI/raw and macOS keep existing
+networking. Host vsock has no listening port. The helper initiates both 1024 and
+1025 connections to the guest's prebound listeners. V2 publishes a second private
+same-uid Unix relay `data.sock` beside agent.sock, with
+`dataSocketPath` added to direct-started.json; validate/retain both exact owned
+paths. Each relay independently has a 64 KiB buffer, bounded polling and partial
+writes. Only initial connect establishment may retry within the existing 60s boot
+window, before a connection succeeds; after connection loss no reconnect. Separate
+data worker failure does not close control/VM or disable the native deadline
+guard. Stop initiates fencing immediately, then allows data workers at most 2s to
+close. Unconfirmed worker/descriptor closure blocks cleanup evidence. No native
+acceptance follows from this contract or existing one-relay socketpair tests.

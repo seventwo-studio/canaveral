@@ -291,3 +291,177 @@ exact without sleeps. It covers:
 These fixtures are source evidence only. They do not show VM execution on either
 backend, image ingestion, guest access, native stop or cleanup, TLS deployment or
 release acceptance.
+
+## ST-535 assignment and transfer wire (unimplemented contract)
+
+This extension is specified for the direct-boot Apple adapter only; KubeVirt has
+no dispatch implementation. It does not change the implementation claims above.
+The [consumer transfer routes](consumer-api.md#st-535-linux-file-routes-unimplemented-contract),
+[guest data frames](guest-wire.md#st-535-data-protocol-contract-unimplemented)
+and [egress policy](linux-egress-policy.md) form the same contract.
+
+### Assignment additions and compatibility
+
+Add required `workspaceIOVersion:1`, `egress:{enabled,policy:"public-https-v1"}`
+and `workspace:{bytes,overheadBytes}` to new workspace assignments. Values are
+immutable admission snapshots, not supplied by consumers; size accounting is
+specified in the boot-bundle contract. Assignment does not carry a host path,
+serial or data nonce: the satellite generates and durably binds those to its
+fresh boot attempt. Image registration and approval each gain optional
+`workspaceIOVersion:1`; the catalog image value is immutable and binds its verified
+bundle-v2 digest. Absence means legacy image/adapter. Only an explicit v1 approval can receive v2 bundle images;
+old images and in-flight assignments keep their existing schema and cleanup
+rules. No optimistic dispatch of new fields to strict old decoders.
+
+Application `linuxEgress` is defined in [applications](applications.md#st-535-application-egress-grant-unimplemented-contract).
+Snapshot its enabled value at acquisition, including durable queued-request
+admission; an idempotent acquisition replay returns the original snapshot.
+Egress is neither a requested capability nor a consumer acquisition field.
+Denied/default-off egress does not prevent offline commands/files. A runner
+without enforcement policy v1 cannot accept any workspace assignment, even one
+with egress off. Operator deny-CIDR configuration and its digest are journaled
+locally before launch, never accepted from guest/consumer input.
+
+Additive storage must preserve old rows: nullable workspace version, workspace
+JSON and egress JSON on leases/assignments; existing rows are v1 legacy (no disk
+or proxy inferred). Add a transfer ledger and serialized step ledger with foreign
+keys to the exact assignment/lease/member/boot/digest, submitted key generation,
+canonical intent digest, step request and first terminal receipt. Persist all
+handoff transitions in SQLite BEGIN IMMEDIATE before returning work. Bound byte
+payloads are transient spool records (at most one 64 KiB chunk per assignment),
+not argv or general response logging. No automatic conversion of running boots.
+
+### Controller ↔ satellite step transport
+
+Use existing runner HTTPS authentication, exact enrollment binding, 1 MiB JSON
+request/response ceiling, 20-second per-request deadline and no redirects/proxies.
+Every route below is POST; `owner` abbreviates required flat fields
+`binding,assignmentId,bootAttempt,bundleDigest`, matching operations/poll's
+registered immutable boot. Controller rechecks the exact current binding inside
+each transaction. No new inbound host listener or runner WebSocket is required.
+
+| Route under `/v1/runners/linux-leases/transfers` | Exact body | 200 response |
+| --- | --- | --- |
+| `/poll` | `{...owner,pollId}` | `{transfer:null-or-work,lease,cancelRequested}` |
+| `/report` | `{...owner,transferId,step,receipt}` | `{transferId,step,state}` |
+
+`lease` has the same state/revision/expiresAt/controllerNow fields as command
+poll. `cancelRequested` is true after authorization loss or invalidation. Work is
+exactly `{id,leaseId,memberId,assignmentId,bootAttempt,bundleDigest,step,request,startBefore,deadlineAt,state}`.
+Work state is `queued`, `succeeded`, `failed` or `unknown`;
+only a previously unseen queued handoff may execute. Terminal poll replays return
+request:null after payload erasure; queued work always has the full request.
+Transfer poll may register
+the boot tuple first using the same atomic immutable registration as command
+poll; files-only acquisition does not depend on first submitting a shell.
+`request` and `receipt` use the guest transfer variants verbatim. The satellite
+validates all owner fields, translates no paths, and streams that single bounded
+step over 1025. The guest UUID equals the controller transfer id. The satellite
+journals work before sending any bytes, then journals receipt before reporting.
+
+Each submitted step fixes startBefore=min(submitTime+120s, lease expiry).
+Dispatch fixes deadlineAt=min(dispatchTime+120s, lease expiry); units are Unix
+UTC seconds, as for lease expiry. Satellite derives a conservative monotonic
+remaining duration from the poll request's send time and controllerNow, subtracts
+transport elapsed time and the existing guest safety margin, and sends the
+remaining duration in transferRequest.remainingMs. Guest and satellite cancel
+locally at that deadline. Renewal never extends a step's deadline. Large-file finish
+verification that exceeds this bound is unknown, not a successful partial hash.
+No progress/bulk data rides lease heartbeat or control 1024.
+
+Poll IDs follow operation poll semantics: persist before sending; a null poll
+records nothing; nonnull pins this poll ID forever to the exact transfer/step.
+Exact replay retrieves current stored work/state, never a second handoff. A new
+poll ID cannot claim a dispatched step. Receipt is authenticated only from the
+original owner and dispatched step. First terminal result wins, including
+controller-generated unknown. Report response state is the step ledger state.
+Same report replay returns the stored result; changed duplicate after an accepted
+runner receipt is 409. A late report after controller-generated unknown returns
+the stored unknown without adopting the supplied result. New work requires current files readiness, unrevoked
+application and submitted lease-key generation, valid binding/approval/image,
+unexpired lease and a live data channel. Revocation/rotation invalidates pending
+work, not merely the HTTP connection. Never allow a body to choose another owner.
+
+For upload, controller validates one caller chunk and persists it until the
+satellite reports its next offset; it then erases those bytes, retaining request
+hash/offset and receipt. For download, a read report carries up to 64 KiB base64;
+controller retains only that latest read payload until the next step is admitted
+or the transfer ends. Consumer fetches it through its step receipt. Controller
+computes incremental upload/download hashes during normal operation; after
+restart it need not reconstruct a streaming hash to redispatch anything. Guest
+final byte/hash verification remains mandatory and is compared with the caller's
+finish hash. Controller must not claim verified download from partial bytes.
+
+One active transfer and one pending step per assignment; command lane is separate
+so a shell can produce files while a transfer runs. Unknown transfer blocks that
+transfer lane for the rest of the boot; it does not block commands/control. Definite
+terminal transfers free the lane. A failed step ends the transfer as failed and
+closes/removes owned staging; unconfirmed cleanup is retained for lease cleanup.
+An abort of a created transfer may be completed in the controller without a guest
+effect; otherwise it is a serialized guest step, not cancellation of unknown work.
+Further steps on a completed transfer are
+rejected except exact receipt replay. Controller spool is bounded globally to
+64 MiB decoded bytes; exhaustion is 503 `transfer_backpressure` before admission,
+with no handoff. Poll responses return promptly (no long polling); data polling
+has a separate bounded worker and cannot queue ahead of heartbeat/renewal/stop.
+At most one poll/report request in flight for data per assignment.
+
+### Loss, invalidation and cleanup
+
+A lost HTTP response permits replay of the identical stored request to retrieve
+its receipt, never re-execution. A caller may retry a pending step using the same
+step/body; the controller does not hand it out twice. Controller crash/restart
+fails undispatched steps with `controller_restarted` and makes dispatched steps
+without accepted receipts unknown. Even if the satellite later supplies success,
+first-terminal-wins preserves that unknown. Queued data bytes are erased on
+invalidation. The controller asks the still-running satellite to abort the
+transfer; it does not infer guest rollback from deletion of its spool.
+
+Satellite restart never reconnects/recreates a boot or transfer. Existing lease
+recovery fences the VM; any step whose receipt was durably recorded may replay
+only that receipt, and all other handed-off work is unknown. A live process may
+retry an exact lost report, while enforcing local deadlines independently. Runner
+credential/binding loss keeps reservations held for operator reconciliation.
+Data-channel loss alone leaves commands, heartbeat, renewal, expiry and stop
+operational: undispatched transfer work fails `data_channel_lost`; handed-off
+work without a definite receipt becomes unknown. Current files readiness is
+withdrawn. No new transfer for that boot; existing receipts remain readable.
+Application revocation, lease-key rotation, expiry and release invalidate pending
+steps (failed before handoff, unknown afterward), send priority transferCancel, close guest transfer descriptors
+and egress flows. A lease heartbeat response carries cancellation to the satellite
+even if data is gone; guest EOF must independently stop pending file publication.
+
+Workspace assignments add required `workspaceRemoved` and `dataPlaneClosed`
+booleans to lease cleanup receipts (not transfer reports). They start false and
+are monotonic. `storageRemoved:true` additionally covers workspace.raw, partial
+allocation/staging, both relay socket paths and private launch/native state.
+`dataPlaneClosed:true` requires all satellite outbound sockets, data/transfer
+workers, relay descriptors and owned data listeners to be closed/joined.
+`workspaceRemoved:true` requires positive helper exit/lock/handle release and
+identity-checked unlink of the owned disk plus parent directory flush; absence
+alone after an uncertain create/start is insufficient. Shared image files are
+never deleted. Complete cleanup needs both new flags plus all existing stop,
+storage and credential flags, under the original current binding. Reject
+`cleanup:complete` with either false. Native fencing starts immediately; data
+teardown has a 2-second bound, after which uncertain closure means blocked cleanup
+and held capacity, never delayed fencing or inferred release.
+
+### Acceptance still required
+
+Portable contract fixtures must cover exact schemas/version downgrade refusal,
+step/poll/report replay, byte cursor/hash checks, controller/satellite restart,
+rotation/revocation races at publication, spool/credit exhaustion, timeout parity,
+files-only boot registration and data loss with continuing commands/renewal.
+Policy fixtures need mixed DNS answers, rebinding, all denied families/embedded
+forms, current host interface addresses and route-query failures. No fixture
+establishes VM isolation or native filesystem durability.
+
+Separately authorized native acceptance must clone a public HTTPS repository,
+verify its exact commit before execution, run npm ci/test with pinned lockfile,
+round-trip empty/binary/multichunk files with hashes, exercise disk-full and
+replacement staging, reject host/LAN/tailnet/metadata/other-guest targets, and
+reject another application's keys. Test expiry during build/transfer, data-only
+disconnect, positive raw-disk removal and held capacity on uncertain cleanup.
+Route-change monitoring, router-public-IP hairpin denial, physical preallocation
+and guest/host flush semantics remain explicit gates. No native experiment or
+acceptance evidence is supplied by this documentation.

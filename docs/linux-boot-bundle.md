@@ -116,3 +116,58 @@ ST-534 native diagnostic and lease observations, including the 4 KiB launch-medi
 requirement and corrected kernel fragment, are recorded in the [native evidence record](../coordination/native-acceptance/README.md).
 These experimental observations do not establish production trust/signing, networking,
 file transfer, concurrent shared-rootfs use, power-loss recovery or ordinary host lease admission.
+
+## ST-535 workspace launch contract (unimplemented)
+
+Bundle v2 keeps v1 artifact fields/canonical ASCII encoding and adds
+`dataVsockPort:1025`, `dataProtocol:1`; `version` becomes 2, `protocol` remains 1
+and `agentVsockPort` remains 1024. `toolVersions` gains `mkfsExt4` (exact first
+line of `/usr/sbin/mkfs.ext4 -V`, captured from its documented output stream).
+Canonical keys, including tool keys, sort lexicographically. The builder recipe
+also becomes v2 and requires pinned e2fsprogs plus its transitive package closure;
+no floating package version is supplied here. New known-byte/digest fixtures are
+required; v1 bytes/digests never change. Kernel must support loopback TCP, vsock,
+ext4 and openat2. There is no virtio NIC. v1 inventory continues its existing
+behavior but cannot advertise ST-535 workspace/files/egress support.
+
+Launch v2 is exactly `{version:2,binding,manifest,workspace,egress,data}`.
+`binding` retains the existing fields and `manifest` must be v2.
+`workspace` is `{serial,bytes,overheadBytes}`; serial is a fresh independent UUID's
+first 20 lowercase hex digits, distinct from launch-medium serial, and bytes is
+an exact multiple of 4096. `egress` is `{enabled,policy:"public-https-v1"}`;
+`data` is `{port:1025,nonce}` with a fresh cryptographically random 32-byte nonce
+encoded as 64 lowercase hex digits. This replaces v1 workspaceBytes, not an
+optional fallback. The 16 KiB launch-file limit and trusted EROFS delivery stay.
+Data hello binds the initial launch revision; only control renew changes current
+authority, and it covers both streams without refreshing the immutable nonce.
+
+The controller fixes `overheadBytes=67108864` (64 MiB) at acquisition and
+`bytes=floor((diskGiB*1073741824-overheadBytes)/4096)*4096`, with a 16 MiB minimum.
+This overhead charges bounded per-lease launch/native metadata and journals;
+implementations must fail closed if those exceed it. Shared immutable image
+storage is operator infrastructure outside the per-lease disk budget. Any extra
+host staging must be charged within overhead or separately reserved before use;
+this tranche streams file bytes and requires no whole-file host copy. ext4's own
+metadata consumes the raw disk's logical bytes, so usable free space is smaller.
+
+Satellite exclusively creates `workspace/workspace.raw` below its owned state,
+mode 0600, one link, no symlink ancestors, journaling intent and inode identity
+before helper prepare. Guarantee physical space for the entire logical disk
+using real host preallocation (Darwin F_PREALLOCATE or an equally strong
+reservation), then set exact length and flush file/parent. A sparse truncate or
+free-space sample alone is insufficient. Refuse launch if the filesystem cannot
+guarantee reservation; never thin-provision against admission's held capacity.
+Partial allocation failure needs owned deletion proof before reporting removal.
+The helper attaches this exact file read-write, serial pinned, without copying.
+Writable media are inode/ownership/length pinned, not immutable/hash pinned.
+
+Guest discovers exactly one whole block device with that serial and exact byte
+size, distinct from root and launch medium, with no partition table, existing
+filesystem/swap signature or holders. Ambiguity or a signature fails boot; no
+force/reuse or guessed /dev/vdc. Only then run pinned mkfs.ext4 once, mount ext4 at
+/workspace with nosuid,nodev (executable), chown uid/gid 1000 mode 0700, and create
+`.canaveral`, `home`, `tmp`, `.npm` with safe ownership. Never reformat on recovery.
+A consumed boot attempt is never relaunched. Files readiness requires this mount,
+strict file-confinement support and dataReady; command readiness requires writable
+workspace plus both initial handshakes. Native format/flush/serial acceptance is
+still open. Deletion is reclamation, not cryptographic secure erasure.
