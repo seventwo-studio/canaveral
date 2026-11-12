@@ -19,11 +19,12 @@ pub mod guest;
 mod operations;
 mod private;
 pub mod reactor;
+mod transfers;
 pub mod workspace;
 
-/// Keep v2 refused until proxy execution, transfers and joined cleanup land.
+/// Workspace v2 implementation is available; native acceptance remains separate.
 /// Both inventory and assignment admission consult this single switch.
-pub const WORKSPACE_V2_ADMISSION_ENABLED: bool = false;
+pub const WORKSPACE_V2_ADMISSION_ENABLED: bool = true;
 pub type Result<T> = std::result::Result<T, &'static str>;
 /// Interval between heartbeat reports while a guest runs; replies carry renewals and stop intent.
 const REPORT_EVERY: Duration = Duration::from_secs(1);
@@ -173,6 +174,8 @@ struct Journal {
     direct: Option<Direct>,
     #[serde(default)]
     operations: operations::Lane,
+    #[serde(default)]
+    transfers: transfers::Lane,
 }
 /// Durable direct-boot launch tuple. The boot attempt is consumed with launch intent.
 #[derive(Clone, Serialize, Deserialize)]
@@ -246,10 +249,18 @@ impl Journal {
             claimed_at: None,
             direct: None,
             operations: operations::Lane::default(),
+            transfers: transfers::Lane::default(),
         })
     }
 }
 pub trait Controller {
+    /// Independent bounded data transport; no shared queue ahead of lease control.
+    fn data_transport(&self) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
     fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value>;
 }
 pub struct Authenticated<'a> {
@@ -257,6 +268,12 @@ pub struct Authenticated<'a> {
     pub transport: &'a Transport,
 }
 impl Controller for Authenticated<'_> {
+    fn data_transport(&self) -> Option<Self> {
+        Some(Self {
+            identity: self.identity,
+            transport: self.transport,
+        })
+    }
     fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value> {
         self.identity
             .linux_lease_request(self.transport, route, body)
@@ -537,6 +554,13 @@ impl Satellite {
         {
             return Err("workspace-v2 runtime integration is not available");
         }
+        let workspace =
+            a.workspace_io_version.is_some() || a.workspace.is_some() || a.egress.is_some();
+        if workspace
+            && (a.workspace_io_version != Some(1) || a.workspace.is_none() || a.egress.is_none())
+        {
+            return Err("incomplete workspace admission snapshot");
+        }
         let r = &a.resources;
         if r.cpu > self.config.max_cpu
             || !NATIVE_CPU.contains(&r.cpu)
@@ -557,6 +581,9 @@ impl Satellite {
             .iter()
             .find(|i| i.image == a.image)
             .ok_or("assignment image not installed; declined")?;
+        if workspace && installed.format.is_efi_raw() {
+            return Err("workspace requires bundle v2");
+        }
         if installed.format.is_efi_raw()
             && io(std::fs::metadata(&installed.path))?.len() > r.disk_gi_b * 1073741824
         {
@@ -597,6 +624,9 @@ impl Satellite {
         let b = bundle::Bundle::open(&installed)?;
         if self.config.bootstrap_builder.is_none() {
             return Err("boot bundle requires a pinned bootstrap builder");
+        }
+        if (b.manifest.version == 2) != (a.workspace_io_version == Some(1)) {
+            return Err("workspace bundle/assignment version mismatch");
         }
         let pins = b.admit()?;
         Ok((installed, Some((b, pins))))
@@ -984,7 +1014,7 @@ impl Satellite {
             }
         }))
     }
-    /// This path remains behind the inventory gate until guest/data/egress integration is complete.
+    /// Build a fresh, owned v2 workspace launch after immutable admission checks.
     fn workspace_request(
         &mut self,
         a: &Assignment,
@@ -1177,6 +1207,169 @@ impl Satellite {
             return Err("guest readiness lapsed");
         }
         Ok(())
+    }
+    fn transfer_report_retry(&mut self, controller: &mut impl Controller) -> Result<()> {
+        if self
+            .state
+            .transfers
+            .current
+            .as_ref()
+            .is_some_and(|s| s.receipt.is_some() && !s.acknowledged)
+        {
+            let body = self.state.transfers.report(self.operation_binding()?)?;
+            let reply = controller.request(LeaseRoute::TransferReport, body)?;
+            self.state.transfers.acknowledge(reply)?;
+            self.save()?;
+        }
+        Ok(())
+    }
+    fn transfer_cancel(
+        &mut self,
+        data: &data::Lane,
+        reason: canaveral_guest_protocol::data::CancelReason,
+    ) -> Result<()> {
+        if let Some(step) = self
+            .state
+            .transfers
+            .current
+            .as_mut()
+            .filter(|s| s.handed_off && !s.cancel_sent)
+        {
+            if data
+                .send_transfer(canaveral_guest_protocol::data::Frame::TransferCancel {
+                    version: 1,
+                    id: step.work.id,
+                    reason,
+                })
+                .is_ok()
+            {
+                step.cancel_sent = true;
+                self.save()?;
+            }
+        }
+        Ok(())
+    }
+    fn transfer_events(&mut self, data: &data::Lane) -> Result<()> {
+        while let Some(frame) = data.receipt() {
+            self.state.transfers.event(frame)?;
+            self.save()?; // Receipt is durable before any report.
+        }
+        if self
+            .state
+            .transfers
+            .current
+            .as_ref()
+            .is_none_or(|s| s.receipt.is_some())
+        {
+            return Ok(());
+        }
+        if !data.files_ready() {
+            self.state.transfers.loss("data_channel_lost");
+        } else if self
+            .state
+            .transfers
+            .current
+            .as_ref()
+            .is_some_and(|s| s.receipt.is_none() && clock::now().as_secs_f64() >= s.deadline - 2.0)
+        {
+            self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
+            self.state.transfers.loss("deadline");
+        } else {
+            return Ok(());
+        }
+        self.save()
+    }
+    fn accept_transfer_poll(&mut self, reply: Value, sent: f64, data: &data::Lane) -> Result<()> {
+        let poll: transfers::Poll =
+            serde_json::from_value(reply).map_err(|_| "invalid transfer poll")?;
+        let lease = &poll.lease;
+        if !lease.controller_now.is_finite()
+            || !lease.expires_at.is_finite()
+            || lease.revision == 0
+            || lease.revision > canaveral_guest_protocol::MAX_SAFE
+        {
+            return Err("invalid transfer lease");
+        }
+        let revoked = poll.cancel_requested
+            || !matches!(lease.state.as_str(), "ready" | "provisioning")
+            || lease.expires_at <= lease.controller_now
+            || self.expired();
+        if let Some(work) = &poll.transfer {
+            let a = self.assignment()?;
+            let d = self.state.direct.as_ref().ok_or("no transfer boot")?;
+            if work.lease_id != a.lease_id
+                || work.member_id != a.member_id
+                || work.assignment_id != a.id
+                || work.boot_attempt != d.boot_attempt
+                || work.bundle_digest != d.bundle_digest
+            {
+                return Err("transfer owner mismatch");
+            }
+        }
+        let frame = if let Some(work) = poll.transfer {
+            self.state.transfers.receive(
+                work,
+                sent,
+                lease.controller_now,
+                clock::now().as_secs_f64(),
+                self.state.deadline,
+            )?
+        } else {
+            None
+        };
+        self.save()?; // Work is durable before any guest bytes.
+        if revoked {
+            self.transfer_cancel(
+                data,
+                canaveral_guest_protocol::data::CancelReason::AuthorizationLost,
+            )?;
+            self.state.transfers.loss("authorization_lost");
+        } else if !data.files_ready() {
+            self.state.transfers.loss("data_channel_lost");
+        } else if let Some(mut frame) = frame {
+            self.state
+                .transfers
+                .current
+                .as_mut()
+                .ok_or("missing transfer")?
+                .handed_off = true;
+            self.save()?; // Uncertain crash after this point is never executable again.
+            let step = self
+                .state
+                .transfers
+                .current
+                .as_ref()
+                .ok_or("missing transfer")?;
+            let now = clock::now().as_secs_f64();
+            let remaining = guest::remaining_ms(step.deadline, now)
+                .ok()
+                .filter(|_| sent + step.work.start_before - lease.controller_now > now);
+            let Some(remaining) = remaining else {
+                self.state
+                    .transfers
+                    .current
+                    .as_mut()
+                    .ok_or("missing transfer")?
+                    .handed_off = false;
+                self.state.transfers.loss("deadline");
+                return self.save();
+            };
+            if let canaveral_guest_protocol::data::Frame::TransferRequest { remaining_ms, .. } =
+                &mut frame
+            {
+                *remaining_ms = remaining;
+            }
+            if data.send_transfer(frame).is_err() {
+                self.state
+                    .transfers
+                    .current
+                    .as_mut()
+                    .ok_or("missing transfer")?
+                    .handed_off = false;
+                self.state.transfers.loss("data_channel_lost");
+            }
+        }
+        self.save()
     }
     fn operation_binding(&self) -> Result<Value> {
         let d = self
@@ -1442,6 +1635,7 @@ impl Satellite {
         if self.state.released {
             // Cleanup acknowledgment cannot retire a command receipt that has not
             // itself been acknowledged. Keep the old binding until exact replay succeeds.
+            self.transfer_report_retry(controller)?;
             self.retry_operation_report(controller)?;
             // The closed assignment's workspace is deleted; a new claim starts a new journal.
             self.state = Journal::fresh(self.state.config.clone())?;
@@ -1468,17 +1662,23 @@ impl Satellite {
             self.save()?;
         }
         if self.state.cleaned {
+            self.state.transfers.recover();
+            self.save()?;
+            let _ = self.transfer_report_retry(controller);
             // Resource cleanup may progress independently, but its journal retains
             // any command receipt until the next invocation can acknowledge it.
             let _ = self.retry_operation_report(controller);
             return self.finish(controller);
         }
         if self.state.launch_intent || self.state.fenced {
+            self.state.transfers.recover();
+            self.save()?;
             if let Some(op) = self.state.operations.current.as_mut() {
                 op.unknown();
             }
             self.save()?;
             self.fence()?;
+            let _ = self.transfer_report_retry(controller);
             let _ = self.retry_operation_report(controller);
             if self.state.stopped {
                 return self.finish(controller);
@@ -1562,7 +1762,14 @@ impl Satellite {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn())?;
+        let mut transfer_controller = controller.data_transport();
+        let mut joined_data_closed = false;
         let stopped = std::thread::scope(|scope| -> Result<bool> {
+            let transfer_worker = transfer_controller
+                .as_mut()
+                .map(|c| operations::Worker::spawn(scope, c));
+            let mut transfer_inflight = false;
+            let mut transfer_polled: Option<clock::Clock> = None;
             let worker = operations::Worker::spawn(scope, controller);
             let mut inflight = false;
             let mut last: Option<clock::Clock> = None;
@@ -1590,6 +1797,71 @@ impl Satellite {
                             self.withdraw()?;
                             self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
+                        }
+                    }
+                    if let Some(w) = &transfer_worker {
+                        self.transfer_events(&data)?;
+                        if transfer_inflight {
+                            if let Ok((route, sent, reply)) = w.recv.try_recv() {
+                                transfer_inflight = false;
+                                if let Ok(reply) = reply {
+                                    let accepted = match route {
+                                        LeaseRoute::TransferPoll => {
+                                            self.accept_transfer_poll(reply, sent, &data)
+                                        }
+                                        LeaseRoute::TransferReport => self
+                                            .state
+                                            .transfers
+                                            .acknowledge(reply)
+                                            .and_then(|_| self.save()),
+                                        _ => Err("unexpected transfer response"),
+                                    };
+                                    if accepted.is_err() {
+                                        self.transfer_cancel(
+                                            &data,
+                                            canaveral_guest_protocol::data::CancelReason::Stop,
+                                        )?;
+                                        self.state.transfers.loss("transport_unknown");
+                                        self.state.transfers.blocked = true;
+                                        self.save()?;
+                                    }
+                                }
+                            }
+                        }
+                        if !transfer_inflight
+                            && transfer_polled
+                                .is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
+                        {
+                            let request = if self
+                                .state
+                                .transfers
+                                .current
+                                .as_ref()
+                                .is_some_and(|s| s.receipt.is_some() && !s.acknowledged)
+                            {
+                                Some((
+                                    LeaseRoute::TransferReport,
+                                    self.state.transfers.report(self.operation_binding()?)?,
+                                ))
+                            } else if self.files_ready
+                                && !self.state.transfers.blocked
+                                && self.assignment()?.capabilities.iter().any(|c| c == "files")
+                            {
+                                let poll_id = self.state.transfers.poll_id()?;
+                                self.save()?;
+                                let mut owner = self.operation_binding()?;
+                                owner["pollId"] = json!(poll_id);
+                                Some((LeaseRoute::TransferPoll, owner))
+                            } else {
+                                None
+                            };
+                            if let Some(request) = request {
+                                w.send
+                                    .try_send(request)
+                                    .map_err(|_| "transfer worker stopped")?;
+                                transfer_inflight = true;
+                                transfer_polled = Some(clock::Clock::now());
+                            }
                         }
                     }
                     if inflight {
@@ -1693,23 +1965,34 @@ impl Satellite {
                     op.unknown();
                 }
             }
+            let cancelled =
+                self.transfer_cancel(&data, canaveral_guest_protocol::data::CancelReason::Stop);
+            self.state.transfers.loss("authorization_lost");
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
             let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
             let closed = data.shutdown();
             if let Some(d) = self.state.direct.as_mut() {
-                d.data_closed = Some(closed.complete());
+                d.data_closed = Some(false);
+                joined_data_closed = closed.complete();
             }
             self.save()?;
             drop(data);
             drop(session);
             drop(worker);
+            drop(transfer_worker);
             fenced?;
             let stopped = self.wait_stopped(Some(&mut child))?;
             saved?;
+            cancelled?;
             supervised?;
             Ok(stopped)
         })?;
+        if let Some(d) = self.state.direct.as_mut() {
+            d.data_closed = Some(joined_data_closed);
+        }
+        self.save()?;
+        let _ = self.transfer_report_retry(controller);
         let _ = self.retry_operation_report(controller);
         if stopped {
             return self.finish(controller);
@@ -1822,6 +2105,7 @@ fn update_path_absent(path: &std::path::Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     mod operations;
+    mod transfers;
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
     fn boot_id() -> uuid::Uuid {
@@ -1954,6 +2238,8 @@ mod tests {
                 LeaseRoute::Claim => "claim",
                 LeaseRoute::Report => "report",
                 LeaseRoute::Assignments => "assignments",
+                LeaseRoute::TransferPoll => "transferPoll",
+                LeaseRoute::TransferReport => "transferReport",
                 LeaseRoute::OperationPoll => "operationPoll",
                 LeaseRoute::OperationReport => "operationReport",
             };

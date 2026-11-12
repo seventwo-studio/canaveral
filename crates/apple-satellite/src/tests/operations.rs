@@ -515,13 +515,13 @@ fn workspace_environment_only_adds_proxy_with_grant() {
 }
 
 #[test]
-fn incomplete_workspace_runtime_refuses_assignments_and_cleanup_evidence() {
+fn incomplete_workspace_snapshot_refuses_assignments_and_cleanup_evidence() {
     let (_tmp, c) = fixture();
     let mut s = seeded(&c);
     s.state.assignment.as_mut().unwrap().workspace_io_version = Some(1);
     assert!(matches!(
         s.validate_assignment(s.assignment().unwrap()),
-        Err("workspace-v2 runtime integration is not available")
+        Err("incomplete workspace admission snapshot")
     ));
     let r = s.receipt().unwrap();
     assert_eq!(r["receipt"]["workspaceRemoved"], false);

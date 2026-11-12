@@ -572,6 +572,8 @@ pub enum LeaseRoute {
     Report,
     OperationPoll,
     OperationReport,
+    TransferPoll,
+    TransferReport,
 }
 impl LeaseRoute {
     fn path(self) -> &'static str {
@@ -581,6 +583,8 @@ impl LeaseRoute {
             Self::Report => "/v1/runners/linux-leases/report",
             Self::OperationPoll => "/v1/runners/linux-leases/operations/poll",
             Self::OperationReport => "/v1/runners/linux-leases/operations/report",
+            Self::TransferPoll => "/v1/runners/linux-leases/transfers/poll",
+            Self::TransferReport => "/v1/runners/linux-leases/transfers/report",
         }
     }
 }

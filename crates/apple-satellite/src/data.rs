@@ -27,6 +27,33 @@ pub(crate) struct Lane {
     options: Option<(bool, Vec<String>, Duration)>,
 }
 impl Lane {
+    #[cfg(test)]
+    pub(crate) fn test_lane(stream: UnixStream, binding: Binding) -> Self {
+        let session = Session::new(stream, binding, "b".repeat(64)).unwrap();
+        Self {
+            attempted: true,
+            worker: Some(crate::reactor::spawn(
+                session,
+                crate::reactor::Deny,
+                crate::egress::Policy::new(&[]).unwrap(),
+                false,
+                crate::reactor::Authority::new(crate::clock::now() + Duration::from_secs(60)),
+            )),
+            initial_ready: false,
+            session: None,
+            options: None,
+        }
+    }
+    pub(crate) fn send_transfer(&self, frame: Frame) -> Result<()> {
+        self.worker
+            .as_ref()
+            .ok_or("data channel unavailable")?
+            .send_transfer(frame)
+            .map_err(|_| "transfer channel unavailable")
+    }
+    pub(crate) fn receipt(&self) -> Option<Frame> {
+        self.worker.as_ref()?.receipts.try_recv().ok()
+    }
     pub(crate) fn authority(&self) -> Option<crate::reactor::Authority> {
         self.worker.as_ref().map(|w| w.authority.clone())
     }

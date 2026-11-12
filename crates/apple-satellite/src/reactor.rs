@@ -22,7 +22,12 @@ use std::{
     time::Duration,
 };
 use uuid::Uuid;
-type Connected = (Uuid, std::result::Result<(TcpStream, IpAddr), ErrorCode>);
+type Recheck = (clock::Clock, Receiver<Vec<(Uuid, ErrorCode)>>);
+type Connected = (
+    Uuid,
+    clock::Clock,
+    std::result::Result<(TcpStream, IpAddr), ErrorCode>,
+);
 type Result<T> = canaveral_guest_protocol::Result<T>;
 const TURN: usize = 65536;
 /// Clone must create an independent evidence/query context. No ambient proxy or DNS at connect.
@@ -155,7 +160,7 @@ impl Closed {
 }
 pub struct Handle {
     pub authority: Authority,
-    requests: SyncSender<Frame>,
+    requests: SyncSender<(Frame, Duration)>,
     cancel: SyncSender<Frame>,
     pub receipts: Receiver<Frame>,
     pub ready: Arc<AtomicBool>,
@@ -173,9 +178,12 @@ impl Handle {
                 .cancel
                 .try_send(frame)
                 .map_err(|_| "cancel slot occupied".into()),
-            Frame::TransferRequest { .. } => self
+            Frame::TransferRequest { remaining_ms, .. } => self
                 .requests
-                .try_send(frame)
+                .try_send((
+                    frame.clone(),
+                    clock::now() + Duration::from_millis(remaining_ms),
+                ))
                 .map_err(|_| "transfer slot occupied".into()),
             _ => Err("not a transfer command".into()),
         }
@@ -213,6 +221,7 @@ struct Socket {
     progress: clock::Clock,
 }
 struct Output {
+    transfer_request: bool,
     reserved: bool,
     bytes: Vec<u8>,
     offset: usize,
@@ -228,10 +237,11 @@ pub struct Reactor<E: Egress> {
     flows: Flows,
     sockets: BTreeMap<Uuid, Socket>,
     live: Live,
-    recheck: Option<(clock::Clock, Receiver<Vec<(Uuid, ErrorCode)>>)>,
+    recheck: Option<Recheck>,
     next_recheck: Duration,
     receipt_tx: Option<SyncSender<Frame>>,
     transfer: Option<(Uuid, u64)>,
+    transfer_deadline: Option<Duration>,
     budget: Budget,
     output: VecDeque<Output>,
     workers: Vec<JoinHandle<()>>,
@@ -267,6 +277,7 @@ impl<E: Egress> Reactor<E> {
             next_recheck: clock::now(),
             receipt_tx: None,
             transfer: None,
+            transfer_deadline: None,
             budget,
             output: VecDeque::new(),
             workers: Vec::new(),
@@ -286,6 +297,7 @@ impl<E: Egress> Reactor<E> {
         }
         self.budget.reserve(decoded, bytes.len())?;
         self.output.push_back(Output {
+            transfer_request: matches!(frame, Frame::TransferRequest { .. }),
             reserved: false,
             bytes,
             offset: 0,
@@ -357,7 +369,7 @@ impl<E: Egress> Reactor<E> {
                 );
                 self.workers.push(thread::spawn(move || {
                     let result = connect(&mut provider, &policy, &authority, &host, port);
-                    let _ = tx.try_send((id, result));
+                    let _ = tx.try_send((id, clock::Clock::now(), result));
                 }));
             }
             Frame::Data { id, seq, data, .. } => {
@@ -403,6 +415,7 @@ impl<E: Egress> Reactor<E> {
                     .try_send(frame)
                     .map_err(|_| "receipt handler full")?;
                 self.transfer = None;
+                self.transfer_deadline = None;
             }
             _ => return Err("unexpected data frame".into()),
         }
@@ -463,7 +476,7 @@ impl<E: Egress> Reactor<E> {
         }
         self.reap();
         self.revalidate()?;
-        while let Ok((id, result)) = self.connected.try_recv() {
+        while let Ok((id, checked, result)) = self.connected.try_recv() {
             if !self.sockets.contains_key(&id) {
                 continue;
             }
@@ -472,7 +485,14 @@ impl<E: Egress> Reactor<E> {
                     if !self.authority.permits() {
                         return Err("authority lost".into());
                     }
-                    if self.policy.recheck(ip, &mut self.provider).is_err() {
+                    // The connect worker refreshed evidence after connection. Never query
+                    // the host synchronously here: that would defeat the periodic bound.
+                    if checked.elapsed() >= Duration::from_secs(2)
+                        || self
+                            .recheck
+                            .as_ref()
+                            .is_some_and(|(started, _)| started.elapsed() >= Duration::from_secs(2))
+                    {
                         self.retire(id, Some(ErrorCode::RouteDenied))?;
                         continue;
                     }
@@ -718,7 +738,7 @@ pub fn spawn<E: Egress>(
     authority: Authority,
 ) -> Handle {
     session.enable_handoff();
-    let (requests, rx) = mpsc::sync_channel(1);
+    let (requests, rx) = mpsc::sync_channel::<(Frame, Duration)>(1);
     let (cancel, cx) = mpsc::sync_channel(1);
     let (tx, receipts) = mpsc::sync_channel(1);
     let ready = Arc::new(AtomicBool::new(false));
@@ -750,7 +770,14 @@ pub fn spawn<E: Egress>(
         };
 
         reactor.receipt_tx = Some(tx);
+        let mut cancelled = None;
         loop {
+            if reactor
+                .transfer_deadline
+                .is_some_and(|deadline| clock::now() >= deadline)
+            {
+                break;
+            }
             if let Ok(f) = if reactor.output.iter().any(|o| o.reserved) {
                 Err(mpsc::TryRecvError::Empty)
             } else {
@@ -760,6 +787,26 @@ pub fn spawn<E: Egress>(
                     Ok(b) => b,
                     Err(_) => break,
                 };
+                if let Frame::TransferCancel { id, .. } = &f {
+                    cancelled = Some(*id);
+                    if reactor.transfer.is_some_and(|(current, _)| current == *id) {
+                        // A wholly unsent request must never execute after its cancel.
+                        if let Some(pos) = reactor
+                            .output
+                            .iter()
+                            .position(|o| o.transfer_request && o.offset == 0)
+                        {
+                            let output = reactor.output.remove(pos).unwrap();
+                            if reactor
+                                .budget
+                                .release(output.decoded, output.bytes.len())
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
                 // A cancel can bypass queued payload, but never a partially written frame.
                 let pos = usize::from(reactor.output.front().is_some_and(|o| o.offset > 0));
                 if reactor.budget.reserve(0, bytes.len()).is_err() {
@@ -768,6 +815,7 @@ pub fn spawn<E: Egress>(
                 reactor.output.insert(
                     pos,
                     Output {
+                        transfer_request: false,
                         reserved: true,
                         bytes,
                         offset: 0,
@@ -775,9 +823,18 @@ pub fn spawn<E: Egress>(
                     },
                 );
             }
-            if let Ok(mut f) = rx.try_recv() {
+            if let Ok((mut f, deadline)) = rx.try_recv() {
+                if matches!(&f, Frame::TransferRequest { id, .. } if cancelled == Some(*id)) {
+                    continue;
+                }
+                if clock::now() >= deadline {
+                    break;
+                }
+                reactor.transfer_deadline = Some(deadline);
                 if let Frame::TransferRequest { remaining_ms, .. } = &mut f {
-                    *remaining_ms = (*remaining_ms).min(reactor.authority.remaining_ms());
+                    *remaining_ms = (*remaining_ms)
+                        .min(reactor.authority.remaining_ms())
+                        .min(deadline.saturating_sub(clock::now()).as_millis() as u64);
                 }
                 if reactor.transfer.is_some() {
                     break;
@@ -1217,6 +1274,32 @@ mod worker_tests {
         let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
         guest.read_exact(&mut body).unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+    #[test]
+    fn expired_queued_transfer_closes_data_without_guest_execution() {
+        let (mut h, mut guest) = start(Deny);
+        h.requests
+            .try_send((
+                Frame::TransferRequest {
+                    version: 1,
+                    id: Uuid::from_u128(22),
+                    step: 1,
+                    request: Request::Abort,
+                    remaining_ms: 60000,
+                },
+                Duration::ZERO,
+            ))
+            .unwrap();
+        for _ in 0..100 {
+            if !h.ready.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!h.ready.load(Ordering::Acquire));
+        let mut byte = [0];
+        assert_eq!(guest.read(&mut byte).unwrap(), 0);
+        assert!(h.shutdown().complete());
     }
     #[test]
     fn transfer_receipt_routing_cancel_and_shutdown_evidence() {
