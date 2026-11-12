@@ -198,3 +198,45 @@ validation passed: coordination typecheck/build and 998 tests; full serial Rust
 suite; satellite clippy with warnings denied; standalone harness typecheck; shell
 syntax checks and the detached-signature refusal regression. These runs preserve
 the experimental scope and all previously listed production acceptance gaps.
+
+### Enforced observation windows (ST-534)
+
+The loss case polls all recorded helper PIDs and requires an alive observation
+at or after deadline minus three seconds. The first all-gone observation must
+fall between deadline minus 2.5 seconds and deadline plus five seconds. These
+bounds account for the guest's two-second early margin, polling jitter and
+bounded native shutdown observation; the helper's own fence targets the deadline.
+A helper that disappears well before expiry cannot pass. Immediately before
+restarting recovery, the harness rechecks that no power-off request exists and
+the last native authorization remains unfenced. The helper's autonomous
+`lease-fenced.json` is expected and is distinct from a recovery request.
+
+Renewal requires exactly the next controller revision and the requested 180-second
+expiry, matching mutation and lease views. The native authorization must reach
+that exact revision. After original expiry plus the guest margin, the command
+must succeed while the same renewed revision and expiry remain current.
+`renewal-post-deadline-command.json` records both. The wait has an explicit bound
+derived from the original expiry, so the default polling timeout cannot preempt it.
+
+Full run `canaveral-native-9Tdxt4` passed these tightened assertions on 2026-11-12,
+with one 2 CPU / 2 GiB guest at a time. The loss helper was observed alive 53 ms
+after its deadline and stopped 255 ms after it. The post-original-deadline
+command succeeded 2.471 seconds after original expiry under renewed revision 3.
+The private run retains `loss-independent-fence.json`,
+`renewal-post-deadline-command.json`, `result.json` and
+`loss-post-run-owned-cleanup.json`. Independent PID, VZ, runtime-lock and empty
+lsof checks preceded removal of the owned workspace/machine and relay. The
+satellite journal was unchanged; its stopped private controller DB retains the
+expired loss lease with runtime unknown, cleanup pending and one reservation.
+No cleanup receipt or capacity reclamation was fabricated.
+
+The complete source/package authentication gate passed against the retained
+experimental inputs, including all 117 Debian packages; signature status, public
+key material, chain indexes and `authenticated-inputs.json` are retained under
+`signature-authentication/`. Archive byte pins were unchanged, so no boot
+artifacts were rebuilt. The disposable signature-verification VM was stopped
+before native acceptance and deleted afterward. Portable validation passed:
+coordination typecheck/build and 998 tests, the full serial Rust suite, satellite
+clippy with warnings denied, standalone harness typecheck, six signature-gate
+regressions and shell syntax checks. These results retain the experimental scope
+and all previously listed production acceptance gaps.

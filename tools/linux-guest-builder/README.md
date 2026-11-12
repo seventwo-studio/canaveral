@@ -50,8 +50,12 @@ satellite runtime state or an existing VM. Limit concurrent work to this VM's
    must be recorded for compiler-level reproduction. Existing VMs are unrelated.
 3. In the guest user's home, create `build`, extract `source.tar` into `build/repo`
    and copy this recipe directory to `build/recipe` using `limactl copy` or tar
-   over `limactl shell`. Run `fetch-experimental.sh` from `build`, then
-   `verify-signatures.sh`. Do not build on signature failure. Kernel checksums
+   over `limactl shell`. Initialize a private GPG home, acquire the kernel key
+   with `gpg --auto-key-locate clear,wkd --locate-keys autosigner@kernel.org`,
+   and export `B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1` to
+   `build/inputs/kernel-key.gpg` after fetching inputs. Retain the authenticated
+   builder Debian archive keyring as `build/inputs/debian-archive-keyring.gpg`. Run `fetch-experimental.sh` from `build`, then
+   `INPUTS="$PWD/inputs" bash recipe/verify-source-inputs.sh`. Do not build on signature failure. Kernel checksums
    must verify under `B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1`; Node checksums
    under `C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C`. The WKD/kernel and HTTPS/Node
    key acquisition is experimental trust material, not production key approval.
@@ -105,6 +109,7 @@ satellite runtime state or an existing VM. Limit concurrent work to this VM's
      assemble --recipe "$WORK/inputs/recipe.json" --inputs "$WORK/inputs" --output "$WORK/bundle"
    ```
 
+   Run the complete `verify-signatures.sh` gate after export and before assembly.
    Run Cargo from the repository. Preflight establishes bytes/header evidence only;
    the independent signature logs cover the narrower upstream checks. Repeat
    assembly into another new directory and compare every output's hash to verify
@@ -170,3 +175,52 @@ Run `node --test tools/linux-guest-builder/signature-gates.test.mjs` for the
 portable refusal regression: failed detached-signature verification must stop
 before the Rust installer destination is created. This does not substitute for
 running real upstream signature verification on the pinned archives.
+
+### Primary-key and complete-input gate (ST-534)
+
+All successful `VALIDSIG` records must name a pinned **primary** key in the final
+status field. Rust key bytes are inspected before import; multiple or mismatched
+primary keys are refused. The Rust pin is
+`108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE`.
+The Debian primary allowlist covers bookworm archive
+`B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8`, bookworm stable
+`4D64FEC119C2029067D6E791F8D2585B8783D481`, trixie archive
+`04B54C3CDCA79751B16BC6B5225629DF75B188BD` and trixie stable
+`41587F7DB8C774BCCF131416762F67A0B2C39DE4`.
+Both snapshot and erofs Release status files are checked against this list.
+Keyring membership alone never authorizes a signature.
+
+Run `verify-source-inputs.sh` before building, with `INPUTS` set to the absolute
+input directory and the authenticated Debian keyring retained there. Acquire
+the kernel key through the kernel WKD and export the pinned key as
+`kernel-key.gpg` on the first run. Relevant source verification repeats before kernel,
+Rust, rootfs and host erofs builds. It verifies kernel, Node, Rust and erofs
+signatures and pins each time, including pre-existing files.
+
+After exporting the complete package set, run `verify-signatures.sh` with the
+same `INPUTS` before accepting or installing artifacts. This complete gate fails
+on missing inputs. It additionally verifies the retained snapshot Release,
+its SHA256 Packages index, every retained package archive and exact package
+identity set. `authenticated-inputs.json` enumerates authentication methods,
+source archive provenance, Cargo.lock checksum enforcement, and hashes of all
+reviewed recipe inputs. Git archive entries, modes, symlink targets and contents
+must match the selected source revision; differences in tar metadata between Git
+versions are ignored. Cargo still uses `--locked` to authenticate fetched registry
+crates against Cargo.lock when compiling. Builder-image package tools and host
+Xcode/autotools remain explicit operator prerequisites. This gate does not claim
+a reproducible compiler or production trust approval.
+
+The fingerprint refusal tests include successful GPG exits with wrong fetched
+primary and wrong `VALIDSIG` primary fingerprints, unpinned Debian primary
+signatures and missing complete-gate inputs. Retained experimental bytes must
+pass the same gates; presence never substitutes for verification.
+
+Run the complete gate from the maintained repository on a verifier with GPG,
+gpgv, xz, Node, Git and the selected source revision's Git objects available;
+a source archive extraction alone has no Git object database. After copying
+inputs back in step 6, use
+`INPUTS="$WORK/inputs" bash "$REPO/tools/linux-guest-builder/verify-signatures.sh"`.
+A disposable Linux verifier can instead import an operator-provided Git bundle
+and invoke the recipe under that checkout. Delete that verifier and bundle after
+retaining signature evidence. The source-only guest build gates do not need a
+Git object database. No missing verification dependency is silently skipped.

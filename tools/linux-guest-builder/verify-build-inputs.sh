@@ -2,23 +2,29 @@
 # Experimental trust acquisition; authenticate exact executable source inputs.
 set -euo pipefail
 : "${INPUTS:?absolute authenticated input directory required}"
+RECIPE_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$RECIPE_DIR/signature-policy.sh"
 cd "$INPUTS"
 export GNUPGHOME="$INPUTS/build-input-keyring"
 mkdir -p "$GNUPGHOME"
 chmod 700 "$GNUPGHOME"
 fetch() { test -f "$2" || curl -fLS --retry 2 --max-time 600 "$1" -o "$2"; }
 fetch https://static.rust-lang.org/rust-key.gpg.ascii rust-key.asc
+# Inspect fetched primary keys before import, even if the file already existed.
+primary=$(gpg --batch --with-colons --import-options show-only --import rust-key.asc | awk -F: '$1=="pub" {want=1;next} want && $1=="fpr" {print $10;want=0}')
+test "$primary" = "$RUST_PRIMARY"
 gpg --batch --import rust-key.asc
 for name in rust-1.99.1-aarch64-unknown-linux-gnu rust-std-1.99.1-aarch64-unknown-linux-musl; do
   fetch "https://static.rust-lang.org/dist/$name.tar.xz.asc" "$name.tar.xz.asc"
   gpg --batch --status-fd 3 --verify "$name.tar.xz.asc" "$name.tar.xz" 3>"$name.status"
-  grep -q '^\[GNUPG:\] VALIDSIG 108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE ' "$name.status"
+  require_primary_signature "$name.status" "$RUST_PRIMARY"
 done
 # Debian archive keys are supplied by the authenticated builder image/apt chain.
 : "${DEBIAN_ARCHIVE_KEYRING:=/usr/share/keyrings/debian-archive-keyring.gpg}"
 fetch https://deb.debian.org/debian/dists/trixie/Release erofs-Release
 fetch https://deb.debian.org/debian/dists/trixie/Release.gpg erofs-Release.gpg
 gpgv --keyring "$DEBIAN_ARCHIVE_KEYRING" --status-fd 3 erofs-Release.gpg erofs-Release 3>erofs-release.status
+require_primary_signature erofs-release.status "$DEBIAN_PRIMARIES"
 fetch https://deb.debian.org/debian/dists/trixie/main/source/Sources.xz erofs-Sources.xz
 awk '$3=="main/source/Sources.xz" && length($1)==64 {print $1 "  erofs-Sources.xz"; found=1} END {if (!found) exit 1}' erofs-Release | shasum -a256 -c -
 xz -dc erofs-Sources.xz > erofs-Sources

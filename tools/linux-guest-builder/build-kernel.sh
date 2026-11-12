@@ -4,6 +4,7 @@ set -euo pipefail
 : "${INPUTS:?verified source directory required}" "${OUTPUT:?new build directory required}"
 test "$(uname -m)" = aarch64
 recipe_dir=$(cd "$(dirname "$0")" && pwd)
+INPUTS="$INPUTS" bash "$recipe_dir/verify-source-inputs.sh"
 mkdir "$OUTPUT"
 cd "$OUTPUT"
 printf '%s  %s\n' 74e99aa5e60e242e0a165fed8cb2ea0d054bf7a401f01861d403d75733456613 "$INPUTS/linux-6.12.117.tar.xz" | sha256sum -c -

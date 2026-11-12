@@ -2,14 +2,18 @@
 # Linux arm64; mmdebstrap uses an unprivileged user namespace, never host sudo.
 set -euo pipefail
 : "${BUILD:?absolute build directory required}"
+RECIPE_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$RECIPE_DIR/signature-policy.sh"
 cd "$BUILD"
+INPUTS="$BUILD/inputs" bash "$RECIPE_DIR/verify-source-inputs.sh"
 export SOURCE_DATE_EPOCH=1793491200 LC_ALL=C TZ=UTC
 mkdir -p inputs/debs
 cp /usr/share/keyrings/debian-archive-keyring.gpg inputs/debian-archive-keyring.gpg
 base=https://snapshot.debian.org/archive/debian/20261101T000000Z
 curl -fLS "$base/dists/bookworm/Release" -o inputs/Release
 curl -fLS "$base/dists/bookworm/Release.gpg" -o inputs/Release.gpg
-gpgv --keyring "$BUILD/inputs/debian-archive-keyring.gpg" inputs/Release.gpg inputs/Release 2> debian-signature.log
+gpgv --keyring "$BUILD/inputs/debian-archive-keyring.gpg" --status-fd 3 inputs/Release.gpg inputs/Release 3> inputs/debian-release.status 2> debian-signature.log
+require_primary_signature inputs/debian-release.status "$DEBIAN_PRIMARIES"
 # apt independently validates Release -> Packages -> each .deb digest.
 mmdebstrap --mode=unshare --variant=minbase --architectures=arm64 --format=tar \
   --keyring="$BUILD/inputs/debian-archive-keyring.gpg" \

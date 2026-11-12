@@ -588,9 +588,11 @@ impl Satellite {
     fn fence(&mut self) -> Result<()> {
         self.fence_for(StopCause::Runtime)
     }
-    fn error_cause(&self, session: Option<&guest::Session>) -> StopCause {
+    fn error_cause(&self, child: &mut Child, session: Option<&guest::Session>) -> StopCause {
         if self.state.terminal {
             StopCause::Controller
+        } else if matches!(child.try_wait(), Ok(Some(_))) {
+            StopCause::Runtime
         } else if self.deadline_reached(session) {
             StopCause::Deadline
         } else {
@@ -1306,13 +1308,13 @@ impl Satellite {
                         && self.guest_step(&mut session, &mut last).is_err()
                     {
                         self.withdraw()?;
-                        self.fence_for(self.error_cause(session.as_ref()))?;
+                        self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                         break;
                     }
                     if let Some(s) = session.as_mut() {
                         if self.operation_events(s).is_err() {
                             self.withdraw()?;
-                            self.fence_for(self.error_cause(session.as_ref()))?;
+                            self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
                         }
                     }
@@ -1332,7 +1334,7 @@ impl Satellite {
                                 };
                                 if accepted.is_err() {
                                     self.withdraw()?;
-                                    self.fence_for(self.error_cause(session.as_ref()))?;
+                                    self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                                     break;
                                 }
                             }
@@ -1349,7 +1351,7 @@ impl Satellite {
                             .is_err()
                         {
                             self.withdraw()?;
-                            self.fence_for(self.error_cause(session.as_ref()))?;
+                            self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
                         }
                     }
@@ -1418,7 +1420,7 @@ impl Satellite {
             }
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
-            let fenced = self.fence_for(self.error_cause(session.as_ref()));
+            let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
             drop(session);
             drop(worker);
             fenced?;
@@ -1775,7 +1777,11 @@ mod tests {
     fn late_errors_recheck_deadline_but_observed_process_exit_wins() {
         let (_tmp, c) = fixture();
         let mut s = seeded(&c);
-        assert!(matches!(s.error_cause(None), StopCause::Runtime));
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        assert!(matches!(
+            s.error_cause(&mut child, None),
+            StopCause::Runtime
+        ));
         // Move authority end between the loop check and guest/reply processing.
         let (mut guest, _peer) =
             guest::tests::session_pair_with_deadline(clock::now().as_secs_f64() + 5.0);
@@ -1783,7 +1789,10 @@ mod tests {
         clock::advance(Duration::from_secs(6));
         assert!(guest.pump(clock::now().as_secs_f64()).is_err());
         assert!(!s.expired());
-        assert!(matches!(s.error_cause(Some(&guest)), StopCause::Deadline));
+        assert!(matches!(
+            s.error_cause(&mut child, Some(&guest)),
+            StopCause::Deadline
+        ));
         clock::advance(Duration::from_secs(101));
         assert!(s.accept_report(json!({}), 0.0).is_err());
         assert!(s.accept_poll(json!({}), 0.0, None).is_err());
@@ -1795,9 +1804,15 @@ mod tests {
             s.supervision_cause(false, None),
             Some(StopCause::Deadline)
         ));
-        s.fence_for(s.error_cause(None)).unwrap();
+        s.fence_for(s.error_cause(&mut child, None)).unwrap();
         clock::advance(Duration::ZERO);
         assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "deadline");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(matches!(
+            s.error_cause(&mut child, Some(&guest)),
+            StopCause::Runtime
+        ));
     }
     #[test]
     fn terminal_poll_ok_and_report_prefer_controller_after_deadline() {
@@ -1825,13 +1840,23 @@ mod tests {
     #[test]
     fn legacy_fenced_journal_replays_as_runtime() {
         let (_tmp, c) = fixture();
-        let mut s = seeded(&c);
-        s.state.fenced = true;
-        s.state.stop_cause = None;
-        s.save().unwrap();
+        let s = seeded(&c);
+        let config = serde_json::to_value(&c).unwrap();
+        let assignment = serde_json::to_value(s.state.assignment.as_ref().unwrap()).unwrap();
         drop(s);
-        let mut s = Satellite::open_preflighted(c).unwrap();
-        s.fence_for(StopCause::Deadline).unwrap();
+        // Real pre-15f557e native expiry journal; local paths/bindings are redacted.
+        let mut document: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/pre-cause-fenced.json")).unwrap();
+        assert!(document.get("stopCause").is_none());
+        document["config"] = config;
+        document["assignment"] = assignment;
+        std::fs::write(
+            c.state.join("state.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let s = Satellite::open_preflighted(c).unwrap();
+        assert!(s.state.fenced);
         assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "runtime");
     }
     #[test]

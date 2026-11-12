@@ -231,10 +231,22 @@ try {
     await ok('POST', `/v1/leases/${id}/operations`, {id: operation, member:'primary', action:'shell', arguments:{argv:['/bin/sh','-c','printf canaveral-native-command']}}, credential);
     const receipt = await until(async () => { await observe(id); const r = await ok('GET', `/v1/leases/${id}/operations/${operation}`, undefined, credential); return ['succeeded','failed','unknown','cancelled'].includes(r.state) && r; }, 'guest command');
     assert.equal(receipt.state, 'succeeded'); assert.equal(Buffer.from(receipt.result.stdoutBase64, 'base64').toString(), 'canaveral-native-command'); save('command.json', receipt);
-    const originalExpiresAt = Date.parse((await inspect(id)).expiresAt);
+    const originalLease = await inspect(id);
+    const originalExpiresAt = Date.parse(originalLease.expiresAt);
     await pause(1100);
-    await ok('POST', `/v1/leases/${id}/renew`, {id:randomUUID(), expectedRevision:(await inspect(id)).revision, ttlSeconds:180}, app.credential);
-    const renewedRevision = (await inspect(id)).revision;
+    const renewalStartedAt = Date.now();
+    const renewal = await ok('POST', `/v1/leases/${id}/renew`, {id:randomUUID(), expectedRevision:originalLease.revision, ttlSeconds:180}, app.credential);
+    const renewalReturnedAt = Date.now();
+    const renewedLease = await inspect(id);
+    const renewedRevision = originalLease.revision + 1;
+    assert.equal(renewedLease.revision, renewedRevision);
+    assert.equal(renewal.lease.revision, renewedRevision);
+    assert.equal(renewal.lease.expiresAt, renewedLease.expiresAt);
+    assert.equal(renewal.mutation.revision, renewedRevision);
+    assert.equal(renewal.mutation.expiresAt, renewedLease.expiresAt);
+    const renewedExpiresAt = Date.parse(renewedLease.expiresAt);
+    assert(renewedExpiresAt >= renewalStartedAt + 180000 - 1 && renewedExpiresAt <= renewalReturnedAt + 180000, 'renewal expiry differs from requested TTL');
+    assert(renewedExpiresAt > originalExpiresAt);
     await until(async () => {
       await observe(id);
       const machine = observed.get(id)!.machine;
@@ -242,9 +254,15 @@ try {
       if (!existsSync(file)) return false;
       const authorization = JSON.parse(readFileSync(file, 'utf8'));
       if (authorization.revision < renewedRevision) return false;
+      assert.equal(authorization.revision, renewedRevision);
+      assert.equal(authorization.fenced, false);
       save('renewed-native-authorization.json', authorization); return true;
     }, 'renewal delivered to native lease guard');
-    await until(async () => Date.now() > originalExpiresAt + 2000, 'past original deadline and guest margin');
+    await until(async () => Date.now() > originalExpiresAt + 2000, 'past original deadline and guest margin', Math.max(10000, originalExpiresAt + 12000 - Date.now()));
+    const commandLease = await inspect(id);
+    assert.equal(commandLease.revision, renewedRevision);
+    assert.equal(commandLease.expiresAt, renewedLease.expiresAt);
+    assert(Date.now() < Date.parse(commandLease.expiresAt));
     const renewalCommand = randomUUID();
     await ok('POST', "/v1/leases/" + id + "/operations", {id:renewalCommand, member:'primary', action:'shell', arguments:{argv:['/bin/sh','-c','printf renewed-after-original-deadline']}}, credential);
     const renewalReceipt = await until(async () => {
@@ -254,7 +272,7 @@ try {
     }, 'post-deadline renewal command');
     assert.equal(renewalReceipt.state, 'succeeded');
     assert.equal(Buffer.from(renewalReceipt.result.stdoutBase64, 'base64').toString(), 'renewed-after-original-deadline');
-    save('renewal-post-deadline-command.json', {originalExpiresAt, observedAt:Date.now(), receipt:renewalReceipt});
+    save('renewal-post-deadline-command.json', {originalExpiresAt, renewedRevision, renewedExpiresAt:renewedLease.expiresAt, commandLease, observedAt:Date.now(), receipt:renewalReceipt});
     await snapshot('renewed', id);
     await ok('POST', `/v1/leases/${id}/release`, {id:randomUUID()}, app.credential); await stopped('release', id);
     const expiry = await start('expiry', 120);
@@ -270,20 +288,30 @@ try {
     const killedAt = Date.now();
     assert(!existsSync(join(observed.get(lost)!.machine, 'power-off.request')));
     // Do not reset state or fabricate cleanup. Preserve this isolated database and reservation.
+    let lastAliveAt = 0;
     await until(async () => {
       const record = observed.get(lost)!;
-      return record.pids.every(pid => { try { process.kill(pid, 0); return false; } catch (e: any) { assert.equal(e.code, 'ESRCH'); return true; } });
-    }, 'orphan helper independent deadline', 180000);
+      assert(record.pids.length > 0);
+      const alive = record.pids.map(pid => { try { process.kill(pid, 0); return true; } catch (e: any) { assert.equal(e.code, 'ESRCH'); return false; } });
+      if (alive.every(Boolean)) lastAliveAt = Date.now();
+      return alive.every(v => !v);
+    }, 'orphan helper independent deadline', Math.max(10000, lossDeadline + 6000 - Date.now()));
     const stoppedObservedAt = Date.now();
+    // The guest may fence 2 s early; the native helper fences at the deadline.
+    // Allow 500 ms polling jitter on the early bound and 5 s for native shutdown.
+    assert(lastAliveAt >= lossDeadline - 3000, 'helper disappeared before deadline observation window');
+    assert(stoppedObservedAt >= lossDeadline - 2500 && stoppedObservedAt <= lossDeadline + 5000, 'autonomous stop outside deadline window');
     const record = observed.get(lost)!;
     for (const pid of record.pids) { try { process.kill(pid, 0); throw Error('orphan helper still alive'); } catch (e: any) { assert.equal(e.code, 'ESRCH'); } }
     const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
     writeFileSync(pem('loss-final-processes.txt'), lossProcesses);
     assert(!lossProcesses.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains after loss deadline');
     assert(!existsSync(join(record.machine, 'power-off.request')), 'controller recovery contaminated autonomous fence');
-    await until(async () => Date.now() > lossDeadline + 2000, 'past loss deadline');
-    save('loss-independent-fence.json', {lossDeadline, killedAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noVZProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
+
+    save('loss-independent-fence.json', {lossDeadline, killedAt, lastAliveAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noVZProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
     // Recovery must report unknown, never relaunch; native deadline independently fences execution.
+    assert(!existsSync(join(record.machine, 'power-off.request')), 'recovery request before restart');
+    assert.equal(JSON.parse(readFileSync(join(record.machine, 'lease-authorization.json'), 'utf8')).fenced, false, 'recovery authorization before restart');
     const recovery = launch(cfg.satellite, ['run-once', pem('satellite-loss-satellite.json')], 'loss-recovery');
     assert.equal((await recovery.done).code, 1);
     assert.equal((await inspect(lost)).runtimeState, 'unknown'); assert.notEqual((await inspect(lost)).cleanup.state, 'complete'); assert.equal((await domain()).reservations, 1);
