@@ -355,3 +355,11 @@ Both relay paths, outbound sockets, disk inode and allocation intent need owned
 journal evidence. Restart never reconnects or replays uncertain file publication.
 Cleanup requires workspaceRemoved/dataPlaneClosed plus existing positive evidence.
 See [egress gates](../../docs/linux-egress-policy.md) before claiming isolation.
+
+ST-535 currently adds portable `egress` policy decisions and a two-second live-ID
+revalidation scheduler, with table provenance in [policy/README.md](policy/README.md).
+These primitives have synthetic evidence tests, not a native route/interface
+provider or TCP reactor. Bundle-v2 admission is explicitly refused before claim.
+Data/transfer poll-report clients and journaling, data cleanup evidence, raw disk
+preallocation and long-command dispatch remain unimplemented. No new satellite
+dependency was introduced; guest-protocol reuses the existing base64 0.22 crate.

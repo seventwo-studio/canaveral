@@ -190,6 +190,10 @@ impl Bundle {
         let bytes = private::trust_file(path, false).map_err(|_| "unsafe boot bundle manifest")?;
         let manifest: Manifest =
             serde_json::from_slice(&bytes).map_err(|_| "invalid boot bundle manifest")?;
+        if manifest.version != 1 {
+            return Err("workspace-v2 runtime integration is not available");
+        }
+
         // Rust-compiled canonical bytes (guest-protocol), never a Foundation encoding.
         let digest = manifest
             .digest()

@@ -176,6 +176,8 @@ impl Recipe {
             command_line: self.command_line.clone(),
             agent_vsock_port: 1024,
             protocol: 1,
+            data_vsock_port: None,
+            data_protocol: None,
             tool_versions: self.tool_versions.clone(),
         }
     }

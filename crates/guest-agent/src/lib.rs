@@ -55,3 +55,5 @@ mod classic;
 pub use classic::run as run_classic_worker;
 
 pub mod atspi;
+
+pub mod workspace;

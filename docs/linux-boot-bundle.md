@@ -171,3 +171,14 @@ A consumed boot attempt is never relaunched. Files readiness requires this mount
 strict file-confinement support and dataReady; command readiness requires writable
 workspace plus both initial handshakes. Native format/flush/serial acceptance is
 still open. Deletion is reclamation, not cryptographic secure erasure.
+
+### ST-535 schema implementation boundary
+
+The Rust manifest canonicalizer validates v2 data fields and the `mkfsExt4` pin;
+known bytes/digests live in `crates/guest-protocol/fixtures/canonical-v2.*`.
+`launch-v2.json` exercises the separate closed workspace launch schema. Existing
+v1 canonical bytes/digest are unchanged and legacy launch rejects a v2 manifest.
+These are schema fixtures, not built or mountable guest artifacts. The builder
+recipe, signature-verified e2fsprogs closure, raw-disk preallocation and journal,
+guest formatting/mounting, and native workspace attachment remain unimplemented.
+Satellite inventory explicitly refuses v2 before a claim; no v1 downgrade occurs.

@@ -139,3 +139,14 @@ steps without a definite receipt become unknown. Losing data alone never kills a
 running shell or prevents renewal. Expiry/revocation/stop closes every flow and
 transfer; data shutdown gets at most 2 seconds and never delays native fencing.
 The satellite retains reservations until separate positive cleanup evidence.
+
+### ST-535 implementation boundary
+
+`guest-protocol::data` implements closed frame/request/receipt schemas, a poisoned
+131072-byte decoder, canonical payload checks, separate flow and transfer IDs,
+credit/budget accounting, half-close decisions, step replay and cursor/hash
+validation. `guest-agent::workspace` supplies portable discovery/identity decisions
+and Linux openat2 read confinement primitives. None is connected to PID1's v1
+control reactor. The data listener, authenticated handshake, file worker and
+publication/durability path remain unimplemented. No files readiness is advertised.
+The known throughput limit is 64 KiB per serialized transfer step.

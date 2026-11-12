@@ -80,6 +80,8 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
         command_line: "console=hvc0 root=/dev/vda rootfstype=erofs ro".into(),
         agent_vsock_port: 1024,
         protocol: 1,
+        data_vsock_port: None,
+        data_protocol: None,
         tool_versions: [
             ("shell", "canaveral-shell-v1"),
             ("git", "git version 2.47"),

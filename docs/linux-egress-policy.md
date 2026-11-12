@@ -28,7 +28,7 @@ SOCKS, transparent TCP and CONNECT to port 22 are absent.
 Hostnames are ASCII case-insensitive LDH labels of 1..63 bytes, starting/ending
 alphanumeric, at least two labels, total ≤253 bytes excluding one optional final
 root dot. Normalize to lowercase and append exactly one root dot for DNS;
-never use search domains, mDNS, hosts-file aliases or resolver fallback. Reject
+never use search domains, mDNS or a relative-name resolver fallback. Reject
 empty labels, underscores, Unicode (caller may supply valid LDH A-labels), and
 suffixes `.local`, `.localhost`, `.internal`, `.home.arpa`, `.lan`, including the
 suffix name itself. Reject single-label and numeric shorthand, octal and hex IP
@@ -43,11 +43,14 @@ host independently; guest validation conveys no authority.
 ## Satellite enforcement
 
 Egress defaults off. Every open checks the immutable assignment grant and the
-current unexpired/unrevoked local authority. Satellite owns DNS and uses no
-ambient proxy, HTTP client or system connect-by-name API. Bound resolution to
-10 seconds including connect, 8 CNAME hops and 64 total terminal A/AAAA answers;
-loops, truncation without complete vetted results, overflow, DNS errors or an
-empty result deny. Check CNAME targets with the same name grammar/suffix policy.
+current unexpired/unrevoked local authority. Satellite owns resolution and uses no
+ambient proxy, HTTP client or connect-by-name API for TCP. A bounded resolver
+worker may use system getaddrinfo for both families on the normalized absolute
+name (with its trailing root dot). Resolution plus connect has a 10-second budget
+and at most 64 terminal A/AAAA answers. Overflow, incomplete results, errors or an
+empty result deny. System resolution does not expose CNAME chains, so this mode
+does not check CNAME targets: every terminal address must pass the same policy.
+A timed-out lookup must not permit replacement workers to accumulate without bound.
 Evaluate **every** terminal address across both families; any denied answer
 rejects the whole name, not merely that answer. Pin an allowed address from this
 set and connect by sockaddr only; fallback may use another already vetted answer
@@ -90,9 +93,13 @@ in [guest wire](guest-wire.md#st-535-data-protocol-contract-unimplemented).
 
 ## Open isolation and compatibility gates
 
-Connect-time checks do not monitor route changes on already-live TCP flows.
-Monitoring/closing affected flows is an open gate; a route may change after the
-last check. A router's public address can hairpin to a private service even when
+Every live flow must revalidate its pinned address against current interface
+addresses, deny CIDRs and kernel route evidence at intervals of at most two
+seconds. Any denial or unavailable evidence closes the flow with `route_denied`.
+The portable `egress::Live` scheduler retires affected IDs in fixture tests, but
+no native route provider or live TCP reactor consumes these decisions yet.
+Native route-change closure remains unproven; this assignment does not change
+host routes without operator authorization. A route can change between checks. A router's public address can hairpin to a private service even when
 its route is default; operators must deny all such site public CIDRs. The policy
 cannot discover arbitrary router translations. DNS and route fixtures do not
 prove host/LAN/tailnet/other-guest isolation. The absolute ST-535 isolation goal
@@ -109,3 +116,12 @@ other protocols on 443, or prevent a public server from acting as an application
 relay; a trusted public service can itself fetch private resources elsewhere.
 This policy controls the satellite's direct destinations, not remote service
 behavior. Host firewall changes and deployment are outside this contract.
+
+## Implementation boundary
+
+Rust provides strict target/CONNECT grammar, destination tables and decisions,
+and fixture revalidation scheduling. The no-NIC direct-boot configuration is
+implemented. The guest loopback listener, resolver worker, native route/interface
+evidence provider and satellite TCP/data reactor are not connected. Egress
+remains unavailable; these primitives do not establish enforcement or acceptance.
+Transfers move at most 64 KiB per serialized step, a known throughput limit.
