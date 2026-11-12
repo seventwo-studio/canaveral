@@ -251,6 +251,84 @@ public-route build/log retrieval, empty/binary/300 KiB file round trips,
 no-replace/disk-full failures, foreign application denial, fixed proxy denial
 codes, egress-off refusal and simultaneous command/transfer expiry. Cleanup
 interception requires both workspaceRemoved and dataPlaneClosed before capacity
-release. Existing v1 cases also run. This harness is unexecuted implementation;
-actual native acceptance, data disconnect, route-change/hairpin topology,
-physical allocation and flush durability remain operator gates.
+release. Existing v1 cases also run. Experimental native results are recorded below. Full acceptance remains false;
+public HTTPS, data disconnect, route-change/hairpin topology and host power-loss
+durability remain open.
+
+## ST-535 native evidence (2026-11-12)
+
+Private run `/private/tmp/canaveral-native-integration-st535/canaveral-native-GcetDy`
+completed all harness groups using source `4e483db`, the signed production helper,
+one 2 CPU / 4096 MiB / 8 GiB workspace-v2 guest at a time, and bundle digest
+`af15f8ef1bc964874f939f2c7390de64ccd8717fba2d2aac24279b028a71ba11`.
+`result.json` correctly records **nativeAcceptance:false** with two failed cases:
+allowed CONNECT and clone/npm. `productionBuildReady` remains false.
+
+The disposable VZ builder stayed within 4 CPU / 8 GiB / 40 GiB. Both assemblies
+matched. All 119 Debian archives, including the ten-package e2fsprogs
+`1.47.0-2+b2:arm64` closure in `formatter-pins.json`, verified against the pinned
+signed snapshot Release → Packages chain. Source signature status, keys and
+package evidence are in `signature-authentication/`. Installed boot data is
+0400/user-immutable. No signing identity or private configuration is recorded here.
+
+Native results:
+
+- Workspace serial/size discovery, ext4 format/mount, both vsock handshakes and
+  files readiness passed (`workspace-ready.json`, `workspace-mountinfo.txt`).
+- Upload/download round trips passed for 0, 4 and 307200 bytes; exact SHA256 values
+  and committed/verified outcomes are in `roundtrip-*-verified.json`. No-replace
+  returned `destination_exists`; filling the disk returned a durable `disk_full`
+  receipt (`workspace-destination_exists.json`, `workspace-disk_full.json`).
+- Host LAN, host tailnet, loopback, metadata and RFC1918 targets returned 403
+  `destination_denied`; port 80 returned `port_denied` (`proxy-*.json`). The
+  foreign application was denied (`workspace-second-tenant-denial.json`). The
+  egress-off guest returned `egress_denied` and cleaned up independently.
+- Public CONNECT returned 403 `route_denied`. The kernel changed from a default
+  route before connect to a cloned /32 after connect. That route remains denied
+  under the unchanged contract (`route-clone-diagnostic.stderr`). Clone of the
+  public JavaScript action example, pinned to
+  `67f3f118c7d8bf535280cf0b61697b1898f6567b`, failed with exit 128 in 44 ms.
+  Guest commit verification, npm ci/test and build-log retrieval were not reached.
+- Expiry interrupted a dispatched sleep command and an opened, uncommitted upload:
+  command `unknown`, upload `failed/authorization_lost`
+  (`workspace-expiry-command-dispatch.json`, `workspace-expiry-transfer-opened.json`,
+  `workspace-expiry-terminal.json`). This tests an active upload across expiry,
+  not an interrupted publication syscall.
+- The v1 lifecycle cases against this v2 bundle passed: readiness, command/output,
+  application isolation, renewal (command 3.146 seconds after original expiry),
+  explicit release and ordinary expiry. Every successful cleanup/reclamation
+  required `workspaceRemoved` and `dataPlaneClosed` (`*-independent-stop.json`,
+  `runner-reports.json`, `renewal-post-deadline-command.json`).
+- Satellite loss passed autonomous fencing: helper alive 26 ms before its
+  deadline, absent 176 ms after it, before any recovery request. Recovery held
+  one reservation with unknown runtime (`loss-independent-fence.json`,
+  `loss-held.json`).
+
+Native defects fixed: Kconfig omits virtio-net when NETDEVICES is disabled;
+Rust acronym casing rejected workspaceIOVersion; redundant host environment
+injection tripped the guest's override refusal; Darwin compact host netmasks
+were rejected; known denied destinations were hidden by route lookup failures;
+file-worker fsuid/fsgid changes left root credentials/capabilities. Regressions
+include `workspace_assignment_uses_controller_acronym_spelling`,
+`workspace_exec_carries_no_environment_overrides`,
+`route_parser_defaults_specific_cloned_and_malformed`,
+`forbidden_destination_precedes_unavailable_route_evidence` and
+`worker_credential_drop_is_permanent_and_thread_local`. The last test actually
+passed in a disposable root-capable Linux namespace (`credential-regression.log`).
+The rootfs also gained the required netcat package.
+
+All owned VMs and controller/satellite/helper processes stopped. Independent PID,
+VZ, helper-lock and lsof checks preceded external removal of the loss workspace,
+machine and relay (`loss-post-run-owned-cleanup.json`). Its journal is unchanged;
+its stopped private database retains the expired loss lease, unknown runtime,
+pending cleanup and one 2 CPU / 4096 MiB / 8 GiB reservation. No cleanup receipt
+was forged. The earlier pre-launch decoder failure was reclaimed through the
+normal authenticated decline path, without launching a VM. The disposable
+builder was deleted; unrelated VMs were untouched.
+
+Portable validation passed: coordination typecheck/build and 1020 tests, full
+serial Rust tests, changed-crate clippy, Linux MUSL guest compilation/clippy,
+signature-gate regressions, standalone harness typecheck and no-Python check.
+No Swift source changed. Public HTTPS needs a separately reviewed route/policy
+design; data disconnect, route-change/hairpin topology, replacement publication
+and host power-loss durability remain separate native gates.

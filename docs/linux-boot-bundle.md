@@ -117,7 +117,9 @@ requirement and corrected kernel fragment, are recorded in the [native evidence 
 These experimental observations do not establish production trust/signing, networking,
 file transfer, concurrent shared-rootfs use, power-loss recovery or ordinary host lease admission.
 
-## ST-535 workspace launch contract (unimplemented)
+<a id="st-535-workspace-launch-contract-unimplemented"></a>
+
+## ST-535 workspace launch contract
 
 Bundle v2 keeps v1 artifact fields/canonical ASCII encoding and adds
 `dataVsockPort:1025`, `dataProtocol:1`; `version` becomes 2, `protocol` remains 1
@@ -181,7 +183,10 @@ v1 canonical bytes/digest are unchanged and legacy launch rejects a v2 manifest.
 These are schema fixtures, not native acceptance. The v2 recipe now accepts
 the mkfsExt4 pin; builder scripts verify the snapshot package closure and kernel
 config. The native helper implements workspace attachment and the data relay.
-PID1 formatting/mounting and end-to-end runtime integration remain unimplemented. The gated satellite v2 prepare path
+PID1 formatting/mounting, both handshakes and file integration have experimental
+native evidence in the [acceptance record](../coordination/native-acceptance/README.md#st-535-native-evidence-2026-11-12).
+Full native acceptance remains false because public CONNECT is refused by the
+required cloned-route policy. The satellite v2 prepare path
 creates workspace.raw exclusively, journals intent and device/inode identity,
 reserves physical space using Darwin F_PREALLOCATE with F_ALLOCATEALL, then sets
 exact length and fsyncs file/parent. Unsupported reservation fails closed. Cleanup
@@ -189,6 +194,9 @@ requires positive stop proof and identity-checked unlink with durable deletion
 intent and parent fsync. Unidentified creation is retained for reconciliation.
 It generates the independent serial/data nonce and builds launch v2; helper
 prepare receives version:2 and workspace:{path,serial,bytes}, without workspaceBytes.
-Portable lifecycle tests inject allocation; they do not establish Darwin physical
-reservation, ext4 durability or native attachment acceptance.
+Portable lifecycle tests inject allocation. The experimental Mac run observed
+Darwin reservation and native attachment, serial/size discovery and ext4 mount.
+It does not establish host power-loss durability or production qualification.
+Exact authenticated formatter closure pins are recorded in
+[formatter-pins.json](../tools/linux-guest-builder/formatter-pins.json).
 Satellite inventory explicitly refuses v2 before a claim; no v1 downgrade occurs.

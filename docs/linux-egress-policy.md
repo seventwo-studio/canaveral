@@ -1,9 +1,10 @@
 # Linux public HTTPS egress policy
 
-ST-535 contract, **unimplemented**. This defines `public-https-v1` for workspace-v2
-Linux direct boot. It establishes no native isolation acceptance. The guest has
-**no NIC**; remove the current direct-boot NAT attachment explicitly, without
-changing EFI or macOS guest networking. Missing guest drivers or guest firewall
+ST-535 experimental implementation. This defines `public-https-v1` for
+workspace-v2 Linux direct boot. Full native acceptance is false; the required
+cloned-route refusal blocks public CONNECT on the tested Mac. The guest has
+**no NIC**; direct boot attaches no NAT device, without changing EFI or macOS
+guest networking. Missing guest drivers or guest firewall
 rules are not the boundary. Only loopback HTTP CONNECT → data vsock 1025 → Rust
 satellite outbound TCP is permitted. The helper never listens on host vsock.
 
@@ -96,8 +97,8 @@ in [guest wire](guest-wire.md#st-535-data-protocol-contract-unimplemented).
 Every live flow must revalidate its pinned address against current interface
 addresses, deny CIDRs and kernel route evidence at intervals of at most two
 seconds. Any denial or unavailable evidence closes the flow with `route_denied`.
-The portable `egress::Live` scheduler retires affected IDs in fixture tests, but
-no native route provider or live TCP reactor consumes these decisions yet.
+The satellite live TCP reactor consumes these decisions using native interface
+and route evidence; portable tests cover revalidation scheduling.
 Native route-change closure remains unproven; this assignment does not change
 host routes without operator authorization. A route can change between checks. A router's public address can hairpin to a private service even when
 its route is default; operators must deny all such site public CIDRs. The policy
@@ -119,11 +120,11 @@ behavior. Host firewall changes and deployment are outside this contract.
 
 ## Implementation boundary
 
-Rust provides strict target/CONNECT grammar, destination tables and decisions,
-and fixture revalidation scheduling. The no-NIC direct-boot configuration is
-implemented. The guest loopback listener, resolver worker, native route/interface
-evidence provider and satellite TCP/data reactor are not connected. Egress
-remains unavailable; these primitives do not establish enforcement or acceptance.
+Rust connects the strict target/CONNECT grammar, no-NIC configuration, guest
+loopback listener, bounded resolver, native route/interface evidence and
+satellite TCP/data reactor. Native denial cases passed; public CONNECT failed
+the required post-connect route check. These observations do not establish full
+egress or isolation acceptance.
 Transfers move at most 64 KiB per serialized step, a known throughput limit.
 
 ### ST-535 data closure and bounded route evidence (2026-11-12)

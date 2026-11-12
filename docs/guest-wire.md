@@ -16,10 +16,13 @@ Guest `output`: version, id, stream (`stdout` or `stderr`), seq (zero-based acro
 
 The initial workspace is tmpfs with an explicit byte capacity in launch.json; it is disposable, volatile, and not persistent storage. Block workspaces are deferred until strict path, fresh disposable identity, expected size and ownership evidence are implemented. No code formats a guessed or retained device.
 
-## ST-535 data protocol contract (unimplemented)
+<a id="st-535-data-protocol-contract-unimplemented"></a>
 
-The following is a required future interface, not executable behavior or native
-acceptance. Control protocol 1 above remains unchanged. Workspace-capable images
+## ST-535 data protocol contract
+
+The following interface is implemented for experimental workspace-v2 boots.
+Full native acceptance remains false; see the implementation boundary below.
+Control protocol 1 above remains unchanged. Workspace-capable images
 use bundle/launch version 2 as defined in [boot bundles](linux-boot-bundle.md#st-535-workspace-launch-contract-unimplemented).
 There is no downgrade to tmpfs or NAT if v2 negotiation fails.
 
@@ -158,21 +161,22 @@ The satellite retains reservations until separate positive cleanup evidence.
 
 ### ST-535 implementation boundary
 
-`guest-protocol::data` implements closed frame/request/receipt schemas, a poisoned
-131072-byte decoder, canonical payload checks, separate flow and transfer IDs,
-credit/budget accounting, half-close decisions, step replay and cursor/hash
-validation. `guest-agent::workspace` supplies portable discovery/identity decisions
-and Linux openat2 read confinement primitives. None is connected to PID1's v1
-control reactor. The guest data listener, authenticated handshake, file worker and
-publication/durability path remain unimplemented. No files readiness is advertised.
+PID1 now connects the v2 workspace, both vsock listeners, authenticated data
+handshake, file worker and publication path to the control reactor. The
+satellite verifies the exact private data.sock sibling, runs its independent
+data reactor and requires joined closure evidence before releasing capacity.
 The known throughput limit is 64 KiB per serialized transfer step.
 
-The satellite can verify/connect the exact data.sock sibling using the control
-relay's private directory, socket ownership/mode and same-uid peer rules, and
-checks directory/socket identity again after connect. Cleanup admits only owned
-agent.sock/data.sock entries after positive stop. This transport primitive is not
-a data handshake or reactor; launched workspace cleanup reports dataPlaneClosed
-false until a joined reactor supplies positive closure evidence.
+The authorized experimental Mac run in the [native evidence record](../coordination/native-acceptance/README.md#st-535-native-evidence-2026-11-12)
+observed ext4 format/mount, both handshakes, files readiness, verified round trips,
+no-replace/disk-full refusal and expiry of an opened upload. File workers use raw
+thread-local setresgid/setresuid syscalls to drop all real/effective/saved IDs to
+1000, clear capabilities and prevent privilege regain, without changing PID1.
+A root-capable Linux namespace regression checks those properties.
+
+These observations do not establish host power-loss durability, native data-only
+disconnect behavior or public egress acceptance. Public CONNECT currently fails
+the required post-connect cloned-route check. Full native acceptance remains false.
 
 ### ST-535 data closure and bounded route evidence (2026-11-12)
 
