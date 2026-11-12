@@ -7,11 +7,13 @@ identified workspace. V1 retains its tmpfs and control-session behavior.
 Workspace discovery uses kernel sysfs serial and size, rejects ambiguous matches,
 partitions, holders and any device backing an existing mount (including root and
 the launch medium), and checks the opened block descriptor's identity and size.
-The entire device must read as zero before formatting. This deliberately stricter
-fresh-media rule rejects unknown signatures and backup metadata without adding a
-signature-library dependency; it adds one sequential read of the whole disk to
-boot latency. Read errors and premature EOF fail boot. No force or reuse path is
-provided. The pinned `/usr/sbin/mkfs.ext4 -V` stderr first line is checked before
+The first and last 1 MiB must read as zero, as must 4 KiB at the btrfs mirror
+offsets of 64 MiB and 256 GiB when present. These windows cover primary/backup
+partition tables and common ext4, XFS, btrfs and swap signatures. The scan reads
+at most 2 MiB + 8 KiB regardless of capacity. Fresh satellite creation and
+preallocation establish blank media; this scan is defense in depth. Read errors
+and premature EOF in scanned windows fail boot. No force or reuse path is provided.
+The pinned `/usr/sbin/mkfs.ext4 -V` stderr first line is checked before
 formatting; formatting runs once with a bounded timeout. Failure never retries.
 Formatting and mounting use PID1's pinned device descriptor via procfs.
 
@@ -20,22 +22,40 @@ device. Workspace and `.canaveral`, `home`, `tmp`, `.npm` are uid/gid 1000 mode
 0700. PID1 pins the workspace root and probes strict openat2 confinement support.
 Any provisioning failure fails boot.
 
-**V2 currently fails boot after successful provisioning**, with an explicit data
-handshake not implemented error. It never enters the legacy reactor or advertises
-command/files readiness. This gate must remain until control and data handshakes
-both complete. Do not relaunch a consumed boot attempt: an already formatted
-workspace will be rejected on subsequent provisioning.
+V2 binds HOST_CID-only, one-shot control/data listeners (1024/1025) after
+provisioning and probes, before any command. Data hello must match the initial
+launch binding and nonce exactly. Control ready waits for the complete dataReady
+echo; renewal and expiry continue independently while waiting. Later data loss or
+violation withdraws local files readiness and closes all proxy sockets, while
+the initial handshake latch allows commands to continue. No data reconnect is
+possible. Never relaunch a consumed boot attempt: formatted media is rejected.
 
-Remaining ST-535 work includes the HOST_CID-only one-shot data listener and
-handshake, independent bounded data reactor, loopback CONNECT listener, trusted
-v2 command environment and negotiated transfer refusal/dispatch hook. The closed
-`guest-protocol::data::Frame` schema currently has no files-unavailable refusal or
-capability signal. Agree an additive signal with the satellite before enabling
-v2 readiness; do not substitute failed `io_error` transfer receipts. File execution
-and durable publication remain a separate later deliverable.
+The independent data thread uses nonblocking sockets, bounded decoding/output
+slots (including a reserved control slot), per-flow receive accounting, a global
+budget and strictly increasing flow IDs. At most 16 proxy clients/flows exist.
+A rotating cursor moves at most 64 KiB payload per flow per turn; connect and
+payload-idle deadlines are 10 and 120 seconds. Half-close drains before shutdown.
 
-Portable tests and a Linux cross-build establish no native acceptance. An
-authorized native run must verify actual sysfs serial/device provenance, zero
+Loopback CONNECT on 127.0.0.1:18080 enforces the shared strict HTTP grammar,
+8192-byte header ceiling, five-second header deadline and fixed error responses.
+The listener opens no flow without the launch grant. It returns 200 only after
+satellite opened, then relays opaque bytes under explicit credits. V2 commands
+use /workspace, fixed PATH, workspace HOME/TMPDIR/npm cache and grant-scoped proxy
+variables; command-supplied environment/cwd overrides are rejected.
+
+The transfer dispatch seam is deliberately incomplete:
+`data::FILE_EXECUTOR_NOT_IMPLEMENTED` returns replayable failed `io_error`
+receipts and accepts cancellation. This temporary behavior is allowed only while
+satellite v2 admission remains gated. The file worker must replace it with
+confined execution, complete transfer-lane lifecycle/replay, lease-bound deadlines
+and durable publication. No new capability/refusal frame is introduced.
+
+Portable tests and Linux cross-checks establish no native acceptance. An
+authorized native run must verify actual sysfs serial/device provenance, fresh
 media, formatting without prompts, pinned mkfs version, ext4 flags/ownership,
-openat2 support, loopback address and route, boot failures on ambiguous/used disks,
-and fresh-attempt behavior. Full data/control/proxy acceptance remains pending.
+openat2 support, loopback address/route, failures on ambiguous/used disks and
+fresh-attempt behavior. It must also verify both vsock handshakes, HOST_CID
+enforcement/no reconnect, control renewal/expiry during data backpressure or loss,
+proxy half-close/idle behavior and real Git/npm HTTPS with system CA trust.
+Satellite destination/route enforcement and complete file execution remain
+separate acceptance requirements.

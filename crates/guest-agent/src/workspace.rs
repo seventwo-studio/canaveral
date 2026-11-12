@@ -1,4 +1,4 @@
-//! Workspace discovery and confinement primitives. PID1 provisions workspace-v2; data readiness remains gated.
+//! Workspace discovery, bounded signature scanning and confinement primitives.
 use canaveral_guest_protocol::Result;
 /// Facts collected from kernel sysfs and a read-only signature scan, never /dev ordering.
 pub struct Candidate {
@@ -260,9 +260,9 @@ mod tests {
     }
 }
 
-/// A fresh satellite disk is zero-filled. Requiring every byte to be zero is
-/// deliberately stricter than recognizing a finite filesystem/signature list.
-/// It catches backup GPT/superblocks and unknown signatures without libblkid.
+/// Defense-in-depth scan of signature regions on a fresh preallocated disk.
+/// Reads at most 2 MiB plus two 4 KiB btrfs mirrors, independent of disk size.
+/// Fresh creation by the satellite, rather than this scan, establishes blank media.
 pub fn require_blank(
     reader: &mut (impl std::io::Read + std::io::Seek),
     expected_bytes: u64,
