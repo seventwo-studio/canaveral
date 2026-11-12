@@ -332,3 +332,10 @@ arriving inside the final margin may miss the guest deadline; it cannot revive
 guest authority and the lease ends as expired under the controller's bounded
 10-second classification tolerance. Cleanup still requires independent stop proof
 and all existing evidence; the tolerance does not extend execution authority.
+
+Supervision observes helper process exit before evaluating the final guest margin.
+Guest pumping and controller-reply errors recheck the local deadline, guest
+authority and known controller terminal state when selecting the first stop cause.
+A terminal or cancel reply records the controller cause (null failure), even after
+the local deadline, unless an earlier fence already recorded a cause. Legacy
+fenced journals without a cause replay as runtime loss. Renewal cannot clear a fence.

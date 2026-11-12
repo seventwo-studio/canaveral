@@ -35,7 +35,7 @@ interface ApprovalRow { controller: string; runner: string; generation: number; 
 interface LeaseRow {
   id: string; application: string; request: string; image_id: string; image_revision: string; arch: string; backend: Backend; digest: string;
   resources: string; capabilities: string; required: string; member: string; domain: string; reservation: string;
-  state: string; runtime: string; cleanup: string; cleanup_id: string | null; revision: number;
+  failure_reason: string | null; state: string; runtime: string; cleanup: string; cleanup_id: string | null; revision: number;
   created: number; expires: number; max_expires: number; provision_deadline: number; credential: string | null;
 }
 interface AssignmentRow {
@@ -161,6 +161,9 @@ export class LinuxLeases {
         CREATE TABLE IF NOT EXISTS linux_lease_mutations (application TEXT NOT NULL, lease TEXT NOT NULL, action TEXT NOT NULL, id TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(application,lease,action,id));
         CREATE TABLE IF NOT EXISTS linux_lease_assignments (id TEXT PRIMARY KEY, claim TEXT NOT NULL UNIQUE, lease TEXT NOT NULL UNIQUE, controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, report TEXT, observed_revision INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, storage_removed INTEGER NOT NULL DEFAULT 0, credentials_erased INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS linux_lease_assignments_binding ON linux_lease_assignments(controller,runner,generation,closed);`);
+      if (!(db.prepare("PRAGMA table_info(linux_leases)").all() as {name: string}[]).some(c => c.name === "failure_reason")) {
+        db.exec("ALTER TABLE linux_leases ADD COLUMN failure_reason TEXT");
+      }
     });
   }
 
@@ -337,7 +340,7 @@ export class LinuxLeases {
       const reservation = randomUUID();
       const domain = this.domains.placements(db, this.placements(db, image), amount).find(d => this.domains.reserve(db, { id: reservation, domain: d, kind: "linux-lease", owner: id, resources: amount }, now));
       if (!domain) throw new ServiceError("No approved runner domain serving this image has capacity.", 503, { code: "capacity_unavailable", retryable: true });
-      db.prepare(`INSERT INTO linux_leases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL)`).run(
+      db.prepare(`INSERT INTO linux_leases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL,NULL)`).run(
         id, application.id, frozen, imageId, revision, a, image.backend, image.digest, JSON.stringify(amount), image.capabilities, JSON.stringify(required),
         randomUUID(), domain, reservation, now, now + ttl, now + limits.maxLifetimeSeconds, now + limits.provisioningTimeoutSeconds);
       return { created: true, lease: this.view(db, this.row(db, id)!) };
@@ -471,7 +474,7 @@ export class LinuxLeases {
       if (active && r.runtimeState === "stopped" && !r.failure) throw new ServiceError("An active lease cannot stop without a reported failure.", 409);
       if (r.failure === "provisioning" && active && lease.state !== "provisioning") throw new ServiceError("Provisioning failure after readiness must be reported as a runtime failure.", 409);
       // Lifecycle first: failure ends an active lease, positive readiness promotes provisioning.
-      if (active && r.failure) this.end(db, lease, r.failure === "deadline" && now >= lease.expires - DEADLINE_REPORT_TOLERANCE ? "expired" : "failed", now);
+      if (active && r.failure) this.end(db, lease, r.failure === "deadline" && now >= lease.expires - DEADLINE_REPORT_TOLERANCE ? "expired" : "failed", now, r.failure === "deadline" ? "deadline_too_early" : null);
       else if (lease.state === "provisioning" && r.runtimeState === "running" && (JSON.parse(lease.required) as Capability[]).every(c => (HEADLESS as readonly string[]).includes(c) && r.ready[c as typeof HEADLESS[number]])) {
         db.prepare("UPDATE linux_leases SET state='ready',revision=revision+1 WHERE id=?").run(lease.id);
       }
@@ -611,10 +614,10 @@ export class LinuxLeases {
   }
 
   /** Terminal transition. Only a never-claimed lease is reclaimed immediately: this transaction excludes any claim. */
-  private end(db: DatabaseSync, lease: LeaseRow, state: "released" | "expired" | "failed", now: number): void {
+  private end(db: DatabaseSync, lease: LeaseRow, state: "released" | "expired" | "failed", now: number, reason: string | null = null): void {
     if (!ACTIVE.includes(lease.state)) return;
     const claimed = !!db.prepare("SELECT 1 FROM linux_lease_assignments WHERE lease=?").get(lease.id);
-    db.prepare("UPDATE linux_leases SET state=?,revision=revision+1,cleanup=?,cleanup_id=? WHERE id=?").run(state, claimed ? "pending" : "complete", randomUUID(), lease.id);
+    db.prepare("UPDATE linux_leases SET state=?,revision=revision+1,cleanup=?,cleanup_id=?,failure_reason=? WHERE id=?").run(state, claimed ? "pending" : "complete", randomUUID(), state === "failed" ? reason : null, lease.id);
     if (!claimed) this.domains.release(db, lease.reservation, lease.id, now);
   }
 
@@ -712,7 +715,7 @@ export class LinuxLeases {
   private reportView(db: DatabaseSync, row: AssignmentRow, now: number): unknown {
     const lease = this.row(db, row.lease)!;
     return { assignmentId: row.id, sequence: row.sequence,
-      failureReason: lease.state === "failed" && row.report && JSON.parse(row.report)[9] === "deadline" ? "deadline_too_early" : null,
+      failureReason: lease.failure_reason ?? null,
       lease: this.authorization(lease, now), runtimeState: lease.runtime,
       cleanup: ACTIVE.includes(lease.state) ? "notRequested" : lease.cleanup, stopRequested: !ACTIVE.includes(lease.state),
       released: !this.domains.held(db, lease.reservation) };

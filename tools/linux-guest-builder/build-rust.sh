@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
+RECIPE_DIR="$(cd "$(dirname "$0")" && pwd)"
 : "${BUILD:?absolute build directory required}"
 cd "$BUILD"
+INPUTS="$BUILD/inputs" bash "$RECIPE_DIR/verify-build-inputs.sh"
 mkdir rust
 for name in rust-1.99.1-aarch64-unknown-linux-gnu rust-std-1.99.1-aarch64-unknown-linux-musl; do
   tar -xf "inputs/$name.tar.xz"

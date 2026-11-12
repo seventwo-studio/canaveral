@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run in BUILD after fetch-experimental.sh. Trust acquisition is experimental.
 set -euo pipefail
+RECIPE_DIR="$(cd "$(dirname "$0")" && pwd)"
 mkdir -m700 signature-keyring
 export GNUPGHOME="$PWD/signature-keyring"
 gpg --auto-key-locate clear,wkd --locate-keys autosigner@kernel.org
@@ -11,3 +12,4 @@ curl -fLS https://raw.githubusercontent.com/nodejs/release-keys/HEAD/gpg/pubring
 gpg --no-default-keyring --keyring "$PWD/inputs/node-keys.kbx" --status-fd 3 --output inputs/node-sums.txt --decrypt inputs/node-sums.asc 3>node.status
 grep -q '^\[GNUPG:\] VALIDSIG C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C ' node.status
 (cd inputs; grep ' linux-6.12.117.tar.xz$' kernel-sums.txt | sha256sum -c -; grep ' node-v24.11.0-linux-arm64.tar.xz$' node-sums.txt | sha256sum -c -)
+INPUTS="$PWD/inputs" bash "$RECIPE_DIR/verify-build-inputs.sh"

@@ -55,9 +55,14 @@ satellite runtime state or an existing VM. Limit concurrent work to this VM's
    must verify under `B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1`; Node checksums
    under `C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C`. The WKD/kernel and HTTPS/Node
    key acquisition is experimental trust material, not production key approval.
-   Preserve key bytes and signature status logs. Rust archive hashes are explicit
-   pins acquired from the official distribution; this recipe checks their hashes,
-   not Rust detached signatures.
+   Preserve key bytes and signature status logs. `verify-build-inputs.sh` also
+   verifies both Rust archive detached signatures under pinned fingerprint
+   `108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE`. It authenticates erofs-utils
+   through Debian trixie's signed Release, SHA256 Sources index, exact 1.8.6-1
+   source entry and .dsc SHA256. All three existing archive pins must also match.
+   Key acquisition and pin selection remain experimental, not production approval.
+   Missing signatures, mismatches or unavailable verification tools stop the build.
+   The Rust build repeats authentication before executing install.sh.
 4. Set `BUILD` to the guest's absolute `build` path. Run:
 
    ```sh
@@ -109,9 +114,12 @@ satellite runtime state or an existing VM. Limit concurrent work to this VM's
 7. Build native erofs-utils separately on the host:
 
    ```sh
-   OUTPUT="$WORK/host-erofs" bash "$REPO/tools/linux-guest-builder/build-host-erofs.sh"
+   INPUTS="$WORK/inputs" OUTPUT="$WORK/host-erofs" bash "$REPO/tools/linux-guest-builder/build-host-erofs.sh"
    ```
 
+   The host requires gpg, gpgv, xz and an authenticated Debian archive keyring
+   (set `DEBIAN_ARCHIVE_KEYRING`); it repeats the same signature chain before
+   extracting source. The authenticated inputs include the Rust archives.
    This uses upstream erofs-utils `1.8.6` as republished by Debian, with SHA256
    `5b221dc3fd6d151425b30534ede46fb7a90dc233a8659cba0372796b0a066547`.
    The initial host build linked only `libSystem`; no Homebrew runtime library is
@@ -152,3 +160,13 @@ supervision; tool probes and readiness alone did not exercise that interface.
 The recipe verifies the resolved built-in. `CONFIG_DEBUG_INFO_NONE=y` is the
 resolved Kconfig choice for builds without debug information. Native findings
 and still-open production gates are in the [evidence record](../../coordination/native-acceptance/README.md).
+
+ST-534 review authenticated the exact existing Rust archives and erofs-utils
+source; all hashes matched the experimental pins, so installed artifacts were
+retained without rebuilding. Signature status and chain evidence remain private
+with the native review run.
+
+Run `node --test tools/linux-guest-builder/signature-gates.test.mjs` for the
+portable refusal regression: failed detached-signature verification must stop
+before the Rust installer destination is created. This does not substitute for
+running real upstream signature verification on the pinned archives.

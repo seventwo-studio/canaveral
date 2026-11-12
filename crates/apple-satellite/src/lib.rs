@@ -588,6 +588,35 @@ impl Satellite {
     fn fence(&mut self) -> Result<()> {
         self.fence_for(StopCause::Runtime)
     }
+    fn error_cause(&self, session: Option<&guest::Session>) -> StopCause {
+        if self.state.terminal {
+            StopCause::Controller
+        } else if self.deadline_reached(session) {
+            StopCause::Deadline
+        } else {
+            StopCause::Runtime
+        }
+    }
+    fn supervision_cause(
+        &self,
+        exited: bool,
+        session: Option<&guest::Session>,
+    ) -> Option<StopCause> {
+        if exited {
+            Some(StopCause::Runtime)
+        } else if self.deadline_reached(session) {
+            Some(StopCause::Deadline)
+        } else {
+            None
+        }
+    }
+    fn deadline_reached(&self, session: Option<&guest::Session>) -> bool {
+        let now = clock::now().as_secs_f64();
+        self.expired()
+            || (self.state.direct.is_some()
+                && now >= self.state.deadline - guest::MARGIN_MS as f64 / 1000.0)
+            || session.is_some_and(|s| s.authority_expired(now))
+    }
     fn fence_for(&mut self, cause: StopCause) -> Result<()> {
         // Old fenced journals have no recorded cause: retain their runtime classification.
         if self.state.stop_cause.is_none() {
@@ -683,7 +712,8 @@ impl Satellite {
             return Err("invalid lease clock");
         }
         // Expiry is evaluated before renewal, including network latency and sleep.
-        let deadline_reached = self.expired();
+        let controller_stop = reply["stopRequested"] == true
+            || !matches!(lease.state.as_str(), "provisioning" | "ready");
         let mut fence = self.state.fenced
             || self.expired()
             || reply["stopRequested"] == true
@@ -703,10 +733,10 @@ impl Satellite {
         self.state.released = reply["released"] == true && self.state.cleaned;
         // Fence cause and acknowledgment are committed together before native effects.
         if fence {
-            self.fence_for(if deadline_reached || self.expired() {
-                StopCause::Deadline
-            } else {
+            self.fence_for(if controller_stop {
                 StopCause::Controller
+            } else {
+                StopCause::Deadline
             })?;
         } else {
             self.save()?;
@@ -1020,14 +1050,13 @@ impl Satellite {
         if lease.expires_at.is_finite()
             && lease.controller_now.is_finite()
             && lease.revision >= self.state.revision
-            && matches!(lease.state.as_str(), "released" | "expired" | "failed")
+            && lease.revision > 0
+            && lease.revision <= canaveral_guest_protocol::MAX_SAFE
+            && (poll.cancel_requested
+                || matches!(lease.state.as_str(), "released" | "expired" | "failed"))
         {
             self.state.terminal = true;
-            self.fence_for(if self.expired() {
-                StopCause::Deadline
-            } else {
-                StopCause::Controller
-            })?;
+            self.fence_for(StopCause::Controller)?;
             return Ok(());
         }
         if !lease.expires_at.is_finite()
@@ -1037,7 +1066,6 @@ impl Satellite {
             || lease.revision > canaveral_guest_protocol::MAX_SAFE
             || lease.expires_at <= lease.controller_now
             || self.expired()
-            || poll.cancel_requested
             || !matches!(lease.state.as_str(), "ready" | "provisioning")
         {
             return Err("operation authorization ended");
@@ -1267,30 +1295,24 @@ impl Satellite {
             let mut session: Option<guest::Session> = None;
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
-                    let now = clock::now().as_secs_f64();
-                    let deadline_reached = self.expired()
-                        || (self.state.direct.is_some()
-                            && now >= self.state.deadline - guest::MARGIN_MS as f64 / 1000.0)
-                        || session.as_ref().is_some_and(|s| s.authority_expired(now));
-                    if deadline_reached || io(child.try_wait())?.is_some() {
-                        self.fence_for(if deadline_reached {
-                            StopCause::Deadline
-                        } else {
-                            StopCause::Runtime
-                        })?;
+                    // Observe process loss before the deadline margin can mask it.
+                    if let Some(cause) =
+                        self.supervision_cause(io(child.try_wait())?.is_some(), session.as_ref())
+                    {
+                        self.fence_for(cause)?;
                         break;
                     }
                     if self.state.direct.is_some()
                         && self.guest_step(&mut session, &mut last).is_err()
                     {
                         self.withdraw()?;
-                        self.fence()?;
+                        self.fence_for(self.error_cause(session.as_ref()))?;
                         break;
                     }
                     if let Some(s) = session.as_mut() {
                         if self.operation_events(s).is_err() {
                             self.withdraw()?;
-                            self.fence()?;
+                            self.fence_for(self.error_cause(session.as_ref()))?;
                             break;
                         }
                     }
@@ -1310,7 +1332,7 @@ impl Satellite {
                                 };
                                 if accepted.is_err() {
                                     self.withdraw()?;
-                                    self.fence()?;
+                                    self.fence_for(self.error_cause(session.as_ref()))?;
                                     break;
                                 }
                             }
@@ -1327,11 +1349,7 @@ impl Satellite {
                             .is_err()
                         {
                             self.withdraw()?;
-                            self.fence_for(if s.authority_expired(clock::now().as_secs_f64()) {
-                                StopCause::Deadline
-                            } else {
-                                StopCause::Runtime
-                            })?;
+                            self.fence_for(self.error_cause(session.as_ref()))?;
                             break;
                         }
                     }
@@ -1400,7 +1418,7 @@ impl Satellite {
             }
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
-            let fenced = self.fence();
+            let fenced = self.fence_for(self.error_cause(session.as_ref()));
             drop(session);
             drop(worker);
             fenced?;
@@ -1752,6 +1770,69 @@ mod tests {
         s.state.deadline = clock::now().as_secs_f64() + 100.0;
         s.save().unwrap();
         s
+    }
+    #[test]
+    fn late_errors_recheck_deadline_but_observed_process_exit_wins() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        assert!(matches!(s.error_cause(None), StopCause::Runtime));
+        // Move authority end between the loop check and guest/reply processing.
+        let (mut guest, _peer) =
+            guest::tests::session_pair_with_deadline(clock::now().as_secs_f64() + 5.0);
+        assert!(!s.deadline_reached(Some(&guest)));
+        clock::advance(Duration::from_secs(6));
+        assert!(guest.pump(clock::now().as_secs_f64()).is_err());
+        assert!(!s.expired());
+        assert!(matches!(s.error_cause(Some(&guest)), StopCause::Deadline));
+        clock::advance(Duration::from_secs(101));
+        assert!(s.accept_report(json!({}), 0.0).is_err());
+        assert!(s.accept_poll(json!({}), 0.0, None).is_err());
+        assert!(matches!(
+            s.supervision_cause(true, None),
+            Some(StopCause::Runtime)
+        ));
+        assert!(matches!(
+            s.supervision_cause(false, None),
+            Some(StopCause::Deadline)
+        ));
+        s.fence_for(s.error_cause(None)).unwrap();
+        clock::advance(Duration::ZERO);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "deadline");
+    }
+    #[test]
+    fn terminal_poll_ok_and_report_prefer_controller_after_deadline() {
+        for poll in [false, true] {
+            let (_tmp, c) = fixture();
+            let mut s = seeded(&c);
+            s.state.deadline = clock::now().as_secs_f64() - 1.0;
+            if poll {
+                s.accept_poll(
+                    json!({"command":null,"cancelRequested":false,
+                    "lease":{"state":"released","revision":2,"expiresAt":1.0,"controllerNow":2.0}}),
+                    0.0,
+                    None,
+                )
+                .unwrap();
+            } else {
+                let mut w = wire(s.assignment().unwrap().clone());
+                w.cancel = true;
+                s.report(&mut w).unwrap();
+            }
+            assert!(s.state.fenced && s.state.terminal);
+            assert_eq!(s.receipt().unwrap()["receipt"]["failure"], Value::Null);
+        }
+    }
+    #[test]
+    fn legacy_fenced_journal_replays_as_runtime() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        s.state.fenced = true;
+        s.state.stop_cause = None;
+        s.save().unwrap();
+        drop(s);
+        let mut s = Satellite::open_preflighted(c).unwrap();
+        s.fence_for(StopCause::Deadline).unwrap();
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "runtime");
     }
     #[test]
     fn stop_cause_is_honest_sticky_and_survives_restart() {

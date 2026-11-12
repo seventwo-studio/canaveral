@@ -34,7 +34,11 @@ Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production pr
 
 For setup without boot artifacts, set `setupOnly: true`, supply a nonexistent manifest path and an explicitly unverified expected `bundleDigest`; `builder` may be omitted. This exercises actual controller startup, fresh state, TLS, application creation, enrollment, domain/image/grant/approval configuration and catalog reads, then stops without acquiring or claiming anything. The expected digest is catalog configuration only: `artifactVerified: false` and `nativeAcceptance: false` prevent treating this as image verification. Setup-only stops before native execution even when artifacts exist.
 
-A full run uses one guest at a time: acquire/readiness, consumer command/output, renewal, explicit release, a second guest's real wall-clock expiry, then satellite crash/recovery and reservation retention. Application 2 has no grant; cross-application inspect/key issuance/operation submission and acquisition must fail. There is no synthetic guest response. The final loss case waits for the helper's independent deadline and retains the unknown reservation and owned state for operator reconciliation; it never forges cleanup or resets the journal. That retained reservation is an expected result, not reclaimed capacity.
+A full run uses one guest at a time: acquire/readiness, consumer command/output, renewal, explicit release, a second guest's real wall-clock expiry, then satellite crash/recovery and reservation retention. Application 2 has no grant; cross-application inspect/key issuance/operation submission and acquisition must fail. Renewal must include a successful consumer command after the original expiry plus
+the two-second guest margin; helper authorization alone is insufficient. There is
+no synthetic guest response. The final loss case kills the satellite, waits past the lease deadline without
+restarting it, proves helper PID and VZ absence with no power-off request, records
+stop timing relative to the deadline, and only then starts recovery. It retains the unknown reservation and owned state for operator reconciliation; it never forges cleanup or resets the journal. That retained reservation is an expected result, not reclaimed capacity.
 
 Evidence includes controller/domain views, report bodies and domain counts around report forwarding, journal revisions, helper signature/entitlements/cdhash, helper and mkfs.erofs SHA256 pins, command receipt and the helper's real serial console copied as `<lease>-boot.log`. Successful release/expiry additionally requires observed helper PIDs gone, workspace/machine and published relay directories removed, durable stop/cleanup/release flags and zero reservations after the complete cleanup report. The independent process check conservatively refuses **any** remaining `com.apple.Virtualization.VirtualMachine` process because process names alone cannot attribute it to a particular VM. It never stops or inspects unrelated VM storage. Existing VMs can therefore block this check; run on a quiescent host or obtain separate attribution evidence before changing the criterion.
 
@@ -148,3 +152,49 @@ local fencing and command-count assertions remain intact. No Swift code changed.
 This acceptance applies only to this experimental bundle and host: production
 trust/signing approval, networking, PTY/files, concurrent shared-rootfs use,
 power-loss reconciliation and ordinary host lease admission remain separate gates.
+
+### Independent review corrections (ST-534, 2026-11-12)
+
+The earlier `pQM3pq` loss case restarted the satellite before proving stop, so
+its power-off request did not establish autonomous helper fencing. Its renewal
+authorization receipt also did not establish guest renewal. The corrected
+harness requires the independent timing and post-deadline command described above.
+
+Portable regressions cover guest-pump/reply errors after authority lapse, observed
+process exit taking priority over the final margin, terminal poll returning Ok,
+controller-stop priority, legacy no-cause journal replay, stale deadline reports
+after controller renewal, provisioning failure followed by a deadline report,
+and additive failure-reason migration with a populated lease ledger.
+
+The Rust distribution and host erofs-utils source archives now require signature
+authentication. The exact existing archive hashes verified unchanged; installed
+experimental artifacts were retained without rebuilding. No Swift source or
+signing identity changed.
+
+Final-binary run `canaveral-native-qkkyiZ` passed all cases with one 2 CPU / 2 GiB
+VM at a time. `release-ready.json`, `command.json`, ownership refusal receipts,
+`release-independent-stop.json` and `expiry-independent-stop.json` cover readiness,
+consumer output, isolation, release and expiry. `renewal-post-deadline-command.json`
+records a successful command 2.418 seconds after the original expiry. In
+`loss-independent-fence.json`, the satellite was killed 103.313 seconds before
+the loss deadline; helper PID absence was observed 228 ms after that deadline.
+No VZ process or recovery power-off request existed before recovery was launched.
+Recovery then reported unknown runtime and held one reservation without claiming
+cleanup (`loss-held.json`). `result.json` records completed native cases.
+
+The controller/satellite processes stopped. `loss-post-run-owned-cleanup.json`
+records independent PID, VZ, helper-lock and lsof checks, followed by removal of
+only the owned workspace, machine and relay; the launch medium's immutable flag
+was cleared only after stop. The satellite journal stayed unchanged. The stopped
+private controller ledger retains the loss lease as expired, runtime unknown,
+cleanup pending, with its reservation held for operator reconciliation. No
+cleanup receipt or capacity reclamation was fabricated. The earlier review run
+`canaveral-native-L3uYIc` also passed and received the same external cleanup; its
+separate stopped private database likewise retains its held reservation.
+
+`signature-authentication/` in the final private evidence directory retains the
+Rust signature/key bytes, status logs and Debian authentication chain. Portable
+validation passed: coordination typecheck/build and 998 tests; full serial Rust
+suite; satellite clippy with warnings denied; standalone harness typecheck; shell
+syntax checks and the detached-signature refusal regression. These runs preserve
+the experimental scope and all previously listed production acceptance gaps.

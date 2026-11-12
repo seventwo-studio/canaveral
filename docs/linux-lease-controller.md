@@ -202,8 +202,12 @@ fields are refused.
   This covers the satellite's 2-second guest margin, 1-second report cadence and
   7 seconds of bounded scheduling delay and modest clock skew, and is below the
   30-second minimum TTL. Earlier deadline reports end as `failed`; the runner
-  report acknowledgment exposes `failureReason: deadline_too_early` when its
-  latest receipt is a deadline report on a failed lease (otherwise null).
+  report acknowledgment exposes `failureReason: deadline_too_early` only when that
+  deadline receipt caused the failed transition. The reason is stored durably in
+  an additive nullable column; existing rows keep null. Later receipts cannot
+  change it, including deadline receipts after provisioning failure. A renewal
+  accepted after a satellite fenced its old deadline cannot revive that guest:
+  its stale deadline report fails the renewed lease when outside the tolerance.
   Other failures on an active lease end it as `failed`. Terminal lifecycle and
   revision remain unchanged by later deadline reports. No report extends or
   resurrects a lease. Renewal inside the final guest margin may not reach the
