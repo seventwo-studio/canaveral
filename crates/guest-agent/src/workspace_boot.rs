@@ -7,7 +7,7 @@ use crate::{
 use canaveral_guest_protocol::{bundle::WorkspaceLaunch, Result};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     os::{
         fd::AsRawFd,
         unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -103,8 +103,7 @@ pub(crate) fn prepare(launch: &WorkspaceLaunch) -> Result<crate::workspace::conf
     if size != launch.workspace.bytes {
         return Err("workspace device size mismatch".into());
     }
-    disk.seek(SeekFrom::Start(0))?;
-    crate::workspace::require_blank(&mut (&mut disk).take(size), size)?;
+    crate::workspace::require_blank(&mut disk, size)?;
     // The pinned PID1 descriptor, rather than a second /dev lookup, identifies
     // the only device passed to mkfs and mount. It remains open through both.
     let source = format!("/proc/{}/fd/{}", std::process::id(), disk.as_raw_fd());

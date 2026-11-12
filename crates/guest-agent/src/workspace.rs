@@ -263,50 +263,82 @@ mod tests {
 /// A fresh satellite disk is zero-filled. Requiring every byte to be zero is
 /// deliberately stricter than recognizing a finite filesystem/signature list.
 /// It catches backup GPT/superblocks and unknown signatures without libblkid.
-pub fn require_blank(reader: &mut impl std::io::Read, expected_bytes: u64) -> Result<()> {
-    let mut buffer = [0; 65536];
-    let mut bytes = 0u64;
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            return if bytes == expected_bytes {
-                Ok(())
-            } else {
-                Err("short workspace signature scan".into())
-            };
-        }
-        bytes = bytes
-            .checked_add(n as u64)
-            .ok_or("workspace scan overflow")?;
-        if bytes > expected_bytes {
-            return Err("workspace size changed during scan".into());
-        }
-        if buffer[..n].iter().any(|b| *b != 0) {
-            return Err("workspace contains existing data or signatures".into());
+pub fn require_blank(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    expected_bytes: u64,
+) -> Result<()> {
+    use std::io::SeekFrom;
+    const MIB: u64 = 1024 * 1024;
+    if expected_bytes < 2 * MIB {
+        return Err("workspace too small for signature scan".into());
+    }
+    // Primary/backup partition tables, ext/XFS/swap and primary btrfs live
+    // in these windows. Include btrfs mirror superblocks when present.
+    let mut regions = vec![(0, MIB), (expected_bytes - MIB, MIB)];
+    for offset in [64 * MIB, 256 * 1024 * MIB] {
+        if offset + 4096 <= expected_bytes {
+            regions.push((offset, 4096));
         }
     }
+    let mut buffer = [0; 65536];
+    for (offset, length) in regions {
+        reader.seek(SeekFrom::Start(offset))?;
+        let mut remaining = length;
+        while remaining != 0 {
+            let n = remaining.min(buffer.len() as u64) as usize;
+            reader.read_exact(&mut buffer[..n])?;
+            if buffer[..n].iter().any(|b| *b != 0) {
+                return Err("workspace contains existing signatures".into());
+            }
+            remaining -= n as u64;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod blank_tests {
     use super::*;
+    use std::io::Cursor;
     #[test]
-    fn rejects_primary_backup_and_unknown_signatures() {
-        let mut bytes = vec![0; 131072];
-        assert!(require_blank(&mut bytes.as_slice(), 131072).is_ok());
-        assert!(require_blank(&mut bytes.as_slice(), 131073).is_err());
-        assert!(require_blank(&mut bytes.as_slice(), 131071).is_err());
-        for offset in [0, 510, 512, 1024 + 56, 65536, 131071] {
+    fn signature_windows_and_bounded_reads() {
+        let size = 16 * 1024 * 1024;
+        let mut bytes = vec![0; size];
+        for offset in [0, 510, 512, 1080, 4095, 65536, size - 1, size - 1048576] {
             bytes[offset] = 1;
-            assert!(require_blank(&mut bytes.as_slice(), 131072).is_err());
+            assert!(require_blank(&mut Cursor::new(&bytes), size as u64).is_err());
             bytes[offset] = 0;
         }
-        struct Broken;
-        impl std::io::Read for Broken {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::Other.into())
+        // Interior bytes are deliberately outside this defense-in-depth scan.
+        bytes[size / 2] = 1;
+        assert!(require_blank(&mut Cursor::new(&bytes), size as u64).is_ok());
+        assert!(require_blank(&mut Cursor::new(&bytes[..1024]), size as u64).is_err());
+        struct Huge {
+            position: u64,
+            read: u64,
+        }
+        impl std::io::Seek for Huge {
+            fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
+                let std::io::SeekFrom::Start(p) = p else {
+                    panic!()
+                };
+                self.position = p;
+                Ok(p)
             }
         }
-        assert!(require_blank(&mut Broken, 1).is_err());
+        impl std::io::Read for Huge {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                b.fill(0);
+                self.read += b.len() as u64;
+                self.position += b.len() as u64;
+                Ok(b.len())
+            }
+        }
+        let mut disk = Huge {
+            position: 0,
+            read: 0,
+        };
+        require_blank(&mut disk, 1024 * 1024 * 1024 * 1024).unwrap();
+        assert_eq!(disk.read, 2 * 1024 * 1024 + 8192);
     }
 }
