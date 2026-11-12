@@ -4,6 +4,8 @@ import type { Resources } from "./consumers.ts";
 import { object, ServiceError } from "./errors.ts";
 import type { SqliteStore } from "./sqlite.ts";
 
+import { physicalBudget } from "./physical-domains.ts";
+
 const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 const zero = (): Resources => ({ cpu: 0, memoryMiB: 0, diskGiB: 0 });
 function transaction(db: DatabaseSync): void {
@@ -64,6 +66,8 @@ export class CapacityLedger {
 
   used(db: DatabaseSync, host: string, exclude?: string): Resources {
     transaction(db);
+    const physical = physicalBudget(db, { hostId: host }, exclude);
+    if (physical) return physical.reserved;
     const used = zero();
     for (const row of db.prepare("SELECT definition FROM inference_jobs WHERE host=? AND state NOT IN ('succeeded','failed','cancelled')").all(host)) {
       const reserved = size(storedObject(row.definition).resources);
@@ -91,6 +95,8 @@ export class CapacityLedger {
 
   remaining(db: DatabaseSync, host: string, exclude?: string): Resources {
     transaction(db);
+    const physical = physicalBudget(db, { hostId: host }, exclude);
+    if (physical) return physical.available;
     const row = db.prepare("SELECT offer FROM hosts WHERE id=?").get(host);
     if (!row) throw new ServiceError("Unknown host.", 404);
     const limits = this.hostLimits(db, host), capacity = size(storedObject(row.offer).capacity), used = this.used(db, host, exclude), remaining = zero();

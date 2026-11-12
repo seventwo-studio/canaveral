@@ -6,7 +6,7 @@ import type { SqliteStore } from "./sqlite.ts";
 export interface Resources { cpu: number; memoryMiB: number; diskGiB: number }
 export interface ImagePermission { id: string; revision: string; arch: "arm64" | "amd64" }
 export interface ApplicationLimits {
-  resources: Resources; activeLeases: number; defaultTTLSeconds: number;
+  resources: Resources; activeLeases: number; maxWaitingRequests?: number; maxRequestPriority?: number; defaultTTLSeconds: number;
   maxTTLSeconds: number; maxLifetimeSeconds: number; provisioningTimeoutSeconds: number;
 }
 export interface ApplicationSpec { id: string; name: string; templates: ImagePermission[]; limits: ApplicationLimits }
@@ -45,7 +45,7 @@ function integer(value: unknown, label: string, maximum = 1_048_576): number {
 export function applicationLimits(value: unknown): ApplicationLimits {
   const limits = object(value);
   const ttlFields = ["defaultTTLSeconds", "maxTTLSeconds", "maxLifetimeSeconds", "provisioningTimeoutSeconds"] as const;
-  if (Object.keys(limits).some(key => !["resources", "activeLeases", ...ttlFields].includes(key))) {
+  if (Object.keys(limits).some(key => !["resources", "activeLeases", "maxWaitingRequests", "maxRequestPriority", ...ttlFields].includes(key))) {
     throw new ServiceError("Invalid application limits.", 400);
   }
   const budget = object(limits.resources);
@@ -59,6 +59,10 @@ export function applicationLimits(value: unknown): ApplicationLimits {
   if (!(result.defaultTTLSeconds <= result.maxTTLSeconds && result.maxTTLSeconds <= result.maxLifetimeSeconds)) {
     throw new ServiceError("Default TTL must fit maximum TTL and total lifetime.", 400);
   }
+  if (Object.hasOwn(limits,"maxWaitingRequests")) result.maxWaitingRequests = integer(limits.maxWaitingRequests, "waiting request limit", 1000);
+  const priority = limits.maxRequestPriority === undefined ? 0 : limits.maxRequestPriority;
+  if (typeof priority !== "number" || !Number.isSafeInteger(priority) || priority < 0 || priority > 1000000) throw new ServiceError("Invalid maximum request priority.", 400);
+  if (Object.hasOwn(limits,"maxRequestPriority")) result.maxRequestPriority = priority;
   return result;
 }
 
@@ -141,6 +145,7 @@ export class ConsumerIdentities {
     return this.store.transaction(db => {
       this.row(db, consumerId);
       db.prepare("UPDATE consumers SET revoked=1 WHERE id=?").run(consumerId);
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='requests'").get()) db.prepare("UPDATE requests SET state='cancelled',reason='application_revoked' WHERE application=? AND state='waiting'").run(consumerId);
       return { id: consumerId, revoked: true };
     });
   }
@@ -155,6 +160,13 @@ export class ConsumerIdentities {
     try { token = secret(value); } catch { throw new ServiceError("Application credential rejected.", 401); }
     const row = db.prepare("SELECT * FROM consumers WHERE credential=? AND revoked=0").get(credentialHash(token)) as Row | undefined;
     if (!row) throw new ServiceError("Application credential rejected.", 401);
+    return this.public(row);
+  }
+
+  /** Internal durable admission authority; never accepts a credential or resurrects a revoked identity. */
+  admission(db: DatabaseSync, id: string): Application {
+    const row = this.row(db, id);
+    if (row.revoked) throw new ServiceError("Application revoked.", 403);
     return this.public(row);
   }
 

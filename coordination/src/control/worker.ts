@@ -12,7 +12,7 @@ import { createModule as imagesModule } from "./images.ts";
 import { createModule as infrastructureModule } from "./infrastructure.ts";
 import { createModule as inferenceModule } from "./inference.ts";
 import { createModule as sessionsModule } from "./sessions.ts";
-import { createModule as leasesModule } from "./leases.ts";
+import { LegacyLeases } from "./leases.ts";
 import { createModule as updatesModule } from "./updates.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
 import { mutatesControlCommand } from "./client.ts";
@@ -38,7 +38,8 @@ const authenticateHost = machines.authenticateHost.bind(machines);
 const modules = [accountRoutes, machines, ...[lifecycleModule, devicesModule, imagesModule,
   infrastructureModule, inferenceModule].map(create => create(store, options))];
 modules.push(sessions);
-modules.push(leasesModule(store, options));
+const leases = new LegacyLeases(store, options);
+modules.push(leases);
 modules.push(updatesModule(store, options));
 
 function principal(token: string): Principal {
@@ -51,7 +52,12 @@ function principal(token: string): Principal {
   return accounts.principal(token);
 }
 
+// wake() contains failures: a busy database must not terminate this worker or its unrelated routes.
+leases.requests.wake();
+setInterval(() => { leases.requests.wake(); }, 1000).unref();
+
 async function dispatch(command: ControlCommand): Promise<unknown> {
+  if (command.type === "requests.wake") return { ok: leases.requests.wake() };
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);
     return { authenticated: true };
@@ -64,7 +70,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
   };
   for (const module of modules) {
     const result = await module.handle(request);
-    if (result !== undefined) return result;
+    if (result !== undefined) { leases.requests.wake(); return result; }
   }
   // Account URLs must never fall through to the legacy administrator-only router.
   if (/^\/v1\/(?:auth(?:\/|$)|users(?:\/|$)|admin\/tokens(?:\/|$))/.test(command.path)) {
@@ -89,7 +95,10 @@ port.on("message", (message: { id: number; command: ControlCommand }) => {
     });
     // Provider text and interpolated request values cannot enter errors or logs.
     reply({ kind: "error", id: message.id, error: {
-      message: messages[known.status] ?? "Controller request failed.", status: known.status,
+      message: ({ request_kind_unsupported: "Use kind lease or linux-lease; model jobs use /v1/model-jobs.",
+        request_waiting_limit: "Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",
+        request_priority_invalid: "Priority must be an integer within the application maximum.",
+        request_conflict: "Request UUID already has a different intent." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,
       code: /^[a-z][a-z0-9_]{0,63}$/.test(known.code) ? known.code : "request_failed", retryable: known.retryable,
       ...(known.outcome ? { outcome: known.outcome } : {}),
     } });

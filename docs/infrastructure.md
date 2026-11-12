@@ -258,7 +258,9 @@ have been removed. Existing database rows are left inert; they no longer affect
 admission. Existing hosts seed their limits once from their last advertised
 capacity when the controller opens the database. Do not advertise the same
 physical capacity under multiple identities: each host's limits are independent,
-and there is no combined limit across hosts or overlapping pools.
+and there is no combined limit across hosts or overlapping pools. The explicit
+host-to-runner-domain mapping below shares a budget across the two controller
+paths for one machine; it does not support overlapping pools.
 
 Direct runners on the same physical machine report the same opaque resource
 domain. Their observed usage must not be summed. The domain is a discovery hint,
@@ -344,3 +346,45 @@ can reassign an unavailable remote host. The resulting configuration is
 `state/local/machine-host.json`; old configuration files remain as evidence.
 
 Kubernetes resource semantics follow the [ResourceQuota contract](https://kubernetes.io/docs/concepts/policy/resource-quotas/).
+
+### Host and runner physical budget
+
+An administrator can bind an enrolled host to an operator-defined resource domain
+with `POST /v1/hosts/{id}/physical-domain`, body `{domainId: UUID}`. The new
+`physical_domains` table enforces one host per domain and one domain per host.
+An identical mapping is a replay. A new mapping or remap requires no host
+reservations (including stopped disks, images, unresolved tasks and extension
+reservations) and no held reservations in either the old or target domain.
+Conflicts return 409. A retired host cannot be mapped. Nothing infers this
+relationship from observed usage or runner discovery hints.
+
+`physicalBudget(db, target, excludeMachine?)` in
+`coordination/src/physical-domains.ts` reads inside the caller's admission
+transaction; it neither opens a transaction nor copies allocations. For a mapped
+pair it combines derived host charges and held domain reservations, retaining
+existing cleanup predicates. Each resource fits the minimum of domain budget,
+saved host limit and current offered capacity. Placement, restart, image/inference
+admission and runner-domain reservation use these shared available amounts.
+The exclusion argument is only for the restarting machine's own host charge.
+Unmapped callers retain their original accounting and missing-table behavior;
+absence of the new table means unmapped.
+
+Host lists and host-resource responses add `physicalDomainId`; domain responses
+add `hostId`, `physicalDomainId` and `effectiveCapacity`. Existing `reserved`
+and `available` fields include both paths. Host lists also expose
+`effectiveCapacity`. Host-resource categories include a shared runner/extension
+category so category totals continue to equal reserved totals. The domain's
+`reservations` count still counts its own held rows, and its `capacity` remains
+the declared domain budget.
+
+A MachineHooks `additionalReservations` callback used with mapped inventory
+must supply `additionalReservationsSql: {id, query}`: a stable source id and a
+read-only SQL SELECT with one positional host-id parameter, returning nonnegative
+integer `cpu`, `memoryMiB` and `diskGiB` columns. Its definition persists in
+`physical_reservation_sources`, so either worker evaluates the same SQL without
+a process-local callback. Sources must not overlap built-in charges. Unmapped
+hosts still invoke the original callback. A callback without a SQL definition
+blocks mapped accounting with 503, including mapping while its work cannot be
+proved absent. Persisted sources are not automatically removed on restart;
+removing an extension requires an operator-owned migration after positive cleanup.
+These are controller fixture guarantees, not native execution acceptance.

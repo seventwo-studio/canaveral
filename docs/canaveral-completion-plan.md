@@ -15,6 +15,8 @@ An agent selects a pinned template/model and required capabilities, supplies a s
 | iOS simulator | Exact owned runtime/device identity on Apple hardware, app install/launch, logs, screenshots and bounded controls |
 | Android emulator | Private AVD and pinned system image, owned serial/ports, app install/launch, logs and bounded controls |
 | Model execution | Pinned installed model, bounded inference, scoped results and positive stop/cleanup before releasing capacity |
+| CI job | A queued GitHub workflow job gets a fresh single-use box of the requested kind, runs once and is destroyed |
+| Preview service | A long-lived box tied to one pull request, reachable on a private per-PR hostname, slept when idle and destroyed on close |
 
 A macOS workspace and an iOS simulator may be separately leased resources. The design must not assume nested virtualization or expose unrestricted host device access. Agent-provider credentials are supplied through an explicit secret boundary, never baked into shared images.
 
@@ -29,13 +31,35 @@ A macOS workspace and an iOS simulator may be separately leased resources. The d
 
 The embedded host ledger already shares VM/image/inference reservations. The Rust runner domain ledger shares Linux leases and model jobs. Binding both to one physical inventory, rather than relying on duplicate operator declarations, remains delivery work.
 
+## Requests and waiting
+
+Accepted direction, 2026-11-11. Not implemented: a full pool currently returns `capacity_unavailable`.
+
+Every consumer uses one request model. A request is a box, a job, a preview or a model call. It carries a caller UUID, pinned template or model, resources, priority, deadline and optional source context. Requests beyond current capacity are accepted and wait instead of failing. Admission is fair per application, bounded by its limits, and a waiting request can be cancelled or expire at its deadline. Replaying the same UUID and specification returns the same request. Admission and reservation happen in one transaction against the single per-machine ledger, so the two existing ledgers must be bound first.
+
+## GitHub and previews
+
+Accepted direction, 2026-11-11. Not implemented: the repository contains no GitHub integration or preview routing.
+
+- A GitHub App receives workflow-job and pull-request events. A queued job carrying a Canaveral label becomes a queued request. The box registers a single-use runner, runs that one job and is destroyed.
+- Source context is repository, pull request, commit and run. A new push supersedes older requests for the same pull request. Closing the pull request cancels waiting requests and reclaims running ones. Outcomes are reported as checks.
+- A preview is a request tied to one pull request. The controller routes a per-PR hostname to the declared port over the existing outbound host connection and posts the URL as a deployment. Previews are private-network only for now; public exposure needs separate authentication and fork rules.
+- App credentials, runner registration tokens and webhook secrets stay behind the explicit secret boundary and never enter images or request bodies.
+
+## Deployment boundary
+
+Canaveral stays independent of any particular installation. This repository ships the controller, hosts, generic deployment inputs and examples. Site-specific manifests, hostnames, capacity limits, images and credentials belong to the operator's own infrastructure repository.
+
 ## Delivery sequence
 
-1. Finish the shared-pool substrate: Linux/macOS multi-runtime model offers, CPU/RAM/disk placement, accounting across runtime types and tenant quota regression coverage.
-2. Make Linux and macOS workspace leases usable end to end: acquire, verified readiness, repo/build operations, artifacts, renewal, expiry, controller/host loss and owned release. Native deadline and cleanup proof must precede enabling ordinary host lease execution.
-3. Apply the same ownership, accounting and expiry contract to iOS/Android simulator leases and scoped model work. Add explicit accelerator admission where needed; do not treat simulator/model inventory as readiness.
-4. Validate the supported paths on specifically authorized disposable targets, including recovery and concurrency under mixed workloads.
-5. Ship the supported matrix and precise remaining gates. Keep the Docker controller externally updated and avoid interrupting active work during runtime updates.
+1. Finish the shared-pool substrate: one authoritative ledger per physical machine across both controller paths, Linux/macOS multi-runtime model offers, CPU/RAM/disk placement and tenant quota regression coverage.
+2. Add the request queue on that ledger: waiting, fair admission, priority, deadline, cancellation and idempotent recovery.
+3. Make Linux workspace leases usable end to end, then macOS: acquire, verified readiness, repo/build operations, artifacts, renewal, expiry, controller/host loss and owned release. Native deadline and cleanup proof must precede enabling ordinary host lease execution.
+4. Add the GitHub App with single-use runners and pull-request context. Drive steps 2–4 first as one thin slice: a labelled job queues, gets a Linux box, runs and is reclaimed.
+5. Apply the same ownership, accounting and expiry contract to iOS/Android simulator leases and scoped model work. Add explicit accelerator or unified-memory admission; do not treat simulator/model inventory as readiness.
+6. Add preview services and an application-scoped model endpoint on the same queue.
+7. Validate the supported paths on specifically authorized disposable targets, including deliberate over-requesting, recovery and concurrency under mixed workloads.
+8. Ship the supported matrix and precise remaining gates. Keep the Docker controller externally updated and avoid interrupting active work during runtime updates.
 
 ## Current gates
 
@@ -48,7 +72,8 @@ Existing portable tests cover many authority, reservation, command/session and r
 - Linux and macOS: acquire a workspace, clone a test repository, run its build/tests, retrieve artifacts and release; a second tenant cannot access it.
 - Mobile: acquire each supported simulator/emulator, install/launch a fixture app, retrieve logs/screenshots, exercise scoped input and positively reclaim the exact instance.
 - Models: run a pinned real model while development/simulator work exists, preserve headroom and prove cancellation/cleanup before reservation release.
-- Scheduling: concurrent requests cannot overspend the same physical budget; constrained and busy hosts are avoided; quotas, draining and fair waiting have observable outcomes.
+- Scheduling: concurrent requests cannot overspend the same physical budget; constrained and busy hosts are avoided; quotas, draining and fair waiting have observable outcomes. Over-requesting queues work and every waiting request is admitted, cancelled or expired.
+- GitHub: a labelled workflow job runs on a fresh box and leaves nothing behind; a superseding push and a closed pull request cancel and reclaim their requests; a preview URL resolves only on the private network and disappears on close.
 - Recovery: expiry, disconnected clients, worker/controller restart and lost receipts do not resurrect a lease, replay effects or release unknown resources.
 - Run relevant portable checks for every change. Native experiments, signing, service installation and deployment require concrete operator authorization under `AGENTS.md`.
 

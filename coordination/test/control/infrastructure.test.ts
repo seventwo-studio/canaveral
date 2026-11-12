@@ -1,3 +1,5 @@
+import { ResourceDomains } from "../../src/resource-domains.ts";
+import { PhysicalDomains } from "../../src/physical-domains.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -249,4 +251,22 @@ test("every protected infrastructure route rechecks current authority inside its
       assert.deepEqual(after, before);
     });
   }
+});
+
+test("mapped host resources include held runner reservations in category totals", t => {
+  const f = fixture(t); f.enroll(String(f.infrastructure.createSetup({ id: randomUUID(), ...offer() }).enrollmentToken));
+  const domain = randomUUID(), domains = new ResourceDomains();
+  f.store.transaction(db => {
+    ResourceDomains.schema(db);
+    domains.define(db, { id: domain, name: "fixture", capacity }, 1);
+    new PhysicalDomains().map(db, f.host, domain);
+    domains.reserve(db, { id: randomUUID(), domain, kind: "model", owner: domain, resources: size }, 1);
+  });
+  f.machine();
+  const report = f.infrastructure.hostResources(f.host);
+  assert.equal(report.physicalDomainId, domain);
+  assert.deepEqual(report.reserved, { cpu: 4, memoryMiB: 2048, diskGiB: 16 });
+  const categories = report.categories as (typeof size & { id: string })[];
+  assert.equal(categories.find(c => c.id === "physicalShared")!.cpu, size.cpu);
+  for (const key of ["cpu", "memoryMiB", "diskGiB"] as const) assert.equal(categories.reduce((sum, c) => sum + c[key], 0), (report.reserved as typeof size)[key]);
 });

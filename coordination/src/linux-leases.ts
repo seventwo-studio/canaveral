@@ -283,14 +283,26 @@ export class LinuxLeases {
   }
 
   acquire(token: string, value: unknown): { created: boolean; lease: unknown } {
+    return this.acquireAuthorized(value, db => this.applications.verify(db, token));
+  }
+  /** Internal queue entry; shares every validation, reservation and lifecycle rule with direct acquisition. */
+  acquireForApplication(application: string, value: unknown) {
+    return this.acquireAuthorized(value, db => this.applications.admission(db, application));
+  }
+  /** Pure acquisition shape check; no state is read or written. Also used before a waiting request is stored. */
+  validateAcquisition(value: unknown) {
     const input = exact(value, ["id", "templateId", "templateRevision", "arch"], "lease acquisition", ["name", "resources", "ttlSeconds", "requiredCapabilities"]);
     const id = identifier(input.id), imageId = text(input.templateId, "templateId"), revision = text(input.templateRevision, "templateRevision"), a = arch(input.arch);
     const name = input.name === undefined ? undefined : text(input.name, "name");
     const required = input.requiredCapabilities === undefined ? [] : capabilityList(input.requiredCapabilities, "requiredCapabilities");
     const overrides = input.resources === undefined ? {} : exact(input.resources, [], "resources", keys);
     for (const key of Object.keys(overrides)) positive(overrides[key], 1_048_576, key);
+    return { input, id, imageId, revision, a, name, required, overrides };
+  }
+  private acquireAuthorized(value: unknown, authorize: (db: DatabaseSync) => ReturnType<ConsumerIdentities["verify"]>) {
+    const { input, id, imageId, revision, a, name, required, overrides } = this.validateAcquisition(value);
     return this.transaction((db, now) => {
-      const application = this.applications.verify(db, token);
+      const application = authorize(db);
       const limits = application.limits;
       const ttl = positive(input.ttlSeconds ?? limits.defaultTTLSeconds, limits.maxTTLSeconds, "ttlSeconds");
       const image = this.imageRow(db, imageId, revision, a);

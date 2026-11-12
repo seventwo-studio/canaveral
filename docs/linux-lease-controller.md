@@ -227,16 +227,16 @@ Leases reserve in the same `resource_domains`/`resource_reservations` ledger as 
 jobs, once, at admission, with `kind: "linux-lease"` and the lease as owner. A claim
 adopts that reservation and refuses to hand out a lease whose reservation is not
 held. Release requires the lease owner. Model-job claims see lease reservations and
-vice versa, so one physical budget is never offered twice. The lease ledger does not
-read the legacy `hosts`/`host_limits`/`leases` tables; do not offer the same
-physical capacity to both.
+vice versa, so one physical budget is never offered twice. For explicitly mapped hosts and runner domains, the physical capacity facade
+combines reservations from both ledgers. Unmapped inventory retains independent
+accounting; do not offer the same physical capacity through unmapped entries.
 
 Only additive tables are created: `linux_lease_images`, `linux_lease_grants`,
 `linux_lease_runner_approvals`, `linux_leases`, `linux_lease_mutations` and
 `linux_lease_assignments`. Legacy rows are not read, converted or adopted.
 
-The controller has no background timer. Expiry is applied when any lease route
-runs. A model-job claim does not refresh leases, so an expired, unclaimed lease
+The controller has a one-second [waiting-request admission timer](requests.md).
+Lease expiry is applied when a lease route or queued acquisition runs. A model-job claim does not refresh leases, so an expired, unclaimed lease
 holds its reservation until the next lease transaction; this is conservative and
 never double counts. [Durable command operations](linux-command-operations.md) add
 scoped submission/get and bound runner poll/report routes, with three additive

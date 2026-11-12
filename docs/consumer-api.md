@@ -80,3 +80,5 @@ unexpected host fields and session secret leakage.
 These are fixture proofs, not separate-network TLS or native environment
 acceptance. Binary interoperability, live client examples, recovery and
 portable release acceptance remain open. Provider acceptance must be recorded separately from portable fixture results.
+
+The additive [durable waiting request API](requests.md) accepts over-requested lease intent through `/v1/requests`; direct lease acquisition retains its existing errors.

@@ -3,7 +3,7 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Canaveral consumer lease API",
-    "version": "0.2.2",
+    "version": "0.3.0",
     "description": "Implemented controller consumer subset. Independently usable execution; ordinary runners remain gated for consumer lease execution. No administrator, enrollment, model, registry or host API is implied. POST bodies are JSON objects of at most 1 MiB with a single Content-Length. Browser Origin requests are rejected. Remote use requires HTTPS; the embedded server uses HTTP behind operator TLS termination. Credentials are opaque bearer secrets, never URL parameters."
   },
   "paths": {
@@ -1254,6 +1254,370 @@
         ],
         "description": "The current scoped lease key can inspect retained receipts after lease termination or credential rotation. Other lease operations remain hidden. Unknown effects must be inspected before submitting another command."
       }
+    },
+    "/v1/requests": {
+      "post": {
+        "operationId": "submitRequest",
+        "summary": "submitRequest",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Request"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Request"
+                }
+              }
+            }
+          }
+        },
+        "description": "Application-owned durable waiting lease intent. See docs/requests.md. SDK never polls or retries.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitRequest"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listRequests",
+        "summary": "listRequests",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestPage"
+                }
+              }
+            }
+          }
+        },
+        "description": "Application-owned durable waiting lease intent. See docs/requests.md. SDK never polls or retries.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/requests/{id}": {
+      "get": {
+        "operationId": "inspectRequest",
+        "summary": "inspectRequest",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Request"
+                }
+              }
+            }
+          }
+        },
+        "description": "Application-owned durable waiting lease intent. See docs/requests.md. SDK never polls or retries.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/requests/{id}/cancel": {
+      "post": {
+        "operationId": "cancelRequest",
+        "summary": "cancelRequest",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Request"
+                }
+              }
+            }
+          }
+        },
+        "description": "Application-owned durable waiting lease intent. See docs/requests.md. SDK never polls or retries.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -1392,6 +1756,18 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 2147483647
+          },
+          "maxWaitingRequests": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 100
+          },
+          "maxRequestPriority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000,
+            "default": 0
           }
         },
         "required": [
@@ -2921,6 +3297,221 @@
           "updatedAt"
         ],
         "additionalProperties": false
+      },
+      "RequestIntent": {
+        "type": "object",
+        "properties": {
+          "templateId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "templateRevision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "arch": {
+            "type": "string",
+            "enum": [
+              "arm64",
+              "amd64"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceOverrides"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "requiredCapabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "command",
+                "pty",
+                "files",
+                "screenshot",
+                "displayStream",
+                "input",
+                "hierarchy"
+              ]
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "templateId",
+          "templateRevision",
+          "arch"
+        ],
+        "additionalProperties": false
+      },
+      "SubmitRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "intent"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "enum": [
+              "lease",
+              "linux-lease"
+            ]
+          },
+          "intent": {
+            "$ref": "#/components/schemas/RequestIntent"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000,
+            "default": 0
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "object",
+            "description": "Opaque source context, at most 4096 UTF-8 bytes; no behavior."
+          }
+        }
+      },
+      "Request": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "intent",
+          "priority",
+          "deadline",
+          "source",
+          "resources",
+          "state",
+          "sequence",
+          "createdAt",
+          "admittedAt",
+          "target",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "enum": [
+              "lease",
+              "linux-lease"
+            ]
+          },
+          "intent": {
+            "$ref": "#/components/schemas/AcquireLease"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000,
+            "default": 0
+          },
+          "deadline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "source": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "resources": {
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "waiting",
+              "admitted",
+              "cancelled",
+              "expired",
+              "rejected"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "admittedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RequestPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requests",
+          "nextCursor"
+        ],
+        "properties": {
+          "requests": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Request"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
       }
     }
   }
