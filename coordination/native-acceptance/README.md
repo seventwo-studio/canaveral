@@ -51,3 +51,66 @@ coordination/node_modules/.bin/tsc --noEmit --target ES2023 --module NodeNext \
   --moduleResolution NodeNext --strict --types node \
   --typeRoots coordination/node_modules/@types coordination/native-acceptance/run.ts
 ```
+
+## ST-534 native integration evidence (2026-11-12)
+
+An operator-authorized arm64 Mac run used the production signed helper, Linux
+6.12.117, the experimental Debian snapshot rootfs and native erofs-utils 1.8.6.
+The diagnostic initrd printed `CANAVERAL-DIAGNOSTIC-ONLY-v1` and the launch disk's
+20-hex UUID-prefix serial. A fast shutdown exposed lost console output: the
+helper now drains pending serial bytes on close and saves a final transcript.
+A socket-free portable Swift test covers immediate close with pending bytes.
+
+The first full boot exposed the host builder's 16 KiB block-size default; the
+satellite now explicitly requests `-b4096`, covered by its fixed-argv regression
+and strict fixture builder. Bootstrap subsequently mounted the real launch
+medium and reached guest readiness. The first command exposed missing
+`CONFIG_PROC_CHILDREN`, required by PID1 orphan supervision. The kernel fragment
+now enables it; the recipe checks the resolved built-in. The fragment also uses
+Kconfig's effective `CONFIG_DEBUG_INFO_NONE=y` choice so the recipe can verify
+that requirement. The harness consumes the HTTP acquisition response directly
+(the SDK wraps it), waits for terminal command states, and captures each guest's
+actual mountinfo through the consumer command route.
+
+Native observations apply to this experimental bundle and host only. Production
+trust/signing approval, networking, file transfer, shared read-only rootfs across
+concurrent VMs, power-loss recovery and the ordinary host lease gate remain open.
+
+The corrected experimental bundle's canonical digest is
+`20f1103284c2657207c2feed20f0de9fa3fda1068deb5759ceded7e92691d8a4`.
+Private run `canaveral-native-CQg8Em` contains `release-ready.json`, `command.json`,
+`renewed-native-authorization.json`, `release-independent-stop.json`, ownership
+refusal responses, per-lease boot logs, `release-mountinfo.txt`,
+`expiry-mountinfo.txt`, `helper-signature.txt` (helper cdhash) and `pins.json`
+(helper and mkfs.erofs SHA256). The diagnostic evidence is in `diagnostic-2`.
+These are local evidence labels, not repository artifacts or public downloads.
+Acquisition/readiness, consumer command/output, native renewal, explicit release
+and application isolation passed. Guest mountinfo showed a separate EROFS launch
+mount with `ro,nosuid,nodev,noexec` in both full guests.
+
+**Expiry remains failing.** The guest session's conservative two-second margin
+ended command authority before the controller TTL. Satellite supervision then
+fenced the VM and reported `failure: runtime`; the controller marked the lease
+`failed`, not `expired`. `runner-reports.json` records this at controller time
+`1794486435.513`, before expiry `1794486437.339`. The following complete cleanup
+report released the reservation. `post-run-independent-stop.json` independently
+confirms the helper and VZ processes are gone and owned machine, workspace and
+relay directories removed. Correcting this classification requires deciding how
+a conservatively early guest fence interacts with renewal and controller expiry;
+no deadline, admission or cleanup check was relaxed. The harness now fails
+immediately on this state instead of waiting for an impossible `expired` state.
+
+The run stopped at this failure. Satellite loss was not reached; no loss-case
+reservation was created. Its documented unknown-reservation recovery behavior
+remains a native gate. No full native acceptance claim is made. Coordination's
+989 tests and Swift's 151 XCTest cases plus the new serial test passed. The full
+Rust suite passed with one test thread; parallel runs exposed timing/lock races
+(`executor already owned` and a stalled-poll count assertion), which remain a
+portable-test concurrency uncertainty.
+
+The failed expiry case also exposed an evidence-retention gap: periodic process
+snapshots overwrote the earlier helper PID. Its final independent scan proves no
+helper or VZ process exists, and cleanup reports and removed paths are retained,
+but its individual helper PID evidence is incomplete. The harness now persists
+its accumulated per-lease PID observations separately. The successful explicit
+release retains its individual PID proof in `release-independent-stop.json`.

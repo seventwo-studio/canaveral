@@ -43,3 +43,9 @@ observations do not establish Linux boot or production-helper acceptance. The fu
 requires installed real bundle artifacts and a real pinned `mkfs.erofs`; setup-only mode
 stops before acquisition. Real boot, command and cleanup evidence must be retained in the
 private run directory before closing the corresponding native gates.
+
+ST-534's 2026-11-12 operator-authorized arm64 diagnostic boot observed the actual
+20-hex launch-disk serial through Linux sysfs. The production helper now drains
+pending console bytes on close and persists a final transcript, including guests
+that stop before the periodic snapshot. See the [native evidence record](../../coordination/native-acceptance/README.md)
+for the narrower full-lease results and remaining production gates.

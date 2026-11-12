@@ -169,6 +169,7 @@ try {
       const pids = rows.filter(r => Number(r[2]) === currentRun?.c.pid && r[3]!.includes(cfg.helper + ' run ' + machine)).map(r => Number(r[1]));
       const old = observed.get(id);
       observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], machine, relay: j.direct?.agentSocket ?? old?.relay});
+      save(id + '-observed-processes.json', observed.get(id));
       for (const name of ['boot.log', 'console.log', 'direct-started.json']) if (existsSync(join(machine, name))) copyFileSync(join(machine, name), pem(id + '-' + name));
       if (existsSync(join(machine, 'console.log'))) copyFileSync(join(machine, 'console.log'), pem(id + '-boot.log'));
       writeFileSync(pem(id + '-processes.txt'), ps);
@@ -176,7 +177,7 @@ try {
     }
     const acquireBody = (ttlSeconds: number) => ({id: randomUUID(), templateId: image.id, templateRevision: image.revision, arch: image.arch, ttlSeconds, requiredCapabilities: ['command']});
     async function start(label: string, ttl = 120) {
-      const lease = (await ok('POST', '/v1/leases', acquireBody(ttl), app.credential)).lease;
+      const lease = await ok('POST', '/v1/leases', acquireBody(ttl), app.credential);
       active = {id: lease.id, credential: app.credential};
       state = pem(label + '-satellite');
       save(label + '-satellite.json', {origin, identity: pem('identity'), binding, state, helper: cfg.helper, helperSha256: sha(cfg.helper), signingRequirement: cfg.signingRequirement,
@@ -186,7 +187,23 @@ try {
       currentRun = launch(cfg.satellite, ['run-once', pem(label + '-satellite.json')], label);
       await until(async () => { await observe(lease.id); const v = await inspect(lease.id); assert(!['failed','expired','released'].includes(v.state), 'guest failed before ready'); return v.state === 'ready' && v; }, 'real guest ready');
       await until(async () => { await observe(lease.id); return observed.get(lease.id)?.pids.length && existsSync(pem(lease.id + '-boot.log')); }, 'helper PID and boot console');
-      await snapshot(label + '-ready', lease.id); return lease.id;
+      await snapshot(label + '-ready', lease.id);
+      const credential = (await ok('POST', `/v1/leases/${lease.id}/credential`, {}, app.credential)).credential;
+      const operation = randomUUID();
+      await ok('POST', `/v1/leases/${lease.id}/operations`, {id:operation, member:'primary', action:'shell', arguments:{argv:['/bin/cat','/proc/self/mountinfo']}}, credential);
+      const receipt = await until(async () => {
+        await observe(lease.id);
+        const r = await ok('GET', `/v1/leases/${lease.id}/operations/${operation}`, undefined, credential);
+        return ['succeeded','failed','unknown','cancelled'].includes(r.state) && r;
+      }, 'guest mountinfo');
+      save(label + '-mountinfo-command.json', receipt);
+      assert.equal(receipt.state, 'succeeded');
+      const mountinfo = Buffer.from(receipt.result.stdoutBase64, 'base64').toString();
+      const launchMount = mountinfo.split('\n').find((line: string) => line.split(' ')[4] === '/etc/canaveral');
+      assert(launchMount, 'missing guest launch mount');
+      for (const flag of ['ro','nosuid','nodev','noexec']) assert(launchMount.split(' ')[5]!.split(',').includes(flag));
+      writeFileSync(pem(label + '-mountinfo.txt'), mountinfo);
+      return lease.id;
     }
     async function stopped(label: string, id: string) {
       await until(async () => { await observe(id); return (await inspect(id)).cleanup.state === 'complete'; }, 'positive cleanup');
@@ -212,7 +229,7 @@ try {
     const credential = (await ok('POST', `/v1/leases/${id}/credential`, {}, app.credential)).credential;
     const operation = randomUUID();
     await ok('POST', `/v1/leases/${id}/operations`, {id: operation, member:'primary', action:'shell', arguments:{argv:['/bin/sh','-c','printf canaveral-native-command']}}, credential);
-    const receipt = await until(async () => { await observe(id); const r = await ok('GET', `/v1/leases/${id}/operations/${operation}`, undefined, credential); return r.state !== 'queued' && r; }, 'guest command');
+    const receipt = await until(async () => { await observe(id); const r = await ok('GET', `/v1/leases/${id}/operations/${operation}`, undefined, credential); return ['succeeded','failed','unknown','cancelled'].includes(r.state) && r; }, 'guest command');
     assert.equal(receipt.state, 'succeeded'); assert.equal(Buffer.from(receipt.result.stdoutBase64, 'base64').toString(), 'canaveral-native-command'); save('command.json', receipt);
     await pause(1100);
     await ok('POST', `/v1/leases/${id}/renew`, {id:randomUUID(), expectedRevision:(await inspect(id)).revision, ttlSeconds:180}, app.credential);
@@ -229,7 +246,12 @@ try {
     await snapshot('renewed', id);
     await ok('POST', `/v1/leases/${id}/release`, {id:randomUUID()}, app.credential); await stopped('release', id);
     const expiry = await start('expiry', 120);
-    await until(async () => { await observe(expiry); return (await inspect(expiry)).state === 'expired'; }, 'wall-clock expiry'); await stopped('expiry', expiry);
+    await until(async () => {
+      await observe(expiry);
+      const view = await inspect(expiry);
+      if (view.state === 'failed') { await snapshot('expiry-failed', expiry); throw Error('guest failure preempted wall-clock expiry'); }
+      return view.state === 'expired';
+    }, 'wall-clock expiry'); await stopped('expiry', expiry);
     const lost = await start('satellite-loss', 120);
     currentRun!.c.kill('SIGKILL'); await currentRun!.done;
     // Recovery must report unknown, never relaunch; native deadline independently fences execution.
@@ -252,7 +274,7 @@ try {
     active = undefined;
     save('result.json', {state:'cases-completed', nativeAcceptance:true, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
   }
-} catch (e: any) { save('failure.json', {message:e.message, activeLease:active?.id}); process.exitCode = 1; }
+} catch (e: any) { save('failure.json', {message:e.message, stack:e.stack, activeLease:active?.id}); process.exitCode = 1; }
 finally {
   if (active && api!) {
     // A release is intent only. Never delete machine state or kill the helper as a substitute for proof.

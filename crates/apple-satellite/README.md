@@ -110,7 +110,7 @@ Each launch consumes a fresh boot attempt UUID with launch intent. It then build
 manifest). The staging root is one 0700 directory holding one 0400 file. The builder is
 the operator-installed erofs-utils `mkfs.erofs` (or an equivalent with the same CLI),
 pinned by hash, run without a shell or environment, with fixed argv
-`--quiet --all-root -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`, a 1 MiB file-size rlimit and
+`--quiet --all-root -b4096 -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`, a 1 MiB file-size rlimit and
 a 30 s bound. `--all-root` records uid/gid 0 for the guest's ownership checks. The
 filesystem UUID is the boot attempt, matching the helper's serial and nonce. The output
 must be an owned single-link file of at most 1 MiB with the EROFS magic. It is then made
@@ -314,3 +314,9 @@ helper and immutable boot artifacts, refuses known fixtures even when renamed, a
 retains unknown reservations after satellite loss. Setup-only mode verifies controller
 configuration and enrollment without claiming a lease; it is not VM evidence. No native
 acceptance is inferred from portable checks or a firmware-only session diagnostic.
+
+ST-534 native integration found that macOS erofs-utils can default to 16 KiB
+blocks, which the experimental 4 KiB-page Linux kernel refused. Launch-medium
+construction now pins `-b4096`; the fixed-argv test and strict fixture builder
+cover that requirement. Actual boot observations and outstanding production
+gates are recorded in the [native evidence record](../../coordination/native-acceptance/README.md).

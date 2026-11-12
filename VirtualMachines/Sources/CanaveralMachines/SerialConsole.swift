@@ -19,7 +19,19 @@ private final class SerialBuffer: @unchecked Sendable {
         if count > 0 { bytes.append(contentsOf: chunk.prefix(count)) }
         if bytes.count > 65536 { bytes = Data(bytes.suffix(65536)) }
     }
-    func stop() { lock.lock(); active = false; lock.unlock() }
+    func stop(_ fd: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        active = false
+        // The VM has stopped, but readability callbacks may still be pending.
+        // Drain the nonblocking pipe before closing it; retain only the tail.
+        var chunk = [UInt8](repeating: 0, count: 8192)
+        for _ in 0..<128 {
+            let count = Darwin.read(fd, &chunk, chunk.count)
+            guard count > 0 else { break }
+            bytes.append(contentsOf: chunk.prefix(count))
+            if bytes.count > 65536 { bytes = Data(bytes.suffix(65536)) }
+        }
+    }
     func drain() -> Data {
         lock.lock(); defer { lock.unlock() }
         let result = bytes; bytes.removeAll(keepingCapacity: true); return result
@@ -61,7 +73,7 @@ private final class SerialBuffer: @unchecked Sendable {
     }
     public func close() {
         guard !closed else { return }; closed = true
-        received.fileHandleForReading.readabilityHandler = nil; buffer.stop(); refresh()
+        received.fileHandleForReading.readabilityHandler = nil; buffer.stop(received.fileHandleForReading.fileDescriptor); refresh()
         for handle in [input.fileHandleForReading, input.fileHandleForWriting, received.fileHandleForReading, received.fileHandleForWriting] { try? handle.close() }
     }
 }

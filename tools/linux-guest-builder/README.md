@@ -120,7 +120,7 @@ satellite runtime state or an existing VM. Limit concurrent work to this VM's
    Boot data is 0400; the builder requires owner execute, so 0400 fails satellite
    admission. Do not weaken that check. Test the exact satellite invocation with
    an empty environment, a 0700 source directory and a 0400 `launch.json`:
-   `--quiet --all-root -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`.
+   `--quiet --all-root -b4096 -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`.
 8. Install with `node tools/linux-guest-builder/install.mjs "$WORK/bundle" "$DEST"`.
    Capture stdout to an external report. It exclusively creates private files,
    flushes, sets 0400 and user-immutable, and verifies single-link metadata.
@@ -146,3 +146,9 @@ also needs `nouchg` before replacement/removal. Do not recursively clear flags o
 remove shared runtime state. Keep input/evidence bytes until native acceptance
 and review are complete, then delete disposable build trees and caches according
 to the operator's retention policy.
+
+ST-534 native integration requires `CONFIG_PROC_CHILDREN=y` for PID1 orphan
+supervision; tool probes and readiness alone did not exercise that interface.
+The recipe verifies the resolved built-in. `CONFIG_DEBUG_INFO_NONE=y` is the
+resolved Kconfig choice for builds without debug information. Native findings
+and still-open production gates are in the [evidence record](../../coordination/native-acceptance/README.md).
