@@ -166,6 +166,7 @@ try {
         catch (e: any) {
           // lsof exits 1 when a process races exit. Other failures are not proof of absence.
           assert.equal(e.code, 1);
+          assert.equal((e.stderr ?? '').trim(), '', 'lsof attribution failed');
           files = e.stdout ?? '';
         }
       }
