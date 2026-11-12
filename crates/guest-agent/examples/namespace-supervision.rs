@@ -1,8 +1,20 @@
 //! Explicit namespace fixture, not a production CLI mode or microVM acceptance.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
+#[path = "../src/data.rs"]
+mod data;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/file_executor.rs"]
+mod file_executor;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 #[path = "../src/runtime.rs"]
 mod runtime;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/workspace.rs"]
+mod workspace;
 #[cfg(target_os = "linux")]
 use canaveral_guest_agent::Launch;
 #[cfg(target_os = "linux")]

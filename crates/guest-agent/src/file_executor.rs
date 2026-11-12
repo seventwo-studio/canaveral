@@ -3,7 +3,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 use crate::runtime::now;
 use canaveral_guest_protocol::{
-    data::{CancelReason, Frame, Receipt, Replay, Request, Step},
+    data::{CancelReason, Frame, Receipt, Request, Step},
     Result,
 };
 use std::sync::{
@@ -11,6 +11,69 @@ use std::sync::{
     mpsc, Arc,
 };
 use uuid::Uuid;
+
+use sha2::{Digest, Sha256};
+
+fn request_digest(request: &Request) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(serde_json::to_vec(request)?).into())
+}
+#[derive(Default)]
+struct Replay {
+    step: u64,
+    digest: Option<[u8; 32]>,
+    receipt: Option<Receipt>,
+    cancelled: bool,
+}
+impl Replay {
+    fn begin(
+        &mut self,
+        id: Uuid,
+        step: u64,
+        request: Request,
+        remaining: u64,
+        now: u64,
+    ) -> Result<Step<'_>> {
+        request.validate()?;
+        if id.is_nil()
+            || step == 0
+            || step > canaveral_guest_protocol::MAX_SAFE
+            || remaining == 0
+            || remaining > canaveral_guest_protocol::MAX_SAFE
+        {
+            return Err("invalid transfer step".into());
+        }
+        now.checked_add(remaining).ok_or("deadline overflow")?;
+        let digest = request_digest(&request)?;
+        if step == self.step {
+            if self.digest != Some(digest) {
+                return Err("changed transfer replay".into());
+            }
+            return self
+                .receipt
+                .as_ref()
+                .map(Step::Replay)
+                .ok_or_else(|| "step still in flight".into());
+        }
+        if self.cancelled || step != self.step + 1 || (self.step != 0 && self.receipt.is_none()) {
+            return Err("transfer gap/cancelled".into());
+        }
+        self.step = step;
+        self.digest = Some(digest);
+        self.receipt = None;
+        Ok(Step::Execute)
+    }
+    fn cancel(&mut self, _: Uuid) {
+        self.cancelled = true;
+    }
+    fn complete(&mut self, receipt: Receipt) -> Result<()> {
+        receipt.validate()?;
+        if self.step == 0 || self.receipt.is_some() {
+            return Err("no pending transfer step".into());
+        }
+        self.receipt = Some(receipt);
+        Ok(())
+    }
+}
 
 pub(crate) struct Authority {
     cancelled: AtomicU8,
@@ -36,7 +99,7 @@ struct Job {
 struct Pending {
     id: Uuid,
     step: u64,
-    request: Request,
+    digest: [u8; 32],
     authority: Arc<Authority>,
 }
 pub(crate) struct Lane {
@@ -44,7 +107,7 @@ pub(crate) struct Lane {
     pending: Option<Pending>,
     active: Option<Uuid>,
     unknown: bool,
-    ended: std::collections::BTreeSet<Uuid>,
+    ended: std::collections::VecDeque<Uuid>,
     send: mpsc::SyncSender<Job>,
     receive: mpsc::Receiver<Receipt>,
 }
@@ -93,6 +156,7 @@ impl Lane {
                     }
                 } else if self.active == Some(id) {
                     self.active = None;
+                    self.ended.push_back(id);
                     self.send.try_send(Job {
                         id,
                         request: Request::Abort,
@@ -113,7 +177,7 @@ impl Lane {
                 ..
             } => {
                 if let Some(p) = &self.pending {
-                    if p.id == id && p.step == step && p.request == request {
+                    if p.id == id && p.step == step && p.digest == request_digest(&request)? {
                         return Ok(None);
                     }
                     return Err("changed replay or concurrent transfer step".into());
@@ -122,7 +186,11 @@ impl Lane {
                     return Err("transfer lane busy".into());
                 }
                 if self.replay.len() >= 128 && !self.replay.contains_key(&id) {
-                    return Err("transfer replay retention limit".into());
+                    let oldest = self
+                        .ended
+                        .pop_front()
+                        .ok_or("transfer replay retention limit")?;
+                    self.replay.remove(&oldest);
                 }
                 let accepted_at = now();
                 match self.replay.entry(id).or_default().begin(
@@ -161,7 +229,7 @@ impl Lane {
                         self.pending = Some(Pending {
                             id,
                             step,
-                            request,
+                            digest: request_digest(&request)?,
                             authority,
                         });
                         Ok(None)
@@ -199,7 +267,7 @@ impl Lane {
                         | Receipt::Verified { .. }
                 ) {
                     self.active = None;
-                    self.ended.insert(p.id);
+                    self.ended.push_back(p.id);
                 }
                 self.replay
                     .get_mut(&p.id)
@@ -257,6 +325,7 @@ pub(crate) mod linux {
         name: CString,
         path: String,
         stage: CString,
+        replace: bool,
     }
     impl Drop for Upload {
         fn drop(&mut self) {
@@ -335,6 +404,33 @@ pub(crate) mod linux {
         }
         Ok(i)
     }
+    // Inspect the directory entry without opening or following the destination.
+    // Replacing a hardlink only removes that entry; it does not write its inode.
+    fn replacement_allowed(parent: &File, name: &CString) -> std::result::Result<(), &'static str> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let e = std::io::Error::last_os_error();
+            return if e.raw_os_error() == Some(libc::ENOENT) {
+                Ok(())
+            } else {
+                Err(error(&e))
+            };
+        }
+        let stat = unsafe { stat.assume_init() };
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFREG => Ok(()),
+            libc::S_IFLNK => Err("path_denied"),
+            _ => Err("not_regular"),
+        }
+    }
     fn execute(
         root: &Root,
         copy: &mut Option<Copy>,
@@ -399,7 +495,7 @@ pub(crate) mod linux {
             });
             return Ok(receipt);
         }
-        if let Request::BeginUpload { path, .. } = request {
+        if let Request::BeginUpload { path, replace, .. } = request {
             if copy.is_some() {
                 return Err("io_error");
             }
@@ -421,8 +517,8 @@ pub(crate) mod linux {
             .map_err(|e| error(e.as_ref()))?;
             let stage = CString::new(id.to_string()).map_err(|_| "io_error")?;
             let file = lookup(
-                &root.root,
-                &format!(".canaveral/transfers/{id}"),
+                &staging,
+                &id.to_string(),
                 libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )
@@ -433,6 +529,7 @@ pub(crate) mod linux {
                 name: CString::new(path.rsplit('/').next().unwrap()).map_err(|_| "path_denied")?,
                 path: path.clone(),
                 stage,
+                replace: *replace,
             };
             let initial = eligible(root, &file)?;
             let receipt = Receipt::Writing { offset: 0 };
@@ -570,17 +667,27 @@ pub(crate) mod linux {
                         .cancelled
                         .compare_exchange(0, 4, Ordering::SeqCst, Ordering::SeqCst)
                         .map_err(|_| "authorization_lost")?;
-                    // Fail closed for existing destinations, including replace:true.
-                    // A check followed by ordinary rename cannot prevent a target race.
-                    let status = unsafe {
-                        libc::syscall(
-                            libc::SYS_renameat2,
-                            u.staging.as_raw_fd(),
-                            u.stage.as_ptr(),
-                            u.parent.as_raw_fd(),
-                            u.name.as_ptr(),
-                            libc::RENAME_NOREPLACE,
-                        )
+                    let status = if u.replace {
+                        replacement_allowed(&u.parent, &u.name)?;
+                        unsafe {
+                            libc::renameat(
+                                u.staging.as_raw_fd(),
+                                u.stage.as_ptr(),
+                                u.parent.as_raw_fd(),
+                                u.name.as_ptr(),
+                            ) as libc::c_long
+                        }
+                    } else {
+                        unsafe {
+                            libc::syscall(
+                                libc::SYS_renameat2,
+                                u.staging.as_raw_fd(),
+                                u.stage.as_ptr(),
+                                u.parent.as_raw_fd(),
+                                u.name.as_ptr(),
+                                libc::RENAME_NOREPLACE,
+                            )
+                        }
                     };
                     if status != 0 {
                         let e = std::io::Error::last_os_error();
@@ -616,6 +723,67 @@ pub(crate) mod linux {
     mod syscall_tests {
         use super::*;
         use std::os::unix::fs::{symlink, MetadataExt};
+        #[test]
+        fn symlinked_parent_and_swapped_staging_fail_closed() {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            symlink(outside.path(), dir.path().join("parent")).unwrap();
+            let root = File::open(dir.path()).unwrap();
+            assert!(lookup(&root, "parent/file", libc::O_RDWR | libc::O_CREAT, 0o600).is_err());
+            std::fs::create_dir_all(dir.path().join(".canaveral/transfers")).unwrap();
+            let staging = lookup(
+                &root,
+                ".canaveral/transfers",
+                libc::O_RDONLY | libc::O_DIRECTORY,
+                0,
+            )
+            .unwrap();
+            std::fs::rename(
+                dir.path().join(".canaveral/transfers"),
+                dir.path().join(".canaveral/old"),
+            )
+            .unwrap();
+            symlink(outside.path(), dir.path().join(".canaveral/transfers")).unwrap();
+            assert!(lookup(
+                &root,
+                ".canaveral/transfers/file",
+                libc::O_RDWR | libc::O_CREAT,
+                0o600
+            )
+            .is_err());
+            let _file = lookup(
+                &staging,
+                "file",
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
+            .unwrap();
+            assert!(!outside.path().join("file").exists());
+        }
+        #[test]
+        fn replacement_inspects_entry_without_following() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = File::open(dir.path()).unwrap();
+            let name = CString::new("entry").unwrap();
+            assert_eq!(replacement_allowed(&root, &name), Ok(()));
+            std::fs::write(dir.path().join("entry"), b"old").unwrap();
+            std::fs::hard_link(dir.path().join("entry"), dir.path().join("alias")).unwrap();
+            assert_eq!(replacement_allowed(&root, &name), Ok(()));
+            std::fs::remove_file(dir.path().join("entry")).unwrap();
+            symlink("alias", dir.path().join("entry")).unwrap();
+            assert_eq!(replacement_allowed(&root, &name), Err("path_denied"));
+            std::fs::remove_file(dir.path().join("entry")).unwrap();
+            std::fs::create_dir(dir.path().join("entry")).unwrap();
+            assert_eq!(replacement_allowed(&root, &name), Err("not_regular"));
+        }
+        #[test]
+        fn cross_device_mount_fails_closed_when_available() {
+            let root = File::open("/").unwrap();
+            let dev = File::open("/dev").unwrap();
+            if root.metadata().unwrap().dev() != dev.metadata().unwrap().dev() {
+                assert!(lookup(&root, "dev", libc::O_RDONLY | libc::O_DIRECTORY, 0).is_err());
+            }
+        }
         #[test]
         fn strict_lookup_rejects_symlink_and_identifies_fifo_hardlink() {
             let dir = tempfile::tempdir().unwrap();
@@ -662,6 +830,18 @@ pub(crate) mod linux {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    #[test]
+    fn terminal_retention_evicts_oldest_at_bound() {
+        let mut lane = Lane::start(|_, _, _| Receipt::Aborted);
+        for id in 1..=129 {
+            lane.dispatch(request(id, 1)).unwrap();
+            completion(&mut lane);
+        }
+        assert_eq!(lane.replay.len(), 128);
+        assert_eq!(lane.ended.len(), 128);
+        assert!(!lane.replay.contains_key(&Uuid::from_u128(1)));
+        assert!(lane.dispatch(request(129, 1)).unwrap().is_some());
+    }
     fn request(id: u128, step: u64) -> Frame {
         Frame::TransferRequest {
             version: 1,

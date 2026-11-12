@@ -251,27 +251,6 @@ fn launch_mount(info: &str) -> Result<String> {
     }
     Ok(entry[2].to_owned())
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn baked_and_untrusted_mounts_rejected() {
-        let root = "1 0 253:0 / / ro - erofs /dev/vda ro\n";
-        assert!(launch_mount(root).is_err());
-        let good = format!(
-            "{root}2 1 253:1 / /etc/canaveral ro,nosuid,nodev,noexec - erofs /dev/vdb ro\n"
-        );
-        assert_eq!(launch_mount(&good).unwrap(), "253:1");
-        for bad in [
-            good.replace("253:1", "253:0"),
-            good.replace("noexec", "exec"),
-            good.replace(" - erofs /dev/vdb", " - tmpfs tmpfs"),
-            good.replace("253:1 / /etc", "253:1 /subdir /etc"),
-        ] {
-            assert!(launch_mount(&bad).is_err());
-        }
-    }
-}
 
 fn vsock_listener(port: u32) -> Result<File> {
     use std::os::fd::AsRawFd;
@@ -322,4 +301,26 @@ fn accept_host(listener: File) -> Result<File> {
         return Err("vsock peer is not HOST_CID".into());
     }
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn baked_and_untrusted_mounts_rejected() {
+        let root = "1 0 253:0 / / ro - erofs /dev/vda ro\n";
+        assert!(launch_mount(root).is_err());
+        let good = format!(
+            "{root}2 1 253:1 / /etc/canaveral ro,nosuid,nodev,noexec - erofs /dev/vdb ro\n"
+        );
+        assert_eq!(launch_mount(&good).unwrap(), "253:1");
+        for bad in [
+            good.replace("253:1", "253:0"),
+            good.replace("noexec", "exec"),
+            good.replace(" - erofs /dev/vdb", " - tmpfs tmpfs"),
+            good.replace("253:1 / /etc", "253:1 /subdir /etc"),
+        ] {
+            assert!(launch_mount(&bad).is_err());
+        }
+    }
 }

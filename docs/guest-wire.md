@@ -123,16 +123,32 @@ ctime/link changes through final rehash and report `source_changed`; concurrent
 commands can mutate files, so downloads are verified copies, not filesystem
 snapshots. Hostile guest root is outside guest-file integrity guarantees.
 
-Uploads create exclusive private staging under `.canaveral/transfers/ID` on the
+Uploads create exclusive staging under `.canaveral/transfers/ID` on the
 workspace filesystem, mode 0600. No destination becomes visible before finish.
 After size/hash/identity and current authorization checks: fsync staged file,
 rename into the pinned destination parent, then fsync that directory and staging
-parent. `replace:false` uses atomic no-replace; `replace:true` may replace only a
-revalidated eligible regular file. A publication race must fail closed. Success
-means durable at the guest filesystem boundary, not proven host power-loss safety.
-Failure before rename is `failed`; uncertain rename or subsequent fsync is
-`unknown`, never an automatic retry or rollback claim. Existing destination and
-staged replacement both consume workspace space. Abort cannot undo publication.
+parent. `replace:false` uses renameat2 RENAME_NOREPLACE. `replace:true` inspects
+the destination relative to the pinned parent without following links: an absent
+entry or regular file (any owner permitted by workspace uid access rules, any
+link count) permits renameat; symlinks fail `path_denied`, other types fail
+`not_regular`. Replacing a regular hardlink removes only that directory entry.
+A same-tenant destination entry change between inspection and rename may be
+replaced. All operations remain relative to pinned workspace descriptors.
+
+Uid 1000 commands in the same lease are the tenant's own code and may mutate
+workspace files, including writable `.canaveral` staging, before or after
+publication. Guarantees are confinement (no access outside `/workspace`, no
+symlink, hardlink or mount escape, no root-privileged access) and that `committed`
+means bytes verified through the staged descriptor were fsynced and renamed.
+It does not assert that concurrent tenant code left those bytes unchanged.
+Adversarial parent/staging rename hardening beyond confinement is not a goal.
+Success means durability at the guest filesystem boundary, not proven host
+power-loss safety. Failure before rename is `failed`; uncertain rename or
+subsequent fsync is `unknown`, never an automatic retry or rollback claim.
+Existing destination and staged replacement both consume workspace space.
+Abort cannot undo publication. Guest replay retains only the SHA-256 of the
+canonical last request and its last receipt per transfer, at most 128 transfers;
+the oldest terminal transfer is evicted first, never an in-flight transfer.
 
 Data disconnect closes descriptors and flows; undispatched steps fail, dispatched
 steps without a definite receipt become unknown. Losing data alone never kills a
