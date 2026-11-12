@@ -1577,6 +1577,15 @@ impl Satellite {
         };
         self.state.operations.receive(c, receipt_deadline)?;
         self.save()?; // Durable dispatch intent precedes any exec/credit effect.
+        if timeout == 0 {
+            self.state
+                .operations
+                .current
+                .as_mut()
+                .ok_or("missing operation")?
+                .timed_out_before_exec();
+            return self.save();
+        }
         let session = session.ok_or("missing guest session")?;
         if session.revision() < self.state.revision {
             session.renew(
@@ -1621,6 +1630,15 @@ impl Satellite {
         } else {
             (timeout, now)
         };
+        if timeout == 0 {
+            self.state
+                .operations
+                .current
+                .as_mut()
+                .ok_or("missing operation")?
+                .timed_out_before_exec();
+            return self.save();
+        }
         let id = session.exec(argv, "/workspace".into(), env, timeout, dispatch_now)?;
         self.state
             .operations

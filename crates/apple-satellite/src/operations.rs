@@ -50,10 +50,17 @@ impl Command {
         if !sent.is_finite() || !controller_now.is_finite() || !now.is_finite() || now < sent {
             return Err("invalid command clock evidence");
         }
-        let mut remaining = guest::remaining_ms(lease_deadline, now)?;
+        if !lease_deadline.is_finite() {
+            return Err("invalid lease deadline");
+        }
+        // The authority margin applies only to the lease, never the command duration.
+        let mut remaining =
+            (((lease_deadline - now) * 1000.0).floor() - guest::MARGIN_MS as f64).max(0.0) as u64;
         if let Some(deadline) = self.execution_deadline_at {
-            let local = sent + (deadline - controller_now);
-            remaining = remaining.min(guest::remaining_ms(local, now)?);
+            // UTC controller timestamps have millisecond precision. Subtract in
+            // milliseconds to avoid rounding an exact 1ms deadline down to zero.
+            let ms = deadline * 1000.0 - controller_now * 1000.0 - (now - sent) * 1000.0;
+            remaining = remaining.min(ms.floor().max(0.0) as u64);
         }
         Ok(remaining.min(self.timeout_ms))
     }
@@ -158,6 +165,13 @@ impl Lane {
     }
 }
 impl Operation {
+    /// No exec was handed off, so expiry has a definite, empty command result.
+    pub fn timed_out_before_exec(&mut self) {
+        self.receipt = Some(json!({"state":"failed","result":{
+            "stdoutBase64":"","stderrBase64":"","exitCode":null,"signal":null,
+            "timedOut":true,"durationMs":0,"stdoutBytes":0,"stderrBytes":0,
+            "truncated":false,"terminationConfirmed":true}}));
+    }
     pub fn unknown(&mut self) {
         if self.receipt.is_none() {
             self.receipt = Some(json!({"state":"unknown"}));

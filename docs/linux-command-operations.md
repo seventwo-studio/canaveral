@@ -178,7 +178,11 @@ server receipt deadline=min(executionDeadlineAt+5s,lease expiry). Replace the ol
 gains `executionDeadlineAt` (Unix UTC seconds). Replay pins both fields. Satellite
 checks the 1..1800000 bound, derives conservative remaining time using the poll
 send time/controllerNow and elapsed time, and sends guest exec timeout equal to
-min(requested timeout, remaining execution deadline, remaining lease authority).
+min(requested timeout, remaining execution deadline, remaining lease authority
+minus its 2000ms safety margin). The margin does not shorten the command deadline.
+If the minimum is nonpositive before exec, return a definite failed result with
+timedOut:true, empty output and terminationConfirmed:true; no exec or lease fence
+is needed.
 It never starts after startBefore or extends this command on renewal. Expiry,
 revocation/cancel and the independent native fence still win. A definite timeout
 with confirmed descendant termination is failed/timedOut; unconfirmed execution
