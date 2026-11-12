@@ -410,3 +410,37 @@ test("revoked approval requests a failure-bearing stop and releases only after c
   assert.equal(clean.released, true);
   assert.equal((await x.f.inspectDomain(x.domain)).reservations, 0);
 });
+
+test('starting report replay before initial readiness never requests a stop', async t => {
+  const f = await fixture(t), app = await f.application();
+  await f.grant(app.id);
+  const domain = await f.domain(VM), runner = await f.enroll();
+  await f.ok(f.approve(runner, domain));
+  await app.client().acquireLease(f.acquire({requiredCapabilities: ['command']}));
+  const a = (await f.claim(runner)).assignment!;
+  const body = {binding: runner.binding, assignmentId: a.id, bootAttempt: randomUUID(), bundleDigest: DIGEST.slice(7), pollId: randomUUID()};
+  const poll = () => f.ok(f.post('/v1/runners/linux-leases/operations/poll', body, runner.credential));
+  for (const replay of [false, true]) {
+    if (replay) {
+      const starting = f.receipt(a);
+      await f.ok(f.report(runner, a.id, 1, starting));
+      await f.ok(f.report(runner, a.id, 1, starting));
+    }
+    const reply = await poll();
+    assert.equal(reply.command, null); assert.equal(reply.stopRequested, false);
+  }
+  await f.ok(f.report(runner, a.id, 2, f.receipt(a, f.running)));
+  assert.equal((await poll()).stopRequested, false);
+  await f.ok(f.report(runner, a.id, 3, f.receipt(a, {runtimeState: 'running'})));
+  assert.equal((await poll()).stopRequested, true);
+});
+
+test('exit report after rotation acknowledges the stored terminal outcome', async t => {
+  const x = await ready(t), req = intent();
+  await x.client.createOperation(req); await x.f.ok(x.poll());
+  await x.app.client().rotateLeaseCredential(x.lease.id);
+  const ack = await x.f.ok(x.reportOp(req.id, {state: 'succeeded', result: success}));
+  assert.equal(ack.state, 'unknown');
+  assert.deepEqual(await x.f.ok(x.reportOp(req.id, {state: 'succeeded', result: success})), ack);
+  assert.equal((await x.f.ok(x.poll())).stopRequested, false);
+});

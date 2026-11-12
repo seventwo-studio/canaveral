@@ -702,6 +702,24 @@ impl Satellite {
         )?;
         self.accept_report(reply, start)
     }
+    fn accept_runtime_report(
+        &mut self,
+        reply: Value,
+        start: f64,
+        last: &mut Option<clock::Clock>,
+    ) -> Result<()> {
+        let current = self.receipt()?;
+        let stale = self
+            .state
+            .pending
+            .as_ref()
+            .is_some_and(|p| p["receipt"]["ready"] != current["receipt"]["ready"]);
+        self.accept_report(reply, start)?;
+        if stale {
+            *last = None;
+        }
+        Ok(())
+    }
     fn accept_report(&mut self, reply: Value, start: f64) -> Result<()> {
         if reply["assignmentId"] != json!(self.assignment()?.id)
             || reply["sequence"] != json!(self.state.sequence + 1)
@@ -1342,7 +1360,9 @@ impl Satellite {
                             inflight = false;
                             if let Ok(reply) = reply {
                                 let accepted = match route {
-                                    LeaseRoute::Report => self.accept_report(reply, start),
+                                    LeaseRoute::Report => {
+                                        self.accept_runtime_report(reply, start, &mut last)
+                                    }
                                     LeaseRoute::OperationPoll => {
                                         self.accept_poll(reply, start, session.as_mut())
                                     }
@@ -1375,7 +1395,9 @@ impl Satellite {
                         }
                     }
                     if !inflight && !self.state.fenced {
-                        let request = if last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
+                        let request = if self.state.pending.is_some()
+                            || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY)
+                        {
                             if self.state.pending.is_none() {
                                 self.state.pending = Some(self.receipt()?);
                                 self.save()?;

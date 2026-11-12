@@ -510,13 +510,17 @@ export class LinuxLeases {
       ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
   }
   private commandEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
-    const approval = this.approval(db, bindingOf(a));
     const report: unknown = a.report ? JSON.parse(a.report) : null;
-    return ACTIVE.includes(lease.state) && lease.state === "ready" && lease.runtime === "running" && !a.closed &&
+    return this.commandOwnerEligible(db, lease, a) && lease.state === "ready" && lease.runtime === "running" &&
+      Array.isArray(report) && report[6] === true;
+  }
+  private commandOwnerEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
+    const approval = this.approval(db, bindingOf(a));
+    return ACTIVE.includes(lease.state) && !a.closed &&
       !!this.applications.active(db, lease.application) && !!this.runners?.current(db, bindingOf(a)) &&
       lease.backend === "appleVirtualization" && approval?.backend === lease.backend && approval.domain === lease.domain &&
       (JSON.parse(approval.images) as string[]).includes(imageKey({ id: lease.image_id, revision: lease.image_revision, arch: lease.arch, digest: lease.digest })) &&
-      (JSON.parse(lease.capabilities) as string[]).includes("command") && Array.isArray(report) && report[6] === true;
+      (JSON.parse(lease.capabilities) as string[]).includes("command");
   }
   private refreshOperations(db: DatabaseSync, now: number): void {
     for (const op of db.prepare("SELECT * FROM linux_operations WHERE state='queued'").all() as unknown as OperationRow[]) {
@@ -584,7 +588,7 @@ export class LinuxLeases {
       }
       return { command: op ? { id: op.id, leaseId: lease.id, memberId: lease.member, assignmentId: a.id, bootAttempt: boot, bundleDigest: digest,
         arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: 30000, state: op.state } : null,
-        lease: this.authorization(lease, now), stopRequested: !eligible, cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
+        lease: this.authorization(lease, now), stopRequested: !this.commandOwnerEligible(db, lease, a) || (lease.state !== "provisioning" && !eligible), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
     });
   }
   reportOperation(token: string, value: unknown): unknown {

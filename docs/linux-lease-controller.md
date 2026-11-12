@@ -148,7 +148,10 @@ as every effect.
   never extends a deadline.
 - `stopRequested` is true once the lease is terminal (released, expired, failed).
   It is intent, not evidence.
-- Operation polls additionally expose `stopRequested` for lost command eligibility.
+- Operation polls additionally expose `stopRequested` for withdrawn established
+  readiness or invalid owner/approval/image eligibility. Initial provisioning
+  without readiness returns no command and does not itself request a stop. Pending
+  reports and current readiness are flushed before satellite operation polling.
   Unlike assignment stop intent, this can be true while a lease is active. The
   satellite then reports `failure: runtime`, so the lease ends failed; reservations
   remain held until the same full cleanup evidence is accepted. Operation-only

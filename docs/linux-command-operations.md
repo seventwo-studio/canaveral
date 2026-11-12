@@ -91,8 +91,12 @@ generation that submitted the operation. Ended/closed assignments dispatch no ne
 work. Existing handoffs remain retrievable by their current owner for cancellation
 without active readiness. `cancelRequested` is true on authorization/lease loss,
 invalidated work, or a failed/unknown command. `stopRequested` separately means
-the assignment is no longer command-eligible (including lost readiness or revoked
-approval). Upgrade the controller and satellite together for this distinction.
+the assignment lost established readiness or its owner/approval/image eligibility.
+Initial provisioning without readiness returns no command and never requests a
+stop solely for missing readiness. The satellite replays pending reports and
+flushes current readiness before operation polling; replaying an older starting
+report cannot move a poll ahead of the fresh ready report. Upgrade the controller
+and satellite together for this distinction.
 A terminal lease fences with no failure. On an active lease, `stopRequested`
 fences with `failure: runtime`, ending the lease as failed before cleanup. A
 revoked/superseded runner binding cannot authenticate; local deadlines still fence
@@ -103,7 +107,8 @@ the matching in-flight guest command, never launches a cancelled handoff, and
 keeps serving the lease. It waits for positive termination evidence; missing or
 uncertain termination still fences under the existing safety rules. A confirmed
 local result can acknowledge an already failed/unknown controller operation
-without fencing after cancellation; the controller keeps its first terminal
+without fencing, even when the guest exits and authority rotates before
+cancellation delivery; the controller keeps its first terminal
 result, including an unknown lane that cannot accept further commands. Key
 rotation invalidates the operation, not the lease.
 

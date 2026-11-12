@@ -568,3 +568,86 @@ fn active_assignment_stop_reports_runtime_failure_and_terminal_stops_remain_clea
         );
     }
 }
+
+#[test]
+fn exit_then_rotation_acknowledges_unknown_without_cancel_delivery() {
+    for confirmed in [true, false] {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let cmd = command();
+        s.state.operations.receive(cmd.clone(), 200.0).unwrap();
+        let id = uuid::Uuid::from_u128(99);
+        s.state.operations.current.as_mut().unwrap().guest_id = Some(id);
+        let (mut session, _peer) = ready();
+        s.state
+            .operations
+            .current
+            .as_mut()
+            .unwrap()
+            .event(
+                Guest::Exit {
+                    version: 1,
+                    id,
+                    status: Some(0),
+                    signal: None,
+                    timed_out: false,
+                    duration_ms: 1,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    termination_confirmed: confirmed,
+                },
+                &mut session,
+            )
+            .unwrap();
+        assert!(!s.state.operations.current.as_ref().unwrap().cancel_sent);
+        if !confirmed {
+            assert!(s.operation_events(&mut session).is_err());
+            s.fence_for(StopCause::Runtime).unwrap();
+        }
+        // The controller rotated authority before it received the exit report.
+        s.acknowledge_operation(json!({"operationId":cmd.id,"state":"unknown"}))
+            .unwrap();
+        assert!(s.state.operations.current.as_ref().unwrap().acknowledged);
+        assert_eq!(s.state.fenced, !confirmed);
+        let mut w = wire(s.assignment().unwrap().clone());
+        s.retry_operation_report(&mut w).unwrap();
+        assert!(w.requests.is_empty());
+    }
+}
+
+#[test]
+fn lost_starting_report_flushes_current_readiness_before_polling() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.direct = Some(Direct {
+        boot_attempt: uuid::Uuid::from_u128(3),
+        revision: 1,
+        bundle_digest: "a".repeat(64),
+        artifacts: vec![],
+        medium: None,
+        agent_socket: None,
+        ready: false,
+        withdrawn: false,
+        timings: Timings::default(),
+    });
+    let mut w = wire(s.assignment().unwrap().clone());
+    w.lose = true;
+    assert!(s.report(&mut w).is_err());
+    let original = w.requests[0].clone();
+    s.state.direct.as_mut().unwrap().ready = true;
+    let mut last = Some(clock::Clock::now());
+    w.lose = false;
+    let reply = w
+        .request(LeaseRoute::Report, s.state.pending.clone().unwrap())
+        .unwrap();
+    s.accept_runtime_report(reply, clock::now().as_secs_f64(), &mut last)
+        .unwrap();
+    assert_eq!(original, w.requests[1]);
+    assert!(
+        last.is_none(),
+        "fresh readiness must precede an operation poll"
+    );
+    s.report(&mut w).unwrap();
+    assert_eq!(w.requests[2].1["receipt"]["ready"]["command"], true);
+    assert!(!s.state.fenced);
+}
