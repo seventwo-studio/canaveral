@@ -402,3 +402,71 @@ logical reservations and their cleanup proofs in the previous evidence directory
 remain unchanged. Route-change monitoring, router hairpin/operator deny CIDRs,
 data-only disconnect, power-loss durability, PTY, concurrency, reconciliation
 and macOS workspaces remain open.
+
+### Connection-churn regression and native reruns (ST-535 / ST-539)
+
+The 2026-11-12–13 Mac reruns address the intermittent npm data-plane failure
+observed in `/private/tmp/canaveral-queue-9oKC6y/canaveral-native-xEPJmL`:
+npm ci exited 1 after 70668 ms and satellite stderr recorded `unknown flow`.
+The old reactor cleared retired IDs on every Open; a late Close could therefore
+terminate the entire data channel. The guest also echoed the acknowledgement of
+its own Close. The original native trace does not identify the offending frame.
+
+`socketpair_churn_tolerates_retired_frames` drives the real reactor through 300
+flows, alternating close initiators and injecting delayed Close, credit, data
+and halfClose frames across subsequent opens. Before the fix it failed with
+`unknown flow`. `socketpair_guest_churn_has_no_redundant_close` drives the real
+guest state machine through 200 flows; restoring the old guest handler fails
+with a redundant Close before the next Open. Both pass with the fix. Existing
+live-flow sequence, crossed-credit, half-close, budget and fixed close-deadline
+regressions also pass. Retirement now uses the strictly increasing ID high-water
+mark and live map, with constant retirement memory; nil/future IDs remain errors.
+
+Cleanup attribution uses observed descendants and VZ open files beneath the
+owned workspace, including disks/media beside the helper machine directory.
+It retains attributed PIDs across reparenting and fails on survivors or incomplete
+lsof evidence. Its portable regression covers unrelated VMs, sibling media,
+ancestry, reparenting and adjacent path prefixes. The final native run observed
+both helper and launchd-parented VZ PIDs and required their absence on cleanup.
+
+Private evidence root: `/private/tmp/canaveral-pr24-churn`. Guest runtime source
+is `4ecd68e`; later guest/protocol commits only adjust test expectations. The
+final host/harness source is `2861955`. A unique disposable Lima VZ builder
+(4 CPU / 8 GiB / 40 GiB) rebuilt the guest and rootfs using unchanged pins and
+the authenticated unchanged kernel. Complete signature verification passed for
+all source inputs and all 119 Debian packages, including the ten-package formatter
+closure. Signature/key/chain evidence is in `signature-authentication/`.
+Duplicate bundle assemblies matched; installed immutable artifacts are in
+`~/.canaveral-native/artifacts/bundle-pr24-churn`, digest
+`b8e56af2c3fc6db224b2bc6a272c2260c3a2217e9c8a6c007511b4b452014c14`.
+Swift and the signed helper were unchanged.
+
+One 2 CPU / 4096 MiB / approximately 8 GiB guest ran at a time. Full harness
+runs `canaveral-native-AwGiRF` (662 s) and `canaveral-native-fcoAtC` (666 s)
+record `nativeAcceptance:true` with no case failures. The latter includes the
+corrected sibling-media attribution. Both passed workspace transfers, proxy and
+ownership denials, egress-off refusal, renewal beyond original expiry, release,
+ordinary expiry and autonomous loss fencing. Helpers stopped 86/167 ms after
+the respective loss deadlines, before recovery. The separate fresh-guest repeat
+`canaveral-native-wr7pUF` passed pinned clone, npm, build-log download and cleanup.
+All three verified repository commit `67f3f118c7d8bf535280cf0b61697b1898f6567b`.
+
+Guest npm ci/test execution durations in run order were 131678/525 ms,
+134400/526 ms and 135464/528 ms. Including dispatch/polling, these were
+132577/1042 ms, 135329/1063 ms and 136040/1253 ms. Each run retains
+`workspace-build.json`, `workspace-npm-{ci,test}.json`, `workspace-build-log.json`
+and independent cleanup evidence. No data-reactor failure recurred.
+
+All owned controller/satellite/helper/VZ processes, workspace/machine/relay
+storage, builder and temporary build/Git/source copies were removed. Both full
+runs retain unchanged loss journals and stopped private databases with one
+unknown reservation each, pending operator reconciliation; no cleanup receipt
+or capacity release was fabricated (`loss-post-run-owned-cleanup.json`).
+Unrelated VMs and untracked coordination dependencies were untouched.
+
+Portable validation passed: 242 serial Rust tests with two build jobs;
+workspace/all-target clippy with warnings denied; guest AArch64 MUSL clippy;
+fmt; coordination typecheck/build and 1026 tests at concurrency two; standalone
+harness typecheck and process-attribution regression; seven signature-gate
+regressions; no-Python check; and the v1 public-API fixture. These results retain
+the experimental scope and previously listed production/topology acceptance gaps.
