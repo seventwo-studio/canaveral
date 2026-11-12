@@ -814,18 +814,36 @@ mod tests {
                 },
             );
             send(&mut host, Frame::HalfClose { version: 1, id });
-            // Opening another flow is a barrier proving the preceding credit was accepted.
             let _other = tunnel(address);
-            let next = receive(&mut host);
-            let next = if matches!(next, Frame::Close { .. }) {
-                receive(&mut host)
-            } else {
-                next
-            };
-            assert!(matches!(next, Frame::Open { .. }));
+            // Close proves the preceding crossed credit and HalfClose were
+            // accepted. Open may arrive first because clients rotate each turn.
+            let mut closed = false;
+            let mut opened = false;
+            for _ in 0..2 {
+                match receive(&mut host) {
+                    Frame::Close { id: closed_id, .. } => {
+                        assert_eq!(closed_id, id);
+                        assert!(!closed);
+                        closed = true;
+                        send(&mut host, Frame::Close { version: 1, id });
+                    }
+                    Frame::Open { id: next_id, .. } => {
+                        assert!(next_id > id);
+                        assert!(!opened);
+                        opened = true;
+                    }
+                    frame => panic!("expected Close or Open, got {frame:?}"),
+                }
+            }
+            assert!(closed && opened);
             assert!(ready.files.load(Ordering::Acquire));
-            drop(host);
-            assert!(worker.join().unwrap().contains("disconnected"));
+            // Keep reads open until the worker exits: dropping both halves can
+            // race a pending guest write and return BrokenPipe instead of EOF.
+            host.shutdown(Shutdown::Write).unwrap();
+            let error = worker.join().unwrap();
+            assert_eq!(error, "data disconnected");
+            assert!(!ready.files.load(Ordering::Acquire));
+            assert!(ready.initial.load(Ordering::Acquire));
         }
     }
     #[test]
