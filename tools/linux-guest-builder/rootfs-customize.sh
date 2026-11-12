@@ -10,6 +10,7 @@ chmod 755 /workspace
 /bin/sh -c 'printf "canaveral-shell-v1\n"' > /tmp/probe-shell.txt
 /usr/bin/git --version > /tmp/probe-git.txt
 /usr/local/bin/node --version > /tmp/probe-node.txt
+/usr/sbin/mkfs.ext4 -V > /tmp/probe-mkfsExt4.txt 2>&1
 rm -f /etc/machine-id
 rm -rf /var/log/* /var/cache/apt/archives/*
 test ! -e /etc/canaveral/launch.json

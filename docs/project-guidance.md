@@ -58,3 +58,10 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 - [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core, deterministic local bundle/initrd assembly, read-only digest preflight and bootstrap source; satellite readiness and consumer commands fixture-covered; kernel/rootfs construction and native acceptance remain outstanding)
 
 - [Native direct Linux boot](../VirtualMachines/Documentation/DirectBoot.md) (direct-kernel helper and relay fixtures; satellite integration and initrd assembly fixture-covered; production kernel/rootfs builds, artifact installation and native acceptance remain open)
+
+- [Linux public HTTPS egress policy](linux-egress-policy.md) and the ST-535 sections
+  in guest wire, boot bundles, lease controller, command operations, consumer API
+  and applications define workspace/data/transfer contracts. Experimental native
+  workspace/files/lifecycle results are in the [acceptance record](../coordination/native-acceptance/README.md#st-535-native-evidence-2026-11-12).
+  Qualified cloned-route evidence, public CONNECT and pinned clone/npm passed
+  on the tested Mac. Native topology and full production acceptance remain open.

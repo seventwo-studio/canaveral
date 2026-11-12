@@ -27,3 +27,18 @@ test('console evidence allowlists milestones and discards adversarial payloads',
   for (const secret of ['FAKE_SECRET', 'supersecret', 'Alice', 'alice', 'secret-host', '/Users']) assert(!clean.includes(secret));
   assert.equal(consoleEvidence('Boot ready\nLinux version secret-host\n'), '2 lines omitted\n');
 });
+
+test('workspace receipts retain outcomes while refusing raw logs, paths and probe targets', async () => {
+  const {receiptEvidence}=await import('./evidence.ts');
+  const privateValues=['192.168.1.4','2001:db8::1','/Users/private','secret identity'];
+  const raw={state:'succeeded',durationMs:12,sha256:'a'.repeat(64),'192.168.1.4':'ready',arguments:{argv:privateValues},result:{stdoutBase64:Buffer.from(privateValues.join(' ')).toString('base64')},path:privateValues[2],target:privateValues[0],caught:privateValues[3]};
+  const clean=JSON.stringify(receiptEvidence(raw));
+  assert(clean.includes('succeeded'));assert(clean.includes('a'.repeat(64)));
+  for(const value of [...privateValues,raw.result.stdoutBase64]) assert(!clean.includes(value));
+});
+
+test('evidence keeps cleanup flags and original deadline as typed fields', async () => {
+  const {receiptEvidence}=await import('./evidence.ts');
+  const flags={machineRemoved:true,relayRemoved:true,workspaceRemoved:true,dataPlaneClosed:true,requirementSatisfied:true,originalExpiresAt:123};
+  assert.deepEqual(receiptEvidence(flags),flags);
+});

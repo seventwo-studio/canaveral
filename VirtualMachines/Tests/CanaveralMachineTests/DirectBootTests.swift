@@ -1,6 +1,7 @@
 import XCTest
 import CryptoKit
 import Darwin
+import Virtualization
 @testable import CanaveralMachines
 
 final class DirectBootTests: XCTestCase {
@@ -12,6 +13,72 @@ final class DirectBootTests: XCTestCase {
         let json: [String: Any] = ["version": 1, "revision": 1, "kernel": artifact, "initrd": artifact, "rootfs": artifact, "launchMedium": artifact, "launchFilesystemUUID": UUID().uuidString, "bundleDigest": String(repeating: "b", count: 64), "commandLine": "root=/dev/vda rootfstype=erofs ro", "leaseID": lease.uuidString, "memberID": member.uuidString, "bootSessionID": UUID().uuidString, "bootAttempt": attempt.uuidString, "workspaceBytes": 16777216]
         return (m, try JSONDecoder().decode(DirectBoot.self, from: JSONSerialization.data(withJSONObject: json)))
     }
+    @MainActor func testDirectBootHasNoNetworkDevice() throws {
+        let (machine, boot) = try fixture()
+        var direct = machine; direct.directBoot = boot
+        XCTAssertTrue(try MachineConfiguration.networkDevices(machine: direct).isEmpty)
+        let efi = try MachineConfiguration.networkDevices(machine: machine)
+        XCTAssertEqual(efi.count, 1)
+        XCTAssertTrue(efi[0].attachment is VZNATNetworkDeviceAttachment)
+        var mac = machine; mac.os = .macOS
+        XCTAssertEqual(try MachineConfiguration.networkDevices(machine: mac).count, 1)
+    }
+@MainActor func testWorkspaceV2ConfigurationAndV1Encoding() throws {
+    let (m, v1) = try fixture()
+    let original = try JSONSerialization.jsonObject(with: JSONEncoder().encode(v1)) as! [String: Any]
+    XCTAssertEqual(original["workspaceBytes"] as? UInt64, 16777216)
+    XCTAssertNil(original["workspace"])
+    let dir = try temporaryDirectory(base: URL(fileURLWithPath: "/private/tmp"))
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let path = dir.appendingPathComponent("workspace.raw").path
+    XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]))
+    let file = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    try file.truncate(atOffset: 16777216); try file.close() // metadata fixture, not preallocation evidence
+    var v2 = v1; v2.version = 2; v2.workspaceBytes = nil
+    v2.workspace = DirectBootWorkspace(path: path, serial: "0123456789abcdef0123", bytes: 16777216)
+    XCTAssertNoThrow(try v2.validateShape(machine: m))
+    var machine = m; machine.directBoot = v2
+    XCTAssertTrue(try MachineConfiguration.networkDevices(machine: machine).isEmpty)
+    let identity = try v2.workspace!.verify()
+    try v2.workspace!.verify(identity: identity)
+    XCTAssertThrowsError(try v2.workspace!.verify(identity: (identity.0, identity.1 + 1)))
+    let disk = try MachineConfiguration.workspaceDevice(v2.workspace!)
+    XCTAssertEqual(disk.blockDeviceIdentifier, v2.workspace!.serial)
+    let attachment = try XCTUnwrap(disk.attachment as? VZDiskImageStorageDeviceAttachment)
+    XCTAssertFalse(attachment.isReadOnly)
+    XCTAssertEqual(attachment.cachingMode, .uncached)
+    XCTAssertEqual(attachment.synchronizationMode, .full)
+    XCTAssertThrowsError(try MachineConfiguration.workspaceDevice(v2.workspace!, afterAttachment: {
+        try FileManager.default.moveItem(atPath: path, toPath: path + ".old")
+        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]))
+        let replacement = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try replacement.truncate(atOffset: 16777216); try replacement.close()
+    }))
+    let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(v2)) as! [String: Any]
+    XCTAssertNil(encoded["workspaceBytes"])
+    XCTAssertNotNil(encoded["workspace"])
+    var bad = v2; bad.workspaceBytes = 16777216
+    XCTAssertThrowsError(try bad.validateShape(machine: m))
+    bad = v2; bad.workspace!.serial = v2.serial
+    XCTAssertThrowsError(try bad.validateShape(machine: m))
+    bad = v2; bad.workspace!.bytes += 1
+    XCTAssertThrowsError(try bad.validateShape(machine: m))
+    XCTAssertEqual(chmod(path, 0o640), 0)
+    XCTAssertThrowsError(try v2.workspace!.verify())
+    XCTAssertEqual(chmod(path, 0o600), 0)
+    var wrong = v2.workspace!; wrong.bytes += 4096
+    XCTAssertThrowsError(try wrong.verify())
+    let link = dir.appendingPathComponent("link").path
+    XCTAssertEqual(symlink(path, link), 0)
+    wrong = v2.workspace!; wrong.path = link
+    XCTAssertThrowsError(try wrong.verify())
+    wrong.path = "/tmp/" + dir.lastPathComponent + "/workspace.raw"
+    XCTAssertThrowsError(try wrong.verify())
+    let hard = dir.appendingPathComponent("hard").path
+    XCTAssertEqual(linkat(AT_FDCWD, path, AT_FDCWD, hard, 0), 0)
+    XCTAssertThrowsError(try v2.workspace!.verify())
+    XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+}
     func testShapeAndNonce() throws {
         let (m, boot) = try fixture()
         XCTAssertNoThrow(try boot.validateShape(machine: m))
@@ -24,7 +91,7 @@ final class DirectBootTests: XCTestCase {
         var b = good; b.workspaceBytes = 1073741824
         XCTAssertNoThrow(try b.validateShape(machine: roomy))
         XCTAssertThrowsError(try b.validateShape(machine: m))
-        b.workspaceBytes += 1; XCTAssertThrowsError(try b.validateShape(machine: roomy))
+        b.workspaceBytes = b.workspaceBytes! + 1; XCTAssertThrowsError(try b.validateShape(machine: roomy))
         b.workspaceBytes = 16777215; XCTAssertThrowsError(try b.validateShape(machine: roomy))
         b = good; b.memberID = UUID(); XCTAssertThrowsError(try b.validateShape(machine: m))
         b = good; b.leaseID = UUID(); XCTAssertThrowsError(try b.validateShape(machine: m))

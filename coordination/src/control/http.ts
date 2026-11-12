@@ -61,14 +61,14 @@ async function readBody(request: IncomingMessage, path: string): Promise<Record<
   const length = request.headers["content-length"]!;
   if (!/^[0-9]+$/.test(length)) throw new ServiceError("Invalid body length.", 400);
   const size = Number(length);
-  const maximum = /^\/v1\/hosts\/[^/]+\/heartbeat$/.test(path) ? MAX_HEARTBEAT : MAX_BODY;
+  const maximum = /^\/v1\/leases\/[^/]+\/transfers(?:\/|$)/.test(path) ? 131072 : /^\/v1\/hosts\/[^/]+\/heartbeat$/.test(path) ? MAX_HEARTBEAT : MAX_BODY;
   if (!Number.isSafeInteger(size) || size < 1 || size > maximum) throw new ServiceError("Request body exceeds the endpoint's size limit.", 413);
   const chunks: Buffer[] = [];
   let received = 0;
   for await (const chunk of request) {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
     received += data.length;
-    if (received > size) throw new ServiceError("Request body exceeds its declared size.", 413);
+    if (received > maximum || received > size) throw new ServiceError("Request body exceeds its declared size.", 413);
     chunks.push(data);
   }
   if (received !== size || !request.complete) throw new ServiceError("Incomplete request.", 400);

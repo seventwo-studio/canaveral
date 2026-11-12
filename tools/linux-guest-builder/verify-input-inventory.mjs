@@ -11,6 +11,8 @@ assert.match(revision,/^[0-9a-f]{40}$/);
 const repository=execFileSync('git',['-C',recipe,'rev-parse','--show-toplevel'],{encoding:'utf8'}).trim();
 const source=execFileSync('git',['-C',repository,'archive',revision],{maxBuffer:128*1024*1024});
 assert.deepEqual(archiveEntries(source),archiveEntries(readFileSync(inputs+'/source.tar')),'source archive differs from recorded Git revision');
+const packageEvidence = JSON.parse(readFileSync(inputs+'/debian-packages-verified.json','utf8'));
+assert(packageEvidence.formatterClosure?.some(p=>p.identity.startsWith('e2fsprogs=')), 'missing authenticated formatter closure');
 const records = [
  ['debian-apt-keyring.gpg','exported Debian primary allowlist, re-inspected before apt and complete acceptance'],
  ['linux-6.12.117.tar.xz','pinned kernel primary signature and SHA256'],

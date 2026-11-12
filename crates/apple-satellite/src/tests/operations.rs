@@ -15,6 +15,7 @@ fn command() -> OperationCommand {
         },
         start_before: 200.0,
         timeout_ms: 30000,
+        execution_deadline_at: None,
         state: "queued".into(),
     }
 }
@@ -193,6 +194,10 @@ fn cleanup_and_restart_preserve_unacknowledged_operation_before_a_new_claim() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: false,
         withdrawn: true,
         timings: Timings::default(),
@@ -275,6 +280,10 @@ fn durable_replay_membership_has_no_4096_command_cutoff_or_eviction() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),
@@ -426,6 +435,10 @@ fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),
@@ -466,6 +479,107 @@ fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
 }
 
 #[test]
+fn workspace_command_deadline_is_fixed_and_conservative() {
+    let mut c = command();
+    assert!(c.validate_timing(false).is_ok());
+    assert!(c.validate_timing(true).is_err());
+    c.timeout_ms = 1800000;
+    c.execution_deadline_at = Some(1100.0);
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 400.0, 110.0).unwrap(), 90000);
+    // Renewal may extend lease authority, never this execution's frozen deadline.
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 900.0, 110.0).unwrap(), 90000);
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 120.0, 110.0).unwrap(), 8000);
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 900.0, 198.0).unwrap(), 2000);
+    c.timeout_ms = 1;
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 900.0, 110.0).unwrap(), 1);
+    assert!(c.validate_timing(false).is_err());
+    c.timeout_ms = 1800001;
+    assert!(c.validate_timing(true).is_err());
+    c.timeout_ms = 30000;
+    c.execution_deadline_at = Some(f64::NAN);
+    assert!(c.validate_timing(true).is_err());
+}
+#[test]
+fn workspace_exec_carries_no_environment_overrides() {
+    for enabled in [false, true] {
+        assert!(crate::operations::environment(enabled).is_empty());
+    }
+}
+
+#[test]
+fn incomplete_workspace_snapshot_refuses_assignments_and_cleanup_evidence() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.assignment.as_mut().unwrap().workspace_io_version = Some(1);
+    assert!(matches!(
+        s.validate_assignment(s.assignment().unwrap()),
+        Err("incomplete workspace admission snapshot")
+    ));
+    let r = s.receipt().unwrap();
+    assert_eq!(r["receipt"]["workspaceRemoved"], false);
+    assert_eq!(r["receipt"]["dataPlaneClosed"], false);
+    s.state.stopped = true;
+    s.state.cleaned = true;
+    // Generic storage flags alone cannot prove the disk or data-plane lifecycle.
+    let r = s.receipt().unwrap();
+    assert_eq!(r["receipt"]["workspaceRemoved"], false);
+    assert_eq!(r["receipt"]["dataPlaneClosed"], false);
+}
+
+#[test]
+fn controller_short_deadlines_convert_without_lease_margin() {
+    let mut c = command();
+    for ms in [1, 1500, 2500] {
+        c.timeout_ms = ms;
+        c.execution_deadline_at = Some(1000.0 + ms as f64 / 1000.0);
+        let timeout = c.timeout(true, 100.0, 1000.0, 400.0, 100.0).unwrap();
+        assert!(timeout > 0 && timeout <= ms);
+        assert_eq!(c.timeout(true, 100.0, 1000.0, 400.0, 103.0).unwrap(), 0);
+    }
+}
+
+#[test]
+fn expired_command_before_exec_reports_timeout_without_fencing_lease() {
+    for ms in [1, 1500, 2500] {
+        let (_tmp, config) = fixture();
+        let mut s = seeded(&config);
+        s.state.assignment.as_mut().unwrap().workspace_io_version = Some(1);
+        s.state.direct = Some(Direct {
+            boot_attempt: uuid::Uuid::from_u128(3),
+            revision: 1,
+            bundle_digest: "a".repeat(64),
+            artifacts: vec![],
+            medium: None,
+            agent_socket: None,
+            workspace_disk: None,
+            data_nonce: None,
+            operator_deny_digest: None,
+            data_closed: None,
+            ready: true,
+            withdrawn: false,
+            timings: Timings::default(),
+        });
+        let a = s.assignment().unwrap();
+        let mut cmd = command();
+        cmd.assignment_id = a.id;
+        cmd.lease_id = a.lease_id;
+        cmd.member_id = a.member_id;
+        cmd.timeout_ms = ms;
+        cmd.execution_deadline_at = Some(100.0 + ms as f64 / 1000.0);
+        // Controller dispatch plus timeout, with a response arriving three seconds later.
+        let poll = json!({"command":cmd,"lease":{"state":"ready","revision":1,
+            "expiresAt":200.0,"controllerNow":100.0},"cancelRequested":false});
+        s.accept_poll(poll, clock::now().as_secs_f64() - 3.0, None)
+            .unwrap();
+        let op = s.state.operations.current.as_ref().unwrap();
+        assert!(op.guest_id.is_none());
+        assert_eq!(op.receipt.as_ref().unwrap()["state"], "failed");
+        assert_eq!(op.receipt.as_ref().unwrap()["result"]["timedOut"], true);
+        assert!(!s.state.fenced);
+    }
+}
+
+#[test]
 fn active_operation_cancellation_cancels_guest_without_fencing() {
     for state in ["failed", "unknown", "queued"] {
         let (_tmp, c) = fixture();
@@ -482,6 +596,11 @@ fn active_operation_cancellation_cancels_guest_without_fencing() {
             artifacts: vec![],
             medium: None,
             agent_socket: None,
+            workspace_disk: None,
+            data_nonce: None,
+            operator_deny_digest: None,
+            data_closed: None,
+
             ready: true,
             withdrawn: false,
             timings: Timings::default(),
@@ -626,6 +745,10 @@ fn lost_starting_report_flushes_current_readiness_before_polling() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: false,
         withdrawn: false,
         timings: Timings::default(),
@@ -663,6 +786,10 @@ fn scheduler_tick_replays_pending_then_fresh_readiness_before_poll() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: false,
         withdrawn: false,
         timings: Timings::default(),

@@ -1,3 +1,4 @@
+import { LinuxTransfers, transferError, transferUUID } from "./linux-transfers.ts";
 import { applicationLeaseUsage, legacyTable, mergedLeasePage, refreshLegacyLeases } from "./control/leases.ts";
 import { operationObject, operationArgv, operationReceipt } from "./linux-operations.ts";
 import { updateDraining } from "./updates/drain.ts";
@@ -30,15 +31,16 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_ACTIVE_ASSIGNMENTS = 32;
 const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 
-interface ImageRow { id: string; revision: string; arch: string; backend: Backend; digest: string; resources: string; capabilities: string }
-interface ApprovalRow { controller: string; runner: string; generation: number; incarnation: string; domain: string; backend: Backend; images: string; revoked: number }
-interface LeaseRow {
+interface WorkspaceRow { workspace_version: number | null; workspace: string | null; egress: string | null }
+interface ImageRow { workspace_version: number | null; id: string; revision: string; arch: string; backend: Backend; digest: string; resources: string; capabilities: string }
+interface ApprovalRow { workspace_version: number | null; controller: string; runner: string; generation: number; incarnation: string; domain: string; backend: Backend; images: string; revoked: number }
+interface LeaseRow extends WorkspaceRow {
   id: string; application: string; request: string; image_id: string; image_revision: string; arch: string; backend: Backend; digest: string;
   resources: string; capabilities: string; required: string; member: string; domain: string; reservation: string;
   failure_reason: string | null; state: string; runtime: string; cleanup: string; cleanup_id: string | null; revision: number;
   created: number; expires: number; max_expires: number; provision_deadline: number; credential: string | null;
 }
-interface AssignmentRow {
+interface AssignmentRow extends WorkspaceRow { workspace_removed: number; data_plane_closed: number; files_lost: number;
   id: string; claim: string; lease: string; controller: string; runner: string; generation: number; incarnation: string;
   sequence: number; report: string | null; observed_revision: number; stopped: number; storage_removed: number; credentials_erased: number; closed: number; created: number;
 }
@@ -46,7 +48,7 @@ interface Receipt {
   leaseId: string; memberId: string; backend: Backend; imageDigest: string; observedRevision: number;
   runtimeState: typeof RUNTIME[number]; ready: { command: boolean; pty: boolean; files: boolean };
   failure: typeof FAILURE[number] | null; executionStopped: boolean; storageRemoved: boolean; credentialsErased: boolean;
-  cleanup: typeof CLEANUP[number];
+  cleanup: typeof CLEANUP[number]; workspaceRemoved?: boolean; dataPlaneClosed?: boolean;
 }
 
 function exact(value: unknown, names: readonly string[], what: string, optional: readonly string[] = []): Record<string, unknown> {
@@ -115,7 +117,7 @@ function runtimeRank(state: string): number {
 
 function parseReceipt(value: unknown): Receipt {
   const r = exact(value, ["leaseId", "memberId", "backend", "imageDigest", "observedRevision", "runtimeState", "ready", "failure",
-    "executionStopped", "storageRemoved", "credentialsErased", "cleanup"], "linux lease receipt");
+    "executionStopped", "storageRemoved", "credentialsErased", "cleanup"], "linux lease receipt", ["workspaceRemoved", "dataPlaneClosed"]);
   const ready = exact(r.ready, HEADLESS, "ready capabilities");
   if (typeof r.imageDigest !== "string" || !DIGEST.test(r.imageDigest)) throw new ServiceError("Invalid image digest.", 400);
   return {
@@ -125,13 +127,15 @@ function parseReceipt(value: unknown): Receipt {
     ready: { command: bool(ready.command, "ready.command"), pty: bool(ready.pty, "ready.pty"), files: bool(ready.files, "ready.files") },
     failure: r.failure === null ? null : oneOf(r.failure, FAILURE, "failure"),
     executionStopped: bool(r.executionStopped, "executionStopped"), storageRemoved: bool(r.storageRemoved, "storageRemoved"),
+    ...(Object.hasOwn(r, "workspaceRemoved") ? { workspaceRemoved: bool(r.workspaceRemoved, "workspaceRemoved") } : {}),
+    ...(Object.hasOwn(r, "dataPlaneClosed") ? { dataPlaneClosed: bool(r.dataPlaneClosed, "dataPlaneClosed") } : {}),
     credentialsErased: bool(r.credentialsErased, "credentialsErased"), cleanup: oneOf(r.cleanup, CLEANUP, "cleanup"),
   };
 }
 /** Fixed key order for exact replay comparison. */
 function canonical(r: Receipt): string {
   return JSON.stringify([r.leaseId, r.memberId, r.backend, r.imageDigest, r.observedRevision, r.runtimeState,
-    r.ready.command, r.ready.pty, r.ready.files, r.failure, r.executionStopped, r.storageRemoved, r.credentialsErased, r.cleanup]);
+    r.ready.command, r.ready.pty, r.ready.files, r.failure, r.executionStopped, r.storageRemoved, r.credentialsErased, r.cleanup, ...(r.workspaceRemoved === undefined ? [] : [r.workspaceRemoved, r.dataPlaneClosed])]);
 }
 
 /** Headless Linux guest leases on explicitly approved kubevirt or Apple Virtualization runner
@@ -141,9 +145,10 @@ function canonical(r: Receipt): string {
  * are held until positive bound stop, storage removal and guest-credential erasure evidence.
  */
 export class LinuxLeases {
+  readonly transfers: LinuxTransfers;
   readonly domains = new ResourceDomains();
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities, readonly runners: RunnerEnrollment | undefined) {
-    store.transaction(db => {
+    this.transfers = store.transaction(db => {
       ResourceDomains.schema(db);
       db.exec(`CREATE TABLE IF NOT EXISTS linux_operations (
         id TEXT PRIMARY KEY, lease TEXT NOT NULL, assignment TEXT NOT NULL, request TEXT NOT NULL, argv TEXT NOT NULL,
@@ -164,6 +169,16 @@ export class LinuxLeases {
       if (!(db.prepare("PRAGMA table_info(linux_leases)").all() as {name: string}[]).some(c => c.name === "failure_reason")) {
         db.exec("ALTER TABLE linux_leases ADD COLUMN failure_reason TEXT");
       }
+      for (const [table, columns] of Object.entries({
+        linux_lease_images: ['workspace_version INTEGER'], linux_lease_runner_approvals: ['workspace_version INTEGER'],
+        linux_leases: ['workspace_version INTEGER', 'workspace TEXT', 'egress TEXT'],
+        linux_lease_assignments: ['workspace_version INTEGER', 'workspace TEXT', 'egress TEXT', 'workspace_removed INTEGER NOT NULL DEFAULT 0', 'data_plane_closed INTEGER NOT NULL DEFAULT 0', 'files_lost INTEGER NOT NULL DEFAULT 0'],
+        linux_operations: ['timeout_ms INTEGER NOT NULL DEFAULT 30000', 'execution_deadline REAL'],
+      })) for (const column of columns) {
+        const name = column.split(' ')[0]!;
+        if (!(db.prepare('PRAGMA table_info(' + table + ')').all() as {name:string}[]).some(c => c.name === name)) db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column);
+      }
+      return new LinuxTransfers(db, store.clock());
     });
   }
 
@@ -174,14 +189,17 @@ export class LinuxLeases {
   }
   /** Lease-ledger transaction: expiry, provisioning deadlines and application revocation are applied first. */
   private transaction<T>(operation: (db: DatabaseSync, now: number) => T): T {
-    return this.store.transaction(db => {
+    const hashes=this.transfers.checkpoint();
+    try { return this.store.transaction(db => {
       const now = this.now();
       this.refresh(db, now);
       this.refreshOperations(db, now);
+      this.refreshTransfers(db, now);
       const result = operation(db, now);
       this.refreshOperations(db, now);
+      this.refreshTransfers(db, now);
       return result;
-    });
+    }); } catch(error) { this.transfers.restore(hashes); throw error; }
   }
 
   /** Compose both lease namespaces inside the caller admission/list transaction. */
@@ -195,7 +213,8 @@ export class LinuxLeases {
 
   /** Immutable installed-image entry: one backend, one digest, fixed reservation size and headless capabilities. */
   image(value: unknown): unknown {
-    const input = exact(value, ["id", "revision", "arch", "os", "mode", "backend", "digest", "resources", "capabilities"], "linux lease image");
+    const input = exact(value, ["id", "revision", "arch", "os", "mode", "backend", "digest", "resources", "capabilities"], "linux lease image", ["workspaceIOVersion"]);
+    const version = input.workspaceIOVersion === undefined ? null : positive(input.workspaceIOVersion, 1, "workspaceIOVersion");
     if (input.os !== "linux" || input.mode !== "headless") throw new ServiceError("Only headless Linux images are supported.", 400);
     if (typeof input.digest !== "string" || !DIGEST.test(input.digest)) throw new ServiceError("Images pin a sha256 digest.", 400);
     const capabilities = capabilityList(input.capabilities, "image capabilities");
@@ -205,12 +224,12 @@ export class LinuxLeases {
       backend: backend(input.backend), digest: input.digest, resources: resources(input.resources), capabilities };
     return this.store.transaction(db => {
       const row = this.imageRow(db, view.id, view.revision, view.arch);
-      if (row && (row.backend !== view.backend || row.digest !== view.digest || row.resources !== JSON.stringify(view.resources) || row.capabilities !== JSON.stringify(capabilities))) {
+      if (row && (row.backend !== view.backend || row.digest !== view.digest || row.resources !== JSON.stringify(view.resources) || row.capabilities !== JSON.stringify(capabilities) || row.workspace_version !== version)) {
         throw new ServiceError("Image entry already exists with a different definition.", 409);
       }
-      if (!row) db.prepare("INSERT INTO linux_lease_images VALUES (?,?,?,?,?,?,?,?)")
-        .run(view.id, view.revision, view.arch, view.backend, view.digest, JSON.stringify(view.resources), JSON.stringify(capabilities), this.now());
-      return view;
+      if (!row) db.prepare("INSERT INTO linux_lease_images (id,revision,arch,backend,digest,resources,capabilities,created,workspace_version) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(view.id, view.revision, view.arch, view.backend, view.digest, JSON.stringify(view.resources), JSON.stringify(capabilities), this.now(), version);
+      return { ...view, ...(version === null ? {} : { workspaceIOVersion: version }) };
     });
   }
 
@@ -238,7 +257,8 @@ export class LinuxLeases {
   /** Maps one current binding to one domain, one backend and the exact installed images it serves. */
   approve(value: unknown): unknown {
     const runners = this.requireRunners();
-    const input = exact(value, ["binding", "domainId", "backend", "images"], "linux lease runner approval");
+    const input = exact(value, ["binding", "domainId", "backend", "images"], "linux lease runner approval", ["workspaceIOVersion"]);
+    const version = input.workspaceIOVersion === undefined ? null : positive(input.workspaceIOVersion, 1, "workspaceIOVersion");
     const domain = identifier(input.domainId), kind = backend(input.backend);
     if (!Array.isArray(input.images) || input.images.length < 1 || input.images.length > 100) throw new ServiceError("Approve 1 to 100 images.", 400);
     const images = input.images.map(item => {
@@ -254,15 +274,16 @@ export class LinuxLeases {
       for (const image of images) {
         const row = this.imageRow(db, image.id, image.revision, image.arch);
         if (!row || row.digest !== image.digest) throw new ServiceError("Approved images require exact catalog entries.", 404);
+        if (row.workspace_version !== null && version !== 1) throw new ServiceError("Workspace images require explicit workspace approval.", 409);
         if (row.backend !== kind) throw new ServiceError("An approved image belongs to a different backend.", 409);
       }
       const stored = JSON.stringify(images.map(imageKey));
       const row = db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE controller=? AND runner=? AND generation=?").get(binding.controllerId, binding.runnerId, binding.generation) as unknown as ApprovalRow | undefined;
-      if (row && (row.revoked || row.domain !== domain || row.backend !== kind || row.images !== stored || row.incarnation !== binding.incarnationId)) {
+      if (row && (row.revoked || row.domain !== domain || row.backend !== kind || row.images !== stored || row.incarnation !== binding.incarnationId || row.workspace_version !== version)) {
         throw new ServiceError("Runner approval already exists with a different definition or was revoked.", 409);
       }
-      if (!row) db.prepare("INSERT INTO linux_lease_runner_approvals VALUES (?,?,?,?,?,?,?,0,?)").run(binding.controllerId, binding.runnerId, binding.generation, binding.incarnationId, domain, kind, stored, this.now());
-      return { binding, domainId: domain, backend: kind, images, revoked: false };
+      if (!row) db.prepare("INSERT INTO linux_lease_runner_approvals (controller,runner,generation,incarnation,domain,backend,images,revoked,created,workspace_version) VALUES (?,?,?,?,?,?,?,0,?,?)").run(binding.controllerId, binding.runnerId, binding.generation, binding.incarnationId, domain, kind, stored, this.now(), version);
+      return { binding, domainId: domain, backend: kind, images, revoked: false, ...(version === null ? {} : { workspaceIOVersion: version }) };
     });
   }
 
@@ -340,9 +361,14 @@ export class LinuxLeases {
       const reservation = randomUUID();
       const domain = this.domains.placements(db, this.placements(db, image), amount).find(d => this.domains.reserve(db, { id: reservation, domain: d, kind: "linux-lease", owner: id, resources: amount }, now));
       if (!domain) throw new ServiceError("No approved runner domain serving this image has capacity.", 503, { code: "capacity_unavailable", retryable: true });
-      db.prepare(`INSERT INTO linux_leases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL,NULL)`).run(
+      db.prepare(`INSERT INTO linux_leases (id,application,request,image_id,image_revision,arch,backend,digest,resources,capabilities,required,member,domain,reservation,state,runtime,cleanup,cleanup_id,revision,created,expires,max_expires,provision_deadline,credential,failure_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL,NULL)`).run(
         id, application.id, frozen, imageId, revision, a, image.backend, image.digest, JSON.stringify(amount), image.capabilities, JSON.stringify(required),
         randomUUID(), domain, reservation, now, now + ttl, now + limits.maxLifetimeSeconds, now + limits.provisioningTimeoutSeconds);
+      if (image.workspace_version === 1) {
+        const overheadBytes = 67108864, bytes = Math.floor((amount.diskGiB * 1073741824 - overheadBytes) / 4096) * 4096;
+        if (!Number.isSafeInteger(bytes) || bytes < 16777216) throw new ServiceError("Invalid workspace size.", 400);
+        db.prepare('UPDATE linux_leases SET workspace_version=1,workspace=?,egress=? WHERE id=?').run(JSON.stringify({ bytes, overheadBytes }), JSON.stringify({ enabled: application.linuxEgress?.enabled ?? false, policy: 'public-https-v1' }), id);
+      }
       return { created: true, lease: this.view(db, this.row(db, id)!) };
     });
   }
@@ -420,12 +446,13 @@ export class LinuxLeases {
       const served = new Set(JSON.parse(approval.images) as string[]);
       const queue = db.prepare(`SELECT l.* FROM linux_leases l WHERE l.state='provisioning' AND l.domain=? AND l.backend=?
         AND NOT EXISTS (SELECT 1 FROM linux_lease_assignments a WHERE a.lease=l.id) ORDER BY l.created, l.rowid`).all(approval.domain, approval.backend) as unknown as LeaseRow[];
-      const next = queue.find(l => served.has(imageKey({ id: l.image_id, revision: l.image_revision, arch: l.arch, digest: l.digest })));
+      const next = queue.find(l => (l.workspace_version === null || approval.workspace_version === 1) && served.has(imageKey({ id: l.image_id, revision: l.image_revision, arch: l.arch, digest: l.digest })));
       if (!next) return { assignment: null };
       // Never accept execution without the admission reservation.
       if (!this.domains.held(db, next.reservation)) throw new ServiceError("Lease reservation state is unavailable.", 503, { retryable: false });
       const id = randomUUID();
-      db.prepare("INSERT INTO linux_lease_assignments VALUES (?,?,?,?,?,?,?,0,NULL,0,0,0,0,0,?)").run(id, claim, next.id, b.controllerId, b.runnerId, b.generation, b.incarnationId, now);
+      db.prepare("INSERT INTO linux_lease_assignments (id,claim,lease,controller,runner,generation,incarnation,sequence,report,observed_revision,stopped,storage_removed,credentials_erased,closed,created) VALUES (?,?,?,?,?,?,?,0,NULL,0,0,0,0,0,?)").run(id, claim, next.id, b.controllerId, b.runnerId, b.generation, b.incarnationId, now);
+      db.prepare("UPDATE linux_lease_assignments SET workspace_version=?,workspace=?,egress=? WHERE id=?").run(next.workspace_version, next.workspace, next.egress, id);
       return { assignment: this.assignmentView(db, this.assignmentRow(db, id)!, now) };
     });
   }
@@ -453,6 +480,8 @@ export class LinuxLeases {
       if (!sameBinding(assignment, b)) throw new ServiceError("The assignment is bound to another runner binding.", 403);
       const lease = this.row(db, assignment.lease);
       if (!lease) throw new ServiceError("Assigned lease state is unavailable.", 503, { retryable: false });
+      if (lease.workspace_version === 1 ? (r.workspaceRemoved === undefined || r.dataPlaneClosed === undefined) : (r.workspaceRemoved !== undefined || r.dataPlaneClosed !== undefined)) throw new ServiceError("Cleanup schema does not match workspace version.", 400);
+      if ((assignment.workspace_removed && !r.workspaceRemoved) || (assignment.data_plane_closed && !r.dataPlaneClosed)) throw new ServiceError("Cleanup evidence cannot regress.", 409);
       if (r.leaseId !== lease.id || r.memberId !== lease.member || r.backend !== lease.backend) throw new ServiceError("The receipt does not match the assignment.", 409);
       if (r.imageDigest !== lease.digest) throw new ServiceError("The receipt reports a different image digest.", 409, { code: "image_mismatch" });
       if (sequence === assignment.sequence) {
@@ -480,14 +509,17 @@ export class LinuxLeases {
       }
       const current = this.row(db, lease.id)!;
       const terminal = !ACTIVE.includes(current.state);
-      if (!terminal && (r.cleanup !== "pending" || r.storageRemoved || r.credentialsErased)) throw new ServiceError("Cleanup cannot start while the lease is active.", 409);
+      if (!terminal && (r.cleanup !== "pending" || r.storageRemoved || r.credentialsErased || r.workspaceRemoved || r.dataPlaneClosed)) throw new ServiceError("Cleanup cannot start while the lease is active.", 409);
+      if (lease.workspace_version === 1 && assignment.report && (JSON.parse(assignment.report) as unknown[])[8] === true && !r.ready.files) db.prepare('UPDATE linux_lease_assignments SET files_lost=1 WHERE id=?').run(id);
+      if (assignment.files_lost && r.ready.files) throw new ServiceError('Data readiness cannot recover within one boot.',409);
       const complete = r.cleanup === "complete";
-      if (complete && !(r.runtimeState === "stopped" && r.executionStopped && r.storageRemoved && r.credentialsErased)) {
+      if (complete && !(r.runtimeState === "stopped" && r.executionStopped && r.storageRemoved && r.credentialsErased && (lease.workspace_version !== 1 || (r.workspaceRemoved && r.dataPlaneClosed)))) {
         throw new ServiceError("Cleanup completion requires stopped runtime, execution stop, storage removal and credential erasure.", 409);
       }
       db.prepare("UPDATE linux_leases SET runtime=?,cleanup=? WHERE id=?").run(r.runtimeState, terminal ? r.cleanup : "notRequested", lease.id);
       db.prepare("UPDATE linux_lease_assignments SET sequence=?,report=?,observed_revision=?,stopped=?,storage_removed=?,credentials_erased=?,closed=? WHERE id=?")
         .run(sequence, encoded, r.observedRevision, r.executionStopped ? 1 : 0, r.storageRemoved ? 1 : 0, r.credentialsErased ? 1 : 0, complete ? 1 : 0, id);
+      db.prepare("UPDATE linux_lease_assignments SET workspace_removed=?,data_plane_closed=? WHERE id=?").run(r.workspaceRemoved ? 1 : 0, r.dataPlaneClosed ? 1 : 0, id);
       if (complete) this.domains.release(db, lease.reservation, lease.id, now);
       return this.reportView(db, this.assignmentRow(db, id)!, now);
     });
@@ -507,6 +539,7 @@ export class LinuxLeases {
   }
   private operationView(row: OperationRow): unknown {
     return { id: row.id, leaseId: row.lease, member: "primary", state: row.state, updatedAt: utc(row.updated),
+      ...(row.dispatched === null ? {} : { dispatchedAt: utc(row.dispatched) }),
       ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
   }
   private commandEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
@@ -515,12 +548,14 @@ export class LinuxLeases {
       Array.isArray(report) && report[6] === true;
   }
   private commandOwnerEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
+    return this.ownerEligible(db,lease,a) && (JSON.parse(lease.capabilities) as string[]).includes("command");
+  }
+  private ownerEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
     const approval = this.approval(db, bindingOf(a));
     return ACTIVE.includes(lease.state) && !a.closed &&
       !!this.applications.active(db, lease.application) && !!this.runners?.current(db, bindingOf(a)) &&
       lease.backend === "appleVirtualization" && approval?.backend === lease.backend && approval.domain === lease.domain &&
-      (JSON.parse(approval.images) as string[]).includes(imageKey({ id: lease.image_id, revision: lease.image_revision, arch: lease.arch, digest: lease.digest })) &&
-      (JSON.parse(lease.capabilities) as string[]).includes("command");
+      (JSON.parse(approval.images) as string[]).includes(imageKey({ id: lease.image_id, revision: lease.image_revision, arch: lease.arch, digest: lease.digest }));
   }
   private refreshOperations(db: DatabaseSync, now: number): void {
     for (const op of db.prepare("SELECT * FROM linux_operations WHERE state='queued'").all() as unknown as OperationRow[]) {
@@ -533,21 +568,26 @@ export class LinuxLeases {
   }
   createOperation(token: string, leaseId: string, value: unknown): unknown {
     const r = operationObject(value, ["id", "member", "action", "arguments"]);
-    const id = identifier(r.id), args = operationObject(r.arguments, ["argv"]), argv = operationArgv(args.argv);
+    const id = identifier(r.id), args = operationObject(r.arguments, ["argv"], ["timeoutMs"]), argv = operationArgv(args.argv);
+    const timeoutMs = args.timeoutMs === undefined ? 30000 : positive(args.timeoutMs, 1800000, "timeoutMs");
     if (r.member !== "primary" || r.action !== "shell") throw new ServiceError("Only primary shell operations are supported.", 400);
-    const request = JSON.stringify({ id, member: "primary", action: "shell", arguments: { argv } });
+    const request = JSON.stringify({ id, member: "primary", action: "shell", arguments: { argv, timeoutMs } });
     return this.transaction((db, now) => {
       const lease = this.operationAccess(db, leaseId, token), old = this.operationRow(db, id);
       if (old) {
         if (old.lease !== lease.id) throw new ServiceError("Unknown operation.", 404);
-        if (old.request !== request) throw new ServiceError("Operation intent changed.", 409);
+        const previous = JSON.parse(old.request) as {arguments:{timeoutMs?:number}};
+        previous.arguments.timeoutMs ??= 30000;
+        if (JSON.stringify(previous) !== request) throw new ServiceError("Operation intent changed.", 409);
         return { created: false, operation: this.operationView(old) };
       }
+      if (lease.workspace_version !== 1 && args.timeoutMs !== undefined) throw new ServiceError("Legacy commands do not accept timeoutMs.", 400);
       const a = db.prepare("SELECT * FROM linux_lease_assignments WHERE lease=?").get(lease.id) as unknown as AssignmentRow | undefined;
       if (!a || !this.commandEligible(db, lease, a)) throw new ServiceError("Command execution is not ready or authorized.", 409);
       if (db.prepare("SELECT 1 FROM linux_operations WHERE assignment=? AND state IN ('queued','unknown')").get(a.id)) throw new ServiceError("Assignment command lane is occupied.", 429);
-      db.prepare("INSERT INTO linux_operations VALUES (?,?,?,?,?,?,'queued',?,?,NULL,NULL,NULL)")
+      db.prepare("INSERT INTO linux_operations (id,lease,assignment,request,argv,credential,state,updated,start_before,dispatched,deadline,result) VALUES (?,?,?,?,?,?,'queued',?,?,NULL,NULL,NULL)")
         .run(id, lease.id, a.id, request, JSON.stringify(argv), lease.credential!, now, Math.min(now + 120, lease.expires));
+      db.prepare("UPDATE linux_operations SET timeout_ms=? WHERE id=?").run(timeoutMs, id);
       return { created: true, operation: this.operationView(this.operationRow(db, id)!) };
     });
   }
@@ -581,13 +621,14 @@ export class LinuxLeases {
         db.prepare("INSERT OR IGNORE INTO linux_operation_boots VALUES (?,?,?)").run(a.id, boot, digest);
         op = db.prepare("SELECT * FROM linux_operations WHERE assignment=? AND state='queued' AND dispatched IS NULL ORDER BY rowid LIMIT 1").get(a.id) as unknown as OperationRow | undefined;
         if (op) {
-          db.prepare("UPDATE linux_operations SET dispatched=?,deadline=?,updated=? WHERE id=?").run(now, Math.min(now + 35, lease.expires, op.start_before + 35), now, op.id);
+          db.prepare("UPDATE linux_operations SET dispatched=?,deadline=?,updated=? WHERE id=?").run(now, lease.workspace_version === 1 ? Math.min(now + op.timeout_ms / 1000 + 5, lease.expires) : Math.min(now + 35, lease.expires, op.start_before + 35), now, op.id);
+          if (lease.workspace_version === 1) db.prepare("UPDATE linux_operations SET execution_deadline=? WHERE id=?").run(Math.min(now + op.timeout_ms / 1000, lease.expires), op.id);
           db.prepare("INSERT INTO linux_operation_polls VALUES (?,?,?,?,?)").run(poll, a.id, boot, digest, op.id);
           op = this.operationRow(db, op.id)!;
         }
       }
       return { command: op ? { id: op.id, leaseId: lease.id, memberId: lease.member, assignmentId: a.id, bootAttempt: boot, bundleDigest: digest,
-        arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: 30000, state: op.state } : null,
+        arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: op.timeout_ms, ...(lease.workspace_version === 1 ? { executionDeadlineAt: op.execution_deadline } : {}), state: op.state } : null,
         lease: this.authorization(lease, now), stopRequested: !this.commandOwnerEligible(db, lease, a) || (lease.state !== "provisioning" && !eligible), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
     });
   }
@@ -603,6 +644,77 @@ export class LinuxLeases {
       if (op.state === "queued") db.prepare("UPDATE linux_operations SET state=?,result=?,updated=? WHERE id=?")
         .run(receipt.state, receipt.result === undefined ? null : JSON.stringify(receipt.result), now, id);
       return { operationId: id, state: this.operationRow(db, id)!.state };
+    });
+  }
+
+  private filesEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
+    // Command and file lanes share owner/approval validation, but readiness is independent.
+    const approval = this.approval(db, bindingOf(a));
+    const report: unknown = a.report ? JSON.parse(a.report) : null;
+    return lease.workspace_version === 1 && !a.files_lost && lease.state === 'ready' && lease.runtime === 'running' && !a.closed &&
+      !!this.applications.active(db, lease.application) && !!this.runners?.current(db, bindingOf(a)) &&
+      lease.backend === 'appleVirtualization' && approval?.workspace_version === 1 && approval.domain === lease.domain && approval.backend === lease.backend &&
+      (JSON.parse(approval.images) as string[]).includes(imageKey({id:lease.image_id,revision:lease.image_revision,arch:lease.arch,digest:lease.digest})) &&
+      (JSON.parse(lease.capabilities) as string[]).includes('files') && Array.isArray(report) && report[8] === true;
+  }
+  private refreshTransfers(db: DatabaseSync, now: number): void {
+    this.transfers.refresh(db, now, t => {
+      const l = this.row(db,t.lease)!, a = this.assignmentRow(db,t.assignment)!;
+      const report: unknown = a.report ? JSON.parse(a.report) : null;
+      return {eligible:this.filesEligible(db,l,a),expires:l.expires,credential:l.credential,
+        ...(l.state==='ready' && l.credential===t.credential && this.applications.active(db,l.application) && Array.isArray(report) && report[8]===false ? {reason:'data_channel_lost'} : {})};
+    });
+  }
+  private transferAccess(db: DatabaseSync, leaseId: string, token: string): LeaseRow {
+    const lease = this.row(db,transferUUID(leaseId));
+    try { this.applications.verify(db,token); transferError('credential_role',403); } catch(e) { if(e instanceof ServiceError && e.status===403) throw e; }
+    if (db.prepare('SELECT 1 FROM sqlite_master WHERE name=?').get('runner_bindings') && db.prepare('SELECT 1 FROM runner_bindings WHERE credential=? AND revoked=0').get(createHash('sha256').update('runner:'+token,'ascii').digest('hex'))) transferError('credential_role',403);
+    if (lease?.credential !== leaseHash(token) && db.prepare('SELECT 1 FROM linux_leases WHERE credential=?').get(leaseHash(token))) transferError('not_found',404);
+    let result: LeaseRow;
+    try { result = this.operationAccess(db, leaseId, token); }
+    catch { transferError('invalid_credential',401); }
+    return result;
+  }
+  private transferOwner(db: DatabaseSync, l: LeaseRow) {
+    const a=db.prepare('SELECT * FROM linux_lease_assignments WHERE lease=?').get(l.id) as unknown as AssignmentRow|undefined;
+    if(!a || l.workspace_version!==1 || !(JSON.parse(l.capabilities) as string[]).includes('files')) transferError('capability_unsupported',409);
+    return {a,owner:{id:a.id,lease:l.id,member:l.member,credential:l.credential!,bytes:(JSON.parse(l.workspace!) as {bytes:number}).bytes}};
+  }
+  createTransfer(token: string, leaseId: string, value: unknown): unknown {
+    return this.transaction((db,now)=>{
+      const l=this.transferAccess(db,leaseId,token),{a,owner}=this.transferOwner(db,l);
+      const id=transferUUID(operationObject(value,['id'],['member','direction','path','bytes','sha256','replace']).id);
+      if(!this.transfers.row(db,id)) { if(!ACTIVE.includes(l.state)) transferError('lease_ended',410); if(!this.filesEligible(db,l,a)) transferError('files_not_ready',409); }
+      return this.transfers.create(db,owner,value,now);
+    });
+  }
+  transfer(token:string,leaseId:string,id:string,step?:number):unknown {
+    return this.transaction(db=>{const l=this.transferAccess(db,leaseId,token),t=this.transfers.owned(db,l.id,id);
+      if(step===undefined) return this.transfers.view(t);
+      const s=this.transfers.step(db,t.id,step); if(!s) transferError('not_found',404); return this.transfers.stepView(s);
+    });
+  }
+  createTransferStep(token:string,leaseId:string,id:string,value:unknown):unknown {
+    return this.transaction((db,now)=>{const l=this.transferAccess(db,leaseId,token),t=this.transfers.owned(db,l.id,id);
+      // Exact receipt replays remain available after invalidation; submit never repeats effects.
+      return this.transfers.submit(db,t,value,now,l.expires);
+    });
+  }
+  pollTransfer(token:string,value:unknown):unknown {
+    const r=operationObject(value,['binding','assignmentId','bootAttempt','bundleDigest','pollId']);
+    return this.transaction((db,now)=>{
+      const {a,lease:l,boot,digest}=this.operationBinding(db,token,r),{owner}=this.transferOwner(db,l);
+      db.prepare('INSERT OR IGNORE INTO linux_operation_boots VALUES (?,?,?)').run(a.id,boot,digest);
+      return {...this.transfers.poll(db,owner,boot,digest,transferUUID(r.pollId),now,l.expires,this.filesEligible(db,l,a)) as object,stopRequested:!this.ownerEligible(db,l,a),lease:this.authorization(l,now)};
+    });
+  }
+  reportTransfer(token:string,value:unknown):unknown {
+    const r=operationObject(value,['binding','assignmentId','bootAttempt','bundleDigest','transferId','step','receipt']);
+    return this.transaction((db,now)=>{
+      const {a,boot,digest}=this.operationBinding(db,token,r);
+      const registered=db.prepare('SELECT boot,digest FROM linux_operation_boots WHERE assignment=?').get(a.id) as {boot:string;digest:string}|undefined;
+      if(!registered || registered.boot!==boot || registered.digest!==digest) transferError('invalid_request',409);
+      return this.transfers.report(db,a.id,transferUUID(r.transferId),r.step as number,r.receipt,now);
     });
   }
 
@@ -638,7 +750,7 @@ export class LinuxLeases {
     const wanted = imageKey(image), domains = new Set<string>();
     for (const row of db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE revoked=0 AND backend=? ORDER BY domain,runner").all(image.backend) as unknown as ApprovalRow[]) {
       if (updateDraining(db, row.runner, "runner")) continue;
-      if ((JSON.parse(row.images) as string[]).includes(wanted) && this.runners?.current(db, bindingOf(row))) domains.add(row.domain);
+      if ((image.workspace_version === null || row.workspace_version === 1) && (JSON.parse(row.images) as string[]).includes(wanted) && this.runners?.current(db, bindingOf(row))) domains.add(row.domain);
     }
     return [...domains];
   }
@@ -693,7 +805,7 @@ export class LinuxLeases {
     // Reports use the fixed canonical tuple above; readiness occupies slots 6–8.
     const latest: unknown = assignment?.report ? JSON.parse(assignment.report) : null;
     const required = JSON.parse(lease.required) as typeof HEADLESS[number][];
-    const ready = lease.state === "ready" && runtime === "running" && Array.isArray(latest) && latest.length === 14 && required.every(c => latest[6 + HEADLESS.indexOf(c)] === true);
+    const ready = lease.state === "ready" && runtime === "running" && Array.isArray(latest) && latest.length >= 14 && required.every(c => latest[6 + HEADLESS.indexOf(c)] === true);
     const terminal = !ACTIVE.includes(lease.state);
     const member: Record<string, unknown> = {
       name: "primary", machineId: lease.member, state: runtime, ready,
@@ -713,6 +825,7 @@ export class LinuxLeases {
     const lease = this.row(db, row.lease)!;
     return { id: row.id, claimId: row.claim, leaseId: lease.id, memberId: lease.member, domainId: lease.domain, sequence: row.sequence, closed: Boolean(row.closed),
       image: { id: lease.image_id, revision: lease.image_revision, arch: lease.arch, backend: lease.backend, digest: lease.digest },
+      ...(row.workspace_version === 1 ? { workspaceIOVersion: 1, workspace: JSON.parse(row.workspace!), egress: JSON.parse(row.egress!) } : {}),
       resources: JSON.parse(lease.resources) as unknown, capabilities: JSON.parse(lease.capabilities) as unknown, requiredCapabilities: JSON.parse(lease.required) as unknown,
       lease: this.authorization(lease, now), stopRequested: !ACTIVE.includes(lease.state) };
   }

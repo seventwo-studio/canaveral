@@ -174,3 +174,57 @@ during an unfinished command without duplicate exec. The helper emits canned
 protocol receipts; it starts no VM and executes no guest program. Portable Rust
 tests separately cover truncation, output sequence/count validation and local
 fencing while controller I/O stalls. Neither fixture establishes native execution.
+
+<a id="st-535-long-commands-and-environment-unimplemented-contract"></a>
+
+## ST-535 long commands and environment (controller implementation)
+
+Controller status: implemented in TypeScript, with additive legacy-compatible
+storage and portable tests. Runtime and native acceptance remain separate gates.
+
+Workspace-v2 extends public `arguments` to `{argv,timeoutMs?}`. timeoutMs is an
+integer 1..1800000 (30 minutes); omitted means 30000. Normalize the default before
+canonical intent comparison, so omitted and explicit 30000 replay identically.
+Other values/fields are 400 `invalid_request`. Existing argv and one-command-lane
+rules and 262144-byte combined capture remain. Full logs should be redirected
+into workspace files and retrieved with the file API. No public environment or
+working-directory override is introduced; cwd remains /workspace.
+
+Keep startBefore=min(submitTime+120s, lease expiry), without renewal extension.
+For workspace-v2 dispatch, freeze
+`executionDeadlineAt=min(dispatchTime+requestedTimeoutMs/1000,lease expiry)` and
+server receipt deadline=min(executionDeadlineAt+5s,lease expiry). Replace the old
+35-second constant together in controller and satellite. Runner command keeps
+`arguments:{argv}`, top-level `timeoutMs` is the normalized requested timeout and
+gains `executionDeadlineAt` (Unix UTC seconds). Replay pins both fields. Satellite
+checks the 1..1800000 bound, derives conservative remaining time using the poll
+send time/controllerNow and elapsed time, and sends guest exec timeout equal to
+min(requested timeout, remaining execution deadline, remaining lease authority
+minus its 2000ms safety margin). The margin does not shorten the command deadline.
+If the minimum is nonpositive before exec, return a definite failed result with
+timedOut:true, empty output and terminationConfirmed:true; no exec or lease fence
+is needed.
+It never starts after startBefore or extends this command on renewal. Expiry,
+revocation/cancel and the independent native fence still win. A definite timeout
+with confirmed descendant termination is failed/timedOut; unconfirmed execution
+or receipt deadline is unknown. No timeout frees an unknown lane or reservation.
+Legacy boots keep the old 30000/35000 contract; no new field reaches old decoders.
+
+Workspace-v2 command environment is supplied by the trusted runtime after clearing
+ambient variables: fixed PATH as before, HOME=/workspace/home,
+TMPDIR=/workspace/tmp, npm_config_cache=/workspace/.npm. Create/check these
+writable uid/gid 1000 directories before readiness. With the acquired egress grant
+only, add HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy, each exactly
+`http://127.0.0.1:18080`, and NO_PROXY=`localhost,127.0.0.1,::1`. Without the grant,
+none of these proxy variables is supplied. Proxy listener port is fixed, not a
+consumer override. Keep system CA trust in the pinned rootfs; never inject host
+credentials or disable TLS verification. HTTP_PROXY does not provide plain HTTP
+forwarding: only CONNECT to 443 is accepted. Package installers must use HTTPS.
+A compromised command may ignore proxy settings but has no NIC or host listener.
+Loss of data makes networking/files unavailable while commands and control remain
+usable; it does not itself cancel an otherwise authorized command.
+
+Public operation receipts include `dispatchedAt` (UTC timestamp) once the runner
+has received the command. It remains present on terminal receipts. This proves
+handoff, not successful guest execution; native expiry acceptance requires this
+receipt before expiry plus independent native cleanup evidence.

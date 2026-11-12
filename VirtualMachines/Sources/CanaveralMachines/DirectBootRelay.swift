@@ -4,19 +4,46 @@ import Virtualization
 import Darwin
 import CanaveralVMCore
 
-/// One consumer stream and one host-originated connection to this VM's fixed agent port.
+/// Independent, single-use control and data channels share only directory lifetime.
 @MainActor final class DirectBootRelay {
     let directory: URL
     var socketPath: String { directory.appendingPathComponent("agent.sock").path }
+    var dataSocketPath: String { directory.appendingPathComponent("data.sock").path }
+    private var control: DirectBootChannel?
+    private var data: DirectBootChannel?
+    init(vm: VZVirtualMachine, version: Int = 1) throws {
+        directory = URL(fileURLWithPath: "/private/tmp/canaveral-" + UUID().uuidString.lowercased())
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else { throw CanaveralError.unavailable("Missing vsock device.") }
+            control = try DirectBootChannel(socketPath: socketPath, port: 1024, device: device)
+if version == 2 {
+    do { data = try DirectBootChannel(socketPath: dataSocketPath, port: 1025, device: device) }
+    catch { NSLog("Canaveral data relay unavailable; control and VM remain active.") }
+}
+        } catch { stop(); throw error }
+    }
+    static func authorizedPeer(_ fd: Int32) -> Bool { DirectBootChannel.authorizedPeer(fd) }
+    func stop() {
+        control?.stop(); control = nil
+        data?.stop(); data = nil
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+@MainActor final class DirectBootChannel {
+    private let socketPath: String
+    private let port: UInt32
     private var listener: Int32 = -1
     private var task: Task<Void, Never>?
     private var channel: DirectBootPump?
     private var connection: VZVirtioSocketConnection?
     private var stopped = false
-    init(vm: VZVirtualMachine) throws {
-        // Short canonical private location avoids sockaddr_un's 104-byte limit without chdir.
-        directory = URL(fileURLWithPath: "/private/tmp/canaveral-" + UUID().uuidString.lowercased())
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+/// Connector injection exercises the real Unix accept/authentication lifecycle without a VM.
+init(socketPath: String, port: UInt32, device: VZVirtioSocketDevice? = nil,
+     connector: ((UInt32, DirectBootPump) -> Void)? = nil) throws {
+
+        self.socketPath = socketPath; self.port = port
         do {
             listener = socket(AF_UNIX, SOCK_STREAM, 0)
             guard listener >= 0 else { throw CanaveralError.unavailable("Cannot create agent listener.") }
@@ -27,8 +54,7 @@ import CanaveralVMCore
             guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw CanaveralError.invalid("Agent socket path too long.") }
             withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
             let result = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
-            guard result == 0, chmod(socketPath, 0o600) == 0, listen(listener, 1) == 0,
-                  let device = vm.socketDevices.first as? VZVirtioSocketDevice else { throw CanaveralError.unavailable("Cannot bind private agent transport.") }
+            guard result == 0, chmod(socketPath, 0o600) == 0, listen(listener, 1) == 0 else { throw CanaveralError.unavailable("Cannot bind private agent transport.") }
             task = Task { [weak self] in
                 while let self, !Task.isCancelled, !self.stopped {
                     let fd = accept(self.listener, nil, nil)
@@ -36,7 +62,9 @@ import CanaveralVMCore
                         guard Self.authorizedPeer(fd) else { close(fd); continue }
                         close(self.listener); self.listener = -1
                         let pump = DirectBootPump(local: fd); self.channel = pump
-                        self.connectGuest(device, pump: pump, until: ContinuousClock.now + Self.guestConnectWindow)
+                        if let connector { connector(self.port, pump) }
+                        else if let device { self.connectGuest(device, pump: pump, until: ContinuousClock.now + Self.guestConnectWindow) }
+                        else { pump.stop() }
                         return
                     }
                     if errno != EAGAIN && errno != EINTR { self.stop(); return }
@@ -49,7 +77,7 @@ import CanaveralVMCore
     /// accepted local stream wait in its socket buffer; the window bounds that wait.
     static let guestConnectWindow: Duration = .seconds(60)
     private func connectGuest(_ device: VZVirtioSocketDevice, pump: DirectBootPump, until deadline: ContinuousClock.Instant) {
-        device.connect(toPort: 1024) { [weak self] result in
+        device.connect(toPort: port) { [weak self] result in
             guard let self, !self.stopped else { if case .success(let c) = result { c.close() }; pump.stop(); return }
             switch result {
             case .success(let c):
@@ -77,7 +105,7 @@ import CanaveralVMCore
         if listener >= 0 { close(listener); listener = -1 }
         channel?.stop(); channel = nil
         connection?.close(); connection = nil
-        try? FileManager.default.removeItem(at: directory)
+        unlink(socketPath)
     }
 }
 

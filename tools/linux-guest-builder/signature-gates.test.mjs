@@ -1,3 +1,5 @@
+import * as crypto from "node:crypto";
+
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync} from 'node:fs';
@@ -50,7 +52,7 @@ test('Debian status refuses an unpinned primary even in a valid keyring', t=>{
  assert.notEqual(result.status,0);
 });
 
-test('complete signature gate refuses missing inputs before acceptance', t=>{
+test('complete signature gate refuses missing kernel input before acceptance', t=>{
  const root=mkdtempSync(join(tmpdir(),'canaveral-complete-gate-'));
  t.after(()=>rmSync(root,{recursive:true,force:true}));
  const result=spawnSync('/bin/bash',[resolve('tools/linux-guest-builder/verify-signatures.sh')],{env:{...process.env,INPUTS:root},encoding:'utf8'});
@@ -71,6 +73,30 @@ test('archive content comparison rejects changed source bytes', async ()=>{
   offset+=Math.ceil(size/512)*512;
  }
  assert.notDeepEqual(archiveEntries(bytes),archiveEntries(changed));
+});
+
+test('formatter archives require signed-index hashes and a retained dependency closure', t=>{
+ const root=mkdtempSync(join(tmpdir(),'canaveral-formatter-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ mkdirSync(join(root,'packages'));
+ const index=join(root,'signed-index');
+ const verify=()=>spawnSync(process.execPath,[resolve('tools/linux-guest-builder/verify-debian-packages.mjs'),root,index],{encoding:'utf8'});
+ const hash='a'.repeat(64);
+ writeFileSync(index,`Package: e2fsprogs\nVersion: fixture\nArchitecture: arm64\nSHA256: ${hash}\n\n`);
+ writeFileSync(join(root,'packages',hash+'.deb'),'tampered');
+ writeFileSync(join(root,'packages.tsv'),`e2fsprogs=fixture:arm64\tpackages/${hash}.deb\n`);
+ assert.notEqual(verify().status,0);
+ rmSync(join(root,'packages',hash+'.deb'));
+ // Synthetic hashes model an already authenticated Packages index, not real packages.
+ const {createHash}=crypto;
+ const actual=createHash('sha256').update('fixture').digest('hex');
+ writeFileSync(join(root,'packages',actual+'.deb'),'fixture');
+ writeFileSync(join(root,'packages.tsv'),`e2fsprogs=fixture:arm64\tpackages/${actual}.deb\n`);
+ const stanza=`Package: e2fsprogs\nVersion: fixture\nArchitecture: arm64\nSHA256: ${actual}\n`;
+ writeFileSync(index,stanza+'Depends: missing-lib (>= 1)\n\n');
+ assert.notEqual(verify().status,0);
+ writeFileSync(index,stanza+'\n');
+ assert.equal(verify().status,0);
 });
 
 test('apt keyring refuses an extra unpinned primary', t => {

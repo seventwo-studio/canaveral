@@ -15,7 +15,7 @@ use std::{
 };
 use uuid::Uuid;
 const CHUNK: usize = 8192;
-fn nonblock(fd: RawFd) -> Result<()> {
+pub(crate) fn nonblock(fd: RawFd) -> Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(std::io::Error::last_os_error().into());
@@ -285,11 +285,41 @@ pub(crate) fn session(transport: File, launch: &Launch) -> Result<()> {
     }
     reactor(transport, launch, std::path::Path::new("/workspace"))
 }
-pub(crate) fn reactor(mut transport: File, launch: &Launch, root: &std::path::Path) -> Result<()> {
+pub(crate) fn reactor(transport: File, launch: &Launch, root: &std::path::Path) -> Result<()> {
     launch.validate()?;
+    reactor_inner(transport, launch, root, None, None)
+}
+pub(crate) fn workspace_session(
+    transport: File,
+    launch: &canaveral_guest_protocol::bundle::WorkspaceLaunch,
+    readiness: &crate::data::Readiness,
+) -> Result<()> {
+    require_pid1()?;
+    launch.validate()?;
+    let scope = Launch {
+        binding: launch.binding.clone(),
+        manifest: launch.manifest.clone(),
+        workspace_bytes: launch.workspace.bytes,
+    };
+    reactor_inner(
+        transport,
+        &scope,
+        std::path::Path::new("/workspace"),
+        Some(launch.egress.enabled),
+        Some(readiness),
+    )
+}
+fn reactor_inner(
+    mut transport: File,
+    launch: &Launch,
+    root: &std::path::Path,
+    workspace_egress: Option<bool>,
+    data_ready: Option<&crate::data::Readiness>,
+) -> Result<()> {
     nonblock(transport.as_raw_fd())?;
     let mut decoder = Decoder::default();
     let mut authority: Option<Authority> = None;
+    let mut deferred_ready = None;
     let mut running: Option<Running> = None;
     let mut last_id = Uuid::nil();
     let mut completed_id = Uuid::nil();
@@ -317,6 +347,16 @@ pub(crate) fn reactor(mut transport: File, launch: &Launch, root: &std::path::Pa
                 if !r.killed && time.saturating_sub(r.start) >= r.timeout {
                     r.timed_out = true;
                     r.kill();
+                }
+            }
+            if pending.is_empty()
+                && data_ready.is_some_and(|r| r.initial.load(std::sync::atomic::Ordering::Acquire))
+            {
+                if let Some(binding) = deferred_ready.take() {
+                    pending = encode(&Guest::Ready {
+                        version: 1,
+                        binding,
+                    })?;
                 }
             }
             // One bounded write frame; all writes are nonblocking.
@@ -359,10 +399,16 @@ pub(crate) fn reactor(mut transport: File, launch: &Launch, root: &std::path::Pa
                                 if !pending.is_empty() {
                                     return Err("pending hello".into());
                                 }
-                                pending = encode(&Guest::Ready {
-                                    version: 1,
-                                    binding,
-                                })?;
+                                if data_ready.is_some_and(|r| {
+                                    !r.initial.load(std::sync::atomic::Ordering::Acquire)
+                                }) {
+                                    deferred_ready = Some(binding);
+                                } else {
+                                    pending = encode(&Guest::Ready {
+                                        version: 1,
+                                        binding,
+                                    })?;
+                                }
                             }
                             Host::Renew {
                                 binding,
@@ -386,11 +432,23 @@ pub(crate) fn reactor(mut transport: File, launch: &Launch, root: &std::path::Pa
                                 env,
                                 timeout_ms,
                                 ..
-                            } if authority.is_some() && running.is_none() && pending.is_empty() => {
+                            } if authority.is_some()
+                                && running.is_none()
+                                && pending.is_empty()
+                                && deferred_ready.is_none() =>
+                            {
                                 if id <= last_id {
                                     return Err("exec replay or unordered UUID".into());
                                 }
                                 last_id = id;
+                                let (cwd, env) = if let Some(enabled) = workspace_egress {
+                                    if cwd != "/workspace" || !env.is_empty() {
+                                        return Err("workspace command overrides forbidden".into());
+                                    }
+                                    (cwd, workspace_environment(enabled))
+                                } else {
+                                    (cwd, env)
+                                };
                                 match Running::start(id, argv, cwd, env, timeout_ms, root) {
                                     Ok(r) => running = Some(r),
                                     Err(e) if e.is::<SpawnFailed>() => {
@@ -766,7 +824,111 @@ mod tests {
         }
     }
     #[test]
+    fn data_gate_keeps_control_renewal_alive() {
+        let (mut host, guest) = UnixStream::pair().unwrap();
+        let manifest: canaveral_guest_protocol::bundle::Manifest = serde_json::from_slice(
+            include_bytes!("../../guest-protocol/fixtures/canonical.json"),
+        )
+        .unwrap();
+        let binding = canaveral_guest_protocol::Binding {
+            lease_id: Uuid::from_u128(1),
+            member_id: Uuid::from_u128(2),
+            revision: 1,
+            boot_attempt: Uuid::from_u128(3),
+            bundle_digest: manifest.digest().unwrap(),
+        };
+        let launch = Launch {
+            binding: binding.clone(),
+            manifest,
+            workspace_bytes: 16777216,
+        };
+        let ready = crate::data::Readiness::new();
+        let state = ready.clone();
+        let worker = std::thread::spawn(move || {
+            use std::os::fd::{FromRawFd, IntoRawFd};
+            reactor_inner(
+                unsafe { File::from_raw_fd(guest.into_raw_fd()) },
+                &launch,
+                std::path::Path::new("/workspace"),
+                Some(false),
+                Some(&state),
+            )
+            .unwrap_err()
+            .to_string()
+        });
+        send(
+            &mut host,
+            Host::Hello {
+                version: 1,
+                binding: binding.clone(),
+                remaining_ms: 1000,
+            },
+        );
+        let mut renew = binding.clone();
+        renew.revision += 1;
+        send(
+            &mut host,
+            Host::Renew {
+                version: 1,
+                binding: renew,
+                remaining_ms: 1500,
+            },
+        );
+        // Unknown cancel proves control is processing while data is unavailable.
+        let id = Uuid::from_u128(10);
+        send(&mut host, Host::Cancel { version: 1, id });
+        assert!(matches!(receive(&mut host), Guest::Rejected { .. }));
+        ready
+            .initial
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            matches!(receive(&mut host), Guest::Ready { binding: actual, .. } if actual == binding)
+        );
+        ready
+            .files
+            .store(false, std::sync::atomic::Ordering::Release);
+        send(&mut host, Host::Cancel { version: 1, id });
+        assert!(matches!(receive(&mut host), Guest::Rejected { .. }));
+        drop(host);
+        assert!(worker.join().unwrap().contains("disconnected"));
+    }
+    #[test]
     fn host_cannot_supervise() {
         assert!(require_pid1().is_err());
+    }
+}
+
+/// Trusted v2 environment; never merged with command-supplied variables.
+fn workspace_environment(egress: bool) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::from([
+        ("HOME".into(), "/workspace/home".into()),
+        ("TMPDIR".into(), "/workspace/tmp".into()),
+        ("npm_config_cache".into(), "/workspace/.npm".into()),
+    ]);
+    if egress {
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            env.insert(key.into(), "http://127.0.0.1:18080".into());
+        }
+        env.insert("NO_PROXY".into(), "localhost,127.0.0.1,::1".into());
+    }
+    env
+}
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+    #[test]
+    fn environment_is_grant_scoped() {
+        let off = workspace_environment(false);
+        assert_eq!(off.len(), 3);
+        assert_eq!(off["HOME"], "/workspace/home");
+        assert_eq!(off["TMPDIR"], "/workspace/tmp");
+        assert_eq!(off["npm_config_cache"], "/workspace/.npm");
+        let on = workspace_environment(true);
+        assert_eq!(on.len(), 8);
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            assert_eq!(on[key], "http://127.0.0.1:18080");
+            assert!(!off.contains_key(key));
+        }
+        assert_eq!(on["NO_PROXY"], "localhost,127.0.0.1,::1");
     }
 }

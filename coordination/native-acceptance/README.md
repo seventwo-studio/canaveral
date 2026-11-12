@@ -30,7 +30,7 @@ CANAVERAL_NATIVE_ACCEPTANCE=operator-authorized \
   node coordination/native-acceptance/run.ts /ABS/private-config.json
 ```
 
-Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. The printed directory is unique per invocation. Keep it private: it contains local CA keys, administrator and enrolled identity credentials, the isolated SQLite state, raw operational configuration and command output under `private/`. Only the files outside `private/` are acceptance evidence. Never commit it. There is no evidence upload.
+Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. The printed directory is unique per invocation. Keep it private: raw configuration, credentials, operational output and receipts stay under `private/`. Files outside `private/` contain allow-listed outcomes, numeric attributed process metadata, console milestones and digests. Proxy evidence filenames use role labels. Never commit native evidence. There is no evidence upload.
 
 For setup without boot artifacts, set `setupOnly: true`, supply a nonexistent manifest path and an explicitly unverified expected `bundleDigest`; `builder` may be omitted. This exercises actual controller startup, fresh state, TLS, application creation, enrollment, domain/image/grant/approval configuration and catalog reads, then stops without acquiring or claiming anything. The expected digest is catalog configuration only: `artifactVerified: false` and `nativeAcceptance: false` prevent treating this as image verification. Setup-only stops before native execution even when artifacts exist.
 
@@ -40,7 +40,7 @@ no synthetic guest response. The final loss case kills the satellite, waits past
 restarting it, proves helper PID and VZ absence with no power-off request, records
 stop timing relative to the deadline, and only then starts recovery. It retains the unknown reservation and owned state for operator reconciliation; it never forges cleanup or resets the journal. That retained reservation is an expected result, not reclaimed capacity.
 
-Evidence includes controller/domain views, report bodies and domain counts around report forwarding, allow-listed journal state/cause/timestamp/digest summaries (paths represented by role names), helper signature status/requirement result/bundle identifier/cdhash/virtualization entitlement, helper and mkfs.erofs SHA256 pins, command receipt and the helper's sanitized serial console exported as `<lease>-boot.log` (only numeric Linux version banners and fixed bootstrap-refused, guest-agent-fenced and session-closed/fence milestones; all payloads discarded and other lines counted as omitted; raw console retained under `private/`). Successful release/expiry additionally requires observed helper PIDs gone, workspace/machine and published relay directories removed, durable stop/cleanup/release flags and zero reservations after the complete cleanup report. Process evidence contains only PID, PPID, state and elapsed time for the run’s observed process tree, with no command arguments. Raw process and codesign output stays in memory; raw journals remain in private operational state. `private/` also holds TLS keys, enrollment identity, configuration, stderr and failure diagnostics; do not share it as evidence. Run `node --test coordination/native-acceptance/evidence.test.ts` for the portable privacy regression. The independent process check conservatively refuses **any** remaining `com.apple.Virtualization.VirtualMachine` process because process names alone cannot attribute it to a particular VM. It never stops or inspects unrelated VM storage. Existing VMs can therefore block this check; run on a quiescent host or obtain separate attribution evidence before changing the criterion.
+Evidence includes controller/domain views, report bodies and domain counts around report forwarding, journal revisions, helper signature/entitlements/cdhash, helper and mkfs.erofs SHA256 pins, command receipt and the helper's real serial console copied as `<lease>-boot.log`. Successful release/expiry additionally requires observed helper PIDs gone, workspace/machine and published relay directories removed, durable stop/cleanup/release flags and zero reservations after the complete cleanup report. The independent process check conservatively refuses **any** remaining `com.apple.Virtualization.VirtualMachine` process because process names alone cannot attribute it to a particular VM. It never stops or inspects unrelated VM storage. Existing VMs can therefore block this check; run on a quiescent host or obtain separate attribution evidence before changing the criterion.
 
 A failed full run preserves evidence and state, requests lease release, and stops its own controller/satellite processes. Release intent is not cleanup proof. The helper's deadline remains the independent fence; inspect failure evidence before rerunning. A new invocation always creates a new controller database, never adopts the old state, and must not be used to evade an unresolved physical reservation.
 
@@ -52,7 +52,7 @@ To typecheck the standalone harness without adding it to ordinary tests:
 
 ```sh
 coordination/node_modules/.bin/tsc --noEmit --target ES2023 --module NodeNext \
-  --moduleResolution NodeNext --strict --types node \
+  --moduleResolution NodeNext --allowImportingTsExtensions --strict --types node \
   --typeRoots coordination/node_modules/@types coordination/native-acceptance/run.ts
 ```
 
@@ -240,3 +240,307 @@ coordination typecheck/build and 998 tests, the full serial Rust suite, satellit
 clippy with warnings denied, standalone harness typecheck, six signature-gate
 regressions and shell syntax checks. These results retain the experimental scope
 and all previously listed production acceptance gaps.
+
+For a separately authorized workspace-v2 run, set `workspaceIOVersion:1` in the
+private configuration. Supply `cloneRepo` (public HTTPS repository), `cloneCommit`
+(full pinned commit), `hostLanTarget`, `hostTailnetTarget`, and
+`hostLoopbackTarget` (CONNECT authorities including `:443`). Keep all values in
+that private file. The bundle must include git, npm, nc, dd and the pinned CA
+store; the repository must include its npm lockfile and tests. This mode adds
+public-route build/log retrieval, empty/binary/300 KiB file round trips,
+no-replace/disk-full failures, foreign application denial, fixed proxy denial
+codes, egress-off refusal and simultaneous command/transfer expiry. Cleanup
+interception requires both workspaceRemoved and dataPlaneClosed before capacity
+release. Existing v1 cases also run. Experimental results below distinguish passed public
+HTTPS/transfer cases from remaining data-only disconnect, route-change/hairpin
+topology and host power-loss durability gates. Full production acceptance remains false.
+
+## ST-535 native evidence (2026-11-12)
+
+Private run GcetDy
+completed all harness groups using source `4e483db`, the signed production helper,
+one 2 CPU / 4096 MiB / 8 GiB workspace-v2 guest at a time, and bundle digest
+`af15f8ef1bc964874f939f2c7390de64ccd8717fba2d2aac24279b028a71ba11`.
+`result.json` correctly records **nativeAcceptance:false** with two failed cases:
+allowed CONNECT and clone/npm. `productionBuildReady` remains false.
+
+The disposable VZ builder stayed within 4 CPU / 8 GiB / 40 GiB. Both assemblies
+matched. All 119 Debian archives, including the ten-package e2fsprogs
+`1.47.0-2+b2:arm64` closure in `formatter-pins.json`, verified against the pinned
+signed snapshot Release → Packages chain. Source signature status, keys and
+package evidence are in `signature-authentication/`. Installed boot data is
+0400/user-immutable. No signing identity or private configuration is recorded here.
+
+Native results:
+
+- Workspace serial/size discovery, ext4 format/mount, both vsock handshakes and
+  files readiness passed (`workspace-ready.json`, `workspace-mountinfo.txt`).
+- Upload/download round trips passed for 0, 4 and 307200 bytes; exact SHA256 values
+  and committed/verified outcomes are in `roundtrip-*-verified.json`. No-replace
+  returned `destination_exists`; filling the disk returned a durable `disk_full`
+  receipt (`workspace-destination_exists.json`, `workspace-disk_full.json`).
+- Host LAN, host tailnet, loopback, metadata and RFC1918 targets returned 403
+  `destination_denied`; port 80 returned `port_denied` (`proxy-*.json`). The
+  foreign application was denied (`workspace-second-tenant-denial.json`). The
+  egress-off guest returned `egress_denied` and cleaned up independently.
+- Public CONNECT returned 403 `route_denied`. The kernel changed from a default
+  route before connect to a cloned /32 after connect. That route remains denied
+  under the unchanged contract (`route-clone-diagnostic.stderr`). Clone of the
+  public JavaScript action example, pinned to
+  `67f3f118c7d8bf535280cf0b61697b1898f6567b`, failed with exit 128 in 44 ms.
+  Guest commit verification, npm ci/test and build-log retrieval were not reached.
+- Expiry interrupted a dispatched sleep command and an opened, uncommitted upload:
+  command `unknown`, upload `failed/authorization_lost`
+  (`workspace-expiry-command-dispatch.json`, `workspace-expiry-transfer-opened.json`,
+  `workspace-expiry-terminal.json`). This tests an active upload across expiry,
+  not an interrupted publication syscall.
+- The v1 lifecycle cases against this v2 bundle passed: readiness, command/output,
+  application isolation, renewal (command 3.146 seconds after original expiry),
+  explicit release and ordinary expiry. Every successful cleanup/reclamation
+  required `workspaceRemoved` and `dataPlaneClosed` (`*-independent-stop.json`,
+  `runner-reports.json`, `renewal-post-deadline-command.json`).
+- Satellite loss passed autonomous fencing: helper alive 26 ms before its
+  deadline, absent 176 ms after it, before any recovery request. Recovery held
+  one reservation with unknown runtime (`loss-independent-fence.json`,
+  `loss-held.json`).
+
+Native defects fixed: Kconfig omits virtio-net when NETDEVICES is disabled;
+Rust acronym casing rejected workspaceIOVersion; redundant host environment
+injection tripped the guest's override refusal; Darwin compact host netmasks
+were rejected; known denied destinations were hidden by route lookup failures;
+file-worker fsuid/fsgid changes left root credentials/capabilities. Regressions
+include `workspace_assignment_uses_controller_acronym_spelling`,
+`workspace_exec_carries_no_environment_overrides`,
+`route_parser_defaults_specific_cloned_and_malformed`,
+`forbidden_destination_precedes_unavailable_route_evidence` and
+`worker_credential_drop_is_permanent_and_thread_local`. The last test actually
+passed in a disposable root-capable Linux namespace (`credential-regression.log`).
+The rootfs also gained the required netcat package.
+
+All owned VMs and controller/satellite/helper processes stopped. Independent PID,
+VZ, helper-lock and lsof checks preceded external removal of the loss workspace,
+machine and relay (`loss-post-run-owned-cleanup.json`). Its journal is unchanged;
+its stopped private database retains the expired loss lease, unknown runtime,
+pending cleanup and one 2 CPU / 4096 MiB / 8 GiB reservation. No cleanup receipt
+was forged. The earlier pre-launch decoder failure was reclaimed through the
+normal authenticated decline path, without launching a VM. The disposable
+builder was deleted; unrelated VMs were untouched.
+
+Portable validation passed: coordination typecheck/build and 1020 tests, full
+serial Rust tests, changed-crate clippy, Linux MUSL guest compilation/clippy,
+signature-gate regressions, standalone harness typecheck and no-Python check.
+No Swift source changed in that run. The qualified-clone rerun below supersedes
+its public HTTPS and replacement gates. Data-only disconnect, route-change/hairpin
+topology and host power-loss durability remain separate native gates.
+
+
+### Qualified-clone full rerun
+
+The final ST-535 integration run on 2026-11-12 supersedes the earlier passing
+`canaveral-native-YVunMd` run. Private evidence is
+run Vpsi5K;
+`result.json` records `nativeAcceptance:true` and no case failures.
+Host and guest source is `13bb46b`, integrating `e9e1fc8`, `7fa4bd8` and
+`13bb46b`. The rebuilt bundle digest is
+`f0b9f6d5d46afbaabf544f9295b3077b496c79dbfb072adbe114ee8466e48fc0`.
+The same private configuration and signed helper ran one 2 CPU / 4096 MiB /
+approximately 8 GiB guest at a time. Full production and topology acceptance
+remain false.
+
+- Public CONNECT returned 200; Git cloned and verified HEAD at
+  `67f3f118c7d8bf535280cf0b61697b1898f6567b`
+  (`proxy-allowed.json`, `workspace-build.json`).
+- npm ci/test passed in 139413/516 ms of guest execution, respectively
+  (140044/1074 ms including dispatch/polling). Downloaded build.log begins with
+  the verified commit and has SHA256
+  `532a42550e33c3869647449bc854920372fb570c65bd6cd3b736a3dffd2d2211`
+  (`workspace-npm-{ci,test}.json`, `workspace-build-log.json`).
+- Empty, binary and 307200-byte round trips; replace:true with verified
+  download; replace:false conflict; and disk_full refusal passed
+  (`roundtrip-*-verified.json`, `workspace-replace-true.json`,
+  `workspace-destination_exists.json`, `workspace-disk_full.json`).
+- Host LAN/tailnet/loopback, metadata/RFC1918, port 80, foreign application and
+  egress-off denials passed. Expiry interrupted the dispatched command and
+  opened upload: command unknown, upload unknown/authorization_lost, preserving
+  uncertain outcomes (`proxy-*.json`, `workspace-expiry-*.json`).
+- All v1 lifecycle cases against the v2 bundle passed: readiness, command/output,
+  ownership refusal, renewal, explicit release and ordinary expiry. Renewal's
+  successful command was observed 2515 ms after original expiry. All five normal
+  cleanup cases proved helper/VZ absence and machine/workspace/relay removal;
+  capacity release required workspaceRemoved and dataPlaneClosed
+  (`*-independent-stop.json`, `runner-reports.json`,
+  `renewal-post-deadline-command.json`).
+- Satellite-loss fencing passed: helper alive 33 ms before deadline, absent
+  168 ms after it, before recovery. Recovery retained one unknown reservation
+  (`loss-independent-fence.json`, `loss-held.json`).
+
+The conflict resolution preserves bounded crossed credit after local half-close
+on both endpoints and drains already credited data until ordered Close
+acknowledgement. Sequence/credit checks, flow accounting and the fixed 10-second
+close deadline remain. Both regression groups pass; restoring the old EOF guard
+rejects crossed credit, while restoring immediate retirement rejects valid
+in-flight data and bypasses the expected sequence/deadline errors. Controller
+restart retains opened transfer lanes with cancellation requested; command
+timeouts no longer subtract the lease margin or fence an expired-before-exec
+command.
+
+Portable validation passed: coordination typecheck/build and 1024 tests
+(concurrency 2), 238 serial Rust tests (2 build jobs), satellite/guest clippy
+with warnings denied, guest AArch64 MUSL clippy, v1 public API fixture,
+standalone harness typecheck, seven signature-gate tests and no-Python checks.
+Swift was unchanged. The disposable pinned Lima builder authenticated all inputs
+and the package closure; bundle preflight and duplicate assembly comparison
+passed. Build/check evidence is in the parent private directory.
+
+All owned VMs, controller/satellite/helper processes, runtime workspace and relay
+storage were removed after PID, VZ, helper-lock, inode and lsof checks. The builder
+and temporary build/Git copies were deleted; unrelated VMs were untouched.
+The loss journal is unchanged; its stopped private database retains one unknown
+2 CPU / 4096 MiB / 8 GiB reservation pending operator reconciliation, without a
+fabricated cleanup receipt (`loss-post-run-owned-cleanup.json`). Earlier retained
+logical reservations and their cleanup proofs in the previous evidence directory
+remain unchanged. Route-change monitoring, router hairpin/operator deny CIDRs,
+data-only disconnect, power-loss durability, PTY, concurrency, reconciliation
+and macOS workspaces remain open.
+
+### Connection-churn regression and native reruns (ST-535 / ST-539)
+
+The 2026-11-12–13 Mac reruns address the intermittent npm data-plane failure
+observed in run xEPJmL:
+npm ci exited 1 after 70668 ms and satellite stderr recorded `unknown flow`.
+The old reactor cleared retired IDs on every Open; a late Close could therefore
+terminate the entire data channel. The guest also echoed the acknowledgement of
+its own Close. The original native trace does not identify the offending frame.
+
+`socketpair_churn_tolerates_retired_frames` drives the real reactor through 300
+flows, alternating close initiators and injecting delayed Close, credit, data
+and halfClose frames across subsequent opens. Before the fix it failed with
+`unknown flow`. `socketpair_guest_churn_has_no_redundant_close` drives the real
+guest state machine through 200 flows; restoring the old guest handler fails
+with a redundant Close before the next Open. Both pass with the fix. Existing
+live-flow sequence, crossed-credit, half-close, budget and fixed close-deadline
+regressions also pass. Retirement now uses the strictly increasing ID high-water
+mark and live map, with constant retirement memory; nil/future IDs remain errors.
+
+Cleanup attribution uses observed descendants and VZ open files beneath the
+owned workspace, including disks/media beside the helper machine directory.
+It retains attributed PIDs across reparenting and fails on survivors or incomplete
+lsof evidence. Its portable regression covers unrelated VMs, sibling media,
+ancestry, reparenting and adjacent path prefixes. The final native run observed
+both helper and launchd-parented VZ PIDs and required their absence on cleanup.
+
+Private evidence set: pr24-churn. Guest runtime source
+is `4ecd68e`; later guest/protocol commits only adjust test expectations. The
+final host/harness source is `2861955`. A unique disposable Lima VZ builder
+(4 CPU / 8 GiB / 40 GiB) rebuilt the guest and rootfs using unchanged pins and
+the authenticated unchanged kernel. Complete signature verification passed for
+all source inputs and all 119 Debian packages, including the ten-package formatter
+closure. Signature/key/chain evidence is in `signature-authentication/`.
+Duplicate bundle assemblies matched; installed immutable artifact set pr24-churn has digest
+`b8e56af2c3fc6db224b2bc6a272c2260c3a2217e9c8a6c007511b4b452014c14`.
+Swift and the signed helper were unchanged.
+
+One 2 CPU / 4096 MiB / approximately 8 GiB guest ran at a time. Full harness
+runs `canaveral-native-AwGiRF` (662 s) and `canaveral-native-fcoAtC` (666 s)
+record `nativeAcceptance:true` with no case failures. The latter includes the
+corrected sibling-media attribution. Both passed workspace transfers, proxy and
+ownership denials, egress-off refusal, renewal beyond original expiry, release,
+ordinary expiry and autonomous loss fencing. Helpers stopped 86/167 ms after
+the respective loss deadlines, before recovery. The separate fresh-guest repeat
+`canaveral-native-wr7pUF` passed pinned clone, npm, build-log download and cleanup.
+All three verified repository commit `67f3f118c7d8bf535280cf0b61697b1898f6567b`.
+
+Guest npm ci/test execution durations in run order were 131678/525 ms,
+134400/526 ms and 135464/528 ms. Including dispatch/polling, these were
+132577/1042 ms, 135329/1063 ms and 136040/1253 ms. Each run retains
+`workspace-build.json`, `workspace-npm-{ci,test}.json`, `workspace-build-log.json`
+and independent cleanup evidence. No data-reactor failure recurred.
+
+All owned controller/satellite/helper/VZ processes, workspace/machine/relay
+storage, builder and temporary build/Git/source copies were removed. Both full
+runs retain unchanged loss journals and stopped private databases with one
+unknown reservation each, pending operator reconciliation; no cleanup receipt
+or capacity release was fabricated (`loss-post-run-owned-cleanup.json`).
+Unrelated VMs and untracked coordination dependencies were untouched.
+
+Portable validation passed: 242 serial Rust tests with two build jobs;
+workspace/all-target clippy with warnings denied; guest AArch64 MUSL clippy;
+fmt; coordination typecheck/build and 1026 tests at concurrency two; standalone
+harness typecheck and process-attribution regression; seven signature-gate
+regressions; no-Python check; and the v1 public-API fixture. These results retain
+the experimental scope and previously listed production/topology acceptance gaps.
+
+### Main integration and full native acceptance (2026-11-13)
+
+PR 24 integrates PR 23's squash merge `e9fe93e` through merge commit `9caaabf`.
+Operation and transfer polls distinguish lane cancellation from a runtime stop:
+rotation, operation failure and transfer uncertainty leave an otherwise eligible
+lease running. Unservable active owners receive failure-bearing runtime stops;
+terminal leases retain a null failure. Pending runtime receipts and fresh readiness
+precede polls. Both acknowledgment paths accept the controller's first terminal
+outcome without replacing local uncertainty or replaying guest effects.
+
+The disposable Lima builder used 4 CPU / 8 GiB / 40 GiB and source `9caaabf`.
+All source signatures and all 119 Debian archives authenticated under unchanged
+pins, including the ten-package e2fsprogs closure. Apt received exact verified
+metadata and SHA256-checked archives through the loopback mirror, using only the
+pinned-primary keyring. No package bypassed that mirror. Authentication evidence
+is retained in the signature-authentication records for evidence set pr24-main.
+Preflight and byte-for-byte duplicate bundle assembly passed. Installed immutable
+artifact set pr24-main has bundle digest
+`1c9a1e93b7a4c3fe419c278f8cfaa79502165a03c7983c66068e30b663cc0216`.
+The production helper was rebuilt with full Xcode and signed through the local
+session wrapper; no identity details are exported.
+
+Rootfs SHA256 changed from
+`cbedf77aadd9291a3fc4c4864f1014fdd2401fce36688874e6cd39e04324ac46` to
+`a384225c087544447e357b015fe3bb1c994a74dc7bfbc9cffe7c23acba4d92fe`.
+Extracted non-agent file contents match; the rebuilt guest executable differs in
+symbol metadata and build ID. Removing symbols and the build-ID note produces
+identical executable payloads, SHA256
+`b450a066cb1fe2643fb85c06094f360dd771c7a2867cadd6e64fd5c81fcdc532`.
+Kernel and initrd digests are unchanged. This establishes the observed binary
+cause of the rootfs difference without claiming whole-build reproducibility.
+
+One full native run, vqpCrg,
+records `nativeAcceptance:true`, zero case failures, using host `e151061` and
+one 2 CPU / 4096 MiB / approximately 8 GiB guest at a time:
+
+- Workspace discovery, ext4 format/mount, both vsock channels and readiness passed.
+  Public CONNECT, pinned clone, npm ci/test and build-log download passed. Guest
+  npm execution took 137391/517 ms; downloaded log SHA256 is
+  `0eee63df96489eaf6c76ca4a1e404942a323664219544436af8e4abf3da9dbd6`.
+- Empty, binary and 307200-byte round trips, replacement, no-replace conflict and
+  disk-full receipts passed. Host LAN/tailnet/loopback, metadata/private targets,
+  port 80, foreign application and egress-off denials passed.
+- Active command/upload expiry preserved unknown outcomes; the upload retained
+  `authorization_lost`. The v1 command/output, isolation, renewal, release and
+  ordinary expiry cases passed. Renewal's command completed 2999 ms after the
+  original deadline. All five normal cleanup groups required workspaceRemoved
+  and dataPlaneClosed before releasing capacity and independently proved owned
+  helper/VZ absence and workspace/machine/relay removal.
+- Satellite-loss fencing stopped the helper 316 ms after its deadline, before
+  recovery. Recovery retained one unknown reservation. Post-run PID attribution,
+  helper-lock and lsof checks preceded external removal of owned residual storage.
+  The journal remains unchanged; the stopped private database retains its unknown
+  reservation pending operator reconciliation. No cleanup receipt was fabricated.
+
+Raw configuration, process argv, receipts, probe output and build-log bytes stay
+under `private/`. Shared JSON uses fixed field/value allowlists; console output
+uses the milestone allowlist, and proxy filenames use roles rather than targets.
+The final exporter preserves typed cleanup flags and deadlines; shared evidence
+was regenerated from private receipts and all 463 files passed checks for IPs,
+configured deny targets, private paths and signing identity fields.
+
+Portable checks passed: coordination typecheck/build and 1034 tests at concurrency
+two; all 249 Rust tests with two jobs and one test thread; workspace/all-target
+clippy and guest AArch64 MUSL clippy with warnings denied; fmt; all 17 Swift tests
+selected by `DirectBoot|SerialConsoleTests` under Xcode 27.2.0; nine signature/mirror
+regressions; five evidence/process regressions; standalone harness typecheck;
+no-Python check; and the v1 public API fixture.
+
+All owned runtime processes and storage, the builder and temporary source/input
+and duplicate assembly copies were removed. Installed artifacts and private
+acceptance evidence remain. Unrelated VMs and untracked coordination dependencies
+were untouched. Production, topology and the previously listed acceptance gaps
+remain open.

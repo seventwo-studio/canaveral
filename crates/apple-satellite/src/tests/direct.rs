@@ -41,8 +41,10 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
     let (tmp, mut c) = fixture_with(|m| {
         let root = m.ancestors().nth(3).unwrap().display().to_string();
         let m = m.display();
-        format!("#!/bin/sh\necho \"$1\" >> '{root}/calls'\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\nprepare) cat > '{root}/prepare.json'; mkdir -m 700 '{m}' ;;\nrun) while [ ! -f '{m}/power-off.request' ]; do sleep 0.01; done ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\nesac\n",
-            clock_json())
+        format!(
+            "#!/bin/sh\necho \"$1\" >> '{root}/calls'\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\nprepare) cat > '{root}/prepare.json'; mkdir -m 700 '{m}' ;;\nrun) while [ ! -f '{m}/power-off.request' ]; do sleep 0.01; done ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\nesac\n",
+            clock_json()
+        )
     });
     let root = tmp.path().to_owned();
     let bundle = root.join("bundle");
@@ -80,6 +82,8 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
         command_line: "console=hvc0 root=/dev/vda rootfstype=erofs ro".into(),
         agent_vsock_port: 1024,
         protocol: 1,
+        data_vsock_port: None,
+        data_protocol: None,
         tool_versions: [
             ("shell", "canaveral-shell-v1"),
             ("git", "git version 2.47"),
@@ -300,6 +304,20 @@ fn assert_cleaned(d: &Direct, w: &Wire) {
     assert_eq!(last["receipt"]["cleanup"], "complete");
 }
 #[test]
+fn failed_prepare_proves_data_closed_without_starting_a_reactor() {
+    let mut d = direct_fixture(|_| {});
+    install_helper(&mut d.c, &format!("#!/bin/sh\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\nprepare) cat >/dev/null; exit 1 ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\nesac\n", clock_json()));
+    let mut s = seeded(&d.c);
+    let mut w = wire(s.assignment().unwrap().clone());
+    assert!(s.run_once(&mut w).is_err());
+    assert!(!s.state.prepared);
+    assert!(s.state.stopped && s.state.cleaned && s.state.released);
+    assert_eq!(s.state.direct.as_ref().unwrap().data_closed, Some(true));
+    assert!(!d.c.state.join("workspace").exists());
+    let (_, last) = w.requests.last().unwrap();
+    assert_eq!(last["receipt"]["cleanup"], "complete");
+}
+#[test]
 fn ready_only_after_bound_guest_ready_then_release_cleans_owned_state() {
     let d = direct_fixture(|_| {});
     validate_local(&d.c).unwrap();
@@ -456,6 +474,10 @@ fn recovered_ready_launch_reports_unknown_and_never_relaunches_or_execs() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
+        operator_deny_digest: None,
+        data_closed: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),
@@ -510,6 +532,7 @@ fn started_record_must_bind_this_launch_and_private_relay() {
         guest::read_started(&machine, &e, now).unwrap(),
         Some(sock.clone())
     );
+    assert!(guest::read_started_with_data(&machine, &e, now).is_err());
     for (key, value) in [
         ("bootAttempt", json!(uuid::Uuid::from_u128(6))),
         ("memberID", json!(uuid::Uuid::from_u128(1))),
@@ -521,7 +544,18 @@ fn started_record_must_bind_this_launch_and_private_relay() {
         std::fs::write(&file, bad.to_string()).unwrap();
         assert!(guest::read_started(&machine, &e, now).is_err(), "{key}");
     }
+    let mut workspace = good.clone();
+    workspace["dataSocketPath"] = json!(sock.replace("agent.sock", "data.sock"));
+    std::fs::write(&file, workspace.to_string()).unwrap();
+    assert_eq!(
+        guest::read_started_with_data(&machine, &e, now).unwrap(),
+        Some(sock.clone())
+    );
+    workspace["dataSocketPath"] = json!("/private/tmp/consumer.sock");
+    std::fs::write(&file, workspace.to_string()).unwrap();
+    assert!(guest::read_started(&machine, &e, now).is_err());
     // A relay directory that is not privately owned is never connected.
+
     assert!(guest::connect(&sock).is_err());
 }
 

@@ -1,4 +1,4 @@
-use crate::{runtime, Launch};
+use crate::{launch::BootLaunch, runtime};
 use canaveral_guest_protocol::Result;
 use std::{
     ffi::CString,
@@ -9,7 +9,13 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
 };
-fn mount(source: &str, target: &str, kind: &str, flags: libc::c_ulong, data: &str) -> Result<()> {
+pub(crate) fn mount(
+    source: &str,
+    target: &str,
+    kind: &str,
+    flags: libc::c_ulong,
+    data: &str,
+) -> Result<()> {
     fs::create_dir_all(target)?;
     let (source, target, kind, data) = (
         CString::new(source)?,
@@ -32,7 +38,7 @@ fn mount(source: &str, target: &str, kind: &str, flags: libc::c_ulong, data: &st
     Ok(())
 }
 pub(crate) fn run() -> Result<()> {
-    // Root is supplied as read-only EROFS; never remount or format a block device.
+    // Root is read-only EROFS; only the independently identified v2 workspace may be formatted.
     mount(
         "proc",
         "/proc",
@@ -69,60 +75,79 @@ pub(crate) fn run() -> Result<()> {
         libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
         "size=1048576,mode=0755",
     )?;
-    mount(
-        "tmpfs",
-        "/workspace",
-        "tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        &format!(
-            "size={},uid=1000,gid=1000,mode=0700",
-            launch.workspace_bytes
-        ),
-    )?;
-    runtime::probes(&launch)?;
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let listener = unsafe { File::from_raw_fd(fd) };
-    let mut address: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
-    address.svm_family = libc::AF_VSOCK as u16;
-    address.svm_port = 1024;
-    address.svm_cid = libc::VMADDR_CID_ANY;
-    if unsafe {
-        libc::bind(
-            fd,
-            (&address as *const libc::sockaddr_vm).cast(),
-            std::mem::size_of_val(&address) as u32,
-        )
-    } != 0
-        || unsafe { libc::listen(fd, 1) } != 0
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // Exactly one accepted launch session. No accept loop or authority restoration.
-    let mut peer: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
-    let accepted = unsafe {
-        libc::accept4(
-            fd,
-            (&mut peer as *mut libc::sockaddr_vm).cast(),
-            &mut len,
-            libc::SOCK_CLOEXEC,
-        )
+    let result = match launch {
+        BootLaunch::Legacy(launch) => {
+            mount(
+                "tmpfs",
+                "/workspace",
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV,
+                &format!(
+                    "size={},uid=1000,gid=1000,mode=0700",
+                    launch.workspace_bytes
+                ),
+            )?;
+            runtime::probes(&launch)?;
+            let control_listener = vsock_listener(1024)?;
+            runtime::session(accept_host(control_listener)?, &launch)
+        }
+        BootLaunch::Workspace(launch) => {
+            crate::workspace_boot::loopback()?;
+            let proxy = std::net::TcpListener::bind("127.0.0.1:18080")?;
+            let workspace = crate::workspace_boot::prepare(&launch)?;
+            let probe_scope = crate::Launch {
+                binding: launch.binding.clone(),
+                manifest: launch.manifest.clone(),
+                workspace_bytes: launch.workspace.bytes,
+            };
+            runtime::probes(&probe_scope)?;
+            // Publish both transport listeners only after provisioning/probes,
+            // so the peer's handshake deadline does not include mkfs latency.
+            let data_listener = vsock_listener(1025)?;
+            let control_listener = vsock_listener(1024)?;
+            let ready = crate::data::Readiness::new();
+            let state = ready.clone();
+            let data_launch = launch.clone();
+            let worker = std::thread::spawn(move || {
+                let result = (|| -> Result<()> {
+                    use std::os::fd::AsRawFd;
+                    runtime::nonblock(data_listener.as_raw_fd())?;
+                    let deadline = runtime::now() + 5000;
+                    loop {
+                        if state.stop.load(std::sync::atomic::Ordering::Acquire)
+                            || runtime::now() >= deadline
+                        {
+                            return Err("data accept deadline".into());
+                        }
+                        let mut poll = libc::pollfd {
+                            fd: data_listener.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        if unsafe { libc::poll(&mut poll, 1, 10) } > 0 {
+                            break;
+                        }
+                    }
+                    let data = accept_host(data_listener)?;
+                    crate::data::session(
+                        data,
+                        proxy,
+                        &data_launch,
+                        &state,
+                        crate::file_executor::linux::start(workspace)?,
+                    )
+                })();
+                if let Err(error) = result {
+                    eprintln!("guest data closed: {error}");
+                }
+            });
+            let control = accept_host(control_listener)?;
+            let result = runtime::workspace_session(control, &launch, &ready);
+            ready.stop.store(true, std::sync::atomic::Ordering::Release);
+            let _ = worker.join();
+            result
+        }
     };
-    if accepted < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let stream = unsafe { File::from_raw_fd(accepted) };
-    drop(listener);
-    if len as usize != std::mem::size_of_val(&peer)
-        || peer.svm_family != libc::AF_VSOCK as u16
-        || peer.svm_cid != libc::VMADDR_CID_HOST
-    {
-        return Err("vsock peer is not HOST_CID".into());
-    }
-    let result = runtime::session(stream, &launch);
     // Remain PID1 and reap late orphans while the native supervisor fences the VM.
     eprintln!("guest session closed: {result:?}; native fence required");
     loop {
@@ -135,7 +160,7 @@ pub(crate) fn run() -> Result<()> {
 }
 
 /// Kernel mountinfo and sysfs are mounted by PID1 above, never supplied by rootfs.
-fn read_launch() -> Result<Launch> {
+fn read_launch() -> Result<BootLaunch> {
     let device = launch_mount(&fs::read_to_string("/proc/self/mountinfo")?)?;
     let nonce = fs::read_to_string("/proc/cmdline")?
         .split_whitespace()
@@ -187,9 +212,8 @@ fn read_launch() -> Result<Launch> {
     if bytes.len() > 16384 {
         return Err("launch config too large".into());
     }
-    let launch: Launch = serde_json::from_slice(&bytes)?;
-    launch.validate()?;
-    if launch.binding.boot_attempt.to_string() != nonce[0] {
+    let launch = BootLaunch::parse(&bytes)?;
+    if launch.binding().boot_attempt.to_string() != nonce[0] {
         return Err("boot nonce mismatch".into());
     }
     Ok(launch)
@@ -227,6 +251,58 @@ fn launch_mount(info: &str) -> Result<String> {
     }
     Ok(entry[2].to_owned())
 }
+
+fn vsock_listener(port: u32) -> Result<File> {
+    use std::os::fd::AsRawFd;
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let listener = unsafe { File::from_raw_fd(fd) };
+    let mut address: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+    address.svm_family = libc::AF_VSOCK as u16;
+    address.svm_port = port;
+    address.svm_cid = libc::VMADDR_CID_ANY;
+    if unsafe {
+        libc::bind(
+            listener.as_raw_fd(),
+            (&address as *const libc::sockaddr_vm).cast(),
+            std::mem::size_of_val(&address) as u32,
+        )
+    } != 0
+        || unsafe { libc::listen(fd, 1) } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(listener)
+}
+fn accept_host(listener: File) -> Result<File> {
+    use std::os::fd::AsRawFd;
+    let mut peer: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
+    let fd = unsafe {
+        libc::accept4(
+            listener.as_raw_fd(),
+            (&mut peer as *mut libc::sockaddr_vm).cast(),
+            &mut len,
+            libc::SOCK_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stream = unsafe { File::from_raw_fd(fd) };
+    // Consume the listener even on failure: no reconnect or second peer.
+    drop(listener);
+    if len as usize != std::mem::size_of_val(&peer)
+        || peer.svm_family != libc::AF_VSOCK as u16
+        || peer.svm_cid != libc::VMADDR_CID_HOST
+    {
+        return Err("vsock peer is not HOST_CID".into());
+    }
+    Ok(stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

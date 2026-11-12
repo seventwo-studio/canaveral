@@ -17,8 +17,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -30,7 +30,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Catalogue"
                 }
               }
             }
@@ -59,8 +59,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -72,7 +72,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Catalogue"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -91,48 +91,6 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Application, resource or connection limit exceeded",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              },
-              "Retry-After": {
-                "schema": {
-                  "const": "60"
-                },
-                "description": "Seconds before retry admission; preserve mutation identity."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StructuredError"
-                }
-              }
-            }
-          },
           "200": {
             "description": "Success",
             "headers": {
@@ -168,6 +126,48 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "description": "Persist the UUID and normalized body before dispatch. Retry only that identity and body after uncertainty. Server policy enforces image permissions, resource minima/granularity, TTL, lifetime, quotas and capacity. Current acquisition creates a primary member; paired phone/watch acquisition is not implemented.",
@@ -184,15 +184,15 @@
       },
       "get": {
         "operationId": "listLeases",
-        "summary": "List this application\u2019s leases",
+        "summary": "List this application’s leases",
         "security": [
           {
             "ApplicationBearer": []
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -204,7 +204,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeasePage"
                 }
               }
             }
@@ -233,8 +233,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -246,7 +246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LeasePage"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -279,8 +279,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -292,7 +292,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Lease"
                 }
               }
             }
@@ -321,8 +321,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -334,7 +334,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Lease"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -363,8 +363,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -376,7 +376,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeaseCredential"
                 }
               }
             }
@@ -405,8 +405,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -418,7 +418,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LeaseCredential"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -461,8 +461,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -474,7 +474,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/MutationResult"
                 }
               }
             }
@@ -503,8 +503,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -516,7 +516,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MutationResult"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -559,8 +559,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -572,7 +572,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/MutationResult"
                 }
               }
             }
@@ -601,8 +601,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -614,7 +614,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MutationResult"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -654,48 +654,6 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Application, resource or connection limit exceeded",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              },
-              "Retry-After": {
-                "schema": {
-                  "const": "60"
-                },
-                "description": "Seconds before retry admission; preserve mutation identity."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StructuredError"
-                }
-              }
-            }
-          },
           "200": {
             "description": "Success",
             "headers": {
@@ -728,6 +686,48 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -767,8 +767,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -780,7 +780,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Session"
                 }
               }
             }
@@ -809,8 +809,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -822,7 +822,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Session"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -860,8 +860,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -873,7 +873,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Session"
                 }
               }
             }
@@ -902,8 +902,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -915,7 +915,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Session"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -963,20 +963,12 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "101": {
+            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
             "headers": {
-              "Cache-Control": {
+              "Sec-WebSocket-Protocol": {
                 "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "const": "canaveral-session-v1"
                 }
               }
             }
@@ -1005,12 +997,20 @@
               }
             }
           },
-          "101": {
-            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
-              "Sec-WebSocket-Protocol": {
+              "Cache-Control": {
                 "schema": {
-                  "const": "canaveral-session-v1"
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1058,48 +1058,6 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Application, resource or connection limit exceeded",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              },
-              "Retry-After": {
-                "schema": {
-                  "const": "60"
-                },
-                "description": "Seconds before retry admission; preserve mutation identity."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StructuredError"
-                }
-              }
-            }
-          },
           "200": {
             "description": "Success",
             "headers": {
@@ -1132,6 +1090,48 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1171,8 +1171,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1184,7 +1184,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Operation"
                 }
               }
             }
@@ -1213,8 +1213,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1226,7 +1226,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Operation"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1265,48 +1265,6 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Application, resource or connection limit exceeded",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses must not be cached."
-              },
-              "Retry-After": {
-                "schema": {
-                  "const": "60"
-                },
-                "description": "Seconds before retry admission; preserve mutation identity."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StructuredError"
-                }
-              }
-            }
-          },
           "200": {
             "description": "Success",
             "headers": {
@@ -1342,6 +1300,48 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "description": "Application-owned durable waiting lease intent. See docs/requests.md. SDK never polls or retries.",
@@ -1365,8 +1365,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1378,7 +1378,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/RequestPage"
                 }
               }
             }
@@ -1407,8 +1407,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1420,7 +1420,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RequestPage"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1449,8 +1449,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1462,7 +1462,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Request"
                 }
               }
             }
@@ -1491,8 +1491,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1504,7 +1504,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Request"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1534,8 +1534,8 @@
           }
         ],
         "responses": {
-          "default": {
-            "description": "Request rejected or service unavailable",
+          "200": {
+            "description": "Success",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1547,7 +1547,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/Request"
                 }
               }
             }
@@ -1576,8 +1576,8 @@
               }
             }
           },
-          "200": {
-            "description": "Success",
+          "default": {
+            "description": "Request rejected or service unavailable",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1589,7 +1589,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Request"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1617,6 +1617,263 @@
             }
           }
         ]
+      }
+    },
+    "/v1/leases/{leaseId}/transfers": {
+      "post": {
+        "operationId": "createLinuxTransfer",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinuxTransferIntent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored transfer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinuxTransfer"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Stored transfer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinuxTransfer"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured error; unknown work must be inspected before any further action"
+          }
+        }
+      }
+    },
+    "/v1/leases/{leaseId}/transfers/{id}": {
+      "get": {
+        "operationId": "getLinuxTransfer",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored transfer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinuxTransfer"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured error; unknown work must be inspected before any further action"
+          }
+        }
+      }
+    },
+    "/v1/leases/{leaseId}/transfers/{id}/steps": {
+      "post": {
+        "operationId": "createLinuxTransferStep",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "step": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "request": {
+                    "$ref": "#/components/schemas/LinuxTransferRequest"
+                  }
+                },
+                "required": [
+                  "step",
+                  "request"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored transfer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinuxTransferStep"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Stored transfer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinuxTransferStep"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured error; unknown work must be inspected before any further action"
+          }
+        }
+      }
+    },
+    "/v1/leases/{leaseId}/transfers/{id}/steps/{step}": {
+      "get": {
+        "operationId": "getLinuxTransferStep",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              }
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored transfer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinuxTransferStep"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured error; unknown work must be inspected before any further action"
+          }
+        }
       }
     }
   },
@@ -3027,6 +3284,12 @@
                       "maxLength": 4096,
                       "pattern": "^[^\\u0000]*$"
                     }
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1800000,
+                    "default": 30000
                   }
                 },
                 "required": [
@@ -3514,6 +3777,378 @@
             "format": "uuid"
           }
         }
+      },
+      "LinuxTransferIntent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+                "not": {
+                  "const": "00000000-0000-0000-0000-000000000000"
+                }
+              },
+              "member": {
+                "const": "primary"
+              },
+              "direction": {
+                "const": "upload"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "replace": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "direction",
+              "path",
+              "bytes",
+              "sha256",
+              "replace"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+                "not": {
+                  "const": "00000000-0000-0000-0000-000000000000"
+                }
+              },
+              "member": {
+                "const": "primary"
+              },
+              "direction": {
+                "const": "download"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            },
+            "required": [
+              "id",
+              "member",
+              "direction",
+              "path"
+            ]
+          }
+        ]
+      },
+      "LinuxTransferRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "beginUpload"
+              },
+              "path": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "replace": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "path",
+              "bytes",
+              "sha256",
+              "replace"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "beginDownload"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "path"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "write"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "data": {
+                "type": "string",
+                "contentEncoding": "base64",
+                "maxLength": 87384
+              }
+            },
+            "required": [
+              "action",
+              "offset",
+              "data"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "read"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxBytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65536
+              }
+            },
+            "required": [
+              "action",
+              "offset",
+              "maxBytes"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "finish"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "action",
+              "bytes",
+              "sha256"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "abort"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        ]
+      },
+      "LinuxTransfer": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            }
+          },
+          "leaseId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            }
+          },
+          "member": {
+            "const": "primary"
+          },
+          "direction": {
+            "enum": [
+              "upload",
+              "download"
+            ]
+          },
+          "state": {
+            "enum": [
+              "created",
+              "writing",
+              "reading",
+              "committed",
+              "verified",
+              "aborted",
+              "failed",
+              "unknown"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "durable": {
+            "type": "boolean"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "enum": [
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "required": [
+                  "code",
+                  "outcome"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "leaseId",
+          "member",
+          "direction",
+          "state",
+          "offset",
+          "bytes",
+          "sha256",
+          "durable",
+          "updatedAt",
+          "error"
+        ]
+      },
+      "LinuxTransferStep": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            }
+          },
+          "step": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "dispatched",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "receipt": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "step",
+          "state",
+          "receipt",
+          "updatedAt"
+        ]
       }
     }
   }

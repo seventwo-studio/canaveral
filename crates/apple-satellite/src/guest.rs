@@ -49,6 +49,8 @@ struct Started {
     boot_attempt: Uuid,
     #[serde(rename = "agentSocket")]
     agent_socket: String,
+    #[serde(default, rename = "dataSocketPath")]
+    data_socket_path: Option<String>,
 }
 pub struct Expected {
     pub lease_id: Uuid,
@@ -60,16 +62,31 @@ pub struct Expected {
 }
 /// The only accepted relay location: SOCKET_ROOT/canaveral-<lowercase uuid>/agent.sock.
 fn relay_directory(path: &str) -> Option<PathBuf> {
+    relay_directory_for(path, "agent.sock")
+}
+fn relay_directory_for(path: &str, socket: &str) -> Option<PathBuf> {
     let rest = path
         .strip_prefix(SOCKET_ROOT)?
         .strip_prefix("/canaveral-")?
-        .strip_suffix("/agent.sock")?;
+        .strip_suffix(&format!("/{socket}"))?;
     let id = Uuid::parse_str(rest).ok()?;
     (id.hyphenated().to_string() == rest && !id.is_nil())
         .then(|| PathBuf::from(format!("{SOCKET_ROOT}/canaveral-{rest}")))
 }
 /// `Ok(None)` until the helper publishes VMM start; any binding mismatch is an error.
 pub fn read_started(machine: &Path, e: &Expected, now: f64) -> Result<Option<String>> {
+    read_started_inner(machine, e, now, false)
+}
+/// Workspace launches must publish the data relay explicitly; no inferred fallback.
+pub fn read_started_with_data(machine: &Path, e: &Expected, now: f64) -> Result<Option<String>> {
+    read_started_inner(machine, e, now, true)
+}
+fn read_started_inner(
+    machine: &Path,
+    e: &Expected,
+    now: f64,
+    require_data: bool,
+) -> Result<Option<String>> {
     let Some(bytes) = private::read_owned(&machine.join("direct-started.json"), 4096)
         .map_err(|_| "unsafe direct start record")?
     else {
@@ -86,6 +103,10 @@ pub fn read_started(machine: &Path, e: &Expected, now: f64) -> Result<Option<Str
         || s.boot_session_id != e.boot_session_id
         || s.boot_attempt != e.boot_attempt
         || relay_directory(&s.agent_socket).is_none()
+        || (require_data && s.data_socket_path.is_none())
+        || s.data_socket_path.as_ref().is_some_and(|path| {
+            relay_directory_for(path, "data.sock") != relay_directory(&s.agent_socket)
+        })
     {
         return Err("direct start record does not match this launch");
     }
@@ -122,7 +143,17 @@ pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
 }
 /// Verifies private ownership of the published relay and of its peer before any frame.
 pub fn connect(path: &str) -> Result<UnixStream> {
-    let dir = relay_directory(path).ok_or("unexpected relay socket path")?;
+    connect_relay(path, "agent.sock")
+}
+/// Data relay must be the exact sibling of the authenticated control relay.
+/// No guest-supplied or independently published path is accepted.
+pub fn connect_data(agent_path: &str) -> Result<UnixStream> {
+    let directory = relay_directory(agent_path).ok_or("unexpected control relay path")?;
+    let path = directory.join("data.sock");
+    connect_relay(path.to_str().ok_or("invalid data relay path")?, "data.sock")
+}
+fn connect_relay(path: &str, socket: &str) -> Result<UnixStream> {
+    let dir = relay_directory_for(path, socket).ok_or("unexpected relay socket path")?;
     let me = unsafe { libc::geteuid() };
     // Nofollow walk: root-owned sticky SOCKET_ROOT, then our private directory.
     let opened = private::walk(&dir).map_err(|_| "unsafe relay directory")?;
@@ -136,14 +167,64 @@ pub fn connect(path: &str) -> Result<UnixStream> {
     {
         return Err("relay socket is not privately owned");
     }
-    let stream = UnixStream::connect(path).map_err(|_| "relay socket refused")?;
+    let stream = if socket == "data.sock" {
+        connect_nonblocking(path)?
+    } else {
+        UnixStream::connect(path).map_err(|_| "relay socket refused")?
+    };
     if peer_uid(&stream) != Some(me) {
         return Err("relay peer is not the helper uid");
+    }
+    let after = std::fs::symlink_metadata(path).map_err(|_| "relay socket disappeared")?;
+    let current = private::walk(&dir).map_err(|_| "relay directory changed")?;
+    let current = current.metadata().map_err(|_| "relay directory changed")?;
+    if (s.dev(), s.ino(), s.uid(), s.mode())
+        != (after.dev(), after.ino(), after.uid(), after.mode())
+        || (d.dev(), d.ino(), d.uid(), d.mode())
+            != (current.dev(), current.ino(), current.uid(), current.mode())
+    {
+        return Err("relay changed during connect");
     }
     stream
         .set_nonblocking(true)
         .map_err(|_| "relay socket refused")?;
     Ok(stream)
+}
+/// Set nonblocking before connect: a full helper listen backlog must not stall
+/// the supervision thread. An incomplete connection is refused, never retried.
+fn connect_nonblocking(path: &str) -> Result<UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_bytes();
+    if bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+        return Err("invalid data relay path");
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = std::mem::size_of_val(&address) as u8;
+    }
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err("data socket unavailable");
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        || unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                &address as *const _ as *const libc::sockaddr,
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        } != 0
+    {
+        return Err("data socket refused or pending");
+    }
+    Ok(UnixStream::from(fd))
 }
 /// Removes only the exact published relay directory after positive VM stop.
 pub fn remove_published(path: &str) -> Result<()> {
@@ -161,7 +242,11 @@ pub fn remove_published(path: &str) -> Result<()> {
         let kind = entry
             .file_type()
             .map_err(|_| "relay directory unreadable")?;
-        if entry.file_name() != "agent.sock" || !kind.is_socket() {
+        if !["agent.sock", "data.sock"]
+            .iter()
+            .any(|name| entry.file_name() == *name)
+            || !kind.is_socket()
+        {
             return Err("unexpected relay directory content; retained");
         }
         std::fs::remove_file(entry.path()).map_err(|_| "relay socket removal failed")?;
@@ -535,6 +620,64 @@ pub(crate) mod tests {
         peer.write_all(&0u32.to_be_bytes()).unwrap();
         assert_eq!(session.pump(100.0), Err("guest protocol violation"));
         assert!(!session.ready(100.0));
+    }
+    #[test]
+    fn saturated_data_backlog_is_refused_without_blocking_supervision() {
+        use std::os::{fd::AsRawFd, unix::net::UnixListener};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let start = std::time::Instant::now();
+        let mut pending = Vec::new();
+        let mut refused = false;
+        for _ in 0..32 {
+            match connect_nonblocking(path.to_str().unwrap()) {
+                Ok(stream) => {
+                    assert_ne!(
+                        unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) }
+                            & libc::O_NONBLOCK,
+                        0
+                    );
+                    pending.push(stream);
+                }
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+    #[test]
+    fn data_relay_is_a_private_sibling_and_cleanup_removes_both() {
+        use std::os::unix::{
+            fs::{DirBuilderExt, PermissionsExt},
+            net::UnixListener,
+        };
+        let dir = PathBuf::from(format!(
+            "{SOCKET_ROOT}/canaveral-{}",
+            crate::random_uuid().unwrap()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let agent = dir.join("agent.sock");
+        let data = dir.join("data.sock");
+        let a = UnixListener::bind(&agent).unwrap();
+        let d = UnixListener::bind(&data).unwrap();
+        for p in [&agent, &data] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let client = connect_data(agent.to_str().unwrap()).unwrap();
+        let _peer = d.accept().unwrap();
+        drop(client);
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(connect_data(agent.to_str().unwrap()).is_err());
+        assert!(connect_data(data.to_str().unwrap()).is_err());
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o600)).unwrap();
+        drop((a, d));
+        remove_published(agent.to_str().unwrap()).unwrap();
+        assert!(!dir.exists());
     }
     #[test]
     fn relay_path_and_remaining_bounds() {

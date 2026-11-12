@@ -20,15 +20,41 @@ public struct DirectBoot: Codable, Sendable, Equatable {
     public var memberID: UUID
     public var bootSessionID: UUID
     public var bootAttempt: UUID
-    public var workspaceBytes: UInt64
+    public var workspaceBytes: UInt64?
+    public var workspace: DirectBootWorkspace?
+private enum CodingKeys: String, CodingKey, CaseIterable {
+    case version, kernel, initrd, rootfs, launchMedium, revision, launchFilesystemUUID
+    case bundleDigest, commandLine, leaseID, memberID, bootSessionID, bootAttempt, workspaceBytes, workspace
+}
+public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    version = try c.decode(Int.self, forKey: .version)
+    if version == 2 {
+        let keys = try decoder.container(keyedBy: DirectBootKey.self).allKeys.map(\.stringValue)
+        let allowed = Set(CodingKeys.allCases.filter { $0 != .workspaceBytes }.map(\.rawValue))
+        guard keys.allSatisfy({ allowed.contains($0) }) else { throw CanaveralError.invalid("Unknown v2 direct boot field.") }
+    }
+    kernel = try c.decode(PinnedBootFile.self, forKey: .kernel)
+    initrd = try c.decodeIfPresent(PinnedBootFile.self, forKey: .initrd)
+    rootfs = try c.decode(PinnedBootFile.self, forKey: .rootfs)
+    launchMedium = try c.decode(PinnedBootFile.self, forKey: .launchMedium)
+    revision = try c.decode(UInt64.self, forKey: .revision)
+    launchFilesystemUUID = try c.decode(UUID.self, forKey: .launchFilesystemUUID)
+    bundleDigest = try c.decode(String.self, forKey: .bundleDigest)
+    commandLine = try c.decode(String.self, forKey: .commandLine)
+    leaseID = try c.decode(UUID.self, forKey: .leaseID)
+    memberID = try c.decode(UUID.self, forKey: .memberID)
+    bootSessionID = try c.decode(UUID.self, forKey: .bootSessionID)
+    bootAttempt = try c.decode(UUID.self, forKey: .bootAttempt)
+    workspaceBytes = try c.decodeIfPresent(UInt64.self, forKey: .workspaceBytes)
+    workspace = try c.decodeIfPresent(DirectBootWorkspace.self, forKey: .workspace)
+}
     /// Digest-pinned launch medium is prepared by the trusted image builder for this tuple.
     public var serial: String { String(bootAttempt.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(20)) }
     public var effectiveCommandLine: String { commandLine + " canaveral.launch=" + bootAttempt.uuidString.lowercased() }
     public func validateShape(machine: Machine) throws {
-        guard version == 1, revision > 0, revision <= 9007199254740991, machine.os == .linux, machine.mode == .server, machine.memoryGiB > 0,
+        guard (version == 1 || version == 2), revision > 0, revision <= 9007199254740991, machine.os == .linux, machine.mode == .server, machine.memoryGiB > 0,
               machine.executionLeaseID == leaseID, machine.id == memberID,
-              workspaceBytes >= 16 * 1024 * 1024, workspaceBytes <= 1024 * 1024 * 1024,
-              workspaceBytes + 64 * 1024 * 1024 <= UInt64(machine.memoryGiB) * 1073741824,
               Self.digestIsValid(bundleDigest), !commandLine.isEmpty, commandLine.utf8.count <= 1993,
               commandLine.utf8.allSatisfy({ (32...126).contains($0) }),
               !commandLine.contains("\""), !commandLine.contains("'"),
@@ -40,13 +66,24 @@ public struct DirectBoot: Codable, Sendable, Equatable {
               !commandLine.split(separator: " ").contains("rw"),
               commandLine.split(separator: " ").filter({ $0.hasPrefix("root=") }).count == 1,
               commandLine.split(separator: " ").filter({ $0.hasPrefix("rootfstype=") }).count == 1 else {
-            throw CanaveralError.invalid("Invalid direct boot v1 inventory or launch binding.")
+            throw CanaveralError.invalid("Invalid direct boot inventory or launch binding.")
+        }
+        if version == 1 {
+            guard workspace == nil, let bytes = workspaceBytes,
+                  bytes >= 16 * 1024 * 1024, bytes <= 1024 * 1024 * 1024,
+                  bytes + 64 * 1024 * 1024 <= UInt64(machine.memoryGiB) * 1073741824 else {
+                throw CanaveralError.invalid("Invalid v1 tmpfs workspace.")
+            }
+        } else {
+            guard workspaceBytes == nil, let workspace else { throw CanaveralError.invalid("Direct boot v2 requires a disk workspace.") }
+            try workspace.validateShape(launchSerial: serial)
         }
         // v1 requires an audited bootstrap initrd to establish the separate launch mount.
         guard initrd != nil else { throw CanaveralError.invalid("Direct boot v1 without a bootstrap initrd is unsupported.") }
     }
     public func validate(machine: Machine) throws {
         try validateShape(machine: machine)
+        try workspace?.verify()
         for file in [kernel, rootfs, launchMedium] + (initrd.map { [$0] } ?? []) { try file.verify() }
         #if os(macOS)
         let kernelHeader = try Self.header(kernel.path, count: 64)
@@ -63,6 +100,77 @@ public struct DirectBoot: Codable, Sendable, Equatable {
         return try file.read(upToCount: count) ?? Data()
     }
     static func digestIsValid(_ value: String) -> Bool { value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }
+}
+
+private struct DirectBootKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? { nil }
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
+}
+
+/// Satellite-owned writable media. The helper only validates and attaches it.
+public struct DirectBootWorkspace: Codable, Sendable, Equatable {
+    public var path: String
+    public var serial: String
+    public var bytes: UInt64
+private enum CodingKeys: String, CodingKey { case path, serial, bytes }
+public init(path: String, serial: String, bytes: UInt64) { self.path = path; self.serial = serial; self.bytes = bytes }
+public init(from decoder: Decoder) throws {
+    let keys = try decoder.container(keyedBy: DirectBootKey.self).allKeys.map(\.stringValue)
+    guard Set(keys) == Set(["path", "serial", "bytes"]) else { throw CanaveralError.invalid("Invalid workspace fields.") }
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    path = try c.decode(String.self, forKey: .path)
+    serial = try c.decode(String.self, forKey: .serial)
+    bytes = try c.decode(UInt64.self, forKey: .bytes)
+}
+    func validateShape(launchSerial: String) throws {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count > 1, parts.first == "", !path.utf8.contains(0),
+              parts.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+              serial.utf8.count == 20, serial.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              serial != launchSerial, bytes >= 16777216, bytes <= 9007199254740991, bytes % 4096 == 0 else {
+            throw CanaveralError.invalid("Invalid workspace disk identity or size.")
+        }
+    }
+    func verify(identity: (Int64, UInt64)) throws {
+        let current = try verify()
+        guard current == identity else { throw CanaveralError.invalid("Workspace identity changed during attachment.") }
+    }
+    @discardableResult func verify() throws -> (Int64, UInt64) {
+        try validateShape(launchSerial: "")
+        #if os(macOS)
+        var directory = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw CanaveralError.invalid("Cannot open workspace root.") }
+        defer { close(directory) }
+        let parts = path.split(separator: "/")
+        for (index, part) in parts.enumerated() {
+            let leaf = index == parts.count - 1
+            let fd = openat(directory, String(part), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (leaf ? 0 : O_DIRECTORY))
+            guard fd >= 0 else { throw CanaveralError.invalid("Unsafe workspace path.") }
+            var info = stat()
+            guard fstat(fd, &info) == 0 else { close(fd); throw CanaveralError.invalid("Cannot inspect workspace.") }
+            if leaf {
+                defer { close(fd) }
+                guard info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
+                      info.st_mode & 0o7777 == 0o600, info.st_nlink == 1,
+                      info.st_size >= 0, UInt64(info.st_size) == bytes else {
+                    throw CanaveralError.invalid("Workspace must be owned, mode 0600, single-link and exact size.")
+                }
+                return (Int64(info.st_dev), UInt64(info.st_ino))
+            } else {
+                guard (info.st_uid == 0 || info.st_uid == getuid()),
+                      info.st_mode & 0o022 == 0 || (info.st_uid == 0 && info.st_mode & S_ISVTX != 0) else {
+                    close(fd); throw CanaveralError.invalid("Unsafe workspace ancestor.")
+                }
+                close(directory); directory = fd
+            }
+        }
+        throw CanaveralError.invalid("Missing workspace disk.")
+        #else
+        throw CanaveralError.unavailable("Workspace disks require macOS.")
+        #endif
+    }
 }
 
 public struct PinnedBootFile: Codable, Sendable, Equatable {

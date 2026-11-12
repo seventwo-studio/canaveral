@@ -113,3 +113,24 @@ by the application's maximum. The controller returns 400
 configured default or maximum below 30 seconds without clamping. This is a Linux
 consumer contract change; other lease kinds and generic application limits keep
 their existing bounds. The SDK preserves this structured service error.
+
+## Linux workspace transfers (ST-535)
+
+`LeaseClient` exposes `createTransfer`, `transfer`, `createTransferStep` and
+`transferStep` for current-key-only workspace-v2 access. `uploadWorkspaceFile`
+and `downloadWorkspaceFile` are exported by the consumer-client entry point.
+Supply the transfer UUID, a durable `TransferJournal.save` callback, and a bounded
+wait callback (optionally an AbortSignal). The helper saves intent and each exact
+step before dispatch, hashes chunks incrementally, and requires final committed
+or verified evidence. Downloads await the caller's durable chunk sink before
+advancing and evicting the previous read. Publication of a local downloaded file
+remains the caller's responsibility after verification.
+
+No mutation is automatically retried. A transport failure or unknown receipt
+stops the helper; inspect the persisted UUID/step with the current lease key.
+Do not rerun a helper on a partially completed download or assign a new UUID to
+repeat an uncertain upload. Recovery uses the low-level stored step and receipt;
+a 410 chunk_evicted means those bytes must already be in the durable sink.
+Unknown transfers hold their file lane until lease termination. Commands have a
+separate lane and workspace commands accept `arguments.timeoutMs` (1..1800000,
+default 30000). Legacy images retain the old command shape and timeout.

@@ -91,5 +91,5 @@ test("Unicode policy ordering, resource limits and TTL defaults match fixed wire
   const templates = ["😀", "\uFFFF", "alpha"].map(id => ({ id, revision: "4", arch: "arm64" }));
   const limits = {resources:reference.APPLICATION.limits.resources,activeLeases:2};
   const input = {...reference.APPLICATION,templates,limits};
-  assert.deepEqual(applicationSpec(input), {...reference.APPLICATION, templates:["alpha","\uFFFF","😀"].map(id=>({id,revision:"4",arch:"arm64"}))});
+  assert.deepEqual(applicationSpec(input), {...reference.APPLICATION, linuxEgress:{enabled:false}, templates:["alpha","\uFFFF","😀"].map(id=>({id,revision:"4",arch:"arm64"}))});
 });

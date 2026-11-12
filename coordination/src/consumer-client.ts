@@ -1,3 +1,6 @@
+import type { FileTransfer, FileStep, FileRequest, TransferIntent } from "./linux-transfer-sdk.ts";
+export { uploadWorkspaceFile, downloadWorkspaceFile } from "./linux-transfer-sdk.ts";
+export type { FileTransfer, FileStep, FileRequest, TransferIntent, TransferJournal, TransferWait } from "./linux-transfer-sdk.ts";
 import { operationReceipt } from "./linux-operations.ts";
 import { X509Certificate, randomBytes, createHash } from "node:crypto";
 import type { Duplex } from "node:stream";
@@ -59,10 +62,10 @@ function waitingRequest(value: unknown, id?: string): WaitingRequest {
 /** Fresh lease-scoped key. Store privately and never log it. */
 export interface LeaseCredential { id: string; credential: string }
 
-export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[] } }
+export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[]; timeoutMs?: number } }
 export interface Operation {
   id: string; leaseId: string; member: "primary"; state: "queued" | "succeeded" | "failed" | "unknown"; updatedAt: string;
-  result?: Record<string, unknown>;
+  dispatchedAt?: string; result?: Record<string, unknown>;
 }
 export interface CreateOperationResult { created: boolean; operation: Operation }
 function boundOperation(value: unknown, leaseId: string, id: string): Operation {
@@ -454,7 +457,8 @@ function releaseBody(request: ReleaseRequest): Record<string, unknown> {
 }
 
 class LeaseOperations {
-  constructor(protected readonly transport: Transport) {}
+  protected readonly transport: Transport;
+  constructor(transport: Transport) { this.transport = transport; }
   protected async inspectById(leaseId: string): Promise<Lease> {
     const id = uuid(leaseId, "leaseId");
     const { value } = await parsed(this.transport, "GET", `/v1/leases/${id}`, undefined, [200], false, undefined, lease);
@@ -547,16 +551,17 @@ export class LeaseClient extends LeaseOperations {
   readonly leaseId: string;
   constructor(options: LeaseClientOptions) {
     const leaseId = uuid(options.leaseId, "leaseId");
-    super(new Transport(options, options.leaseKey)); this.leaseId = leaseId;
+    super(new Transport({...options,timeoutMs:Math.min(options.timeoutMs??20000,20000)}, options.leaseKey)); this.leaseId = leaseId;
   }
   async createOperation(request: OperationRequest): Promise<CreateOperationResult> {
     const r = exact(request, ["id", "member", "action", "arguments"], "Operation request"), id = uuid(r.id, "id");
-    const args = exact(r.arguments, ["argv"], "Operation arguments"), argv = args.argv;
+    const args = exact(r.arguments, ["argv", "timeoutMs"], "Operation arguments"), argv = args.argv;
     if (r.member !== "primary" || r.action !== "shell" || !Array.isArray(argv) || !argv.length || argv[0] === "" ||
         argv.some(v => typeof v !== "string" || v.includes("\0")) || Buffer.byteLength(JSON.stringify(argv)) > 65536) {
       throw new ConsumerConfigurationError("Invalid shell operation.", "invalid_request");
     }
-    const body = { id, member: "primary", action: "shell", arguments: { argv } };
+    if (args.timeoutMs !== undefined && (typeof args.timeoutMs !== "number" || !Number.isSafeInteger(args.timeoutMs) || args.timeoutMs < 1 || args.timeoutMs > 1800000)) throw new ConsumerConfigurationError("Invalid timeoutMs.", "invalid_request");
+    const body = { id, member: "primary", action: "shell", arguments: { argv, ...(args.timeoutMs === undefined ? {} : {timeoutMs:args.timeoutMs}) } };
     const { status, value } = await parsed(this.transport, "POST", `/v1/leases/${this.leaseId}/operations`, body, [200, 201], true, id,
       value => boundOperation(value, this.leaseId, id));
     return { created: status === 201, operation: value };
@@ -565,6 +570,22 @@ export class LeaseClient extends LeaseOperations {
     const id = uuid(operationId, "operationId");
     return (await parsed(this.transport, "GET", `/v1/leases/${this.leaseId}/operations/${id}`, undefined, [200], false, undefined,
       value => boundOperation(value, this.leaseId, id))).value;
+  }
+  async createTransfer(intent:TransferIntent):Promise<FileTransfer> {
+    return (await parsed(this.transport,'POST',`/v1/leases/${this.leaseId}/transfers`,intent,[200,201],true,intent.id,v=>this.fileReply<FileTransfer>(v,intent.id))).value;
+  }
+  async transfer(id:string):Promise<FileTransfer> {
+    return (await parsed(this.transport,'GET',`/v1/leases/${this.leaseId}/transfers/${uuid(id,'id')}`,undefined,[200],false,undefined,v=>this.fileReply<FileTransfer>(v,id))).value;
+  }
+  async createTransferStep(id:string,step:number,request:FileRequest):Promise<FileStep> {
+    return (await parsed(this.transport,'POST',`/v1/leases/${this.leaseId}/transfers/${uuid(id,'id')}/steps`,{step,request},[200,202],true,id,v=>this.fileReply<FileStep>(v,id,step))).value;
+  }
+  async transferStep(id:string,step:number):Promise<FileStep> {
+    return (await parsed(this.transport,'GET',`/v1/leases/${this.leaseId}/transfers/${uuid(id,'id')}/steps/${step}`,undefined,[200],false,undefined,v=>this.fileReply<FileStep>(v,id,step))).value;
+  }
+  private fileReply<T>(v:unknown,id:string,step?:number):T {
+    if(!isRecord(v)||v.id!==id||typeof v.state!=='string'||typeof v.updatedAt!=='string'||!Number.isFinite(Date.parse(v.updatedAt))||(step!==undefined?v.step!==step:v.leaseId!==this.leaseId)) throw new TypeError('Transfer response');
+    return v as T;
   }
   inspect(): Promise<Lease> { return this.inspectById(this.leaseId); }
   renew(request: RenewRequest): Promise<MutationResult> { return this.renewById(this.leaseId, request); }

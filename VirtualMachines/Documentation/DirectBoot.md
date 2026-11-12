@@ -49,3 +49,58 @@ ST-534's 2026-11-12 operator-authorized arm64 diagnostic boot observed the actua
 pending console bytes on close and persists a final transcript, including guests
 that stop before the periodic snapshot. See the [native evidence record](../../coordination/native-acceptance/README.md)
 for the narrower full-lease results and remaining production gates.
+
+## ST-535 direct boot v2 helper
+
+For workspace-v2 preparation, directBoot.version becomes 2. Replace workspaceBytes
+with `workspace:{path,serial,bytes}`; path is canonical absolute and
+host-resolved under satellite-owned state, never consumer input. The data port is fixed at 1025; no data port inventory field is accepted. Kernel/rootfs/initrd/
+launchMedium pins and existing boot binding stay unchanged. Swift does not parse
+launch egress/nonce; the satellite binds them in the immutable v2 medium. Writable
+workspace admission checks one-link regular inode, mode 0600, trusted ancestry,
+exact size and distinct identity from immutable media. Satellite guarantees
+physical reservation; helper must preserve and recheck its pinned inode when
+attaching it read-write with the fresh 20-byte serial. No format/copy/resize occurs
+in Swift. Attach after the read-only rootfs and launch medium; the guest discovers
+by serial, never device order. Preparation journal must retain mutable disk
+identity; cleanup cannot infer removal from a missing guessed path.
+
+Direct-boot v2 and v1 configurations must explicitly have **zero network devices**;
+remove the NAT attachment from direct boot only. EFI/raw and macOS keep existing
+networking. Host vsock has no listening port. The helper initiates both 1024 and
+1025 connections to the guest's prebound listeners. V2 publishes a second private
+same-uid Unix relay `data.sock` beside agent.sock, with
+`dataSocketPath` added to direct-started.json; validate/retain both exact owned
+paths. Each relay independently has a 64 KiB buffer, bounded polling and partial
+writes. Only initial connect establishment may retry within the existing 60s boot
+window, before a connection succeeds; after connection loss no reconnect. Separate
+data worker failure does not close control/VM or disable the native deadline
+guard. Stop initiates fencing immediately, then allows data workers at most 2s to
+close. Unconfirmed worker/descriptor closure blocks cleanup evidence. No native
+acceptance follows from this contract or existing one-relay socketpair tests.
+
+Direct-kernel configurations now attach no network device. EFI Linux and macOS
+retain NAT; unit tests exercise all three configuration decisions. Workspace-v2
+disk attachment and the independent port-1025 relay are implemented;
+no native networking-isolation acceptance is implied by configuration tests.
+
+The v2 workspace path must have no symlink components or unsafe writable ancestors.
+The helper checks current uid, mode 0600, regular-file type, single link, exact
+length, 4096-byte alignment and a distinct 20-lowercase-hex serial. It rechecks
+inode identity around VZ attachment. Satellite-owned path entries must remain
+stable throughout prepare/run; same-uid malicious replacement is outside this
+trust boundary. The helper neither allocates nor copies, resizes, formats or
+removes workspace media. VZ attaches it with `.uncached` caching and `.full`
+synchronization, read-write, after the root and launch disks. Physical reservation
+remains the satellite's responsibility, not established by helper metadata checks.
+
+V1 retains its existing JSON fields and tmpfs bounds; v2 omits `workspaceBytes`.
+Both channel listeners use mode 0600 and the same getpeereid uid check, and each
+consumes one authorized local stream. Data setup/connect/pump failure affects only
+data. A setup failure leaves the published data path unavailable and cannot yield
+guest data readiness. Both channels stop on VM stop. Unix fixture tests cover
+single accept, fixed port selection, mode, data stop with live control, and the
+shared pump's backpressure/half-close behavior. They do not run a VM. Native
+acceptance must verify writable-disk sysfs serial and exact size, preallocation,
+format/mount, VZ flush/caching and descriptor lifetime, both vsock handshakes and
+independent data-loss/control renewal behavior.

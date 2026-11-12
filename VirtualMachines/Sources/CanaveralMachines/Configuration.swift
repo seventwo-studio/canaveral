@@ -26,6 +26,26 @@ import CanaveralVMCore
         try MachineStore.save(machine, directory: directory)
         _ = try build(machine: machine, directory: directory)
     }
+    /// Direct-kernel guests have no NIC. EFI and macOS retain their NAT device.
+    static func networkDevices(machine: Machine) throws -> [VZNetworkDeviceConfiguration] {
+        if machine.directBoot != nil { return [] }
+        let network = VZVirtioNetworkDeviceConfiguration()
+        network.attachment = VZNATNetworkDeviceAttachment()
+        guard let address = VZMACAddress(string: machine.macAddress) else {
+            throw CanaveralError.invalid("Invalid guest network identity.")
+        }
+        network.macAddress = address
+        return [network]
+    }
+static func workspaceDevice(_ workspace: DirectBootWorkspace, afterAttachment: () throws -> Void = {}) throws -> VZVirtioBlockDeviceConfiguration {
+    let identity = try workspace.verify()
+    let attachment = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: workspace.path), readOnly: false, cachingMode: .uncached, synchronizationMode: .full)
+    try afterAttachment()
+    try workspace.verify(identity: identity)
+    let disk = VZVirtioBlockDeviceConfiguration(attachment: attachment)
+    disk.blockDeviceIdentifier = workspace.serial
+    return disk
+}
     public static func build(machine: Machine, directory: URL, serialAttachment: VZSerialPortAttachment? = nil) throws -> VZVirtualMachineConfiguration {
         try machine.validate()
         try machine.directBoot?.validate(machine: machine)
@@ -37,6 +57,7 @@ import CanaveralVMCore
             let launch = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: boot.launchMedium.path), readOnly: true))
             launch.blockDeviceIdentifier = boot.serial
             c.storageDevices = [root, launch]
+            if let workspace = boot.workspace { c.storageDevices.append(try workspaceDevice(workspace)) }
             c.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         } else {
         let disk = VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: directory.appendingPathComponent("disk.img"), readOnly: false, cachingMode: .uncached, synchronizationMode: .full))
@@ -46,16 +67,15 @@ import CanaveralVMCore
             c.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: seed, readOnly: true)))
         }
         }
-        let network = VZVirtioNetworkDeviceConfiguration(); network.attachment = VZNATNetworkDeviceAttachment()
-        guard let address = VZMACAddress(string: machine.macAddress) else { throw CanaveralError.invalid("Invalid guest network identity.") }
-        network.macAddress = address; c.networkDevices = [network]
+        c.networkDevices = try networkDevices(machine: machine)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         if machine.mode == .desktop {
             c.keyboards = [VZUSBKeyboardConfiguration()]
             c.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
-        } else {
+        } else if let serialAttachment {
+            // Preparation validates without a console; every runtime supplies SerialConsole.
             let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-            serial.attachment = try serialAttachment ?? VZFileSerialPortAttachment(url: directory.appendingPathComponent("boot.log"), append: true)
+            serial.attachment = serialAttachment
             c.serialPorts = [serial]
         }
         // No host directories, clipboard, microphones, cameras, or physical devices are shared.

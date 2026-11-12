@@ -1,3 +1,6 @@
+import {ownedProcesses,processRows,vzPids} from './processes.ts';
+import {proxyProbe,assertProxy} from './proxy.ts';
+import {workspaceCases} from './workspace.ts';
 // Operator-only native acceptance. Run directly with Node >=24; never imported by tests.
 import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
@@ -7,7 +10,7 @@ import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFile
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
-import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence} from './evidence.ts';
+import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence, receiptEvidence} from './evidence.ts';
 const exec = promisify(execFile);
 type ObjectValue = Record<string, any>;
 assert(!process.env.CI && process.env.CANAVERAL_NATIVE_ACCEPTANCE === 'operator-authorized', 'requires explicit operator authorization outside CI');
@@ -34,7 +37,10 @@ const root = realpathSync(cfg.stateRoot);
 const dir = mkdtempSync(join(root, 'canaveral-native-')); chmodSync(dir, 0o700);
 const privateDir = join(dir, 'private'); mkdirSync(privateDir, {mode: 0o700});
 console.log(JSON.stringify({runDirectory: dir}));
-const save = (name: string, value: unknown) => writeFileSync(join(dir, name), JSON.stringify(value, null, 2), {mode: 0o600});
+const save = (name: string, value: unknown) => {
+  writeFileSync(join(privateDir, name), JSON.stringify(value, null, 2), {mode:0o600});
+  writeFileSync(join(dir, name), JSON.stringify(receiptEvidence(value), null, 2), {mode:0o600});
+};
 const sha = (path: string) => 'sha256:' + createHash('sha256').update(readFileSync(path)).digest('hex');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const children: ChildProcess[] = [];
@@ -97,6 +103,7 @@ try {
             reports.push({at: new Date().toISOString(), body, response, before, after: await api('GET', '/v1/resource-domains/' + domainForReports)});
             save('runner-reports.json', reports);
             if (response.released === true) {
+              if(cfg.workspaceIOVersion===1) {assert.equal(body.receipt.workspaceRemoved,true);assert.equal(body.receipt.dataPlaneClosed,true);}
               assert.equal(body.receipt.cleanup, 'complete', 'reservation released before cleanup report');
               assert.equal(reports.at(-1).after.body.reservations, 0);
             } else assert.equal(reports.at(-1).after.body.reservations, 1, 'reservation disappeared before cleanup');
@@ -121,7 +128,7 @@ try {
   });
   const ok = async (m: string, r: string, b?: unknown, token?: string) => { const v = await api(m, r, b, token); assert(v.status < 300, `${r}: ${JSON.stringify(v)}`); return v.body; };
   const appBody = (name: string) => ({id: randomUUID(), name, templates: [], limits: {resources, activeLeases: 1, defaultTTLSeconds: 120, maxTTLSeconds: 300, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 180}});
-  const app = await ok('POST', '/v1/consumers', appBody('native acceptance application 1'));
+  let app = await ok('POST', '/v1/consumers', {...appBody('native acceptance application 1'),...(cfg.workspaceIOVersion===1?{linuxEgress:{enabled:true}}:{})});
   const app2 = await ok('POST', '/v1/consumers', appBody('native acceptance application 2 (no grant)'));
   const domainId = randomUUID(); domainForReports = domainId;
   await ok('POST', '/v1/resource-domains', {id: domainId, name: 'native acceptance: one guest', capacity: resources});
@@ -132,9 +139,9 @@ try {
     const result = await c.done; assert.equal(result.code, 0, 'runner enrollment failed (see stderr)');
   }
   const image = {id: 'native-linux', revision: '1', arch: 'arm64', backend: 'appleVirtualization', digest: cfg.bundleDigest};
-  await ok('POST', '/v1/linux-lease-images', {...image, os: 'linux', mode: 'headless', resources, capabilities: ['command']});
+  await ok('POST', '/v1/linux-lease-images', {...image, os: 'linux', mode: 'headless', resources, capabilities: cfg.workspaceIOVersion===1?['command','files']:['command'],...(cfg.workspaceIOVersion===1?{workspaceIOVersion:1}:{})});
   await ok('POST', '/v1/linux-lease-grants', {applicationId: app.id, imageId: image.id, revision: image.revision, arch: image.arch, digest: image.digest});
-  await ok('POST', '/v1/linux-lease-runner-approvals', {binding, domainId, backend: image.backend, images: [{id:image.id, revision:image.revision, arch:image.arch, digest:image.digest}]});
+  await ok('POST', '/v1/linux-lease-runner-approvals', {binding, domainId, backend: image.backend, images: [{id:image.id, revision:image.revision, arch:image.arch, digest:image.digest}],...(cfg.workspaceIOVersion===1?{workspaceIOVersion:1}:{})});
   save('setup.json', {binding, domainId, image, artifactVerified: false, application1: app.id, application2: app2.id,
     domain: await ok('GET', '/v1/resource-domains/' + domainId), catalog: await ok('GET', '/v1/environments/templates', undefined, app.credential)});
   // Setup is real controller/TLS/enrollment evidence, never VM acceptance. No lease or claim yet.
@@ -155,7 +162,23 @@ try {
     }
     // Capture process tree and console while the helper exists, before cleanup removes its directory.
     const journalVersions = new Set<string>();
-    const observed = new Map<string, {pids: number[], machine: string, relay?: string}>();
+    const observed = new Map<string, {pids: number[], owned: number[], machine: string, relay?: string}>();
+    async function attributed(ps: string, pids: number[], machine: string, previous: number[] = []) {
+      const rows = processRows(ps);
+      const vz = vzPids(rows);
+      let files = '';
+      if (vz.length) {
+        try { files = (await exec('/usr/sbin/lsof', ['-nP', '-Fpn', '-p', vz.join(',')])).stdout; }
+        catch (e: any) {
+          // lsof exits 1 when a process races exit. Other failures are not proof of absence.
+          assert.equal(e.code, 1);
+          assert.equal((e.stderr ?? '').trim(), '', 'lsof attribution failed');
+          files = e.stdout ?? '';
+        }
+      }
+      return ownedProcesses(rows, pids, machine, files, previous);
+    }
+
     async function observe(id: string) {
       if (!existsSync(join(state, 'state.json'))) return;
       const journalBytes = readFileSync(join(state, 'state.json'));
@@ -167,16 +190,12 @@ try {
       const j = JSON.parse(journalBytes.toString());
       if (!j.assignment) return;
       const machine = join(state, 'workspace', j.assignment.memberId.toUpperCase());
-      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,state=,etime='])).stdout;
-      const owned = processEvidence(ps, [currentRun!.c.pid!]);
-      const pids: number[] = [];
-      for (const row of owned.filter(row => row.ppid === currentRun!.c.pid)) {
-        // Only inspect argv after numeric ancestry attributes the process to this run.
-        const command = await exec('/bin/ps', ['-p', String(row.pid), '-o', 'command=']).catch(() => null);
-        if (command?.stdout.includes(cfg.helper + ' run ' + machine)) pids.push(row.pid);
-      }
+      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
+      const numericPs = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,state=,etime='])).stdout;
+      const rows = ps.split('\n').map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean) as RegExpMatchArray[];
+      const pids = rows.filter(r => Number(r[2]) === currentRun?.c.pid && r[3]!.includes(cfg.helper + ' run ' + machine)).map(r => Number(r[1]));
       const old = observed.get(id);
-      observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], machine, relay: j.direct?.agentSocket ?? old?.relay});
+      observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], owned: await attributed(ps, [...(old?.pids ?? []), ...pids], machine, old?.owned), machine, relay: j.direct?.agentSocket ?? old?.relay});
       save(id + '-observed-processes.json', {pids: observed.get(id)!.pids, machine: 'lease-machine', relay: 'agent-relay'});
       for (const name of ['boot.log', 'console.log']) if (existsSync(join(machine, name))) {
         const raw = readFileSync(join(machine, name));
@@ -184,7 +203,7 @@ try {
         writeFileSync(evidence(id + '-' + name), consoleEvidence(raw.toString('utf8')));
       }
       if (existsSync(join(machine, 'console.log'))) copyFileSync(evidence(id + '-console.log'), evidence(id + '-boot.log'));
-      save(id + '-processes.json', processEvidence(ps, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));
+      save(id + '-processes.json', processEvidence(numericPs, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));
       save(id + '-latest.journal.json', journalEvidence(j));
     }
     const acquireBody = (ttlSeconds: number) => ({id: randomUUID(), templateId: image.id, templateRevision: image.revision, arch: image.arch, ttlSeconds, requiredCapabilities: ['command']});
@@ -214,7 +233,8 @@ try {
       const launchMount = mountinfo.split('\n').find((line: string) => line.split(' ')[4] === '/etc/canaveral');
       assert(launchMount, 'missing guest launch mount');
       for (const flag of ['ro','nosuid','nodev','noexec']) assert(launchMount.split(' ')[5]!.split(',').includes(flag));
-      writeFileSync(evidence(label + '-mountinfo.txt'), mountinfo);
+      writeFileSync(pem(label + '-mountinfo.txt'), mountinfo);
+      writeFileSync(evidence(label + '-mountinfo.txt'), 'root erofs ro; bootstrap erofs ro\n');
       return lease.id;
     }
     async function stopped(label: string, id: string) {
@@ -223,15 +243,27 @@ try {
       const record = observed.get(id)!; assert(record?.pids.length, 'no independent helper PID observation');
       const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { assert.equal(e.code, 'ESRCH'); return false; } };
       for (const pid of record.pids) assert(!alive(pid), 'helper still alive');
-      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,comm='])).stdout;
-      // Fail conservatively on any VZ service still present: process names alone cannot attribute a VM.
-      assert(!ps.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains; VM attribution requires operator inspection');
+      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
+      const owned = await attributed(ps, record.pids, record.machine, record.owned);
+      assert(!processRows(ps).some(r => owned.includes(r.pid)), 'owned VM process remains');
       assert(!existsSync(record.machine)); assert(!existsSync(join(state, 'workspace')));
       assert(record.relay, 'no published relay evidence'); assert(!existsSync(dirname(record.relay)));
       const journal = JSON.parse(readFileSync(join(state, 'state.json'), 'utf8'));
       assert(journal.stopped && journal.cleaned && journal.released);
-      save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noVZProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal: journalEvidence(journal)});
+      save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noOwnedVMProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal: journalEvidence(journal)});
       await snapshot(label + '-after', id); active = undefined;
+    }
+    const caseFailures:string[]=[];
+    if(cfg.workspaceIOVersion===1) {
+      caseFailures.push(...await workspaceCases({cfg,origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
+      const granted=app;
+      app=await ok('POST','/v1/consumers',{...appBody('workspace offline'),linuxEgress:{enabled:false}});
+      await ok('POST','/v1/linux-lease-grants',{applicationId:app.id,imageId:image.id,revision:image.revision,arch:image.arch,digest:image.digest});
+      const offline=await start('workspace-offline',120),key=(await ok('POST',`/v1/leases/${offline}/credential`,{},app.credential)).credential,op=randomUUID();
+      await ok('POST',`/v1/leases/${offline}/operations`,{id:op,member:'primary',action:'shell',arguments:{argv:proxyProbe('github.com:443'),timeoutMs:30000}},key);
+      const result=await until(async()=>{const r=await ok('GET',`/v1/leases/${offline}/operations/${op}`,undefined,key);return ['succeeded','failed','unknown'].includes(r.state)&&r;},'offline proxy denial');
+      assertProxy(result,'HTTP/1.1 403 Forbidden','egress_denied');
+      await ok('POST',`/v1/leases/${offline}/release`,{id:randomUUID()},key);await stopped('workspace-offline',offline);app=granted;
     }
     const id = await start('release');
     for (const [m, route, body] of [ ['GET', `/v1/leases/${id}`, undefined], ['POST', `/v1/leases/${id}/credential`, {}], ['POST', `/v1/leases/${id}/operations`, {id: randomUUID(), member:'primary', action:'shell', arguments:{argv:['printf','denied']}}] ] as [string,string,unknown][]) {
@@ -315,12 +347,13 @@ try {
     assert(stoppedObservedAt >= lossDeadline - 2500 && stoppedObservedAt <= lossDeadline + 5000, 'autonomous stop outside deadline window');
     const record = observed.get(lost)!;
     for (const pid of record.pids) { try { process.kill(pid, 0); throw Error('orphan helper still alive'); } catch (e: any) { assert.equal(e.code, 'ESRCH'); } }
-    const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,comm='])).stdout;
-    save('loss-final-processes.json', processEvidence((await exec('/bin/ps', ['-axo', 'pid=,ppid=,state=,etime='])).stdout, record.pids));
-    assert(!lossProcesses.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains after loss deadline');
+    const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
+    writeFileSync(pem('loss-final-processes.txt'), lossProcesses);
+    const owned = await attributed(lossProcesses, record.pids, record.machine, record.owned);
+    assert(!processRows(lossProcesses).some(r => owned.includes(r.pid)), 'owned VM process remains after loss deadline');
     assert(!existsSync(join(record.machine, 'power-off.request')), 'controller recovery contaminated autonomous fence');
 
-    save('loss-independent-fence.json', {lossDeadline, killedAt, lastAliveAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noVZProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
+    save('loss-independent-fence.json', {lossDeadline, killedAt, lastAliveAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noOwnedVMProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
     // Recovery must report unknown, never relaunch; native deadline independently fences execution.
     assert(!existsSync(join(record.machine, 'power-off.request')), 'recovery request before restart');
     assert.equal(JSON.parse(readFileSync(join(record.machine, 'lease-authorization.json'), 'utf8')).fenced, false, 'recovery authorization before restart');
@@ -330,7 +363,8 @@ try {
     const capacity = await api('POST', '/v1/leases', acquireBody(120), app.credential); assert([429,503].includes(capacity.status));
     await snapshot('loss-held', lost);
     active = undefined;
-    save('result.json', {state:'cases-completed', nativeAcceptance:true, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
+    if(caseFailures.length) process.exitCode=1;
+    save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, caseFailureCount:caseFailures.length, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
   }
 } catch (e: any) { writeFileSync(join(privateDir, 'failure.txt'), String(e.stack ?? e)); save('failure.json', {state:'failed', activeLease:active?.id}); process.exitCode = 1; }
 finally {

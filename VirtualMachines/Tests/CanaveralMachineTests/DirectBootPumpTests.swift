@@ -106,6 +106,41 @@ final class DirectBootPumpTests: XCTestCase {
             XCTAssertEqual(fcntl(fds[1], F_GETFD), -1); XCTAssertEqual(errno, EBADF)
         }
     }
+@MainActor func testDataChannelSingleAcceptAndControlSurvivesDataStop() async throws {
+    let directory = URL(fileURLWithPath: "/private/tmp/canaveral-" + UUID().uuidString.lowercased())
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let controlRemote = try pair(), dataRemote = try pair()
+    defer { for fd in controlRemote + dataRemote { close(fd) } }
+    let controlAccepted = expectation(description: "control accepted")
+    let dataAccepted = expectation(description: "data accepted once"); dataAccepted.assertForOverFulfill = true
+    let control = try DirectBootChannel(socketPath: directory.path + "/agent.sock", port: 1024, connector: { port, pump in
+        XCTAssertEqual(port, 1024); pump.start(remote: controlRemote[1]) {}; controlAccepted.fulfill()
+    })
+    let data = try DirectBootChannel(socketPath: directory.path + "/data.sock", port: 1025, connector: { port, pump in
+        XCTAssertEqual(port, 1025); pump.start(remote: dataRemote[1]) {}; dataAccepted.fulfill()
+    })
+    defer { control.stop(); data.stop() }
+    func connect(_ name: String) throws -> Int32 {
+        let path = directory.path + "/" + name
+        let attrs = try FileManager.default.attributesOfItem(atPath: path)
+        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(path.utf8) + [0]) }
+        let result = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        guard result == 0 else { close(fd); throw POSIXError(.ECONNREFUSED) }
+        return fd
+    }
+    let a = try connect("agent.sock"), b = try connect("data.sock")
+    defer { close(a); close(b) }
+    await fulfillment(of: [controlAccepted, dataAccepted], timeout: 2)
+    XCTAssertThrowsError(try connect("data.sock"))
+    data.stop()
+    XCTAssertTrue(Self.send([42], to: a)); shutdown(a, SHUT_WR)
+    XCTAssertTrue(Self.receive([42], from: controlRemote[0]))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path + "/agent.sock"))
+}
     @MainActor func testPeerCredentialsFailClosed() throws {
         let fds = try pair(); defer { close(fds[0]); close(fds[1]) }
         XCTAssertTrue(DirectBootRelay.authorizedPeer(fds[0]))

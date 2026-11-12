@@ -9,7 +9,7 @@ export interface ApplicationLimits {
   resources: Resources; activeLeases: number; maxWaitingRequests?: number; maxRequestPriority?: number; defaultTTLSeconds: number;
   maxTTLSeconds: number; maxLifetimeSeconds: number; provisioningTimeoutSeconds: number;
 }
-export interface ApplicationSpec { id: string; name: string; templates: ImagePermission[]; limits: ApplicationLimits }
+export interface ApplicationSpec { id: string; name: string; templates: ImagePermission[]; limits: ApplicationLimits; linuxEgress?: { enabled: boolean } }
 export interface Application extends ApplicationSpec { revoked: boolean; createdAt: number }
 interface Row { id: string; specification: string; credential: string; revoked: number; created: number }
 
@@ -78,7 +78,10 @@ function compareText(a: string, b: string): number {
 
 export function applicationSpec(value: unknown): ApplicationSpec {
   const input = object(value);
-  exact(input, ["id", "name", "templates", "limits"]);
+  exact(input, ["id", "name", "templates", "limits", ...(Object.hasOwn(input, "linuxEgress") ? ["linuxEgress"] : [])]);
+  const egress = input.linuxEgress === undefined ? { enabled: false } : object(input.linuxEgress);
+  exact(egress, ["enabled"]);
+  if (typeof egress.enabled !== "boolean") throw new ServiceError("Invalid Linux egress grant.", 400);
   if (!Array.isArray(input.templates) || input.templates.length > 1000) throw new ServiceError("Invalid application image allowlist.", 400);
   const seen = new Set<string>();
   const templates = input.templates.map(value => {
@@ -90,7 +93,7 @@ export function applicationSpec(value: unknown): ApplicationSpec {
     seen.add(key); return entry;
   });
   templates.sort((a, b) => compareText(a.id, b.id) || compareText(a.revision, b.revision) || compareText(a.arch, b.arch));
-  return { id: identifier(input.id), name: text(input.name, "application name"), templates, limits: applicationLimits(input.limits) };
+  return { id: identifier(input.id), name: text(input.name, "application name"), templates, limits: applicationLimits(input.limits), linuxEgress: { enabled: egress.enabled } };
 }
 
 // Legacy application keys use digest(secret): SHA256 of its JSON string.
@@ -108,7 +111,8 @@ export class ConsumerIdentities {
   }
 
   private public(row: Row): Application {
-    return { ...JSON.parse(row.specification) as ApplicationSpec, revoked: Boolean(row.revoked), createdAt: row.created };
+    const spec = JSON.parse(row.specification) as ApplicationSpec;
+    return { ...spec, linuxEgress: spec.linuxEgress ?? { enabled: false }, revoked: Boolean(row.revoked), createdAt: row.created };
   }
 
   create(value: unknown): Application & { credential: string } {

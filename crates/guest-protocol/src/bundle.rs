@@ -1,4 +1,4 @@
-//! Boot bundle v1: validation and canonical digest, never downloads or builds.
+//! Boot bundle v1/v2: validation and canonical digest, never downloads or builds.
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,18 @@ pub struct Manifest {
     pub command_line: String,
     pub agent_vsock_port: u32,
     pub protocol: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_u32"
+    )]
+    pub data_vsock_port: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_u32"
+    )]
+    pub data_protocol: Option<u32>,
     #[serde(deserialize_with = "crate::unique_map")]
     pub tool_versions: BTreeMap<String, String>,
 }
@@ -85,9 +97,14 @@ impl Artifact {
         Ok(())
     }
 }
+fn present_u32<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<u32>, D::Error> {
+    u32::deserialize(d).map(Some)
+}
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.id.is_empty()
             || self.id.len() > 128
             || self.revision == 0
@@ -109,15 +126,26 @@ impl Manifest {
         {
             return Err("invalid boot bundle contract".into());
         }
+        if (self.version == 1 && (self.data_vsock_port.is_some() || self.data_protocol.is_some()))
+            || (self.version == 2
+                && (self.data_vsock_port != Some(1025)
+                    || self.data_protocol != Some(1)
+                    || self.initrd.is_none()))
+        {
+            return Err("invalid bundle data protocol".into());
+        }
         self.kernel.validate()?;
         self.rootfs.validate()?;
         if let Some(initrd) = &self.initrd {
             initrd.validate()?;
         }
-        if self.tool_versions.len() != 3 {
+        if self.tool_versions.len() != if self.version == 2 { 4 } else { 3 } {
             return Err("expected shell/git/node pins".into());
         }
-        for name in ["shell", "git", "node"] {
+        for name in ["shell", "git", "node"]
+            .into_iter()
+            .chain((self.version == 2).then_some("mkfsExt4"))
+        {
             let pin = self.tool_versions.get(name).ok_or("missing tool pin")?;
             if pin.is_empty() || pin.len() > 128 || !printable(pin) || pin.trim() != pin {
                 return Err("invalid exact probe line".into());
@@ -196,6 +224,9 @@ pub const MAX_LAUNCH_BYTES: usize = 16384;
 impl Launch {
     pub fn validate(&self) -> Result<()> {
         self.binding.validate()?;
+        if self.manifest.version != 1 {
+            return Err("legacy launch requires bundle v1".into());
+        }
         if !(16 * 1024 * 1024..=1024 * 1024 * 1024).contains(&self.workspace_bytes) {
             return Err("workspace capacity must be 16MiB..1GiB".into());
         }
@@ -331,6 +362,8 @@ mod tests {
             command_line: "ro".into(),
             agent_vsock_port: 1024,
             protocol: 1,
+            data_vsock_port: None,
+            data_protocol: None,
             tool_versions: pins
                 .into_iter()
                 .map(|(k, v)| (k.into(), v.into()))
@@ -343,5 +376,119 @@ mod tests {
         std::fs::write(dir.join("Image"), b"corrupt").unwrap();
         assert!(m.verify(&dir).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Workspace launch is a separate closed schema: it cannot decode as a v1 launch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceLaunch {
+    pub version: u32,
+    pub binding: crate::Binding,
+    pub manifest: Manifest,
+    pub workspace: Workspace,
+    pub egress: Egress,
+    pub data: DataLaunch,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Workspace {
+    pub serial: String,
+    pub bytes: u64,
+    pub overhead_bytes: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Egress {
+    pub enabled: bool,
+    pub policy: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataLaunch {
+    pub port: u32,
+    pub nonce: String,
+}
+impl WorkspaceLaunch {
+    pub fn validate(&self) -> Result<()> {
+        self.binding.validate()?;
+        if self.version != 2
+            || self.manifest.version != 2
+            || self.manifest.digest()? != self.binding.bundle_digest
+            || self.workspace.bytes < 16 * 1024 * 1024
+            || self.workspace.bytes > crate::MAX_SAFE
+            || !self.workspace.bytes.is_multiple_of(4096)
+            || self.workspace.overhead_bytes != 67108864
+            || !crate::data::lower_hex(&self.workspace.serial, 20)
+            || self.workspace.serial == self.binding.boot_attempt.simple().to_string()[..20]
+            || self.egress.policy != "public-https-v1"
+            || self.data.port != 1025
+            || !crate::data::lower_hex(&self.data.nonce, 64)
+        {
+            return Err("invalid workspace launch".into());
+        }
+        Ok(())
+    }
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self)?;
+        if bytes.len() > MAX_LAUNCH_BYTES {
+            return Err("launch config too large".into());
+        }
+        Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    #[test]
+    fn v2_canonical_fixture_and_legacy_downgrade_refusal() {
+        let bytes = include_bytes!("../fixtures/canonical-v2.json");
+        let m: Manifest = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(m.canonical_bytes().unwrap(), bytes);
+        assert_eq!(
+            m.digest().unwrap(),
+            include_str!("../fixtures/canonical-v2.sha256").trim()
+        );
+        let launch: WorkspaceLaunch =
+            serde_json::from_slice(include_bytes!("../fixtures/launch-v2.json")).unwrap();
+        launch.validate().unwrap();
+        let parsed: WorkspaceLaunch = serde_json::from_slice(&launch.to_bytes().unwrap()).unwrap();
+        parsed.validate().unwrap();
+        assert!(
+            serde_json::from_slice::<Launch>(include_bytes!("../fixtures/launch-v2.json")).is_err()
+        );
+        let mut legacy = Launch {
+            binding: launch.binding.clone(),
+            workspace_bytes: 16777216,
+            manifest: m.clone(),
+        };
+        assert!(legacy.validate().is_err());
+        legacy.manifest.version = 1;
+        assert!(legacy.validate().is_err());
+        for field in ["dataProtocol", "dataVsockPort"] {
+            let mut v = serde_json::to_value(&m).unwrap();
+            v.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Manifest>(v)
+                .unwrap()
+                .validate()
+                .is_err());
+        }
+        let mut bad = launch.clone();
+        bad.workspace.serial = bad.binding.boot_attempt.simple().to_string()[..20].into();
+        assert!(bad.validate().is_err());
+        bad = launch.clone();
+        bad.workspace.bytes += 1;
+        assert!(bad.validate().is_err());
+        bad = launch.clone();
+        bad.data.nonce = bad.data.nonce.to_uppercase();
+        assert!(bad.validate().is_err());
+        bad = launch.clone();
+        bad.workspace.overhead_bytes = 0;
+        assert!(bad.validate().is_err());
+        bad = launch;
+        bad.manifest.version = 1;
+        assert!(bad.validate().is_err());
     }
 }

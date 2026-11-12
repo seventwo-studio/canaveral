@@ -38,7 +38,7 @@ mirror="http://127.0.0.1:$(cat mirror.port)"
 mmdebstrap --mode=unshare --variant=minbase --architectures=arm64 --format=tar \
   --keyring="$apt_keys/pinned.gpg" --keyring="$apt_keys/empty" \
   --aptopt='Acquire::Check-Valid-Until "false"' \
-  --include=bash,coreutils,git,ca-certificates \
+  --include=bash,coreutils,git,ca-certificates,e2fsprogs,netcat-openbsd \
   --skip=essential/unlink --customize-hook='copy-out /var/cache/apt/archives '"$BUILD/inputs/debs" \
   --customize-hook="copy-in $BUILD/inputs/node-v24.11.0-linux-arm64.tar.xz /tmp/" \
   --customize-hook="copy-in $BUILD/repo/target/aarch64-unknown-linux-musl/release/canaveral-guest-agent /sbin/" \
@@ -49,7 +49,8 @@ mmdebstrap --mode=unshare --variant=minbase --architectures=arm64 --format=tar \
   --customize-hook="copy-out /tmp/probe-shell.txt $BUILD" \
   --customize-hook="copy-out /tmp/probe-git.txt $BUILD" \
   --customize-hook="copy-out /tmp/probe-node.txt $BUILD" \
-  --customize-hook='rm -f "$1/tmp/node-v24.11.0-linux-arm64.tar.xz" "$1/tmp/rootfs-customize.sh" "$1/tmp/packages.txt" "$1/tmp/probe-shell.txt" "$1/tmp/probe-git.txt" "$1/tmp/probe-node.txt"' \
+  --customize-hook="copy-out /tmp/probe-mkfsExt4.txt $BUILD" \
+  --customize-hook='rm -f "$1/tmp/node-v24.11.0-linux-arm64.tar.xz" "$1/tmp/rootfs-customize.sh" "$1/tmp/packages.txt" "$1/tmp/probe-shell.txt" "$1/tmp/probe-git.txt" "$1/tmp/probe-node.txt" "$1/tmp/probe-mkfsExt4.txt"' \
   --customize-hook='printf "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261101T000000Z bookworm main\n" > "$1/etc/apt/sources.list"' \
   bookworm rootfs.tar "deb [check-valid-until=no signed-by=$apt_keys/pinned.gpg] $mirror bookworm main"
 mkfs.erofs --quiet -T "$SOURCE_DATE_EPOCH" -U 3414215f-8063-4db0-9b6d-092dad50bd8b --tar=f rootfs.erofs < rootfs.tar

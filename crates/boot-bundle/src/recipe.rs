@@ -57,11 +57,17 @@ impl Recipe {
         Unique::deserialize(&mut decoder)?;
         decoder.end()?;
         let r: Self = serde_json::from_slice(bytes)?;
-        if r.version != 1 {
+        if r.version != 1 && r.version != 2 {
             return Err("unsupported recipe".into());
         }
-        r.manifest().validate()?;
-        let mut bootstrap = r.manifest();
+        let mut candidate = r.manifest();
+        // Assembly generates the initrd from this pinned bootstrap. Validate the
+        // input artifact here; only assembly can publish the actual initrd pin.
+        if r.version == 2 {
+            candidate.initrd = Some(r.bootstrap.clone());
+        }
+        candidate.validate()?;
+        let mut bootstrap = candidate;
         bootstrap.kernel = r.bootstrap.clone();
         bootstrap.validate()?;
         super::bootstrap::base_args(&r.command_line)?;
@@ -150,6 +156,15 @@ impl Recipe {
                 return Err("missing required Debian package pin".into());
             }
         }
+        if r.version == 2
+            && !p
+                .debian
+                .packages
+                .iter()
+                .any(|v| v.identity.starts_with("e2fsprogs="))
+        {
+            return Err("v2 requires an exact e2fsprogs package pin".into());
+        }
         if p.node.identity != "node-v24.11.0-linux-arm64.tar.xz"
             || !p
                 .rust
@@ -166,7 +181,7 @@ impl Recipe {
     }
     pub fn manifest(&self) -> Manifest {
         Manifest {
-            version: 1,
+            version: self.version,
             id: self.id.clone(),
             revision: self.revision,
             arch: "arm64".into(),
@@ -176,6 +191,8 @@ impl Recipe {
             command_line: self.command_line.clone(),
             agent_vsock_port: 1024,
             protocol: 1,
+            data_vsock_port: (self.version == 2).then_some(1025),
+            data_protocol: (self.version == 2).then_some(1),
             tool_versions: self.tool_versions.clone(),
         }
     }

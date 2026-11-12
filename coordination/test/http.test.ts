@@ -229,3 +229,10 @@ test("runner HTTP routes separate administrator, enrollment and consumer proofs"
   assert.equal((await request("/v1/runners/revoke", b, session)).status, 200);
   assert.equal((await request("/v1/runners/authenticate", b, rotated)).status, 401);
 });
+
+test('transfer limit counts whitespace in the received JSON body',async t=>{
+  const {raw}=await fixture(t);
+  const data=Buffer.from('{}'+' '.repeat(131071));
+  const result=await raw(`/v1/leases/${randomUUID()}/transfers`,data,{'Content-Length':data.length});
+  assert.equal(result.status,413);
+});

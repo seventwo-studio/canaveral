@@ -447,3 +447,7 @@ mod tests {
 }
 
 pub mod bundle;
+
+pub mod data;
+
+pub mod proxy;

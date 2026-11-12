@@ -339,3 +339,78 @@ authority and known controller terminal state when selecting the first stop caus
 A terminal or cancel reply records the controller cause (null failure), even after
 the local deadline, unless an earlier fence already recorded a cause. Legacy
 fenced journals without a cause replay as runtime loss. Renewal cannot clear a fence.
+
+## ST-535 workspace I/O implementation
+
+The [assignment/transfer extension](../../docs/linux-lease-controller.md#st-535-assignment-and-transfer-wire-controller-implementation)
+uses workspace-v2 bundles, a preallocated owned raw disk, an independently
+relayed data connection on guest port 1025, public-HTTPS enforcement and durable
+controller-issued file steps. Native acceptance remains outstanding. Bind [launch identity](../../docs/linux-boot-bundle.md#st-535-workspace-launch-contract-unimplemented)
+and [data frames](../../docs/guest-wire.md#st-535-data-protocol-contract-unimplemented)
+together; never downgrade if v2 fields or physical allocation are unsupported.
+Data workers/payloads must be bounded separately from heartbeat/control; a stalled
+transfer cannot delay lease expiry. No controller token crosses into the guest.
+Both relay paths, outbound sockets, disk inode and allocation intent need owned
+journal evidence. Restart never reconnects or replays uncertain file publication.
+Cleanup requires workspaceRemoved/dataPlaneClosed plus existing positive evidence.
+See [egress gates](../../docs/linux-egress-policy.md) before claiming isolation.
+
+ST-535 has portable policy decisions and a host data reactor in `reactor.rs`.
+The authenticated single-use data handshake and reactor run on their own thread;
+control heartbeat, renewal and fencing do not join that thread. Initial command
+readiness waits for both control and data echoes; later data loss leaves control
+and established command readiness running. Socket relays enforce credits,
+sequences, 16 live flows, decoded/encoded budgets, rotating 64 KiB flow turns,
+half-close, 10-second connect and 120-second idle deadlines. Connect workers are
+bounded separately, including retired requests. Live route evidence is checked
+on a two-second schedule using a separate bounded query worker. If evidence
+misses the two-second period, every live flow closes with route_denied. A stalled
+query is retained without creating replacement workers and prevents positive
+joined cleanup evidence.
+
+`reactor::Egress: HostEvidence + Clone + Send + 'static` supplies bounded DNS and
+address-only connection operations. Each clone must have independent query state;
+evidence queries must return promptly. The gated production lane installs the `Native` adapter to `native_egress`;
+`Deny` remains available for offline callers.
+Native providers must retain the default peer-address verification and honor the
+combined DNS/connect deadline. Portable loopback fixtures explicitly override peer
+matching to map a vetted public address to a local echo server. They establish
+byte relay behavior, not native destination isolation.
+
+Private operator configuration accepts optional `operatorDenyCidrs` (default `[]`).
+Every entry must parse as a canonical network CIDR; at most 4096 entries are
+allowed. The config remains part of the pinned local journal, and the SHA-256 of
+its JSON-encoded deny list is saved in the direct-launch journal before workspace
+creation/launch. Guest and controller fields cannot supply this list.
+
+Transfer polling/reporting uses a separate capacity-one worker and HTTPS
+transport, independent of command/heartbeat traffic. Poll IDs are persisted before
+sending; nonnull polls remain pinned until acknowledgment. Files-only boots
+register their immutable tuple through transfer poll. Work is journaled before
+guest handoff, and guest receipts before reports. Lost responses replay the exact
+poll/report; restart replays only receipts and never executes saved work.
+Deadline translation charges poll transport time and the existing guest margin;
+renewal cannot extend a step. Cancellation uses the reserved data cancel slot.
+Data loss fails undispatched work and marks handed-off work without a receipt
+unknown. Files readiness requires dataReady and a live channel, and withdraws
+on loss while command/control processing continues. Custom Controller adapters
+must supply data_transport for an independent worker; the authenticated adapter
+does so using the same scoped identity and bounded HTTPS transport. There is no
+local consumer transfer listener.
+
+Fencing revokes data authority before native stop requests. Shutdown waits at most
+two seconds, after issuing the fence, and records positive socket/worker/relay
+closure evidence only after all reactor workers join and the provider attests
+closure of its socket-owning nested workers. Timed-out getaddrinfo threads are
+excluded: they hold no guest-reachable socket and are capped at four. Transfer
+HTTP workers must also join before dataPlaneClosed becomes true. A provider that ignores its deadline
+can outlive this wait; cleanup reports remain conservative and reconciliation is
+required. Process restart cannot infer closure of a previously unproven data plane.
+
+The gated v2 prepare path retains owned raw-disk intent/inode journaling,
+preallocation, exact-length flush, identity checks, launch-v2 bootstrap construction
+and helper workspace attachment. `WORKSPACE_V2_ADMISSION_ENABLED` is true after
+the guest file executor landed in f4219fe. Route-change/hairpin adversarial
+checks, real filesystem cancellation/publication faults, and actual Git/npm
+workloads remain native acceptance gates. Portable tests and the legacy public API fixture do not establish
+native acceptance. No additional crate dependencies were introduced.

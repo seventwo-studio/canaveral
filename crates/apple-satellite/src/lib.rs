@@ -14,9 +14,17 @@ use std::{
 mod bootstrap;
 pub mod bundle;
 pub mod clock;
+pub mod data;
 pub mod guest;
 mod operations;
 mod private;
+pub mod reactor;
+mod transfers;
+pub mod workspace;
+
+/// Workspace v2 implementation is available; native acceptance remains separate.
+/// Both inventory and assignment admission consult this single switch.
+pub const WORKSPACE_V2_ADMISSION_ENABLED: bool = true;
 pub type Result<T> = std::result::Result<T, &'static str>;
 /// Interval between heartbeat reports while a guest runs; replies carry renewals and stop intent.
 const REPORT_EVERY: Duration = Duration::from_secs(1);
@@ -60,6 +68,8 @@ pub struct Installed {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_deny_cidrs: Vec<String>,
     pub origin: String,
     pub identity: PathBuf,
     pub binding: Binding,
@@ -107,6 +117,22 @@ pub struct Assignment {
     required_capabilities: Vec<String>,
     lease: Lease,
     stop_requested: bool,
+    #[serde(
+        rename = "workspaceIOVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    workspace_io_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<WorkspaceAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress: Option<canaveral_guest_protocol::bundle::Egress>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceAdmission {
+    bytes: u64,
+    overhead_bytes: u64,
 }
 /// First reason for stopping; later supervision cannot overwrite it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +178,8 @@ struct Journal {
     direct: Option<Direct>,
     #[serde(default)]
     operations: operations::Lane,
+    #[serde(default)]
+    transfers: transfers::Lane,
 }
 /// Durable direct-boot launch tuple. The boot attempt is consumed with launch intent.
 #[derive(Clone, Serialize, Deserialize)]
@@ -170,6 +198,14 @@ struct Direct {
     ready: bool,
     withdrawn: bool,
     timings: Timings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_disk: Option<workspace::Disk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_deny_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_closed: Option<bool>,
 }
 /// Continuous-clock milestones (seconds). Fixture values are not performance evidence.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -217,10 +253,18 @@ impl Journal {
             claimed_at: None,
             direct: None,
             operations: operations::Lane::default(),
+            transfers: transfers::Lane::default(),
         })
     }
 }
 pub trait Controller {
+    /// Independent bounded data transport; no shared queue ahead of lease control.
+    fn data_transport(&self) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
     fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value>;
 }
 pub struct Authenticated<'a> {
@@ -228,6 +272,12 @@ pub struct Authenticated<'a> {
     pub transport: &'a Transport,
 }
 impl Controller for Authenticated<'_> {
+    fn data_transport(&self) -> Option<Self> {
+        Some(Self {
+            identity: self.identity,
+            transport: self.transport,
+        })
+    }
     fn request(&mut self, route: LeaseRoute, body: Value) -> Result<Value> {
         self.identity
             .linux_lease_request(self.transport, route, body)
@@ -334,6 +384,7 @@ fn host_arch() -> &'static str {
 }
 /// Local artifact pins. Everything here runs before any claim is sent.
 fn validate_local(c: &Config) -> Result<()> {
+    egress::Policy::new(&c.operator_deny_cidrs).map_err(|_| "invalid operator deny CIDRs")?;
     if c.identity.starts_with(&c.state)
         || c.state.starts_with(&c.identity)
         || !c.identity.is_absolute()
@@ -426,6 +477,8 @@ pub struct Satellite {
     config: Config,
     dir: private::Directory,
     state: Journal,
+    data_authority: Option<reactor::Authority>,
+    files_ready: bool,
 }
 impl Satellite {
     /// Completes artifact, signature and binding-local preflight before any claim.
@@ -445,7 +498,13 @@ impl Satellite {
         } else {
             Journal::fresh(fingerprint)?
         };
-        let mut s = Self { config, dir, state };
+        let mut s = Self {
+            config,
+            dir,
+            state,
+            data_authority: None,
+            files_ready: false,
+        };
         if !s.state.operations.completed.is_empty() {
             let assignment = s.assignment()?.id;
             for id in &s.state.operations.completed {
@@ -494,6 +553,18 @@ impl Satellite {
     }
     /// Pre-launch admission. Any failure has had no local effect and is declined.
     fn validate_assignment(&self, a: &Assignment) -> Result<&Installed> {
+        if !WORKSPACE_V2_ADMISSION_ENABLED
+            && (a.workspace_io_version.is_some() || a.workspace.is_some() || a.egress.is_some())
+        {
+            return Err("workspace-v2 runtime integration is not available");
+        }
+        let workspace =
+            a.workspace_io_version.is_some() || a.workspace.is_some() || a.egress.is_some();
+        if workspace
+            && (a.workspace_io_version != Some(1) || a.workspace.is_none() || a.egress.is_none())
+        {
+            return Err("incomplete workspace admission snapshot");
+        }
         let r = &a.resources;
         if r.cpu > self.config.max_cpu
             || !NATIVE_CPU.contains(&r.cpu)
@@ -514,6 +585,9 @@ impl Satellite {
             .iter()
             .find(|i| i.image == a.image)
             .ok_or("assignment image not installed; declined")?;
+        if workspace && installed.format.is_efi_raw() {
+            return Err("workspace requires bundle v2");
+        }
         if installed.format.is_efi_raw()
             && io(std::fs::metadata(&installed.path))?.len() > r.disk_gi_b * 1073741824
         {
@@ -554,6 +628,9 @@ impl Satellite {
         let b = bundle::Bundle::open(&installed)?;
         if self.config.bootstrap_builder.is_none() {
             return Err("boot bundle requires a pinned bootstrap builder");
+        }
+        if (b.manifest.version == 2) != (a.workspace_io_version == Some(1)) {
+            return Err("workspace bundle/assignment version mismatch");
         }
         let pins = b.admit()?;
         Ok((installed, Some((b, pins))))
@@ -620,6 +697,9 @@ impl Satellite {
             || session.is_some_and(|s| s.authority_expired(now))
     }
     fn fence_for(&mut self, cause: StopCause) -> Result<()> {
+        if let Some(authority) = &self.data_authority {
+            authority.revoke();
+        }
         // Old fenced journals have no recorded cause: retain their runtime classification.
         if self.state.stop_cause.is_none() {
             self.state.stop_cause = Some(if self.state.fenced {
@@ -629,7 +709,6 @@ impl Satellite {
             });
         }
         self.state.fenced = true;
-        self.save()?;
         if self.state.prepared && !self.state.stopped && !self.state.cleaning {
             self.authorize()?;
             self.write_machine(
@@ -637,7 +716,9 @@ impl Satellite {
                 json!({"id":self.assignment()?.member_id,"boot":self.state.boot}),
             )?;
         }
-        Ok(())
+        // Fencing only removes authority. Publish it before journal persistence
+        // so a stalled journal cannot postpone the helper or data fence.
+        self.save()
     }
     fn expired(&self) -> bool {
         clock::now().as_secs_f64() >= self.state.deadline
@@ -679,15 +760,33 @@ impl Satellite {
         } else {
             "pending"
         };
-        Ok(
-            json!({"assignmentId":a.id,"sequence":s.sequence+1,"receipt":{
+        let mut report = json!({"assignmentId":a.id,"sequence":s.sequence+1,"receipt":{
             "leaseId":a.lease_id,"memberId":a.member_id,"backend":a.image.backend,"imageDigest":a.image.digest,
             "observedRevision":s.revision,"runtimeState":runtime,
             // EFI boot never implies readiness; PTY and files have no guest transport yet.
-            "ready":{"command":command,"pty":false,"files":false},
+            "ready":{"command":command,"pty":false,"files":guest_ready && self.files_ready && a.capabilities.iter().any(|c| c == "files")},
             "failure":failure,"executionStopped":s.stopped,"storageRemoved":s.cleaned,
-            "credentialsErased":s.cleaned,"cleanup":cleanup}}),
-        )
+            "credentialsErased":s.cleaned,"cleanup":cleanup}});
+        if a.workspace_io_version == Some(1) {
+            report["receipt"]["workspaceRemoved"] = json!(
+                s.stopped
+                    && (s.abandoned
+                        || direct
+                            .and_then(|d| d.workspace_disk.as_ref())
+                            .is_some_and(|d| d.removed))
+            );
+            // Launched v2 assignments retain their reservation unless all data
+            // sockets, workers and relay descriptors were positively closed.
+            report["receipt"]["dataPlaneClosed"] = json!(
+                (s.abandoned && s.cleaned)
+                    || self
+                        .state
+                        .direct
+                        .as_ref()
+                        .is_some_and(|d| s.stopped && d.data_closed == Some(true))
+            );
+        }
+        Ok(report)
     }
     /// Sends the persisted pending report, or persists then sends the current one.
     fn report(&mut self, controller: &mut impl Controller) -> Result<()> {
@@ -833,6 +932,26 @@ impl Satellite {
                 // Positive stop is proven; only the exact published relay path is removed.
                 guest::remove_published(&path)?;
             }
+            if let Some(mut disk) = self
+                .state
+                .direct
+                .as_ref()
+                .and_then(|d| d.workspace_disk.clone())
+            {
+                if !disk.removed {
+                    if !self.state.stopped {
+                        return Err("workspace removal requires positive stop proof");
+                    }
+                    workspace::remove(&self.workspace(), &mut disk, |disk| {
+                        self.state
+                            .direct
+                            .as_mut()
+                            .ok_or("no direct launch")?
+                            .workspace_disk = Some(disk.clone());
+                        self.save()
+                    })?;
+                }
+            }
             self.dir.cleanup_workspace(resumed)?;
             self.state.cleaned = true;
             self.save()?;
@@ -876,6 +995,9 @@ impl Satellite {
             .bootstrap_builder
             .clone()
             .ok_or("boot bundle requires a pinned bootstrap builder")?;
+        if b.manifest.version == 2 {
+            return self.workspace_request(a, b, &builder);
+        }
         // Guest tmpfs: a quarter of reserved memory, within the agent's 16MiB..1GiB bounds.
         let workspace_bytes =
             (a.resources.memory_mi_b * 1048576 / 4).clamp(16 * 1048576, 1073741824);
@@ -915,6 +1037,111 @@ impl Satellite {
             }
         }))
     }
+    /// Build a fresh, owned v2 workspace launch after immutable admission checks.
+    fn workspace_request(
+        &mut self,
+        a: &Assignment,
+        b: &bundle::Bundle,
+        builder: &bundle::Builder,
+    ) -> Result<Value> {
+        let admitted = a.workspace.as_ref().ok_or("missing workspace admission")?;
+        let egress = a.egress.clone().ok_or("missing egress admission")?;
+        let expected = a
+            .resources
+            .disk_gi_b
+            .checked_mul(1073741824)
+            .and_then(|n| n.checked_sub(67108864))
+            .ok_or("invalid workspace reservation")?
+            / 4096
+            * 4096;
+        if a.workspace_io_version != Some(1)
+            || admitted.overhead_bytes != 67108864
+            || admitted.bytes != expected
+            || egress.policy != "public-https-v1"
+        {
+            return Err("workspace admission mismatch");
+        }
+        let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+        if d.workspace_disk.is_some() || d.data_nonce.is_some() {
+            return Err("workspace launch attempt consumed");
+        }
+        let launch_serial = d.boot_attempt.simple().to_string()[..20].to_owned();
+        let serial = random_uuid()?.simple().to_string()[..20].to_owned();
+        let mut disk = workspace::Disk::intent(serial, admitted.bytes, &launch_serial)?;
+        let mut nonce = [0; 32];
+        getrandom::fill(&mut nonce).map_err(|_| "randomness unavailable")?;
+        let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+        self.state
+            .direct
+            .as_mut()
+            .ok_or("no direct launch")?
+            .data_nonce = Some(nonce.clone());
+        let digest = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&self.config.operator_deny_cidrs)
+                    .map_err(|_| "invalid deny list")?
+            )
+        );
+        self.state
+            .direct
+            .as_mut()
+            .ok_or("no direct launch")?
+            .operator_deny_digest = Some(digest);
+        self.save()?;
+        workspace::create(&self.workspace(), &mut disk, |disk| {
+            self.state
+                .direct
+                .as_mut()
+                .ok_or("no direct launch")?
+                .workspace_disk = Some(disk.clone());
+            self.save()
+        })?;
+        let launch = canaveral_guest_protocol::bundle::WorkspaceLaunch {
+            version: 2,
+            binding: self.guest_binding(self.state.revision)?,
+            manifest: b.manifest.clone(),
+            workspace: canaveral_guest_protocol::bundle::Workspace {
+                serial: disk.serial.clone(),
+                bytes: disk.bytes,
+                overhead_bytes: admitted.overhead_bytes,
+            },
+            egress,
+            data: canaveral_guest_protocol::bundle::DataLaunch { port: 1025, nonce },
+        };
+        let medium =
+            bootstrap::build_workspace(builder, &self.workspace().join("bootstrap"), &launch)?;
+        let d = self.state.direct.as_mut().ok_or("no direct launch")?;
+        d.medium = Some(medium.clone());
+        d.timings.medium_built = Some(clock::now().as_secs_f64());
+        let d = d.clone();
+        self.save()?;
+        for pin in &d.artifacts {
+            bundle::recheck(pin)?;
+        }
+        workspace::verify(&self.workspace(), &disk)?;
+        let role = |r: &str| {
+            d.artifacts
+                .iter()
+                .find(|p| p.role == r)
+                .map(bundle::Pinned::swift)
+                .ok_or("missing admitted artifact")
+        };
+        Ok(json!({
+            "id":a.member_id,"leaseID":a.lease_id,"name":"leased-linux","os":"linux","mode":"headless",
+            "cpu":a.resources.cpu,"memoryMiB":a.resources.memory_mi_b,"diskGiB":a.resources.disk_gi_b,
+            "directory":self.workspace(),
+            "directBoot":{
+                "version":2,"revision":self.state.revision,
+                "kernel":role("kernel")?,"initrd":role("initrd")?,"rootfs":role("rootfs")?,
+                "launchMedium":medium.swift(),"launchFilesystemUUID":d.boot_attempt,
+                "bundleDigest":d.bundle_digest,"commandLine":b.manifest.command_line,
+                "leaseID":a.lease_id,"memberID":a.member_id,
+                "bootSessionID":self.state.boot_session_id,"bootAttempt":d.boot_attempt,
+                "workspace":{"path":self.workspace().join("workspace.raw"),"serial":disk.serial,"bytes":disk.bytes}
+            }
+        }))
+    }
     fn withdraw(&mut self) -> Result<()> {
         if let Some(d) = self.state.direct.as_mut() {
             d.ready = false;
@@ -926,9 +1153,18 @@ impl Satellite {
     fn guest_step(
         &mut self,
         session: &mut Option<guest::Session>,
+        data: &mut data::Lane,
         last: &mut Option<clock::Clock>,
     ) -> Result<()> {
         let now = clock::now().as_secs_f64();
+        data.configure(
+            self.assignment()?
+                .egress
+                .as_ref()
+                .is_some_and(|e| e.enabled),
+            self.config.operator_deny_cidrs.clone(),
+            Duration::from_secs_f64(self.state.deadline.max(0.0)),
+        );
         if session.is_none() {
             let d = self.state.direct.as_ref().ok_or("no direct launch")?;
             if d.agent_socket.is_some() || d.withdrawn {
@@ -942,7 +1178,12 @@ impl Satellite {
                 boot_attempt: d.boot_attempt,
                 boot: self.state.boot,
             };
-            let Some(path) = guest::read_started(&self.machine()?, &expected, now)? else {
+            let path = if d.data_nonce.is_some() {
+                guest::read_started_with_data(&self.machine()?, &expected, now)?
+            } else {
+                guest::read_started(&self.machine()?, &expected, now)?
+            };
+            let Some(path) = path else {
                 return Ok(());
             };
             let d = self.state.direct.as_mut().ok_or("no direct launch")?;
@@ -956,9 +1197,28 @@ impl Satellite {
                 self.state.deadline,
                 now,
             )?);
+            if let Some(nonce) = self
+                .state
+                .direct
+                .as_ref()
+                .and_then(|d| d.data_nonce.clone())
+            {
+                data.start(&path, self.guest_binding(launch_revision)?, nonce);
+                self.data_authority = data.authority();
+            }
         }
         let s = session.as_mut().ok_or("no guest session")?;
-        if s.pump(now)? {
+        s.pump(now)?;
+        // Data errors are permanently local to data, including initial mismatch.
+        // Keep control pumping for renewal/expiry even if readiness never arrives.
+        data.pump();
+        let files_ready = data.files_ready();
+        if self.files_ready != files_ready {
+            self.files_ready = files_ready;
+            *last = None;
+        }
+        let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+        if !d.ready && s.ready(now) && data.commands_ready(d.data_nonce.is_some()) {
             let d = self.state.direct.as_mut().ok_or("no direct launch")?;
             d.ready = true;
             d.timings.guest_ready = Some(now);
@@ -970,6 +1230,198 @@ impl Satellite {
             return Err("guest readiness lapsed");
         }
         Ok(())
+    }
+    fn transfer_report_retry(&mut self, controller: &mut impl Controller) -> Result<()> {
+        if self
+            .state
+            .transfers
+            .current
+            .as_ref()
+            .is_some_and(|s| s.receipt.is_some() && !s.acknowledged)
+        {
+            let body = self.state.transfers.report(self.operation_binding()?)?;
+            let reply = controller.request(LeaseRoute::TransferReport, body)?;
+            self.state.transfers.acknowledge(reply)?;
+            self.save()?;
+        }
+        Ok(())
+    }
+    fn transfer_cancel(
+        &mut self,
+        data: &data::Lane,
+        reason: canaveral_guest_protocol::data::CancelReason,
+    ) -> Result<()> {
+        if let Some(step) = self
+            .state
+            .transfers
+            .current
+            .as_mut()
+            .filter(|s| (s.handed_off || s.guest_open()) && !s.cancel_sent)
+        {
+            if data
+                .send_transfer(canaveral_guest_protocol::data::Frame::TransferCancel {
+                    version: 1,
+                    id: step.work.id,
+                    reason,
+                })
+                .is_ok()
+            {
+                step.cancel_sent = true;
+                self.save()?;
+            }
+        }
+        Ok(())
+    }
+    fn transfer_events(&mut self, data: &data::Lane) -> Result<()> {
+        while let Some(frame) = data.receipt() {
+            self.state.transfers.event(frame)?;
+            self.save()?; // Receipt is durable before any report.
+        }
+        // A controller terminal does not prove closure of an opened guest transfer.
+        // The durable blocked flag keeps retrying until cancellation is queued.
+        if self.state.transfers.current.as_ref().is_some_and(|s| {
+            s.guest_open()
+                && (self.state.transfers.blocked
+                    || matches!(
+                        s.receipt,
+                        Some(canaveral_guest_protocol::data::Receipt::Unknown { .. })
+                    ))
+        }) {
+            self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
+        }
+        if self
+            .state
+            .transfers
+            .current
+            .as_ref()
+            .is_none_or(|s| s.receipt.is_some())
+        {
+            return Ok(());
+        }
+        if !data.files_ready() {
+            self.state.transfers.loss("data_channel_lost");
+        } else if self
+            .state
+            .transfers
+            .current
+            .as_ref()
+            .is_some_and(|s| s.receipt.is_none() && clock::now().as_secs_f64() >= s.deadline - 2.0)
+        {
+            self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
+            self.state.transfers.loss("deadline");
+        } else {
+            return Ok(());
+        }
+        self.save()
+    }
+    fn accept_transfer_poll(&mut self, reply: Value, sent: f64, data: &data::Lane) -> Result<()> {
+        self.accept_transfer_poll_with_clock(reply, sent, data, || clock::now().as_secs_f64())
+    }
+    fn accept_transfer_poll_with_clock(
+        &mut self,
+        reply: Value,
+        sent: f64,
+        data: &data::Lane,
+        mut now: impl FnMut() -> f64,
+    ) -> Result<()> {
+        let poll: transfers::Poll =
+            serde_json::from_value(reply).map_err(|_| "invalid transfer poll")?;
+        let lease = &poll.lease;
+        if !lease.controller_now.is_finite()
+            || !lease.expires_at.is_finite()
+            || lease.revision == 0
+            || lease.revision > canaveral_guest_protocol::MAX_SAFE
+        {
+            return Err("invalid transfer lease");
+        }
+        if matches!(lease.state.as_str(), "released" | "expired" | "failed") {
+            self.state.terminal = true;
+            self.fence_for(StopCause::Controller)?;
+        } else if poll.stop_requested {
+            self.fence_for(StopCause::Runtime)?;
+        }
+        let revoked = poll.cancel_requested
+            || !matches!(lease.state.as_str(), "ready" | "provisioning")
+            || lease.expires_at <= lease.controller_now
+            || self.expired();
+        if let Some(work) = &poll.transfer {
+            let a = self.assignment()?;
+            let d = self.state.direct.as_ref().ok_or("no transfer boot")?;
+            if work.lease_id != a.lease_id
+                || work.member_id != a.member_id
+                || work.assignment_id != a.id
+                || work.boot_attempt != d.boot_attempt
+                || work.bundle_digest != d.bundle_digest
+            {
+                return Err("transfer owner mismatch");
+            }
+        }
+        let frame = if let Some(work) = poll.transfer {
+            self.state.transfers.receive(
+                work,
+                sent,
+                lease.controller_now,
+                now(),
+                self.state.deadline,
+            )?
+        } else {
+            None
+        };
+        self.save()?; // Work is durable before any guest bytes.
+        if revoked {
+            self.transfer_cancel(
+                data,
+                canaveral_guest_protocol::data::CancelReason::AuthorizationLost,
+            )?;
+            self.state.transfers.loss("authorization_lost");
+        } else if !data.files_ready() {
+            self.state.transfers.loss("data_channel_lost");
+        } else if let Some(mut frame) = frame {
+            self.state
+                .transfers
+                .current
+                .as_mut()
+                .ok_or("missing transfer")?
+                .handed_off = true;
+            self.save()?; // Uncertain crash after this point is never executable again.
+            let step = self
+                .state
+                .transfers
+                .current
+                .as_ref()
+                .ok_or("missing transfer")?;
+            let now = now();
+            let remaining = guest::remaining_ms(step.deadline, now)
+                .ok()
+                .filter(|_| sent + step.work.start_before - lease.controller_now > now);
+            let Some(remaining) = remaining else {
+                self.state
+                    .transfers
+                    .current
+                    .as_mut()
+                    .ok_or("missing transfer")?
+                    .handed_off = false;
+                self.state.transfers.loss("deadline");
+                self.transfer_cancel(data, canaveral_guest_protocol::data::CancelReason::Deadline)?;
+                return self.save();
+            };
+            if let canaveral_guest_protocol::data::Frame::TransferRequest { remaining_ms, .. } =
+                &mut frame
+            {
+                *remaining_ms = remaining;
+            }
+            if data.send_transfer(frame).is_err() {
+                self.state
+                    .transfers
+                    .current
+                    .as_mut()
+                    .ok_or("missing transfer")?
+                    .handed_off = false;
+                self.state.transfers.loss("data_channel_lost");
+            }
+        }
+        self.transfer_events(data)?;
+        self.save()
     }
     fn operation_binding(&self) -> Result<Value> {
         let d = self
@@ -1112,7 +1564,8 @@ impl Satellite {
             || c.boot_attempt != d.boot_attempt
             || c.bundle_digest != d.bundle_digest
             || !c.start_before.is_finite()
-            || c.timeout_ms != 30000
+            || c.validate_timing(a.workspace_io_version == Some(1))
+                .is_err()
             || !d.ready
             || d.withdrawn
             || a.image.backend != "appleVirtualization"
@@ -1142,7 +1595,11 @@ impl Satellite {
             .as_ref()
             .filter(|o| o.command.id == c.id)
         {
-            if op.command.arguments != c.arguments || op.command.start_before != c.start_before {
+            if op.command.arguments != c.arguments
+                || op.command.start_before != c.start_before
+                || op.command.timeout_ms != c.timeout_ms
+                || op.command.execution_deadline_at != c.execution_deadline_at
+            {
                 return Err("operation replay changed immutable request");
             }
             return Ok(());
@@ -1161,11 +1618,40 @@ impl Satellite {
         if remaining_start <= 0.0 {
             return Err("operation start expired");
         }
-        let timeout = guest::remaining_ms(self.state.deadline, now)?.min(30000);
-        self.state
-            .operations
-            .receive(c, now + timeout as f64 / 1000.0 + 2.0)?;
+        let workspace = a.workspace_io_version == Some(1);
+        let env = if workspace {
+            operations::environment(a.egress.as_ref().is_some_and(|e| e.enabled))
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let timeout = c.timeout(
+            workspace,
+            start,
+            lease.controller_now,
+            self.state.deadline,
+            now,
+        )?;
+        let receipt_deadline = if workspace {
+            (start
+                + c.execution_deadline_at
+                    .ok_or("missing execution deadline")?
+                - lease.controller_now
+                + 5.0)
+                .min(self.state.deadline)
+        } else {
+            now + timeout as f64 / 1000.0 + 2.0
+        };
+        self.state.operations.receive(c, receipt_deadline)?;
         self.save()?; // Durable dispatch intent precedes any exec/credit effect.
+        if timeout == 0 {
+            self.state
+                .operations
+                .current
+                .as_mut()
+                .ok_or("missing operation")?
+                .timed_out_before_exec();
+            return self.save();
+        }
         let session = session.ok_or("missing guest session")?;
         if session.revision() < self.state.revision {
             session.renew(
@@ -1185,13 +1671,41 @@ impl Satellite {
             .arguments
             .argv
             .clone();
-        let id = session.exec(
-            argv,
-            "/workspace".into(),
-            std::collections::BTreeMap::new(),
-            timeout,
-            now,
-        )?;
+        let (timeout, dispatch_now) = if workspace {
+            let dispatch_now = clock::now().as_secs_f64();
+            let command = &self
+                .state
+                .operations
+                .current
+                .as_ref()
+                .ok_or("missing operation")?
+                .command;
+            if command.start_before - lease.controller_now - (dispatch_now - start) <= 0.0 {
+                return Err("operation start expired before dispatch");
+            }
+            (
+                command.timeout(
+                    true,
+                    start,
+                    lease.controller_now,
+                    self.state.deadline,
+                    dispatch_now,
+                )?,
+                dispatch_now,
+            )
+        } else {
+            (timeout, now)
+        };
+        if timeout == 0 {
+            self.state
+                .operations
+                .current
+                .as_mut()
+                .ok_or("missing operation")?
+                .timed_out_before_exec();
+            return self.save();
+        }
+        let id = session.exec(argv, "/workspace".into(), env, timeout, dispatch_now)?;
         self.state
             .operations
             .current
@@ -1256,6 +1770,7 @@ impl Satellite {
         if self.state.released {
             // Cleanup acknowledgment cannot retire a command receipt that has not
             // itself been acknowledged. Keep the old binding until exact replay succeeds.
+            self.transfer_report_retry(controller)?;
             self.retry_operation_report(controller)?;
             // The closed assignment's workspace is deleted; a new claim starts a new journal.
             self.state = Journal::fresh(self.state.config.clone())?;
@@ -1282,17 +1797,23 @@ impl Satellite {
             self.save()?;
         }
         if self.state.cleaned {
+            self.state.transfers.recover();
+            self.save()?;
+            let _ = self.transfer_report_retry(controller);
             // Resource cleanup may progress independently, but its journal retains
             // any command receipt until the next invocation can acknowledge it.
             let _ = self.retry_operation_report(controller);
             return self.finish(controller);
         }
         if self.state.launch_intent || self.state.fenced {
+            self.state.transfers.recover();
+            self.save()?;
             if let Some(op) = self.state.operations.current.as_mut() {
                 op.unknown();
             }
             self.save()?;
             self.fence()?;
+            let _ = self.transfer_report_retry(controller);
             let _ = self.retry_operation_report(controller);
             if self.state.stopped {
                 return self.finish(controller);
@@ -1320,6 +1841,10 @@ impl Satellite {
                 artifacts: pins.clone(),
                 medium: None,
                 agent_socket: None,
+                workspace_disk: None,
+                data_nonce: None,
+                operator_deny_digest: None,
+                data_closed: None,
                 ready: false,
                 withdrawn: false,
                 timings: Timings {
@@ -1354,6 +1879,10 @@ impl Satellite {
         }
         if prepared.is_err() || self.expired() {
             // The prepare process has exited (or was killed and reaped); no run was started.
+            // No data reactor or worker has been constructed on this branch.
+            if let Some(d) = self.state.direct.as_mut() {
+                d.data_closed = Some(true);
+            }
             self.fence_for(if self.expired() {
                 StopCause::Deadline
             } else {
@@ -1372,12 +1901,20 @@ impl Satellite {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn())?;
+        let mut transfer_controller = controller.data_transport();
+        let mut joined_data_closed = false;
         let stopped = std::thread::scope(|scope| -> Result<bool> {
+            let transfer_worker = transfer_controller
+                .as_mut()
+                .map(|c| operations::Worker::spawn(scope, c));
+            let mut transfer_inflight = false;
+            let mut transfer_polled: Option<clock::Clock> = None;
             let worker = operations::Worker::spawn(scope, controller);
             let mut inflight = false;
             let mut last: Option<clock::Clock> = None;
             let mut polled: Option<clock::Clock> = None;
             let mut session: Option<guest::Session> = None;
+            let mut data = data::Lane::default();
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
                     // Observe process loss before the deadline margin can mask it.
@@ -1388,7 +1925,7 @@ impl Satellite {
                         break;
                     }
                     if self.state.direct.is_some()
-                        && self.guest_step(&mut session, &mut last).is_err()
+                        && self.guest_step(&mut session, &mut data, &mut last).is_err()
                     {
                         self.withdraw()?;
                         self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
@@ -1399,6 +1936,73 @@ impl Satellite {
                             self.withdraw()?;
                             self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
+                        }
+                    }
+                    if let Some(w) = &transfer_worker {
+                        self.transfer_events(&data)?;
+                        if transfer_inflight {
+                            if let Ok((route, sent, reply)) = w.recv.try_recv() {
+                                transfer_inflight = false;
+                                if let Ok(reply) = reply {
+                                    let accepted = match route {
+                                        LeaseRoute::TransferPoll => {
+                                            self.accept_transfer_poll(reply, sent, &data)
+                                        }
+                                        LeaseRoute::TransferReport => self
+                                            .state
+                                            .transfers
+                                            .acknowledge(reply)
+                                            .and_then(|_| self.save()),
+                                        _ => Err("unexpected transfer response"),
+                                    };
+                                    if accepted.is_err() {
+                                        self.transfer_cancel(
+                                            &data,
+                                            canaveral_guest_protocol::data::CancelReason::Stop,
+                                        )?;
+                                        self.state.transfers.loss("transport_unknown");
+                                        self.state.transfers.blocked = true;
+                                        self.save()?;
+                                    }
+                                }
+                            }
+                        }
+                        if !transfer_inflight
+                            && self.state.pending.is_none()
+                            && last.is_some()
+                            && transfer_polled
+                                .is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
+                        {
+                            let request = if self
+                                .state
+                                .transfers
+                                .current
+                                .as_ref()
+                                .is_some_and(|s| s.receipt.is_some() && !s.acknowledged)
+                            {
+                                Some((
+                                    LeaseRoute::TransferReport,
+                                    self.state.transfers.report(self.operation_binding()?)?,
+                                ))
+                            } else if self.files_ready
+                                && !self.state.transfers.blocked
+                                && self.assignment()?.capabilities.iter().any(|c| c == "files")
+                            {
+                                let poll_id = self.state.transfers.poll_id()?;
+                                self.save()?;
+                                let mut owner = self.operation_binding()?;
+                                owner["pollId"] = json!(poll_id);
+                                Some((LeaseRoute::TransferPoll, owner))
+                            } else {
+                                None
+                            };
+                            if let Some(request) = request {
+                                w.send
+                                    .try_send(request)
+                                    .map_err(|_| "transfer worker stopped")?;
+                                transfer_inflight = true;
+                                transfer_polled = Some(clock::Clock::now());
+                            }
                         }
                     }
                     if inflight {
@@ -1464,6 +2068,8 @@ impl Satellite {
                 }
                 Ok(())
             })();
+            // Revoke data authority and request native fencing before cancellation or journal work.
+            let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
             if let Some(op) = self.state.operations.current.as_mut() {
                 if op.receipt.is_none() {
                     if let (Some(s), Some(id)) = (session.as_mut(), op.guest_id) {
@@ -1473,17 +2079,34 @@ impl Satellite {
                     op.unknown();
                 }
             }
+            let cancelled =
+                self.transfer_cancel(&data, canaveral_guest_protocol::data::CancelReason::Stop);
+            self.state.transfers.loss("authorization_lost");
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
-            let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
+            let closed = data.shutdown();
+            if let Some(d) = self.state.direct.as_mut() {
+                d.data_closed = Some(false);
+                joined_data_closed = closed.complete();
+            }
+            self.save()?;
+            drop(data);
             drop(session);
             drop(worker);
+            drop(transfer_worker);
             fenced?;
             let stopped = self.wait_stopped(Some(&mut child))?;
             saved?;
+            cancelled?;
             supervised?;
             Ok(stopped)
-        })?;
+        });
+        if let Some(d) = self.state.direct.as_mut() {
+            d.data_closed = Some(joined_data_closed);
+        }
+        self.save()?;
+        let stopped = stopped?;
+        let _ = self.transfer_report_retry(controller);
         let _ = self.retry_operation_report(controller);
         if stopped {
             return self.finish(controller);
@@ -1596,6 +2219,7 @@ fn update_path_absent(path: &std::path::Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     mod operations;
+    mod transfers;
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
     fn boot_id() -> uuid::Uuid {
@@ -1625,6 +2249,7 @@ mod tests {
         std::fs::write(&image, b"fixture installed disk").unwrap();
         std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o400)).unwrap();
         let mut c = Config {
+            operator_deny_cidrs: Vec::new(),
             origin: "https://localhost".into(),
             identity: root.join("identity"),
             binding: Binding {
@@ -1710,6 +2335,20 @@ mod tests {
             "lease":{"state":"provisioning","revision":1,"expiresAt":101.0,"controllerNow":100.0},
             "stopRequested":false}).to_string().as_bytes()).unwrap()
     }
+    #[test]
+    fn workspace_assignment_uses_controller_acronym_spelling() {
+        let (_tmp, c) = fixture();
+        let mut wire = serde_json::to_value(assignment(&c, uuid::Uuid::from_u128(42))).unwrap();
+        wire["workspaceIOVersion"] = json!(1);
+        wire["workspace"] = json!({"bytes": 16777216, "overheadBytes": 1048576});
+        wire["egress"] = json!({"enabled": true, "policy": "public-https-v1"});
+        let parsed: Assignment = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.workspace_io_version, Some(1));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        wire["workspaceIoVersion"] = wire["workspaceIOVersion"].take();
+        wire.as_object_mut().unwrap().remove("workspaceIOVersion");
+        assert!(serde_json::from_value::<Assignment>(wire).is_err());
+    }
     /// Mirrors the controller's receipt rules that matter to the satellite.
     struct Wire {
         a: Assignment,
@@ -1727,6 +2366,8 @@ mod tests {
                 LeaseRoute::Claim => "claim",
                 LeaseRoute::Report => "report",
                 LeaseRoute::Assignments => "assignments",
+                LeaseRoute::TransferPoll => "transferPoll",
+                LeaseRoute::TransferReport => "transferReport",
                 LeaseRoute::OperationPoll => "operationPoll",
                 LeaseRoute::OperationReport => "operationReport",
             };
@@ -1827,6 +2468,36 @@ mod tests {
         s.state.deadline = clock::now().as_secs_f64() + 100.0;
         s.save().unwrap();
         s
+    }
+    #[test]
+    fn fence_revokes_live_authority_even_when_journal_save_fails() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let authority = reactor::Authority::new(clock::now() + Duration::from_secs(100));
+        s.data_authority = Some(authority.clone());
+        assert!(authority.permits());
+        // A directory at the journal staging path makes persistence fail.
+        std::fs::create_dir(c.state.join("state.next")).unwrap();
+        assert!(s.fence_for(StopCause::Runtime).is_err());
+        assert!(!authority.permits());
+    }
+    #[test]
+    fn native_fence_is_published_before_a_failed_journal_write() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        s.dir.workspace().unwrap();
+        let machine = s.machine().unwrap();
+        std::fs::create_dir(&machine).unwrap();
+        std::fs::set_permissions(&machine, std::fs::Permissions::from_mode(0o700)).unwrap();
+        s.state.prepared = true;
+        std::fs::create_dir(c.state.join("state.next")).unwrap();
+        assert!(s.fence_for(StopCause::Runtime).is_err());
+        let native: Value = serde_json::from_slice(
+            &std::fs::read(machine.join("lease-authorization.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(native["fenced"], true);
+        assert!(machine.join("power-off.request").exists());
     }
     #[test]
     fn late_errors_recheck_deadline_but_observed_process_exit_wins() {
@@ -2198,3 +2869,6 @@ mod tests {
         assert!(!s.state.cleaned && !s.state.stopped);
     }
 }
+
+pub mod egress;
+pub mod native_egress;

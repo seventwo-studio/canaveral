@@ -20,7 +20,55 @@ pub struct Command {
     pub arguments: Arguments,
     pub start_before: f64,
     pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_deadline_at: Option<f64>,
     pub state: String,
+}
+impl Command {
+    pub fn validate_timing(&self, workspace: bool) -> Result<()> {
+        if workspace {
+            if !(1..=1800000).contains(&self.timeout_ms)
+                || self.execution_deadline_at.is_none_or(|d| !d.is_finite())
+            {
+                return Err("invalid workspace command timing");
+            }
+        } else if self.timeout_ms != 30000 || self.execution_deadline_at.is_some() {
+            return Err("invalid legacy command timing");
+        }
+        Ok(())
+    }
+    /// Translate UTC once using poll send time; elapsed transport time is charged.
+    pub fn timeout(
+        &self,
+        workspace: bool,
+        sent: f64,
+        controller_now: f64,
+        lease_deadline: f64,
+        now: f64,
+    ) -> Result<u64> {
+        self.validate_timing(workspace)?;
+        if !sent.is_finite() || !controller_now.is_finite() || !now.is_finite() || now < sent {
+            return Err("invalid command clock evidence");
+        }
+        if !lease_deadline.is_finite() {
+            return Err("invalid lease deadline");
+        }
+        // The authority margin applies only to the lease, never the command duration.
+        let mut remaining =
+            (((lease_deadline - now) * 1000.0).floor() - guest::MARGIN_MS as f64).max(0.0) as u64;
+        if let Some(deadline) = self.execution_deadline_at {
+            // UTC controller timestamps have millisecond precision. Subtract in
+            // milliseconds to avoid rounding an exact 1ms deadline down to zero.
+            let ms = deadline * 1000.0 - controller_now * 1000.0 - (now - sent) * 1000.0;
+            remaining = remaining.min(ms.floor().max(0.0) as u64);
+        }
+        Ok(remaining.min(self.timeout_ms))
+    }
+}
+/// PID1 derives workspace variables from the immutable launch egress grant.
+/// The control frame must carry no overrides, including for an enabled grant.
+pub fn environment(_egress: bool) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +165,13 @@ impl Lane {
     }
 }
 impl Operation {
+    /// No exec was handed off, so expiry has a definite, empty command result.
+    pub fn timed_out_before_exec(&mut self) {
+        self.receipt = Some(json!({"state":"failed","result":{
+            "stdoutBase64":"","stderrBase64":"","exitCode":null,"signal":null,
+            "timedOut":true,"durationMs":0,"stdoutBytes":0,"stderrBytes":0,
+            "truncated":false,"terminationConfirmed":true}}));
+    }
     pub fn unknown(&mut self) {
         if self.receipt.is_none() {
             self.receipt = Some(json!({"state":"unknown"}));
