@@ -167,7 +167,11 @@ fn connect_relay(path: &str, socket: &str) -> Result<UnixStream> {
     {
         return Err("relay socket is not privately owned");
     }
-    let stream = UnixStream::connect(path).map_err(|_| "relay socket refused")?;
+    let stream = if socket == "data.sock" {
+        connect_nonblocking(path)?
+    } else {
+        UnixStream::connect(path).map_err(|_| "relay socket refused")?
+    };
     if peer_uid(&stream) != Some(me) {
         return Err("relay peer is not the helper uid");
     }
@@ -185,6 +189,42 @@ fn connect_relay(path: &str, socket: &str) -> Result<UnixStream> {
         .set_nonblocking(true)
         .map_err(|_| "relay socket refused")?;
     Ok(stream)
+}
+/// Set nonblocking before connect: a full helper listen backlog must not stall
+/// the supervision thread. An incomplete connection is refused, never retried.
+fn connect_nonblocking(path: &str) -> Result<UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_bytes();
+    if bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+        return Err("invalid data relay path");
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = std::mem::size_of_val(&address) as u8;
+    }
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err("data socket unavailable");
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        || unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                &address as *const _ as *const libc::sockaddr,
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        } != 0
+    {
+        return Err("data socket refused or pending");
+    }
+    Ok(UnixStream::from(fd))
 }
 /// Removes only the exact published relay directory after positive VM stop.
 pub fn remove_published(path: &str) -> Result<()> {
@@ -580,6 +620,35 @@ pub(crate) mod tests {
         peer.write_all(&0u32.to_be_bytes()).unwrap();
         assert_eq!(session.pump(100.0), Err("guest protocol violation"));
         assert!(!session.ready(100.0));
+    }
+    #[test]
+    fn saturated_data_backlog_is_refused_without_blocking_supervision() {
+        use std::os::{fd::AsRawFd, unix::net::UnixListener};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let start = std::time::Instant::now();
+        let mut pending = Vec::new();
+        let mut refused = false;
+        for _ in 0..32 {
+            match connect_nonblocking(path.to_str().unwrap()) {
+                Ok(stream) => {
+                    assert_ne!(
+                        unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) }
+                            & libc::O_NONBLOCK,
+                        0
+                    );
+                    pending.push(stream);
+                }
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused);
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
     #[test]
     fn data_relay_is_a_private_sibling_and_cleanup_removes_both() {
