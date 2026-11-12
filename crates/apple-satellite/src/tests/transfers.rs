@@ -409,3 +409,27 @@ fn transfer_stop_distinguishes_runtime_failure_from_terminal_lease() {
         );
     }
 }
+
+#[test]
+fn transfer_acknowledges_first_terminal_without_replacing_local_receipt() {
+    for state in ["succeeded", "failed", "unknown"] {
+        let (_tmp, mut s, data, _peer) = setup();
+        let reply = poll(
+            &s,
+            json!({"action":"beginDownload","path":"file"}),
+            1,
+            false,
+        );
+        s.accept_transfer_poll(reply, clock::now().as_secs_f64(), &data)
+            .unwrap();
+        s.state.transfers.loss("authorization_lost");
+        let step = s.state.transfers.current.as_ref().unwrap();
+        let receipt = serde_json::to_value(&step.receipt).unwrap();
+        let ack = json!({"transferId":step.work.id,"step":step.work.step,"state":state});
+        s.state.transfers.acknowledge(ack).unwrap();
+        let step = s.state.transfers.current.as_ref().unwrap();
+        assert!(step.acknowledged);
+        assert_eq!(serde_json::to_value(&step.receipt).unwrap(), receipt);
+        assert!(s.state.transfers.blocked);
+    }
+}

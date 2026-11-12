@@ -211,15 +211,9 @@ impl Lane {
             return Err("transfer acknowledgment mismatch");
         }
         let receipt = step.receipt.as_ref().ok_or("missing transfer receipt")?;
-        let expected = match receipt {
-            Receipt::Failed { .. } => "failed",
-            Receipt::Unknown { .. } => "unknown",
-            _ => "succeeded",
-        };
-        if reply["state"] != expected && reply["state"] != "unknown" {
-            return Err("transfer outcome mismatch");
-        }
-        self.blocked |= reply["state"] == "unknown";
+        // The stored controller terminal can win before cancellation arrives.
+        // Preserve local uncertainty and never replay the guest effect.
+        self.blocked |= reply["state"] == "unknown" || matches!(receipt, Receipt::Unknown { .. });
         step.acknowledged = true;
         self.poll_id = None;
         Ok(())
