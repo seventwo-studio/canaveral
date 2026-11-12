@@ -389,9 +389,7 @@ impl<E: Egress> Reactor<E> {
                     .checked_add(bytes)
                     .filter(|n| *n <= data::MAX_CREDIT)
                     .ok_or("excess credit")?;
-                if s.read_eof {
-                    return Err("credit after half close".into());
-                }
+                // Keep accounting bounded, but EOF prevents this credit being spent.
             }
             Frame::HalfClose { id, .. } => {
                 if self.retired.contains(&id) {
@@ -1028,6 +1026,62 @@ mod tests {
         assert!(r.budget.reserve(data::DECODED_BUDGET, 0).is_err());
         assert!(r.budget.reserve(0, data::ENCODED_BUDGET).is_err());
         assert!(r.close().complete());
+    }
+    #[test]
+    fn crossed_credit_after_local_half_close_preserves_other_flows() {
+        for remote_first in [false, true] {
+            let (mut r, mut peer, fake) = setup(true);
+            open(&mut r, 1);
+            let (mut tcp, _) = fake.listener.accept().unwrap();
+            r.frame(Frame::Credit {
+                version: 1,
+                id: id(1),
+                bytes: 65536,
+            })
+            .unwrap();
+            tcp.write_all(b"reply").unwrap();
+            tcp.shutdown(Shutdown::Write).unwrap();
+            let mut frames = collect(&mut peer);
+            for _ in 0..100 {
+                r.step().unwrap();
+                frames.extend(collect(&mut peer));
+                if frames.iter().any(|f| matches!(f, Frame::HalfClose { .. })) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(frames.iter().any(|f| matches!(f, Frame::HalfClose { .. })));
+            if remote_first {
+                r.frame(Frame::HalfClose {
+                    version: 1,
+                    id: id(1),
+                })
+                .unwrap();
+            }
+            r.frame(Frame::Credit {
+                version: 1,
+                id: id(1),
+                bytes: 5,
+            })
+            .unwrap();
+            assert!(r
+                .frame(Frame::Credit {
+                    version: 1,
+                    id: id(1),
+                    bytes: data::MAX_CREDIT
+                })
+                .is_err());
+            if !remote_first {
+                r.frame(Frame::HalfClose {
+                    version: 1,
+                    id: id(1),
+                })
+                .unwrap();
+            }
+            open(&mut r, 2);
+            assert!(r.sockets.contains_key(&id(2)));
+            assert!(r.close().complete());
+        }
     }
     #[test]
     fn real_tcp_echo_half_close_and_live_route_denial() {

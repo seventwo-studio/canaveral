@@ -69,7 +69,10 @@ Reserve one 131072-byte control-frame slot independently of payload budget; boun
 round-robin work (at most 64 KiB payload per flow per turn) prevents starvation.
 Connect (including DNS) is limited to 10 seconds; a flow with no payload progress
 for 120 seconds closes, including credit stalls. Half-close is directional;
-both drained halves close and retire the flow. Unknown IDs, data before opened,
+valid replenishment credit may cross halfClose after the local producer has
+reached EOF. Accept it without resuming reads, retaining bounded credit accounting
+(up to 262144); unknown/retired IDs keep the rules below. Both drained halves
+close and retire the flow. Unknown IDs, data before opened,
 excess credit, sequence gaps and data after halfClose are protocol violations.
 A guest-initiated Close retains the flow in a closing state until the host's
 ordered Close acknowledgement. Already granted payload is sequence/credit checked

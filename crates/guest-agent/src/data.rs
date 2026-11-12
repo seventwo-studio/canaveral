@@ -301,11 +301,10 @@ pub(crate) fn session(
                                         .iter_mut()
                                         .find(|c| c.id == Some(id))
                                         .ok_or("unknown client")?;
-                                    if (!c.closing && c.local_eof)
-                                        || c.send_credit + bytes > data::MAX_CREDIT
-                                    {
+                                    if c.send_credit + bytes > data::MAX_CREDIT {
                                         return Err("invalid send credit".into());
                                     }
+                                    // EOF prevents spending late credit; retain it for the limit.
                                     c.send_credit += bytes;
                                 }
                                 Frame::Data { id, seq, data, .. } => {
@@ -749,6 +748,70 @@ mod tests {
         assert!(error.contains("disconnected"), "{error}");
         assert!(!ready.files.load(Ordering::Acquire));
         assert!(ready.initial.load(Ordering::Acquire));
+    }
+    #[test]
+    fn crossed_credit_after_local_half_close_keeps_data_ready() {
+        for remote_first in [false, true] {
+            let (mut host, address, ready, worker) = pair(true);
+            hello(&mut host);
+            let mut client = tunnel(address);
+            let id = match receive(&mut host) {
+                Frame::Open { id, .. } => id,
+                _ => panic!(),
+            };
+            send(&mut host, Frame::Opened { version: 1, id });
+            let mut header = [0; 39];
+            client.read_exact(&mut header).unwrap();
+            assert!(matches!(receive(&mut host), Frame::Credit { .. }));
+            send(
+                &mut host,
+                Frame::Credit {
+                    version: 1,
+                    id,
+                    bytes: 65536,
+                },
+            );
+            client.write_all(b"guest").unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            assert!(matches!(receive(&mut host), Frame::Data { .. }));
+            assert!(matches!(receive(&mut host), Frame::HalfClose { .. }));
+            if remote_first {
+                send(
+                    &mut host,
+                    Frame::Data {
+                        version: 1,
+                        id,
+                        seq: 0,
+                        data: STANDARD.encode(b"host"),
+                    },
+                );
+                let mut body = [0; 4];
+                client.read_exact(&mut body).unwrap();
+                assert_eq!(&body, b"host");
+                assert!(matches!(receive(&mut host), Frame::Credit { bytes: 4, .. }));
+            }
+            send(
+                &mut host,
+                Frame::Credit {
+                    version: 1,
+                    id,
+                    bytes: 5,
+                },
+            );
+            send(&mut host, Frame::HalfClose { version: 1, id });
+            // Opening another flow is a barrier proving the preceding credit was accepted.
+            let _other = tunnel(address);
+            let next = receive(&mut host);
+            let next = if matches!(next, Frame::Close { .. }) {
+                receive(&mut host)
+            } else {
+                next
+            };
+            assert!(matches!(next, Frame::Open { .. }));
+            assert!(ready.files.load(Ordering::Acquire));
+            drop(host);
+            assert!(worker.join().unwrap().contains("disconnected"));
+        }
     }
     #[test]
     fn sequence_violation_withdraws_only_data_readiness() {
