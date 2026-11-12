@@ -231,6 +231,9 @@ impl Session {
         })?;
         Ok(s)
     }
+    pub fn authority_expired(&self, now: f64) -> bool {
+        now >= self.guest_deadline
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -446,6 +449,9 @@ fn next_id(last: Uuid) -> Result<Uuid> {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn session_pair() -> (Session, UnixStream) {
+        session_pair_with_deadline(110.0)
+    }
+    pub(crate) fn session_pair_with_deadline(deadline: f64) -> (Session, UnixStream) {
         let (stream, peer) = UnixStream::pair().unwrap();
         stream.set_nonblocking(true).unwrap();
         let binding = Binding {
@@ -465,7 +471,7 @@ pub(crate) mod tests {
                 decoder: GuestDecoder::default(),
                 hello: binding,
                 revision: 1,
-                guest_deadline: 110.0,
+                guest_deadline: deadline,
                 phase: Phase::Handshake,
                 events: VecDeque::new(),
                 event_bytes: 0,

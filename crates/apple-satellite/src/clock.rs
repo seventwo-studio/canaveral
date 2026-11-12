@@ -11,7 +11,7 @@ impl Clock {
     }
 }
 #[cfg(target_os = "macos")]
-pub fn now() -> Duration {
+fn system_now() -> Duration {
     #[repr(C)]
     struct Timebase {
         numer: u32,
@@ -32,7 +32,7 @@ pub fn now() -> Duration {
     )
 }
 #[cfg(target_os = "linux")]
-pub fn now() -> Duration {
+fn system_now() -> Duration {
     let mut value = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -43,6 +43,22 @@ pub fn now() -> Duration {
     Duration::new(value.tv_sec as u64, value.tv_nsec as u32)
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn now() -> Duration {
+fn system_now() -> Duration {
     std::process::abort()
+}
+
+#[cfg(test)]
+thread_local! { static ADVANCE: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) }; }
+#[cfg(test)]
+pub fn advance(by: Duration) {
+    ADVANCE.with(|v| v.set(by));
+}
+pub fn now() -> Duration {
+    let now = system_now();
+    #[cfg(test)]
+    {
+        ADVANCE.with(|v| now + v.get())
+    }
+    #[cfg(not(test))]
+    now
 }

@@ -108,6 +108,15 @@ pub struct Assignment {
     lease: Lease,
     stop_requested: bool,
 }
+/// First reason for stopping; later supervision cannot overwrite it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StopCause {
+    Controller,
+    Deadline,
+    Runtime,
+}
+
 /// Durable per-claim journal. Every flag is forward-only within one claim.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,6 +128,8 @@ struct Journal {
     launch_intent: bool,
     prepared: bool,
     fenced: bool,
+    #[serde(default)]
+    stop_cause: Option<StopCause>,
     /// Declined before launch intent: nothing was created for this assignment.
     abandoned: bool,
     boot: f64,
@@ -190,6 +201,7 @@ impl Journal {
             launch_intent: false,
             prepared: false,
             fenced: false,
+            stop_cause: None,
             abandoned: false,
             boot: 0.0,
             boot_session_id: uuid::Uuid::nil(),
@@ -574,6 +586,48 @@ impl Satellite {
     }
     /// Sticky. Signals the native helper only while a prepared machine may still execute.
     fn fence(&mut self) -> Result<()> {
+        self.fence_for(StopCause::Runtime)
+    }
+    fn error_cause(&self, child: &mut Child, session: Option<&guest::Session>) -> StopCause {
+        if self.state.terminal {
+            StopCause::Controller
+        } else if matches!(child.try_wait(), Ok(Some(_))) {
+            StopCause::Runtime
+        } else if self.deadline_reached(session) {
+            StopCause::Deadline
+        } else {
+            StopCause::Runtime
+        }
+    }
+    fn supervision_cause(
+        &self,
+        exited: bool,
+        session: Option<&guest::Session>,
+    ) -> Option<StopCause> {
+        if exited {
+            Some(StopCause::Runtime)
+        } else if self.deadline_reached(session) {
+            Some(StopCause::Deadline)
+        } else {
+            None
+        }
+    }
+    fn deadline_reached(&self, session: Option<&guest::Session>) -> bool {
+        let now = clock::now().as_secs_f64();
+        self.expired()
+            || (self.state.direct.is_some()
+                && now >= self.state.deadline - guest::MARGIN_MS as f64 / 1000.0)
+            || session.is_some_and(|s| s.authority_expired(now))
+    }
+    fn fence_for(&mut self, cause: StopCause) -> Result<()> {
+        // Old fenced journals have no recorded cause: retain their runtime classification.
+        if self.state.stop_cause.is_none() {
+            self.state.stop_cause = Some(if self.state.fenced {
+                StopCause::Runtime
+            } else {
+                cause
+            });
+        }
         self.state.fenced = true;
         self.save()?;
         if self.state.prepared && !self.state.stopped && !self.state.cleaning {
@@ -594,7 +648,11 @@ impl Satellite {
         let failure = if s.abandoned {
             Some("provisioning")
         } else if s.fenced {
-            Some("runtime")
+            match s.stop_cause.unwrap_or(StopCause::Runtime) {
+                StopCause::Controller => None,
+                StopCause::Deadline => Some("deadline"),
+                StopCause::Runtime => Some("runtime"),
+            }
         } else {
             None
         };
@@ -644,6 +702,24 @@ impl Satellite {
         )?;
         self.accept_report(reply, start)
     }
+    fn accept_runtime_report(
+        &mut self,
+        reply: Value,
+        start: f64,
+        last: &mut Option<clock::Clock>,
+    ) -> Result<()> {
+        let current = self.receipt()?;
+        let stale = self
+            .state
+            .pending
+            .as_ref()
+            .is_some_and(|p| p["receipt"]["ready"] != current["receipt"]["ready"]);
+        self.accept_report(reply, start)?;
+        if stale {
+            *last = None;
+        }
+        Ok(())
+    }
     fn accept_report(&mut self, reply: Value, start: f64) -> Result<()> {
         if reply["assignmentId"] != json!(self.assignment()?.id)
             || reply["sequence"] != json!(self.state.sequence + 1)
@@ -656,6 +732,8 @@ impl Satellite {
             return Err("invalid lease clock");
         }
         // Expiry is evaluated before renewal, including network latency and sleep.
+        let controller_stop = reply["stopRequested"] == true
+            || !matches!(lease.state.as_str(), "provisioning" | "ready");
         let mut fence = self.state.fenced
             || self.expired()
             || reply["stopRequested"] == true
@@ -673,12 +751,18 @@ impl Satellite {
         self.state.sequence += 1;
         self.state.pending = None;
         self.state.released = reply["released"] == true && self.state.cleaned;
-        self.save()?;
-        // Native effects follow durable bookkeeping, so a failed write cannot replay a report.
+        // Fence cause and acknowledgment are committed together before native effects.
         if fence {
-            self.fence()?;
-        } else if renewed && self.state.prepared && !self.state.stopped {
-            self.authorize()?;
+            self.fence_for(if controller_stop {
+                StopCause::Controller
+            } else {
+                StopCause::Deadline
+            })?;
+        } else {
+            self.save()?;
+            if renewed && self.state.prepared && !self.state.stopped {
+                self.authorize()?;
+            }
         }
         Ok(())
     }
@@ -983,6 +1067,17 @@ impl Satellite {
         let poll: operations::Poll =
             serde_json::from_value(reply).map_err(|_| "invalid operation poll")?;
         let lease = &poll.lease;
+        if lease.expires_at.is_finite()
+            && lease.controller_now.is_finite()
+            && lease.revision >= self.state.revision
+            && lease.revision > 0
+            && lease.revision <= canaveral_guest_protocol::MAX_SAFE
+            && matches!(lease.state.as_str(), "released" | "expired" | "failed")
+        {
+            self.state.terminal = true;
+            self.fence_for(StopCause::Controller)?;
+            return Ok(());
+        }
         if !lease.expires_at.is_finite()
             || !lease.controller_now.is_finite()
             || lease.revision < self.state.revision
@@ -990,7 +1085,6 @@ impl Satellite {
             || lease.revision > canaveral_guest_protocol::MAX_SAFE
             || lease.expires_at <= lease.controller_now
             || self.expired()
-            || poll.cancel_requested
             || !matches!(lease.state.as_str(), "ready" | "provisioning")
         {
             return Err("operation authorization ended");
@@ -1000,6 +1094,11 @@ impl Satellite {
             self.state.revision = lease.revision;
             self.save()?;
             self.authorize()?;
+        }
+        if poll.stop_requested {
+            // The lease is active, so a failure-bearing stop must end it before cleanup.
+            self.fence_for(StopCause::Runtime)?;
+            return Ok(());
         }
         let Some(c) = poll.command else {
             return Ok(());
@@ -1020,6 +1119,21 @@ impl Satellite {
             || !a.capabilities.iter().any(|c| c == "command")
         {
             return Err("operation launch binding mismatch");
+        }
+        if poll.cancel_requested {
+            if let Some(op) = self.state.operations.current.as_mut() {
+                if op.command.id != c.id {
+                    return Err("operation cancellation binding mismatch");
+                }
+                if !op.cancel_sent {
+                    if let Some(id) = op.guest_id.filter(|_| op.receipt.is_none()) {
+                        session.ok_or("missing guest session")?.cancel(id)?;
+                    }
+                    op.cancel_sent = true;
+                    self.save()?;
+                }
+            }
+            return Ok(());
         }
         if let Some(op) = self
             .state
@@ -1091,6 +1205,52 @@ impl Satellite {
         }
         self.save()
     }
+    /// Select the next request for the runtime loop, preserving report priority.
+    fn runtime_request_tick(
+        &mut self,
+        last: &mut Option<clock::Clock>,
+        polled: &mut Option<clock::Clock>,
+        guest_ready: bool,
+    ) -> Result<Option<(LeaseRoute, Value)>> {
+        let request =
+            if self.state.pending.is_some() || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
+                if self.state.pending.is_none() {
+                    self.state.pending = Some(self.receipt()?);
+                    self.save()?;
+                }
+                *last = Some(clock::Clock::now());
+                Some((
+                    LeaseRoute::Report,
+                    self.state.pending.clone().ok_or("missing report")?,
+                ))
+            } else if self
+                .state
+                .operations
+                .current
+                .as_ref()
+                .is_some_and(|o| o.receipt.is_some() && !o.acknowledged)
+            {
+                Some((LeaseRoute::OperationReport, self.operation_report()?))
+            } else if guest_ready
+                && self
+                    .assignment()?
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "command")
+                && polled.is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
+            {
+                let poll_id = self.state.operations.poll_id()?;
+                self.save()?;
+                let mut body = self.operation_binding()?;
+                body["pollId"] = json!(poll_id);
+                *polled = Some(clock::Clock::now());
+                Some((LeaseRoute::OperationPoll, body))
+            } else {
+                None
+            };
+        Ok(request)
+    }
+
     /// One durable claim per journal. Restart never repeats prepare/run after launch intent.
     pub fn run_once(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
         if self.state.released {
@@ -1194,7 +1354,11 @@ impl Satellite {
         }
         if prepared.is_err() || self.expired() {
             // The prepare process has exited (or was killed and reaped); no run was started.
-            self.fence()?;
+            self.fence_for(if self.expired() {
+                StopCause::Deadline
+            } else {
+                StopCause::Runtime
+            })?;
             if self.wait_stopped(None)? {
                 self.finish(controller)?;
             }
@@ -1216,21 +1380,24 @@ impl Satellite {
             let mut session: Option<guest::Session> = None;
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
-                    if self.expired() || io(child.try_wait())?.is_some() {
-                        self.fence()?;
+                    // Observe process loss before the deadline margin can mask it.
+                    if let Some(cause) =
+                        self.supervision_cause(io(child.try_wait())?.is_some(), session.as_ref())
+                    {
+                        self.fence_for(cause)?;
                         break;
                     }
                     if self.state.direct.is_some()
                         && self.guest_step(&mut session, &mut last).is_err()
                     {
                         self.withdraw()?;
-                        self.fence()?;
+                        self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                         break;
                     }
                     if let Some(s) = session.as_mut() {
                         if self.operation_events(s).is_err() {
                             self.withdraw()?;
-                            self.fence()?;
+                            self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
                         }
                     }
@@ -1239,7 +1406,9 @@ impl Satellite {
                             inflight = false;
                             if let Ok(reply) = reply {
                                 let accepted = match route {
-                                    LeaseRoute::Report => self.accept_report(reply, start),
+                                    LeaseRoute::Report => {
+                                        self.accept_runtime_report(reply, start, &mut last)
+                                    }
                                     LeaseRoute::OperationPoll => {
                                         self.accept_poll(reply, start, session.as_mut())
                                     }
@@ -1250,7 +1419,7 @@ impl Satellite {
                                 };
                                 if accepted.is_err() {
                                     self.withdraw()?;
-                                    self.fence()?;
+                                    self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                                     break;
                                 }
                             }
@@ -1267,48 +1436,18 @@ impl Satellite {
                             .is_err()
                         {
                             self.withdraw()?;
-                            self.fence()?;
+                            self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
                         }
                     }
                     if !inflight && !self.state.fenced {
-                        let request = if last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
-                            if self.state.pending.is_none() {
-                                self.state.pending = Some(self.receipt()?);
-                                self.save()?;
-                            }
-                            last = Some(clock::Clock::now());
-                            Some((
-                                LeaseRoute::Report,
-                                self.state.pending.clone().ok_or("missing report")?,
-                            ))
-                        } else if self
-                            .state
-                            .operations
-                            .current
-                            .as_ref()
-                            .is_some_and(|o| o.receipt.is_some() && !o.acknowledged)
-                        {
-                            Some((LeaseRoute::OperationReport, self.operation_report()?))
-                        } else if session
-                            .as_ref()
-                            .is_some_and(|s| s.ready(clock::now().as_secs_f64()))
-                            && self
-                                .assignment()?
-                                .capabilities
-                                .iter()
-                                .any(|c| c == "command")
-                            && polled.is_none_or(|t| t.elapsed() >= Duration::from_millis(200))
-                        {
-                            let poll_id = self.state.operations.poll_id()?;
-                            self.save()?;
-                            let mut body = self.operation_binding()?;
-                            body["pollId"] = json!(poll_id);
-                            polled = Some(clock::Clock::now());
-                            Some((LeaseRoute::OperationPoll, body))
-                        } else {
-                            None
-                        };
+                        let request = self.runtime_request_tick(
+                            &mut last,
+                            &mut polled,
+                            session
+                                .as_ref()
+                                .is_some_and(|s| s.ready(clock::now().as_secs_f64())),
+                        )?;
                         if let Some(request) = request {
                             worker
                                 .send
@@ -1336,7 +1475,7 @@ impl Satellite {
             }
             let saved = self.save();
             // Fence and prove stop before joining a bounded but potentially stalled HTTP call.
-            let fenced = self.fence();
+            let fenced = self.fence_for(self.error_cause(&mut child, session.as_ref()));
             drop(session);
             drop(worker);
             fenced?;
@@ -1612,7 +1751,7 @@ mod tests {
                         assert_eq!(r["storageRemoved"], false);
                     }
                     if r["runtimeState"] == "stopped" {
-                        assert!(!r["failure"].is_null());
+                        assert!(self.cancel || !r["failure"].is_null());
                     }
                     let complete = r["cleanup"] == "complete";
                     if complete {
@@ -1690,6 +1829,120 @@ mod tests {
         s
     }
     #[test]
+    fn late_errors_recheck_deadline_but_observed_process_exit_wins() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        assert!(matches!(
+            s.error_cause(&mut child, None),
+            StopCause::Runtime
+        ));
+        // Move authority end between the loop check and guest/reply processing.
+        let (mut guest, _peer) =
+            guest::tests::session_pair_with_deadline(clock::now().as_secs_f64() + 5.0);
+        assert!(!s.deadline_reached(Some(&guest)));
+        clock::advance(Duration::from_secs(6));
+        assert!(guest.pump(clock::now().as_secs_f64()).is_err());
+        assert!(!s.expired());
+        assert!(matches!(
+            s.error_cause(&mut child, Some(&guest)),
+            StopCause::Deadline
+        ));
+        clock::advance(Duration::from_secs(101));
+        assert!(s.accept_report(json!({}), 0.0).is_err());
+        assert!(s.accept_poll(json!({}), 0.0, None).is_err());
+        assert!(matches!(
+            s.supervision_cause(true, None),
+            Some(StopCause::Runtime)
+        ));
+        assert!(matches!(
+            s.supervision_cause(false, None),
+            Some(StopCause::Deadline)
+        ));
+        s.fence_for(s.error_cause(&mut child, None)).unwrap();
+        clock::advance(Duration::ZERO);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "deadline");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(matches!(
+            s.error_cause(&mut child, Some(&guest)),
+            StopCause::Runtime
+        ));
+    }
+    #[test]
+    fn terminal_poll_ok_and_report_prefer_controller_after_deadline() {
+        for poll in [false, true] {
+            let (_tmp, c) = fixture();
+            let mut s = seeded(&c);
+            s.state.deadline = clock::now().as_secs_f64() - 1.0;
+            if poll {
+                s.accept_poll(
+                    json!({"command":null,"cancelRequested":false,
+                    "lease":{"state":"released","revision":2,"expiresAt":1.0,"controllerNow":2.0}}),
+                    0.0,
+                    None,
+                )
+                .unwrap();
+            } else {
+                let mut w = wire(s.assignment().unwrap().clone());
+                w.cancel = true;
+                s.report(&mut w).unwrap();
+            }
+            assert!(s.state.fenced && s.state.terminal);
+            assert_eq!(s.receipt().unwrap()["receipt"]["failure"], Value::Null);
+        }
+    }
+    #[test]
+    fn legacy_fenced_journal_replays_as_runtime() {
+        let (_tmp, c) = fixture();
+        let s = seeded(&c);
+        let config = serde_json::to_value(&c).unwrap();
+        let assignment = serde_json::to_value(s.state.assignment.as_ref().unwrap()).unwrap();
+        drop(s);
+        // Real pre-15f557e native expiry journal; local paths/bindings are redacted.
+        let mut document: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/pre-cause-fenced.json")).unwrap();
+        assert!(document.get("stopCause").is_none());
+        document["config"] = config;
+        document["assignment"] = assignment;
+        std::fs::write(
+            c.state.join("state.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let s = Satellite::open_preflighted(c).unwrap();
+        assert!(s.state.fenced);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "runtime");
+    }
+    #[test]
+    fn stop_cause_is_honest_sticky_and_survives_restart() {
+        for (cause, expected) in [
+            (StopCause::Controller, Value::Null),
+            (StopCause::Deadline, json!("deadline")),
+            (StopCause::Runtime, json!("runtime")),
+        ] {
+            let (_tmp, c) = fixture();
+            let mut s = seeded(&c);
+            s.fence_for(cause).unwrap();
+            s.fence().unwrap(); // Later supervision cannot overwrite the first cause.
+            assert_eq!(s.receipt().unwrap()["receipt"]["failure"], expected);
+            drop(s);
+            let mut s = Satellite::open_preflighted(c).unwrap();
+            s.fence().unwrap();
+            assert_eq!(s.receipt().unwrap()["receipt"]["failure"], expected);
+        }
+    }
+    #[test]
+    fn terminal_controller_reply_fences_without_runtime_failure() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let mut w = wire(s.assignment().unwrap().clone());
+        w.cancel = true;
+        s.report(&mut w).unwrap();
+        assert!(s.state.terminal && s.state.fenced);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], Value::Null);
+    }
+    #[test]
     fn pending_report_replayed_exactly_after_loss_and_restart() {
         let (_tmp, c) = fixture();
         let mut s = seeded(&c);
@@ -1717,6 +1970,7 @@ mod tests {
         s.report(&mut w).unwrap();
         assert!(s.state.fenced);
         assert_eq!(s.state.revision, 1);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "deadline");
         s.state.deadline = clock::now().as_secs_f64() + 100.0;
         s.report(&mut w).unwrap();
         assert!(s.state.fenced);

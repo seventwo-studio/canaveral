@@ -21,7 +21,10 @@ const HEADLESS = ["command", "pty", "files"] as const;
 const ACTIVE = ["provisioning", "ready"];
 const RUNTIME = ["starting", "running", "stopped", "unknown"] as const;
 const CLEANUP = ["pending", "running", "blocked", "complete"] as const;
-const FAILURE = ["provisioning", "runtime"] as const;
+const FAILURE = ["provisioning", "runtime", "deadline"] as const;
+// Seconds: 2s guest margin + 1s report cadence + 7s bounded scheduling/clock skew.
+// Classification only: never changes the stored deadline or cleanup requirements.
+export const DEADLINE_REPORT_TOLERANCE = 10;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_ACTIVE_ASSIGNMENTS = 32;
@@ -32,7 +35,7 @@ interface ApprovalRow { controller: string; runner: string; generation: number; 
 interface LeaseRow {
   id: string; application: string; request: string; image_id: string; image_revision: string; arch: string; backend: Backend; digest: string;
   resources: string; capabilities: string; required: string; member: string; domain: string; reservation: string;
-  state: string; runtime: string; cleanup: string; cleanup_id: string | null; revision: number;
+  failure_reason: string | null; state: string; runtime: string; cleanup: string; cleanup_id: string | null; revision: number;
   created: number; expires: number; max_expires: number; provision_deadline: number; credential: string | null;
 }
 interface AssignmentRow {
@@ -60,6 +63,12 @@ function text(value: unknown, what: string): string {
 function positive(value: unknown, maximum: number, what: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > maximum) throw new ServiceError(`Invalid ${what}.`, 400);
   return value;
+}
+function linuxTTL(value: unknown, maximum: number): number {
+  if (maximum < 30 || (typeof value === "number" && value < 30)) {
+    throw new ServiceError("Linux lease TTL and configured maximum must be at least 30 seconds.", 400, { code: "linux_ttl_below_minimum" });
+  }
+  return positive(value, maximum, "ttlSeconds");
 }
 function arch(value: unknown): "arm64" | "amd64" {
   if (value !== "arm64" && value !== "amd64") throw new ServiceError("Architecture must be arm64 or amd64.", 400);
@@ -152,6 +161,9 @@ export class LinuxLeases {
         CREATE TABLE IF NOT EXISTS linux_lease_mutations (application TEXT NOT NULL, lease TEXT NOT NULL, action TEXT NOT NULL, id TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(application,lease,action,id));
         CREATE TABLE IF NOT EXISTS linux_lease_assignments (id TEXT PRIMARY KEY, claim TEXT NOT NULL UNIQUE, lease TEXT NOT NULL UNIQUE, controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, report TEXT, observed_revision INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, storage_removed INTEGER NOT NULL DEFAULT 0, credentials_erased INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS linux_lease_assignments_binding ON linux_lease_assignments(controller,runner,generation,closed);`);
+      if (!(db.prepare("PRAGMA table_info(linux_leases)").all() as {name: string}[]).some(c => c.name === "failure_reason")) {
+        db.exec("ALTER TABLE linux_leases ADD COLUMN failure_reason TEXT");
+      }
     });
   }
 
@@ -304,7 +316,9 @@ export class LinuxLeases {
     return this.transaction((db, now) => {
       const application = authorize(db);
       const limits = application.limits;
-      const ttl = positive(input.ttlSeconds ?? limits.defaultTTLSeconds, limits.maxTTLSeconds, "ttlSeconds");
+      // An invalid Linux default is explicit configuration failure even with an override.
+      linuxTTL(limits.defaultTTLSeconds, limits.maxTTLSeconds);
+      const ttl = linuxTTL(input.ttlSeconds ?? limits.defaultTTLSeconds, limits.maxTTLSeconds);
       const image = this.imageRow(db, imageId, revision, a);
       const minimum = image ? JSON.parse(image.resources) as Resources : undefined;
       const amount = minimum ? { ...minimum, ...overrides } as Resources : undefined;
@@ -326,7 +340,7 @@ export class LinuxLeases {
       const reservation = randomUUID();
       const domain = this.domains.placements(db, this.placements(db, image), amount).find(d => this.domains.reserve(db, { id: reservation, domain: d, kind: "linux-lease", owner: id, resources: amount }, now));
       if (!domain) throw new ServiceError("No approved runner domain serving this image has capacity.", 503, { code: "capacity_unavailable", retryable: true });
-      db.prepare(`INSERT INTO linux_leases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL)`).run(
+      db.prepare(`INSERT INTO linux_leases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning','pending','notRequested',NULL,1,?,?,?,?,NULL,NULL)`).run(
         id, application.id, frozen, imageId, revision, a, image.backend, image.digest, JSON.stringify(amount), image.capabilities, JSON.stringify(required),
         randomUUID(), domain, reservation, now, now + ttl, now + limits.maxLifetimeSeconds, now + limits.provisioningTimeoutSeconds);
       return { created: true, lease: this.view(db, this.row(db, id)!) };
@@ -362,7 +376,7 @@ export class LinuxLeases {
     const input = exact(value, action === "renew" ? ["id", "expectedRevision", "ttlSeconds"] : ["id"], "lease mutation");
     const mutation = identifier(input.id);
     const request = JSON.stringify(action === "renew"
-      ? { id: mutation, expectedRevision: positive(input.expectedRevision, Number.MAX_SAFE_INTEGER, "expectedRevision"), ttlSeconds: positive(input.ttlSeconds, 2 ** 31 - 1, "ttlSeconds") }
+      ? { id: mutation, expectedRevision: positive(input.expectedRevision, Number.MAX_SAFE_INTEGER, "expectedRevision"), ttlSeconds: linuxTTL(input.ttlSeconds, 2 ** 31 - 1) }
       : { id: mutation });
     return this.transaction((db, now) => {
       const { lease, application } = this.access(db, id, token);
@@ -372,7 +386,7 @@ export class LinuxLeases {
         return { mutation: JSON.parse(old.result) as unknown, lease: this.view(db, lease) };
       }
       if (action === "renew") {
-        const ttl = positive(input.ttlSeconds, application.limits.maxTTLSeconds, "ttlSeconds");
+        const ttl = linuxTTL(input.ttlSeconds, application.limits.maxTTLSeconds);
         if (!ACTIVE.includes(lease.state)) throw new ServiceError("Ended leases cannot be renewed.", 409);
         if (input.expectedRevision !== lease.revision) throw new ServiceError("Lease revision changed.", 409);
         // Never shortens; capped by the lifetime fixed at admission.
@@ -460,7 +474,7 @@ export class LinuxLeases {
       if (active && r.runtimeState === "stopped" && !r.failure) throw new ServiceError("An active lease cannot stop without a reported failure.", 409);
       if (r.failure === "provisioning" && active && lease.state !== "provisioning") throw new ServiceError("Provisioning failure after readiness must be reported as a runtime failure.", 409);
       // Lifecycle first: failure ends an active lease, positive readiness promotes provisioning.
-      if (active && r.failure) this.end(db, lease, "failed", now);
+      if (active && r.failure) this.end(db, lease, r.failure === "deadline" && now >= lease.expires - DEADLINE_REPORT_TOLERANCE ? "expired" : "failed", now, r.failure === "deadline" ? "deadline_too_early" : null);
       else if (lease.state === "provisioning" && r.runtimeState === "running" && (JSON.parse(lease.required) as Capability[]).every(c => (HEADLESS as readonly string[]).includes(c) && r.ready[c as typeof HEADLESS[number]])) {
         db.prepare("UPDATE linux_leases SET state='ready',revision=revision+1 WHERE id=?").run(lease.id);
       }
@@ -496,13 +510,17 @@ export class LinuxLeases {
       ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
   }
   private commandEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
-    const approval = this.approval(db, bindingOf(a));
     const report: unknown = a.report ? JSON.parse(a.report) : null;
-    return ACTIVE.includes(lease.state) && lease.state === "ready" && lease.runtime === "running" && !a.closed &&
+    return this.commandOwnerEligible(db, lease, a) && lease.state === "ready" && lease.runtime === "running" &&
+      Array.isArray(report) && report[6] === true;
+  }
+  private commandOwnerEligible(db: DatabaseSync, lease: LeaseRow, a: AssignmentRow): boolean {
+    const approval = this.approval(db, bindingOf(a));
+    return ACTIVE.includes(lease.state) && !a.closed &&
       !!this.applications.active(db, lease.application) && !!this.runners?.current(db, bindingOf(a)) &&
       lease.backend === "appleVirtualization" && approval?.backend === lease.backend && approval.domain === lease.domain &&
       (JSON.parse(approval.images) as string[]).includes(imageKey({ id: lease.image_id, revision: lease.image_revision, arch: lease.arch, digest: lease.digest })) &&
-      (JSON.parse(lease.capabilities) as string[]).includes("command") && Array.isArray(report) && report[6] === true;
+      (JSON.parse(lease.capabilities) as string[]).includes("command");
   }
   private refreshOperations(db: DatabaseSync, now: number): void {
     for (const op of db.prepare("SELECT * FROM linux_operations WHERE state='queued'").all() as unknown as OperationRow[]) {
@@ -570,7 +588,7 @@ export class LinuxLeases {
       }
       return { command: op ? { id: op.id, leaseId: lease.id, memberId: lease.member, assignmentId: a.id, bootAttempt: boot, bundleDigest: digest,
         arguments: { argv: JSON.parse(op.argv) as unknown }, startBefore: op.start_before, timeoutMs: 30000, state: op.state } : null,
-        lease: this.authorization(lease, now), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
+        lease: this.authorization(lease, now), stopRequested: !this.commandOwnerEligible(db, lease, a) || (lease.state !== "provisioning" && !eligible), cancelRequested: !eligible || !!op && (["failed", "unknown"].includes(op.state) || op.credential !== lease.credential) };
     });
   }
   reportOperation(token: string, value: unknown): unknown {
@@ -600,10 +618,10 @@ export class LinuxLeases {
   }
 
   /** Terminal transition. Only a never-claimed lease is reclaimed immediately: this transaction excludes any claim. */
-  private end(db: DatabaseSync, lease: LeaseRow, state: "released" | "expired" | "failed", now: number): void {
+  private end(db: DatabaseSync, lease: LeaseRow, state: "released" | "expired" | "failed", now: number, reason: string | null = null): void {
     if (!ACTIVE.includes(lease.state)) return;
     const claimed = !!db.prepare("SELECT 1 FROM linux_lease_assignments WHERE lease=?").get(lease.id);
-    db.prepare("UPDATE linux_leases SET state=?,revision=revision+1,cleanup=?,cleanup_id=? WHERE id=?").run(state, claimed ? "pending" : "complete", randomUUID(), lease.id);
+    db.prepare("UPDATE linux_leases SET state=?,revision=revision+1,cleanup=?,cleanup_id=?,failure_reason=? WHERE id=?").run(state, claimed ? "pending" : "complete", randomUUID(), state === "failed" ? reason : null, lease.id);
     if (!claimed) this.domains.release(db, lease.reservation, lease.id, now);
   }
 
@@ -700,7 +718,9 @@ export class LinuxLeases {
   }
   private reportView(db: DatabaseSync, row: AssignmentRow, now: number): unknown {
     const lease = this.row(db, row.lease)!;
-    return { assignmentId: row.id, sequence: row.sequence, lease: this.authorization(lease, now), runtimeState: lease.runtime,
+    return { assignmentId: row.id, sequence: row.sequence,
+      failureReason: lease.failure_reason ?? null,
+      lease: this.authorization(lease, now), runtimeState: lease.runtime,
       cleanup: ACTIVE.includes(lease.state) ? "notRequested" : lease.cleanup, stopRequested: !ACTIVE.includes(lease.state),
       released: !this.domains.held(db, lease.reservation) };
   }

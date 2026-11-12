@@ -359,7 +359,7 @@ test("exact expiry boundary, renewal, release replay, provisioning failure and p
 
   f.clock(T0 + 300);
   // now >= expiresAt: expiry wins over the renewal in the same transaction.
-  await rejectsWith(c.renewLease(lease.id, { id: randomUUID(), expectedRevision: 4, ttlSeconds: 10 }), 409);
+  await rejectsWith(c.renewLease(lease.id, { id: randomUUID(), expectedRevision: 4, ttlSeconds: 30 }), 409);
   const expired = await c.inspectLease(lease.id);
   assert.deepEqual([expired.state, expired.revision, expired.cleanup.state, (expired.members[0]!.cleanup as Body).reason], ["expired", 5, "pending", "execution_pending"]);
   const release = { id: randomUUID() };
@@ -379,7 +379,7 @@ test("exact expiry boundary, renewal, release replay, provisioning failure and p
   assert.equal((await f.inspectDomain(domain)).reservations, 0);
   const reclaimed = await c.inspectLease(lease.id);
   assert.deepEqual([reclaimed.state, reclaimed.cleanup.state, reclaimed.runtimeState], ["expired", "complete", "stopped"]);
-  await rejectsWith(c.renewLease(lease.id, { id: randomUUID(), expectedRevision: 5, ttlSeconds: 10 }), 409);
+  await rejectsWith(c.renewLease(lease.id, { id: randomUUID(), expectedRevision: 5, ttlSeconds: 30 }), 409);
 
   // Provisioning failure ends the lease but keeps the reservation until positive cleanup.
   const failing = await c.acquireLease(f.acquire());
@@ -510,4 +510,95 @@ test("durable request SDK over-requests Linux capacity, skips quota, restarts an
   await f.restart();
   assert.equal((await b.client().inspectRequest(waiting.request.id)).state,"admitted");
   assert.equal((await a.client().inspectRequest(blocked.request.id)).state,"admitted");
+});
+
+for (const offset of [-10.001, -10, -2, 0]) {
+  test(`deadline receipt at expiry offset ${offset} preserves cleanup gating`, async t => {
+    const f = await fixture(t), app = await f.application();
+    await f.grant(app.id);
+    const domain = await f.domain({ cpu: 16, memoryMiB: 32768, diskGiB: 200 });
+    const runner = await f.enroll(); await f.approve(runner, domain);
+    await app.client().acquireLease(f.acquire());
+    const a = (await f.claim(runner)).assignment!;
+    f.clock(a.lease.expiresAt + offset);
+    const result = await f.ok(f.report(runner, a.id, 1, f.receipt(a, { runtimeState: "stopped", executionStopped: true, failure: "deadline" })));
+    const state = offset < -10 ? "failed" : "expired";
+    assert.equal((result.lease as Body).state, state);
+    assert.equal(result.failureReason, state === "failed" ? "deadline_too_early" : null);
+    assert.equal((await f.inspectDomain(domain)).reservations, 1);
+    const revision = (result.lease as Body).revision;
+    const terminal = await f.ok(f.report(runner, a.id, 2, f.receipt(a, { ...f.stoppedClean, failure: "deadline" })));
+    assert.equal((terminal.lease as Body).state, state);
+    assert.equal((terminal.lease as Body).revision, revision);
+    assert.equal((await f.inspectDomain(domain)).reservations, 0);
+  });
+}
+
+test("deadline receipt cannot change an explicitly released lease", async t => {
+  const f = await fixture(t), app = await f.application(); await f.grant(app.id);
+  const domain = await f.domain({ cpu: 16, memoryMiB: 32768, diskGiB: 200 });
+  const runner = await f.enroll(); await f.approve(runner, domain);
+  const { lease } = await app.client().acquireLease(f.acquire());
+  const a = (await f.claim(runner)).assignment!;
+  await app.client().releaseLease(lease.id, { id: randomUUID() });
+  const result = await f.ok(f.report(runner, a.id, 1, f.receipt(a, { ...f.stoppedClean, failure: "deadline" })));
+  assert.equal((result.lease as Body).state, "released");
+  assert.equal((result.lease as Body).revision, 2);
+});
+
+test("Linux TTL minimum is explicit for acquisition, defaults, maximum and renewal", async t => {
+  const f = await fixture(t), app = await f.application(); await f.grant(app.id);
+  const domain = await f.domain({ cpu: 16, memoryMiB: 32768, diskGiB: 200 });
+  const runner = await f.enroll(); await f.approve(runner, domain);
+  await rejectsWith(app.client().acquireLease(f.acquire({ ttlSeconds: 29 })), 400, "linux_ttl_below_minimum");
+  const { lease } = await app.client().acquireLease(f.acquire({ ttlSeconds: 30 }));
+  await rejectsWith(app.client().renewLease(lease.id, { id: randomUUID(), expectedRevision: 1, ttlSeconds: 29 }), 400, "linux_ttl_below_minimum");
+  for (const ttlSeconds of [-1, 0, 29]) {
+    const refused = await f.post(`/v1/leases/${lease.id}/renew`, {id: randomUUID(), expectedRevision: 1, ttlSeconds}, app.credential);
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.code, "linux_ttl_below_minimum");
+  }
+  const renewed = await app.client().renewLease(lease.id, { id: randomUUID(), expectedRevision: 1, ttlSeconds: 30 });
+  assert.equal(renewed.mutation.revision, 2);
+  for (const limits of [{defaultTTLSeconds:29}, {defaultTTLSeconds:29, maxTTLSeconds:29}]) {
+    const bad = await f.application(limits); await f.grant(bad.id);
+    await rejectsWith(bad.client().acquireLease(f.acquire()), 400, "linux_ttl_below_minimum");
+    await rejectsWith(bad.client().acquireLease(f.acquire({ttlSeconds:30})), 400, "linux_ttl_below_minimum");
+  }
+});
+
+test("renewal after old satellite fence rejects stale deadline without revival", async t => {
+  const f = await fixture(t), app = await f.application(); await f.grant(app.id);
+  const domain = await f.domain(VM), runner = await f.enroll(); await f.approve(runner, domain);
+  const {lease} = await app.client().acquireLease(f.acquire());
+  const a = (await f.claim(runner)).assignment!;
+  await f.ok(f.report(runner, a.id, 1, f.receipt(a, f.running)));
+  f.clock(a.lease.expiresAt - 1);
+  await app.client().renewLease(lease.id, {id:randomUUID(), expectedRevision:2, ttlSeconds:100});
+  const r = await f.ok(f.report(runner, a.id, 2, f.receipt(a, {runtimeState:'stopped', executionStopped:true, failure:'deadline'})));
+  assert.equal((r.lease as Body).state, 'failed'); assert.equal(r.failureReason, 'deadline_too_early');
+  await f.restart();
+  const again = await f.ok(f.report(runner, a.id, 3, f.receipt(a, {...f.stoppedClean, failure:'runtime'})));
+  assert.equal((again.lease as Body).state, 'failed'); assert.equal(again.failureReason, 'deadline_too_early');
+});
+
+test("provisioning deadline reason cannot be overwritten by later deadline receipt", async t => {
+  const f = await fixture(t), app = await f.application({provisioningTimeoutSeconds:30}); await f.grant(app.id);
+  const domain = await f.domain(VM), runner = await f.enroll(); await f.approve(runner, domain);
+  const {lease} = await app.client().acquireLease(f.acquire()); const a = (await f.claim(runner)).assignment!;
+  f.clock(T0 + 31); assert.equal((await app.client().inspectLease(lease.id)).state, 'failed');
+  await f.restart();
+  const r = await f.ok(f.report(runner, a.id, 1, f.receipt(a, {...f.stoppedClean, failure:'deadline'})));
+  assert.equal((r.lease as Body).state, 'failed'); assert.equal(r.failureReason, null);
+});
+
+test("additive failure-reason migration preserves existing lease and reservation", async t => {
+  const f = await fixture(t), app = await f.application(); await f.grant(app.id);
+  const domain = await f.domain(VM), runner = await f.enroll(); await f.approve(runner, domain);
+  const {lease} = await app.client().acquireLease(f.acquire());
+  const db = new DatabaseSync(f.statePath); db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason'); db.close();
+  await f.restart();
+  assert.equal((await app.client().inspectLease(lease.id)).state, 'provisioning');
+  assert.equal((await f.inspectDomain(domain)).reservations, 1);
+  assert.equal(f.rows('SELECT failure_reason FROM linux_leases')[0]!.failure_reason, null);
 });

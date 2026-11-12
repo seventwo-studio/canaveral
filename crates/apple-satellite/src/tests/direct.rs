@@ -110,7 +110,7 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
     }];
     // SIMULATED EROFS builder: checks the fixed argv, writes magic, a label and launch.json.
     let builder = root.join("mkfs.erofs");
-    std::fs::write(&builder, format!("#!/bin/sh\n[ $# = 8 ] && [ \"$1\" = --quiet ] && [ \"$2\" = --all-root ] && [ \"$3\" = -T ] && [ \"$4\" = 0 ] && [ \"$5\" = -U ] || exit 2\n[ -f \"$8/launch.json\" ] || exit 3\nIFS= read -r line < \"$8/launch.json\"\n{{ printf '%1024s' ''; printf '\\342\\341\\365\\340'; printf '{}'; printf '%s' \"$line\"; }} > \"$7\"\n", String::from_utf8_lossy(LABEL).replace('\n', "\\n"))).unwrap();
+    std::fs::write(&builder, format!("#!/bin/sh\n[ $# = 9 ] && [ \"$1\" = --quiet ] && [ \"$2\" = --all-root ] && [ \"$3\" = -b4096 ] && [ \"$4\" = -T ] && [ \"$5\" = 0 ] && [ \"$6\" = -U ] || exit 2\n[ -f \"$9/launch.json\" ] || exit 3\nIFS= read -r line < \"$9/launch.json\"\n{{ printf '%1024s' ''; printf '\\342\\341\\365\\340'; printf '{}'; printf '%s' \"$line\"; }} > \"$8\"\n", String::from_utf8_lossy(LABEL).replace('\n', "\\n"))).unwrap();
     std::fs::set_permissions(&builder, std::fs::Permissions::from_mode(0o500)).unwrap();
     c.bootstrap_builder = Some(bundle::Builder {
         sha256: hash_file(&builder).unwrap(),
@@ -630,7 +630,8 @@ fn active_command_stalled_poll_cannot_delay_local_fence_or_stop() {
     }
     let d = direct_fixture(|_| {});
     let mut satellite = seeded(&d.c);
-    satellite.state.deadline = clock::now().as_secs_f64() + 3.5;
+    // Allow fixture preparation and dispatch before the two-second guest margin.
+    satellite.state.deadline = clock::now().as_secs_f64() + 6.5;
     satellite.save().unwrap();
     // Ready mode leaves exec running; the local deadline must cancel and fence it.
     let frames = fake_guest(&d, Mode::Ready);

@@ -110,7 +110,7 @@ Each launch consumes a fresh boot attempt UUID with launch intent. It then build
 manifest). The staging root is one 0700 directory holding one 0400 file. The builder is
 the operator-installed erofs-utils `mkfs.erofs` (or an equivalent with the same CLI),
 pinned by hash, run without a shell or environment, with fixed argv
-`--quiet --all-root -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`, a 1 MiB file-size rlimit and
+`--quiet --all-root -b4096 -T 0 -U BOOT_ATTEMPT DESTINATION SOURCE`, a 1 MiB file-size rlimit and
 a 30 s bound. `--all-root` records uid/gid 0 for the guest's ownership checks. The
 filesystem UUID is the boot attempt, matching the helper's serial and nonce. The output
 must be an owned single-link file of at most 1 MiB with the EROFS magic. It is then made
@@ -305,3 +305,37 @@ rejection, and the timings on real images. The separate
 binary into an initrd; kernel/rootfs construction and native bootstrap qualification
 remain open. All installed boot artifacts still require operator pins and immutable
 installation before satellite admission.
+
+## Operator native acceptance
+
+The separately gated [native acceptance harness](../../coordination/native-acceptance/README.md)
+creates a fresh private controller, CA and enrollment per run. It requires real signed
+helper and immutable boot artifacts, refuses known fixtures even when renamed, and
+retains unknown reservations after satellite loss. Setup-only mode verifies controller
+configuration and enrollment without claiming a lease; it is not VM evidence. No native
+acceptance is inferred from portable checks or a firmware-only session diagnostic.
+
+ST-534 native integration found that macOS erofs-utils can default to 16 KiB
+blocks, which the experimental 4 KiB-page Linux kernel refused. Launch-medium
+construction now pins `-b4096`; the fixed-argv test and strict fixture builder
+cover that requirement. Actual boot observations and outstanding production
+gates are recorded in the [native evidence record](../../coordination/native-acceptance/README.md).
+
+Stop classification is sticky in the private journal. An explicit controller stop
+of a terminal lease reports `failure: null`; the satellite's deadline fence
+(including the guest authority ending at the conservative two-second margin)
+reports `failure: deadline`. Unexpected helper/VM/guest loss remains
+`failure: runtime`, and pre-launch abandonment remains `provisioning`.
+Old fenced journals without a cause retain their conservative runtime failure.
+Restart never reclassifies a recorded cause or relaunches execution. A renewal
+arriving inside the final margin may miss the guest deadline; it cannot revive
+guest authority and the lease ends as expired under the controller's bounded
+10-second classification tolerance. Cleanup still requires independent stop proof
+and all existing evidence; the tolerance does not extend execution authority.
+
+Supervision observes helper process exit before evaluating the final guest margin.
+Guest pumping and controller-reply errors recheck the local deadline, guest
+authority and known controller terminal state when selecting the first stop cause.
+A terminal or cancel reply records the controller cause (null failure), even after
+the local deadline, unless an earlier fence already recorded a cause. Legacy
+fenced journals without a cause replay as runtime loss. Renewal cannot clear a fence.

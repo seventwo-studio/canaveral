@@ -87,6 +87,7 @@ jobs:
       - run: npm --prefix coordination ci --ignore-scripts
       - run: npm --prefix coordination run build
       - run: npm run check:no-python
+      - run: node --test --test-concurrency=2 coordination/native-acceptance/evidence.test.ts tools/linux-guest-builder/*.test.mjs
       - run: npm run test:tools
       - run: node fixtures/migration/verify_lease_guard.mjs
       - run: node --check canaveral/web/app.js
@@ -238,7 +239,7 @@ jobs:
           xcodebuild -version
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 26
           swift build --package-path VirtualMachines
-          swift test --package-path VirtualMachines --filter DirectBoot
+          swift test --package-path VirtualMachines --filter 'DirectBoot|SerialConsoleTests'
       - if: runner.os == 'Linux'
         run: |
           node script/build_linux_lease_deadline.mjs --output "$RUNNER_TEMP/deadline.so"

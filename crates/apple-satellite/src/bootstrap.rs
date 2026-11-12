@@ -24,8 +24,10 @@ use std::{
 pub const MEDIUM_MAX: u64 = 1 << 20;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Exact erofs-utils `mkfs.erofs [OPTIONS] DESTINATION SOURCE` invocation.
+/// Pin 4 KiB blocks: macOS may default to its 16 KiB host page size, which
+/// a guest kernel with 4 KiB pages cannot mount.
 pub fn argv(filesystem: uuid::Uuid, destination: &Path, source: &Path) -> Vec<OsString> {
-    let mut out: Vec<OsString> = ["--quiet", "--all-root", "-T", "0", "-U"]
+    let mut out: Vec<OsString> = ["--quiet", "--all-root", "-b4096", "-T", "0", "-U"]
         .into_iter()
         .map(Into::into)
         .collect();
@@ -179,6 +181,7 @@ mod tests {
             [
                 "--quiet",
                 "--all-root",
+                "-b4096",
                 "-T",
                 "0",
                 "-U",

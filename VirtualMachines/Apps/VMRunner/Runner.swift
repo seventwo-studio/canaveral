@@ -212,6 +212,7 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
                 let consoleLog = directory.appendingPathComponent("console.log")
                 var previousConsole = ""
                 while let vm = runtime.virtualMachine, vm.state != .stopped, vm.state != .error {
+                    runtime.serialConsole?.refresh()
                     if let output = runtime.serialConsole?.output, output != previousConsole {
                         // SerialConsole retains only its bounded tail, including in a headless process.
                         do {
@@ -233,6 +234,11 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
                     try await Task.sleep(for: .seconds(1))
                 }
                 guard runtime.releaseWhenStopped() else { throw CanaveralError.unavailable("Guest has not stopped.") }
+                // A fast guest can stop between periodic console snapshots.
+                if let output = runtime.serialConsole?.output, !output.isEmpty {
+                    try Data(output.utf8).write(to: consoleLog, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: consoleLog.path)
+                }
             default: throw CanaveralError.invalid("Unknown runner command.")
             }
         } catch {

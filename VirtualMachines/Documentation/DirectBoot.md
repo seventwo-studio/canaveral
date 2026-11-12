@@ -33,3 +33,19 @@ The parent Rust satellite authenticates ownership before opening the socket, sen
 The same-uid credential check is covered with socketpairs; a live foreign-uid rejection before guest connect remains an integration gate. Optional-image Runner request decoding and relay drain before stopped-status publication are source/build checked; no helper or VM was executed.
 
 Compilation, artifact verification and unprivileged Unix socketpair tests establish no native acceptance. Socketpair coverage includes 4 MiB byte-exact traffic in both directions, backpressure, half-close and stalled stop; it does not establish VZ descriptor shutdown semantics. Shared read-only rootfs use by multiple VMs on one host remains unproven. Trusted initrd mount delivery, filesystem UUID selection, real block serial, PID1/tool probes, end-to-end vsock, stalled relay shutdown, independent expiry and stop/handle release require separately authorized native acceptance. Production namespace supervision remains a separate gate.
+
+## Authorized native diagnostics
+
+The [operator acceptance harness](../../coordination/native-acceptance/README.md) is
+separate from ordinary tests. Its signed session probe compares configuration validation,
+invalid-kernel rejection and firmware-only VZ start/stop across execution contexts. These
+observations do not establish Linux boot or production-helper acceptance. The full harness
+requires installed real bundle artifacts and a real pinned `mkfs.erofs`; setup-only mode
+stops before acquisition. Real boot, command and cleanup evidence must be retained in the
+private run directory before closing the corresponding native gates.
+
+ST-534's 2026-11-12 operator-authorized arm64 diagnostic boot observed the actual
+20-hex launch-disk serial through Linux sysfs. The production helper now drains
+pending console bytes on close and persists a final transcript, including guests
+that stop before the periodic snapshot. See the [native evidence record](../../coordination/native-acceptance/README.md)
+for the narrower full-lease results and remaining production gates.

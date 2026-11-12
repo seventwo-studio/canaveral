@@ -32,12 +32,20 @@ The agent owns the guest PID namespace. Commands get separate process groups; pr
 
 ## Operator kernel/rootfs build contract (construction remains external)
 
+The [experimental Linux guest builder recipe](../tools/linux-guest-builder/README.md)
+provides a bounded disposable Lima builder, a committed minimal arm64 kernel
+fragment, diagnostic-only init, signed upstream input checks, Debian snapshot
+rootfs construction, native macOS erofs-utils construction and immutable
+installation. It feeds the existing assembler and preflight below. Its pins are
+experimental operator choices, not production trust decisions; successful
+construction does not close native acceptance or production signature gates.
+
 A release builder must supply all these inputs, without defaults: Debian snapshot timestamp and signed Release digest/trust root; exact arm64 package versions and SHA256 values for bash, coreutils, git, ca-certificates and transitive packages; official Node `v24.11.0` linux-arm64 tarball SHA256 and signature verification material; Rust `1.99.1` toolchain/target archive SHA256 values; kernel source version/archive SHA256, committed config and patch digests; EROFS tool version/digest; bootstrap source/digest and trusted configuration-medium contract. Unknown checksums are **required inputs**, not placeholder pins or floating defaults. Fixture version values in unit tests are synthetic, never release inputs.
 
 1. In an isolated authorized release builder, verify the pinned Debian snapshot metadata and every package digest before extracting packages into a fresh staging root. Do not install packages at boot. Include /bin/sh, Git, CA certificates and all shared libraries. Fix locale, timezone, file order, ownership and SOURCE_DATE_EPOCH to explicit release inputs.
 2. Verify the official pinned Node tarball; extract Node to `/usr/local/bin/node` with its support files. Run separate argv probes and check each exit code and expected version. A compound shell command's final status is not proof that all tools work.
 3. Build `canaveral-guest-agent` from the public source revision and Cargo.lock using Rust 1.99.1 and `aarch64-unknown-linux-musl`, `--locked --release`. Verify the resulting ELF is static; copy it as `/sbin/canaveral-guest-agent`. No Python production daemon or host executable bridge belongs in this root.
-4. Build the pinned minimal kernel with virtio MMIO/PCI, virtio block, virtio vsock transport, EROFS, ext4, tmpfs, procfs, sysfs and devtmpfs **built in**, plus the selected architecture/console/bootstrap requirements. Include PID namespace support. Produce uncompressed `arch/arm64/boot/Image`. EROFS root must be mounted `ro`; ext4 support does not authorize formatting any workspace device.
+4. Build the pinned minimal kernel with virtio MMIO/PCI, virtio block, virtio vsock transport, EROFS, ext4, tmpfs, procfs, sysfs and devtmpfs **built in**, plus the selected architecture/console/bootstrap requirements. Include PID namespace support and `CONFIG_PROC_CHILDREN=y`; command supervision reads `/proc/self/task/1/children` to reap adopted descendants. Produce uncompressed `arch/arm64/boot/Image`. EROFS root must be mounted `ro`; ext4 support does not authorize formatting any workspace device.
 5. Precreate mount points and uid/gid 1000 metadata; assemble deterministic EROFS using the pinned tool and fixed metadata. If needed, produce a deterministic bootstrap initrd from audited source. Keep per-launch configuration external to hashed artifacts. Package no private credentials, retained disks or parent repository history.
 6. Record artifact paths, actual byte sizes and computed hashes, exact kernel command line and all tool pins in manifest v1. Canonicalize and compute image.digest. Publish only after a separate authorized boot/ownership/expiry/disconnect/backpressure acceptance run on each backend.
 
@@ -103,3 +111,8 @@ Running the example requires a matching namespace launcher with the explicit
 `CANAVERAL_NAMESPACE_FIXTURE=1` gate. If that launcher is absent from the release,
 the execution gate is unavailable; compilation is not a substitute. The lane
 requires user namespaces, subordinate uid/gid mappings covering guest uid 1000, `newuidmap/newgidmap` policy and unprivileged private mounts. OS denial is an explicit failed gate: do not use sudo, relax host protection, mount on the host, or substitute a host process test. If policy requires privileged execution, approval for that disposable lane is still required. Existing PR CI only compiles the example through clippy --all-targets and runs ordinary tests. Fresh Linux CI, the namespace fixture, real boot delivery and Apple Virtualization/KubeVirt native acceptance must be reported independently. No new VM, image, container or native experiment was performed.
+
+ST-534 native diagnostic and lease observations, including the 4 KiB launch-medium
+requirement and corrected kernel fragment, are recorded in the [native evidence record](../coordination/native-acceptance/README.md).
+These experimental observations do not establish production trust/signing, networking,
+file transfer, concurrent shared-rootfs use, power-loss recovery or ordinary host lease admission.
