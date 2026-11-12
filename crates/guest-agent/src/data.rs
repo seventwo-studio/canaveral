@@ -378,6 +378,25 @@ pub(crate) fn session(
             let mut retire = false;
             c.send_turn = !c.send_turn;
             let mut moved = 0;
+            // Socket deadlines do not depend on a writable data transport.
+            if !c.terminal {
+                if c.id.is_none()
+                    && !c.opened
+                    && (c.header.len() == 8192 || now() - c.started >= 5000)
+                {
+                    c.response = response(400, "invalid_target");
+                    c.terminal = true;
+                } else if c.id.is_some() && !c.opened && now() - c.started >= 10000 {
+                    c.response = response(504, "connect_timeout");
+                    c.response_sent = 0;
+                    c.terminal = true;
+                } else if c.opened && now() - c.progress >= 120000 {
+                    let _ = c.socket.shutdown(Shutdown::Both);
+                    c.response.clear();
+                    c.response_sent = 0;
+                    c.terminal = true;
+                }
+            }
             if c.response_sent < c.response.len() {
                 match c.socket.write(&c.response[c.response_sent..]) {
                     Ok(0) => retire = true,
@@ -518,7 +537,9 @@ pub(crate) fn session(
                 }
             }
             if retire && c.id.is_some() && !output.idle() {
-                // Keep ownership until the terminal frame can be queued.
+                // Close TCP now; retain only bounded flow ownership until the
+                // terminal frame can be queued behind a partial data write.
+                let _ = c.socket.shutdown(Shutdown::Both);
                 c.terminal = true;
                 clients.push_back(c);
             } else if retire {
