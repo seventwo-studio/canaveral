@@ -9,3 +9,18 @@ require_primary_signature() {
     END {exit (!found || bad)}
   ' "$1"
 }
+# Reject extra primary keys even when the Release happens to use a pinned key.
+require_pinned_keyring() {
+  local listing
+  listing=$(gpg --batch --with-colons --show-keys "$1") || return 1
+  printf '%s\n' "$listing" | awk -F: -v pins="$DEBIAN_PRIMARIES" '
+    BEGIN {n=split(pins,p," "); for(i=1;i<=n;i++) allowed[p[i]]=1}
+    $1=="pub" {primary=1}
+    $1=="sub" {primary=0}
+    $1=="fpr" && primary {if (!allowed[$10]) bad=1; found=1; primary=0}
+    END {exit (!found || bad)}'
+}
+export_pinned_keyring() {
+  gpg --batch --no-default-keyring --keyring "$1" --export $DEBIAN_PRIMARIES > "$2"
+  require_pinned_keyring "$2"
+}

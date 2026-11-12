@@ -12,6 +12,7 @@ const repository=execFileSync('git',['-C',recipe,'rev-parse','--show-toplevel'],
 const source=execFileSync('git',['-C',repository,'archive',revision],{maxBuffer:128*1024*1024});
 assert.deepEqual(archiveEntries(source),archiveEntries(readFileSync(inputs+'/source.tar')),'source archive differs from recorded Git revision');
 const records = [
+ ['debian-apt-keyring.gpg','exported Debian primary allowlist, re-inspected before apt and complete acceptance'],
  ['linux-6.12.117.tar.xz','pinned kernel primary signature and SHA256'],
  ['node-v24.11.0-linux-arm64.tar.xz','pinned Node primary signature and SHA256'],
  ['rust-1.99.1-aarch64-unknown-linux-gnu.tar.xz','pinned Rust primary signature and SHA256'],

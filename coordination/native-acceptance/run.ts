@@ -7,6 +7,7 @@ import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFile
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
+import {signatureEvidence, processEvidence, journalEvidence} from './evidence.ts';
 const exec = promisify(execFile);
 type ObjectValue = Record<string, any>;
 assert(!process.env.CI && process.env.CANAVERAL_NATIVE_ACCEPTANCE === 'operator-authorized', 'requires explicit operator authorization outside CI');
@@ -31,6 +32,7 @@ assert(cfg.signingRequirement.includes('anchor apple'), 'Apple signing requireme
 const resources = {cpu: cfg.cpu ?? 2, memoryMiB: cfg.memoryMiB ?? 2048, diskGiB: cfg.diskGiB ?? 4};
 const root = realpathSync(cfg.stateRoot);
 const dir = mkdtempSync(join(root, 'canaveral-native-')); chmodSync(dir, 0o700);
+const privateDir = join(dir, 'private'); mkdirSync(privateDir, {mode: 0o700});
 console.log(JSON.stringify({runDirectory: dir}));
 const save = (name: string, value: unknown) => writeFileSync(join(dir, name), JSON.stringify(value, null, 2), {mode: 0o600});
 const sha = (path: string) => 'sha256:' + createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -49,19 +51,20 @@ function launch(bin: string, args: string[], name: string) {
   let output = ''; c.stdout!.on('data', b => output += b);
   const errors: Buffer[] = []; c.stderr!.on('data', b => errors.push(b));
   const done = once(c, 'exit').then(([code, signal]) => {
-    writeFileSync(join(dir, name + '.stderr'), Buffer.concat(errors));
+    writeFileSync(join(privateDir, name + '.stderr'), Buffer.concat(errors));
     return {code, signal, output};
   });
   return {c, done, output: () => output};
 }
 try {
   const signature = await exec('/usr/bin/codesign', ['-dvvv', '--entitlements', ':-', cfg.helper]);
-  writeFileSync(join(dir, 'helper-signature.txt'), signature.stdout + signature.stderr);
   await exec('/usr/bin/codesign', ['--verify', '--strict', '-R', '=' + cfg.signingRequirement, cfg.helper]);
   assert.match(signature.stdout + signature.stderr, /com.apple.security.virtualization/);
   assert(!/Signature=adhoc/.test(signature.stderr));
+  save('helper-signature.json', signatureEvidence(signature.stdout + signature.stderr, true));
   save('pins.json', {helper: sha(cfg.helper), builder: cfg.builder && existsSync(cfg.builder) ? sha(cfg.builder) : null});
-  const pem = (n: string) => join(dir, n);
+  const pem = (n: string) => join(privateDir, n);
+  const evidence = (n: string) => join(dir, n);
   const conf = pem('openssl.cnf');
   writeFileSync(conf, '[req]\ndistinguished_name=dn\n[dn]\n[ca_ext]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n[leaf_ext]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n');
   const ssl = (args: string[]) => exec('openssl', args, {env: {...process.env, OPENSSL_CONF: conf}});
@@ -71,7 +74,7 @@ try {
   await ssl(['verify', '-x509_strict', '-CAfile', pem('ca.pem'), '-purpose', 'sslserver', pem('cert.pem')]);
   const admin = randomBytes(32).toString('base64url'), controllerId = randomUUID();
   writeFileSync(pem('admin'), admin);
-  save('controller.json', {statePath: pem('db'), adminTokenFile: pem('admin'), controllerId, listen: {host: '127.0.0.1', port: 0}, tls: {certFile: pem('cert.pem'), keyFile: pem('key.pem')}});
+  writeFileSync(pem('controller.json'), JSON.stringify({statePath: pem('db'), adminTokenFile: pem('admin'), controllerId, listen: {host: '127.0.0.1', port: 0}, tls: {certFile: pem('cert.pem'), keyFile: pem('key.pem')}}));
   const controller = launch(process.execPath, [resolve('coordination/dist/src/main.js'), pem('controller.json')], 'controller');
   const port = await until(async () => {
     assert(controller.c.exitCode === null, 'controller exited');
@@ -148,7 +151,7 @@ try {
     async function snapshot(label: string, id: string) {
       save(label + '.json', {at: new Date().toISOString(), lease: await inspect(id), domain: await domain()});
       const journal = join(state, 'state.json');
-      if (existsSync(journal)) copyFileSync(journal, pem(label + '.journal.json'));
+      if (existsSync(journal)) save(label + '.journal.json', journalEvidence(JSON.parse(readFileSync(journal, 'utf8'))));
     }
     // Capture process tree and console while the helper exists, before cleanup removes its directory.
     const journalVersions = new Set<string>();
@@ -158,35 +161,40 @@ try {
       const journalBytes = readFileSync(join(state, 'state.json'));
       const journalHash = createHash('sha256').update(journalBytes).digest('hex');
       if (!journalVersions.has(journalHash)) {
-        writeFileSync(pem(id + '-journal-' + journalVersions.size + '.json'), journalBytes);
+        save(id + '-journal-' + journalVersions.size + '.json', journalEvidence(JSON.parse(journalBytes.toString())));
         journalVersions.add(journalHash);
       }
       const j = JSON.parse(journalBytes.toString());
       if (!j.assignment) return;
       const machine = join(state, 'workspace', j.assignment.memberId.toUpperCase());
-      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
-      const rows = ps.split('\n').map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean) as RegExpMatchArray[];
-      const pids = rows.filter(r => Number(r[2]) === currentRun?.c.pid && r[3]!.includes(cfg.helper + ' run ' + machine)).map(r => Number(r[1]));
+      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,state=,etime='])).stdout;
+      const owned = processEvidence(ps, [currentRun!.c.pid!]);
+      const pids: number[] = [];
+      for (const row of owned.filter(row => row.ppid === currentRun!.c.pid)) {
+        // Only inspect argv after numeric ancestry attributes the process to this run.
+        const command = await exec('/bin/ps', ['-p', String(row.pid), '-o', 'command=']).catch(() => null);
+        if (command?.stdout.includes(cfg.helper + ' run ' + machine)) pids.push(row.pid);
+      }
       const old = observed.get(id);
       observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], machine, relay: j.direct?.agentSocket ?? old?.relay});
-      save(id + '-observed-processes.json', observed.get(id));
-      for (const name of ['boot.log', 'console.log', 'direct-started.json']) if (existsSync(join(machine, name))) copyFileSync(join(machine, name), pem(id + '-' + name));
-      if (existsSync(join(machine, 'console.log'))) copyFileSync(join(machine, 'console.log'), pem(id + '-boot.log'));
-      writeFileSync(pem(id + '-processes.txt'), ps);
-      copyFileSync(join(state, 'state.json'), pem(id + '-latest.journal.json'));
+      save(id + '-observed-processes.json', {pids: observed.get(id)!.pids, machine: 'lease-machine', relay: 'agent-relay'});
+      for (const name of ['boot.log', 'console.log']) if (existsSync(join(machine, name))) copyFileSync(join(machine, name), evidence(id + '-' + name));
+      if (existsSync(join(machine, 'console.log'))) copyFileSync(join(machine, 'console.log'), evidence(id + '-boot.log'));
+      save(id + '-processes.json', processEvidence(ps, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));
+      save(id + '-latest.journal.json', journalEvidence(j));
     }
     const acquireBody = (ttlSeconds: number) => ({id: randomUUID(), templateId: image.id, templateRevision: image.revision, arch: image.arch, ttlSeconds, requiredCapabilities: ['command']});
     async function start(label: string, ttl = 120) {
       const lease = await ok('POST', '/v1/leases', acquireBody(ttl), app.credential);
       active = {id: lease.id, credential: app.credential};
       state = pem(label + '-satellite');
-      save(label + '-satellite.json', {origin, identity: pem('identity'), binding, state, helper: cfg.helper, helperSha256: sha(cfg.helper), signingRequirement: cfg.signingRequirement,
+      writeFileSync(pem(label + '-satellite.json'), JSON.stringify( {origin, identity: pem('identity'), binding, state, helper: cfg.helper, helperSha256: sha(cfg.helper), signingRequirement: cfg.signingRequirement,
         ca: pem('ca.pem'), inventory: [{credentialFree: true, format: 'bootBundle', image, path: cfg.manifest}],
-        bootstrapBuilder: {path: cfg.builder, sha256: sha(cfg.builder)}, maxCpu: resources.cpu, maxMemoryMiB: resources.memoryMiB, maxDiskGiB: resources.diskGiB});
+        bootstrapBuilder: {path: cfg.builder, sha256: sha(cfg.builder)}, maxCpu: resources.cpu, maxMemoryMiB: resources.memoryMiB, maxDiskGiB: resources.diskGiB}));
       await snapshot(label + '-before', lease.id);
       currentRun = launch(cfg.satellite, ['run-once', pem(label + '-satellite.json')], label);
       await until(async () => { await observe(lease.id); const v = await inspect(lease.id); assert(!['failed','expired','released'].includes(v.state), 'guest failed before ready'); return v.state === 'ready' && v; }, 'real guest ready');
-      await until(async () => { await observe(lease.id); return observed.get(lease.id)?.pids.length && existsSync(pem(lease.id + '-boot.log')); }, 'helper PID and boot console');
+      await until(async () => { await observe(lease.id); return observed.get(lease.id)?.pids.length && existsSync(evidence(lease.id + '-boot.log')); }, 'helper PID and boot console');
       await snapshot(label + '-ready', lease.id);
       const credential = (await ok('POST', `/v1/leases/${lease.id}/credential`, {}, app.credential)).credential;
       const operation = randomUUID();
@@ -202,7 +210,7 @@ try {
       const launchMount = mountinfo.split('\n').find((line: string) => line.split(' ')[4] === '/etc/canaveral');
       assert(launchMount, 'missing guest launch mount');
       for (const flag of ['ro','nosuid','nodev','noexec']) assert(launchMount.split(' ')[5]!.split(',').includes(flag));
-      writeFileSync(pem(label + '-mountinfo.txt'), mountinfo);
+      writeFileSync(evidence(label + '-mountinfo.txt'), mountinfo);
       return lease.id;
     }
     async function stopped(label: string, id: string) {
@@ -211,14 +219,14 @@ try {
       const record = observed.get(id)!; assert(record?.pids.length, 'no independent helper PID observation');
       const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { assert.equal(e.code, 'ESRCH'); return false; } };
       for (const pid of record.pids) assert(!alive(pid), 'helper still alive');
-      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
+      const ps = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,comm='])).stdout;
       // Fail conservatively on any VZ service still present: process names alone cannot attribute a VM.
       assert(!ps.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains; VM attribution requires operator inspection');
       assert(!existsSync(record.machine)); assert(!existsSync(join(state, 'workspace')));
       assert(record.relay, 'no published relay evidence'); assert(!existsSync(dirname(record.relay)));
       const journal = JSON.parse(readFileSync(join(state, 'state.json'), 'utf8'));
       assert(journal.stopped && journal.cleaned && journal.released);
-      save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noVZProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal});
+      save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noVZProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal: journalEvidence(journal)});
       await snapshot(label + '-after', id); active = undefined;
     }
     const id = await start('release');
@@ -303,8 +311,8 @@ try {
     assert(stoppedObservedAt >= lossDeadline - 2500 && stoppedObservedAt <= lossDeadline + 5000, 'autonomous stop outside deadline window');
     const record = observed.get(lost)!;
     for (const pid of record.pids) { try { process.kill(pid, 0); throw Error('orphan helper still alive'); } catch (e: any) { assert.equal(e.code, 'ESRCH'); } }
-    const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
-    writeFileSync(pem('loss-final-processes.txt'), lossProcesses);
+    const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,comm='])).stdout;
+    save('loss-final-processes.json', processEvidence((await exec('/bin/ps', ['-axo', 'pid=,ppid=,state=,etime='])).stdout, record.pids));
     assert(!lossProcesses.split('\n').some(l => /com\.apple\.Virtualization\.VirtualMachine/.test(l)), 'VZ process remains after loss deadline');
     assert(!existsSync(join(record.machine, 'power-off.request')), 'controller recovery contaminated autonomous fence');
 
@@ -320,7 +328,7 @@ try {
     active = undefined;
     save('result.json', {state:'cases-completed', nativeAcceptance:true, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
   }
-} catch (e: any) { save('failure.json', {message:e.message, stack:e.stack, activeLease:active?.id}); process.exitCode = 1; }
+} catch (e: any) { writeFileSync(join(privateDir, 'failure.txt'), String(e.stack ?? e)); save('failure.json', {state:'failed', activeLease:active?.id}); process.exitCode = 1; }
 finally {
   if (active && api!) {
     // A release is intent only. Never delete machine state or kill the helper as a substitute for proof.

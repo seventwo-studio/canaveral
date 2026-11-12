@@ -50,7 +50,7 @@ test('Debian status refuses an unpinned primary even in a valid keyring', t=>{
  assert.notEqual(result.status,0);
 });
 
-test('complete signature gate refuses missing kernel input before acceptance', t=>{
+test('complete signature gate refuses missing inputs before acceptance', t=>{
  const root=mkdtempSync(join(tmpdir(),'canaveral-complete-gate-'));
  t.after(()=>rmSync(root,{recursive:true,force:true}));
  const result=spawnSync('/bin/bash',[resolve('tools/linux-guest-builder/verify-signatures.sh')],{env:{...process.env,INPUTS:root},encoding:'utf8'});
@@ -71,4 +71,16 @@ test('archive content comparison rejects changed source bytes', async ()=>{
   offset+=Math.ceil(size/512)*512;
  }
  assert.notDeepEqual(archiveEntries(bytes),archiveEntries(changed));
+});
+
+test('apt keyring refuses an extra unpinned primary', t => {
+ const root=mkdtempSync(join(tmpdir(),'canaveral-apt-keyring-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ mkdirSync(join(root,'bin'));
+ const pin='B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8';
+ for (const extra of [false,true]) {
+  writeFileSync(join(root,'bin','gpg'), `#!/bin/sh\nprintf 'pub::::::::::\\nfpr:::::::::${pin}:\\n${extra?'pub::::::::::\\nfpr:::::::::0000000000000000000000000000000000000000:\\n':''}'\n`,{mode:0o700});
+  const result=spawnSync('/bin/bash',['-c','source "$1"; require_pinned_keyring "$2"','bash',resolve('tools/linux-guest-builder/signature-policy.sh'),join(root,'apt.gpg')],{env:{...process.env,PATH:join(root,'bin')+':'+process.env.PATH}});
+  assert.equal(result.status===0,!extra);
+ }
 });

@@ -87,6 +87,7 @@ jobs:
       - run: npm --prefix coordination ci --ignore-scripts
       - run: npm --prefix coordination run build
       - run: npm run check:no-python
+      - run: node --test --test-concurrency=2 coordination/native-acceptance/evidence.test.ts tools/linux-guest-builder/*.test.mjs
       - run: npm run test:tools
       - run: node fixtures/migration/verify_lease_guard.mjs
       - run: node --check canaveral/web/app.js

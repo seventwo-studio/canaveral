@@ -84,8 +84,13 @@ satellite runtime state or an existing VM. Limit concurrent work to this VM's
    static C executable: it prints `CANAVERAL-DIAGNOSTIC-ONLY-v1` to hvc0, lists
    block serials and powers off. **Never catalogue the diagnostic initrd for leases.**
 5. The rootfs uses Debian bookworm at snapshot `20261101T000000Z`, verifies
-   `Release.gpg` with the Debian archive keyring and lets apt verify the signed
-   package index and every archive. Only the immutable snapshot's Valid-Until
+   `Release.gpg` with a keyring exported only from the pinned Debian primary
+   fingerprints and re-inspected after export. Apt uses that restricted keyring
+   and an empty additional trusted-key directory. A loopback-only mirror serves
+   exactly the verified Release and SHA256-authenticated Packages index; it fetches
+   only index-listed archives and checks their SHA256 before returning any bytes
+   to apt, before extraction or maintainer scripts. No upstream metadata is
+   forwarded. Apt also verifies this same signature/index/archive chain. Only the immutable snapshot's Valid-Until
    time check is disabled. All 117 installed package identities in the initial
    experiment matched the retained archives, including the complete essential
    closure. `export-inputs.sh` requires equality of these sets on every build.
@@ -188,7 +193,10 @@ The Debian primary allowlist covers bookworm archive
 `04B54C3CDCA79751B16BC6B5225629DF75B188BD` and trixie stable
 `41587F7DB8C774BCCF131416762F67A0B2C39DE4`.
 Both snapshot and erofs Release status files are checked against this list.
-Keyring membership alone never authorizes a signature.
+Keyring membership alone never authorizes a signature. The complete gate also
+refuses any non-pinned primary in `debian-apt-keyring.gpg`; retain that exported
+keyring with the inputs. `verified-mirror.test.mjs` covers exact metadata, encoded
+package names and refusal of corrupt or unlisted archives.
 
 Run `verify-source-inputs.sh` before building, with `INPUTS` set to the absolute
 input directory and the authenticated Debian keyring retained there. Acquire
