@@ -309,7 +309,7 @@ try {
   // 4. Partition: a stalled controller blocks the satellite's report, yet the native guard ends
   //    execution at the local continuous-clock deadline. Cleanup is retained until the satellite
   //    can report; recovery then completes from the durable stop proof.
-  const ttl = 4, claimedBefore = Date.now();
+  const ttl = 30, claimedBefore = Date.now();
   const third = (await acquire(ttl)).lease;
   const partitioned = satellite();
   const thirdMachine = machineDir(third);
@@ -317,10 +317,14 @@ try {
   const thirdPid = Number(readFileSync(join(thirdMachine, 'fixture-running'), 'utf8')); orphans.push(thirdPid);
   partition = 'stall';
   await until(() => held.length > 0, 'stalled satellite request');
+  // Isolate the native guard from satellite supervision, which can otherwise stop the helper
+  // first once a stalled request times out during the minimum 30-second lease.
+  partitioned.kill('SIGSTOP');
   // The exited guest stays an unreaped zombie of the blocked satellite, so observe the fence record.
   await until(() => existsSync(join(thirdMachine, 'lease-fenced.json')), 'native deadline fence', (ttl + 3) * 1000);
   assert(Date.now() - claimedBefore < (ttl + 2) * 1000, 'guest outlived its local deadline');
   assert.equal(partitioned.exitCode, null, 'satellite should still be blocked on the stalled controller');
+  partitioned.kill('SIGCONT');
   partition = 'drop'; for (const socket of held.splice(0)) socket.destroy();
   const cut = await partitioned.done;
   assert.equal(cut.code, 1, cut.errors); assert.match(cut.errors, /terminal lease acknowledgment|reply missing/);
