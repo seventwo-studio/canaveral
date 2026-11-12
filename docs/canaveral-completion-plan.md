@@ -65,6 +65,8 @@ Canaveral stays independent of any particular installation. This repository ship
 
 Ordinary TypeScript hosts still reject consumer execution declarations. Mobile providers reject leased execution pending independent deadline/cleanup support. The Linux runner controller and generic host lease paths have different execution bindings and must not be enabled through a permissive configuration flag. The embedded inference API is an administrator API; scoped application model jobs are a separate path, not a general model-session lease.
 
+First native Linux evidence, 2026-11-12: on one Apple-silicon Mac, an experimental pinned arm64 bundle ([builder](../tools/linux-guest-builder/README.md)) booted through the signed helper and the Rust Apple satellite. Acquisition to readiness, a consumer command, renewal, expiry, explicit release with independent stop and cleanup proof, satellite loss holding its reservation, and cross-application denial passed ([evidence summary](../coordination/native-acceptance/README.md)). Step 3 remains open for guest networking and repository clone, file and artifact transfer, PTY sessions, concurrent guests on one host, operator reconciliation of held reservations, production trust roots and signing, power-loss recovery and macOS workspaces.
+
 Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish Linux/macOS build acceptance, native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
 
 ## Acceptance before completion
