@@ -157,7 +157,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const inspectDomain = async (id: string) => (await ok(get(`/v1/resource-domains/${id}`, admin))) as { reserved: { cpu: number }; reservations: number };
   const acquire = (extra: Partial<AcquireRequest> = {}): AcquireRequest => ({ id: randomUUID(), templateId: IMAGE.id, templateRevision: IMAGE.revision, arch: "amd64", ...extra });
   function rows(sql: string): Body[] {
-    const db = new DatabaseSync(statePath);
+    const db = new DatabaseSync(statePath, { timeout: 15000 });
     try { return db.prepare(sql).all().map(row => ({ ...row })) as Body[]; } finally { db.close(); }
   }
   await ok(post("/v1/linux-lease-images", IMAGE, admin));
@@ -486,4 +486,28 @@ test("lost replies replay across restart; stale bindings keep unknown reservatio
   assert.equal(((await f.leaseClient(fresh.lease.id, freshKey).inspect()) as Lease).state, "ready");
   assert.equal((await f.inspectDomain(domain)).reservations, 2);
   assert.deepEqual(f.rows("SELECT id,state FROM leases"), [{ id: "legacy-lease", state: "ready" }]);
+});
+
+test("durable request SDK over-requests Linux capacity, skips quota, restarts and admits on release",async t=>{
+  const f=await fixture(t), a=await f.application({activeLeases:1}), b=await f.application();
+  await f.grant(a.id);await f.grant(b.id);
+  const domain=await f.domain(VM), runner=await f.enroll();await f.ok(f.approve(runner,domain));
+  const input=()=>{const {id,...intent}=f.acquire();return {id,kind:"linux-lease" as const,intent};};
+  const first=await a.client().submitRequest(input());assert.equal(first.request.state,"admitted");
+  const blocked=await a.client().submitRequest(input()), waiting=await b.client().submitRequest(input());
+  assert.equal(blocked.request.state,"waiting");assert.equal(waiting.request.state,"waiting");
+  assert.equal((await a.client().listRequests()).requests.length,2);
+  await f.restart();assert.equal((await b.client().inspectRequest(waiting.request.id)).state,"waiting");
+  await a.client().cancelRequest(first.request.id);
+  // Unclaimed Linux leases are positively reclaimed by the existing release transaction.
+  const current=await b.client().inspectRequest(waiting.request.id);
+  // Either application may take the persisted next turn; exactly one can reserve this domain.
+  const own=await a.client().inspectRequest(blocked.request.id);
+  assert.equal([current,own].filter(r=>r.state==="admitted").length,1);
+  assert.equal((await f.inspectDomain(domain)).reserved.cpu,VM.cpu);
+  const survivor=current.state==="admitted" ? b.client():a.client();
+  await survivor.cancelRequest(current.state==="admitted" ? current.id:own.id);
+  await f.restart();
+  assert.equal((await b.client().inspectRequest(waiting.request.id)).state,"admitted");
+  assert.equal((await a.client().inspectRequest(blocked.request.id)).state,"admitted");
 });

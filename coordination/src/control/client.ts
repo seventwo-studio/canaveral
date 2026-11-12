@@ -14,7 +14,7 @@ export interface HttpCommand {
   body: Record<string, unknown>;
 }
 export interface HostAuthenticateCommand { type: "hosts.authenticate"; hostId: string; token: string }
-export type ControlCommand = HttpCommand | SessionCommand | HostAuthenticateCommand;
+export type ControlCommand = HttpCommand | SessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
   return command.type === "sessions.attach" || command.type === "sessions.disconnect";
@@ -68,6 +68,8 @@ export class ControlClient extends EventEmitter {
     this.worker.on("exit", () => this.fail());
   }
 
+  wakeRequests(): Promise<unknown> { return this.request({ type: "requests.wake" }); }
+
   private unavailable(mutation = false): ServiceError {
     return new ServiceError("Controller response was not confirmed. Inspect state before another mutation.", 503, {
       code: "transport_interrupted", retryable: false, ...(mutation ? { outcome: "unknown" as const } : {}),
@@ -98,6 +100,7 @@ export class ControlClient extends EventEmitter {
     }));
   }
 
+  request(command: { type: "requests.wake" }): Promise<unknown>;
   request(command: HttpCommand): Promise<ControlResponse | undefined>;
   request(command: SessionCommand): Promise<unknown>;
   request(command: HostAuthenticateCommand): Promise<unknown>;

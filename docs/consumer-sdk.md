@@ -6,7 +6,7 @@ is a small Node 24 client for the application/lease subset of the
 
 | Class | Credential | Operations |
 | --- | --- | --- |
-| `ConsumerClient` | Application key | `catalogue`, `listLeases`, `acquireLease`, `inspectLease`, `renewLease`, `releaseLease`, `rotateLeaseCredential` |
+| `ConsumerClient` | Application key | `submitRequest`, `inspectRequest`, `listRequests`, `cancelRequest`, `catalogue`, `listLeases`, `acquireLease`, `inspectLease`, `renewLease`, `releaseLease`, `rotateLeaseCredential` |
 | `LeaseClient` | One lease's current key | `inspect`, `renew`, `release`, `createOperation`, `operation` for its bound lease |
 
 `LeaseClient` has no catalogue, listing, acquisition or credential-rotation method, and each
@@ -104,3 +104,5 @@ evidence. Application clients have no operation methods; only the current scoped
 key may submit or inspect, including old receipts after lease termination. Treat
 command arguments and returned output as private. These methods have controller
 and fake-peer fixture coverage, without native execution acceptance.
+
+The [waiting request contract](requests.md) is opt-in. Request methods use only the application key, preserve caller UUIDs, and never poll or retry. Types and methods are also exposed through `sdk.ts`.

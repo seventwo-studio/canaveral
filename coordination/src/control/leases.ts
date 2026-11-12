@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { Requests } from "../requests.ts";
 import { ConsumerIdentities } from "../consumers.ts";
 import { RunnerEnrollment } from "../enrollment.ts";
 import { LinuxLeases } from "../linux-leases.ts";
@@ -182,6 +183,7 @@ export class LegacyLeases implements ControlModule {
   readonly applications: ConsumerIdentities;
   readonly machines: MachineStore;
   readonly linux: LinuxLeases;
+  readonly requests: Requests;
   private operations: ControlModule;
   constructor(readonly store: SqliteStore, readonly options: ControlOptions) {
     this.applications = new ConsumerIdentities(store);
@@ -190,6 +192,13 @@ export class LegacyLeases implements ControlModule {
     store.transaction(initializeLeases);
     store.addTransactionHook(refreshLegacyLeases);
     store.transaction(db => refreshLegacyLeases(db, store.clock()));
+    this.requests = new Requests(store, this.applications, (kind, app, intent) => {
+      if (kind === "lease") this.acquireForApplication(app, intent);
+      else this.linux.acquireForApplication(app, intent);
+    }, (db, row, token) => {
+      if (row.kind === "lease") this.mutation(db, row.id, token, "release", { id: row.id });
+      else this.linux.mutate(token, row.id, "release", { id: row.id });
+    });
     this.operations = operationModule(store, options);
     registerMachineHooks(store, {
       reportFields: ["leaseFenced"],
@@ -207,11 +216,18 @@ export class LegacyLeases implements ControlModule {
     });
   }
   acquire(token: string, value: unknown): ControlResponse {
+    return this.acquireAuthorized(value, db => this.applications.verify(db, token));
+  }
+  /** Internal queue entry; shares every validation, reservation and lifecycle rule with direct acquisition. */
+  acquireForApplication(application: string, value: unknown) {
+    return this.acquireAuthorized(value, db => this.applications.admission(db, application));
+  }
+  private acquireAuthorized(value: unknown, authorize: (db: DatabaseSync) => Application) {
     const input = object(value);
     if (Object.keys(input).some(k => !["id", "name", "templateId", "templateRevision", "arch", "resources", "ttlSeconds", "requiredCapabilities"].includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
     const id = machineIdentifier(input.id);
     return this.store.transaction(db => {
-      const app = this.applications.verify(db, token), limits = app.limits;
+      const app = authorize(db), limits = app.limits;
       this.linux.refreshAuthorization(db, this.store.clock());
       const ttl = positive(Object.hasOwn(input, "ttlSeconds") ? input.ttlSeconds : limits.defaultTTLSeconds, "lease TTL", limits.maxTTLSeconds);
       if (Object.hasOwn(input, "resources")) object(input.resources);
@@ -286,6 +302,21 @@ export class LegacyLeases implements ControlModule {
     return { mutation: result, lease: legacyLeaseView(db, current, this.store.clock()) };
   }
   handle(req: ControlRequest): ControlResponse | undefined | Promise<ControlResponse | undefined> {
+    if (req.parts[0] === "v1" && req.parts[1] === "requests") {
+      if ([...req.query.keys()].some(k => k !== "after") || req.query.getAll("after").length > 1) throw new ServiceError("Only an after cursor is supported.",400);
+      if (req.parts.length === 2 && req.method === "POST") {
+        this.requests.pass();
+        const result = this.requests.submit(req.token, req.body);
+        this.requests.pass();
+        return { status: result.created ? 201 : 200, body: this.requests.inspect(req.token,result.request.id) };
+      }
+      // Cancellation wins if still waiting when it obtains the SQLite write lock.
+      if (req.parts.length === 4 && req.parts[3] === "cancel" && req.method === "POST") return { body: this.requests.cancel(req.token,req.parts[2]!,req.body) };
+      this.requests.pass();
+      if (req.parts.length === 2 && req.method === "GET") return { body:this.requests.list(req.token, req.query.get("after") ?? undefined) };
+      if (req.parts.length === 3 && req.method === "GET") return { body:this.requests.inspect(req.token,req.parts[2]!) };
+      throw new ServiceError("Unknown request route.",404);
+    }
     if (req.path === "/v1/environments/templates" && req.method === "GET") {
       return this.store.transaction(db => {
         const app = this.applications.verify(db, req.token);

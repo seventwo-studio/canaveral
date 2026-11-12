@@ -7,7 +7,7 @@ import { createIdentityHandler, limitServer } from "../http.ts";
 import type { IdentityClient } from "../identity-client.ts";
 import type { ControlClient, HttpCommand } from "./client.ts";
 
-type Requester = Pick<ControlClient, "authorizeHost"> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
+type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
 export type ControllerHandler = (request: IncomingMessage, response: ServerResponse) => void;
 export type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;
 const MAX_BODY = 1_048_576;
@@ -136,6 +136,8 @@ export function createControllerHandler(control: Requester, identities: Identity
       if (response.destroyed) return;
       if (result === undefined) {
         if (/^\/v1\/(?:auth(?:\/|$)|users(?:\/|$)|admin\/tokens(?:\/|$))/.test(target.path)) throw new ServiceError("Unknown endpoint.", 404);
+        // Identity-owned releases, runner receipts and policy changes wake the sole queue owner.
+        response.once("finish", () => { if (request.method === "POST") void control.wakeRequests?.().catch(() => {}); });
         identity(request, response);
       } else respond(response, result.body, result.status);
     })().catch((error: unknown) => {

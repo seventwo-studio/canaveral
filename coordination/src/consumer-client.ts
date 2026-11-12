@@ -38,6 +38,23 @@ export interface AcquireRequest {
 export interface AcquireResult { /** True for 201 (new intent); false for an idempotent 200 replay. */ created: boolean; lease: Lease }
 export interface RenewRequest { id: string; expectedRevision: number; ttlSeconds: number }
 export interface ReleaseRequest { id: string }
+/** Opt-in durable lease intent. Persist the envelope before dispatch. */
+export interface WaitingRequestInput { id: string; kind: "lease" | "linux-lease"; intent: Omit<AcquireRequest,"id">; priority?: number; deadline?: string; source?: Record<string, unknown> }
+export interface WaitingRequest extends Omit<WaitingRequestInput,"deadline" | "source" | "intent"> { intent: AcquireRequest; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
+export interface WaitingRequestPage { requests: WaitingRequest[]; nextCursor: string | null }
+function waitingRequest(value: unknown, id?: string): WaitingRequest {
+  if (!isRecord(value) || typeof value["id"] !== "string" || (id !== undefined && !sameId(value["id"],id)) ||
+      !["lease","linux-lease"].includes(value["kind"] as string) || !["waiting","admitted","cancelled","expired","rejected"].includes(value["state"] as string) ||
+      !Number.isSafeInteger(value["sequence"]) || !isRecord(value["intent"]) || typeof value["createdAt"] !== "string" ||
+      !Number.isSafeInteger(value["priority"]) || !isRecord(value["resources"]) ||
+      !(value["deadline"] === null || (typeof value["deadline"] === "string" && Number.isFinite(Date.parse(value["deadline"])))) ||
+      !(value["source"] === null || isRecord(value["source"])) ||
+      !(value["admittedAt"] === null || (typeof value["admittedAt"] === "string" && Number.isFinite(Date.parse(value["admittedAt"])))) ||
+      !(value["reason"] === null || typeof value["reason"] === "string") ||
+      (value["state"] === "admitted" && (value["target"] !== value["id"] || value["admittedAt"] === null)) ||
+      !(value["target"] === null || value["target"] === value["id"])) throw new TypeError("waiting request");
+  return value as unknown as WaitingRequest;
+}
 /** Fresh lease-scoped key. Store privately and never log it. */
 export interface LeaseCredential { id: string; credential: string }
 
@@ -462,6 +479,35 @@ export class ConsumerClient extends LeaseOperations {
   constructor(options: ApplicationClientOptions) {
     const transport = new Transport(options, options.applicationKey);
     super(transport); this.#transport = transport;
+  }
+  async submitRequest(request: WaitingRequestInput): Promise<{ created: boolean; request: WaitingRequest }> {
+    const r = exact(request, ["id","kind","intent","priority","deadline","source"], "Waiting request");
+    const id = uuid(r["id"], "id");
+    if (r["kind"] !== "lease" && r["kind"] !== "linux-lease") throw new ConsumerConfigurationError("Use lease or linux-lease.", "invalid_request");
+    if (!isRecord(r["intent"]) || Object.hasOwn(r["intent"],"id")) throw new ConsumerConfigurationError("intent excludes the envelope UUID.", "invalid_request");
+    const intent = acquireBody({ ...r["intent"] as Omit<AcquireRequest,"id">, id });
+    delete intent["id"];
+    const body = { ...r, id, intent };
+    if (r["priority"] !== undefined && (typeof r["priority"] !== "number" || !Number.isSafeInteger(r["priority"]) || Math.abs(r["priority"]) > 1000000)) throw new ConsumerConfigurationError("Invalid priority.", "invalid_request");
+    if (r["deadline"] !== undefined && (typeof r["deadline"] !== "string" || !r["deadline"].endsWith("Z") || !Number.isFinite(Date.parse(r["deadline"])))) throw new ConsumerConfigurationError("Invalid deadline.", "invalid_request");
+    if (r["source"] !== undefined && (!isRecord(r["source"]) || Buffer.byteLength(JSON.stringify(r["source"])) > 4096)) throw new ConsumerConfigurationError("source must be an object within 4096 bytes.", "invalid_request");
+    const result = await parsed(this.#transport,"POST","/v1/requests",body,[200,201],true,id,v => waitingRequest(v,id));
+    return { created:result.status === 201, request:result.value };
+  }
+  async inspectRequest(requestId: string): Promise<WaitingRequest> {
+    const id = uuid(requestId,"requestId");
+    return (await parsed(this.#transport,"GET",`/v1/requests/${id}`,undefined,[200],false,undefined,v => waitingRequest(v,id))).value;
+  }
+  async cancelRequest(requestId: string): Promise<WaitingRequest> {
+    const id = uuid(requestId,"requestId");
+    return (await parsed(this.#transport,"POST",`/v1/requests/${id}/cancel`,{},[200],true,id,v => waitingRequest(v,id))).value;
+  }
+  async listRequests(options: { after?: string } = {}): Promise<WaitingRequestPage> {
+    const query = options.after === undefined ? "" : "?after=" + uuid(options.after,"after");
+    return (await parsed(this.#transport,"GET","/v1/requests"+query,undefined,[200],false,undefined,v => {
+      if (!isRecord(v) || !Array.isArray(v["requests"]) || !(v["nextCursor"] === null || typeof v["nextCursor"] === "string")) throw new TypeError("request page");
+      return { requests:v["requests"].map(r => waitingRequest(r)),nextCursor:v["nextCursor"] as string | null };
+    })).value;
   }
   async catalogue(): Promise<Catalogue> {
     return (await parsed(this.#transport, "GET", "/v1/environments/templates", undefined, [200], false, undefined, catalogue)).value;

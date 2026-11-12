@@ -26,6 +26,7 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 - [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
 - [leases](leases.md)
+- [durable waiting requests](requests.md)
 - [libvirt resource ownership](libvirt-resource-ownership.md)
 - [libvirt supervision](libvirt-supervision.md)
 - [macos display input](macos-display-input.md)
