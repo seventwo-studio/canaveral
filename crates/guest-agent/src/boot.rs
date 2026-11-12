@@ -94,7 +94,7 @@ pub(crate) fn run() -> Result<()> {
         BootLaunch::Workspace(launch) => {
             crate::workspace_boot::loopback()?;
             let proxy = std::net::TcpListener::bind("127.0.0.1:18080")?;
-            let _workspace = crate::workspace_boot::prepare(&launch)?;
+            let workspace = crate::workspace_boot::prepare(&launch)?;
             let probe_scope = crate::Launch {
                 binding: launch.binding.clone(),
                 manifest: launch.manifest.clone(),
@@ -129,7 +129,13 @@ pub(crate) fn run() -> Result<()> {
                         }
                     }
                     let data = accept_host(data_listener)?;
-                    crate::data::session(data, proxy, &data_launch, &state)
+                    crate::data::session(
+                        data,
+                        proxy,
+                        &data_launch,
+                        &state,
+                        crate::file_executor::linux::start(workspace)?,
+                    )
                 })();
                 if let Err(error) = result {
                     eprintln!("guest data closed: {error}");

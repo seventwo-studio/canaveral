@@ -123,7 +123,7 @@ pub(crate) fn prepare(launch: &WorkspaceLaunch) -> Result<crate::workspace::conf
         "",
     )?;
     directory(Path::new("/workspace"))?;
-    for name in [".canaveral", "home", "tmp", ".npm"] {
+    for name in [".canaveral", ".canaveral/transfers", "home", "tmp", ".npm"] {
         let path = PathBuf::from("/workspace").join(name);
         fs::create_dir(&path)?;
         directory(&path)?;

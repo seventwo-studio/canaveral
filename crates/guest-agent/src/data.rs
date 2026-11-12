@@ -4,7 +4,7 @@ use crate::runtime::{nonblock, now};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use canaveral_guest_protocol::{
     bundle::WorkspaceLaunch,
-    data::{self, Budget, Decoder, Direction, Flows, Frame, Receipt, Replay, Sender, Step},
+    data::{self, Budget, Decoder, Direction, Flows, Frame, Sender},
     proxy::{self, HeaderError, Target},
     Result,
 };
@@ -21,44 +21,6 @@ use std::{
 };
 use uuid::Uuid;
 
-/// Temporary dispatch seam: remove when the confined file executor is connected.
-/// Satellite v2 admission must remain disabled while this is true.
-const FILE_EXECUTOR_NOT_IMPLEMENTED: bool = true;
-
-fn dispatch(replay: &mut Replay, frame: Frame) -> Result<Option<Frame>> {
-    match frame {
-        Frame::TransferRequest {
-            id,
-            step,
-            request,
-            remaining_ms,
-            ..
-        } => {
-            let receipt = match replay.begin(id, step, request, remaining_ms, now())? {
-                Step::Replay(receipt) => receipt.clone(),
-                Step::Execute if FILE_EXECUTOR_NOT_IMPLEMENTED => {
-                    let receipt = Receipt::Failed {
-                        code: "io_error".into(),
-                    };
-                    replay.complete(receipt.clone())?;
-                    receipt
-                }
-                Step::Execute => return Err("file executor missing".into()),
-            };
-            Ok(Some(Frame::TransferReceipt {
-                version: 1,
-                id,
-                step,
-                receipt,
-            }))
-        }
-        Frame::TransferCancel { id, .. } => {
-            replay.cancel(id);
-            Ok(None)
-        }
-        _ => Err("not a transfer frame".into()),
-    }
-}
 pub(crate) fn handshake(frame: Frame, launch: &WorkspaceLaunch) -> Result<Frame> {
     frame.validate(Sender::Host)?;
     match frame {
@@ -216,6 +178,7 @@ pub(crate) fn session(
     proxy: TcpListener,
     launch: &WorkspaceLaunch,
     ready: &Readiness,
+    mut files: crate::file_executor::Lane,
 ) -> Result<()> {
     struct Withdraw<'a>(&'a Readiness);
     impl Drop for Withdraw<'_> {
@@ -237,7 +200,7 @@ pub(crate) fn session(
         2 * data::MAX_CHUNK as u64,
         4 * (data::MAX_FRAME + 4) + 16 * 8192,
     )?;
-    let mut replay = Replay::default();
+
     let mut hello = false;
     let mut next_id = 0u128;
     let connected = now();
@@ -247,6 +210,11 @@ pub(crate) fn session(
         }
         if !hello && now() - connected >= 5000 {
             return Err("data hello deadline".into());
+        }
+        if output.control.is_none() {
+            if let Some(receipt) = files.poll()? {
+                output.queue(receipt)?;
+            }
         }
         output.flush(&mut socket)?;
         if hello && output.idle() && !ready.initial.load(Ordering::Acquire) {
@@ -268,7 +236,7 @@ pub(crate) fn session(
                         } else {
                             match frame {
                                 Frame::TransferRequest { .. } | Frame::TransferCancel { .. } => {
-                                    if let Some(receipt) = dispatch(&mut replay, frame)? {
+                                    if let Some(receipt) = files.dispatch(frame)? {
                                         output.queue(receipt)?;
                                     }
                                 }
@@ -674,9 +642,15 @@ mod tests {
         launch.egress.enabled = enabled;
         let worker = std::thread::spawn(move || {
             let file = unsafe { File::from_raw_fd(guest.into_raw_fd()) };
-            session(file, proxy, &launch, &state)
-                .unwrap_err()
-                .to_string()
+            session(
+                file,
+                proxy,
+                &launch,
+                &state,
+                crate::file_executor::Lane::start(|_, _, _| data::Receipt::Aborted),
+            )
+            .unwrap_err()
+            .to_string()
         });
         (host, address, ready, worker)
     }
@@ -872,32 +846,5 @@ mod tests {
         assert!(response.ends_with("egress_denied"));
         drop(host);
         assert!(worker.join().unwrap().contains("disconnected"));
-    }
-    #[test]
-    fn dispatch_seam_replays_and_rejects_changed_request() {
-        let mut replay = Replay::default();
-        let id = Uuid::from_u128(1);
-        let frame = || Frame::TransferRequest {
-            version: 1,
-            id,
-            step: 1,
-            request: data::Request::Abort,
-            remaining_ms: 1000,
-        };
-        assert!(
-            matches!(dispatch(&mut replay, frame()).unwrap(), Some(Frame::TransferReceipt { receipt: Receipt::Failed { code }, .. }) if code == "io_error")
-        );
-        assert!(dispatch(&mut replay, frame()).unwrap().is_some());
-        assert!(dispatch(
-            &mut replay,
-            Frame::TransferRequest {
-                version: 1,
-                id,
-                step: 3,
-                request: data::Request::Abort,
-                remaining_ms: 1000
-            }
-        )
-        .is_err());
     }
 }

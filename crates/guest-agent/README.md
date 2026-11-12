@@ -18,7 +18,7 @@ formatting; formatting runs once with a bounded timeout. Failure never retries.
 Formatting and mounting use PID1's pinned device descriptor via procfs.
 
 The ext4 mount must be writable, executable, nosuid and nodev on the expected
-device. Workspace and `.canaveral`, `home`, `tmp`, `.npm` are uid/gid 1000 mode
+device. Workspace and `.canaveral`, `.canaveral/transfers`, `home`, `tmp`, `.npm` are uid/gid 1000 mode
 0700. PID1 pins the workspace root and probes strict openat2 confinement support.
 Any provisioning failure fails boot.
 
@@ -43,12 +43,32 @@ satellite opened, then relays opaque bytes under explicit credits. V2 commands
 use /workspace, fixed PATH, workspace HOME/TMPDIR/npm cache and grant-scoped proxy
 variables; command-supplied environment/cwd overrides are rejected.
 
-The transfer dispatch seam is deliberately incomplete:
-`data::FILE_EXECUTOR_NOT_IMPLEMENTED` returns replayable failed `io_error`
-receipts and accepts cancellation. This temporary behavior is allowed only while
-satellite v2 admission remains gated. The file worker must replace it with
-confined execution, complete transfer-lane lifecycle/replay, lease-bound deadlines
-and durable publication. No new capability/refusal frame is introduced.
+File requests execute on a dedicated worker through a bounded single-step queue.
+The reactor retains exact request/receipt replay for up to 128 transfer IDs and
+closes data rather than evicting replay authority. It continues proxy/control
+processing during hashing and fsync. Per-step CLOCK_BOOTTIME deadlines are fixed
+at acceptance; replay cannot extend them. Raw thread-local setgroups and
+setfsuid/setfsgid drop filesystem authority to uid/gid 1000 without changing
+PID1's real/effective IDs or other threads' credentials. Worker shutdown cancels
+publication and does not join blocked filesystem calls.
+
+The worker supports staged no-replace uploads, cursor and incremental hash checks,
+a second full hash pass, pinned downloads with identity/change detection, abort,
+and cancellation. Publication fsyncs the file and both directories. Cancellation
+inside the publication window or failed post-rename durability returns unknown.
+An unknown receipt blocks subsequent file effects. No additional crate is needed:
+the protocol Cursor supplies both hash passes.
+
+This remains partial and satellite v2 admission must stay gated. Existing-target
+`replace:true` deliberately returns `destination_exists`; atomic eligible-target
+replacement still needs a race-safe design. Parent/staging reachability and file
+identity are rechecked, but native adversarial rename/staging races remain an
+acceptance gap. Replay receipts are process-local, not restart recovery evidence.
+The frozen protocol Replay helper retains full requests rather than compact
+request digests. Digest-backed retention and the 128-ID limit need integration
+and memory-budget review. Native
+fault injection must qualify cancellation, ENOSPC and uncertain rename/fsync,
+worker credential isolation, and shutdown while syscalls are blocked.
 
 Portable tests and Linux cross-checks establish no native acceptance. An
 authorized native run must verify actual sysfs serial/device provenance, fresh

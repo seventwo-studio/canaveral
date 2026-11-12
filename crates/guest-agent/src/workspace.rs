@@ -83,8 +83,8 @@ pub mod confined {
     }
     const RESOLVE: u64 = 0x08 | 0x04 | 0x02 | 0x01; // BENEATH, NO_SYMLINKS, NO_MAGICLINKS, NO_XDEV
     pub struct Root {
-        root: File,
-        device: u64,
+        pub(crate) root: File,
+        pub(crate) device: u64,
     }
     impl Root {
         /// Caller supplies the descriptor pinned immediately after mounting ext4.
@@ -94,7 +94,7 @@ pub mod confined {
                 return Err("unsafe workspace root".into());
             }
             // Probe syscall/resolve support before files readiness. No realpath fallback.
-            let probe = lookup(&root, ".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+            let probe = lookup(&root, ".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
             drop(probe);
             Ok(Self {
                 root,
@@ -103,14 +103,14 @@ pub mod confined {
         }
         pub fn open_read(&self, name: &str) -> Result<File> {
             path(name)?;
-            if unsafe { libc::geteuid() } != 1000 || unsafe { libc::getegid() } != 1000 {
+            if unsafe { libc::setfsuid(!0) } != 1000 || unsafe { libc::setfsgid(!0) } != 1000 {
                 return Err("file worker must run as uid/gid 1000".into());
             }
             let groups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
             if groups != 0 {
                 return Err("file worker has supplementary groups".into());
             }
-            let file = lookup(&self.root, name, libc::O_RDONLY)?;
+            let file = lookup(&self.root, name, libc::O_RDONLY, 0)?;
             identity(&file)?.eligible(self.device)?;
             Ok(file)
         }
@@ -119,7 +119,12 @@ pub mod confined {
         pub fn parent_reachable(&self, name: &str, parent: &File) -> Result<()> {
             path(name)?;
             let parent_name = name.rsplit_once('/').map_or(".", |(p, _)| p);
-            let current = lookup(&self.root, parent_name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+            let current = lookup(
+                &self.root,
+                parent_name,
+                libc::O_RDONLY | libc::O_DIRECTORY,
+                0,
+            )?;
             let (a, b) = (current.metadata()?, parent.metadata()?);
             if a.dev() != self.device || a.dev() != b.dev() || a.ino() != b.ino() {
                 return Err("destination parent changed".into());
@@ -127,11 +132,11 @@ pub mod confined {
             Ok(())
         }
     }
-    fn lookup(root: &File, name: &str, flags: i32) -> Result<File> {
+    pub(crate) fn lookup(root: &File, name: &str, flags: i32, mode: u64) -> Result<File> {
         let name = CString::new(name)?;
         let how = OpenHow {
             flags: (flags | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
-            mode: 0,
+            mode,
             resolve: RESOLVE,
         };
         let fd = unsafe {
