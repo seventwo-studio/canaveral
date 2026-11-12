@@ -160,8 +160,9 @@ an unbounded series of workers. Native acceptance remains required.
 The earlier run reported a default route before connect and a cloned /32 after
 connect. The former contract refused that clone. The qualified clone rule above
 supersedes that blanket refusal and is used before connect, after connect and
-for periodic revalidation. Native results are recorded in the
-[acceptance summary](../coordination/native-acceptance/README.md).
+for periodic revalidation. Public CONNECT and pinned clone/npm passed in the
+[qualified-clone native rerun](../coordination/native-acceptance/README.md#qualified-clone-full-rerun).
+Native route-change monitoring and router hairpin coverage remain unproven.
 
 Static reserved/operator-denied destinations are classified before requesting
 route evidence, so unavailable route evidence cannot hide a known

@@ -251,9 +251,9 @@ public-route build/log retrieval, empty/binary/300 KiB file round trips,
 no-replace/disk-full failures, foreign application denial, fixed proxy denial
 codes, egress-off refusal and simultaneous command/transfer expiry. Cleanup
 interception requires both workspaceRemoved and dataPlaneClosed before capacity
-release. Existing v1 cases also run. Experimental native results are recorded below. Full acceptance remains false;
-public HTTPS, data disconnect, route-change/hairpin topology and host power-loss
-durability remain open.
+release. Existing v1 cases also run. Experimental results below distinguish passed public
+HTTPS/transfer cases from remaining data-only disconnect, route-change/hairpin
+topology and host power-loss durability gates. Full production acceptance remains false.
 
 ## ST-535 native evidence (2026-11-12)
 
@@ -329,6 +329,68 @@ builder was deleted; unrelated VMs were untouched.
 Portable validation passed: coordination typecheck/build and 1020 tests, full
 serial Rust tests, changed-crate clippy, Linux MUSL guest compilation/clippy,
 signature-gate regressions, standalone harness typecheck and no-Python check.
-No Swift source changed. Public HTTPS needs a separately reviewed route/policy
-design; data disconnect, route-change/hairpin topology, replacement publication
-and host power-loss durability remain separate native gates.
+No Swift source changed in that run. The qualified-clone rerun below supersedes
+its public HTTPS and replacement gates. Data-only disconnect, route-change/hairpin
+topology and host power-loss durability remain separate native gates.
+
+
+### Qualified-clone full rerun
+
+Private run `/private/tmp/canaveral-native-integration-st535/canaveral-native-YVunMd`
+passed every harness case on 2026-11-12: `result.json` records
+`nativeAcceptance:true` and no case failures. Host implementation is
+`add485c`; the guest bundle uses source `8736e79` and digest
+`f8c56d8b4ae9645b2ca20cac0585fdc988730ae8c12ae87bafe58de6f641834c`.
+One 2 CPU / 4096 MiB / approximately 8 GiB guest ran at a time through the signed
+helper. Full production readiness and topology acceptance remain false.
+
+- Qualified current-default clone evidence passed CONNECT 200
+  (`proxy-allowed.json`). Git cloned and verified HEAD at
+  `67f3f118c7d8bf535280cf0b61697b1898f6567b` (`workspace-build.json`).
+- npm ci/test succeeded in 137506/536 ms of guest command time, respectively
+  (138050/1303 ms including dispatch/polling; `workspace-npm-{ci,test}.json`).
+  Downloaded `build.log` begins with the verified commit and has SHA256
+  `b7514fa04cdde25c2b38d8178638dbb8dc9ba5b458503dcbeb554e525c0c6969`
+  (`workspace-build-log.json`).
+- Empty, binary and 307200-byte round trips, replace:true over an existing
+  regular file with verified download, replace:false conflict and durable
+  disk_full passed (`roundtrip-*-verified.json`, `workspace-replace-true.json`,
+  `workspace-destination_exists.json`, `workspace-disk_full.json`).
+- Host LAN/tailnet/loopback, metadata and RFC1918 targets, port 80, foreign
+  application and egress-off denials passed. Expiry interrupted a dispatched
+  command (unknown) and opened upload (failed/authorization_lost), with independent
+  stop/cleanup proof (`proxy-*.json`, `workspace-expiry-*.json`).
+- All existing v1 lifecycle cases against this v2 bundle passed: readiness,
+  command/output, ownership refusal, renewal, release and ordinary expiry.
+  Renewal's command succeeded 3008 ms after original expiry. Capacity release
+  required workspaceRemoved and dataPlaneClosed; no checks were relaxed
+  (`*-independent-stop.json`, `runner-reports.json`).
+- After satellite loss, the helper was alive 70 ms before deadline and absent
+  132 ms after it, before recovery. Recovery retained the unknown reservation
+  (`loss-independent-fence.json`, `loss-held.json`).
+
+Two additional native defects were fixed: missing PL031 RTC support left the
+guest clock in 1970, correctly failing TLS; premature local proxy retirement
+rejected already credited in-flight data and withdrew files readiness. The RTC
+is now built in and checked against host time. Closing flows retain their bounded
+credit/sequence state until Close acknowledgement, with a fixed 10-second bound.
+Linux guest tests cover valid in-flight data, sequence-gap rejection and close
+expiry. The 60-second active-transfer expiry case allows setup before expiry;
+it still proves both operations active and interrupted at the real deadline.
+
+All owned VMs, processes, workspace and relay storage were removed after PID,
+VZ, helper-lock and lsof checks. Both disposable builders and intermediate build
+copies were deleted; unrelated VMs were untouched. The loss journal is unchanged
+and its private database retains one unknown reservation without a fabricated
+cleanup receipt (`loss-post-run-owned-cleanup.json`). A separate pre-launch
+serial-attachment refusal in `canaveral-native-81Nw7d` also retains a private
+logical reservation after physical cleanup; its data-closure reporting defect
+is fixed for future launches. Aggregate proof is `owned-route-cleanup.json`
+in the parent evidence directory.
+
+Portable validation passed: coordination typecheck/build and 1020 tests, full
+serial Rust suite, satellite/guest clippy, 156 Swift tests, standalone harness
+typecheck, signature-gate regressions and no-Python checks. Both rebuilt bundles
+passed input authentication and deterministic assembly. Route-change monitoring,
+router hairpin/operator deny CIDRs, data-only disconnect, power-loss durability,
+PTY, concurrency, reconciliation and macOS workspaces remain open.

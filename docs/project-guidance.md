@@ -63,5 +63,5 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
   in guest wire, boot bundles, lease controller, command operations, consumer API
   and applications define workspace/data/transfer contracts. Experimental native
   workspace/files/lifecycle results are in the [acceptance record](../coordination/native-acceptance/README.md#st-535-native-evidence-2026-11-12).
-  Public CONNECT remains blocked by the required cloned-route policy; full
-  native and production acceptance remain false.
+  Qualified cloned-route evidence, public CONNECT and pinned clone/npm passed
+  on the tested Mac. Native topology and full production acceptance remain open.
