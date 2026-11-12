@@ -349,17 +349,17 @@ test("SDK validates local intent, response binding and unknown mutation outcomes
 });
 
 test("dispatch readiness is explicit and expiry bounds the server deadline", async t => {
-  const x = await ready(t, 20);
+  const x = await ready(t, 30);
   await x.f.ok(x.f.report(x.runner, x.a.id, 2, x.f.receipt(x.a, { runtimeState: "running" })));
   await rejectsWith(x.client.createOperation(intent()), 409);
   assert.equal((await x.f.ok(x.poll())).command, null);
   await x.f.ok(x.f.report(x.runner, x.a.id, 3, x.f.receipt(x.a, x.f.running)));
   const req = intent(); await x.client.createOperation(req); await x.f.ok(x.poll());
   const stored = x.f.rows("SELECT start_before,deadline FROM linux_operations")[0]!;
-  assert.deepEqual([stored.start_before, stored.deadline], [T0 + 20, T0 + 20]);
+  assert.deepEqual([stored.start_before, stored.deadline], [T0 + 30, T0 + 30]);
   const other = await x.f.enroll();
   assert.equal((await x.reportOp(req.id, { state: "bogus" }, { binding: other.binding }, other)).status, 403);
-  x.f.clock(T0 + 20);
+  x.f.clock(T0 + 30);
   assert.equal((await x.client.operation(req.id)).state, "unknown");
   assert.equal((await x.f.ok(x.poll())).cancelRequested, true);
 });

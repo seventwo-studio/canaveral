@@ -36,6 +36,7 @@ export interface AcquireRequest {
   name?: string; resources?: Partial<Resources>; ttlSeconds?: number; requiredCapabilities?: Capability[];
 }
 export interface AcquireResult { /** True for 201 (new intent); false for an idempotent 200 replay. */ created: boolean; lease: Lease }
+/** Linux TTLs must be >=30 seconds; the controller returns linux_ttl_below_minimum. */
 export interface RenewRequest { id: string; expectedRevision: number; ttlSeconds: number }
 export interface ReleaseRequest { id: string }
 /** Opt-in durable lease intent. Persist the envelope before dispatch. */

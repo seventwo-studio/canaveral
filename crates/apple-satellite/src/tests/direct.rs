@@ -630,7 +630,8 @@ fn active_command_stalled_poll_cannot_delay_local_fence_or_stop() {
     }
     let d = direct_fixture(|_| {});
     let mut satellite = seeded(&d.c);
-    satellite.state.deadline = clock::now().as_secs_f64() + 3.5;
+    // Allow fixture preparation and dispatch before the two-second guest margin.
+    satellite.state.deadline = clock::now().as_secs_f64() + 6.5;
     satellite.save().unwrap();
     // Ready mode leaves exec running; the local deadline must cancel and fence it.
     let frames = fake_guest(&d, Mode::Ready);

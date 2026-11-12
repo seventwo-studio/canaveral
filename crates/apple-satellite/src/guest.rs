@@ -231,6 +231,9 @@ impl Session {
         })?;
         Ok(s)
     }
+    pub fn authority_expired(&self, now: f64) -> bool {
+        now >= self.guest_deadline
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }

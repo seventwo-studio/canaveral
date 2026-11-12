@@ -106,3 +106,10 @@ command arguments and returned output as private. These methods have controller
 and fake-peer fixture coverage, without native execution acceptance.
 
 The [waiting request contract](requests.md) is opt-in. Request methods use only the application key, preserve caller UUIDs, and never poll or retry. Types and methods are also exposed through `sdk.ts`.
+
+Linux lease acquisition and renewal require integer `ttlSeconds >= 30`, bounded
+by the application's maximum. The controller returns 400
+`linux_ttl_below_minimum` below this minimum. Acquisition also refuses a
+configured default or maximum below 30 seconds without clamping. This is a Linux
+consumer contract change; other lease kinds and generic application limits keep
+their existing bounds. The SDK preserves this structured service error.

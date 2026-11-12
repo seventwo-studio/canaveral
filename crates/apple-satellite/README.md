@@ -320,3 +320,15 @@ blocks, which the experimental 4 KiB-page Linux kernel refused. Launch-medium
 construction now pins `-b4096`; the fixed-argv test and strict fixture builder
 cover that requirement. Actual boot observations and outstanding production
 gates are recorded in the [native evidence record](../../coordination/native-acceptance/README.md).
+
+Stop classification is sticky in the private journal. An explicit controller stop
+of a terminal lease reports `failure: null`; the satellite's deadline fence
+(including the guest authority ending at the conservative two-second margin)
+reports `failure: deadline`. Unexpected helper/VM/guest loss remains
+`failure: runtime`, and pre-launch abandonment remains `provisioning`.
+Old fenced journals without a cause retain their conservative runtime failure.
+Restart never reclassifies a recorded cause or relaunches execution. A renewal
+arriving inside the final margin may miss the guest deadline; it cannot revive
+guest authority and the lease ends as expired under the controller's bounded
+10-second classification tolerance. Cleanup still requires independent stop proof
+and all existing evidence; the tolerance does not extend execution authority.

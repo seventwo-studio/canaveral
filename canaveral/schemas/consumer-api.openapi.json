@@ -2011,7 +2011,8 @@
           "ttlSeconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 2147483647
+            "maximum": 2147483647,
+            "description": "Linux leases require at least 30 seconds (400 linux_ttl_below_minimum otherwise); acquisition also refuses a configured default or maximum below 30 seconds, without clamping. Other lease kinds retain their existing bounds."
           },
           "requiredCapabilities": {
             "type": "array",
@@ -2285,7 +2286,8 @@
           "ttlSeconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 2147483647
+            "maximum": 2147483647,
+            "description": "Linux leases require at least 30 seconds (400 linux_ttl_below_minimum otherwise); acquisition also refuses a configured default or maximum below 30 seconds, without clamping. Other lease kinds retain their existing bounds."
           }
         },
         "required": [

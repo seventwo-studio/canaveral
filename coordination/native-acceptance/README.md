@@ -88,29 +88,63 @@ Acquisition/readiness, consumer command/output, native renewal, explicit release
 and application isolation passed. Guest mountinfo showed a separate EROFS launch
 mount with `ro,nosuid,nodev,noexec` in both full guests.
 
-**Expiry remains failing.** The guest session's conservative two-second margin
-ended command authority before the controller TTL. Satellite supervision then
-fenced the VM and reported `failure: runtime`; the controller marked the lease
-`failed`, not `expired`. `runner-reports.json` records this at controller time
-`1794486435.513`, before expiry `1794486437.339`. The following complete cleanup
-report released the reservation. `post-run-independent-stop.json` independently
-confirms the helper and VZ processes are gone and owned machine, workspace and
-relay directories removed. Correcting this classification requires deciding how
-a conservatively early guest fence interacts with renewal and controller expiry;
-no deadline, admission or cleanup check was relaxed. The harness now fails
-immediately on this state instead of waiting for an impossible `expired` state.
+### Deadline classification and full rerun (ST-534)
 
-The run stopped at this failure. Satellite loss was not reached; no loss-case
-reservation was created. Its documented unknown-reservation recovery behavior
-remains a native gate. No full native acceptance claim is made. Coordination's
-989 tests and Swift's 151 XCTest cases plus the new serial test passed. The full
-Rust suite passed with one test thread; parallel runs exposed timing/lock races
-(`executor already owned` and a stalled-poll count assertion), which remain a
-portable-test concurrency uncertainty.
+The earlier run's expiry failure is superseded by private run
+`canaveral-native-pQM3pq`. The controller now accepts `failure: deadline` within
+10 seconds of its deadline as expiry. This covers the two-second guest margin,
+one-second report cadence and seven seconds of bounded scheduling/skew allowance.
+Linux acquisition and renewal now require at least 30 seconds; smaller TTLs or
+acquisition defaults/maximums below that return 400 `linux_ttl_below_minimum`.
+This change is confined to the Linux path. The satellite journals the first stop
+cause: controller terminal stop reports null, deadline reports deadline, and
+unexpected execution loss reports runtime. No deadline or cleanup check is relaxed.
 
-The failed expiry case also exposed an evidence-retention gap: periodic process
-snapshots overwrote the earlier helper PID. Its final independent scan proves no
-helper or VZ process exists, and cleanup reports and removed paths are retained,
-but its individual helper PID evidence is incomplete. The harness now persists
-its accumulated per-lease PID observations separately. The successful explicit
-release retains its individual PID proof in `release-independent-stop.json`.
+One operator-authorized full run passed, using one 2 CPU / 2 GiB guest at a time:
+
+- Acquisition/readiness: `release-ready.json` and `release-ready.journal.json`.
+- Consumer command/output: `command.json`; native renewal:
+  `renewed-native-authorization.json` and `renewed.json`.
+- Explicit release: `release-independent-stop.json`, `release-after.json`.
+  Both stopped and complete-cleanup receipts report `failure: null`.
+- Expiry: `expiry-independent-stop.json`, `expiry-after.json` and
+  `runner-reports.json`. The first stopped deadline receipt ended the lease as
+  `expired` at controller time `1794487297.658`, before the stored deadline
+  `1794487299.13`. Its reservation stayed at one until the complete cleanup
+  receipt, then became zero. Independent PID, VZ absence, removed machine,
+  workspace and relay evidence passed for both release and expiry.
+- Satellite loss: `loss-held.json`, `loss-held.journal.json` and
+  `loss-independent-fence.json`. Recovery refused relaunch and reported unknown
+  runtime. The controller retained one reservation and denied further admission.
+  The owned helper was positively stopped through its fenced authorization and
+  power-off path; independent PID and VZ absence checks passed.
+- Application-2 isolation: `ownership-GET-<lease-id>.json`,
+  `ownership-POST-credential.json`, `ownership-POST-operations.json`; its
+  acquisition without a grant also returned 403. Every guest's consumer mountinfo
+  command confirmed a separate EROFS launch mount with `ro,nosuid,nodev,noexec`.
+
+`result.json` records completion of these experimental native cases. The
+controller and satellite processes were stopped. After independent process,
+helper-lock and empty lsof checks, the loss guest's owned machine/workspace and
+published relay were removed; its owned user-immutable launch medium was cleared
+only after stop, as in production cleanup. `loss-post-run-owned-cleanup.json`
+records this external cleanup. The satellite journal was not changed to claim
+stop/cleanup and no cleanup receipt was fabricated.
+
+The isolated, stopped controller database still holds the loss lease as
+`failed`, runtime `unknown`, cleanup `pending`: one reservation for 2 CPU,
+2048 MiB memory and 4 GiB disk. Keep its private database, binding/journal and
+proofs for operator reconciliation. An operator must correlate that exact
+assignment and binding with the independent stop, handle and removal evidence
+before recording cleanup and releasing capacity through a separately reviewed
+reconciliation implementation. That recovery operation is not implemented;
+restarting the satellite or controller does not reclaim it. Do not reset the
+journal, forge a report or edit reservation rows to manufacture acceptance.
+
+The full Rust suite passed serially; coordination typecheck/build and all 995
+tests passed. Standalone native harness typecheck passed. A stalled-controller
+fixture now allows preparation/dispatch before the guest margin; its stall,
+local fencing and command-count assertions remain intact. No Swift code changed.
+This acceptance applies only to this experimental bundle and host: production
+trust/signing approval, networking, PTY/files, concurrent shared-rootfs use,
+power-loss reconciliation and ordinary host lease admission remain separate gates.

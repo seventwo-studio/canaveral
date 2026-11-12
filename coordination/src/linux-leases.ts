@@ -21,7 +21,10 @@ const HEADLESS = ["command", "pty", "files"] as const;
 const ACTIVE = ["provisioning", "ready"];
 const RUNTIME = ["starting", "running", "stopped", "unknown"] as const;
 const CLEANUP = ["pending", "running", "blocked", "complete"] as const;
-const FAILURE = ["provisioning", "runtime"] as const;
+const FAILURE = ["provisioning", "runtime", "deadline"] as const;
+// Seconds: 2s guest margin + 1s report cadence + 7s bounded scheduling/clock skew.
+// Classification only: never changes the stored deadline or cleanup requirements.
+export const DEADLINE_REPORT_TOLERANCE = 10;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_ACTIVE_ASSIGNMENTS = 32;
@@ -60,6 +63,12 @@ function text(value: unknown, what: string): string {
 function positive(value: unknown, maximum: number, what: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > maximum) throw new ServiceError(`Invalid ${what}.`, 400);
   return value;
+}
+function linuxTTL(value: unknown, maximum: number): number {
+  if (maximum < 30 || (typeof value === "number" && value < 30)) {
+    throw new ServiceError("Linux lease TTL and configured maximum must be at least 30 seconds.", 400, { code: "linux_ttl_below_minimum" });
+  }
+  return positive(value, maximum, "ttlSeconds");
 }
 function arch(value: unknown): "arm64" | "amd64" {
   if (value !== "arm64" && value !== "amd64") throw new ServiceError("Architecture must be arm64 or amd64.", 400);
@@ -304,7 +313,9 @@ export class LinuxLeases {
     return this.transaction((db, now) => {
       const application = authorize(db);
       const limits = application.limits;
-      const ttl = positive(input.ttlSeconds ?? limits.defaultTTLSeconds, limits.maxTTLSeconds, "ttlSeconds");
+      // An invalid Linux default is explicit configuration failure even with an override.
+      linuxTTL(limits.defaultTTLSeconds, limits.maxTTLSeconds);
+      const ttl = linuxTTL(input.ttlSeconds ?? limits.defaultTTLSeconds, limits.maxTTLSeconds);
       const image = this.imageRow(db, imageId, revision, a);
       const minimum = image ? JSON.parse(image.resources) as Resources : undefined;
       const amount = minimum ? { ...minimum, ...overrides } as Resources : undefined;
@@ -362,7 +373,7 @@ export class LinuxLeases {
     const input = exact(value, action === "renew" ? ["id", "expectedRevision", "ttlSeconds"] : ["id"], "lease mutation");
     const mutation = identifier(input.id);
     const request = JSON.stringify(action === "renew"
-      ? { id: mutation, expectedRevision: positive(input.expectedRevision, Number.MAX_SAFE_INTEGER, "expectedRevision"), ttlSeconds: positive(input.ttlSeconds, 2 ** 31 - 1, "ttlSeconds") }
+      ? { id: mutation, expectedRevision: positive(input.expectedRevision, Number.MAX_SAFE_INTEGER, "expectedRevision"), ttlSeconds: linuxTTL(input.ttlSeconds, 2 ** 31 - 1) }
       : { id: mutation });
     return this.transaction((db, now) => {
       const { lease, application } = this.access(db, id, token);
@@ -372,7 +383,7 @@ export class LinuxLeases {
         return { mutation: JSON.parse(old.result) as unknown, lease: this.view(db, lease) };
       }
       if (action === "renew") {
-        const ttl = positive(input.ttlSeconds, application.limits.maxTTLSeconds, "ttlSeconds");
+        const ttl = linuxTTL(input.ttlSeconds, application.limits.maxTTLSeconds);
         if (!ACTIVE.includes(lease.state)) throw new ServiceError("Ended leases cannot be renewed.", 409);
         if (input.expectedRevision !== lease.revision) throw new ServiceError("Lease revision changed.", 409);
         // Never shortens; capped by the lifetime fixed at admission.
@@ -460,7 +471,7 @@ export class LinuxLeases {
       if (active && r.runtimeState === "stopped" && !r.failure) throw new ServiceError("An active lease cannot stop without a reported failure.", 409);
       if (r.failure === "provisioning" && active && lease.state !== "provisioning") throw new ServiceError("Provisioning failure after readiness must be reported as a runtime failure.", 409);
       // Lifecycle first: failure ends an active lease, positive readiness promotes provisioning.
-      if (active && r.failure) this.end(db, lease, "failed", now);
+      if (active && r.failure) this.end(db, lease, r.failure === "deadline" && now >= lease.expires - DEADLINE_REPORT_TOLERANCE ? "expired" : "failed", now);
       else if (lease.state === "provisioning" && r.runtimeState === "running" && (JSON.parse(lease.required) as Capability[]).every(c => (HEADLESS as readonly string[]).includes(c) && r.ready[c as typeof HEADLESS[number]])) {
         db.prepare("UPDATE linux_leases SET state='ready',revision=revision+1 WHERE id=?").run(lease.id);
       }
@@ -700,7 +711,9 @@ export class LinuxLeases {
   }
   private reportView(db: DatabaseSync, row: AssignmentRow, now: number): unknown {
     const lease = this.row(db, row.lease)!;
-    return { assignmentId: row.id, sequence: row.sequence, lease: this.authorization(lease, now), runtimeState: lease.runtime,
+    return { assignmentId: row.id, sequence: row.sequence,
+      failureReason: lease.state === "failed" && row.report && JSON.parse(row.report)[9] === "deadline" ? "deadline_too_early" : null,
+      lease: this.authorization(lease, now), runtimeState: lease.runtime,
       cleanup: ACTIVE.includes(lease.state) ? "notRequested" : lease.cleanup, stopRequested: !ACTIVE.includes(lease.state),
       released: !this.domains.held(db, lease.reservation) };
   }

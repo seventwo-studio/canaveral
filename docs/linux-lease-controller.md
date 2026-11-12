@@ -68,7 +68,12 @@ transaction:
 1. The application needs an unrevoked grant for the exact image digest (403).
 2. `requiredCapabilities` outside the image's set are `capability_unsupported` (409).
 3. `resources` overrides may only raise the image size (400). `ttlSeconds` defaults
-   to and is bounded by the application's limits (400).
+   to and is bounded by the application's limits (400). Linux acquisition and
+   renewal require integer `ttlSeconds >= 30`. Smaller TTLs return 400
+   `linux_ttl_below_minimum`. Acquisition also rejects an application default or
+   maximum below 30 seconds with that code, even with an explicit override;
+   values are never silently clamped. This consumer contract change applies only
+   to Linux leases, not other lease kinds or generic application limits.
 4. Active leases and held reservations (including terminal but unreclaimed ones) are
    bounded by the application's limits (429).
 5. Placement considers only domains with a current approval serving the image
@@ -150,7 +155,7 @@ as every effect.
 | --- | --- | --- |
 | `/v1/runners/linux-leases/claim` | `{binding, claimId}` | `{assignment: Assignment \| null}` |
 | `/v1/runners/linux-leases/assignments` | `{binding}` | `{assignments: Assignment[]}` (unclosed, this exact binding) |
-| `/v1/runners/linux-leases/report` | `{binding, assignmentId, sequence, receipt}` | `{assignmentId, sequence, lease: {state, revision, expiresAt, controllerNow}, runtimeState, cleanup, stopRequested, released}` |
+| `/v1/runners/linux-leases/report` | `{binding, assignmentId, sequence, receipt}` | `{assignmentId, sequence, lease: {state, revision, expiresAt, controllerNow}, runtimeState, cleanup, stopRequested, released, failureReason}` |
 
 **Claim.** Approvals are `{binding, domainId, backend, images}`; one binding serves one
 backend. Persist `claimId` before sending. Replaying a recorded `claimId` for the
@@ -174,7 +179,7 @@ existing reservation; it never reserves twice. `null` records nothing.
 }
 ```
 
-`failure` is `null`, `"provisioning"` or `"runtime"`. All fields are required; unknown
+`failure` is `null`, `"provisioning"`, `"runtime"` or `"deadline"`. All fields are required; unknown
 fields are refused.
 
 - `sequence` starts at 1 and advances by exactly one. Persist `(sequence, receipt)`
@@ -192,7 +197,17 @@ fields are refused.
   Lifecycle stays separate: consumer `members[].ready` requires the latest report to
   confirm every required capability, and becomes false when that evidence is withdrawn
   or runtime/binding becomes unknown. A later valid report can restore member readiness.
-- `failure` on an active lease ends it as `failed`. `runtimeState: stopped` on an active
+- `failure: deadline` on an active lease ends it as `expired` only when
+  controller `now >= expiresAt - DEADLINE_REPORT_TOLERANCE` (10 seconds).
+  This covers the satellite's 2-second guest margin, 1-second report cadence and
+  7 seconds of bounded scheduling delay and modest clock skew, and is below the
+  30-second minimum TTL. Earlier deadline reports end as `failed`; the runner
+  report acknowledgment exposes `failureReason: deadline_too_early` when its
+  latest receipt is a deadline report on a failed lease (otherwise null).
+  Other failures on an active lease end it as `failed`. Terminal lifecycle and
+  revision remain unchanged by later deadline reports. No report extends or
+  resurrects a lease. Renewal inside the final guest margin may not reach the
+  guest before its authority ends; that lease then expires. `runtimeState: stopped` on an active
   lease requires `failure`. Cleanup fields other than `pending`/false are refused
   while the lease is active.
 - Evidence flags never revert, and `cleanup: complete` is sticky.

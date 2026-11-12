@@ -108,6 +108,15 @@ pub struct Assignment {
     lease: Lease,
     stop_requested: bool,
 }
+/// First reason for stopping; later supervision cannot overwrite it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StopCause {
+    Controller,
+    Deadline,
+    Runtime,
+}
+
 /// Durable per-claim journal. Every flag is forward-only within one claim.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,6 +128,8 @@ struct Journal {
     launch_intent: bool,
     prepared: bool,
     fenced: bool,
+    #[serde(default)]
+    stop_cause: Option<StopCause>,
     /// Declined before launch intent: nothing was created for this assignment.
     abandoned: bool,
     boot: f64,
@@ -190,6 +201,7 @@ impl Journal {
             launch_intent: false,
             prepared: false,
             fenced: false,
+            stop_cause: None,
             abandoned: false,
             boot: 0.0,
             boot_session_id: uuid::Uuid::nil(),
@@ -574,6 +586,17 @@ impl Satellite {
     }
     /// Sticky. Signals the native helper only while a prepared machine may still execute.
     fn fence(&mut self) -> Result<()> {
+        self.fence_for(StopCause::Runtime)
+    }
+    fn fence_for(&mut self, cause: StopCause) -> Result<()> {
+        // Old fenced journals have no recorded cause: retain their runtime classification.
+        if self.state.stop_cause.is_none() {
+            self.state.stop_cause = Some(if self.state.fenced {
+                StopCause::Runtime
+            } else {
+                cause
+            });
+        }
         self.state.fenced = true;
         self.save()?;
         if self.state.prepared && !self.state.stopped && !self.state.cleaning {
@@ -594,7 +617,11 @@ impl Satellite {
         let failure = if s.abandoned {
             Some("provisioning")
         } else if s.fenced {
-            Some("runtime")
+            match s.stop_cause.unwrap_or(StopCause::Runtime) {
+                StopCause::Controller => None,
+                StopCause::Deadline => Some("deadline"),
+                StopCause::Runtime => Some("runtime"),
+            }
         } else {
             None
         };
@@ -656,6 +683,7 @@ impl Satellite {
             return Err("invalid lease clock");
         }
         // Expiry is evaluated before renewal, including network latency and sleep.
+        let deadline_reached = self.expired();
         let mut fence = self.state.fenced
             || self.expired()
             || reply["stopRequested"] == true
@@ -673,12 +701,18 @@ impl Satellite {
         self.state.sequence += 1;
         self.state.pending = None;
         self.state.released = reply["released"] == true && self.state.cleaned;
-        self.save()?;
-        // Native effects follow durable bookkeeping, so a failed write cannot replay a report.
+        // Fence cause and acknowledgment are committed together before native effects.
         if fence {
-            self.fence()?;
-        } else if renewed && self.state.prepared && !self.state.stopped {
-            self.authorize()?;
+            self.fence_for(if deadline_reached || self.expired() {
+                StopCause::Deadline
+            } else {
+                StopCause::Controller
+            })?;
+        } else {
+            self.save()?;
+            if renewed && self.state.prepared && !self.state.stopped {
+                self.authorize()?;
+            }
         }
         Ok(())
     }
@@ -983,6 +1017,19 @@ impl Satellite {
         let poll: operations::Poll =
             serde_json::from_value(reply).map_err(|_| "invalid operation poll")?;
         let lease = &poll.lease;
+        if lease.expires_at.is_finite()
+            && lease.controller_now.is_finite()
+            && lease.revision >= self.state.revision
+            && matches!(lease.state.as_str(), "released" | "expired" | "failed")
+        {
+            self.state.terminal = true;
+            self.fence_for(if self.expired() {
+                StopCause::Deadline
+            } else {
+                StopCause::Controller
+            })?;
+            return Ok(());
+        }
         if !lease.expires_at.is_finite()
             || !lease.controller_now.is_finite()
             || lease.revision < self.state.revision
@@ -1194,7 +1241,11 @@ impl Satellite {
         }
         if prepared.is_err() || self.expired() {
             // The prepare process has exited (or was killed and reaped); no run was started.
-            self.fence()?;
+            self.fence_for(if self.expired() {
+                StopCause::Deadline
+            } else {
+                StopCause::Runtime
+            })?;
             if self.wait_stopped(None)? {
                 self.finish(controller)?;
             }
@@ -1216,8 +1267,17 @@ impl Satellite {
             let mut session: Option<guest::Session> = None;
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
-                    if self.expired() || io(child.try_wait())?.is_some() {
-                        self.fence()?;
+                    let now = clock::now().as_secs_f64();
+                    let deadline_reached = self.expired()
+                        || (self.state.direct.is_some()
+                            && now >= self.state.deadline - guest::MARGIN_MS as f64 / 1000.0)
+                        || session.as_ref().is_some_and(|s| s.authority_expired(now));
+                    if deadline_reached || io(child.try_wait())?.is_some() {
+                        self.fence_for(if deadline_reached {
+                            StopCause::Deadline
+                        } else {
+                            StopCause::Runtime
+                        })?;
                         break;
                     }
                     if self.state.direct.is_some()
@@ -1267,7 +1327,11 @@ impl Satellite {
                             .is_err()
                         {
                             self.withdraw()?;
-                            self.fence()?;
+                            self.fence_for(if s.authority_expired(clock::now().as_secs_f64()) {
+                                StopCause::Deadline
+                            } else {
+                                StopCause::Runtime
+                            })?;
                             break;
                         }
                     }
@@ -1612,7 +1676,7 @@ mod tests {
                         assert_eq!(r["storageRemoved"], false);
                     }
                     if r["runtimeState"] == "stopped" {
-                        assert!(!r["failure"].is_null());
+                        assert!(self.cancel || !r["failure"].is_null());
                     }
                     let complete = r["cleanup"] == "complete";
                     if complete {
@@ -1690,6 +1754,34 @@ mod tests {
         s
     }
     #[test]
+    fn stop_cause_is_honest_sticky_and_survives_restart() {
+        for (cause, expected) in [
+            (StopCause::Controller, Value::Null),
+            (StopCause::Deadline, json!("deadline")),
+            (StopCause::Runtime, json!("runtime")),
+        ] {
+            let (_tmp, c) = fixture();
+            let mut s = seeded(&c);
+            s.fence_for(cause).unwrap();
+            s.fence().unwrap(); // Later supervision cannot overwrite the first cause.
+            assert_eq!(s.receipt().unwrap()["receipt"]["failure"], expected);
+            drop(s);
+            let mut s = Satellite::open_preflighted(c).unwrap();
+            s.fence().unwrap();
+            assert_eq!(s.receipt().unwrap()["receipt"]["failure"], expected);
+        }
+    }
+    #[test]
+    fn terminal_controller_reply_fences_without_runtime_failure() {
+        let (_tmp, c) = fixture();
+        let mut s = seeded(&c);
+        let mut w = wire(s.assignment().unwrap().clone());
+        w.cancel = true;
+        s.report(&mut w).unwrap();
+        assert!(s.state.terminal && s.state.fenced);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], Value::Null);
+    }
+    #[test]
     fn pending_report_replayed_exactly_after_loss_and_restart() {
         let (_tmp, c) = fixture();
         let mut s = seeded(&c);
@@ -1717,6 +1809,7 @@ mod tests {
         s.report(&mut w).unwrap();
         assert!(s.state.fenced);
         assert_eq!(s.state.revision, 1);
+        assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "deadline");
         s.state.deadline = clock::now().as_secs_f64() + 100.0;
         s.report(&mut w).unwrap();
         assert!(s.state.fenced);
