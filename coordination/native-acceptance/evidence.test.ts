@@ -11,3 +11,11 @@ test('native evidence excludes unrelated argv, signing identity and journal path
   const all = JSON.stringify({processes, signature, journal});
   for (const privateValue of ['FAKE_SECRET','/Users/','Private Operator','PRIVATE_TEAM','--token']) assert(!all.includes(privateValue));
 });
+
+test('console evidence retains boot milestones and redacts network and host identity', async () => {
+  const {consoleEvidence} = await import('./evidence.ts');
+  const raw = 'Linux version 6.12\nBoot ready\n192.168.1.3 2001:db8::1 ::1 fe80::abcd%en0\n/Users/alice/vm/console /private/tmp/vm\nhostname=secret-mac username=alice\nalice@secret-mac.local\nSecretMac alice\n';
+  const clean = consoleEvidence(raw, ['SecretMac', 'alice']);
+  for (const value of ['192.168', '2001:db8', '::1', 'fe80', '/Users', '/private', 'alice', 'secret-mac', 'SecretMac']) assert(!clean.includes(value), clean);
+  assert(clean.includes('Linux version 6.12\nBoot ready'));
+});

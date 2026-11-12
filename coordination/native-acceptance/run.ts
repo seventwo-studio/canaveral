@@ -6,8 +6,9 @@ import {randomUUID, randomBytes, createHash} from 'node:crypto';
 import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync, copyFileSync} from 'node:fs';
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
+import {hostname, userInfo} from 'node:os';
 import {promisify} from 'node:util';
-import {signatureEvidence, processEvidence, journalEvidence} from './evidence.ts';
+import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence} from './evidence.ts';
 const exec = promisify(execFile);
 type ObjectValue = Record<string, any>;
 assert(!process.env.CI && process.env.CANAVERAL_NATIVE_ACCEPTANCE === 'operator-authorized', 'requires explicit operator authorization outside CI');
@@ -178,8 +179,12 @@ try {
       const old = observed.get(id);
       observed.set(id, {pids: [...new Set([...(old?.pids ?? []), ...pids])], machine, relay: j.direct?.agentSocket ?? old?.relay});
       save(id + '-observed-processes.json', {pids: observed.get(id)!.pids, machine: 'lease-machine', relay: 'agent-relay'});
-      for (const name of ['boot.log', 'console.log']) if (existsSync(join(machine, name))) copyFileSync(join(machine, name), evidence(id + '-' + name));
-      if (existsSync(join(machine, 'console.log'))) copyFileSync(join(machine, 'console.log'), evidence(id + '-boot.log'));
+      for (const name of ['boot.log', 'console.log']) if (existsSync(join(machine, name))) {
+        const raw = readFileSync(join(machine, name));
+        writeFileSync(pem(id + '-' + name), raw);
+        writeFileSync(evidence(id + '-' + name), consoleEvidence(raw.toString('utf8'), [hostname(), hostname().split('.')[0]!, userInfo().username]));
+      }
+      if (existsSync(join(machine, 'console.log'))) copyFileSync(evidence(id + '-console.log'), evidence(id + '-boot.log'));
       save(id + '-processes.json', processEvidence(ps, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));
       save(id + '-latest.journal.json', journalEvidence(j));
     }
