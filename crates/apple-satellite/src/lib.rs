@@ -1987,11 +1987,12 @@ impl Satellite {
             cancelled?;
             supervised?;
             Ok(stopped)
-        })?;
+        });
         if let Some(d) = self.state.direct.as_mut() {
             d.data_closed = Some(joined_data_closed);
         }
         self.save()?;
+        let stopped = stopped?;
         let _ = self.transfer_report_retry(controller);
         let _ = self.retry_operation_report(controller);
         if stopped {
