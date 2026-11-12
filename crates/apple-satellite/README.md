@@ -305,3 +305,12 @@ rejection, and the timings on real images. The separate
 binary into an initrd; kernel/rootfs construction and native bootstrap qualification
 remain open. All installed boot artifacts still require operator pins and immutable
 installation before satellite admission.
+
+## Operator native acceptance
+
+The separately gated [native acceptance harness](../../coordination/native-acceptance/README.md)
+creates a fresh private controller, CA and enrollment per run. It requires real signed
+helper and immutable boot artifacts, refuses known fixtures even when renamed, and
+retains unknown reservations after satellite loss. Setup-only mode verifies controller
+configuration and enrollment without claiming a lease; it is not VM evidence. No native
+acceptance is inferred from portable checks or a firmware-only session diagnostic.
