@@ -80,11 +80,29 @@ fn run(builder: &bundle::Builder, args: &[OsString], cwd: &Path) -> Result<()> {
 }
 /// Builds `dir/launch.erofs` for exactly this launch and returns its admission pin.
 pub fn build(builder: &bundle::Builder, dir: &Path, launch: &Launch) -> Result<bundle::Pinned> {
+    let bytes = launch.to_bytes().map_err(|_| "invalid launch binding")?;
+    build_bytes(builder, dir, &bytes, launch.binding.boot_attempt)
+}
+pub fn build_workspace(
+    builder: &bundle::Builder,
+    dir: &Path,
+    launch: &canaveral_guest_protocol::bundle::WorkspaceLaunch,
+) -> Result<bundle::Pinned> {
+    let bytes = launch
+        .to_bytes()
+        .map_err(|_| "invalid workspace launch binding")?;
+    build_bytes(builder, dir, &bytes, launch.binding.boot_attempt)
+}
+fn build_bytes(
+    builder: &bundle::Builder,
+    dir: &Path,
+    bytes: &[u8],
+    boot_attempt: uuid::Uuid,
+) -> Result<bundle::Pinned> {
     if !bundle::SUPPORTED {
         return Err("bootstrap medium requires macOS immutable files");
     }
     bundle::verify_builder(builder)?;
-    let bytes = launch.to_bytes().map_err(|_| "invalid launch binding")?;
     let mkdir = |path: &Path| {
         io(std::fs::DirBuilder::new().mode(0o700).create(path))?;
         io(std::fs::set_permissions(
@@ -102,7 +120,7 @@ pub fn build(builder: &bundle::Builder, dir: &Path, launch: &Launch) -> Result<b
         .mode(0o400)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&config))?;
-    io(f.write_all(&bytes))?;
+    io(f.write_all(bytes))?;
     io(f.set_permissions(std::fs::Permissions::from_mode(0o400)))?;
     io(f.sync_all())?;
     drop(f);
@@ -117,11 +135,7 @@ pub fn build(builder: &bundle::Builder, dir: &Path, launch: &Launch) -> Result<b
         return Err("unexpected bootstrap staging content");
     }
     let medium = dir.join("launch.erofs");
-    let built = run(
-        builder,
-        &argv(launch.binding.boot_attempt, &medium, &stage),
-        dir,
-    );
+    let built = run(builder, &argv(boot_attempt, &medium, &stage), dir);
     io(std::fs::remove_file(&config))?;
     io(std::fs::remove_dir(&stage))?;
     built?;

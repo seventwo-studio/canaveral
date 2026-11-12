@@ -458,6 +458,8 @@ fn recovered_ready_launch_reports_unknown_and_never_relaunches_or_execs() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),
@@ -523,7 +525,18 @@ fn started_record_must_bind_this_launch_and_private_relay() {
         std::fs::write(&file, bad.to_string()).unwrap();
         assert!(guest::read_started(&machine, &e, now).is_err(), "{key}");
     }
+    let mut workspace = good.clone();
+    workspace["dataSocketPath"] = json!(sock.replace("agent.sock", "data.sock"));
+    std::fs::write(&file, workspace.to_string()).unwrap();
+    assert_eq!(
+        guest::read_started(&machine, &e, now).unwrap(),
+        Some(sock.clone())
+    );
+    workspace["dataSocketPath"] = json!("/private/tmp/consumer.sock");
+    std::fs::write(&file, workspace.to_string()).unwrap();
+    assert!(guest::read_started(&machine, &e, now).is_err());
     // A relay directory that is not privately owned is never connected.
+
     assert!(guest::connect(&sock).is_err());
 }
 

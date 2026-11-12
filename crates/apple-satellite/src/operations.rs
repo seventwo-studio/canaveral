@@ -20,7 +20,57 @@ pub struct Command {
     pub arguments: Arguments,
     pub start_before: f64,
     pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_deadline_at: Option<f64>,
     pub state: String,
+}
+impl Command {
+    pub fn validate_timing(&self, workspace: bool) -> Result<()> {
+        if workspace {
+            if !(1..=1800000).contains(&self.timeout_ms)
+                || self.execution_deadline_at.is_none_or(|d| !d.is_finite())
+            {
+                return Err("invalid workspace command timing");
+            }
+        } else if self.timeout_ms != 30000 || self.execution_deadline_at.is_some() {
+            return Err("invalid legacy command timing");
+        }
+        Ok(())
+    }
+    /// Translate UTC once using poll send time; elapsed transport time is charged.
+    pub fn timeout(
+        &self,
+        workspace: bool,
+        sent: f64,
+        controller_now: f64,
+        lease_deadline: f64,
+        now: f64,
+    ) -> Result<u64> {
+        self.validate_timing(workspace)?;
+        if !sent.is_finite() || !controller_now.is_finite() || !now.is_finite() || now < sent {
+            return Err("invalid command clock evidence");
+        }
+        let mut remaining = guest::remaining_ms(lease_deadline, now)?;
+        if let Some(deadline) = self.execution_deadline_at {
+            let local = sent + (deadline - controller_now);
+            remaining = remaining.min(guest::remaining_ms(local, now)?);
+        }
+        Ok(remaining.min(self.timeout_ms))
+    }
+}
+pub fn environment(egress: bool) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::from([
+        ("HOME".into(), "/workspace/home".into()),
+        ("TMPDIR".into(), "/workspace/tmp".into()),
+        ("npm_config_cache".into(), "/workspace/.npm".into()),
+    ]);
+    if egress {
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            env.insert(key.into(), "http://127.0.0.1:18080".into());
+        }
+        env.insert("NO_PROXY".into(), "localhost,127.0.0.1,::1".into());
+    }
+    env
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

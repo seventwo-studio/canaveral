@@ -15,6 +15,7 @@ fn command() -> OperationCommand {
         },
         start_before: 200.0,
         timeout_ms: 30000,
+        execution_deadline_at: None,
         state: "queued".into(),
     }
 }
@@ -193,6 +194,8 @@ fn cleanup_and_restart_preserve_unacknowledged_operation_before_a_new_claim() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
         ready: false,
         withdrawn: true,
         timings: Timings::default(),
@@ -275,6 +278,8 @@ fn durable_replay_membership_has_no_4096_command_cutoff_or_eviction() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),
@@ -426,6 +431,8 @@ fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
         artifacts: vec![],
         medium: None,
         agent_socket: None,
+        workspace_disk: None,
+        data_nonce: None,
         ready: true,
         withdrawn: false,
         timings: Timings::default(),
@@ -463,4 +470,60 @@ fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].1["receipt"], json!({"state":"unknown"}));
     assert!(!w.requests.iter().any(|(name, _)| *name == "operationPoll"));
+}
+
+#[test]
+fn workspace_command_deadline_is_fixed_and_conservative() {
+    let mut c = command();
+    assert!(c.validate_timing(false).is_ok());
+    assert!(c.validate_timing(true).is_err());
+    c.timeout_ms = 1800000;
+    c.execution_deadline_at = Some(1100.0);
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 400.0, 110.0).unwrap(), 88000);
+    // Renewal may extend lease authority, never this execution's frozen deadline.
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 900.0, 110.0).unwrap(), 88000);
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 120.0, 110.0).unwrap(), 8000);
+    assert!(c.timeout(true, 100.0, 1000.0, 900.0, 198.0).is_err());
+    c.timeout_ms = 1;
+    assert_eq!(c.timeout(true, 100.0, 1000.0, 900.0, 110.0).unwrap(), 1);
+    assert!(c.validate_timing(false).is_err());
+    c.timeout_ms = 1800001;
+    assert!(c.validate_timing(true).is_err());
+    c.timeout_ms = 30000;
+    c.execution_deadline_at = Some(f64::NAN);
+    assert!(c.validate_timing(true).is_err());
+}
+#[test]
+fn workspace_environment_only_adds_proxy_with_grant() {
+    let offline = crate::operations::environment(false);
+    assert_eq!(offline.len(), 3);
+    assert_eq!(offline["HOME"], "/workspace/home");
+    assert_eq!(offline["TMPDIR"], "/workspace/tmp");
+    assert_eq!(offline["npm_config_cache"], "/workspace/.npm");
+    let online = crate::operations::environment(true);
+    assert_eq!(online.len(), 8);
+    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        assert_eq!(online[key], "http://127.0.0.1:18080");
+    }
+    assert_eq!(online["NO_PROXY"], "localhost,127.0.0.1,::1");
+}
+
+#[test]
+fn incomplete_workspace_runtime_refuses_assignments_and_cleanup_evidence() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.assignment.as_mut().unwrap().workspace_io_version = Some(1);
+    assert!(matches!(
+        s.validate_assignment(s.assignment().unwrap()),
+        Err("workspace-v2 runtime integration is not available")
+    ));
+    let r = s.receipt().unwrap();
+    assert_eq!(r["receipt"]["workspaceRemoved"], false);
+    assert_eq!(r["receipt"]["dataPlaneClosed"], false);
+    s.state.stopped = true;
+    s.state.cleaned = true;
+    // Generic storage flags alone cannot prove the disk or data-plane lifecycle.
+    let r = s.receipt().unwrap();
+    assert_eq!(r["receipt"]["workspaceRemoved"], false);
+    assert_eq!(r["receipt"]["dataPlaneClosed"], false);
 }

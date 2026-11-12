@@ -147,6 +147,13 @@ The satellite retains reservations until separate positive cleanup evidence.
 credit/budget accounting, half-close decisions, step replay and cursor/hash
 validation. `guest-agent::workspace` supplies portable discovery/identity decisions
 and Linux openat2 read confinement primitives. None is connected to PID1's v1
-control reactor. The data listener, authenticated handshake, file worker and
+control reactor. The guest data listener, authenticated handshake, file worker and
 publication/durability path remain unimplemented. No files readiness is advertised.
 The known throughput limit is 64 KiB per serialized transfer step.
+
+The satellite can verify/connect the exact data.sock sibling using the control
+relay's private directory, socket ownership/mode and same-uid peer rules, and
+checks directory/socket identity again after connect. Cleanup admits only owned
+agent.sock/data.sock entries after positive stop. This transport primitive is not
+a data handshake or reactor; launched workspace cleanup reports dataPlaneClosed
+false until a joined reactor supplies positive closure evidence.

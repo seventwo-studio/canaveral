@@ -49,6 +49,8 @@ struct Started {
     boot_attempt: Uuid,
     #[serde(rename = "agentSocket")]
     agent_socket: String,
+    #[serde(default, rename = "dataSocketPath")]
+    data_socket_path: Option<String>,
 }
 pub struct Expected {
     pub lease_id: Uuid,
@@ -60,10 +62,13 @@ pub struct Expected {
 }
 /// The only accepted relay location: SOCKET_ROOT/canaveral-<lowercase uuid>/agent.sock.
 fn relay_directory(path: &str) -> Option<PathBuf> {
+    relay_directory_for(path, "agent.sock")
+}
+fn relay_directory_for(path: &str, socket: &str) -> Option<PathBuf> {
     let rest = path
         .strip_prefix(SOCKET_ROOT)?
         .strip_prefix("/canaveral-")?
-        .strip_suffix("/agent.sock")?;
+        .strip_suffix(&format!("/{socket}"))?;
     let id = Uuid::parse_str(rest).ok()?;
     (id.hyphenated().to_string() == rest && !id.is_nil())
         .then(|| PathBuf::from(format!("{SOCKET_ROOT}/canaveral-{rest}")))
@@ -86,6 +91,9 @@ pub fn read_started(machine: &Path, e: &Expected, now: f64) -> Result<Option<Str
         || s.boot_session_id != e.boot_session_id
         || s.boot_attempt != e.boot_attempt
         || relay_directory(&s.agent_socket).is_none()
+        || s.data_socket_path.as_ref().is_some_and(|path| {
+            relay_directory_for(path, "data.sock") != relay_directory(&s.agent_socket)
+        })
     {
         return Err("direct start record does not match this launch");
     }
@@ -122,7 +130,17 @@ pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
 }
 /// Verifies private ownership of the published relay and of its peer before any frame.
 pub fn connect(path: &str) -> Result<UnixStream> {
-    let dir = relay_directory(path).ok_or("unexpected relay socket path")?;
+    connect_relay(path, "agent.sock")
+}
+/// Data relay must be the exact sibling of the authenticated control relay.
+/// No guest-supplied or independently published path is accepted.
+pub fn connect_data(agent_path: &str) -> Result<UnixStream> {
+    let directory = relay_directory(agent_path).ok_or("unexpected control relay path")?;
+    let path = directory.join("data.sock");
+    connect_relay(path.to_str().ok_or("invalid data relay path")?, "data.sock")
+}
+fn connect_relay(path: &str, socket: &str) -> Result<UnixStream> {
+    let dir = relay_directory_for(path, socket).ok_or("unexpected relay socket path")?;
     let me = unsafe { libc::geteuid() };
     // Nofollow walk: root-owned sticky SOCKET_ROOT, then our private directory.
     let opened = private::walk(&dir).map_err(|_| "unsafe relay directory")?;
@@ -139,6 +157,16 @@ pub fn connect(path: &str) -> Result<UnixStream> {
     let stream = UnixStream::connect(path).map_err(|_| "relay socket refused")?;
     if peer_uid(&stream) != Some(me) {
         return Err("relay peer is not the helper uid");
+    }
+    let after = std::fs::symlink_metadata(path).map_err(|_| "relay socket disappeared")?;
+    let current = private::walk(&dir).map_err(|_| "relay directory changed")?;
+    let current = current.metadata().map_err(|_| "relay directory changed")?;
+    if (s.dev(), s.ino(), s.uid(), s.mode())
+        != (after.dev(), after.ino(), after.uid(), after.mode())
+        || (d.dev(), d.ino(), d.uid(), d.mode())
+            != (current.dev(), current.ino(), current.uid(), current.mode())
+    {
+        return Err("relay changed during connect");
     }
     stream
         .set_nonblocking(true)
@@ -161,7 +189,11 @@ pub fn remove_published(path: &str) -> Result<()> {
         let kind = entry
             .file_type()
             .map_err(|_| "relay directory unreadable")?;
-        if entry.file_name() != "agent.sock" || !kind.is_socket() {
+        if !["agent.sock", "data.sock"]
+            .iter()
+            .any(|name| entry.file_name() == *name)
+            || !kind.is_socket()
+        {
             return Err("unexpected relay directory content; retained");
         }
         std::fs::remove_file(entry.path()).map_err(|_| "relay socket removal failed")?;
@@ -535,6 +567,35 @@ pub(crate) mod tests {
         peer.write_all(&0u32.to_be_bytes()).unwrap();
         assert_eq!(session.pump(100.0), Err("guest protocol violation"));
         assert!(!session.ready(100.0));
+    }
+    #[test]
+    fn data_relay_is_a_private_sibling_and_cleanup_removes_both() {
+        use std::os::unix::{
+            fs::{DirBuilderExt, PermissionsExt},
+            net::UnixListener,
+        };
+        let dir = PathBuf::from(format!(
+            "{SOCKET_ROOT}/canaveral-{}",
+            crate::random_uuid().unwrap()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let agent = dir.join("agent.sock");
+        let data = dir.join("data.sock");
+        let a = UnixListener::bind(&agent).unwrap();
+        let d = UnixListener::bind(&data).unwrap();
+        for p in [&agent, &data] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let client = connect_data(agent.to_str().unwrap()).unwrap();
+        let _peer = d.accept().unwrap();
+        drop(client);
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(connect_data(agent.to_str().unwrap()).is_err());
+        assert!(connect_data(data.to_str().unwrap()).is_err());
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o600)).unwrap();
+        drop((a, d));
+        remove_published(agent.to_str().unwrap()).unwrap();
+        assert!(!dir.exists());
     }
     #[test]
     fn relay_path_and_remaining_bounds() {

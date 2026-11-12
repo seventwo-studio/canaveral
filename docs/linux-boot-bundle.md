@@ -178,7 +178,17 @@ The Rust manifest canonicalizer validates v2 data fields and the `mkfsExt4` pin;
 known bytes/digests live in `crates/guest-protocol/fixtures/canonical-v2.*`.
 `launch-v2.json` exercises the separate closed workspace launch schema. Existing
 v1 canonical bytes/digest are unchanged and legacy launch rejects a v2 manifest.
-These are schema fixtures, not built or mountable guest artifacts. The builder
-recipe, signature-verified e2fsprogs closure, raw-disk preallocation and journal,
-guest formatting/mounting, and native workspace attachment remain unimplemented.
+These are schema fixtures, not native acceptance. The v2 recipe now accepts
+the mkfsExt4 pin; builder scripts verify the snapshot package closure and kernel
+config. The native helper implements workspace attachment and the data relay.
+PID1 formatting/mounting and end-to-end runtime integration remain unimplemented. The gated satellite v2 prepare path
+creates workspace.raw exclusively, journals intent and device/inode identity,
+reserves physical space using Darwin F_PREALLOCATE with F_ALLOCATEALL, then sets
+exact length and fsyncs file/parent. Unsupported reservation fails closed. Cleanup
+requires positive stop proof and identity-checked unlink with durable deletion
+intent and parent fsync. Unidentified creation is retained for reconciliation.
+It generates the independent serial/data nonce and builds launch v2; helper
+prepare receives version:2 and workspace:{path,serial,bytes}, without workspaceBytes.
+Portable lifecycle tests inject allocation; they do not establish Darwin physical
+reservation, ext4 durability or native attachment acceptance.
 Satellite inventory explicitly refuses v2 before a claim; no v1 downgrade occurs.

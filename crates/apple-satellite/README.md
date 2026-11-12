@@ -360,6 +360,18 @@ ST-535 currently adds portable `egress` policy decisions and a two-second live-I
 revalidation scheduler, with table provenance in [policy/README.md](policy/README.md).
 These primitives have synthetic evidence tests, not a native route/interface
 provider or TCP reactor. Bundle-v2 admission is explicitly refused before claim.
-Data/transfer poll-report clients and journaling, data cleanup evidence, raw disk
-preallocation and long-command dispatch remain unimplemented. No new satellite
+Data/transfer poll-report clients and journaling, joined data cleanup evidence,
+and native egress enforcement remain unimplemented. The gated v2 prepare path
+implements durable owned raw-disk intent/inode journaling, Darwin all-or-nothing
+preallocation, exact-length flush, identity recheck before prepare, launch-v2
+bootstrap construction and helper workspace attachment JSON. Disk cleanup checks
+identity, journals deletion intent and flushes the parent before workspaceRemoved.
+Missing identity or an unexplained missing disk holds cleanup for reconciliation.
+The data relay connector verifies the exact private sibling and same-uid peer.
+Long-command parsing/dispatch bounds timeout by requested duration, the frozen
+execution deadline and local lease authority, charging poll transport elapsed time
+and the guest safety margin. Replay pins both timing fields. Workspace environment
+variables come from the trusted satellite; proxy variables require the grant.
+These paths remain unreachable from v2 inventory until PID1 mounting and both
+handshakes, data/file/egress reactors and worker teardown are complete. No new satellite
 dependency was introduced; guest-protocol reuses the existing base64 0.22 crate.

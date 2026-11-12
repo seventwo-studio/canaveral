@@ -17,6 +17,7 @@ pub mod clock;
 pub mod guest;
 mod operations;
 mod private;
+pub mod workspace;
 pub type Result<T> = std::result::Result<T, &'static str>;
 /// Interval between heartbeat reports while a guest runs; replies carry renewals and stop intent.
 const REPORT_EVERY: Duration = Duration::from_secs(1);
@@ -107,6 +108,18 @@ pub struct Assignment {
     required_capabilities: Vec<String>,
     lease: Lease,
     stop_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_io_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<WorkspaceAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress: Option<canaveral_guest_protocol::bundle::Egress>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceAdmission {
+    bytes: u64,
+    overhead_bytes: u64,
 }
 /// First reason for stopping; later supervision cannot overwrite it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +183,10 @@ struct Direct {
     ready: bool,
     withdrawn: bool,
     timings: Timings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_disk: Option<workspace::Disk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_nonce: Option<String>,
 }
 /// Continuous-clock milestones (seconds). Fixture values are not performance evidence.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -494,6 +511,9 @@ impl Satellite {
     }
     /// Pre-launch admission. Any failure has had no local effect and is declined.
     fn validate_assignment(&self, a: &Assignment) -> Result<&Installed> {
+        if a.workspace_io_version.is_some() || a.workspace.is_some() || a.egress.is_some() {
+            return Err("workspace-v2 runtime integration is not available");
+        }
         let r = &a.resources;
         if r.cpu > self.config.max_cpu
             || !NATIVE_CPU.contains(&r.cpu)
@@ -679,15 +699,26 @@ impl Satellite {
         } else {
             "pending"
         };
-        Ok(
-            json!({"assignmentId":a.id,"sequence":s.sequence+1,"receipt":{
+        let mut report = json!({"assignmentId":a.id,"sequence":s.sequence+1,"receipt":{
             "leaseId":a.lease_id,"memberId":a.member_id,"backend":a.image.backend,"imageDigest":a.image.digest,
             "observedRevision":s.revision,"runtimeState":runtime,
             // EFI boot never implies readiness; PTY and files have no guest transport yet.
             "ready":{"command":command,"pty":false,"files":false},
             "failure":failure,"executionStopped":s.stopped,"storageRemoved":s.cleaned,
-            "credentialsErased":s.cleaned,"cleanup":cleanup}}),
-        )
+            "credentialsErased":s.cleaned,"cleanup":cleanup}});
+        if a.workspace_io_version == Some(1) {
+            report["receipt"]["workspaceRemoved"] = json!(
+                s.stopped
+                    && (s.abandoned
+                        || direct
+                            .and_then(|d| d.workspace_disk.as_ref())
+                            .is_some_and(|d| d.removed))
+            );
+            // Until a joined data reactor supplies positive evidence, launched v2
+            // assignments must retain their reservation even after disk deletion.
+            report["receipt"]["dataPlaneClosed"] = json!(s.abandoned && s.cleaned);
+        }
+        Ok(report)
     }
     /// Sends the persisted pending report, or persists then sends the current one.
     fn report(&mut self, controller: &mut impl Controller) -> Result<()> {
@@ -815,6 +846,26 @@ impl Satellite {
                 // Positive stop is proven; only the exact published relay path is removed.
                 guest::remove_published(&path)?;
             }
+            if let Some(mut disk) = self
+                .state
+                .direct
+                .as_ref()
+                .and_then(|d| d.workspace_disk.clone())
+            {
+                if !disk.removed {
+                    if !self.state.stopped {
+                        return Err("workspace removal requires positive stop proof");
+                    }
+                    workspace::remove(&self.workspace(), &mut disk, |disk| {
+                        self.state
+                            .direct
+                            .as_mut()
+                            .ok_or("no direct launch")?
+                            .workspace_disk = Some(disk.clone());
+                        self.save()
+                    })?;
+                }
+            }
             self.dir.cleanup_workspace(resumed)?;
             self.state.cleaned = true;
             self.save()?;
@@ -858,6 +909,9 @@ impl Satellite {
             .bootstrap_builder
             .clone()
             .ok_or("boot bundle requires a pinned bootstrap builder")?;
+        if b.manifest.version == 2 {
+            return self.workspace_request(a, b, &builder);
+        }
         // Guest tmpfs: a quarter of reserved memory, within the agent's 16MiB..1GiB bounds.
         let workspace_bytes =
             (a.resources.memory_mi_b * 1048576 / 4).clamp(16 * 1048576, 1073741824);
@@ -894,6 +948,98 @@ impl Satellite {
                 "leaseID":a.lease_id,"memberID":a.member_id,
                 "bootSessionID":self.state.boot_session_id,"bootAttempt":d.boot_attempt,
                 "workspaceBytes":workspace_bytes
+            }
+        }))
+    }
+    /// This path remains behind the inventory gate until guest/data/egress integration is complete.
+    fn workspace_request(
+        &mut self,
+        a: &Assignment,
+        b: &bundle::Bundle,
+        builder: &bundle::Builder,
+    ) -> Result<Value> {
+        let admitted = a.workspace.as_ref().ok_or("missing workspace admission")?;
+        let egress = a.egress.clone().ok_or("missing egress admission")?;
+        let expected = a
+            .resources
+            .disk_gi_b
+            .checked_mul(1073741824)
+            .and_then(|n| n.checked_sub(67108864))
+            .ok_or("invalid workspace reservation")?
+            / 4096
+            * 4096;
+        if a.workspace_io_version != Some(1)
+            || admitted.overhead_bytes != 67108864
+            || admitted.bytes != expected
+            || egress.policy != "public-https-v1"
+        {
+            return Err("workspace admission mismatch");
+        }
+        let d = self.state.direct.as_ref().ok_or("no direct launch")?;
+        if d.workspace_disk.is_some() || d.data_nonce.is_some() {
+            return Err("workspace launch attempt consumed");
+        }
+        let launch_serial = d.boot_attempt.simple().to_string()[..20].to_owned();
+        let serial = random_uuid()?.simple().to_string()[..20].to_owned();
+        let mut disk = workspace::Disk::intent(serial, admitted.bytes, &launch_serial)?;
+        let mut nonce = [0; 32];
+        getrandom::fill(&mut nonce).map_err(|_| "randomness unavailable")?;
+        let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+        self.state
+            .direct
+            .as_mut()
+            .ok_or("no direct launch")?
+            .data_nonce = Some(nonce.clone());
+        workspace::create(&self.workspace(), &mut disk, |disk| {
+            self.state
+                .direct
+                .as_mut()
+                .ok_or("no direct launch")?
+                .workspace_disk = Some(disk.clone());
+            self.save()
+        })?;
+        let launch = canaveral_guest_protocol::bundle::WorkspaceLaunch {
+            version: 2,
+            binding: self.guest_binding(self.state.revision)?,
+            manifest: b.manifest.clone(),
+            workspace: canaveral_guest_protocol::bundle::Workspace {
+                serial: disk.serial.clone(),
+                bytes: disk.bytes,
+                overhead_bytes: admitted.overhead_bytes,
+            },
+            egress,
+            data: canaveral_guest_protocol::bundle::DataLaunch { port: 1025, nonce },
+        };
+        let medium =
+            bootstrap::build_workspace(builder, &self.workspace().join("bootstrap"), &launch)?;
+        let d = self.state.direct.as_mut().ok_or("no direct launch")?;
+        d.medium = Some(medium.clone());
+        d.timings.medium_built = Some(clock::now().as_secs_f64());
+        let d = d.clone();
+        self.save()?;
+        for pin in &d.artifacts {
+            bundle::recheck(pin)?;
+        }
+        workspace::verify(&self.workspace(), &disk)?;
+        let role = |r: &str| {
+            d.artifacts
+                .iter()
+                .find(|p| p.role == r)
+                .map(bundle::Pinned::swift)
+                .ok_or("missing admitted artifact")
+        };
+        Ok(json!({
+            "id":a.member_id,"leaseID":a.lease_id,"name":"leased-linux","os":"linux","mode":"headless",
+            "cpu":a.resources.cpu,"memoryMiB":a.resources.memory_mi_b,"diskGiB":a.resources.disk_gi_b,
+            "directory":self.workspace(),
+            "directBoot":{
+                "version":2,"revision":self.state.revision,
+                "kernel":role("kernel")?,"initrd":role("initrd")?,"rootfs":role("rootfs")?,
+                "launchMedium":medium.swift(),"launchFilesystemUUID":d.boot_attempt,
+                "bundleDigest":d.bundle_digest,"commandLine":b.manifest.command_line,
+                "leaseID":a.lease_id,"memberID":a.member_id,
+                "bootSessionID":self.state.boot_session_id,"bootAttempt":d.boot_attempt,
+                "workspace":{"path":self.workspace().join("workspace.raw"),"serial":disk.serial,"bytes":disk.bytes}
             }
         }))
     }
@@ -1090,7 +1236,8 @@ impl Satellite {
             || c.boot_attempt != d.boot_attempt
             || c.bundle_digest != d.bundle_digest
             || !c.start_before.is_finite()
-            || c.timeout_ms != 30000
+            || c.validate_timing(a.workspace_io_version == Some(1))
+                .is_err()
             || !d.ready
             || d.withdrawn
             || a.image.backend != "appleVirtualization"
@@ -1105,7 +1252,11 @@ impl Satellite {
             .as_ref()
             .filter(|o| o.command.id == c.id)
         {
-            if op.command.arguments != c.arguments || op.command.start_before != c.start_before {
+            if op.command.arguments != c.arguments
+                || op.command.start_before != c.start_before
+                || op.command.timeout_ms != c.timeout_ms
+                || op.command.execution_deadline_at != c.execution_deadline_at
+            {
                 return Err("operation replay changed immutable request");
             }
             return Ok(());
@@ -1124,10 +1275,30 @@ impl Satellite {
         if remaining_start <= 0.0 {
             return Err("operation start expired");
         }
-        let timeout = guest::remaining_ms(self.state.deadline, now)?.min(30000);
-        self.state
-            .operations
-            .receive(c, now + timeout as f64 / 1000.0 + 2.0)?;
+        let workspace = a.workspace_io_version == Some(1);
+        let env = if workspace {
+            operations::environment(a.egress.as_ref().is_some_and(|e| e.enabled))
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let timeout = c.timeout(
+            workspace,
+            start,
+            lease.controller_now,
+            self.state.deadline,
+            now,
+        )?;
+        let receipt_deadline = if workspace {
+            (start
+                + c.execution_deadline_at
+                    .ok_or("missing execution deadline")?
+                - lease.controller_now
+                + 5.0)
+                .min(self.state.deadline)
+        } else {
+            now + timeout as f64 / 1000.0 + 2.0
+        };
+        self.state.operations.receive(c, receipt_deadline)?;
         self.save()?; // Durable dispatch intent precedes any exec/credit effect.
         let session = session.ok_or("missing guest session")?;
         if session.revision() < self.state.revision {
@@ -1148,13 +1319,32 @@ impl Satellite {
             .arguments
             .argv
             .clone();
-        let id = session.exec(
-            argv,
-            "/workspace".into(),
-            std::collections::BTreeMap::new(),
-            timeout,
-            now,
-        )?;
+        let (timeout, dispatch_now) = if workspace {
+            let dispatch_now = clock::now().as_secs_f64();
+            let command = &self
+                .state
+                .operations
+                .current
+                .as_ref()
+                .ok_or("missing operation")?
+                .command;
+            if command.start_before - lease.controller_now - (dispatch_now - start) <= 0.0 {
+                return Err("operation start expired before dispatch");
+            }
+            (
+                command.timeout(
+                    true,
+                    start,
+                    lease.controller_now,
+                    self.state.deadline,
+                    dispatch_now,
+                )?,
+                dispatch_now,
+            )
+        } else {
+            (timeout, now)
+        };
+        let id = session.exec(argv, "/workspace".into(), env, timeout, dispatch_now)?;
         self.state
             .operations
             .current
@@ -1237,6 +1427,8 @@ impl Satellite {
                 artifacts: pins.clone(),
                 medium: None,
                 agent_socket: None,
+                workspace_disk: None,
+                data_nonce: None,
                 ready: false,
                 withdrawn: false,
                 timings: Timings {
