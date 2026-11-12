@@ -32,6 +32,14 @@ The agent owns the guest PID namespace. Commands get separate process groups; pr
 
 ## Operator kernel/rootfs build contract (construction remains external)
 
+The [experimental Linux guest builder recipe](../tools/linux-guest-builder/README.md)
+provides a bounded disposable Lima builder, a committed minimal arm64 kernel
+fragment, diagnostic-only init, signed upstream input checks, Debian snapshot
+rootfs construction, native macOS erofs-utils construction and immutable
+installation. It feeds the existing assembler and preflight below. Its pins are
+experimental operator choices, not production trust decisions; successful
+construction does not close native acceptance or production signature gates.
+
 A release builder must supply all these inputs, without defaults: Debian snapshot timestamp and signed Release digest/trust root; exact arm64 package versions and SHA256 values for bash, coreutils, git, ca-certificates and transitive packages; official Node `v24.11.0` linux-arm64 tarball SHA256 and signature verification material; Rust `1.99.1` toolchain/target archive SHA256 values; kernel source version/archive SHA256, committed config and patch digests; EROFS tool version/digest; bootstrap source/digest and trusted configuration-medium contract. Unknown checksums are **required inputs**, not placeholder pins or floating defaults. Fixture version values in unit tests are synthetic, never release inputs.
 
 1. In an isolated authorized release builder, verify the pinned Debian snapshot metadata and every package digest before extracting packages into a fresh staging root. Do not install packages at boot. Include /bin/sh, Git, CA certificates and all shared libraries. Fix locale, timezone, file order, ownership and SOURCE_DATE_EPOCH to explicit release inputs.
