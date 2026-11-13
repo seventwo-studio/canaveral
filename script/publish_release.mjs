@@ -18,13 +18,19 @@ export function registryFailure(url,status,body) {
   try {codes=(JSON.parse(body).errors??[]).slice(0,3).map(e=>[e.code,e.message].filter(v=>typeof v==='string').join(': ').slice(0,200)).join('; ');} catch {}
   return 'Registry request failed: HTTP '+status+' for '+url.pathname+(codes?' ('+codes+')':'')+'.';
 }
+/** Read at most 4 KiB of an error body, then stop the transfer. */
+async function boundedText(response,limit=4096) {
+  const chunks=[];let length=0;
+  for await(const chunk of response.body??[]) {chunks.push(chunk);length+=chunk.length;if(length>=limit) break;}
+  return Buffer.concat(chunks).subarray(0,limit).toString('utf8');
+}
 export class Registry {
   constructor(packageName, authorization) { this.package=packageName.replace(/^ghcr\.io\//,'');this.authorization=authorization; }
   static async get(url,auth) {
     const parsed=new URL(url);
     if(parsed.protocol!=='https:' || parsed.hostname!=='ghcr.io' || parsed.username || parsed.password) throw new Error('Unexpected registry origin.');
     const response=await fetch(url,{headers:{Authorization:auth,Accept:'application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json','User-Agent':'canaveral-release'},signal:AbortSignal.timeout(30_000),redirect:'error'});
-    if(!response.ok) {const error=new Error(registryFailure(parsed,response.status,await response.text().catch(()=>'')));error.status=response.status;throw error;}
+    if(!response.ok) {const error=new Error(registryFailure(parsed,response.status,await boundedText(response).catch(()=>'')));error.status=response.status;throw error;}
     const chunks=[];let length=0;
     for await(const chunk of response.body) {
       length+=chunk.length;
