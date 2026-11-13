@@ -41,7 +41,7 @@
               "--config",
               "/config/host.json",
               "--state",
-              "/data",
+              "/data/host",
               "--enrollment-token-file",
               "/run/credentials/enrollment.token",
               "--ca-file",
@@ -111,7 +111,7 @@
             }
           },
           {
-            "name": "credentials",
+            "name": "credential-source",
             "secret": {
               "secretName": "canaveral-enrollment",
               "defaultMode": 288
@@ -128,6 +128,58 @@
             "emptyDir": {
               "sizeLimit": "128Mi"
             }
+          },
+          {
+            "name": "credentials",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "stage-credentials",
+            "image": "canaveral-kubevirt:local",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "install",
+              "-m",
+              "0600",
+              "-t",
+              "/run/credentials",
+              "/run/credential-source/enrollment.token"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "16Mi"
+              },
+              "limits": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "credential-source",
+                "mountPath": "/run/credential-source",
+                "readOnly": true
+              },
+              {
+                "name": "credentials",
+                "mountPath": "/run/credentials"
+              }
+            ]
           }
         ]
       }

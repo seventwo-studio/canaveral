@@ -157,6 +157,8 @@ Set the intended templates, architectures and pool capacity in a patch to `deplo
 kubectl apply -k deploy/kubernetes/worker-kubevirt
 ```
 
+The CLI accepts credentials only as regular files owned by its user with mode `0600`, and keeps host state in a directory with the same ownership and mode `0700`. Kubernetes Secret volumes are root-owned symbolic links, and a fresh volume root is not private to the process user. The controller and worker therefore copy their Secret entries into a memory-backed volume with a `stage-credentials` init container, and the worker keeps its state in `/data/host` on its PVC. An existing worker whose identity was saved at the PVC root needs `--state /data` kept, or a deliberate move of that directory, to keep the same host identity.
+
 The worker StatefulSet retains its host identity on a PVC and uses namespace-scoped access to VM resources and source-volume cloning. Its state is separate from individual VM root disks. Do not scale one pool configuration into multiple independent offers with the same capacity; divide the capacity deliberately. The in-cluster example uses HTTPS with an explicit CA file. Template VMs use independent CDI-cloned disks and `Always`/`Halted` run strategies. Console/VNC access uses `virtctl` and your existing Kubernetes credentials. Guest/network access and Windows secure-boot/TPM storage need acceptance against the cluster's actual KubeVirt configuration.
 
 These files are deployment inputs, not evidence of an installed cluster or successful VM boots. The implementation does not automatically deploy into a current kubeconfig context.

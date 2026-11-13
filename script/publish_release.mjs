@@ -79,6 +79,7 @@ export function bundle(version,revision,images,output,sourceRoot=ROOT) {
         const data=uniqueJSON(text), containers=data.spec.template.spec.containers;
         if(containers.length!==1) throw new Error('Expected one runtime per stage.');
         containers[0].image=images[stage];
+        for(const init of data.spec.template.spec.initContainers??[]) init.image=images[stage];
         const metadata=data.spec.template.metadata;
         (metadata.labels??={})['app.kubernetes.io/version']=version;
         text=JSON.stringify(data,null,2)+'\n';

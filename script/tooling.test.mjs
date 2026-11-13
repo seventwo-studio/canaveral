@@ -79,7 +79,7 @@ test('release bundle preserves optional stage, protected storage and scoped pod 
  for(const stage of ['orchestrator','dashboard','kubevirt']) for(const name of readdirSync(join(root,stage)).filter(n=>n.endsWith('.json'))) {
   const value=JSON.parse(readFileSync(join(root,stage,name)));assert.equal(value.metadata.namespace,undefined);assert.ok(!['Secret','Namespace'].includes(value.kind));
   if(['Deployment','StatefulSet'].includes(value.kind)) {
-   const pod=value.spec.template.spec;if(stage!=='kubevirt')assert.equal(pod.automountServiceAccountToken,false);assert.equal(pod.containers[0].image,images()[stage]);
+   const pod=value.spec.template.spec;if(stage!=='kubevirt')assert.equal(pod.automountServiceAccountToken,false);assert.equal(pod.containers[0].image,images()[stage]);for(const init of pod.initContainers??[])assert.equal(init.image,images()[stage]);
    assert.equal(pod.securityContext.seccompProfile.type,'RuntimeDefault');assert.equal(pod.securityContext.runAsNonRoot,true);assert.equal(pod.containers[0].securityContext.allowPrivilegeEscalation,false);
    if(stage==='dashboard')assert.ok(!pod.volumes?.some(v=>v.secret));
   }
@@ -161,6 +161,15 @@ test('native packaging breaks Cargo artifact hardlinks before owned runtime admi
   if(process.platform!=='win32')assert.equal(lstatSync(installed).mode&0o777,0o755);
  }
 });
+test('controller and worker stage Secret credentials as private regular files',()=>{
+ for(const [path,files] of [['../deploy/orchestrator/deployment.json',['admin.token','enrollment.token']],['../deploy/kubevirt/statefulset.json',['enrollment.token']]]) {
+  const pod=JSON.parse(readFileSync(new URL(path,import.meta.url))).spec.template.spec,[init]=pod.initContainers,main=pod.containers[0];
+  assert.equal(pod.initContainers.length,1);assert.equal(init.image,main.image);assert.deepEqual(init.securityContext,main.securityContext);
+  assert.deepEqual(init.command,['install','-m','0600','-t','/run/credentials',...files.map(f=>'/run/credential-source/'+f)]);
+  assert.ok(pod.volumes.some(v=>v.name==='credentials' && v.emptyDir?.medium==='Memory'));assert.ok(pod.volumes.some(v=>v.name==='credential-source' && v.secret));
+  assert.ok(main.volumeMounts.some(v=>v.name==='credentials' && v.mountPath==='/run/credentials' && v.readOnly));assert.ok(!main.volumeMounts.some(v=>v.name==='credential-source'));
+ }
+});
 test('KubeVirt deployment keeps restricted pods, namespace-scoped observation and durable identity',()=>{
  const load=name=>JSON.parse(readFileSync(new URL('../deploy/kubevirt/'+name+'.json',import.meta.url)));
  const pod=load('statefulset').spec.template.spec,container=pod.containers[0];
@@ -170,6 +179,7 @@ test('KubeVirt deployment keeps restricted pods, namespace-scoped observation an
  assert.equal(container.securityContext.allowPrivilegeEscalation,false);
  assert.ok(pod.volumes.some(v=>v.name==='tmp' && v.emptyDir));
  assert.ok(container.volumeMounts.some(v=>v.name==='tmp' && v.mountPath==='/tmp'));
+ assert.equal(container.args[container.args.indexOf('--state')+1],'/data/host');
  const rules=load('role').rules;
  for(const [group,resource,verbs] of [['','pods',['get','list']],['','resourcequotas',['get','list']],['metrics.k8s.io','pods',['get','list']],['kubevirt.io','virtualmachines',['get','list','create','patch']],['kubevirt.io','virtualmachineinstances',['get','list']],['','persistentvolumeclaims',['get','list']],['','secrets',['get','create']],['cdi.kubevirt.io','datavolumes/source',['create']]]) {
   const rule=rules.find(r=>r.apiGroups.includes(group)&&r.resources.includes(resource));assert.ok(rule,resource);assert.deepEqual(rule.verbs,verbs);
