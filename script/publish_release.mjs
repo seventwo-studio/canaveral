@@ -9,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { ROOT, run } from './tasks.mjs';
 import { uniqueJSON } from './json.mjs';
 export const SOURCE='https://github.com/seventwo-studio/canaveral';
-export const PACKAGE='ghcr.io/seventwo-studio/canaveral';
-export const IMAGES={orchestrator:PACKAGE,dashboard:PACKAGE+'-dashboard',kubevirt:PACKAGE+'-kubevirt'};
+// Repo-scoped names: packages first pushed by this repository's GITHUB_TOKEN are linked to it
+// and grant its workflows write access. The older top-level packages are not used.
+export const NAMESPACE='ghcr.io/seventwo-studio/canaveral';
+export const IMAGES={orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',kubevirt:NAMESPACE+'/kubevirt'};
+export const DEPLOYMENT=NAMESPACE+'/deploy';
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
 /** Describe a registry failure without credentials: status, path and registry error codes only. */
 export function registryFailure(url,status,body) {
@@ -133,15 +136,15 @@ export async function main() {
   try {
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,output);
     for(const stage of ['orchestrator','dashboard','kubevirt']) run('kubectl',['kustomize',join(output,stage)]);
-    const registry=await Registry.connect(PACKAGE);let artifact=await registry.manifest('deploy-'+version);
+    const registry=await Registry.connect(DEPLOYMENT);let artifact=await registry.manifest(version);
     const sourceRevision=tag+'@sha1:'+revision;
     if(!artifact) {
-      run('flux',['push','artifact','oci://'+PACKAGE+':deploy-'+version,'--path',output,'--source',SOURCE,'--revision',sourceRevision,'--reproducible','--annotations','org.opencontainers.image.version='+version]);
-      artifact=await registry.manifest('deploy-'+version);
+      run('flux',['push','artifact','oci://'+DEPLOYMENT+':'+version,'--path',output,'--source',SOURCE,'--revision',sourceRevision,'--reproducible','--annotations','org.opencontainers.image.version='+version]);
+      artifact=await registry.manifest(version);
     }
     if(!artifact) throw new Error('Deployment publication did not complete.');
     checkIdentity(artifact[0],version,sourceRevision,true);
-    result.deployment={url:'oci://'+PACKAGE,tag:'deploy-'+version,digest:artifact[1]};
+    result.deployment={url:'oci://'+DEPLOYMENT,tag:version,digest:artifact[1]};
     writeFileSync(metadata,JSON.stringify(result,null,2)+'\n');
   } finally {rmSync(temporary,{recursive:true,force:true});}
   run('gh',['release','upload',tag,metadata,'--clobber']);run('gh',['release','edit',tag,'--draft=false']);
