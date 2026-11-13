@@ -68,13 +68,32 @@ try {
  await new Promise(r=>stalled.listen(0,'127.0.0.1',r));
  try {
    const stalledPath=join(dir,'stalled.json');
-   writeFileSync(stalledPath,JSON.stringify({...config,controller:`http://127.0.0.1:${stalled.address().port}`,execution:{...config.execution,stateDir:join(dir,'stalled-state'),executionMs:300}}),{mode:0o600});
+   writeFileSync(stalledPath,JSON.stringify({...config,controller:`http://127.0.0.1:${stalled.address().port}`,execution:{...config.execution,stateDir:join(dir,'stalled-state'),executionMs:300,contactMs:5000}}),{mode:0o600});
    const stalledJob=await submit('hang');const stalledChild=await start(runner,[stalledPath]);let diagnostic='';stalledChild.stderr.on('data',b=>diagnostic+=b);
+   const exited=once(stalledChild,'exit');
    const started=join(dir,'stalled-state','workspace','generation.started');
-   for(let i=0;i<500&&!existsSync(started);i++)await new Promise(r=>setTimeout(r,10));
+   let generationStart=performance.now();
+   for(let i=0;i<500&&!existsSync(started);i++){
+     generationStart=performance.now();
+     await new Promise(r=>setTimeout(r,10));
+   }
    assert(existsSync(started),'stalled fixture did not start');
    const pid=Number(readFileSync(join(dir,'stalled-state','workspace','runtime.pid'),'utf8'));
-   assert.equal((await once(stalledChild,'exit'))[0],0,diagnostic);
+   // Use the poll before the marker appeared, so marker detection cannot
+   // shorten the measured interval. Observe stop independently of runner exit.
+   let stopObserved;
+   for(let i=0;i<500;i++){
+     try {process.kill(pid,0);} catch(error){
+       if(error.code!=='ESRCH')throw error;
+       stopObserved=performance.now();break;
+     }
+     await new Promise(r=>setTimeout(r,10));
+   }
+   // Supervision checks every ~20 ms; fencing allows 50 ms TERM grace and
+   // checks every ~10 ms. Add 1 s for fencing and CI scheduling/polling slack.
+   // 1.3 s stays below both the 2 s listing stall and 5 s contact timeout.
+   assert(stopObserved-generationStart<300+1000,'controller listing postponed runtime stop');
+   assert.equal((await exited)[0],0,diagnostic);
    // No stop timestamp is persisted in the runner journal. Allow scheduling and
    // cleanup slack from the first listing request, retaining 200 ms of separation
    // from its 2 s stall. Measuring at the proxy avoids marker-polling latency.
