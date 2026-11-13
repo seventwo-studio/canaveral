@@ -69,24 +69,28 @@ jobs:
           subject-name: ghcr.io/seventwo-studio/canaveral/orchestrator
           subject-digest: ${{ steps.digests.outputs.orchestrator }}
           push-to-registry: true
+          create-storage-record: false
       - name: Attest dashboard provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/seventwo-studio/canaveral/dashboard
           subject-digest: ${{ steps.digests.outputs.dashboard }}
           push-to-registry: true
+          create-storage-record: false
       - name: Attest kubevirt provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/seventwo-studio/canaveral/kubevirt
           subject-digest: ${{ steps.digests.outputs.kubevirt }}
           push-to-registry: true
+          create-storage-record: false
       - name: Attest deploy provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/seventwo-studio/canaveral/deploy
           subject-digest: ${{ steps.digests.outputs.deploy }}
           push-to-registry: true
+          create-storage-record: false
       - name: Remove registry credentials
         if: always()
         run: docker logout ghcr.io
