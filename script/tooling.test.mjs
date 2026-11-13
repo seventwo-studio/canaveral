@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { MAX_BYTES,SECTIONS,compare,load,main,validate } from './check_retention.mjs';
-import { PACKAGE,SOURCE,IMAGES,bundle,checkIdentity,draftRelease,Registry,registryFailure } from './publish_release.mjs';
+import { NAMESPACE,DEPLOYMENT,SOURCE,IMAGES,bundle,checkIdentity,draftRelease,Registry,registryFailure } from './publish_release.mjs';
 import { inspectArtifact } from './build_android_transfer.mjs';
 import { violations,scan } from './check_no_python.mjs';
 import { uniqueJSON } from './json.mjs';
@@ -88,7 +88,7 @@ test('release bundle preserves optional stage, protected storage and scoped pod 
 });
 test('release refuses mutable, wrong-package and wrong-version images plus occupied output',t=>{
  const root=directory(t);let i=0;
- for(const value of [{orchestrator:PACKAGE+':latest',dashboard:images().dashboard},{...images(),dashboard:PACKAGE+'-dashboard:0.2.0@sha256:'+'b'.repeat(64)},{...images(),kubevirt:PACKAGE+'-kubevirt:latest'},{...images(),kubevirt:images().dashboard}])assert.throws(()=>bundle('0.1.0','c'.repeat(40),value,join(root,String(i++))));
+ for(const value of [{orchestrator:IMAGES.orchestrator+':latest',dashboard:images().dashboard},{...images(),dashboard:IMAGES.dashboard+':0.2.0@sha256:'+'b'.repeat(64)},{...images(),kubevirt:IMAGES.kubevirt+':latest'},{...images(),kubevirt:images().dashboard}])assert.throws(()=>bundle('0.1.0','c'.repeat(40),value,join(root,String(i++))));
  writeFileSync(join(root,'unreviewed'),'');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),root));
 });
 test('release rejects undeclared or symlinked deployment inputs',t=>{
@@ -105,7 +105,7 @@ test('publication identity checks source, version, revision, both architectures 
 });
 test('registry verifies content digests and refuses credential redirects',async t=>{
  const original=Registry.get;t.after(()=>Registry.get=original);const raw=Buffer.from('{"annotations":{}}'),digest='sha256:'+createHash('sha256').update(raw).digest('hex');
- Registry.get=async()=>[raw,new Headers({'Docker-Content-Digest':digest})];const registry=new Registry(PACKAGE,'Bearer fixture');assert.deepEqual(await registry.manifest('0.1.0'),[{annotations:{}},digest]);
+ Registry.get=async()=>[raw,new Headers({'Docker-Content-Digest':digest})];const registry=new Registry(IMAGES.orchestrator,'Bearer fixture');assert.deepEqual(await registry.manifest('0.1.0'),[{annotations:{}},digest]);
  Registry.get=async()=>[raw,new Headers({'Docker-Content-Digest':'sha256:'+'0'.repeat(64)})];await assert.rejects(registry.manifest('0.1.0'),/digest/);
  Registry.get=async()=>{const e=new Error();e.status=404;throw e;};assert.equal(await registry.manifest('0.1.0'),null);
  await assert.rejects(original('https://example.invalid/','Bearer fixture'),/origin/);
@@ -188,7 +188,7 @@ test('KubeVirt deployment keeps restricted pods, namespace-scoped observation an
  assert.equal(load('role').kind,'Role');
  const namespaces=JSON.parse(readFileSync(new URL('../deploy/kubernetes/namespaces/namespaces.json',import.meta.url))).items;
  assert.ok(namespaces.every(n=>n.metadata.labels['pod-security.kubernetes.io/enforce']==='restricted'));
- assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(PACKAGE,'ghcr.io/seventwo-studio/canaveral');
+ assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(NAMESPACE,'ghcr.io/seventwo-studio/canaveral');assert.deepEqual(IMAGES,{orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',kubevirt:NAMESPACE+'/kubevirt'});assert.equal(DEPLOYMENT,NAMESPACE+'/deploy');
 });
 test('registry failures report status, path and registry codes without credentials',()=>{
  const url=new URL('https://ghcr.io/v2/seventwo-studio/canaveral/manifests/0.3.1?token=secret');
