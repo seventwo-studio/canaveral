@@ -35,6 +35,9 @@ test('harness startup discards private parser, path and assertion diagnostics', 
     writeFileSync(base.operatorDenyCidrsFile, '{"operatorDenyCidrs": ' + secret + '}', {mode: 0o600});
     run(JSON.stringify(base), 'private configuration invalid');
     writeFileSync(base.operatorDenyCidrsFile, JSON.stringify({operatorDenyCidrs: ['8.8.8.8/32']}));
+    for (const workspaceIOVersion of [0,2,null,'1']) {
+      run(JSON.stringify({...base,workspaceIOVersion}), 'private configuration invalid');
+    }
     run(JSON.stringify({...base, helper: join(dir, 'fixture-' + secret)}), 'private configuration invalid');
     run(JSON.stringify({...base, stateRoot: join(dir, secret)}), 'private configuration invalid');
   } finally { rmSync(dir, {recursive: true, force: true}); }

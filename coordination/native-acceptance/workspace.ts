@@ -62,6 +62,8 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
     let caught: string | undefined;
     try {await uploadWorkspaceFile(client,{id,member:'primary',direction:'upload',path,bytes:bytes.length,sha256,replace:false},(async function*(){yield bytes;})(),journal,wait);} catch(e) {caught=String(e);}
     const transfer=await client.transfer(id);save('workspace-'+code+'.json',{transfer,caught});
+    assert(caught !== undefined, 'upload must reject');
+    assert.equal(transfer.state,'failed');
     assert.equal(transfer.error?.code,code);
   }
   const replacement=Buffer.from('replacement over existing regular file');

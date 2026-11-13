@@ -1,4 +1,4 @@
-import {internalFailure, guardEvidenceWrite} from './failure-boundary.ts';
+import {internalFailure, guardEvidenceWrite, hasInternalFailure, onInternalFailure} from './failure-boundary.ts';
 import {loadOperatorDenyList} from './operator-policy.ts';
 import {ownedProcesses,processRows,vzPids} from './processes.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
@@ -9,7 +9,7 @@ import {spawn, execFile, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
 import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync as rawWriteFileSync, readFileSync, existsSync} from 'node:fs';
-import {join, resolve, dirname} from 'node:path';
+import {join, resolve, dirname, basename} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
 import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence, receiptEvidence} from './evidence.ts';
@@ -53,6 +53,7 @@ const {operatorDenyCidrs, denyEvidence, resources, dir, privateDir} = (() => {
       if (cfg[name] !== undefined && (typeof cfg[name] !== 'string' || resolve(cfg[name]) !== cfg[name])) throw Error();
     }
     if (!/^sha256:[0-9a-f]{64}$/.test(cfg.bundleDigest) || !cfg.signingRequirement.includes('anchor apple')) throw Error();
+    if (cfg.workspaceIOVersion !== undefined && cfg.workspaceIOVersion !== 1) throw Error();
     if (cfg.workspaceIOVersion === 1) {
       if (typeof cfg.cloneRepo !== 'string' || !/^https:\/\//.test(cfg.cloneRepo) ||
           typeof cfg.cloneCommit !== 'string' || !/^[0-9a-f]{40}$/.test(cfg.cloneCommit)) throw Error();
@@ -71,11 +72,21 @@ const {operatorDenyCidrs, denyEvidence, resources, dir, privateDir} = (() => {
     return {...policy, resources: {cpu: cfg.cpu ?? 2, memoryMiB: cfg.memoryMiB ?? 2048, diskGiB: cfg.diskGiB ?? 4}, dir, privateDir};
   } catch { privateFailure('invalid'); }
 })();
-console.log(JSON.stringify({runDirectory: dir}));
+console.log(JSON.stringify({runLabel: basename(dir)}));
 const save = (name: string, value: unknown) => {
   writeFileSync(join(privateDir, name), JSON.stringify(value, null, 2), {mode:0o600});
   writeFileSync(join(dir, name), JSON.stringify(receiptEvidence(value), null, 2), {mode:0o600});
 };
+let completed = false;
+let result: ObjectValue = {state:'failed', nativeAcceptance:false};
+const caseFailures: string[] = [];
+function publishResult() {
+  const accepted = completed && caseFailures.length === 0 && !hasInternalFailure();
+  save('result.json', {...result, nativeAcceptance:accepted,
+    ...(!accepted ? {failure:'native_acceptance_failed'} : {}),
+    caseFailureCount:caseFailures.length});
+}
+onInternalFailure(publishResult);
 const sha = (path: string) => 'sha256:' + createHash('sha256').update(readFileSync(path)).digest('hex');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const children: ChildProcess[] = [];
@@ -97,7 +108,7 @@ function launch(bin: string, args: string[], name: string) {
     return {code, signal, output};
   }).catch(() => {
     internalFailure();
-    return {code: 1, signal: null, output};
+    return {code: null, signal: null, output, launchFailed: true};
   });
   return {c, done, output: () => output};
 }
@@ -149,9 +160,9 @@ try {
             } else assert.equal(reports.at(-1).after.body.reservations, 1, 'reservation disappeared before cleanup');
           }
           res.writeHead(reply.statusCode!, reply.headers); res.end(bytes);
-        })().catch(e => res.destroy(e)); });
-      }); upstream.on('error', e => res.destroy(e)); upstream.end(raw);
-    })().catch(e => res.destroy(e)); });
+        })().catch(() => { internalFailure(); res.destroy(); }); });
+      }); upstream.on('error', () => { internalFailure(); res.destroy(); }); upstream.end(raw);
+    })().catch(() => { internalFailure(); res.destroy(); }); });
   });
   let domainForReports = '';
   await new Promise<void>(r => proxy!.listen(0, '127.0.0.1', r));
@@ -187,7 +198,7 @@ try {
   // Setup is real controller/TLS/enrollment evidence, never VM acceptance. No lease or claim yet.
   if (cfg.setupOnly || !existsSync(cfg.manifest) || !cfg.builder || !existsSync(cfg.builder)) {
     assert(cfg.setupOnly, 'real manifest and mkfs.erofs required; no lease acquired');
-    save('result.json', {state: 'blocked-real-artifacts', setupComplete: true, nativeAcceptance: false});
+    result = {state: 'blocked-real-artifacts', setupComplete: true};
   } else {
     const manifest = JSON.parse(readFileSync(cfg.manifest, 'utf8'));
     for (const role of ['kernel', 'initrd', 'rootfs']) refuseFixture(resolve(dirname(cfg.manifest), manifest[role].path));
@@ -289,11 +300,11 @@ try {
       assert(!existsSync(record.machine)); assert(!existsSync(join(state, 'workspace')));
       assert(record.relay, 'no published relay evidence'); assert(!existsSync(dirname(record.relay)));
       const journal = JSON.parse(readFileSync(join(state, 'state.json'), 'utf8'));
-      assert(journal.stopped && journal.cleaned && journal.released);
+      for (const flag of ['stopped','cleaned','released']) assert.equal(journal[flag], true);
       save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noOwnedVMProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal: journalEvidence(journal)});
       await snapshot(label + '-after', id); active = undefined;
     }
-    const caseFailures:string[]=[];
+
     if (cfg.workspaceIOVersion === 1) {
       const events: {event:string;at:number}[]=[];
       const mark=(event:string)=>{events.push({event,at:Date.now()});save('queue-sequence.json',events);};
@@ -317,8 +328,9 @@ try {
     if(cfg.workspaceIOVersion===1) {
       try {
         caseFailures.push(...await workspaceCases({cfg:{...cfg,operatorDenyCidrs,denyEvidence},origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
-      } catch (error) {
-        caseFailures.push('workspace: '+String(error));save('workspace-fatal-case.json',{error:String(error)});
+      } catch {
+        internalFailure();
+        caseFailures.push('workspace');save('workspace-fatal-case.json',{failure:'native_acceptance_failed'});
         if (active) {
           await ok('POST',`/v1/leases/${active.id}/release`,{id:randomUUID()},active.credential);
           await stopped('workspace-failed',active.id);
@@ -395,7 +407,8 @@ try {
       return view.state === 'expired';
     }, 'wall-clock expiry'); await stopped('expiry', expiry);
     const lost = await start('satellite-loss', 120);
-    currentRun!.c.kill('SIGKILL'); await currentRun!.done;
+    assert(currentRun!.c.kill('SIGKILL'));
+    const killed = await currentRun!.done; assert.equal(killed.code, null); assert.equal(killed.signal, 'SIGKILL');
     const lossDeadline = Date.parse((await inspect(lost)).expiresAt);
     const killedAt = Date.now();
     assert(!existsSync(join(observed.get(lost)!.machine, 'power-off.request')));
@@ -432,7 +445,9 @@ try {
     await snapshot('loss-held', lost);
     active = undefined;
     if(caseFailures.length) process.exitCode=1;
-    save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, caseFailureCount:caseFailures.length, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
+    result = {state:'cases-completed', lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true};
+    assert.equal(controller.c.exitCode, null); assert.equal(controller.c.signalCode, null);
+    completed = true;
   }
 } catch {
   internalFailure();
@@ -440,12 +455,19 @@ try {
   try { save('failure.json', {state:'failed', activeLease:active?.id}); } catch {}
 }
 finally {
+  try {
   if (active && api!) {
     // A release is intent only. Never delete machine state or kill the helper as a substitute for proof.
-    await api('POST', `/v1/leases/${active.id}/release`, {id:randomUUID()}, active.credential).catch(() => {});
+    await api('POST', `/v1/leases/${active.id}/release`, {id:randomUUID()}, active.credential).catch(() => { internalFailure(); });
     await pause(5000);
   }
   if (proxy) { proxy.closeAllConnections(); await new Promise<void>(r => proxy!.close(() => r())); }
   for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGTERM');
-  for (const c of children) if (c.exitCode === null && c.signalCode === null) await Promise.race([once(c, 'exit'), pause(20000)]);
+  for (const c of children) if (c.exitCode === null && c.signalCode === null) await Promise.race([once(c, 'exit'), pause(20000).then(() => { throw Error(); })]);
+  } catch { internalFailure(); }
+  // Publish only after every assertion, asynchronous callback and cleanup boundary.
+  try { publishResult(); } catch {
+    internalFailure();
+    try { publishResult(); } catch {}
+  }
 }

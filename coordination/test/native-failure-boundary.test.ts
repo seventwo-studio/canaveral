@@ -24,7 +24,7 @@ function run(source: string, scenario: string, mode = 'strict') {
 import {once} from 'node:events';
 import {writeFileSync as rawWriteFileSync, mkdirSync, rmSync, chmodSync} from 'node:fs';
 import {join} from 'node:path';
-${modern ? `import {internalFailure,guardEvidenceWrite} from ${JSON.stringify(join(root,'coordination/native-acceptance/failure-boundary.ts'))};
+${modern ? `import {internalFailure,guardEvidenceWrite,hasInternalFailure,onInternalFailure} from ${JSON.stringify(join(root,'coordination/native-acceptance/failure-boundary.ts'))};
 const writeFileSync: typeof rawWriteFileSync = (...args) => guardEvidenceWrite(() => rawWriteFileSync(...args));` : 'const writeFileSync = rawWriteFileSync;'}
 const privateDir = ${JSON.stringify(join(dir,token,'private'))};
 const dir = ${JSON.stringify(join(dir,token))};
