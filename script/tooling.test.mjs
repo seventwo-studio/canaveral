@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { MAX_BYTES,SECTIONS,compare,load,main,validate } from './check_retention.mjs';
-import { PACKAGE,SOURCE,IMAGES,bundle,checkIdentity,draftRelease,Registry } from './publish_release.mjs';
+import { PACKAGE,SOURCE,IMAGES,bundle,checkIdentity,draftRelease,Registry,registryFailure } from './publish_release.mjs';
 import { inspectArtifact } from './build_android_transfer.mjs';
 import { violations,scan } from './check_no_python.mjs';
 import { uniqueJSON } from './json.mjs';
@@ -189,4 +189,11 @@ test('KubeVirt deployment keeps restricted pods, namespace-scoped observation an
  const namespaces=JSON.parse(readFileSync(new URL('../deploy/kubernetes/namespaces/namespaces.json',import.meta.url))).items;
  assert.ok(namespaces.every(n=>n.metadata.labels['pod-security.kubernetes.io/enforce']==='restricted'));
  assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(PACKAGE,'ghcr.io/seventwo-studio/canaveral');
+});
+test('registry failures report status, path and registry codes without credentials',()=>{
+ const url=new URL('https://ghcr.io/v2/seventwo-studio/canaveral/manifests/0.3.1?token=secret');
+ const message=registryFailure(url,403,JSON.stringify({errors:[{code:'DENIED',message:'permission_denied: write_package'}]}));
+ assert.equal(message,'Registry request failed: HTTP 403 for /v2/seventwo-studio/canaveral/manifests/0.3.1 (DENIED: permission_denied: write_package).');
+ assert.ok(!message.includes('secret'));
+ assert.equal(registryFailure(url,500,'not json'),'Registry request failed: HTTP 500 for /v2/seventwo-studio/canaveral/manifests/0.3.1.');
 });
