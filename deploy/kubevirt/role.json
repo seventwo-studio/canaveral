@@ -1,0 +1,95 @@
+{
+  "apiVersion": "rbac.authorization.k8s.io/v1",
+  "kind": "Role",
+  "metadata": {
+    "name": "canaveral-worker"
+  },
+  "rules": [
+    {
+      "apiGroups": [
+        "kubevirt.io"
+      ],
+      "resources": [
+        "virtualmachines"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "create",
+        "patch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "kubevirt.io"
+      ],
+      "resources": [
+        "virtualmachineinstances"
+      ],
+      "verbs": [
+        "get",
+        "list"
+      ]
+    },
+    {
+      "apiGroups": [
+        ""
+      ],
+      "resources": [
+        "persistentvolumeclaims"
+      ],
+      "verbs": [
+        "get",
+        "list"
+      ]
+    },
+    {
+      "apiGroups": [
+        "cdi.kubevirt.io"
+      ],
+      "resources": [
+        "datavolumes/source"
+      ],
+      "verbs": [
+        "create"
+      ]
+    },
+    {
+      "apiGroups": [
+        ""
+      ],
+      "resources": [
+        "secrets"
+      ],
+      "verbs": [
+        "get",
+        "create"
+      ]
+    },
+    {
+      "apiGroups": [
+        ""
+      ],
+      "resources": [
+        "pods",
+        "resourcequotas"
+      ],
+      "verbs": [
+        "get",
+        "list"
+      ]
+    },
+    {
+      "apiGroups": [
+        "metrics.k8s.io"
+      ],
+      "resources": [
+        "pods"
+      ],
+      "verbs": [
+        "get",
+        "list"
+      ]
+    }
+  ]
+}

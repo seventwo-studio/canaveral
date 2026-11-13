@@ -1,0 +1,103 @@
+# Optional example. Adapt API endpoint, DNS and guest access before applying.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: canaveral
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-clients
+  namespace: canaveral
+spec:
+  podSelector:
+    matchLabels:
+      app: canaveral-orchestrator
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: canaveral-dashboard
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: canaveral-guests
+          podSelector:
+            matchLabels:
+              app: canaveral-worker
+      ports:
+        - protocol: TCP
+          port: 8765
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-egress
+  namespace: canaveral-guests
+spec:
+  podSelector:
+    matchLabels:
+      app: canaveral-worker
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: canaveral
+          podSelector:
+            matchLabels:
+              app: canaveral-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8765
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Documentation-only IP. Replace with API endpoint(s), including post-DNAT
+    # addresses as required by your CNI. Never broaden this to all destinations.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.1/32
+      ports:
+        - protocol: TCP
+          port: 6443
+# Add guest SSH/preparation egress for your actual guest network if needed.
+# Disabled placeholder: add as another document after adapting selectors/CIDR.
+# ---
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: private-ingress
+#   namespace: canaveral
+# spec:
+#   podSelector: {} # Select dashboard and/or orchestrator deliberately.
+#   policyTypes: [Ingress]
+#   ingress:
+#     - from:
+#         - namespaceSelector:
+#             matchLabels:
+#               kubernetes.io/metadata.name: REPLACE-INGRESS-NAMESPACE
+#           podSelector:
+#             matchLabels:
+#               app: REPLACE-INGRESS-CONTROLLER
+#         - ipBlock:
+#             cidr: 192.0.2.0/24 # REPLACE with private external runner CIDR.
+#       ports:
+#         - protocol: TCP
+#           port: 8765
+#         - protocol: TCP
+#           port: 8766

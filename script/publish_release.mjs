@@ -8,8 +8,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT, run } from './tasks.mjs';
 import { uniqueJSON } from './json.mjs';
-export const SOURCE='https://github.com/example/canaveral-public';
-export const PACKAGE='ghcr.io/example/canaveral-public';
+export const SOURCE='https://github.com/seventwo-studio/canaveral';
+export const PACKAGE='ghcr.io/seventwo-studio/canaveral';
 export const IMAGES={orchestrator:PACKAGE,dashboard:PACKAGE+'-dashboard',kubevirt:PACKAGE+'-kubevirt'};
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
 export class Registry {
@@ -64,18 +64,18 @@ export function bundle(version,revision,images,output,sourceRoot=ROOT) {
   if(existsSync(output) && (lstatSync(output).isSymbolicLink() || readdirSync(output).length)) throw new Error('Release output must be empty.');
   // Validate every input before producing any release files.
   const sources={};
-  for(const stage of ['orchestrator','dashboard']) {
-    const source=join(sourceRoot,'deploy',stage), expected=['deployment.json','service.json','kustomization.yaml'];
+  for(const stage of ['orchestrator','dashboard','kubevirt']) {
+    const source=join(sourceRoot,'deploy',stage), expected=stage==='kubevirt' ? ['serviceaccount.json','role.json','rolebinding.json','configmap.json','service.json','statefulset.json','kustomization.yaml'] : ['deployment.json','service.json','kustomization.yaml'];
     if(stage==='orchestrator') expected.push('persistentvolumeclaim.json');
     if(lstatSync(source).isSymbolicLink() || readdirSync(source).sort().join(',')!==expected.sort().join(',') || expected.some(name=>!lstatSync(join(source,name)).isFile() || lstatSync(join(source,name)).isSymbolicLink())) throw new Error('Only declared deployment sources may enter the artifact.');
     sources[stage]=Object.fromEntries(expected.map(name=>[name,readFileSync(join(source,name),'utf8')]));
   }
   mkdirSync(output,{recursive:true});
-  for(const stage of ['orchestrator','dashboard']) {
+  for(const stage of ['orchestrator','dashboard','kubevirt']) {
     const directory=join(output,stage);mkdirSync(directory);
     for(const [name,source] of Object.entries(sources[stage])) {
       let text=source;
-      if(name==='deployment.json') {
+      if(name==='deployment.json' || name==='statefulset.json') {
         const data=uniqueJSON(text), containers=data.spec.template.spec.containers;
         if(containers.length!==1) throw new Error('Expected one runtime per stage.');
         containers[0].image=images[stage];
@@ -103,7 +103,7 @@ export async function main() {
   const revision=capture('git',['rev-parse','HEAD']);
   run('git',['merge-base','--is-ancestor',revision,'origin/main']);
   if(capture('git',['rev-parse',tag+'^{commit}'])!==revision) throw new Error('Checked-out release identity differs.');
-  draftRelease(uniqueJSON(capture('gh',['api','--paginate','--slurp','repos/example/canaveral-public/releases?per_page=100'])),tag,revision);
+  draftRelease(uniqueJSON(capture('gh',['api','--paginate','--slurp','repos/seventwo-studio/canaveral/releases?per_page=100'])),tag,revision);
   const dist=join(ROOT,'dist');mkdirSync(dist,{recursive:true});
   const images={};
   for(const [stage,packageName] of Object.entries(IMAGES)) {
@@ -119,7 +119,7 @@ export async function main() {
   const temporary=mkdtempSync(join(tmpdir(),'canaveral-release-'));const metadata=join(dist,'release.json');
   try {
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,output);
-    for(const stage of ['orchestrator','dashboard']) run('kubectl',['kustomize',join(output,stage)]);
+    for(const stage of ['orchestrator','dashboard','kubevirt']) run('kubectl',['kustomize',join(output,stage)]);
     const registry=await Registry.connect(PACKAGE);let artifact=await registry.manifest('deploy-'+version);
     const sourceRevision=tag+'@sha1:'+revision;
     if(!artifact) {

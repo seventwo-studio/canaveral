@@ -76,13 +76,16 @@ Run the controller and runner under your service manager for unattended use;
 ### Docker on the same server
 
 The source-build Compose setup uses named volumes and needs no site-specific
-registry or secret manager:
+registry or secret manager. Set `CANAVERAL_TLS_DIRECTORY` to an absolute directory with readable `server.crt`,
+`server.key` and `ca.crt` before running Compose. The server SANs must cover
+`orchestrator` and the native runner hostname (for example `localhost`).
+
 
 ```sh
 docker compose --profile setup run --rm init
 docker compose up -d orchestrator
-docker compose run --rm --no-deps orchestrator \
-  --url http://orchestrator:8765 --allow-http \
+docker compose run --rm --no-deps -e NODE_EXTRA_CA_CERTS=/run/tls/ca.crt orchestrator \
+  --url https://orchestrator:8765 \
   --token-file /run/credentials/admin.token hosts
 ```
 
@@ -94,7 +97,9 @@ loopback API after receiving the enrollment file through a protected local file:
 umask 077
 docker compose run --rm --no-deps --entrypoint cat orchestrator \
   /run/credentials/enrollment.token > ./enrollment.token
-node coordination/dist/src/cli.js host --config ./host.json --state ./state/host \
+node coordination/dist/src/cli.js --url https://localhost:8765 host \
+  --config ./host.json --state ./state/host \
+  --ca-file "$CANAVERAL_TLS_DIRECTORY/ca.crt" \
   --enrollment-token-file ./enrollment.token
 ```
 
@@ -104,20 +109,28 @@ Mac does not provide the Apple backend. Add the optional dashboard with
 `docker compose --profile dashboard up -d`; bootstrap its first administrator
 using [dashboard.md](dashboard.md).
 
-## Kubernetes homelab
+## Kubernetes
 
-The controller needs one persistent volume, its operator/enrollment Secret and
+The controller needs one persistent volume, its operator/enrollment Secret, TLS Secret and
 one replica with a Recreate strategy. It does not need Kubernetes API access or
-KubeVirt. Use `deploy/kubernetes/orchestrator.json` for a direct installation,
+KubeVirt. Use `deploy/kubernetes/orchestrator` for a direct installation,
 or the release artifact's namespace-free `orchestrator/` Kustomization for your
 own GitOps setup. Select the matching immutable image digest from `release.json`.
-The `dashboard/` stage is optional. Follow the concrete namespace, credential,
-image and persistent-storage steps in [running.md](running.md#kubernetes).
+The `dashboard/` and `kubevirt/` stages are optional. Follow the concrete namespace, credential,
+TLS and persistent-storage steps in [running.md](running.md#kubernetes).
+
+The ordered setup creates both namespaces, runs `init` once, creates
+`canaveral-credentials`, then `canaveral-controller-tls`, then
+`canaveral-controller-ca` in both namespaces, then the enrollment-only
+`canaveral-enrollment` Secret before applying workloads. Certificate SANs must
+cover `orchestrator`, `orchestrator.canaveral`, `orchestrator.canaveral.svc` and any
+external ingress name. Use your PKI or optional cert-manager. See the same guide
+for private TLS ingress, optional NetworkPolicies and OpenShift limits.
 
 To offer Kubernetes VM capacity, first install compatible KubeVirt and CDI and
 verify KVM on eligible nodes. Import a bootable image into an offline template
 PVC, matching the guest architecture and intended bootstrap mechanism. Then
-adapt `deploy/kubernetes/worker-kubevirt.json` with:
+adapt `deploy/kubernetes/worker-kubevirt` with:
 
 - The released `images.kubevirt` image, or your own build of Docker's `kubevirt`
   target with kubectl compatible with the cluster.

@@ -75,12 +75,12 @@ test('draft discovery requires one exact reviewed unfinished target',()=>{
 });
 test('release bundle preserves optional stage, protected storage and scoped pod permissions',t=>{
  const root=directory(t),metadata=bundle('0.1.0','c'.repeat(40),images(),root);
- assert.deepEqual(metadata.images,images());assert.equal(metadata.source,SOURCE);assert.deepEqual(readdirSync(root).sort(),['app-release.json','dashboard','orchestrator']);
- for(const stage of ['orchestrator','dashboard']) for(const name of readdirSync(join(root,stage)).filter(n=>n.endsWith('.json'))) {
+ assert.deepEqual(metadata.images,images());assert.equal(metadata.source,SOURCE);assert.deepEqual(readdirSync(root).sort(),['app-release.json','dashboard','kubevirt','orchestrator']);
+ for(const stage of ['orchestrator','dashboard','kubevirt']) for(const name of readdirSync(join(root,stage)).filter(n=>n.endsWith('.json'))) {
   const value=JSON.parse(readFileSync(join(root,stage,name)));assert.equal(value.metadata.namespace,undefined);assert.ok(!['Secret','Namespace'].includes(value.kind));
-  if(value.kind==='Deployment') {
-   const pod=value.spec.template.spec;assert.equal(pod.automountServiceAccountToken,false);assert.equal(pod.containers[0].image,images()[stage]);
-   assert.equal(pod.securityContext.runAsNonRoot,true);assert.equal(pod.containers[0].securityContext.allowPrivilegeEscalation,false);
+  if(['Deployment','StatefulSet'].includes(value.kind)) {
+   const pod=value.spec.template.spec;if(stage!=='kubevirt')assert.equal(pod.automountServiceAccountToken,false);assert.equal(pod.containers[0].image,images()[stage]);
+   assert.equal(pod.securityContext.seccompProfile.type,'RuntimeDefault');assert.equal(pod.securityContext.runAsNonRoot,true);assert.equal(pod.containers[0].securityContext.allowPrivilegeEscalation,false);
    if(stage==='dashboard')assert.ok(!pod.volumes?.some(v=>v.secret));
   }
   if(value.kind==='PersistentVolumeClaim')assert.equal(value.metadata.annotations['kustomize.toolkit.fluxcd.io/prune'],'disabled');
@@ -92,7 +92,7 @@ test('release refuses mutable, wrong-package and wrong-version images plus occup
  writeFileSync(join(root,'unreviewed'),'');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),root));
 });
 test('release rejects undeclared or symlinked deployment inputs',t=>{
- const root=directory(t);for(const stage of ['orchestrator','dashboard']) {const d=join(root,'deploy',stage);mkdirSync(d,{recursive:true});for(const name of readdirSync(new URL('../deploy/'+stage+'/',import.meta.url)))copyFileSync(new URL('../deploy/'+stage+'/'+name,import.meta.url),join(d,name));}
+ const root=directory(t);for(const stage of ['orchestrator','dashboard','kubevirt']) {const d=join(root,'deploy',stage);mkdirSync(d,{recursive:true});for(const name of readdirSync(new URL('../deploy/'+stage+'/',import.meta.url)))copyFileSync(new URL('../deploy/'+stage+'/'+name,import.meta.url),join(d,name));}
  writeFileSync(join(root,'deploy/dashboard/extra'),'unreviewed');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),join(root,'out'),root));
 });
 test('publication identity checks source, version, revision, both architectures and Flux layer',()=>{
@@ -160,4 +160,23 @@ test('native packaging breaks Cargo artifact hardlinks before owned runtime admi
   writeFileSync(source+'.cargo-artifact','changed build output');assert.deepEqual(readFileSync(installed),bytes);
   if(process.platform!=='win32')assert.equal(lstatSync(installed).mode&0o777,0o755);
  }
+});
+test('KubeVirt deployment keeps restricted pods, namespace-scoped observation and durable identity',()=>{
+ const load=name=>JSON.parse(readFileSync(new URL('../deploy/kubevirt/'+name+'.json',import.meta.url)));
+ const pod=load('statefulset').spec.template.spec,container=pod.containers[0];
+ assert.deepEqual(pod.securityContext,{runAsNonRoot:true,runAsUser:10001,runAsGroup:10001,fsGroup:10001,seccompProfile:{type:'RuntimeDefault'}});
+ assert.equal(container.securityContext.readOnlyRootFilesystem,true);
+ assert.deepEqual(container.securityContext.capabilities.drop,['ALL']);
+ assert.equal(container.securityContext.allowPrivilegeEscalation,false);
+ assert.ok(pod.volumes.some(v=>v.name==='tmp' && v.emptyDir));
+ assert.ok(container.volumeMounts.some(v=>v.name==='tmp' && v.mountPath==='/tmp'));
+ const rules=load('role').rules;
+ for(const [group,resource,verbs] of [['','pods',['get','list']],['','resourcequotas',['get','list']],['metrics.k8s.io','pods',['get','list']],['kubevirt.io','virtualmachines',['get','list','create','patch']],['kubevirt.io','virtualmachineinstances',['get','list']],['','persistentvolumeclaims',['get','list']],['','secrets',['get','create']],['cdi.kubevirt.io','datavolumes/source',['create']]]) {
+  const rule=rules.find(r=>r.apiGroups.includes(group)&&r.resources.includes(resource));assert.ok(rule,resource);assert.deepEqual(rule.verbs,verbs);
+ }
+ assert.ok(rules.every(r=>!r.apiGroups.includes('*')&&!r.resources.includes('*')&&!r.verbs.includes('*')));
+ assert.equal(load('role').kind,'Role');
+ const namespaces=JSON.parse(readFileSync(new URL('../deploy/kubernetes/namespaces/namespaces.json',import.meta.url))).items;
+ assert.ok(namespaces.every(n=>n.metadata.labels['pod-security.kubernetes.io/enforce']==='restricted'));
+ assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(PACKAGE,'ghcr.io/seventwo-studio/canaveral');
 });

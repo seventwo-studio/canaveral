@@ -1,0 +1,55 @@
+name: Publish Canaveral release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed existing main tag with an exact-commit draft (for example v0.3.0)
+        required: true
+        type: string
+permissions:
+  contents: write
+  packages: write
+concurrency:
+  group: canaveral-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Validate tag input
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Install pinned release CLIs
+        run: |
+          curl --fail --location --retry 3 -o /tmp/kubectl https://dl.k8s.io/release/v1.34.1/bin/linux/amd64/kubectl
+          echo '7721f265e18709862655affba5343e85e1980639395d5754473dafaadcaa69e3  /tmp/kubectl' | sha256sum --check
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          curl --fail --location --retry 3 -o /tmp/flux.tar.gz https://github.com/fluxcd/flux2/releases/download/v2.7.5/flux_2.7.5_linux_amd64.tar.gz
+          echo '1e92141e8498289e4b27411385aeb18396053176cf297b0cb99abd6ca8293e75  /tmp/flux.tar.gz' | sha256sum --check
+          tar -xzf /tmp/flux.tar.gz -C /tmp flux
+          sudo install -m 0755 /tmp/flux /usr/local/bin/flux
+      - name: Authenticate GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish reviewed images and deployment artifact
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node script/publish_release.mjs
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io

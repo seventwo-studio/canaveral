@@ -1,0 +1,10 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "canaveral-worker-config"
+  },
+  "data": {
+    "host.json": "{\n  \"name\": \"kubernetes-pool\",\n  \"provider\": \"kubevirt\",\n  \"namespace\": \"canaveral-guests\",\n  \"capacity\": {\"cpu\": 16, \"memoryMiB\": 32768, \"diskGiB\": 500},\n  \"templates\": [\n    {\"id\": \"linux-server\", \"revision\": \"1\", \"os\": \"linux\", \"arch\": \"amd64\", \"mode\": \"headless\", \"pvc\": \"linux-server-template\", \"minimum\": {\"cpu\": 1, \"memoryMiB\": 1024, \"diskGiB\": 10}},\n    {\"id\": \"linux-desktop\", \"revision\": \"1\", \"os\": \"linux\", \"arch\": \"amd64\", \"mode\": \"desktop\", \"pvc\": \"linux-desktop-template\", \"minimum\": {\"cpu\": 2, \"memoryMiB\": 4096, \"diskGiB\": 32}}\n  ]\n}\n"
+  }
+}
