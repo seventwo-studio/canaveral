@@ -15,30 +15,57 @@ import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence, re
 const exec = promisify(execFile);
 type ObjectValue = Record<string, any>;
 assert(!process.env.CI && process.env.CANAVERAL_NATIVE_ACCEPTANCE === 'operator-authorized', 'requires explicit operator authorization outside CI');
-assert.equal(process.platform, 'darwin');
 process.umask(0o077);
 const input = process.argv[2];
 assert(input, 'usage: node coordination/native-acceptance/run.ts /absolute/config.json');
-const cfg: ObjectValue = JSON.parse(readFileSync(input, 'utf8'));
-const {operatorDenyCidrs,denyEvidence} = loadOperatorDenyList(cfg.operatorDenyCidrsFile);
+// Never let parser, filesystem or assertion details escape the private boundary.
+function privateFailure(kind: 'unreadable' | 'invalid'): never {
+  console.error('private configuration ' + kind);
+  process.exit(1);
+}
+let configBytes: string;
+try { configBytes = readFileSync(input, 'utf8'); }
+catch { privateFailure('unreadable'); }
+let cfg: ObjectValue;
+try {
+  cfg = JSON.parse(configBytes);
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw Error();
+} catch { privateFailure('invalid'); }
 
-// Check both names and embedded fixture markers, including renamed fixture executables.
-export function refuseFixture(path: string) {
-  assert(!/fixture|simulated|fake[-_ ]?helper/i.test(path), `fixture path refused: ${path}`);
+// Check both names and embedded fixture markers, including renamed executables.
+function refuseFixture(path: string) {
+  if (/fixture|simulated|fake[-_ ]?helper/i.test(path)) throw Error();
   if (!existsSync(path)) return;
   const bytes = readFileSync(realpathSync(path));
-  assert(!/fixture[-_ ]helper|fixture[-_ ]bootstrap[-_ ]builder|fixture-running|fixture-only guest secret|dev\.canaveral\.fixture|CANAVERAL-SIMULATED-EROFS|simulated erofs|fixture audited initrd/i.test(bytes.toString('latin1')), `fixture content refused: ${path}`);
+  if (/fixture[-_ ]helper|fixture[-_ ]bootstrap[-_ ]builder|fixture-running|fixture-only guest secret|dev\.canaveral\.fixture|CANAVERAL-SIMULATED-EROFS|simulated erofs|fixture audited initrd/i.test(bytes.toString('latin1'))) throw Error();
 }
-for (const name of ['helper', 'builder', 'bootstrap', 'satellite', 'runnerClient', 'manifest']) {
-  if (cfg[name]) { assert.equal(resolve(cfg[name]), cfg[name], `${name} must be absolute`); refuseFixture(cfg[name]); }
-}
-assert(cfg.helper && cfg.satellite && cfg.runnerClient && cfg.manifest && cfg.stateRoot && cfg.bundleDigest && cfg.signingRequirement);
-assert.match(cfg.bundleDigest, /^sha256:[0-9a-f]{64}$/);
-assert(cfg.signingRequirement.includes('anchor apple'), 'Apple signing requirement required');
-const resources = {cpu: cfg.cpu ?? 2, memoryMiB: cfg.memoryMiB ?? 2048, diskGiB: cfg.diskGiB ?? 4};
-const root = realpathSync(cfg.stateRoot);
-const dir = mkdtempSync(join(root, 'canaveral-native-')); chmodSync(dir, 0o700);
-const privateDir = join(dir, 'private'); mkdirSync(privateDir, {mode: 0o700});
+const {operatorDenyCidrs, denyEvidence, resources, dir, privateDir} = (() => {
+  try {
+    for (const name of ['helper', 'satellite', 'runnerClient', 'manifest', 'stateRoot', 'bundleDigest', 'signingRequirement', 'operatorDenyCidrsFile']) {
+      if (typeof cfg[name] !== 'string' || !cfg[name]) throw Error();
+    }
+    for (const name of ['helper', 'builder', 'bootstrap', 'satellite', 'runnerClient', 'manifest', 'stateRoot']) {
+      if (cfg[name] !== undefined && (typeof cfg[name] !== 'string' || resolve(cfg[name]) !== cfg[name])) throw Error();
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(cfg.bundleDigest) || !cfg.signingRequirement.includes('anchor apple')) throw Error();
+    if (cfg.workspaceIOVersion === 1) {
+      if (typeof cfg.cloneRepo !== 'string' || !/^https:\/\//.test(cfg.cloneRepo) ||
+          typeof cfg.cloneCommit !== 'string' || !/^[0-9a-f]{40}$/.test(cfg.cloneCommit)) throw Error();
+      for (const name of ['hostLanTarget', 'hostTailnetTarget', 'hostLoopbackTarget']) if (typeof cfg[name] !== 'string') throw Error();
+    }
+  } catch { privateFailure('invalid'); }
+  let policy: ReturnType<typeof loadOperatorDenyList>;
+  try { policy = loadOperatorDenyList(cfg.operatorDenyCidrsFile); }
+  catch { privateFailure('invalid'); }
+  try {
+    for (const name of ['helper', 'builder', 'bootstrap', 'satellite', 'runnerClient', 'manifest']) if (cfg[name]) refuseFixture(cfg[name]);
+    if (process.platform !== 'darwin') throw Error();
+    const root = realpathSync(cfg.stateRoot);
+    const dir = mkdtempSync(join(root, 'canaveral-native-')); chmodSync(dir, 0o700);
+    const privateDir = join(dir, 'private'); mkdirSync(privateDir, {mode: 0o700});
+    return {...policy, resources: {cpu: cfg.cpu ?? 2, memoryMiB: cfg.memoryMiB ?? 2048, diskGiB: cfg.diskGiB ?? 4}, dir, privateDir};
+  } catch { privateFailure('invalid'); }
+})();
 console.log(JSON.stringify({runDirectory: dir}));
 const save = (name: string, value: unknown) => {
   writeFileSync(join(privateDir, name), JSON.stringify(value, null, 2), {mode:0o600});
