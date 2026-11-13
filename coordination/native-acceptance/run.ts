@@ -1,3 +1,4 @@
+import {internalFailure, guardEvidenceWrite} from './failure-boundary.ts';
 import {loadOperatorDenyList} from './operator-policy.ts';
 import {ownedProcesses,processRows,vzPids} from './processes.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
@@ -7,12 +8,16 @@ import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync} from 'node:fs';
+import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync as rawWriteFileSync, readFileSync, existsSync} from 'node:fs';
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
 import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence, receiptEvidence} from './evidence.ts';
 const exec = promisify(execFile);
+const writeFileSync: typeof rawWriteFileSync = (...args) =>
+  guardEvidenceWrite(() => rawWriteFileSync(...args));
+const copyEvidenceFile: typeof copyFileSync = (...args) =>
+  guardEvidenceWrite(() => copyFileSync(...args));
 type ObjectValue = Record<string, any>;
 assert(!process.env.CI && process.env.CANAVERAL_NATIVE_ACCEPTANCE === 'operator-authorized', 'requires explicit operator authorization outside CI');
 process.umask(0o077);
@@ -90,6 +95,9 @@ function launch(bin: string, args: string[], name: string) {
   const done = once(c, 'exit').then(([code, signal]) => {
     writeFileSync(join(privateDir, name + '.stderr'), Buffer.concat(errors));
     return {code, signal, output};
+  }).catch(() => {
+    internalFailure();
+    return {code: 1, signal: null, output};
   });
   return {c, done, output: () => output};
 }
@@ -234,7 +242,7 @@ try {
         writeFileSync(pem(id + '-' + name), raw);
         writeFileSync(evidence(id + '-' + name), consoleEvidence(raw.toString('utf8')));
       }
-      if (existsSync(join(machine, 'console.log'))) copyFileSync(evidence(id + '-console.log'), evidence(id + '-boot.log'));
+      if (existsSync(join(machine, 'console.log'))) copyEvidenceFile(evidence(id + '-console.log'), evidence(id + '-boot.log'));
       save(id + '-processes.json', processEvidence(numericPs, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));
       save(id + '-latest.journal.json', journalEvidence(j));
     }
@@ -426,7 +434,11 @@ try {
     if(caseFailures.length) process.exitCode=1;
     save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, caseFailureCount:caseFailures.length, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
   }
-} catch (e: any) { writeFileSync(join(privateDir, 'failure.txt'), String(e.stack ?? e)); save('failure.json', {state:'failed', activeLease:active?.id}); process.exitCode = 1; }
+} catch {
+  internalFailure();
+  // Evidence storage can disappear or become unwritable during a run.
+  try { save('failure.json', {state:'failed', activeLease:active?.id}); } catch {}
+}
 finally {
   if (active && api!) {
     // A release is intent only. Never delete machine state or kill the helper as a substitute for proof.
