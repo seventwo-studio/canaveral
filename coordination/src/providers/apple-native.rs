@@ -5,7 +5,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 use std::{
     env,
-    ffi::{CStr, CString, OsStr},
+    ffi::{c_char, CStr, CString, OsStr},
     fs::{File, OpenOptions},
     io::{self, Read},
     os::{
@@ -42,8 +42,8 @@ const NONBLOCK: i32 = 0x800;
 compile_error!("Native provider storage helper supports Darwin and Linux only.");
 
 unsafe extern "C" {
-    fn openat(fd: i32, name: *const i8, flags: i32, ...) -> i32;
-    fn unlinkat(fd: i32, name: *const i8, flags: i32) -> i32;
+    fn openat(fd: i32, name: *const c_char, flags: i32, ...) -> i32;
+    fn unlinkat(fd: i32, name: *const c_char, flags: i32) -> i32;
     fn dup(fd: i32) -> i32;
     fn close(fd: i32) -> i32;
     fn fdopendir(fd: i32) -> *mut std::ffi::c_void;
@@ -55,9 +55,21 @@ unsafe extern "C" {
     #[cfg(target_os = "linux")]
     fn __errno_location() -> *mut i32;
     #[cfg(target_os = "macos")]
-    fn renameatx_np(from: i32, source: *const i8, to: i32, target: *const i8, flags: u32) -> i32;
+    fn renameatx_np(
+        from: i32,
+        source: *const c_char,
+        to: i32,
+        target: *const c_char,
+        flags: u32,
+    ) -> i32;
     #[cfg(target_os = "linux")]
-    fn renameat2(from: i32, source: *const i8, to: i32, target: *const i8, flags: u32) -> i32;
+    fn renameat2(
+        from: i32,
+        source: *const c_char,
+        to: i32,
+        target: *const c_char,
+        flags: u32,
+    ) -> i32;
 }
 fn refused() -> io::Error {
     io::Error::other("native storage identity, ownership, or removal is unconfirmed")

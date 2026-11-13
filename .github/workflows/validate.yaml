@@ -72,6 +72,11 @@ jobs:
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - run: rustup show
       - run: cargo fmt --all --check
+      - name: Check native storage helper on ARM64 Linux
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check -p canaveral-apple-native --target aarch64-unknown-linux-gnu --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
   validate:
