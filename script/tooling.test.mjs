@@ -164,7 +164,7 @@ test('native packaging breaks Cargo artifact hardlinks before owned runtime admi
 test('controller and worker stage Secret credentials as private regular files',()=>{
  for(const [path,files] of [['../deploy/orchestrator/deployment.json',['admin.token','enrollment.token']],['../deploy/kubevirt/statefulset.json',['enrollment.token']]]) {
   const pod=JSON.parse(readFileSync(new URL(path,import.meta.url))).spec.template.spec,[init]=pod.initContainers,main=pod.containers[0];
-  assert.equal(pod.initContainers.length,1);assert.equal(init.image,main.image);assert.deepEqual(init.securityContext,main.securityContext);
+  assert.equal(pod.securityContext.fsGroupChangePolicy,'OnRootMismatch');assert.equal(pod.initContainers.length,1);assert.equal(init.image,main.image);assert.deepEqual(init.securityContext,main.securityContext);
   assert.deepEqual(init.command,['install','-m','0600','-t','/run/credentials',...files.map(f=>'/run/credential-source/'+f)]);
   assert.ok(pod.volumes.some(v=>v.name==='credentials' && v.emptyDir?.medium==='Memory'));assert.ok(pod.volumes.some(v=>v.name==='credential-source' && v.secret));
   assert.ok(main.volumeMounts.some(v=>v.name==='credentials' && v.mountPath==='/run/credentials' && v.readOnly));assert.ok(!main.volumeMounts.some(v=>v.name==='credential-source'));
@@ -173,7 +173,7 @@ test('controller and worker stage Secret credentials as private regular files',(
 test('KubeVirt deployment keeps restricted pods, namespace-scoped observation and durable identity',()=>{
  const load=name=>JSON.parse(readFileSync(new URL('../deploy/kubevirt/'+name+'.json',import.meta.url)));
  const pod=load('statefulset').spec.template.spec,container=pod.containers[0];
- assert.deepEqual(pod.securityContext,{runAsNonRoot:true,runAsUser:10001,runAsGroup:10001,fsGroup:10001,seccompProfile:{type:'RuntimeDefault'}});
+ assert.deepEqual(pod.securityContext,{runAsNonRoot:true,runAsUser:10001,runAsGroup:10001,fsGroup:10001,fsGroupChangePolicy:'OnRootMismatch',seccompProfile:{type:'RuntimeDefault'}});
  assert.equal(container.securityContext.readOnlyRootFilesystem,true);
  assert.deepEqual(container.securityContext.capabilities.drop,['ALL']);
  assert.equal(container.securityContext.allowPrivilegeEscalation,false);
