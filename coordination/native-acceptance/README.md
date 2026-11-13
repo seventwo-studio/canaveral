@@ -24,7 +24,7 @@ From the repository root, create a private JSON configuration outside the checko
 }
 ```
 
-The operator deny-list file must have mode 0600 and contain `{ "operatorDenyCidrs": ["CIDR"] }`. The harness passes it to the satellite, probes each listed address on port 443 and requires `403 destination_denied`. Keep its contents in private runtime configuration; copied evidence contains only its count and SHA256 digest.
+The operator deny-list file must have mode 0600 and contain `{ "version": 1, "operatorDenyCidrs": ["CIDR"] }` with 1–4096 canonical network CIDRs. The original unversioned v1 format remains supported; other explicit versions are refused. Filesystem and validation failures expose fixed diagnostics only. The harness passes the list to the satellite and probes configured network addresses on port 443 only when the shipped, digest-verified special-purpose and IPv6 allocation tables would otherwise allow them and fresh host interface evidence excludes them. At least one such target must qualify; built-in denials alone fail acceptance. Every qualifying probe must return `403 destination_denied`; CONNECT success or a route denial fails. This proves address-policy discrimination, not route reachability or full topology isolation. Keep policy values in private runtime configuration; copied evidence contains only count, SHA256 digest and aggregate outcomes.
 
 `bundleDigest` is the Rust guest-protocol canonical manifest digest, not the hash of the JSON file. Artifacts must already satisfy the production immutable installation contract. The harness pins the exact helper and builder bytes; it does not build or repair artifacts, alter admission, or set flags to bypass installation checks. An optional `bootstrap` path is also screened for fixture markers when supplied. The builder and all boot artifacts are screened, including known embedded markers in renamed fixture binaries. This screen is an extra refusal boundary, not an attestation that arbitrary operator binaries are trustworthy. The satellite's full signature, pin, path, ownership and immutability checks remain authoritative.
 
@@ -599,4 +599,45 @@ skipped at concurrency two; standalone harness typecheck; six evidence/process
 regressions; no-Python check; and the branch diff private-path scan. The full suite used the existing native inference helper configured
 explicitly. Rust and Swift are unchanged. Queue milestones and aggregate hairpin results pass the same evidence
 allowlist as other receipts; raw configuration and output remain under private/.
+Production and topology acceptance remain open.
+
+### Review-fix full rerun (2026-11-13)
+
+Full native run y359Jk passed with `nativeAcceptance:true` and zero case
+failures, using the unchanged pr24-main v2 artifacts and resource limits above.
+Only one guest ran at a time, including the queue case's two sequential boxes.
+
+- Queue waiting, sequential admission, both readiness commands and independent
+  cleanup passed.
+- The stricter operator probe passed for one target independently permitted by
+  the digest-verified built-in address tables and excluded from fresh host
+  interface addresses. Evidence retains only policy count/digest and aggregate
+  outcomes. Built-in-denied entries cannot satisfy this case.
+- Public CONNECT, pinned clone, npm ci/test and build-log retrieval passed.
+  Guest npm execution took 139084/520 ms; downloaded build-log SHA256 is
+  `1fce0f4838ae04343cf6406fb85f5f6de1c92fa7ff49e5b72cf50d77476ccf4f`.
+- Empty, binary and 307200-byte transfers, replacement/conflict, disk-full,
+  tenant isolation, egress-off, active command/upload expiry, v1 commands,
+  renewal beyond the original deadline, release and ordinary expiry passed.
+- All seven normal cleanup groups independently proved owned helper/VZ absence
+  and machine/workspace/relay removal. Autonomous satellite-loss fencing passed:
+  helper absence was observed 280 ms after deadline, before recovery.
+
+Post-run process attribution, runtime-lock and empty open-handle checks preceded
+removal of owned residual workspace/bootstrap and relay storage. Immutable launch
+media flags were cleared only after ownership, inode and link-count verification.
+The journal remains unchanged; the stopped private database retains one unknown
+reservation for operator reconciliation. No cleanup receipt or capacity release
+was fabricated. All owned runtime processes and storage are gone; installed
+artifacts and private evidence remain. Unrelated VMs were untouched.
+
+Portable validation passed: coordination typecheck/build, 1037 tests with nine
+skipped at concurrency two, standalone harness/test typecheck, eight
+evidence/process/policy regressions, no-Python check and private-path diff scan.
+The new regressions reject missing/unreadable files, secret-bearing malformed
+JSON, wrong shapes/versions, noncanonical CIDRs and excessive counts without
+exposing private paths or input through thrown errors, stderr or evidence.
+Counterfactual CONNECT success with an omitted operator policy, route-only
+denials and built-in-only deny lists fail verification; a qualifying operator
+denial passes. Shareable evidence passed address/private-path scanning.
 Production and topology acceptance remain open.

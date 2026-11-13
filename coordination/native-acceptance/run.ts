@@ -1,3 +1,4 @@
+import {loadOperatorDenyList} from './operator-policy.ts';
 import {ownedProcesses,processRows,vzPids} from './processes.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
 import {workspaceCases} from './workspace.ts';
@@ -6,7 +7,7 @@ import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync, statSync} from 'node:fs';
+import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync} from 'node:fs';
 import {join, resolve, dirname} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
@@ -19,12 +20,7 @@ process.umask(0o077);
 const input = process.argv[2];
 assert(input, 'usage: node coordination/native-acceptance/run.ts /absolute/config.json');
 const cfg: ObjectValue = JSON.parse(readFileSync(input, 'utf8'));
-assert(cfg.operatorDenyCidrsFile && resolve(cfg.operatorDenyCidrsFile) === cfg.operatorDenyCidrsFile, 'operatorDenyCidrsFile must be absolute');
-assert.equal(statSync(cfg.operatorDenyCidrsFile).mode & 0o777, 0o600, 'operator deny-list file must have mode 0600');
-const denyBytes = readFileSync(cfg.operatorDenyCidrsFile);
-const operatorDenyCidrs = JSON.parse(denyBytes.toString()).operatorDenyCidrs;
-assert(Array.isArray(operatorDenyCidrs) && operatorDenyCidrs.length > 0 && operatorDenyCidrs.every(x => typeof x === 'string'));
-const denyEvidence = { count: operatorDenyCidrs.length, digest: createHash('sha256').update(denyBytes).digest('hex') };
+const {operatorDenyCidrs,denyEvidence} = loadOperatorDenyList(cfg.operatorDenyCidrsFile);
 
 // Check both names and embedded fixture markers, including renamed fixture executables.
 export function refuseFixture(path: string) {
