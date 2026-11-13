@@ -288,9 +288,25 @@ jobs:
         with:
           persist-credentials: false
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=""
+  container-images:
+    name: Container images (release targets)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      # Build every published target for one platform without pushing, so a release
+      # cannot be the first place a Dockerfile change is exercised.
+      - name: Build orchestrator, dashboard and KubeVirt worker targets
+        run: |
+          for target in orchestrator dashboard kubevirt; do
+            docker buildx build . --target "$target" --platform linux/amd64 --progress plain --output type=cacheonly
+          done
   ci-required:
     if: ${{ always() }}
-    needs: [typescript, rust, validate, dashboard, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance, remote-tls-acceptance]
+    needs: [typescript, rust, validate, dashboard, container-images, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance, remote-tls-acceptance]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

@@ -6,7 +6,8 @@ COPY dashboard/package*.json ./dashboard/
 RUN npm --prefix coordination ci --ignore-scripts && npm --prefix dashboard ci --ignore-scripts
 COPY coordination ./coordination
 COPY dashboard ./dashboard
-COPY script/prepare_cli.mjs ./script/prepare_cli.mjs
+# prepare_cli.mjs imports package_checks.mjs to verify the emitted module closure.
+COPY script/prepare_cli.mjs script/package_checks.mjs ./script/
 RUN npm --prefix coordination run build && npm --prefix dashboard run build
 
 FROM rust:1.99.1-bookworm AS rust-build
