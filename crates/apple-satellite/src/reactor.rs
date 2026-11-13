@@ -868,20 +868,54 @@ mod tests {
     use super::*;
     use crate::egress::Evidence;
     use std::net::TcpListener;
+    use std::sync::{Condvar, Mutex};
+
+    pub(super) const WAIT: Duration = Duration::from_secs(5);
+
+    #[derive(Default)]
+    pub(super) struct Gate {
+        pub(super) state: Mutex<(bool, bool)>, // blocked, entered
+        changed: Condvar,
+    }
+    impl Gate {
+        pub(super) fn block(&self) {
+            *self.state.lock().unwrap() = (true, false);
+        }
+        pub(super) fn enter(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.1 = true;
+            self.changed.notify_all();
+            let (state, timeout) = self
+                .changed
+                .wait_timeout_while(state, WAIT * 3, |s| s.0)
+                .unwrap();
+            assert!(
+                !timeout.timed_out() || !state.0,
+                "test gate was not released"
+            );
+        }
+        pub(super) fn wait_entered(&self) {
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(self.state.lock().unwrap(), WAIT, |s| !s.1)
+                .unwrap();
+            assert!(state.1, "provider did not enter gate");
+        }
+        pub(super) fn release(&self) {
+            self.state.lock().unwrap().0 = false;
+            self.changed.notify_all();
+        }
+    }
     #[derive(Clone)]
     struct Fake {
         listener: Arc<TcpListener>,
         denied: Arc<AtomicBool>,
-        evidence_gate: Arc<AtomicBool>,
-        evidence_entered: Arc<AtomicBool>,
+        evidence_gate: Arc<Gate>,
         resolves: Arc<AtomicU64>,
     }
     impl HostEvidence for Fake {
         fn evidence(&mut self, _: IpAddr) -> std::result::Result<Evidence, ErrorCode> {
-            self.evidence_entered.store(true, Ordering::Release);
-            while self.evidence_gate.load(Ordering::Acquire) {
-                thread::sleep(Duration::from_millis(1));
-            }
+            self.evidence_gate.enter();
             if self.denied.load(Ordering::Acquire) {
                 return Err(ErrorCode::RouteDenied);
             }
@@ -920,11 +954,10 @@ mod tests {
         let fake = Fake {
             listener: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
             denied: Arc::new(AtomicBool::new(false)),
-            evidence_gate: Arc::new(AtomicBool::new(false)),
-            evidence_entered: Arc::new(AtomicBool::new(false)),
+            evidence_gate: Arc::new(Gate::default()),
             resolves: Arc::new(AtomicU64::new(0)),
         };
-        let r = Reactor::new(
+        let mut r = Reactor::new(
             host,
             fake.clone(),
             Policy::new(&[]).unwrap(),
@@ -932,6 +965,9 @@ mod tests {
             Authority::new(clock::now() + Duration::from_secs(300)),
         )
         .unwrap();
+        // Opening validates evidence itself. Keep an unrelated empty periodic
+        // snapshot out of tests until they explicitly advance the clock.
+        r.next_recheck = clock::now() + Duration::from_secs(2);
         (r, peer, fake)
     }
     fn id(n: u128) -> Uuid {
@@ -945,19 +981,34 @@ mod tests {
             port: 443,
         })
         .unwrap();
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline {
             r.step().unwrap();
             if r.sockets.get(&id(n)).is_some_and(|s| s.stream.is_some()) {
                 return;
             }
-            thread::sleep(Duration::from_millis(1));
+            thread::yield_now();
         }
         panic!("connect did not finish");
     }
     fn collect(peer: &mut UnixStream) -> Vec<Frame> {
+        collect_frames(peer, |_| true)
+    }
+    fn collect_until(
+        r: &mut Reactor<Fake>,
+        peer: &mut UnixStream,
+        done: impl Fn(&[Frame]) -> bool,
+    ) -> Vec<Frame> {
+        collect_frames(peer, |frames| {
+            r.step().unwrap();
+            done(frames)
+        })
+    }
+    fn collect_frames(peer: &mut UnixStream, mut done: impl FnMut(&[Frame]) -> bool) -> Vec<Frame> {
         let mut decoder = data::Decoder::default();
         let mut result = Vec::new();
         let mut buf = [0; TURN];
+        let deadline = std::time::Instant::now() + WAIT;
         loop {
             let want = decoder.needed().min(TURN);
             match peer.read(&mut buf[..want]) {
@@ -967,7 +1018,16 @@ mod tests {
                         result.push(f);
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if done(&result) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "expected frames did not arrive: {result:?}"
+                    );
+                    thread::yield_now();
+                }
                 Err(e) => panic!("{e}"),
             }
         }
@@ -1040,16 +1100,11 @@ mod tests {
             .unwrap();
             tcp.write_all(b"reply").unwrap();
             tcp.shutdown(Shutdown::Write).unwrap();
-            let mut frames = collect(&mut peer);
-            for _ in 0..100 {
-                r.step().unwrap();
-                frames.extend(collect(&mut peer));
-                if frames.iter().any(|f| matches!(f, Frame::HalfClose { .. })) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
+            let frames = collect_until(&mut r, &mut peer, |frames| {
+                frames.iter().any(|f| matches!(f, Frame::HalfClose { .. }))
+            });
             assert!(frames.iter().any(|f| matches!(f, Frame::HalfClose { .. })));
+
             if remote_first {
                 r.frame(Frame::HalfClose {
                     version: 1,
@@ -1113,15 +1168,10 @@ mod tests {
         assert_eq!(body, b"hello");
         tcp.write_all(&body).unwrap();
         tcp.shutdown(Shutdown::Write).unwrap();
-        let mut frames = collect(&mut peer);
-        for _ in 0..20 {
-            r.step().unwrap();
-            frames.extend(collect(&mut peer));
-            if !r.sockets.contains_key(&id(1)) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        let frames = collect_until(&mut r, &mut peer, |frames| {
+            frames.iter().any(|f| matches!(f, Frame::Data { .. }))
+                && frames.iter().any(|f| matches!(f, Frame::HalfClose { .. }))
+        });
         assert!(frames
             .iter()
             .any(|f| matches!(f, Frame::Data { data, .. } if data == &STANDARD.encode(b"hello"))));
@@ -1130,16 +1180,28 @@ mod tests {
         open(&mut r, 2);
         fake.denied.store(true, Ordering::Release);
         clock::advance(Duration::from_secs(2));
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline {
             r.step().unwrap();
             if r.sockets.is_empty() {
                 break;
             }
-            thread::sleep(Duration::from_millis(1));
+            thread::yield_now();
         }
         clock::advance(Duration::ZERO);
         assert!(r.sockets.is_empty());
-        assert!(collect(&mut peer).iter().any(|f| matches!(
+        let frames = collect_until(&mut r, &mut peer, |frames| {
+            frames.iter().any(|f| {
+                matches!(
+                    f,
+                    Frame::Error {
+                        code: ErrorCode::RouteDenied,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(frames.iter().any(|f| matches!(
             f,
             Frame::Error {
                 code: ErrorCode::RouteDenied,
@@ -1154,34 +1216,41 @@ mod tests {
         open(&mut r, 1);
         open(&mut r, 2);
         // Complete any previous periodic snapshot before pinning the blocked query.
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline {
             r.reap();
             r.revalidate().unwrap();
             if r.recheck.is_none() {
                 break;
             }
-            thread::sleep(Duration::from_millis(1));
+            thread::yield_now();
         }
-        fake.evidence_entered.store(false, Ordering::Release);
-        fake.evidence_gate.store(true, Ordering::Release);
+        assert!(
+            r.recheck.is_none(),
+            "previous evidence query did not finish"
+        );
+        fake.evidence_gate.block();
         clock::advance(Duration::from_secs(2));
         r.revalidate().unwrap();
-        for _ in 0..100 {
-            if fake.evidence_entered.load(Ordering::Acquire) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(fake.evidence_entered.load(Ordering::Acquire));
+        fake.evidence_gate.wait_entered();
         let started = std::time::Instant::now();
         r.step().unwrap();
         assert_eq!(r.sockets.len(), 2);
         clock::advance(Duration::from_secs(4));
         r.step().unwrap();
         assert!(r.sockets.is_empty());
-        assert!(started.elapsed() < Duration::from_millis(100));
+        // Both steps finish while evidence is still gated. Five seconds allows
+        // loaded runners to schedule us, but is below the gate's 15 s backstop.
+        assert!(started.elapsed() < WAIT);
+        assert!(fake.evidence_gate.state.lock().unwrap().0);
+        let frames = collect_until(&mut r, &mut peer, |frames| {
+            [id(1), id(2)].iter().all(|expected| {
+                frames.iter().any(|f|
+        matches!(f, Frame::Error { id, code: ErrorCode::RouteDenied, .. } if id == expected))
+            })
+        });
         assert_eq!(
-            collect(&mut peer)
+            frames
                 .iter()
                 .filter(|f| matches!(
                     f,
@@ -1197,7 +1266,7 @@ mod tests {
         let workers = r.workers.len();
         r.step().unwrap();
         assert_eq!(r.workers.len(), workers);
-        fake.evidence_gate.store(false, Ordering::Release);
+        fake.evidence_gate.release();
         clock::advance(Duration::ZERO);
         assert!(r.close().complete());
     }
@@ -1302,11 +1371,11 @@ mod tests {
             bytes: TURN as u64,
         })
         .unwrap();
-        for _ in 0..10 {
-            r.step().unwrap();
-            thread::sleep(Duration::from_millis(1));
-        }
-        let frames = collect(&mut peer);
+        let frames = collect_until(&mut r, &mut peer, |frames| {
+            frames
+                .iter()
+                .any(|f| matches!(f, Frame::Data { id: i, .. } if *i == id(2)))
+        });
         assert!(frames
             .iter()
             .any(|f| matches!(f, Frame::Data { id: i, .. } if *i == id(2))));
@@ -1336,6 +1405,7 @@ mod tests {
 
 #[cfg(test)]
 mod worker_tests {
+    use super::tests::{Gate, WAIT};
     use super::*;
     use canaveral_guest_protocol::{
         data::{CancelReason, Request},
@@ -1378,11 +1448,12 @@ mod worker_tests {
                 .unwrap(),
             )
             .unwrap();
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline {
             if handle.ready.load(Ordering::Acquire) {
                 return (handle, guest);
             }
-            thread::sleep(Duration::from_millis(2));
+            thread::yield_now();
         }
         panic!("worker not ready");
     }
@@ -1408,11 +1479,12 @@ mod worker_tests {
                 Duration::ZERO,
             ))
             .unwrap();
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline {
             if !h.ready.load(Ordering::Acquire) {
                 break;
             }
-            thread::sleep(Duration::from_millis(2));
+            thread::yield_now();
         }
         assert!(!h.ready.load(Ordering::Acquire));
         let mut byte = [0];
@@ -1460,8 +1532,7 @@ mod worker_tests {
     }
     #[derive(Clone)]
     struct Stalled {
-        gate: Arc<AtomicBool>,
-        entered: Arc<AtomicBool>,
+        gate: Arc<Gate>,
     }
     impl HostEvidence for Stalled {
         fn evidence(
@@ -1476,10 +1547,7 @@ mod worker_tests {
             true
         }
         fn resolve(&mut self, _: &str, _: Duration) -> std::result::Result<Vec<IpAddr>, ErrorCode> {
-            self.entered.store(true, Ordering::Release);
-            while self.gate.load(Ordering::Acquire) {
-                thread::sleep(Duration::from_millis(1));
-            }
+            self.gate.enter();
             Err(ErrorCode::ConnectTimeout)
         }
         fn connect(
@@ -1494,9 +1562,9 @@ mod worker_tests {
     #[test]
     fn stalled_provider_cannot_delay_control_or_assert_closed() {
         let provider = Stalled {
-            gate: Arc::new(AtomicBool::new(true)),
-            entered: Arc::new(AtomicBool::new(false)),
+            gate: Arc::new(Gate::default()),
         };
+        provider.gate.block();
         let (mut h, mut guest) = start(provider.clone());
         guest
             .write_all(
@@ -1512,35 +1580,31 @@ mod worker_tests {
                 .unwrap(),
             )
             .unwrap();
-        for _ in 0..100 {
-            if provider.entered.load(Ordering::Acquire) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        assert!(provider.entered.load(Ordering::Acquire));
+        provider.gate.wait_entered();
         let (mut control, mut peer) = crate::guest::tests::session_pair();
         crate::guest::tests::send_ready(&control, &mut peer);
         assert!(control.pump(100.0).unwrap());
         let start = std::time::Instant::now();
         let closed = h.shutdown();
-        provider.gate.store(false, Ordering::Release);
         assert!(!closed.complete());
-        assert!(start.elapsed() < Duration::from_millis(2100));
+        assert!(start.elapsed() < WAIT);
+        assert!(provider.gate.state.lock().unwrap().0);
         let start = std::time::Instant::now();
         drop(h);
-        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(start.elapsed() < WAIT);
+        provider.gate.release();
         assert!(control.ready(101.0));
     }
     #[test]
     fn invalid_wire_closes_only_data_and_joins_descriptors() {
         let (mut h, mut guest) = start(Deny);
         guest.write_all(&0u32.to_be_bytes()).unwrap();
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline {
             if h.worker.as_ref().unwrap().is_finished() {
                 break;
             }
-            thread::sleep(Duration::from_millis(2));
+            thread::yield_now();
         }
         assert!(h.worker.as_ref().unwrap().is_finished());
         assert!(h.shutdown().complete());

@@ -60,22 +60,44 @@ try {
  const contender=await submit('success');assert.equal((await run(path2)).code,0);assert.equal((await inspect(contender)).state,'waitingForResources');assert(!existsSync(join(dir,'state2','workspace')));
  await call('/v1/model-jobs/'+second+'/cancel' ,{version:1,applicationId:appId,id:second,message:{type:'cancel'}},app.credential);assert.equal((await once(c,'exit'))[0],0,errors);view=await inspect(second);assert.equal(view.state,'cancelled');assert.equal(view.reservationHeld,false);assert.throws(()=>process.kill(cancelledPid,0),{code:'ESRCH'});assert(!existsSync(join(dir,'state','workspace')));assert.equal((await run(path2)).code,0);assert.equal((await inspect(contender)).state,'succeeded');assert(!existsSync(join(dir,'state2','workspace')));
  // A stalled listing must not hold the generation deadline hostage.
- let delayedListings=0;
+ let delayedListings=0,listingStarted;
  const stalled=http.createServer((req,res)=>{
-   if(req.url.endsWith('/assignments')){delayedListings++;setTimeout(()=>res.destroy(),2000);req.resume();return;}
+   if(req.url.endsWith('/assignments')){delayedListings++;listingStarted??=performance.now();setTimeout(()=>res.destroy(),2000);req.resume();return;}
    const upstream=http.request({hostname:'127.0.0.1',port,path:req.url,method:req.method,headers:req.headers},reply=>{res.writeHead(reply.statusCode,reply.headers);reply.pipe(res);});req.pipe(upstream);upstream.on('error',()=>res.destroy());
  });
  await new Promise(r=>stalled.listen(0,'127.0.0.1',r));
  try {
    const stalledPath=join(dir,'stalled.json');
-   writeFileSync(stalledPath,JSON.stringify({...config,controller:`http://127.0.0.1:${stalled.address().port}`,execution:{...config.execution,stateDir:join(dir,'stalled-state'),executionMs:300}}),{mode:0o600});
+   writeFileSync(stalledPath,JSON.stringify({...config,controller:`http://127.0.0.1:${stalled.address().port}`,execution:{...config.execution,stateDir:join(dir,'stalled-state'),executionMs:300,contactMs:5000}}),{mode:0o600});
    const stalledJob=await submit('hang');const stalledChild=await start(runner,[stalledPath]);let diagnostic='';stalledChild.stderr.on('data',b=>diagnostic+=b);
+   const exited=once(stalledChild,'exit');
    const started=join(dir,'stalled-state','workspace','generation.started');
-   for(let i=0;i<500&&!existsSync(started);i++)await new Promise(r=>setTimeout(r,10));
+   let generationStart=performance.now();
+   for(let i=0;i<500&&!existsSync(started);i++){
+     generationStart=performance.now();
+     await new Promise(r=>setTimeout(r,10));
+   }
    assert(existsSync(started),'stalled fixture did not start');
    const pid=Number(readFileSync(join(dir,'stalled-state','workspace','runtime.pid'),'utf8'));
-   const before=performance.now();assert.equal((await once(stalledChild,'exit'))[0],0,diagnostic);
-   assert(performance.now()-before<900,'controller listing postponed execution deadline');
+   // Use the poll before the marker appeared, so marker detection cannot
+   // shorten the measured interval. Observe stop independently of runner exit.
+   let stopObserved;
+   for(let i=0;i<500;i++){
+     try {process.kill(pid,0);} catch(error){
+       if(error.code!=='ESRCH')throw error;
+       stopObserved=performance.now();break;
+     }
+     await new Promise(r=>setTimeout(r,10));
+   }
+   // Supervision checks every ~20 ms; fencing allows 50 ms TERM grace and
+   // checks every ~10 ms. Add 1 s for fencing and CI scheduling/polling slack.
+   // 1.3 s stays below both the 2 s listing stall and 5 s contact timeout.
+   assert(stopObserved-generationStart<300+1000,'controller listing postponed runtime stop');
+   assert.equal((await exited)[0],0,diagnostic);
+   // No stop timestamp is persisted in the runner journal. Allow scheduling and
+   // cleanup slack from the first listing request, retaining 200 ms of separation
+   // from its 2 s stall. Measuring at the proxy avoids marker-polling latency.
+   assert(performance.now()-listingStarted<1800,'controller listing postponed execution deadline');
    assert(delayedListings>0);const stopped=await inspect(stalledJob);assert.equal(stopped.state,'failed',diagnostic);assert.equal(stopped.reservationHeld,false);
    assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});assert(!existsSync(join(dir,'stalled-state','workspace')));
  } finally {stalled.closeAllConnections();await new Promise(r=>stalled.close(r));}
