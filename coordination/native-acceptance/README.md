@@ -33,7 +33,7 @@ CANAVERAL_NATIVE_ACCEPTANCE=operator-authorized \
   node coordination/native-acceptance/run.ts /ABS/private-config.json
 ```
 
-Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. The printed directory is unique per invocation. Keep it private: raw configuration, credentials, operational output and receipts stay under `private/`. Files outside `private/` contain allow-listed outcomes, numeric attributed process metadata, console milestones and digests. Proxy evidence filenames use role labels. Never commit native evidence. There is no evidence upload.
+Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. Stdout prints only the opaque run label, unique per invocation. Locate it beneath the configured private state root. Keep that root private: raw configuration, credentials, operational output and receipts stay under `private/`. Files outside `private/` contain allow-listed outcomes, numeric attributed process metadata, console milestones and digests. Proxy evidence filenames use role labels. Never commit native evidence. There is no evidence upload.
 
 For setup without boot artifacts, set `setupOnly: true`, supply a nonexistent manifest path and an explicitly unverified expected `bundleDigest`; `builder` may be omitted. This exercises actual controller startup, fresh state, TLS, application creation, enrollment, domain/image/grant/approval configuration and catalog reads, then stops without acquiring or claiming anything. The expected digest is catalog configuration only: `artifactVerified: false` and `nativeAcceptance: false` prevent treating this as image verification. Setup-only stops before native execution even when artifacts exist.
 
@@ -651,3 +651,71 @@ under Node's strict, throw and warn rejection modes. No native guest is started.
 After the coordination build, set `CANAVERAL_FAILURE_BASELINE=79dd1ac` when running
 that test to additionally verify that each scenario exposes its synthetic secret
 on the previous implementation. Ordinary runs require no historical Git objects.
+
+## Final harness verdict hardening (2026-11-13)
+
+The final verdict is written after case assertions and shutdown. Launch failures
+carry a null exit code and a distinct failure marker, so a missing executable
+cannot satisfy recovery's expected exit 1. A sticky internal-failure flag also
+covers proxy callbacks, evidence writes, fatal events and cleanup errors/timeouts.
+Only completed cases with no case or internal failures can publish
+`nativeAcceptance: true`; other results carry the fixed
+`native_acceptance_failed` code. Unwritable evidence storage still forces a
+nonzero exit, though it cannot guarantee a persisted result. Stdout contains only
+the opaque run label. Shared signature evidence omits signing identifiers.
+
+Audit scope: `run.ts` startup/configuration, fixture refusal, resource defaults,
+launch/completion, polling, proxy callbacks, API parsing, enrollment, setup-only
+branch, snapshots, process attribution/lsof races, guest readiness/mountinfo,
+cleanup, queue sequencing, workspace recovery, egress-off, tenant ownership,
+command/renewal/expiry, loss/deadline/recovery, outer catch and final shutdown;
+`failure-boundary.ts` fatal listeners/write guard; `workspace.ts` case aggregation,
+commands, clone/npm conditional execution, transfers/replacement/conflicts,
+disk-full, tenant checks and active expiry; `proxy.ts` fragmented output/status
+assertions; `operator-policy.ts` parser, table pins, interface refresh and denial
+aggregation; `processes.ts` row parsing/attribution; `evidence.ts` signature,
+process, journal, console and recursive receipt exporters. Test files checked:
+`evidence.test.ts`, `operator-policy.test.ts`, `processes.test.ts`,
+`startup.test.ts`, `verdict.test.ts`, and the coordination failure-boundary and
+proxy tests. Private operational receipts remain under `private/`; public
+evidence uses the existing allowlist. No native production/topology claim changes.
+
+Unsupported explicit workspace versions now fail startup rather than silently
+skipping workspace cases. The full native run uses version 1; this validation
+was tightened while that run was active and does not change its execution path.
+Additional audit fixes require boolean cleanup journal flags and both upload
+rejection and a durable failed transfer state. Before these checks, truthy
+`"false"` flags and a succeeded transfer with a stale error code could satisfy
+negative cases. The satellite-loss case now verifies the requested SIGKILL
+completion and checks controller survival before completing cases. Workspace
+fatal errors use a fixed failure code rather than converting thrown values.
+
+Portable verdict regressions exercise the actual harness boundaries with a
+genuine expected pass plus launch, write, callback, assertion, case, fatal, warning
+and shutdown failures. With `CANAVERAL_VERDICT_BASELINE=6de2f08`, they demonstrate
+false acceptance before the fix for launch/write/callback/shutdown failures,
+private-path stdout disclosure, truthy cleanup flags and stale transfer errors.
+Signature evidence regression refuses the formerly exported identifier.
+
+One operator-authorized full run, `canaveral-native-O8pL7k`, exited zero and
+published `state: cases-completed`, `nativeAcceptance: true` and
+`caseFailureCount: 0`. It used the existing PR 24 artifacts and private operator
+deny file, one guest at a time, including the two queue guests in sequence.
+Queue admission/commands, workspace clone/npm, transfer and policy cases,
+egress-off, ownership checks, renewal beyond the original deadline, release,
+ordinary expiry and satellite-loss recovery passed. All seven normal cleanup
+groups passed. Independent helper absence was observed 258 ms after the loss
+deadline, before recovery; recovery retained the unknown reservation.
+
+Post-run attribution, helper lock and open-handle checks preceded removal of the
+owned residual workspace/bootstrap and relay storage. All owned runtime
+processes and storage are gone. Private evidence and the unchanged journal/database
+remain; the unknown reservation still requires operator reconciliation. No
+cleanup receipt or capacity release was fabricated. Unrelated VMs were untouched.
+
+Validation passed: fixture binaries built first with Cargo concurrency two;
+coordination typecheck/build and all 1064 tests at concurrency two (zero skips);
+standalone harness/test typecheck; 23 harness/evidence/policy/process/verdict tests
+and 18 failure-boundary tests; no-Python check; private-path diff scan; shared
+native evidence scan against private configuration and deny values, addresses
+and private paths. Stdout contained only the opaque run label; stderr was empty.
