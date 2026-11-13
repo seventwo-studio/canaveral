@@ -51,3 +51,33 @@ and `ca.crt`; the dashboard receives only the public CA. Kubernetes takes a
 server certificate must cover the controller names clients actually use.
 Operator/enrollment credentials remain a different Secret or volume. These
 inputs are examples requiring operator provisioning, not deployment acceptance.
+
+## Release procedure
+
+The next source release is 0.3.0. Internal coordination/dashboard npm packages
+keep their independent private 0.1.0 versions; package checks do not couple them
+to the root version. Do not reuse historical 0.2.2 registry tags after the history
+rewrite: immutable identity checks intentionally reject another source revision.
+
+1. Merge the reviewed change into `main` and require green validation at the
+   selected full commit. Verify root `package.json` and lockfile match the release.
+2. With separate release authorization, create `v0.3.0` on that exact commit and
+   push the tag. Create one **draft** GitHub release with that tag and set its
+   target to the full commit SHA (not the string `main`). Add reviewed notes.
+3. Dispatch **Publish Canaveral release** from `main`, supplying `v0.3.0`.
+   The GitHub-hosted runner checks out that tag, verifies its main ancestry and
+   draft identity, and uses `GITHUB_TOKEN` with contents/package write permission.
+   Docker buildx and QEMU build `linux/amd64,linux/arm64`; kubectl and Flux are
+   version-pinned with verified checksums. No cluster credentials are needed.
+4. The script publishes `ghcr.io/seventwo-studio/canaveral`, `canaveral-dashboard`
+   and `canaveral-kubevirt`, all under the `seventwo-studio` owner. It pins their
+   version/digests into the namespace-free `orchestrator/`, `dashboard/` and
+   `kubevirt/` Kustomizations, publishes `deploy-0.3.0` as a Flux OCI artifact,
+   uploads `release.json` and publishes the draft. Review the metadata/digests
+   before selecting them in an installation-specific GitOps overlay.
+
+Dispatch is publication authorization, not a preview. No workflow run creates a
+release tag or deploys to Kubernetes. A failed run may have published some images;
+inspect the registry and draft before retrying the same exact commit. Identity
+mismatches require a new reviewed version, never overwriting an old tag. Release
+publication and portable validation do not establish installed-cluster acceptance.

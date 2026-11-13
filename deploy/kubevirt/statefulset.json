@@ -1,0 +1,206 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "StatefulSet",
+  "metadata": {
+    "name": "canaveral-worker"
+  },
+  "spec": {
+    "serviceName": "canaveral-worker",
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "app": "canaveral-worker"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "canaveral-worker"
+        }
+      },
+      "spec": {
+        "serviceAccountName": "canaveral-worker",
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "runAsGroup": 10001,
+          "fsGroup": 10001,
+          "fsGroupChangePolicy": "OnRootMismatch",
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "containers": [
+          {
+            "name": "worker",
+            "image": "canaveral-kubevirt:local",
+            "imagePullPolicy": "IfNotPresent",
+            "args": [
+              "--url",
+              "https://orchestrator.canaveral.svc:8765",
+              "host",
+              "--config",
+              "/config/host.json",
+              "--state",
+              "/data/host",
+              "--enrollment-token-file",
+              "/run/credentials/enrollment.token",
+              "--ca-file",
+              "/run/tls/ca.crt"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              },
+              "limits": {
+                "cpu": "1",
+                "memory": "512Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "state",
+                "mountPath": "/data"
+              },
+              {
+                "name": "config",
+                "mountPath": "/config",
+                "readOnly": true
+              },
+              {
+                "name": "credentials",
+                "mountPath": "/run/credentials",
+                "readOnly": true
+              },
+              {
+                "name": "controller-ca",
+                "mountPath": "/run/tls",
+                "readOnly": true
+              },
+              {
+                "name": "tmp",
+                "mountPath": "/tmp"
+              }
+            ],
+            "env": [
+              {
+                "name": "NODE_EXTRA_CA_CERTS",
+                "value": "/run/tls/ca.crt"
+              },
+              {
+                "name": "HOME",
+                "value": "/tmp"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "config",
+            "configMap": {
+              "name": "canaveral-worker-config"
+            }
+          },
+          {
+            "name": "credential-source",
+            "secret": {
+              "secretName": "canaveral-enrollment",
+              "defaultMode": 288
+            }
+          },
+          {
+            "name": "controller-ca",
+            "configMap": {
+              "name": "canaveral-controller-ca"
+            }
+          },
+          {
+            "name": "tmp",
+            "emptyDir": {
+              "sizeLimit": "128Mi"
+            }
+          },
+          {
+            "name": "credentials",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "stage-credentials",
+            "image": "canaveral-kubevirt:local",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "install",
+              "-m",
+              "0600",
+              "-t",
+              "/run/credentials",
+              "/run/credential-source/enrollment.token"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "16Mi"
+              },
+              "limits": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "credential-source",
+                "mountPath": "/run/credential-source",
+                "readOnly": true
+              },
+              {
+                "name": "credentials",
+                "mountPath": "/run/credentials"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "name": "state"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "1Gi"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

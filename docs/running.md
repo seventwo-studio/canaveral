@@ -84,19 +84,19 @@ Android emulator and iOS simulator runners use native SDKs rather than the VM
 backends above. See [mobile devices](devices.md) for host prerequisites, examples,
 control operations and acceptance. The controller can stay in Docker or Kubernetes.
 
-The Compose example keeps state and credentials in separate named volumes, with private credentials readable by the container's fixed user:
+Set `CANAVERAL_TLS_DIRECTORY` to an absolute directory containing your TLS files before using Compose. The Compose example keeps state and credentials in separate named volumes, with private credentials readable by the container's fixed user:
 
 ```sh
 docker compose --profile setup run --rm init
 docker compose up -d orchestrator
-docker compose run --rm --no-deps orchestrator \
-  --url http://orchestrator:8765 --allow-http \
+docker compose run --rm --no-deps -e NODE_EXTRA_CA_CERTS=/run/tls/ca.crt orchestrator \
+  --url https://orchestrator:8765 \
   --token-file /run/credentials/admin.token hosts
 ```
 
-Run initialization once. It intentionally fails if credential files already exist. The host-published port is bound to `127.0.0.1`; add your private TLS proxy for remote use. Internal Compose HTTP is explicitly enabled in the example CLI call. Export an enrollment file to a protected local destination if registering native hosts, for example by redirecting `docker compose run --rm --no-deps --entrypoint cat orchestrator /run/credentials/enrollment.token` directly to that file; do not paste credentials into chat or command-line flags.
+Run initialization once. It intentionally fails if credential files already exist. The host-published port is bound to `127.0.0.1`; add your private TLS proxy for remote use. Set `CANAVERAL_TLS_DIRECTORY` before running Compose. It must contain `server.crt`, `server.key` and `ca.crt`, readable by UID 10001. The server certificate must cover `orchestrator` and any external name clients use. The CLI call trusts that CA through `NODE_EXTRA_CA_CERTS`. Export an enrollment file to a protected local destination if registering native hosts, for example by redirecting `docker compose run --rm --no-deps --entrypoint cat orchestrator /run/credentials/enrollment.token` directly to that file; do not paste credentials into chat or command-line flags.
 
-The [optional web dashboard](dashboard.md) runs separately with `node coordination/dist/src/cli.js dashboard` or `docker compose --profile dashboard up -d`. It is not required by the orchestrator. Kubernetes has a separate opt-in `deploy/kubernetes/dashboard.json` Deployment and internal Service.
+The [optional web dashboard](dashboard.md) runs separately with `node coordination/dist/src/cli.js dashboard` or `docker compose --profile dashboard up -d`. It is not required by the orchestrator. Kubernetes has a separate opt-in `deploy/kubernetes/dashboard` Deployment and internal Service.
 
 Build the worker images when needed:
 
@@ -110,29 +110,106 @@ A Linux libvirt worker container must reach the host's libvirt Unix socket and s
 
 ## Kubernetes
 
-`deploy/kubernetes/orchestrator.json` defines a namespace, one controller Deployment, a state PVC and internal Service. Build/publish or load `canaveral:local` into the target cluster, then replace the image reference as appropriate. Create a Secret from local private files before starting the Deployment:
+The namespace overlays in `deploy/kubernetes/` use the namespace-free
+`deploy/orchestrator`, `deploy/dashboard` and `deploy/kubevirt` stages as their
+single source. Build/load the local images or select immutable released image
+references through a site overlay. Configure storage classes before applying if
+your cluster has no default class. The controller and worker need persistent volumes.
+
+Provision TLS before starting the pods. Supply a CA-signed server certificate
+(`server.crt`, including intermediates), its key (`server.key`) and the trust root
+(`ca.crt`). Its DNS SANs must include `orchestrator`, `orchestrator.canaveral`,
+and `orchestrator.canaveral.svc`, plus any external ingress name. The dashboard
+uses `https://orchestrator:8765`; the worker uses
+`https://orchestrator.canaveral.svc:8765`. Your existing PKI or cert-manager can
+issue these files; cert-manager is optional. Keep the key private.
+
+For a fresh installation, run these ordered steps from a built checkout:
 
 ```sh
-kubectl create namespace canaveral
+# Create namespaces and enforce Restricted Pod Security for the shipped pods.
+kubectl apply -k deploy/kubernetes/namespaces
+# One-time initialization refuses to overwrite existing credential files.
+node coordination/dist/src/cli.js init ./secrets
 kubectl -n canaveral create secret generic canaveral-credentials \
   --from-file=admin.token=./secrets/admin.token \
   --from-file=enrollment.token=./secrets/enrollment.token
-kubectl apply -f deploy/kubernetes/orchestrator.json
+kubectl -n canaveral create secret tls canaveral-controller-tls \
+  --cert=./tls/server.crt --key=./tls/server.key
+kubectl -n canaveral create configmap canaveral-controller-ca \
+  --from-file=ca.crt=./tls/ca.crt
+kubectl -n canaveral-guests create configmap canaveral-controller-ca \
+  --from-file=ca.crt=./tls/ca.crt
+kubectl -n canaveral-guests create secret generic canaveral-enrollment \
+  --from-file=enrollment.token=./secrets/enrollment.token
+kubectl apply -k deploy/kubernetes/orchestrator
+# Optional dashboard; requires the CA ConfigMap above.
+kubectl apply -k deploy/kubernetes/dashboard
 ```
 
-Use one replica with the included Recreate strategy and persistent local/block storage for SQLite. The controller does not need Kubernetes API access. Add a private TLS ingress for external native hosts. A local `kubectl -n canaveral port-forward service/orchestrator 8765:8765` permits using the normal CLI against loopback.
+Use one replica with the included Recreate strategy and persistent local/block storage for SQLite. The controller does not need Kubernetes API access. Add a private TLS ingress for external native hosts. For port-forward access, retain a URL hostname covered by the certificate and resolve it to loopback locally; a loopback IP URL needs its own IP SAN. Keep CA verification enabled.
 
 Running VMs inside Kubernetes requires a working KubeVirt + CDI installation, virtualization-capable nodes, suitable firmware, storage and prepared template PVCs. It is separate from merely running the Canaveral orchestrator in a pod. KubeVirt handles KVM access and pod scheduling; the controller pod is not privileged. macOS VM creation continues through separate Apple hosts, not generic Kubernetes Linux nodes.
 
-Edit `deploy/kubernetes/worker-kubevirt.json` for the intended templates, architectures, pool capacity limit and worker image. Its default examples require `linux-server-template` and `linux-desktop-template` PVCs in `canaveral-guests`. Source PVCs must be offline and their sizes must fit the advertised minimums. Build/load the worker image, create the namespace and a separate enrollment-only Secret there, then apply:
+Set the intended templates, architectures and pool capacity in a patch to `deploy/kubevirt/configmap.json`; select the worker image in your site overlay over `deploy/kubernetes/worker-kubevirt`. Its default examples require `linux-server-template` and `linux-desktop-template` PVCs in `canaveral-guests`. Source PVCs must be offline and their sizes must fit the advertised minimums. Build/load the worker image and provision the namespace, CA and enrollment Secret above, then apply:
 
 ```sh
-kubectl create namespace canaveral-guests
-kubectl -n canaveral-guests create secret generic canaveral-enrollment \
-  --from-file=enrollment.token=./secrets/enrollment.token
-kubectl apply -f deploy/kubernetes/worker-kubevirt.json
+kubectl apply -k deploy/kubernetes/worker-kubevirt
 ```
 
-The worker StatefulSet retains its host identity on a PVC and uses namespace-scoped access to VM resources and source-volume cloning. Its state is separate from individual VM root disks. Do not scale one pool configuration into multiple independent offers with the same capacity; divide the capacity deliberately. The in-cluster example explicitly permits private HTTP to the controller Service. Template VMs use independent CDI-cloned disks and `Always`/`Halted` run strategies. Console/VNC access uses `virtctl` and your existing Kubernetes credentials. Guest/network access and Windows secure-boot/TPM storage need acceptance against the cluster's actual KubeVirt configuration.
+The CLI accepts credentials only as regular files owned by its user with mode `0600`, and keeps host state in a directory with the same ownership and mode `0700`. Kubernetes Secret volumes are root-owned symbolic links, and a fresh volume root is not private to the process user. The controller and worker therefore copy their Secret entries into a memory-backed volume with a `stage-credentials` init container, and the worker keeps its state in `/data/host` on its PVC. An existing worker whose identity was saved at the PVC root needs `--state /data` kept, or a deliberate move of that directory, to keep the same host identity. Both pods set `fsGroupChangePolicy: OnRootMismatch`, so the kubelet adjusts group ownership only while the volume root does not yet match. The default recursive change would add group permissions to `/data/host` on every remount, and the worker would then refuse its own state. Storage drivers that ignore `fsGroup` must still give user 10001 write access to the volume root. CSI drivers that apply `fsGroup` themselves (`VOLUME_MOUNT_GROUP`) bypass this kubelet policy and need their own check that remounts keep `/data/host` private. The policy does not repair state already given group permissions by an earlier recursive mount; restore mode `0700` on such directories and `0600` on their files as user 10001 before restarting.
+
+The worker StatefulSet retains its host identity on a PVC and uses namespace-scoped access to VM resources and source-volume cloning. Its state is separate from individual VM root disks. Do not scale one pool configuration into multiple independent offers with the same capacity; divide the capacity deliberately. The in-cluster example uses HTTPS with an explicit CA file. Template VMs use independent CDI-cloned disks and `Always`/`Halted` run strategies. Console/VNC access uses `virtctl` and your existing Kubernetes credentials. Guest/network access and Windows secure-boot/TPM storage need acceptance against the cluster's actual KubeVirt configuration.
 
 These files are deployment inputs, not evidence of an installed cluster or successful VM boots. The implementation does not automatically deploy into a current kubeconfig context.
+
+### Private ingress and optional network policies
+
+Expose the orchestrator only through private TLS passthrough or TLS re-encryption.
+For re-encryption, configure the proxy to verify the upstream CA and a certificate
+SAN such as `orchestrator.canaveral.svc`; cleartext upstream traffic cannot reach
+the TLS-only listener. Include the external API hostname in the appropriate server
+certificate. Keep native runners on a private trusted access path.
+
+Expose the dashboard through a private HTTPS proxy to Service `dashboard:8766`.
+Preserve the incoming Host header and proxy the entire origin without a path
+prefix. See [dashboard proxy and account setup](dashboard.md). Ingress resources
+and controller annotations are installation-specific and are not in the base install.
+
+The separately applied `deploy/kubernetes/network-policies` example denies
+Canaveral namespace ingress except dashboard and worker access to the controller.
+It also restricts worker egress to DNS, the controller and an example API endpoint.
+Copy and edit it for your API server IPs/ports, DNS topology and guest preparation
+or SSH destinations before applying. Service DNAT and NetworkPolicy ordering vary
+by CNI; verify the actual API destination. A conformant cluster may have no
+NetworkPolicy-enforcing CNI, so verify enforcement independently.
+
+```sh
+# Only after adapting the policy inputs and adding private ingress/runners rules:
+kubectl apply -k deploy/kubernetes/network-policies
+```
+
+The file includes disabled examples for ingress-controller and external-runner
+sources. Replace their selectors/CIDRs and enable them deliberately. No policy is
+automatically applied by the base overlays or release bundle.
+
+### Pod Security and OpenShift
+
+The shipped Canaveral pods use non-root UID/GID 10001, no privilege escalation,
+dropped capabilities and RuntimeDefault seccomp. Worker state and kubectl cache
+live on its PVC; temporary files use an emptyDir at `/tmp` (also HOME). SSH uses
+explicit state paths for keys and known hosts. The root filesystem stays read-only.
+Namespace creation enforces Restricted Pod Security. KubeVirt launcher/importer
+pods may need exemptions managed by the KubeVirt/CDI operator and your cluster
+administrator; verify those before offering VM capacity in `canaveral-guests`.
+These labels do not establish that guest pods meet Restricted.
+
+OpenShift restricted-v2 SCC allocates UIDs and groups, so the fixed `runAsUser`,
+`runAsGroup` and `fsGroup` 10001 fields conflict with its defaults. An OpenShift
+overlay can remove those fields for SCC assignment, but that alone is not tested
+arbitrary-UID support: the image defaults to 10001:10001 and its built-in data/home
+directories are owned by that user, without arbitrary-group write permissions.
+Provision writable PVC/emptyDir ownership and readable mounted keys for the
+assigned group, and verify private-state ownership checks under that UID. Otherwise
+use a dedicated narrowly scoped SCC permitting 10001. Neither route has native
+OpenShift acceptance here; do not grant privileged access to the Canaveral pods.

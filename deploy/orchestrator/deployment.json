@@ -27,6 +27,7 @@
           "runAsUser": 10001,
           "runAsGroup": 10001,
           "fsGroup": 10001,
+          "fsGroupChangePolicy": "OnRootMismatch",
           "seccompProfile": {
             "type": "RuntimeDefault"
           }
@@ -117,7 +118,7 @@
             }
           },
           {
-            "name": "credentials",
+            "name": "credential-source",
             "secret": {
               "secretName": "canaveral-credentials",
               "defaultMode": 288
@@ -139,6 +140,59 @@
                 }
               ]
             }
+          },
+          {
+            "name": "credentials",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "stage-credentials",
+            "image": "canaveral:local",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "install",
+              "-m",
+              "0600",
+              "-t",
+              "/run/credentials",
+              "/run/credential-source/admin.token",
+              "/run/credential-source/enrollment.token"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "16Mi"
+              },
+              "limits": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "credential-source",
+                "mountPath": "/run/credential-source",
+                "readOnly": true
+              },
+              {
+                "name": "credentials",
+                "mountPath": "/run/credentials"
+              }
+            ]
           }
         ]
       }

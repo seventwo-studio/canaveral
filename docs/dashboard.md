@@ -264,8 +264,8 @@ docker compose --profile dashboard up -d
 Without that profile, Compose starts only the orchestrator. The dashboard publishes loopback port 8766 and reaches the orchestrator through the internal network. It mounts no credentials, state or host sockets. Bootstrap the first account through the controller CLI, then sign in to the dashboard with the account:
 
 ```sh
-docker compose run --rm --no-deps orchestrator \
-  --url http://orchestrator:8765 --allow-http \
+docker compose run --rm --no-deps -e NODE_EXTRA_CA_CERTS=/run/tls/ca.crt orchestrator \
+  --url https://orchestrator:8765 \
   --token-file /run/credentials/admin.token admin create --username admin
 ```
 
@@ -273,7 +273,7 @@ For Kubernetes, build the optional image and select it in the separate deploymen
 
 ```sh
 docker build --target dashboard -t canaveral-dashboard:local .
-kubectl apply -f deploy/kubernetes/dashboard.json
+kubectl apply -k deploy/kubernetes/dashboard
 kubectl -n canaveral port-forward service/dashboard 8766:8766
 ```
 
