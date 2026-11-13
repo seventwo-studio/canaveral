@@ -1,3 +1,4 @@
+import {verifyOperatorDenials} from './operator-policy.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash,randomBytes} from 'node:crypto';
@@ -30,6 +31,7 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
     const result=await command(proxyProbe(target));save('proxy-'+label+'.json',result);
     denials.push({result,code});
   }
+  save('operator-hairpin-denial.json',await verifyOperatorDenials(cfg.operatorDenyCidrs,cfg.denyEvidence,command));
   const allowed=await command(proxyProbe('github.com:443'));save('proxy-allowed.json',allowed);
   for(const {result,code} of denials) check('proxy denial '+code,()=>assertProxy(result,'HTTP/1.1 403 Forbidden',code));
   check('allowed CONNECT',()=>assertProxy(allowed, 'HTTP/1.1 200 Connection Established'));
@@ -60,6 +62,8 @@ export async function workspaceCases(o:{cfg:Record<string,any>;origin:string;ca:
     let caught: string | undefined;
     try {await uploadWorkspaceFile(client,{id,member:'primary',direction:'upload',path,bytes:bytes.length,sha256,replace:false},(async function*(){yield bytes;})(),journal,wait);} catch(e) {caught=String(e);}
     const transfer=await client.transfer(id);save('workspace-'+code+'.json',{transfer,caught});
+    assert(caught !== undefined, 'upload must reject');
+    assert.equal(transfer.state,'failed');
     assert.equal(transfer.error?.code,code);
   }
   const replacement=Buffer.from('replacement over existing regular file');

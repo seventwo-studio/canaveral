@@ -356,7 +356,7 @@ export class LinuxLeases {
       const offered = JSON.parse(image.capabilities) as string[];
       if (required.some(c => !offered.includes(c))) unsupported();
       for (const key of keys) if (amount[key] < minimum[key]) throw new ServiceError(`Requested ${key} is below the image minimum.`, 400);
-      this.quota(db, application, amount);
+      this.quota(db, application, amount, image.workspace_version === 1);
       // Balance only approved, fitting domains; the resulting placement stays pinned.
       const reservation = randomUUID();
       const domain = this.domains.placements(db, this.placements(db, image), amount).find(d => this.domains.reserve(db, { id: reservation, domain: d, kind: "linux-lease", owner: id, resources: amount }, now));
@@ -738,9 +738,15 @@ export class LinuxLeases {
   }
 
   /** Active lease count and held reservations (including terminal-but-unreclaimed) bound admission. */
-  private quota(db: DatabaseSync, application: Application, amount: Resources): void {
+  private quota(db: DatabaseSync, application: Application, amount: Resources, workspace: boolean): void {
     refreshLegacyLeases(db, this.now());
     const usage = applicationLeaseUsage(db, application.id);
+    if (workspace) {
+      const held = Number(db.prepare(`SELECT COUNT(*) AS n FROM linux_leases l JOIN resource_reservations r ON r.id=l.reservation
+        WHERE l.application=? AND l.workspace_version=1 AND r.state='held'`).get(application.id)!.n);
+      if (held >= (application.limits.maxConcurrentBoxes ?? application.limits.activeLeases))
+        throw new ServiceError("Application concurrent box limit exceeded.", 429);
+    }
     if (usage.active >= application.limits.activeLeases) throw new ServiceError("Application active lease limit exceeded.", 429);
     if (keys.some(key => usage.resources[key] + amount[key] > application.limits.resources[key])) throw new ServiceError("Application resource limit exceeded.", 429);
   }

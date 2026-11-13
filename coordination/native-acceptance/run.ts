@@ -1,3 +1,5 @@
+import {internalFailure, guardEvidenceWrite, hasInternalFailure, onInternalFailure} from './failure-boundary.ts';
+import {loadOperatorDenyList} from './operator-policy.ts';
 import {ownedProcesses,processRows,vzPids} from './processes.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
 import {workspaceCases} from './workspace.ts';
@@ -6,46 +8,91 @@ import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync, readFileSync, existsSync, copyFileSync} from 'node:fs';
-import {join, resolve, dirname} from 'node:path';
+import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync as rawWriteFileSync, readFileSync, existsSync} from 'node:fs';
+import {join, resolve, dirname, basename} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
 import {signatureEvidence, processEvidence, journalEvidence, consoleEvidence, receiptEvidence} from './evidence.ts';
 const exec = promisify(execFile);
+const writeFileSync: typeof rawWriteFileSync = (...args) =>
+  guardEvidenceWrite(() => rawWriteFileSync(...args));
+const copyEvidenceFile: typeof copyFileSync = (...args) =>
+  guardEvidenceWrite(() => copyFileSync(...args));
 type ObjectValue = Record<string, any>;
 assert(!process.env.CI && process.env.CANAVERAL_NATIVE_ACCEPTANCE === 'operator-authorized', 'requires explicit operator authorization outside CI');
-assert.equal(process.platform, 'darwin');
 process.umask(0o077);
 const input = process.argv[2];
 assert(input, 'usage: node coordination/native-acceptance/run.ts /absolute/config.json');
-const cfg: ObjectValue = JSON.parse(readFileSync(input, 'utf8'));
-// Check both names and embedded fixture markers, including renamed fixture executables.
-export function refuseFixture(path: string) {
-  assert(!/fixture|simulated|fake[-_ ]?helper/i.test(path), `fixture path refused: ${path}`);
+// Never let parser, filesystem or assertion details escape the private boundary.
+function privateFailure(kind: 'unreadable' | 'invalid'): never {
+  console.error('private configuration ' + kind);
+  process.exit(1);
+}
+let configBytes: string;
+try { configBytes = readFileSync(input, 'utf8'); }
+catch { privateFailure('unreadable'); }
+let cfg: ObjectValue;
+try {
+  cfg = JSON.parse(configBytes);
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw Error();
+} catch { privateFailure('invalid'); }
+
+// Check both names and embedded fixture markers, including renamed executables.
+function refuseFixture(path: string) {
+  if (/fixture|simulated|fake[-_ ]?helper/i.test(path)) throw Error();
   if (!existsSync(path)) return;
   const bytes = readFileSync(realpathSync(path));
-  assert(!/fixture[-_ ]helper|fixture[-_ ]bootstrap[-_ ]builder|fixture-running|fixture-only guest secret|dev\.canaveral\.fixture|CANAVERAL-SIMULATED-EROFS|simulated erofs|fixture audited initrd/i.test(bytes.toString('latin1')), `fixture content refused: ${path}`);
+  if (/fixture[-_ ]helper|fixture[-_ ]bootstrap[-_ ]builder|fixture-running|fixture-only guest secret|dev\.canaveral\.fixture|CANAVERAL-SIMULATED-EROFS|simulated erofs|fixture audited initrd/i.test(bytes.toString('latin1'))) throw Error();
 }
-for (const name of ['helper', 'builder', 'bootstrap', 'satellite', 'runnerClient', 'manifest']) {
-  if (cfg[name]) { assert.equal(resolve(cfg[name]), cfg[name], `${name} must be absolute`); refuseFixture(cfg[name]); }
-}
-assert(cfg.helper && cfg.satellite && cfg.runnerClient && cfg.manifest && cfg.stateRoot && cfg.bundleDigest && cfg.signingRequirement);
-assert.match(cfg.bundleDigest, /^sha256:[0-9a-f]{64}$/);
-assert(cfg.signingRequirement.includes('anchor apple'), 'Apple signing requirement required');
-const resources = {cpu: cfg.cpu ?? 2, memoryMiB: cfg.memoryMiB ?? 2048, diskGiB: cfg.diskGiB ?? 4};
-const root = realpathSync(cfg.stateRoot);
-const dir = mkdtempSync(join(root, 'canaveral-native-')); chmodSync(dir, 0o700);
-const privateDir = join(dir, 'private'); mkdirSync(privateDir, {mode: 0o700});
-console.log(JSON.stringify({runDirectory: dir}));
+const {operatorDenyCidrs, denyEvidence, resources, dir, privateDir} = (() => {
+  try {
+    for (const name of ['helper', 'satellite', 'runnerClient', 'manifest', 'stateRoot', 'bundleDigest', 'signingRequirement', 'operatorDenyCidrsFile']) {
+      if (typeof cfg[name] !== 'string' || !cfg[name]) throw Error();
+    }
+    for (const name of ['helper', 'builder', 'bootstrap', 'satellite', 'runnerClient', 'manifest', 'stateRoot']) {
+      if (cfg[name] !== undefined && (typeof cfg[name] !== 'string' || resolve(cfg[name]) !== cfg[name])) throw Error();
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(cfg.bundleDigest) || !cfg.signingRequirement.includes('anchor apple')) throw Error();
+    if (cfg.workspaceIOVersion !== undefined && cfg.workspaceIOVersion !== 1) throw Error();
+    if (cfg.workspaceIOVersion === 1) {
+      if (typeof cfg.cloneRepo !== 'string' || !/^https:\/\//.test(cfg.cloneRepo) ||
+          typeof cfg.cloneCommit !== 'string' || !/^[0-9a-f]{40}$/.test(cfg.cloneCommit)) throw Error();
+      for (const name of ['hostLanTarget', 'hostTailnetTarget', 'hostLoopbackTarget']) if (typeof cfg[name] !== 'string') throw Error();
+    }
+  } catch { privateFailure('invalid'); }
+  let policy: ReturnType<typeof loadOperatorDenyList>;
+  try { policy = loadOperatorDenyList(cfg.operatorDenyCidrsFile); }
+  catch { privateFailure('invalid'); }
+  try {
+    for (const name of ['helper', 'builder', 'bootstrap', 'satellite', 'runnerClient', 'manifest']) if (cfg[name]) refuseFixture(cfg[name]);
+    if (process.platform !== 'darwin') throw Error();
+    const root = realpathSync(cfg.stateRoot);
+    const dir = mkdtempSync(join(root, 'canaveral-native-')); chmodSync(dir, 0o700);
+    const privateDir = join(dir, 'private'); mkdirSync(privateDir, {mode: 0o700});
+    return {...policy, resources: {cpu: cfg.cpu ?? 2, memoryMiB: cfg.memoryMiB ?? 2048, diskGiB: cfg.diskGiB ?? 4}, dir, privateDir};
+  } catch { privateFailure('invalid'); }
+})();
+console.log(JSON.stringify({runLabel: basename(dir)}));
 const save = (name: string, value: unknown) => {
   writeFileSync(join(privateDir, name), JSON.stringify(value, null, 2), {mode:0o600});
   writeFileSync(join(dir, name), JSON.stringify(receiptEvidence(value), null, 2), {mode:0o600});
 };
+let completed = false;
+let result: ObjectValue = {state:'failed', nativeAcceptance:false};
+const caseFailures: string[] = [];
+function publishResult() {
+  const accepted = completed && caseFailures.length === 0 && !hasInternalFailure();
+  save('result.json', {...result, nativeAcceptance:accepted,
+    ...(!accepted ? {failure:'native_acceptance_failed'} : {}),
+    caseFailureCount:caseFailures.length});
+}
+onInternalFailure(publishResult);
 const sha = (path: string) => 'sha256:' + createHash('sha256').update(readFileSync(path)).digest('hex');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const children: ChildProcess[] = [];
 let proxy: https.Server | undefined;
 let active: {id: string, credential: string} | undefined;
+let queuedSuccessor: string | undefined;
 let api: (method: string, route: string, body?: unknown, token?: string) => Promise<any>;
 async function until(check: () => Promise<any>, label: string, ms = 180000): Promise<any> {
   const deadline = Date.now() + ms;
@@ -59,6 +106,9 @@ function launch(bin: string, args: string[], name: string) {
   const done = once(c, 'exit').then(([code, signal]) => {
     writeFileSync(join(privateDir, name + '.stderr'), Buffer.concat(errors));
     return {code, signal, output};
+  }).catch(() => {
+    internalFailure();
+    return {code: null, signal: null, output, launchFailed: true};
   });
   return {c, done, output: () => output};
 }
@@ -105,13 +155,14 @@ try {
             if (response.released === true) {
               if(cfg.workspaceIOVersion===1) {assert.equal(body.receipt.workspaceRemoved,true);assert.equal(body.receipt.dataPlaneClosed,true);}
               assert.equal(body.receipt.cleanup, 'complete', 'reservation released before cleanup report');
-              assert.equal(reports.at(-1).after.body.reservations, 0);
+              const successor = queuedSuccessor && (await api('GET','/v1/requests/'+queuedSuccessor,undefined,app.credential)).body;
+              assert.equal(reports.at(-1).after.body.reservations, successor?.state === 'admitted' ? 1 : 0);
             } else assert.equal(reports.at(-1).after.body.reservations, 1, 'reservation disappeared before cleanup');
           }
           res.writeHead(reply.statusCode!, reply.headers); res.end(bytes);
-        })().catch(e => res.destroy(e)); });
-      }); upstream.on('error', e => res.destroy(e)); upstream.end(raw);
-    })().catch(e => res.destroy(e)); });
+        })().catch(() => { internalFailure(); res.destroy(); }); });
+      }); upstream.on('error', () => { internalFailure(); res.destroy(); }); upstream.end(raw);
+    })().catch(() => { internalFailure(); res.destroy(); }); });
   });
   let domainForReports = '';
   await new Promise<void>(r => proxy!.listen(0, '127.0.0.1', r));
@@ -127,7 +178,7 @@ try {
     }); r.setTimeout(20000, () => r.destroy(Error('HTTP timeout'))); r.on('error', reject); r.end(bytes);
   });
   const ok = async (m: string, r: string, b?: unknown, token?: string) => { const v = await api(m, r, b, token); assert(v.status < 300, `${r}: ${JSON.stringify(v)}`); return v.body; };
-  const appBody = (name: string) => ({id: randomUUID(), name, templates: [], limits: {resources, activeLeases: 1, defaultTTLSeconds: 120, maxTTLSeconds: 300, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 180}});
+  const appBody = (name: string) => ({id: randomUUID(), name, templates: [], limits: {resources, maxConcurrentBoxes: 1, activeLeases: 1, defaultTTLSeconds: 120, maxTTLSeconds: 300, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 180}});
   let app = await ok('POST', '/v1/consumers', {...appBody('native acceptance application 1'),...(cfg.workspaceIOVersion===1?{linuxEgress:{enabled:true}}:{})});
   const app2 = await ok('POST', '/v1/consumers', appBody('native acceptance application 2 (no grant)'));
   const domainId = randomUUID(); domainForReports = domainId;
@@ -147,7 +198,7 @@ try {
   // Setup is real controller/TLS/enrollment evidence, never VM acceptance. No lease or claim yet.
   if (cfg.setupOnly || !existsSync(cfg.manifest) || !cfg.builder || !existsSync(cfg.builder)) {
     assert(cfg.setupOnly, 'real manifest and mkfs.erofs required; no lease acquired');
-    save('result.json', {state: 'blocked-real-artifacts', setupComplete: true, nativeAcceptance: false});
+    result = {state: 'blocked-real-artifacts', setupComplete: true};
   } else {
     const manifest = JSON.parse(readFileSync(cfg.manifest, 'utf8'));
     for (const role of ['kernel', 'initrd', 'rootfs']) refuseFixture(resolve(dirname(cfg.manifest), manifest[role].path));
@@ -202,18 +253,18 @@ try {
         writeFileSync(pem(id + '-' + name), raw);
         writeFileSync(evidence(id + '-' + name), consoleEvidence(raw.toString('utf8')));
       }
-      if (existsSync(join(machine, 'console.log'))) copyFileSync(evidence(id + '-console.log'), evidence(id + '-boot.log'));
+      if (existsSync(join(machine, 'console.log'))) copyEvidenceFile(evidence(id + '-console.log'), evidence(id + '-boot.log'));
       save(id + '-processes.json', processEvidence(numericPs, [currentRun!.c.pid!, ...(observed.get(id)?.pids ?? [])]));
       save(id + '-latest.journal.json', journalEvidence(j));
     }
     const acquireBody = (ttlSeconds: number) => ({id: randomUUID(), templateId: image.id, templateRevision: image.revision, arch: image.arch, ttlSeconds, requiredCapabilities: ['command']});
-    async function start(label: string, ttl = 120) {
-      const lease = await ok('POST', '/v1/leases', acquireBody(ttl), app.credential);
+    async function start(label: string, ttl = 120, admittedId?: string) {
+      const lease = admittedId ? await inspect(admittedId) : await ok('POST', '/v1/leases', acquireBody(ttl), app.credential);
       active = {id: lease.id, credential: app.credential};
       state = pem(label + '-satellite');
       writeFileSync(pem(label + '-satellite.json'), JSON.stringify( {origin, identity: pem('identity'), binding, state, helper: cfg.helper, helperSha256: sha(cfg.helper), signingRequirement: cfg.signingRequirement,
         ca: pem('ca.pem'), inventory: [{credentialFree: true, format: 'bootBundle', image, path: cfg.manifest}],
-        bootstrapBuilder: {path: cfg.builder, sha256: sha(cfg.builder)}, maxCpu: resources.cpu, maxMemoryMiB: resources.memoryMiB, maxDiskGiB: resources.diskGiB}));
+        bootstrapBuilder: {path: cfg.builder, sha256: sha(cfg.builder)}, maxCpu: resources.cpu, maxMemoryMiB: resources.memoryMiB, maxDiskGiB: resources.diskGiB, operatorDenyCidrs}), {mode:0o600});
       await snapshot(label + '-before', lease.id);
       currentRun = launch(cfg.satellite, ['run-once', pem(label + '-satellite.json')], label);
       await until(async () => { await observe(lease.id); const v = await inspect(lease.id); assert(!['failed','expired','released'].includes(v.state), 'guest failed before ready'); return v.state === 'ready' && v; }, 'real guest ready');
@@ -249,13 +300,42 @@ try {
       assert(!existsSync(record.machine)); assert(!existsSync(join(state, 'workspace')));
       assert(record.relay, 'no published relay evidence'); assert(!existsSync(dirname(record.relay)));
       const journal = JSON.parse(readFileSync(join(state, 'state.json'), 'utf8'));
-      assert(journal.stopped && journal.cleaned && journal.released);
+      for (const flag of ['stopped','cleaned','released']) assert.equal(journal[flag], true);
       save(label + '-independent-stop.json', {helperPids: record.pids, helperPidsGone: true, noOwnedVMProcess: true, machineRemoved: true, workspaceRemoved: true, relayRemoved: true, journal: journalEvidence(journal)});
       await snapshot(label + '-after', id); active = undefined;
     }
-    const caseFailures:string[]=[];
+
+    if (cfg.workspaceIOVersion === 1) {
+      const events: {event:string;at:number}[]=[];
+      const mark=(event:string)=>{events.push({event,at:Date.now()});save('queue-sequence.json',events);};
+      const submit=async()=>{const {id,...intent}=acquireBody(300);return ok('POST','/v1/requests',{id,kind:'linux-lease',intent},app.credential);};
+      const first=await submit();assert.equal(first.state,'admitted');mark('first admitted');
+      const second=await submit();assert.equal(second.state,'waiting');queuedSuccessor=second.id;
+      assert.equal((await domain()).reservations,1);
+      assert.equal((await api('GET','/v1/leases/'+second.id,undefined,app.credential)).status,404);mark('second waiting without lease/reservation');
+      const one=await start('queue-first',300,first.target);mark('first ready and mountinfo command succeeded');
+      assert.equal((await ok('GET','/v1/requests/'+second.id,undefined,app.credential)).state,'waiting');
+      await ok('POST',`/v1/leases/${one}/release`,{id:randomUUID()},app.credential);mark('first release requested');
+      await stopped('queue-first',one);mark('first positive cleanup');
+      const admitted=await until(async()=>{const r=await ok('GET','/v1/requests/'+second.id,undefined,app.credential);return r.state==='admitted'&&r;},'second admission');mark('second admitted');
+      queuedSuccessor=undefined;
+      const two=await start('queue-second',300,admitted.target);mark('second ready and mountinfo command succeeded');
+      await ok('POST',`/v1/leases/${two}/release`,{id:randomUUID()},app.credential);
+      await stopped('queue-second',two);mark('second positive cleanup');
+      assert.equal((await domain()).reservations,0);
+    }
+
     if(cfg.workspaceIOVersion===1) {
-      caseFailures.push(...await workspaceCases({cfg,origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
+      try {
+        caseFailures.push(...await workspaceCases({cfg:{...cfg,operatorDenyCidrs,denyEvidence},origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
+      } catch {
+        internalFailure();
+        caseFailures.push('workspace');save('workspace-fatal-case.json',{failure:'native_acceptance_failed'});
+        if (active) {
+          await ok('POST',`/v1/leases/${active.id}/release`,{id:randomUUID()},active.credential);
+          await stopped('workspace-failed',active.id);
+        }
+      }
       const granted=app;
       app=await ok('POST','/v1/consumers',{...appBody('workspace offline'),linuxEgress:{enabled:false}});
       await ok('POST','/v1/linux-lease-grants',{applicationId:app.id,imageId:image.id,revision:image.revision,arch:image.arch,digest:image.digest});
@@ -327,7 +407,8 @@ try {
       return view.state === 'expired';
     }, 'wall-clock expiry'); await stopped('expiry', expiry);
     const lost = await start('satellite-loss', 120);
-    currentRun!.c.kill('SIGKILL'); await currentRun!.done;
+    assert(currentRun!.c.kill('SIGKILL'));
+    const killed = await currentRun!.done; assert.equal(killed.code, null); assert.equal(killed.signal, 'SIGKILL');
     const lossDeadline = Date.parse((await inspect(lost)).expiresAt);
     const killedAt = Date.now();
     assert(!existsSync(join(observed.get(lost)!.machine, 'power-off.request')));
@@ -364,16 +445,29 @@ try {
     await snapshot('loss-held', lost);
     active = undefined;
     if(caseFailures.length) process.exitCode=1;
-    save('result.json', {state:'cases-completed', nativeAcceptance:caseFailures.length===0, caseFailures, caseFailureCount:caseFailures.length, lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true});
+    result = {state:'cases-completed', lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true};
+    assert.equal(controller.c.exitCode, null); assert.equal(controller.c.signalCode, null);
+    completed = true;
   }
-} catch (e: any) { writeFileSync(join(privateDir, 'failure.txt'), String(e.stack ?? e)); save('failure.json', {state:'failed', activeLease:active?.id}); process.exitCode = 1; }
+} catch {
+  internalFailure();
+  // Evidence storage can disappear or become unwritable during a run.
+  try { save('failure.json', {state:'failed', activeLease:active?.id}); } catch {}
+}
 finally {
+  try {
   if (active && api!) {
     // A release is intent only. Never delete machine state or kill the helper as a substitute for proof.
-    await api('POST', `/v1/leases/${active.id}/release`, {id:randomUUID()}, active.credential).catch(() => {});
+    await api('POST', `/v1/leases/${active.id}/release`, {id:randomUUID()}, active.credential).catch(() => { internalFailure(); });
     await pause(5000);
   }
   if (proxy) { proxy.closeAllConnections(); await new Promise<void>(r => proxy!.close(() => r())); }
   for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGTERM');
-  for (const c of children) if (c.exitCode === null && c.signalCode === null) await Promise.race([once(c, 'exit'), pause(20000)]);
+  for (const c of children) if (c.exitCode === null && c.signalCode === null) await Promise.race([once(c, 'exit'), pause(20000).then(() => { throw Error(); })]);
+  } catch { internalFailure(); }
+  // Publish only after every assertion, asynchronous callback and cleanup boundary.
+  try { publishResult(); } catch {
+    internalFailure();
+    try { publishResult(); } catch {}
+  }
 }

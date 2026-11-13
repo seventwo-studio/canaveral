@@ -19,9 +19,12 @@ From the repository root, create a private JSON configuration outside the checko
   "cpu": 2,
   "memoryMiB": 2048,
   "diskGiB": 4,
+  "operatorDenyCidrsFile": "/ABS/private-operator-deny-cidrs.json",
   "setupOnly": false
 }
 ```
+
+The operator deny-list file must have mode 0600 and contain `{ "version": 1, "operatorDenyCidrs": ["CIDR"] }` with 1–4096 canonical network CIDRs. The original unversioned v1 format remains supported; other explicit versions are refused. Startup reads and validates the outer private configuration and deny list behind fixed diagnostics only (`private configuration unreadable` or `private configuration invalid`); parser excerpts, assertion values and filesystem error causes are discarded. The entry point installs fixed fatal diagnostics before reading configuration, including uncaught exceptions, unhandled rejections and Node warnings. Child completion promises handle rejection immediately. Evidence writes fail with fixed diagnostics and retain a nonzero run status even when failure reporting cannot save evidence. Credentials and CA material are generated inside the main private error boundary, rather than loaded from operator-supplied files. The harness passes the list to the satellite and probes configured network addresses on port 443 only when the shipped, digest-verified special-purpose and IPv6 allocation tables would otherwise allow them and fresh host interface evidence excludes them. At least one such target must qualify; built-in denials alone fail acceptance. Every qualifying probe must return `403 destination_denied`; CONNECT success or a route denial fails. This proves address-policy discrimination, not route reachability or full topology isolation. Keep policy values in private runtime configuration; copied evidence contains only count, SHA256 digest and aggregate outcomes.
 
 `bundleDigest` is the Rust guest-protocol canonical manifest digest, not the hash of the JSON file. Artifacts must already satisfy the production immutable installation contract. The harness pins the exact helper and builder bytes; it does not build or repair artifacts, alter admission, or set flags to bypass installation checks. An optional `bootstrap` path is also screened for fixture markers when supplied. The builder and all boot artifacts are screened, including known embedded markers in renamed fixture binaries. This screen is an extra refusal boundary, not an attestation that arbitrary operator binaries are trustworthy. The satellite's full signature, pin, path, ownership and immutability checks remain authoritative.
 
@@ -30,11 +33,11 @@ CANAVERAL_NATIVE_ACCEPTANCE=operator-authorized \
   node coordination/native-acceptance/run.ts /ABS/private-config.json
 ```
 
-Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. The printed directory is unique per invocation. Keep it private: raw configuration, credentials, operational output and receipts stay under `private/`. Files outside `private/` contain allow-listed outcomes, numeric attributed process metadata, console milestones and digests. Proxy evidence filenames use role labels. Never commit native evidence. There is no evidence upload.
+Node >=24, macOS, `openssl`, `codesign`, `ps`, and the satellite's production prerequisites (including `lsof`) are required. Stdout prints only the opaque run label, unique per invocation. Locate it beneath the configured private state root. Keep that root private: raw configuration, credentials, operational output and receipts stay under `private/`. Files outside `private/` contain allow-listed outcomes, numeric attributed process metadata, console milestones and digests. Proxy evidence filenames use role labels. Never commit native evidence. There is no evidence upload.
 
 For setup without boot artifacts, set `setupOnly: true`, supply a nonexistent manifest path and an explicitly unverified expected `bundleDigest`; `builder` may be omitted. This exercises actual controller startup, fresh state, TLS, application creation, enrollment, domain/image/grant/approval configuration and catalog reads, then stops without acquiring or claiming anything. The expected digest is catalog configuration only: `artifactVerified: false` and `nativeAcceptance: false` prevent treating this as image verification. Setup-only stops before native execution even when artifacts exist.
 
-A full run uses one guest at a time: acquire/readiness, consumer command/output, renewal, explicit release, a second guest's real wall-clock expiry, then satellite crash/recovery and reservation retention. Application 2 has no grant; cross-application inspect/key issuance/operation submission and acquisition must fail. Renewal must include a successful consumer command after the original expiry plus
+A workspace run first submits two `linux-lease` box requests into a one-box domain. It proves the second waits without a lease or reservation, runs a command in each box in turn, and checks positive cleanup before starting the successor. A full run uses one guest at a time: acquire/readiness, consumer command/output, renewal, explicit release, a second guest's real wall-clock expiry, then satellite crash/recovery and reservation retention. Application 2 has no grant; cross-application inspect/key issuance/operation submission and acquisition must fail. Renewal must include a successful consumer command after the original expiry plus
 the two-second guest margin; helper authorization alone is insufficient. There is
 no synthetic guest response. The final loss case kills the satellite, waits past the lease deadline without
 restarting it, proves helper PID and VZ absence with no power-off request, records
@@ -544,3 +547,175 @@ and duplicate assembly copies were removed. Installed artifacts and private
 acceptance evidence remain. Unrelated VMs and untracked coordination dependencies
 were untouched. Production, topology and the previously listed acceptance gaps
 remain open.
+
+## Bounded workspace queue evidence (ST-542)
+
+The single full integration run 1RgYle records nativeAcceptance:true and zero
+case failures. It uses the installed pr24-main v2 artifact set
+unchanged (bundle digest
+`1c9a1e93b7a4c3fe419c278f8cfaa79502165a03c7983c66068e30b663cc0216`).
+It runs one 2 CPU / 4096 MiB / approximately 8 GiB guest at a time, with
+`maxConcurrentBoxes:1` and one box of physical capacity.
+
+- Request 2 waited without a lease or reservation at +16 ms. Box 1 was ready
+  and its mountinfo command succeeded at +24831 ms; release was requested at
+  +24881 ms and positive cleanup observed at +25714 ms. Request 2 was observed
+  admitted at +25719 ms. Its command succeeded at +50585 ms and positive cleanup
+  completed at +51456 ms. Both cleanup groups independently proved helper/VZ
+  absence and machine/workspace/relay removal (`queue-sequence.json`,
+  `queue-*-independent-stop.json`).
+- The operator hairpin/site-public-address probe returned 403 destination_denied
+  for the one configured target. Policy evidence exports count 1 and SHA256
+  `fe3345d9b3c626f6641d504e9b3c4f853ebd73acc2f0b77d5ed0805bc7f240e2`;
+  no policy values or probe argv are exported (`operator-hairpin-denial.json`).
+- Public CONNECT, pinned clone and npm ci/test passed. Guest npm execution took
+  133890/516 ms; including dispatch/polling, 134719/1304 ms. Downloaded build.log
+  SHA256 is `bc780bbce9cc05d2a63f67bd31bf018c15eaf5d90d128797c859322e21fa41d0`.
+- Empty, binary and 307200-byte file round trips, replacement, no-replace conflict,
+  disk-full refusal, workspace command/upload expiry and egress-off denial passed.
+  Renewal's consumer command succeeded 3114 ms after the original deadline;
+  explicit release proved positive cleanup.
+
+Ordinary expiry and autonomous satellite-loss fencing passed. The helper was
+observed alive 39 ms after the loss deadline and absent 241 ms after it, before
+recovery. All seven normal cleanup groups required workspaceRemoved and
+dataPlaneClosed before capacity release and independently proved owned helper/VZ
+absence and machine/workspace/relay removal.
+
+After the run, PID attribution, runtime-lock and empty lsof checks preceded
+removal of owned residual workspace/bootstrap and relay storage. The owned launch
+medium's user-immutable flag was cleared only after those checks and inode,
+ownership and link-count verification. The journal is unchanged and the stopped
+private database retains one unknown reservation for operator reconciliation;
+no cleanup receipt or capacity release was fabricated
+(`loss-post-run-owned-cleanup.json`). All owned runtime processes and storage
+are gone. Installed artifacts and private evidence remain; unrelated VMs were
+untouched. All 538 shareable files passed checks for configured private values,
+private paths and IP addresses; private process logs contain no operator policy
+values.
+
+Portable checks passed: coordination typecheck/build, 1037 tests passed and nine
+skipped at concurrency two; standalone harness typecheck; six evidence/process
+regressions; no-Python check; and the branch diff private-path scan. The full suite used the existing native inference helper configured
+explicitly. Rust and Swift are unchanged. Queue milestones and aggregate hairpin results pass the same evidence
+allowlist as other receipts; raw configuration and output remain under private/.
+Production and topology acceptance remain open.
+
+### Review-fix full rerun (2026-11-13)
+
+Full native run y359Jk passed with `nativeAcceptance:true` and zero case
+failures, using the unchanged pr24-main v2 artifacts and resource limits above.
+Only one guest ran at a time, including the queue case's two sequential boxes.
+
+- Queue waiting, sequential admission, both readiness commands and independent
+  cleanup passed.
+- The stricter operator probe passed for one target independently permitted by
+  the digest-verified built-in address tables and excluded from fresh host
+  interface addresses. Evidence retains only policy count/digest and aggregate
+  outcomes. Built-in-denied entries cannot satisfy this case.
+- Public CONNECT, pinned clone, npm ci/test and build-log retrieval passed.
+  Guest npm execution took 139084/520 ms; downloaded build-log SHA256 is
+  `1fce0f4838ae04343cf6406fb85f5f6de1c92fa7ff49e5b72cf50d77476ccf4f`.
+- Empty, binary and 307200-byte transfers, replacement/conflict, disk-full,
+  tenant isolation, egress-off, active command/upload expiry, v1 commands,
+  renewal beyond the original deadline, release and ordinary expiry passed.
+- All seven normal cleanup groups independently proved owned helper/VZ absence
+  and machine/workspace/relay removal. Autonomous satellite-loss fencing passed:
+  helper absence was observed 280 ms after deadline, before recovery.
+
+Post-run process attribution, runtime-lock and empty open-handle checks preceded
+removal of owned residual workspace/bootstrap and relay storage. Immutable launch
+media flags were cleared only after ownership, inode and link-count verification.
+The journal remains unchanged; the stopped private database retains one unknown
+reservation for operator reconciliation. No cleanup receipt or capacity release
+was fabricated. All owned runtime processes and storage are gone; installed
+artifacts and private evidence remain. Unrelated VMs were untouched.
+
+Portable validation passed: coordination typecheck/build, 1037 tests with nine
+skipped at concurrency two, standalone harness/test typecheck, eight
+evidence/process/policy regressions, no-Python check and private-path diff scan.
+The new regressions reject missing/unreadable files, secret-bearing malformed
+JSON, wrong shapes/versions, noncanonical CIDRs and excessive counts without
+exposing private paths or input through thrown errors, stderr or evidence.
+Counterfactual CONNECT success with an omitted operator policy, route-only
+denials and built-in-only deny lists fail verification; a qualifying operator
+denial passes. Shareable evidence passed address/private-path scanning.
+Production and topology acceptance remain open.
+
+## Portable failure-boundary regression checks
+
+`coordination/test/native-failure-boundary.test.ts` runs extracted harness launch and
+reporting code in subprocesses with synthetic secrets. It checks spawn failures,
+removed and unwritable evidence storage, deep callback exceptions and warnings
+under Node's strict, throw and warn rejection modes. No native guest is started.
+After the coordination build, set `CANAVERAL_FAILURE_BASELINE=79dd1ac` when running
+that test to additionally verify that each scenario exposes its synthetic secret
+on the previous implementation. Ordinary runs require no historical Git objects.
+
+## Final harness verdict hardening (2026-11-13)
+
+The final verdict is written after case assertions and shutdown. Launch failures
+carry a null exit code and a distinct failure marker, so a missing executable
+cannot satisfy recovery's expected exit 1. A sticky internal-failure flag also
+covers proxy callbacks, evidence writes, fatal events and cleanup errors/timeouts.
+Only completed cases with no case or internal failures can publish
+`nativeAcceptance: true`; other results carry the fixed
+`native_acceptance_failed` code. Unwritable evidence storage still forces a
+nonzero exit, though it cannot guarantee a persisted result. Stdout contains only
+the opaque run label. Shared signature evidence omits signing identifiers.
+
+Audit scope: `run.ts` startup/configuration, fixture refusal, resource defaults,
+launch/completion, polling, proxy callbacks, API parsing, enrollment, setup-only
+branch, snapshots, process attribution/lsof races, guest readiness/mountinfo,
+cleanup, queue sequencing, workspace recovery, egress-off, tenant ownership,
+command/renewal/expiry, loss/deadline/recovery, outer catch and final shutdown;
+`failure-boundary.ts` fatal listeners/write guard; `workspace.ts` case aggregation,
+commands, clone/npm conditional execution, transfers/replacement/conflicts,
+disk-full, tenant checks and active expiry; `proxy.ts` fragmented output/status
+assertions; `operator-policy.ts` parser, table pins, interface refresh and denial
+aggregation; `processes.ts` row parsing/attribution; `evidence.ts` signature,
+process, journal, console and recursive receipt exporters. Test files checked:
+`evidence.test.ts`, `operator-policy.test.ts`, `processes.test.ts`,
+`startup.test.ts`, `verdict.test.ts`, and the coordination failure-boundary and
+proxy tests. Private operational receipts remain under `private/`; public
+evidence uses the existing allowlist. No native production/topology claim changes.
+
+Unsupported explicit workspace versions now fail startup rather than silently
+skipping workspace cases. The full native run uses version 1; this validation
+was tightened while that run was active and does not change its execution path.
+Additional audit fixes require boolean cleanup journal flags and both upload
+rejection and a durable failed transfer state. Before these checks, truthy
+`"false"` flags and a succeeded transfer with a stale error code could satisfy
+negative cases. The satellite-loss case now verifies the requested SIGKILL
+completion and checks controller survival before completing cases. Workspace
+fatal errors use a fixed failure code rather than converting thrown values.
+
+Portable verdict regressions exercise the actual harness boundaries with a
+genuine expected pass plus launch, write, callback, assertion, case, fatal, warning
+and shutdown failures. With `CANAVERAL_VERDICT_BASELINE=6de2f08`, they demonstrate
+false acceptance before the fix for launch/write/callback/shutdown failures,
+private-path stdout disclosure, truthy cleanup flags and stale transfer errors.
+Signature evidence regression refuses the formerly exported identifier.
+
+One operator-authorized full run, `canaveral-native-O8pL7k`, exited zero and
+published `state: cases-completed`, `nativeAcceptance: true` and
+`caseFailureCount: 0`. It used the existing PR 24 artifacts and private operator
+deny file, one guest at a time, including the two queue guests in sequence.
+Queue admission/commands, workspace clone/npm, transfer and policy cases,
+egress-off, ownership checks, renewal beyond the original deadline, release,
+ordinary expiry and satellite-loss recovery passed. All seven normal cleanup
+groups passed. Independent helper absence was observed 258 ms after the loss
+deadline, before recovery; recovery retained the unknown reservation.
+
+Post-run attribution, helper lock and open-handle checks preceded removal of the
+owned residual workspace/bootstrap and relay storage. All owned runtime
+processes and storage are gone. Private evidence and the unchanged journal/database
+remain; the unknown reservation still requires operator reconciliation. No
+cleanup receipt or capacity release was fabricated. Unrelated VMs were untouched.
+
+Validation passed: fixture binaries built first with Cargo concurrency two;
+coordination typecheck/build and all 1064 tests at concurrency two (zero skips);
+standalone harness/test typecheck; 23 harness/evidence/policy/process/verdict tests
+and 18 failure-boundary tests; no-Python check; private-path diff scan; shared
+native evidence scan against private configuration and deny values, addresses
+and private paths. Stdout contained only the opaque run label; stderr was empty.

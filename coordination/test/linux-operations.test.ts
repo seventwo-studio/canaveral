@@ -30,7 +30,7 @@ const IMAGE = { id: "linux-dev", revision: "1", arch: "amd64", os: "linux", mode
 const APPLE = { ...IMAGE, id: "linux-dev-apple", arch: "arm64", backend: "appleVirtualization", digest: OTHER_DIGEST };
 const MODEL = "fixture-model:1", MODEL_DIGEST = "sha256:" + "ab".repeat(32);
 
-function call(port: number, method: "GET" | "POST", route: string, body?: unknown, token?: string): Promise<Reply> {
+function call(port: number, method: "GET" | "POST", route: string, body?: unknown, token?: string, dispatch?: (send: () => void) => void): Promise<Reply> {
   const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   return new Promise((resolve, reject) => {
     const request = http.request({ host: "127.0.0.1", port, method, path: route, agent: false, timeout: 10_000, headers: {
@@ -46,7 +46,7 @@ function call(port: number, method: "GET" | "POST", route: string, body?: unknow
     });
     request.once("error", reject);
     request.once("timeout", () => request.destroy(new Error("fixture timeout")));
-    request.end(data);
+    if (dispatch) { request.flushHeaders(); dispatch(() => request.end(data)); } else request.end(data);
   });
 }
 
@@ -580,4 +580,99 @@ for (const loss of ['rotation','restart'] as const) test(`transfer ${loss} cance
   const reply=await f.ok(poll());
   assert.equal(reply.cancelRequested,true); assert.equal(reply.stopRequested,false);
   assert.equal((reply.lease as Body).state,'ready');
+});
+
+const boxIntent = () => ({ templateId: IMAGE.id, templateRevision: IMAGE.revision, arch: 'amd64', ttlSeconds: 100, requiredCapabilities: ['command'] });
+async function submitBox(f: Awaited<ReturnType<typeof fixture>>, app: {credential:string}, extra: Body = {}, via?: number) {
+  const r=await f.post('/v1/requests',{id:randomUUID(),kind:'linux-lease',intent:boxIntent(),...extra},app.credential,via);
+  assert([200,201].includes(r.status),JSON.stringify(r.body));return r.body;
+}
+
+test('workspace queue retains ended boxes until both cleanup proofs, snapshots admission and survives restart/replay',async t=>{
+  const f=await fixture(t,true),app=await f.application({maxConcurrentBoxes:1});await f.grant(app.id);
+  const d=await f.domain({cpu:32,memoryMiB:65536,diskGiB:200}),runner=await f.enroll();await f.ok(f.approve(runner,d));
+  const first=await submitBox(f,app);assert.equal(first.state,'admitted');
+  const a=(await f.claim(runner)).assignment!;await f.ok(f.report(runner,a.id,1,f.receipt(a,f.running)));
+  const waiting=await submitBox(f,app);assert.equal(waiting.state,'waiting');
+  assert.equal(f.rows(`SELECT * FROM linux_leases WHERE id='${waiting.id}'`).length,0);
+  await f.restart();assert.equal((await f.ok(f.get(`/v1/requests/${waiting.id}`,app.credential))).state,'waiting');
+  assert.equal((await f.ok(f.get(`/v1/requests/${first.id}`,app.credential))).target,first.id);
+  const key=(await app.client().rotateLeaseCredential(first.id as string)).credential;
+  assert.equal((await f.leaseClient(first.id as string,key).inspect()).state,'ready');
+  await app.client().cancelRequest(first.id as string);
+  await rejectsWith(app.client().acquireLease(f.acquire()),429);
+  for(const [workspaceRemoved,dataPlaneClosed] of [[false,true],[true,false]]) {
+    assert.equal((await f.report(runner,a.id,2,f.receipt(a,{observedRevision:3,...f.stoppedClean,workspaceRemoved,dataPlaneClosed}))).status,409);
+    assert.equal((await f.ok(f.get(`/v1/requests/${waiting.id}`,app.credential))).state,'waiting');
+  }
+  const db=new DatabaseSync(f.statePath),row=db.prepare('SELECT specification FROM consumers WHERE id=?').get(app.id)!;
+  const spec=JSON.parse(row.specification as string);spec.linuxEgress.enabled=false;
+  db.prepare('UPDATE consumers SET specification=? WHERE id=?').run(JSON.stringify(spec),app.id);db.close();
+  await f.ok(f.report(runner,a.id,2,f.receipt(a,{observedRevision:3,...f.stoppedClean,workspaceRemoved:true,dataPlaneClosed:true})));
+  assert.equal((await f.ok(f.get(`/v1/requests/${waiting.id}`,app.credential))).state,'admitted');
+  assert.deepEqual(JSON.parse(f.rows(`SELECT egress FROM linux_leases WHERE id='${waiting.id}'`)[0]!.egress as string),{enabled:false,policy:'public-https-v1'});
+  const replay=await f.post('/v1/requests',{id:waiting.id,kind:'linux-lease',intent:boxIntent()},app.credential);assert.equal(replay.status,200);assert.equal(replay.body.target,waiting.id);
+  assert.equal(f.rows(`SELECT * FROM linux_leases WHERE id='${waiting.id}'`).length,1);
+});
+
+test('workspace waiting cancellation and deadline do not start lease TTL; admitted cancellation releases',async t=>{
+  const f=await fixture(t,true),app=await f.application({maxConcurrentBoxes:1});await f.grant(app.id);
+  const d=await f.domain(VM),runner=await f.enroll();await f.ok(f.approve(runner,d));
+  const first=await submitBox(f,app),cancel=await submitBox(f,app),expires=await submitBox(f,app,{deadline:new Date((T0+20)*1000).toISOString()}),next=await submitBox(f,app,{deadline:new Date((T0+25)*1000).toISOString()});
+  assert.equal((await app.client().cancelRequest(cancel.id as string)).state,'cancelled');
+  f.clock(T0+20);assert.equal((await app.client().inspectRequest(expires.id as string)).state,'expired');
+  assert.equal(f.rows(`SELECT * FROM linux_leases WHERE id='${next.id}'`).length,0);
+  await app.client().cancelRequest(first.id as string);
+  assert.equal((await app.client().inspectRequest(next.id as string)).state,'admitted');
+  assert.equal(f.rows(`SELECT expires FROM linux_leases WHERE id='${next.id}'`)[0]!.expires,T0+120);
+  f.clock(T0+30);assert.equal((await app.client().inspectRequest(next.id as string)).state,'admitted');
+  assert.equal((await app.client().inspectLease(next.id as string)).state,'provisioning');
+  await app.client().cancelRequest(next.id as string);assert.equal((await f.inspectDomain(d)).reservations,0);
+});
+
+for(const mode of ['direct','queued','mixed']) for(const bound of ['quota','physical']) test(`two controller workspace writers serialize ${mode} ${bound} admission`,async t=>{
+  const f=await fixture(t,true),app=await f.application({maxConcurrentBoxes:bound==='quota'?1:8});await f.grant(app.id);
+  const d=await f.domain(bound==='physical'?VM:{cpu:32,memoryMiB:65536,diskGiB:200}),runner=await f.enroll();await f.ok(f.approve(runner,d));const second=await f.start();
+  const sends: (()=>void)[]=[];
+  const barrier=(send:()=>void)=>{sends.push(send);if(sends.length===2) for(const dispatch of sends) dispatch();};
+  const requests=await Promise.all([0,1].map(i=>{
+    const direct=mode==='direct'||(mode==='mixed'&&i===0);
+    return call(i===0?f.port():second.port,'POST',direct?'/v1/leases':'/v1/requests',direct?f.acquire():{id:randomUUID(),kind:'linux-lease',intent:boxIntent()},app.credential,barrier);
+  }));
+  assert(requests.every(r=>[200,201,429,503].includes(r.status)));
+  assert.equal(f.rows('SELECT * FROM linux_leases').length,1);assert.equal((await f.inspectDomain(d)).reservations,1);assert.equal((await f.inspectDomain(d)).reserved.cpu,VM.cpu);
+});
+
+test('workspace queue round robin gives both applications a turn',async t=>{
+  const f=await fixture(t,true),a=await f.application({maxConcurrentBoxes:1}),b=await f.application({maxConcurrentBoxes:1});await f.grant(a.id);await f.grant(b.id);
+  const d=await f.domain(VM),runner=await f.enroll();await f.ok(f.approve(runner,d));
+  const head=await submitBox(f,a),own=await submitBox(f,a),other=await submitBox(f,b);
+  await a.client().cancelRequest(head.id as string);
+  assert.equal((await b.client().inspectRequest(other.id as string)).state,'admitted');
+  assert.equal((await a.client().inspectRequest(own.id as string)).state,'waiting');
+  await b.client().cancelRequest(other.id as string);assert.equal((await a.client().inspectRequest(own.id as string)).state,'admitted');
+});
+
+test('box limit validates safe positive integers and normalizes old stored application policies',async t=>{
+  const f=await fixture(t,true),app=await f.application();
+  const applications=(await f.ok(f.get('/v1/consumers',f.admin))).consumers as Body[];
+  assert.equal(((applications.find(a=>a.id===app.id)!.limits) as Body).maxConcurrentBoxes,8);
+  const spec=JSON.parse(f.rows(`SELECT specification FROM consumers WHERE id='${app.id}'`)[0]!.specification as string);
+  assert.equal(Object.hasOwn(spec.limits,'maxConcurrentBoxes'),false);
+  await f.restart();assert.equal((((await f.ok(f.get('/v1/consumers',f.admin))).consumers as Body[]).find(a=>a.id===app.id)!.limits as Body).maxConcurrentBoxes,8);
+  for(const limit of [0,-1,1.1,Number.MAX_SAFE_INTEGER+1,'1',null]) {
+    const r=await f.post('/v1/consumers',{...spec,id:randomUUID(),limits:{...spec.limits,maxConcurrentBoxes:limit}},f.admin);assert.equal(r.status,400);
+  }
+});
+
+for(const ended of ['expired','failed']) test(`box count includes ${ended} workspace with held reservation`,async t=>{
+  const f=await fixture(t,true),app=await f.application({maxConcurrentBoxes:1});await f.grant(app.id);
+  const d=await f.domain({cpu:32,memoryMiB:65536,diskGiB:200}),runner=await f.enroll();await f.ok(f.approve(runner,d));
+  const first=await submitBox(f,app),a=(await f.claim(runner)).assignment!;
+  if(ended==='expired') f.clock(T0+100);
+  else await f.ok(f.report(runner,a.id,1,f.receipt(a,{runtimeState:'stopped',executionStopped:true,failure:'runtime'})));
+  assert.equal((await app.client().inspectLease(first.id as string)).state,ended);
+  const waiting=await submitBox(f,app);assert.equal(waiting.state,'waiting');
+  await rejectsWith(app.client().acquireLease(f.acquire()),429);
+  assert.equal((await f.inspectDomain(d)).reservations,1);
 });

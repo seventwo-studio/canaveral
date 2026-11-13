@@ -5,7 +5,7 @@ test('native evidence excludes unrelated argv, signing identity and journal path
   const processes = processEvidence('10 1 S 00:03 /Users/private/helper\n11 10 S 00:02 helper\n90 1 S 00:01 --token=FAKE_SECRET', [10]);
   assert.deepEqual(processes.map(p=>p.pid), [10,11]);
   const signature = signatureEvidence('Executable=/Users/private/helper\nIdentifier=dev.canaveral.runner\nAuthority=Private Operator\nTeamIdentifier=PRIVATE_TEAM\nCDHash='+'a'.repeat(40), true);
-  assert.equal(signature.identifier, 'dev.canaveral.runner');
+  assert(!JSON.stringify(signature).includes('dev.canaveral.runner'));
   const journal = journalEvidence({config:{path:'/Users/private/config', token:'FAKE_SECRET'}, stopped:true, deadline:123, stopCause:'deadline', direct:{agentSocket:'/Users/private/relay'}});
   assert.equal(journal.stopped,true); assert.equal(journal.deadline,123);
   const all = JSON.stringify({processes, signature, journal});
@@ -41,4 +41,13 @@ test('evidence keeps cleanup flags and original deadline as typed fields', async
   const {receiptEvidence}=await import('./evidence.ts');
   const flags={machineRemoved:true,relayRemoved:true,workspaceRemoved:true,dataPlaneClosed:true,requirementSatisfied:true,originalExpiresAt:123};
   assert.deepEqual(receiptEvidence(flags),flags);
+});
+
+ test('queue and operator probe evidence retain only milestones and aggregate policy', async () => {
+  const {receiptEvidence}=await import('./evidence.ts');
+  const events=[{event:'first admitted',at:123},{event:'second positive cleanup',at:456}];
+  assert.deepEqual(receiptEvidence(events),events);
+  const policy={count:1,deniedCount:1,passed:true,digest:'a'.repeat(64)};
+  assert.deepEqual(receiptEvidence({...policy,operatorDenyCidrs:['private-address'],target:'private-address'}),policy);
+  assert.deepEqual(receiptEvidence({event:'private-address'}),{});
 });
