@@ -2,13 +2,15 @@ import {internalFailure, guardEvidenceWrite, hasInternalFailure, onInternalFailu
 import {loadOperatorDenyList} from './operator-policy.ts';
 import {ownedProcesses,processRows,vzPids} from './processes.ts';
 import {proxyProbe,assertProxy} from './proxy.ts';
+import {reconciliationMode, validateReconciliation, reconciliationRequest, reconcileCase, proveOrphanExclusion, fenceTiming} from './reconciliation.ts';
+import {inspectPhysicalState} from './reconciliation-preflight.ts';
 import {workspaceCases} from './workspace.ts';
 // Operator-only native acceptance. Run directly with Node >=24; never imported by tests.
 import assert from 'node:assert/strict';
 import {spawn, execFile, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
-import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync as rawWriteFileSync, readFileSync, existsSync} from 'node:fs';
+import {copyFileSync, mkdtempSync, mkdirSync, chmodSync, realpathSync, writeFileSync as rawWriteFileSync, readFileSync, existsSync, openSync, fsyncSync, closeSync} from 'node:fs';
 import {join, resolve, dirname, basename} from 'node:path';
 import https from 'node:https';
 import {promisify} from 'node:util';
@@ -53,8 +55,10 @@ const {operatorDenyCidrs, denyEvidence, resources, dir, privateDir} = (() => {
       if (cfg[name] !== undefined && (typeof cfg[name] !== 'string' || resolve(cfg[name]) !== cfg[name])) throw Error();
     }
     if (!/^sha256:[0-9a-f]{64}$/.test(cfg.bundleDigest) || !cfg.signingRequirement.includes('anchor apple')) throw Error();
+    if (cfg.mode !== undefined && cfg.mode !== 'native-reconciliation-v1') throw Error();
+    if (cfg.mode === 'native-reconciliation-v1') validateReconciliation(cfg,process.env);
     if (cfg.workspaceIOVersion !== undefined && cfg.workspaceIOVersion !== 1) throw Error();
-    if (cfg.workspaceIOVersion === 1) {
+    if (cfg.workspaceIOVersion === 1 && cfg.mode !== 'native-reconciliation-v1') {
       if (typeof cfg.cloneRepo !== 'string' || !/^https:\/\//.test(cfg.cloneRepo) ||
           typeof cfg.cloneCommit !== 'string' || !/^[0-9a-f]{40}$/.test(cfg.cloneCommit)) throw Error();
       for (const name of ['hostLanTarget', 'hostTailnetTarget', 'hostLoopbackTarget']) if (typeof cfg[name] !== 'string') throw Error();
@@ -82,7 +86,7 @@ let result: ObjectValue = {state:'failed', nativeAcceptance:false};
 const caseFailures: string[] = [];
 function publishResult() {
   const accepted = completed && caseFailures.length === 0 && !hasInternalFailure();
-  save('result.json', {...result, nativeAcceptance:accepted,
+  save('result.json', {...result, ...(result.mode === 'native-reconciliation-v1' ? {reconciliationPassed:accepted && result.reconciliationPassed === true} : {}), nativeAcceptance:accepted && result.mode !== 'native-reconciliation-v1',
     ...(!accepted ? {failure:'native_acceptance_failed'} : {}),
     caseFailureCount:caseFailures.length});
 }
@@ -90,6 +94,13 @@ onInternalFailure(publishResult);
 const sha = (path: string) => 'sha256:' + createHash('sha256').update(readFileSync(path)).digest('hex');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const children: ChildProcess[] = [];
+// A hard stop preserves unknown resources; it never kills an orphan helper.
+const outerTimer = cfg.mode === reconciliationMode ? setTimeout(() => {
+  internalFailure();
+  for(const c of children) if(c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
+  try { publishResult(); } catch {}
+  process.exit(1);
+}, 600000) : undefined;
 let proxy: https.Server | undefined;
 let active: {id: string, credential: string} | undefined;
 let queuedSuccessor: string | undefined;
@@ -119,6 +130,7 @@ try {
   assert(!/Signature=adhoc/.test(signature.stderr));
   save('helper-signature.json', signatureEvidence(signature.stdout + signature.stderr, true));
   save('pins.json', {helper: sha(cfg.helper), builder: cfg.builder && existsSync(cfg.builder) ? sha(cfg.builder) : null});
+  if(cfg.mode === reconciliationMode) inspectPhysicalState(cfg.physicalStateRoots,(await exec('/bin/ps',['-axo','pid=,ppid=,command='])).stdout);
   const pem = (n: string) => join(privateDir, n);
   const evidence = (n: string) => join(dir, n);
   const conf = pem('openssl.cnf');
@@ -201,6 +213,7 @@ try {
     result = {state: 'blocked-real-artifacts', setupComplete: true};
   } else {
     const manifest = JSON.parse(readFileSync(cfg.manifest, 'utf8'));
+    if(cfg.mode === reconciliationMode) {assert.equal(manifest.version,2);assert.equal(manifest.dataVsockPort,1025);assert.equal(manifest.dataProtocol,1);}
     for (const role of ['kernel', 'initrd', 'rootfs']) refuseFixture(resolve(dirname(cfg.manifest), manifest[role].path));
     const inspect = (id: string) => ok('GET', '/v1/leases/' + id, undefined, app.credential);
     const domain = () => ok('GET', '/v1/resource-domains/' + domainId);
@@ -305,7 +318,7 @@ try {
       await snapshot(label + '-after', id); active = undefined;
     }
 
-    if (cfg.workspaceIOVersion === 1) {
+    if (cfg.mode !== reconciliationMode && cfg.workspaceIOVersion === 1) {
       const events: {event:string;at:number}[]=[];
       const mark=(event:string)=>{events.push({event,at:Date.now()});save('queue-sequence.json',events);};
       const submit=async()=>{const {id,...intent}=acquireBody(300);return ok('POST','/v1/requests',{id,kind:'linux-lease',intent},app.credential);};
@@ -325,7 +338,7 @@ try {
       assert.equal((await domain()).reservations,0);
     }
 
-    if(cfg.workspaceIOVersion===1) {
+    if(cfg.mode !== reconciliationMode && cfg.workspaceIOVersion===1) {
       try {
         caseFailures.push(...await workspaceCases({cfg:{...cfg,operatorDenyCidrs,denyEvidence},origin,ca:readFileSync(pem('ca.pem')),app,other:app2,api,ok,until,save,start,stopped}));
       } catch {
@@ -345,6 +358,7 @@ try {
       assertProxy(result,'HTTP/1.1 403 Forbidden','egress_denied');
       await ok('POST',`/v1/leases/${offline}/release`,{id:randomUUID()},key);await stopped('workspace-offline',offline);app=granted;
     }
+    if(cfg.mode !== reconciliationMode) {
     const id = await start('release');
     for (const [m, route, body] of [ ['GET', `/v1/leases/${id}`, undefined], ['POST', `/v1/leases/${id}/credential`, {}], ['POST', `/v1/leases/${id}/operations`, {id: randomUUID(), member:'primary', action:'shell', arguments:{argv:['printf','denied']}}] ] as [string,string,unknown][]) {
       const r = await api(m, route, body, app2.credential); assert([401,403,404].includes(r.status)); save('ownership-' + m + '-' + route.split('/').at(-1) + '.json', r);
@@ -406,11 +420,33 @@ try {
       if (view.state === 'failed') { await snapshot('expiry-failed', expiry); throw Error('guest failure preempted wall-clock expiry'); }
       return view.state === 'expired';
     }, 'wall-clock expiry'); await stopped('expiry', expiry);
+    }
     const lost = await start('satellite-loss', 120);
+    const readJournal = () => JSON.parse(readFileSync(join(state,'state.json'),'utf8'));
+    if(cfg.mode === reconciliationMode) {
+      const j = readJournal();
+      reconciliationRequest(j,randomUUID());
+      assert.equal(j.assignment.leaseId,lost);
+      assert.equal(j.assignment.domainId,domainId);
+      assert.equal(j.assignment.image.digest,cfg.bundleDigest);
+      assert.equal(j.direct.workspaceDisk.bytes,8*1073741824-67108864);
+      assert.deepEqual(j.config.binding,binding);
+      save('reconciliation-owned-observation.json',{journal:j,processes:observed.get(lost),lease:await inspect(lost)});
+    }
     assert(currentRun!.c.kill('SIGKILL'));
     const killed = await currentRun!.done; assert.equal(killed.code, null); assert.equal(killed.signal, 'SIGKILL');
     const lossDeadline = Date.parse((await inspect(lost)).expiresAt);
     const killedAt = Date.now();
+    if(cfg.mode === reconciliationMode) {
+      await proveOrphanExclusion({
+        journalBytes:()=>readFileSync(join(state,"state.json"),"utf8"),
+        secondOwner:async()=>{const r=await launch(cfg.satellite,["run-once",pem("satellite-loss-satellite.json")],"orphan-owner-exclusion").done;return {code:r.code,diagnostic:readFileSync(pem("orphan-owner-exclusion.stderr"),"utf8")};},
+        helpersAlive:()=>{for(const pid of observed.get(lost)!.pids) process.kill(pid,0);return observed.get(lost)!.pids.length>0;},
+        reservations:async()=>(await domain()).reservations,
+        capacityRefused:async()=>[429,503].includes((await api("POST","/v1/leases",acquireBody(120),app.credential)).status),
+      });
+      save('orphan-exclusion.json',{orphanExclusionPassed:true,reservationHeld:true});
+    }
     assert(!existsSync(join(observed.get(lost)!.machine, 'power-off.request')));
     // Do not reset state or fabricate cleanup. Preserve this isolated database and reservation.
     let lastAliveAt = 0;
@@ -422,6 +458,7 @@ try {
       return alive.every(v => !v);
     }, 'orphan helper independent deadline', Math.max(10000, lossDeadline + 6000 - Date.now()));
     const stoppedObservedAt = Date.now();
+    if(cfg.mode === reconciliationMode) fenceTiming(lossDeadline,lastAliveAt,stoppedObservedAt);
     // The guest may fence 2 s early; the native helper fences at the deadline.
     // Allow 500 ms polling jitter on the early bound and 5 s for native shutdown.
     assert(lastAliveAt >= lossDeadline - 3000, 'helper disappeared before deadline observation window');
@@ -431,10 +468,33 @@ try {
     const lossProcesses = (await exec('/bin/ps', ['-axo', 'pid=,ppid=,command='])).stdout;
     writeFileSync(pem('loss-final-processes.txt'), lossProcesses);
     const owned = await attributed(lossProcesses, record.pids, record.machine, record.owned);
+    if(cfg.mode === reconciliationMode) assert.equal(vzPids(processRows(lossProcesses)).length,0);
     assert(!processRows(lossProcesses).some(r => owned.includes(r.pid)), 'owned VM process remains after loss deadline');
     assert(!existsSync(join(record.machine, 'power-off.request')), 'controller recovery contaminated autonomous fence');
 
     save('loss-independent-fence.json', {lossDeadline, killedAt, lastAliveAt, stoppedObservedAt, stopOffsetMs:stoppedObservedAt - lossDeadline, checkedPastDeadlineAt:Date.now(), autonomous:true, helperPids:record.pids, helperPidsGone:true, noOwnedVMProcess:true, reservationHeld:(await domain()).reservations === 1, cleanupProven:false});
+    if(cfg.mode === reconciliationMode) {
+      await until(async()=>Date.now()>lossDeadline,'terminal deadline',10000);
+      // Supplemental scan. Reconcile must still prove its exact guard descriptor
+      // in fresh lsof evidence and hold runtime.lock through deletion.
+      let openHandles = '';
+      try { openHandles = (await exec('/usr/sbin/lsof',['-nP','-Fpn','+D',join(state,'workspace')])).stdout; }
+      catch(e:any) {assert.equal(e.code,1);assert.equal(e.stderr ?? '','');openHandles=e.stdout ?? '';}
+      assert.equal(openHandles.trim(),'');
+      assert.equal((await domain()).reservations,1);
+      const scoped = await reconcileCase({
+        journal:readJournal, persist:(name,value)=>{
+          writeFileSync(pem(name),JSON.stringify(value),{mode:0o600,flag:'wx'});
+          for(const path of [pem(name),privateDir]) {const fd=openSync(path,'r');try {fsyncSync(fd);} finally {closeSync(fd);}}
+        },
+        dispatch:async name=>{const r=await launch(cfg.satellite,['reconcile',pem('satellite-loss-satellite.json'),pem(name)],name).done;writeFileSync(pem(name+'.stdout'),r.output);return r;},
+        reports:()=>reports, reservations:async()=>(await domain()).reservations,
+        removed:()=>!existsSync(join(state,'workspace')) && !!record.relay && !existsSync(dirname(record.relay)),
+      },randomUUID());
+      await snapshot('reconciliation-after',lost);
+      active=undefined;
+      result={state:'cases-completed',mode:reconciliationMode,...scoped};
+    } else {
     // Recovery must report unknown, never relaunch; native deadline independently fences execution.
     assert(!existsSync(join(record.machine, 'power-off.request')), 'recovery request before restart');
     assert.equal(JSON.parse(readFileSync(join(record.machine, 'lease-authorization.json'), 'utf8')).fenced, false, 'recovery authorization before restart');
@@ -446,6 +506,7 @@ try {
     active = undefined;
     if(caseFailures.length) process.exitCode=1;
     result = {state:'cases-completed', lossReservationHeld:true, lossCleanupRequiresOperatorReconciliation:true};
+    }
     assert.equal(controller.c.exitCode, null); assert.equal(controller.c.signalCode, null);
     completed = true;
   }
@@ -465,6 +526,7 @@ finally {
   for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGTERM');
   for (const c of children) if (c.exitCode === null && c.signalCode === null) await Promise.race([once(c, 'exit'), pause(20000).then(() => { throw Error(); })]);
   } catch { internalFailure(); }
+  if(typeof outerTimer !== 'undefined') clearTimeout(outerTimer);
   // Publish only after every assertion, asynchronous callback and cleanup boundary.
   try { publishResult(); } catch {
     internalFailure();

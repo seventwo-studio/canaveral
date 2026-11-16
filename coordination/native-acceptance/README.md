@@ -766,3 +766,82 @@ Fixtures establish protocol behavior only. Native descriptor inheritance,
 launch timing, APFS durability, VZ/XPC/lsof completeness and physical workspace
 removal remain open acceptance gates until that bounded experiment is authorized
 and its evidence reviewed.
+
+## ST-589 operator-only reconciliation case (preparation)
+
+`native-reconciliation-v1` is an explicit alternative to the default suite. It
+runs exactly one workspace-v2 guest, with 2 CPU, 4096 MiB and 8 GiB, a 120-second
+lease and a hard 600-second outer process bound. The default suite is unchanged.
+No native run is recorded by this preparation change. Lead review and concrete
+operator approval are required before execution.
+
+Use the private configuration above with these additional/replacement fields:
+
+```json
+{
+  "mode": "native-reconciliation-v1",
+  "setupOnly": false,
+  "workspaceIOVersion": 1,
+  "cpu": 2,
+  "memoryMiB": 4096,
+  "diskGiB": 8,
+  "physicalStateRoots": ["/ABS/private-evidence-root", "/ABS/other-physical-controller-state"]
+}
+```
+
+`cloneRepo`, `cloneCommit` and host probe targets are unnecessary in this mode.
+The manifest must be version 2 with the data protocol on port 1025. The installed
+satellite must include ST-588 and PR34, and the current helper must retain the
+inherited ownership descriptor. Already installed immutable pinned artifacts,
+builder and signed helper are prerequisites; the case never builds, signs,
+installs, repairs or downloads them. Production satellite checks stay authoritative.
+
+After approval, the exact invocation from the checkout root is:
+
+```sh
+CANAVERAL_NATIVE_ACCEPTANCE=operator-authorized \
+  node coordination/native-acceptance/run.ts /ABS/private-reconciliation-config.json
+```
+
+CI is refused. Before using this command, the operator must establish a complete
+inventory of **all** controller and satellite state roots for this physical Mac,
+including prior native evidence roots, and prevent other workloads from starting
+for the duration. `physicalStateRoots` must include `stateRoot`, use canonical
+owned nonsymlink directories and cover that inventory. A new empty root is not
+proof of free physical capacity. If inventory completeness or exclusive use
+cannot be established, do not run; inspection of known roots alone cannot prove
+that omitted state has no reservations. There is no configuration bypass for this
+prerequisite. The preflight recursively checks supplied roots within depth/file
+bounds, refuses unsafe metadata, unresolved satellite journals, any nonreleased
+resource reservation in discovered SQLite stores and any generic host, machine, image, image-task or inference-job inventory.
+Unreadable/unknown schemas fail closed. It also refuses existing satellite,
+runner/helper/controller or VZ processes before creating the fresh controller.
+It never clears old held state to make a run fit. Keep unrelated large artifact
+libraries outside these state-only roots; excessive inventories fail closed.
+
+The case acquires and verifies readiness, saves the full helper/process observation
+and original journal privately, and kills only its own satellite child. While the
+known helper is alive, a second state owner must report `executor already owned`,
+leave the journal byte-for-byte unchanged and retain capacity. No run-once recovery
+is used after helper exclusion, avoiding pending-report recovery shortcuts. The
+case waits for the real autonomous deadline and process observations, refuses any
+remaining VZ process or workspace handle, then invokes `reconcile CONFIG REQUEST`.
+The production reconciler independently requires its guarded fresh lsof proof.
+The exact journal-derived tuple and mutation UUID/body are saved privately before
+dispatch. An unknown reply retries once with that same saved request; further
+uncertainty fails and retains evidence for inspection.
+
+Success requires ordinary completed-report acknowledgement with a held-to-released
+reservation transition, durable stopped/cleaned/released flags, workspace and relay
+removal, identical replay and altered-intent conflict without new reports or journal
+effects. Public result evidence uses `mode`, `reconciliationPassed`, `replayPassed`
+and `conflictPassed`; **nativeAcceptance remains false**. Raw requests, paths,
+credentials, child diagnostics and observations stay private. Failures and the
+outer bound preserve unknown resources; a release request is never cleanup proof.
+Inspect retained state and reservations before another attempt.
+
+A successful operator run establishes only this installed helper's runtime orphan
+exclusion and this single reconciliation path. Prepare-input descriptor retention,
+broader VZ/XPC/lsof topology variants and APFS interrupted deletion/power loss
+remain open. Existing ordinary host/controller execution gates stay closed; this
+case cannot establish full platform acceptance.

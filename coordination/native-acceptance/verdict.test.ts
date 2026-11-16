@@ -13,7 +13,7 @@ function run(s:string,scenario:string) {
   const modern=s.includes('function publishResult()');
   const failure=new URL('./failure-boundary.ts',import.meta.url).pathname;
   const evidence=new URL('./evidence.ts',import.meta.url).pathname;
-  const finish=modern?`result={state:'cases-completed'};completed=true;`:
+  const finish=scenario==='reconciliation' ? `result={state:'cases-completed',mode:'native-reconciliation-v1',reconciliationPassed:true};completed=true;` : modern?`result={state:'cases-completed'};completed=true;`:
     `save('result.json',{state:'cases-completed',nativeAcceptance:caseFailures.length===0});`;
   const callback=s.includes('.catch(() => { internalFailure(); res.destroy(); })')?
     `.catch(() => { internalFailure(); res.destroy(); })`:`.catch(e => res.destroy(e))`;
@@ -132,4 +132,13 @@ test('signature evidence omits configuration identifiers',()=>{
     const old=execFileSync('git',['show',baseline+':coordination/native-acceptance/evidence.ts'],{encoding:'utf8'});
     assert(JSON.stringify(signature(old)(raw,true)).includes('PRIVATE-CONFIG-ID'));
   }
+});
+
+
+test("scoped reconciliation success never upgrades broad native acceptance",()=>{
+  const r=run(source,"reconciliation");
+  assert.equal(r.status,0,r.stderr);
+  assert.equal(r.evidence.nativeAcceptance,false);
+  assert.equal(r.evidence.reconciliationPassed,true);
+  assert.equal(r.evidence.mode,"native-reconciliation-v1");
 });
