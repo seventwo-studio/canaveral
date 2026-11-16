@@ -365,6 +365,12 @@ try {
     assert.match(recovered.errors, /no relaunch/);
     return true;
   }, 'recovery after helper releases ownership');
+  // The first sequenced report ends the active lease with cleanup still pending.
+  // Only the next report can acknowledge terminal intent and publish blocked cleanup.
+  view = await inspect(fourth.id);
+  assert.equal(view.state, 'failed'); assert.equal(view.members[0].cleanup.reason, 'execution_pending');
+  const blockedRecovery = await run();
+  assert.equal(blockedRecovery.code, 1); assert.match(blockedRecovery.errors, /no relaunch/);
   assert(existsSync(join(fourthMachine, 'lease-fenced.json')) || existsSync(join(fourthMachine, 'power-off.request')));
   view = await inspect(fourth.id);
   assert.equal(view.state, 'failed'); assert.equal(view.runtimeState, 'unknown'); assert.notEqual(view.cleanup.state, 'complete'); neverReady(view);
@@ -571,11 +577,14 @@ try {
     assert.match(recovered.errors, /no relaunch/);
     return true;
   }, 'direct recovery after helper releases ownership');
+  const blockedDirect = await run(directConfig);
+  assert.equal(blockedDirect.code, 1); assert.match(blockedDirect.errors, /no relaunch/);
   const lostDirect = assignmentReports(d4.id).find(e => e.dropped);
   assert.deepEqual(assignmentReports(d4.id).find(e => !e.dropped && e.body.sequence === lostDirect.body.sequence).body, lostDirect.body);
   view = await inspect(d4.id);
   assert.equal(view.state, 'failed'); assert.equal(view.runtimeState, 'unknown'); assert.equal(view.members[0].ready, false);
   assert.notEqual(view.cleanup.state, 'complete'); await noDirectCapacity();
+  assert.equal(view.members[0].cleanup.reason, 'recovery');
   assert.equal(assignmentReports(d4.id).at(-1).body.receipt.ready.command, false);
   const unknownCommand = await ok('GET', `${interruptedRoute}/${interrupted.id}`, undefined, interruptedKey.credential);
   assert.equal(unknownCommand.state, 'unknown');
