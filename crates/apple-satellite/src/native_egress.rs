@@ -276,13 +276,14 @@ where
     }
     let permit = LookupPermit(count);
     let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("egress-dns".into())
-        .spawn(move || {
+    crate::ownership::try_spawn(
+        std::thread::Builder::new().name("egress-dns".into()),
+        move || {
             let _permit = permit; // Retained even after the caller times out.
             let _ = tx.send(lookup());
-        })
-        .map_err(|_| ErrorCode::Limit)?;
+        },
+    )
+    .map_err(|_| ErrorCode::Limit)?;
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or(ErrorCode::ConnectTimeout)?;

@@ -414,3 +414,81 @@ the guest file executor landed in f4219fe. Route-change/hairpin adversarial
 checks, real filesystem cancellation/publication faults, and actual Git/npm
 workloads remain native acceptance gates. Portable tests and the legacy public API fixture do not establish
 native acceptance. No additional crate dependencies were introduced.
+
+## Explicit held-work reconciliation (ST-588)
+
+`canaveral-apple-satellite reconcile /ABS/satellite.json /ABS/request.json`
+recovers one retained launch without claiming, preparing or running it. The request
+is an owned private regular file with trusted ancestry. Its closed version-1 shape is:
+
+```json
+{
+  "version": 1,
+  "mutationUUID": "STABLE_UUID",
+  "binding": {"controllerId":"UUID","runnerId":"UUID","generation":1,"incarnationId":"UUID"},
+  "claimId": "UUID",
+  "assignmentId": "UUID",
+  "leaseId": "UUID",
+  "memberId": "UUID",
+  "domainId": "UUID",
+  "imageDigest": "sha256:EXACT_ASSIGNMENT_DIGEST",
+  "bootAttempt": "EXACT_DIRECT_BOOT_UUID_OR_NULL_FOR_EFI"
+}
+```
+
+Read the tuple from the retained private journal; do not edit the journal. Reuse
+both the mutation UUID and the complete request after any uncertain response.
+Paths and stopped flags are not request fields. The config, installed artifacts,
+helper hash/signature and original current runner binding must still validate.
+Revoked or superseded runner credentials cannot reconcile through a new binding.
+Revoking only placement approval is distinct from revoking the runner credential.
+
+New launch intents persist `workerOwnershipProtocol: 1` before creating storage.
+Every reactor, connect, evidence and nested resolver worker retains an opaque
+`Arc<File>` for the original private state flock. Panic and timed-out shutdown do
+not release another worker's ownership. Scoped controller/transfer workers finish
+before their owner returns. The helper and bootstrap builder inherit a duplicate
+of that same locked open file description through fork/exec. Only the child
+duplicate has CLOEXEC cleared; the original private descriptor remains CLOEXEC.
+The pinned Swift helper does not close inherited descriptors and retains this
+lock until process exit, including while reading preparation input. No process
+scan or PID assumption is used. A future helper/builder that closes inherited
+unknown descriptors would break this protocol and requires a new design/pin review.
+The native acceptance experiment below must verify the actual installed helper.
+
+Acquiring private state therefore excludes surviving prospective workers and
+orphan preparation/runtime subprocesses, even when the managed satellite process
+itself remains alive. A live helper can make reconciliation wait until its own
+lease fence stops it; this command does not kill processes. Legacy launch intents
+without the marker remain blocked, on the same boot as well as across reboot.
+The marker is never added to an old launch during recovery.
+
+Reconciliation durably records its mutation before effects and publishes the
+sticky native fence. It replays pending reports exactly, then requires a fresh
+sequenced report from the existing controller route acknowledging terminal intent.
+Local expiry alone does not authorize deletion. The explicit recovery fence
+does not report a new runtime failure to manufacture terminal intent for an active
+lease; ordinary retained failure receipts still replay exactly. It holds an exclusive native
+`runtime.lock` flock through fresh lsof proof and owned relay/disk/workspace
+removal. A missing lock inside an existing machine directory is exclusively
+created 0600 and synced; replacement, contention, symlinks and unsafe metadata
+block recovery. Helper `inspect` is never called under this lock. The bounded
+lsof scan accepts only the reconciler's exact PID/fd/device/inode record; other
+handles in that PID also block cleanup. Empty output is insufficient because the
+known guard must appear. Unavailable, incomplete or excessive evidence blocks.
+Missing workspace storage is accepted only after durable deletion intent; partial
+removal that lost the machine directory remains conservatively blocked.
+
+Only after these proofs does recovery set executionStopped/dataPlaneClosed and
+reuse ordinary owned cleanup and reporting. Capacity is reclaimed only on the
+controller's `released:true`. Pending command/transfer receipts survive cleanup;
+recovery never replays their guest effects. Compact per-mutation receipts remain
+outside the resettable claim journal. Before a released journal can reset, any
+lost final reconciliation receipt is republished from its retained request.
+Identical replay returns the recorded outcome, including after another claim;
+a changed request with the same UUID conflicts and cannot touch that new claim.
+Tombstones are retained without automatic garbage collection.
+
+Portable coverage uses disposable files, fake helpers, socketpairs and controller
+fixtures. It does not establish native VZ/XPC/socket closure or production helper
+inheritance. See the ST-588 experiment in the native acceptance contract.

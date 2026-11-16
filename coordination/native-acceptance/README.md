@@ -719,3 +719,49 @@ standalone harness/test typecheck; 23 harness/evidence/policy/process/verdict te
 and 18 failure-boundary tests; no-Python check; private-path diff scan; shared
 native evidence scan against private configuration and deny values, addresses
 and private paths. Stdout contained only the opaque run label; stderr was empty.
+
+## ST-588 reconciliation acceptance plan (unexecuted)
+
+The prospective Rust satellite now implements explicit reconciliation through
+ordinary bound runner reports; see [the current command contract](../../crates/apple-satellite/README.md#explicit-held-work-reconciliation-st-588).
+This does not supersede historical cleanup evidence or authorize changing old
+journals. Historical held launches without the ownership marker remain blocked.
+No native recovery was executed for this implementation milestone.
+
+A future experiment requires explicit operator authorization, an isolated private
+controller/binding/state, already installed immutable artifacts and pinned signed
+helper/builder. Bound it to one 2-CPU / 4096-MiB / 8-GiB workspace-v2 lease, at
+most 120 seconds, no service installation, route changes or unrelated process
+termination. Abort on any unrelated resource ownership or unavailable proof.
+
+1. Verify the pinned native helper retains the inherited original state flock
+   before it consumes prepare stdin and throughout native preparation/runtime.
+   Pause only the owned fixture process at the prepare-input boundary, terminate
+   only its satellite, and prove a second owner cannot open state. Resume/reap
+   that helper before continuing. Also exercise managed-return with a blocked
+   data worker: state must stay unavailable until the last nested worker exits.
+2. For one real direct-boot workspace, retain exact claim/assignment/binding,
+   image digest, boot attempt and stable mutation UUID. End the consumer lease
+   through the normal API, interrupt its satellite, then wait for independent
+   helper fencing. Confirm no launch replay. Do not use a new runner generation.
+3. Under explicit reconciliation, retain the exact native runtime flock through
+   lsof and deletion. Record native PID/fd/device/inode evidence, including VZ/XPC
+   and relay socket closure. A second same-PID file handle, unrelated foreign
+   handle, contested/replaced lock, delayed helper and missing lock must each
+   demonstrate the documented hold/create behavior without freeing capacity.
+   Reconciler guard exclusion must never exclude the whole process.
+4. Interrupt after deletion intent, during deletion and after controller report
+   commit but before reply. Retry the identical mutation; prove no new effects,
+   exact pending report replay, and capacity released only with `released:true`.
+   A partial deletion missing the machine directory may remain blocked; record
+   that boundary rather than resetting state. Replay again after a new claim,
+   then alter one request field under the same UUID: only a conflict is allowed.
+5. Verify old journals without the marker and revoked/cross-generation bindings
+   remain held. Retain private evidence and finish only the experiment's owned
+   resources through ordinary authorized cleanup. Unexpected ownership or failed
+   proof leaves its reservation held for further review.
+
+Fixtures establish protocol behavior only. Native descriptor inheritance,
+launch timing, APFS durability, VZ/XPC/lsof completeness and physical workspace
+removal remain open acceptance gates until that bounded experiment is authorized
+and its evidence reviewed.

@@ -74,7 +74,7 @@ fn private(file: &File, directory: bool) -> Result<()> {
 pub(super) struct Directory {
     path: PathBuf,
     dir: File,
-    lock: File,
+    lock: crate::ownership::Guard,
 }
 impl Directory {
     pub fn open(path: &Path) -> Result<Self> {
@@ -99,7 +99,7 @@ impl Directory {
         let result = Self {
             path: path.to_owned(),
             dir,
-            lock,
+            lock: crate::ownership::Guard::new(lock),
         };
         result.check()?;
         // The exclusive owner can discard only an unpublished journal candidate.
@@ -108,15 +108,18 @@ impl Directory {
         result.check()?;
         Ok(result)
     }
+    pub(crate) fn worker_guard(&self) -> crate::ownership::Guard {
+        self.lock.clone()
+    }
     pub fn check(&self) -> Result<()> {
         private(&self.dir, true)?;
-        private(&self.lock, false)?;
+        private(self.lock.file(), false)?;
         let current = walk(&self.path)?;
         let a = io(current.metadata())?;
         let b = io(self.dir.metadata())?;
         let lock = openat(&self.dir, &name("lock".as_ref())?, libc::O_RDONLY)?;
         let x = io(lock.metadata())?;
-        let y = io(self.lock.metadata())?;
+        let y = io(self.lock.file().metadata())?;
         if (a.dev(), a.ino()) != (b.dev(), b.ino()) || (x.dev(), x.ino()) != (y.dev(), y.ino()) {
             return Err(invalid());
         }

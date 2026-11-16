@@ -17,6 +17,9 @@ pub mod clock;
 pub mod data;
 pub mod guest;
 mod operations;
+mod reconcile;
+pub use reconcile::reconcile;
+pub mod ownership;
 mod private;
 pub mod reactor;
 mod transfers;
@@ -139,6 +142,8 @@ struct WorkspaceAdmission {
 #[serde(rename_all = "camelCase")]
 enum StopCause {
     Controller,
+    /// Explicit recovery fences execution but cannot manufacture terminal lease intent.
+    Reconciliation,
     Deadline,
     Runtime,
 }
@@ -152,6 +157,11 @@ struct Journal {
     assignment: Option<Assignment>,
     /// Published before workspace/prepare/run: irreversible, even when an effect's result was lost.
     launch_intent: bool,
+    /// Present only for launches whose data workers retain the private flock.
+    #[serde(default)]
+    worker_ownership_protocol: Option<u32>,
+    #[serde(default)]
+    reconciliation: Option<reconcile::Request>,
     prepared: bool,
     fenced: bool,
     #[serde(default)]
@@ -235,6 +245,8 @@ impl Journal {
             claim_id: random_uuid()?,
             assignment: None,
             launch_intent: false,
+            worker_ownership_protocol: None,
+            reconciliation: None,
             prepared: false,
             fenced: false,
             stop_cause: None,
@@ -324,7 +336,7 @@ fn artifact_hash(path: &Path, raw: bool) -> Result<String> {
     Ok(format!("sha256:{:x}", hash.finalize()))
 }
 fn command(helper: &Path, args: &[&str], input: Option<&Value>, limit: Duration) -> Result<Value> {
-    let mut child = io(Command::new(helper)
+    let mut child = io(ownership::command(helper)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -730,7 +742,7 @@ impl Satellite {
             Some("provisioning")
         } else if s.fenced {
             match s.stop_cause.unwrap_or(StopCause::Runtime) {
-                StopCause::Controller => None,
+                StopCause::Controller | StopCause::Reconciliation => None,
                 StopCause::Deadline => Some("deadline"),
                 StopCause::Runtime => Some("runtime"),
             }
@@ -1767,7 +1779,16 @@ impl Satellite {
 
     /// One durable claim per journal. Restart never repeats prepare/run after launch intent.
     pub fn run_once(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
+        ownership::with_guard(Some(self.dir.worker_guard()), || self.run_owned(controller))
+    }
+    fn run_owned(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
+        if !self.state.released {
+            if let Some(request) = self.state.reconciliation.clone() {
+                return self.reconcile(controller, request).map(|_| ());
+            }
+        }
         if self.state.released {
+            self.seal_reconciliation()?;
             // Cleanup acknowledgment cannot retire a command receipt that has not
             // itself been acknowledged. Keep the old binding until exact replay succeeds.
             self.transfer_report_retry(controller)?;
@@ -1831,6 +1852,7 @@ impl Satellite {
         let a = self.assignment()?.clone();
         // Even prepare is never retried after an interrupted effect.
         self.state.launch_intent = true;
+        self.state.worker_ownership_protocol = Some(1);
         self.state.boot = clock::now().as_secs_f64();
         if let Some((b, pins)) = &direct {
             // A fresh boot attempt is consumed together with launch intent.
@@ -1894,7 +1916,7 @@ impl Satellite {
             return Err("prepare failed or lease expired before run; fenced");
         }
         self.authorize()?;
-        let mut child = io(Command::new(&self.config.helper)
+        let mut child = io(ownership::command(&self.config.helper)
             .arg("run")
             .arg(self.machine()?)
             .stdin(Stdio::null())
@@ -1914,7 +1936,7 @@ impl Satellite {
             let mut last: Option<clock::Clock> = None;
             let mut polled: Option<clock::Clock> = None;
             let mut session: Option<guest::Session> = None;
-            let mut data = data::Lane::default();
+            let mut data = data::Lane::owned(self.dir.worker_guard());
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
                     // Observe process loss before the deadline margin can mask it.
@@ -2219,6 +2241,7 @@ fn update_path_absent(path: &std::path::Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     mod operations;
+    mod reconcile;
     mod transfers;
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};

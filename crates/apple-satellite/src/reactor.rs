@@ -31,6 +31,7 @@ type Connected = (
 type Result<T> = canaveral_guest_protocol::Result<T>;
 const TURN: usize = 65536;
 /// Clone must create an independent evidence/query context. No ambient proxy or DNS at connect.
+/// Every nested worker must use `ownership::spawn` to retain the original state lock.
 pub trait Egress: HostEvidence + Clone + Send + 'static {
     /// Covers socket-owning workers. Timed-out, capped resolver threads are excluded.
     fn workers_closed(&self) -> bool {
@@ -369,7 +370,7 @@ impl<E: Egress> Reactor<E> {
                     self.authority.clone(),
                     self.connected_tx.clone(),
                 );
-                self.workers.push(thread::spawn(move || {
+                self.workers.push(crate::ownership::spawn(move || {
                     let result = connect(&mut provider, &policy, &authority, &host, port);
                     let _ = tx.try_send((id, clock::Clock::now(), result));
                 }));
@@ -460,7 +461,7 @@ impl<E: Egress> Reactor<E> {
             let mut provider = self.provider.clone();
             let (tx, rx) = mpsc::sync_channel(1);
             self.recheck = Some((clock::Clock::now(), rx));
-            self.workers.push(thread::spawn(move || {
+            self.workers.push(crate::ownership::spawn(move || {
                 let invalid = snapshot.revalidate(u64::MAX, &policy, &mut provider);
                 let _ = tx.send(invalid);
             }));
@@ -741,7 +742,7 @@ pub fn spawn<E: Egress>(
     let ready = Arc::new(AtomicBool::new(false));
     let flag = ready.clone();
     let auth = authority.clone();
-    let worker = thread::spawn(move || {
+    let worker = crate::ownership::spawn(move || {
         while auth.permits() && !session.ready() {
             if session.pump().is_err() {
                 return Closed {
@@ -1565,7 +1566,12 @@ mod worker_tests {
             gate: Arc::new(Gate::default()),
         };
         provider.gate.block();
-        let (mut h, mut guest) = start(provider.clone());
+        let temp =
+            tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+        let path = temp.path().join("state");
+        let dir = crate::private::Directory::open(&path).unwrap();
+        let (mut h, mut guest) =
+            crate::ownership::with_guard(Some(dir.worker_guard()), || start(provider.clone()));
         guest
             .write_all(
                 &data::encode(
@@ -1592,7 +1598,17 @@ mod worker_tests {
         let start = std::time::Instant::now();
         drop(h);
         assert!(start.elapsed() < WAIT);
+        drop(dir); // models Satellite returning while the managed process stays alive
+        assert!(crate::private::Directory::open(&path).is_err());
         provider.gate.release();
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            if crate::private::Directory::open(&path).is_ok() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
         assert!(control.ready(101.0));
     }
     #[test]
