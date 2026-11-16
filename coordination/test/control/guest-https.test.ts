@@ -35,6 +35,7 @@ test("guest HTTPS uses verified TLS, independent requests, bounded deadlines, an
       await assert.rejects(new GuestHTTPS(origin, credential).call("/v1/accessibility", null), (e: unknown) => e instanceof ServiceError && e.code === "transport_interrupted");
       await assert.rejects(new GuestHTTPS(origin.replace("localhost", "127.0.0.1"), credential, cert).call("/v1/accessibility", null));
       for (const value of ["http://localhost", `${origin}/a`, `${origin}?`, `${origin}#`, `https://name:password@localhost`, `${origin}/./`, "https://localhost:0", "https://localhost:65536"]) assert.throws(() => new GuestHTTPS(value, credential));
+      for (const value of ["a".repeat(31), "a".repeat(4097), "é".repeat(32), "a".repeat(31) + " ", "a".repeat(32) + "\n"]) assert.throws(() => new GuestHTTPS(origin, value));
       assert.equal(seen.length, count);
     });
     await t.test("redirects and malformed responses carry unknown mutation outcomes without replay", async () => {
@@ -58,6 +59,15 @@ test("guest HTTPS uses verified TLS, independent requests, bounded deadlines, an
           assert.ok(e instanceof ServiceError); assert.equal(e.retryable, false); assert.equal(e.outcome, code === "private-secret" ? "unknown" : undefined); assert.equal(e.code, code === "private-secret" ? "conflict" : code); assert.equal(e.message.includes("private-secret"), false); return true;
         });
       }
+    });
+    await t.test("bound 401 is unauthenticated while legacy response validation is preserved", async () => {
+      reply = (_req, r) => { r.writeHead(401, { "Content-Type": "application/json" }); r.end('{"error":"private-secret"}'); };
+      await assert.rejects(client.call("/v1/shell/write", {}), (e: unknown) => e instanceof ServiceError && e.status === 401 && e.code === "unauthenticated" && e.outcome === "unknown" && !e.message.includes("private-secret"));
+      reply = (_req, r) => { r.writeHead(401, { "Content-Type": "text/plain" }); r.end("private-secret"); };
+      await assert.rejects(client.call("/v1/shell/write", {}), (e: unknown) => e instanceof ServiceError && e.code === "response_invalid" && e.outcome === "unknown");
+      const bound = new GuestHTTPS(origin, credential, cert, 20, "Canaveral-Binding-v1 " + "b".repeat(43)), count = seen.length;
+      await assert.rejects(bound.call("/v1/shell/write", {}), (e: unknown) => e instanceof ServiceError && e.status === 401 && e.code === "unauthenticated" && e.outcome === "unknown" && e.retryable === false && !e.message.includes("private-secret"));
+      assert.equal(seen.length, count + 1);
     });
     await t.test("one slow terminal cannot serialize other reads and deadline includes trickled response", async () => {
       let finishSlow!: () => void;
