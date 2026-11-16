@@ -13,7 +13,7 @@ function run(s:string,scenario:string) {
   const modern=s.includes('function publishResult()');
   const failure=new URL('./failure-boundary.ts',import.meta.url).pathname;
   const evidence=new URL('./evidence.ts',import.meta.url).pathname;
-  const finish=modern?`result={state:'cases-completed'};completed=true;`:
+  const finish=scenario.startsWith('reconciliation') ? `result={state:'cases-completed',mode:'native-reconciliation-v1',reconciliationPassed:true};completed=true;` : modern?`result={state:'cases-completed'};completed=true;`:
     `save('result.json',{state:'cases-completed',nativeAcceptance:caseFailures.length===0});`;
   const callback=s.includes('.catch(() => { internalFailure(); res.destroy(); })')?
     `.catch(() => { internalFailure(); res.destroy(); })`:`.catch(e => res.destroy(e))`;
@@ -23,9 +23,10 @@ function run(s:string,scenario:string) {
     scenario==='assertion'?`assert.equal(false,true);`:
     scenario==='case'?`caseFailures.push('failed case');`:
     scenario==='fatal'?`setImmediate(()=>{throw Error('PRIVATE_SECRET');});await new Promise(r=>setTimeout(r,50));`:
-    scenario==='warning'?`process.emitWarning('PRIVATE_SECRET');await new Promise(r=>setTimeout(r,50));`:'';
+    scenario==='warning'?`process.emitWarning('PRIVATE_SECRET');await new Promise(r=>setTimeout(r,50));`:
+    scenario==='reconciliation-lingering'?`const lingering=new EventEmitter();Object.assign(lingering,{exitCode:null,signalCode:null,kill:()=>true});children.push(lingering);setInterval(()=>{},1000);`:'';
   const script=`import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';import {once} from 'node:events';
+import {spawn} from 'node:child_process';import {once,EventEmitter} from 'node:events';
 import {join} from 'node:path';
 import {writeFileSync as rawWriteFileSync,mkdirSync} from 'node:fs';
 import {internalFailure,guardEvidenceWrite,hasInternalFailure,onInternalFailure} from ${JSON.stringify(failure)};
@@ -33,6 +34,7 @@ import {receiptEvidence} from ${JSON.stringify(evidence)};
 const dir=${JSON.stringify(dir)},privateDir=join(dir,'private');mkdirSync(privateDir);
 const writeFileSync:typeof rawWriteFileSync=(...args)=>guardEvidenceWrite(()=>rawWriteFileSync(...args));
 const children:any[]=[];let active:any;let api:any;
+${scenario==='reconciliation-lingering'?`const outerTimer=setTimeout(()=>process.exit(77),5000);`:''}
 const pause=async (_ms:number)=>{};
 let proxy:any=${scenario==='cleanup'?`{closeAllConnections(){throw Error('PRIVATE_SECRET');}}`:'undefined'};
 ${section(s,'const save = ','const sha = ')}
@@ -132,4 +134,21 @@ test('signature evidence omits configuration identifiers',()=>{
     const old=execFileSync('git',['show',baseline+':coordination/native-acceptance/evidence.ts'],{encoding:'utf8'});
     assert(JSON.stringify(signature(old)(raw,true)).includes('PRIVATE-CONFIG-ID'));
   }
+});
+
+
+test("scoped reconciliation success never upgrades broad native acceptance",()=>{
+  const r=run(source,"reconciliation");
+  assert.equal(r.status,0,r.stderr);
+  assert.equal(r.evidence.nativeAcceptance,false);
+  assert.equal(r.evidence.reconciliationPassed,true);
+  assert.equal(r.evidence.mode,"native-reconciliation-v1");
+});
+
+test('scoped finalization exits failed despite a child that retains open handles',()=>{
+  const r=run(source,'reconciliation-lingering');
+  assert.equal(r.status,1,r.stderr);
+  assert.equal(r.evidence.nativeAcceptance,false);
+  assert.equal(r.evidence.reconciliationPassed,false);
+  assert.equal(r.evidence.failure,'native_acceptance_failed');
 });
