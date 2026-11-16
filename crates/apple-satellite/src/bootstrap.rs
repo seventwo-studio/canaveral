@@ -17,7 +17,7 @@ use std::{
         process::CommandExt,
     },
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 /// Upper bound for the produced image; a launch.json medium is a few KiB.
@@ -37,7 +37,7 @@ pub fn argv(filesystem: uuid::Uuid, destination: &Path, source: &Path) -> Vec<Os
     out
 }
 fn run(builder: &bundle::Builder, args: &[OsString], cwd: &Path) -> Result<()> {
-    let mut command = Command::new(&builder.path);
+    let mut command = crate::ownership::command(&builder.path);
     command
         .args(args)
         .env_clear()

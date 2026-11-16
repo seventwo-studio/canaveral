@@ -18,8 +18,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Per-boot readiness latch. Data is attempted once and never reconnected.
-#[derive(Default)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Lane {
+    owner: Option<crate::ownership::Guard>,
     attempted: bool,
     initial_ready: bool,
     session: Option<Session>,
@@ -27,10 +28,21 @@ pub(crate) struct Lane {
     options: Option<(bool, Vec<String>, Duration)>,
 }
 impl Lane {
+    pub(crate) fn owned(owner: crate::ownership::Guard) -> Self {
+        Self {
+            owner: Some(owner),
+            attempted: false,
+            initial_ready: false,
+            session: None,
+            worker: None,
+            options: None,
+        }
+    }
     #[cfg(test)]
     pub(crate) fn test_lane(stream: UnixStream, binding: Binding) -> Self {
         let session = Session::new(stream, binding, "b".repeat(64)).unwrap();
         Self {
+            owner: None,
             attempted: true,
             worker: Some(crate::reactor::spawn(
                 session,
@@ -83,13 +95,16 @@ impl Lane {
             if let Ok(session) = Session::open(path, binding, nonce) {
                 if let Some((enabled, denied, deadline)) = &self.options {
                     if let Ok(policy) = crate::egress::Policy::new(denied) {
-                        self.worker = Some(crate::reactor::spawn(
-                            session,
-                            crate::reactor::Native,
-                            policy,
-                            *enabled,
-                            crate::reactor::Authority::new(*deadline),
-                        ));
+                        self.worker =
+                            Some(crate::ownership::with_guard(self.owner.clone(), || {
+                                crate::reactor::spawn(
+                                    session,
+                                    crate::reactor::Native,
+                                    policy,
+                                    *enabled,
+                                    crate::reactor::Authority::new(*deadline),
+                                )
+                            }));
                     }
                 } else {
                     self.session = Some(session);
@@ -344,6 +359,7 @@ mod tests {
             s.pump().unwrap();
         }
         assert!(s.ready());
+        peer.shutdown(Shutdown::Write).unwrap();
         drop(peer);
         assert!(s.pump().is_err());
         assert!(!s.ready());
@@ -379,6 +395,7 @@ mod tests {
         lane.pump();
         assert!(lane.commands_ready(true));
         assert!(lane.files_ready());
+        peer.shutdown(Shutdown::Write).unwrap();
         drop(peer);
         lane.pump();
         assert!(lane.session.is_none());

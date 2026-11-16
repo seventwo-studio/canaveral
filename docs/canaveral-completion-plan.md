@@ -72,10 +72,17 @@ pinned clone/HEAD verification, npm ci/test, hashed build-log download, binary
 file round trips, replacement/conflict/disk-full cases, tenant and egress denials,
 renewal, release, expiry and autonomous satellite-loss fencing passed on one
 Apple-silicon Mac ([evidence](../coordination/native-acceptance/README.md#qualified-clone-full-rerun)).
-Open gates: native route-change monitoring, router hairpin coverage requiring
+Open gates: native route-change acceptance, router hairpin coverage requiring
 operator deny CIDRs, data-only disconnect, power-loss durability, PTY, concurrent
-guests, held-reservation reconciliation, production trust/signing and macOS
+guests, native reconciliation, production trust/signing and macOS
 workspaces. These results do not enable the ordinary host lease path.
+
+Explicit [held-work reconciliation](../crates/apple-satellite/README.md#explicit-held-work-reconciliation-st-588)
+is implemented for the original valid runner binding and prospective launches
+whose workers and subprocesses retain ownership. Portable fixtures cover its
+exclusion, exact recovery and cleanup-report contract. Native helper retention,
+VZ/XPC and handle closure, and interrupted-deletion durability remain unaccepted.
+Legacy or revoked-binding recovery and ambiguous missing storage stay blocked.
 
 Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish Linux/macOS build acceptance, native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
 

@@ -2,6 +2,12 @@
 fn run() -> Result<(), &'static str> {
     use canaveral_apple_satellite::{read_config, run_once_with_ready, Config};
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|v| v == "reconcile") && args.len() == 3 {
+        let config = read_config(std::path::Path::new(&args[1]))?;
+        let outcome = canaveral_apple_satellite::reconcile(config, std::path::Path::new(&args[2]))?;
+        println!("{outcome}");
+        return Ok(());
+    }
     let managed = args.first().is_some_and(|v| v == "--update-managed");
     let check = args.first().is_some_and(|v| v == "--update-check");
     let status = args.first().is_some_and(|v| v == "--update-status");
@@ -16,7 +22,7 @@ fn run() -> Result<(), &'static str> {
         (&args[1], None)
     } else {
         return Err(
-            "expected run-once CONFIG, --update-check CONFIG, or --update-managed --config CONFIG --state STATE",
+            "expected reconcile CONFIG REQUEST.json, run-once CONFIG, --update-check CONFIG, or --update-managed --config CONFIG --state STATE",
         );
     };
     let config: Config = read_config(std::path::Path::new(path))?;

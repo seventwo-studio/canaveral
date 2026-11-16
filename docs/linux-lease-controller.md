@@ -106,7 +106,11 @@ keeps its reservation, and `cleanup` stays `pending`, `running` or `blocked`, un
 the bound runner reports positive stop, storage removal and guest-credential
 erasure. If the binding was revoked or superseded, the view shows `runtimeState:
 unknown` and cleanup reason `recovery`, and the reservation stays held. There is no
-automatic failover, reassignment or operator reconciliation in this slice.
+automatic failover or reassignment. The Apple satellite supports explicit
+[held-work reconciliation](../crates/apple-satellite/README.md#explicit-held-work-reconciliation-st-588)
+for prospective launches with ownership proof, using these same report routes
+and the original valid binding. It adds no controller/admin force-release route;
+legacy proof gaps and revoked/cross-generation bindings stay held.
 
 ## Runner wire interface
 

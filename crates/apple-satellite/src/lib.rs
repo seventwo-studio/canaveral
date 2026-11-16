@@ -17,6 +17,9 @@ pub mod clock;
 pub mod data;
 pub mod guest;
 mod operations;
+mod reconcile;
+pub use reconcile::reconcile;
+pub mod ownership;
 mod private;
 pub mod reactor;
 mod transfers;
@@ -139,6 +142,8 @@ struct WorkspaceAdmission {
 #[serde(rename_all = "camelCase")]
 enum StopCause {
     Controller,
+    /// Explicit recovery fences execution but cannot manufacture terminal lease intent.
+    Reconciliation,
     Deadline,
     Runtime,
 }
@@ -152,6 +157,11 @@ struct Journal {
     assignment: Option<Assignment>,
     /// Published before workspace/prepare/run: irreversible, even when an effect's result was lost.
     launch_intent: bool,
+    /// Present only for launches whose data workers retain the private flock.
+    #[serde(default)]
+    worker_ownership_protocol: Option<u32>,
+    #[serde(default)]
+    reconciliation: Option<reconcile::Request>,
     prepared: bool,
     fenced: bool,
     #[serde(default)]
@@ -235,6 +245,8 @@ impl Journal {
             claim_id: random_uuid()?,
             assignment: None,
             launch_intent: false,
+            worker_ownership_protocol: None,
+            reconciliation: None,
             prepared: false,
             fenced: false,
             stop_cause: None,
@@ -324,7 +336,7 @@ fn artifact_hash(path: &Path, raw: bool) -> Result<String> {
     Ok(format!("sha256:{:x}", hash.finalize()))
 }
 fn command(helper: &Path, args: &[&str], input: Option<&Value>, limit: Duration) -> Result<Value> {
-    let mut child = io(Command::new(helper)
+    let mut child = io(ownership::command(helper)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -730,7 +742,7 @@ impl Satellite {
             Some("provisioning")
         } else if s.fenced {
             match s.stop_cause.unwrap_or(StopCause::Runtime) {
-                StopCause::Controller => None,
+                StopCause::Controller | StopCause::Reconciliation => None,
                 StopCause::Deadline => Some("deadline"),
                 StopCause::Runtime => Some("runtime"),
             }
@@ -1767,7 +1779,16 @@ impl Satellite {
 
     /// One durable claim per journal. Restart never repeats prepare/run after launch intent.
     pub fn run_once(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
+        ownership::with_guard(Some(self.dir.worker_guard()), || self.run_owned(controller))
+    }
+    fn run_owned(&mut self, controller: &mut (impl Controller + Send)) -> Result<()> {
+        if !self.state.released {
+            if let Some(request) = self.state.reconciliation.clone() {
+                return self.reconcile(controller, request).map(|_| ());
+            }
+        }
         if self.state.released {
+            self.seal_reconciliation()?;
             // Cleanup acknowledgment cannot retire a command receipt that has not
             // itself been acknowledged. Keep the old binding until exact replay succeeds.
             self.transfer_report_retry(controller)?;
@@ -1831,6 +1852,7 @@ impl Satellite {
         let a = self.assignment()?.clone();
         // Even prepare is never retried after an interrupted effect.
         self.state.launch_intent = true;
+        self.state.worker_ownership_protocol = Some(1);
         self.state.boot = clock::now().as_secs_f64();
         if let Some((b, pins)) = &direct {
             // A fresh boot attempt is consumed together with launch intent.
@@ -1894,7 +1916,7 @@ impl Satellite {
             return Err("prepare failed or lease expired before run; fenced");
         }
         self.authorize()?;
-        let mut child = io(Command::new(&self.config.helper)
+        let mut child = io(ownership::command(&self.config.helper)
             .arg("run")
             .arg(self.machine()?)
             .stdin(Stdio::null())
@@ -1914,7 +1936,7 @@ impl Satellite {
             let mut last: Option<clock::Clock> = None;
             let mut polled: Option<clock::Clock> = None;
             let mut session: Option<guest::Session> = None;
-            let mut data = data::Lane::default();
+            let mut data = data::Lane::owned(self.dir.worker_guard());
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
                     // Observe process loss before the deadline margin can mask it.
@@ -2219,9 +2241,36 @@ fn update_path_absent(path: &std::path::Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     mod operations;
+    mod reconcile;
     mod transfers;
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    /// Detached workers and a concurrent fork may still hold the original lock
+    /// after the previous Satellite is dropped. Retry only that exclusion error.
+    fn reopen_after_workers(config: Config) -> Satellite {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match Satellite::open_preflighted(config.clone()) {
+                Ok(satellite) => return satellite,
+                Err("executor already owned") if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("fixture reopen failed: {error}"),
+            }
+        }
+    }
+    fn assert_eventually_idle(config: &Config) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match update_status(config) {
+                Ok(true) => return,
+                Ok(false) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => panic!("fixture did not become idle: {result:?}"),
+            }
+        }
+    }
     fn boot_id() -> uuid::Uuid {
         uuid::Uuid::from_u128(123)
     }
@@ -2307,23 +2356,23 @@ mod tests {
         };
         drop(Identity::prepare(&c.identity, &c.origin, approval).unwrap());
         assert!(update_status(&c).is_err()); // A status probe never initializes missing runtime state.
-        let mut satellite = Satellite::open_preflighted(c.clone()).unwrap();
+        let mut satellite = reopen_after_workers(c.clone());
         assert_eq!(update_status(&c), Ok(false));
         drop(satellite);
-        assert_eq!(update_status(&c), Ok(true));
-        satellite = Satellite::open_preflighted(c.clone()).unwrap();
+        assert_eventually_idle(&c);
+        satellite = reopen_after_workers(c.clone());
         satellite.state.assignment = Some(assignment(&c, satellite.state.claim_id));
         satellite.save().unwrap();
         drop(satellite);
         assert_eq!(update_status(&c), Ok(false));
-        satellite = Satellite::open_preflighted(c.clone()).unwrap();
+        satellite = reopen_after_workers(c.clone());
         satellite.state.stopped = true;
         satellite.state.terminal = true;
         satellite.state.cleaned = true;
         satellite.state.released = true;
         satellite.save().unwrap();
         drop(satellite);
-        assert_eq!(update_status(&c), Ok(true));
+        assert_eventually_idle(&c);
         std::fs::create_dir(c.state.join("workspace")).unwrap();
         assert_eq!(update_status(&c), Ok(false));
     }
@@ -2423,13 +2472,13 @@ mod tests {
     #[test]
     fn claim_reply_loss_replays_across_restart_and_never_changes_identity() {
         let (_tmp, c) = fixture();
-        let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+        let mut s = reopen_after_workers(c.clone());
         let mut w = wire(assignment(&c, s.state.claim_id));
         w.lose = true;
         assert!(s.run_once(&mut w).is_err());
         let first = w.requests[0].clone();
         drop(s);
-        let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+        let mut s = reopen_after_workers(c.clone());
         assert!(s.run_once(&mut w).is_err());
         assert_eq!(first, w.requests[1]);
         drop(s);
@@ -2443,7 +2492,7 @@ mod tests {
     #[test]
     fn idle_claim_does_not_age_a_later_assignment() {
         let (_tmp, c) = fixture();
-        let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+        let mut s = reopen_after_workers(c.clone());
         let mut a = assignment(&c, s.state.claim_id);
         a.resources.cpu = 3; // declined after recording, so no launch is attempted
         let mut w = wire(a);
@@ -2461,7 +2510,7 @@ mod tests {
         assert_eq!(w.requests[0], w.requests[1]);
     }
     fn seeded(c: &Config) -> Satellite {
-        let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+        let mut s = reopen_after_workers(c.clone());
         s.state.assignment = Some(assignment(c, s.state.claim_id));
         s.state.revision = 1;
         s.state.boot_session_id = boot_id();
@@ -2581,7 +2630,7 @@ mod tests {
             serde_json::to_vec(&document).unwrap(),
         )
         .unwrap();
-        let s = Satellite::open_preflighted(c).unwrap();
+        let s = reopen_after_workers(c);
         assert!(s.state.fenced);
         assert_eq!(s.receipt().unwrap()["receipt"]["failure"], "runtime");
     }
@@ -2598,7 +2647,7 @@ mod tests {
             s.fence().unwrap(); // Later supervision cannot overwrite the first cause.
             assert_eq!(s.receipt().unwrap()["receipt"]["failure"], expected);
             drop(s);
-            let mut s = Satellite::open_preflighted(c).unwrap();
+            let mut s = reopen_after_workers(c);
             s.fence().unwrap();
             assert_eq!(s.receipt().unwrap()["receipt"]["failure"], expected);
         }
@@ -2622,7 +2671,7 @@ mod tests {
         assert!(s.report(&mut w).is_err());
         let original = w.requests[0].clone();
         drop(s);
-        let mut s = Satellite::open_preflighted(c).unwrap();
+        let mut s = reopen_after_workers(c);
         w.lose = false;
         w.cancel = true;
         s.report(&mut w).unwrap();
@@ -2656,7 +2705,7 @@ mod tests {
         s.state.launch_intent = true;
         s.save().unwrap();
         drop(s);
-        let mut s = Satellite::open_preflighted(c).unwrap();
+        let mut s = reopen_after_workers(c);
         let mut w = wire(s.assignment().unwrap().clone());
         assert!(s.run_once(&mut w).is_err());
         assert!(s.state.fenced && !s.state.stopped && !s.state.cleaned);
@@ -2674,7 +2723,7 @@ mod tests {
     #[test]
     fn resources_images_and_local_artifacts_fail_closed() {
         let (_tmp, c) = fixture();
-        let s = Satellite::open_preflighted(c.clone()).unwrap();
+        let s = reopen_after_workers(c.clone());
         let mut a = assignment(&c, s.state.claim_id);
         a.resources.cpu = 3;
         assert!(s.validate_assignment(&a).is_err());
@@ -2705,7 +2754,7 @@ mod tests {
     #[test]
     fn declined_assignment_releases_without_any_local_effect() {
         let (_tmp, c) = fixture();
-        let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+        let mut s = reopen_after_workers(c.clone());
         let mut a = assignment(&c, s.state.claim_id);
         a.image.digest = "sha256:".to_string() + &"0".repeat(64);
         let mut w = wire(a);
@@ -2775,7 +2824,7 @@ mod tests {
             assert!(c.state.join("workspace").exists());
             // Durable stop proof lets recovery finish once the controller is reachable.
             drop(s);
-            let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+            let mut s = reopen_after_workers(c.clone());
             w.lose = false;
             s.run_once(&mut w).unwrap();
             assert!(s.state.cleaned && s.state.released);
@@ -2811,7 +2860,7 @@ mod tests {
         assert!(s.run_once(&mut w).is_err());
         let pending = w.requests[0].clone();
         drop(s);
-        let mut s = Satellite::open_preflighted(c).unwrap();
+        let mut s = reopen_after_workers(c);
         w.lose = false;
         s.run_once(&mut w).unwrap();
         assert_eq!(pending, w.requests[1]);
@@ -2846,7 +2895,7 @@ mod tests {
     #[test]
     fn cleanup_never_follows_a_symlink_into_unrelated_storage() {
         let (tmp, c) = fixture();
-        let s = Satellite::open_preflighted(c.clone()).unwrap();
+        let s = reopen_after_workers(c.clone());
         s.dir.workspace().unwrap();
         let other = tmp.path().join("other");
         std::fs::create_dir(&other).unwrap();

@@ -342,18 +342,35 @@ try {
   assert.equal(calls('prepare'), 3); assert.equal(calls('run'), 3);
 
   // 5. Satellite crash while the guest runs: no relaunch, unknown runtime, reservation retained.
-  const fourth = (await acquire()).lease;
+  const fourth = (await acquire(30)).lease;
   const crashing = satellite();
   const fourthMachine = machineDir(fourth);
   await until(() => existsSync(join(fourthMachine, 'fixture-running')), 'fourth guest start');
   const fourthPid = Number(readFileSync(join(fourthMachine, 'fixture-running'), 'utf8')); orphans.push(fourthPid);
   crashing.kill('SIGKILL'); await crashing.done;
   assert(alive(fourthPid), 'fixture guest should survive the satellite crash');
+  const retainedFourth = readFileSync(join(dir, 'state', 'state.json'), 'utf8');
   for (let i = 0; i < 2; i++) {
     const recovered = await run();
-    assert.equal(recovered.code, 1); assert.match(recovered.errors, /no relaunch/);
+    assert.equal(recovered.code, 1); assert.match(recovered.errors, /executor already owned/);
+    assert.equal(readFileSync(join(dir, 'state', 'state.json'), 'utf8'), retainedFourth);
   }
-  await until(() => !alive(fourthPid), 'native fence after recovery');
+  // The orphan helper retains the state flock. Only its independent deadline
+  // permits another satellite to open state and report the uncertain launch.
+  await until(() => !alive(fourthPid), 'native fence after crash', 33000);
+  await until(async () => {
+    const recovered = await run();
+    assert.equal(recovered.code, 1);
+    if (/executor already owned/.test(recovered.errors)) return false;
+    assert.match(recovered.errors, /no relaunch/);
+    return true;
+  }, 'recovery after helper releases ownership');
+  // The first sequenced report ends the active lease with cleanup still pending.
+  // Only the next report can acknowledge terminal intent and publish blocked cleanup.
+  view = await inspect(fourth.id);
+  assert.equal(view.state, 'failed'); assert.equal(view.members[0].cleanup.reason, 'execution_pending');
+  const blockedRecovery = await run();
+  assert.equal(blockedRecovery.code, 1); assert.match(blockedRecovery.errors, /no relaunch/);
   assert(existsSync(join(fourthMachine, 'lease-fenced.json')) || existsSync(join(fourthMachine, 'power-off.request')));
   view = await inspect(fourth.id);
   assert.equal(view.state, 'failed'); assert.equal(view.runtimeState, 'unknown'); assert.notEqual(view.cleanup.state, 'complete'); neverReady(view);
@@ -532,11 +549,12 @@ try {
   // 7e. Crash after ready with a lost report: recovery replays it, never relaunches or executes,
   //     withdraws readiness and keeps the reservation until stop is proven.
   guestMode('commands');
-  const d4 = (await acquireDirect()).lease;
+  const d4 = (await acquireDirect(30)).lease;
   const crash = satellite(directConfig);
   await until(async () => (await inspect(d4.id)).state === 'ready', 'second direct guest ready');
   const d4Machine = directMachine(d4);
-  orphans.push(Number(readFileSync(join(d4Machine, 'fixture-running'), 'utf8')));
+  const d4Pid = Number(readFileSync(join(d4Machine, 'fixture-running'), 'utf8'));
+  orphans.push(d4Pid);
   relays.push(JSON.parse(readFileSync(join(d4Machine, 'direct-started.json'), 'utf8')).agentSocket);
   const interruptedKey = await sdk.rotateLeaseCredential(d4.id);
   const interrupted = {id: randomUUID(), member: 'primary', action: 'shell', arguments: {argv: ['fixture', 'wait']}};
@@ -547,13 +565,26 @@ try {
   await until(() => assignmentReports(d4.id).some(e => e.dropped), 'dropped direct report');
   crash.kill('SIGKILL'); await crash.done;
   const runs = calls('run'), prepares = calls('prepare');
-  const recovered = await run(directConfig);
-  assert.equal(recovered.code, 1); assert.match(recovered.errors, /no relaunch/);
+  const retainedDirect = readFileSync(join(directState, 'state.json'), 'utf8');
+  const heldDirect = await run(directConfig);
+  assert.equal(heldDirect.code, 1); assert.match(heldDirect.errors, /executor already owned/);
+  assert.equal(readFileSync(join(directState, 'state.json'), 'utf8'), retainedDirect);
+  await until(() => !alive(d4Pid), 'direct helper independent fence after crash', 33000);
+  await until(async () => {
+    const recovered = await run(directConfig);
+    assert.equal(recovered.code, 1);
+    if (/executor already owned/.test(recovered.errors)) return false;
+    assert.match(recovered.errors, /no relaunch/);
+    return true;
+  }, 'direct recovery after helper releases ownership');
+  const blockedDirect = await run(directConfig);
+  assert.equal(blockedDirect.code, 1); assert.match(blockedDirect.errors, /no relaunch/);
   const lostDirect = assignmentReports(d4.id).find(e => e.dropped);
   assert.deepEqual(assignmentReports(d4.id).find(e => !e.dropped && e.body.sequence === lostDirect.body.sequence).body, lostDirect.body);
   view = await inspect(d4.id);
   assert.equal(view.state, 'failed'); assert.equal(view.runtimeState, 'unknown'); assert.equal(view.members[0].ready, false);
   assert.notEqual(view.cleanup.state, 'complete'); await noDirectCapacity();
+  assert.equal(view.members[0].cleanup.reason, 'recovery');
   assert.equal(assignmentReports(d4.id).at(-1).body.receipt.ready.command, false);
   const unknownCommand = await ok('GET', `${interruptedRoute}/${interrupted.id}`, undefined, interruptedKey.credential);
   assert.equal(unknownCommand.state, 'unknown');
