@@ -53,3 +53,7 @@ test("explicit nulls and trailing newlines cannot bypass template validation", (
   for (const change of [{ defaults: null }, { memoryStepMiB: null }, { prepare: { driver: "cloud-init", packages: null } }, { prepare: { driver: "cloud-init", timeoutSeconds: null } }, { prepare: { driver: "cloud-init", files: null } }, { prepare: { driver: "cloud-init", packages: ["curl\n"] } }, { prepare: { driver: "cloud-init", files: [{ path: "/file", content: "x", mode: "0600\n" }] } }]) assert.throws(() => normalizeTemplate({ ...image(), ...change }));
   assert.throws(() => source({ path: "/base.raw", format: "raw", sha256: "a".repeat(64) + "\n" }));
 });
+test("guestAccess admission remains Linux-only after macOS helper protocol verification", () => {
+  assert.equal(normalizeTemplate({ ...image(), guestAccess: true }).guestAccess, true);
+  for (const os of ["macos", "windows", "ios", "android"]) assert.throws(() => normalizeTemplate({ ...image(), os, guestAccess: true }));
+});

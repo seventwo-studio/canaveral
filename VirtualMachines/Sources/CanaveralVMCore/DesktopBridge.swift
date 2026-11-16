@@ -17,6 +17,8 @@ public actor DesktopBridge {
     private var closing=false
     private var shutdownWasUncertain: Bool?
     private let workspace: (any GuestWorkspaceService)?
+    private let assignment: GuestAssignmentContext?
+    private let incarnation = UUID().uuidString.lowercased()
     private let token: String
     private let device: any GuestDesktopDevice
     private let journalURL: URL
@@ -30,9 +32,9 @@ public actor DesktopBridge {
     private var acting = false
     private let clock: @Sendable () -> Double
     private var inspections: [UUID: (snapshot: GuestAccessibilitySnapshot, started: Double)] = [:]
-    public init(token: String, device: any GuestDesktopDevice, journalURL: URL, workspace: (any GuestWorkspaceService)? = nil, displayStream: GuestDisplayStream? = nil, clock: @escaping @Sendable () -> Double = { NativeLeaseClock.now() }) throws {
+    public init(token: String, device: any GuestDesktopDevice, journalURL: URL, workspace: (any GuestWorkspaceService)? = nil, assignment: GuestAssignmentContext? = nil, displayStream: GuestDisplayStream? = nil, clock: @escaping @Sendable () -> Double = { NativeLeaseClock.now() }) throws {
         guard token.count >= 32 else { throw CanaveralError.invalid("Guest credential is too short.") }
-        self.displayStream=displayStream; self.workspace=workspace; self.token = token; self.device = device; self.journalURL = journalURL; self.clock=clock
+        self.assignment=assignment; self.displayStream=displayStream; self.workspace=workspace; self.token = token; self.device = device; self.journalURL = journalURL; self.clock=clock
         controlURL = journalURL.deletingLastPathComponent().appendingPathComponent("control.json")
         let pendingURL=journalURL.deletingLastPathComponent().appendingPathComponent("control-pending.json")
         controlPendingURL = pendingURL
@@ -42,10 +44,20 @@ public actor DesktopBridge {
         controlUncertain = FileManager.default.fileExists(atPath: pendingURL.path) || (try? FileManager.default.destinationOfSymbolicLink(atPath:pendingURL.path)) != nil
     }
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
-        guard Secrets.equal(request.bearer, token) else { return .error("Guest credential rejected.", status: 401) }
+        if let assignment {
+            let identity = request.path == "/v1/identity"
+            guard let expected = try? assignment.authorization(credential:token,incarnation:identity ? nil : incarnation),
+                  Secrets.equal(request.headers["authorization"] ?? "",expected) else { return .error("Guest credential rejected.",status:401) }
+        } else {
+            guard Secrets.equal(request.bearer, token) else { return .error("Guest credential rejected.", status: 401) }
+        }
         guard request.headers["origin"] == nil else { return .error("Browser clients are not supported.", status: 403) }
         guard !closing else { return .error("Guest helper is shutting down.",status:503) }
         do {
+            if request.path == "/v1/identity", let assignment {
+                guard request.method == "GET", request.target == "/v1/identity", request.body.isEmpty else { throw CanaveralError.invalid("Invalid guest identity request.") }
+                return try .json(assignment.identity(incarnation:incarnation))
+            }
             if (request.path.hasPrefix("/v1/files/") || request.path.hasPrefix("/v1/shell/")), let workspace { return try await workspace.handle(request) }
             if request.path.hasPrefix("/v1/display/"), let displayStream {
                 if request.method == "GET", request.path == "/v1/display/frame" {
