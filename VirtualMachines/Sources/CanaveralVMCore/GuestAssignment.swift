@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import CoreFoundation
 
 /// Immutable trusted assignment. There is no production launch source or bootstrap delivery yet.
 public struct GuestAssignmentContext: Sendable, Encodable {
