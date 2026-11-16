@@ -34,13 +34,13 @@ function fixture(unknown=false) {
   const s={journal:()=>j,persist:(n:string,v:unknown)=>{files.set(n,structuredClone(v));},reports:()=>reports,reservations:async()=>held,removed:()=>removed,
     dispatch:async(n:string)=>{
       assert(files.has(n),'intent persisted before dispatch');calls.push(n);
-      if(n==='reconcile-conflict.json') return {code:1,output:'private diagnostic'};
+      if(n==='reconcile-conflict.json') return {code:1,output:'',diagnostic:'reconciliation mutation conflicts\n'};
       if(!j.released) {
         Object.assign(j,{stopped:true,cleaned:true,released:true});j.direct.dataClosed=true;j.direct.workspaceDisk.removed=true;held=0;removed=true;
-        reports.push({body:{receipt:{cleanup:'complete',executionStopped:true,workspaceRemoved:true,dataPlaneClosed:true}},response:{released:true},before:{body:{reservations:1}},after:{body:{reservations:0}}});
-        if(unknown)return {code:null,output:''};
+        reports.push({body:{assignmentId:j.assignment.id,receipt:{cleanup:'complete',executionStopped:true,workspaceRemoved:true,dataPlaneClosed:true}},response:{assignmentId:j.assignment.id,released:true},before:{body:{reservations:1}},after:{body:{reservations:0}}});
+        if(unknown)return {code:null,output:'',diagnostic:'lost cleanup acknowledgment'};
       }
-      return {code:0,output:JSON.stringify({version:1,mutationUUID:mutation,assignmentId:j.assignment.id,released:true})};
+      return {code:0,output:JSON.stringify({version:1,mutationUUID:mutation,assignmentId:j.assignment.id,released:true}),diagnostic:''};
     }};
   return {s,mutation,calls,j,files,reports};
 }
@@ -50,9 +50,23 @@ for(const unknown of [false,true]) test('success/replay/conflict with stable sav
   assert.equal(f.files.get('reconcile-request.json').mutationUUID,f.mutation);
 });
 test('uncertain failure preserves identity and refuses any reclamation claim',async()=>{
-  const f=fixture();f.s.dispatch=async n=>{f.calls.push(n);return {code:null,output:'PRIVATE_SECRET'};};
+  const f=fixture();f.s.dispatch=async n=>{f.calls.push(n);return {code:null,output:'PRIVATE_SECRET',diagnostic:'PRIVATE_SECRET'};};
   await assert.rejects(reconcileCase(f.s,f.mutation));
   assert.deepEqual(f.calls,['reconcile-request.json','reconcile-request.json']);assert.equal(await f.s.reservations(),1);assert.equal(f.j.released,undefined);
+});
+test('a conflict must be proven rather than inferred from an unrelated CLI failure',async()=>{
+  for(const diagnostic of ['current identity authentication failed','controller reply missing','']) {
+    const f=fixture(), dispatch=f.s.dispatch;
+    f.s.dispatch=async n=>n==='reconcile-conflict.json'?{code:1,output:'',diagnostic}:dispatch(n);
+    await assert.rejects(reconcileCase(f.s,f.mutation));
+  }
+});
+test('cleanup acknowledgment must belong to the exact reconciled assignment',async()=>{
+  for(const target of ['body','response']) {
+    const f=fixture(), dispatch=f.s.dispatch;
+    f.s.dispatch=async n=>{const r=await dispatch(n);f.reports[0][target].assignmentId=randomUUID();return r;};
+    await assert.rejects(reconcileCase(f.s,f.mutation));
+  }
 });
 test('insufficient ownership and false cleanup/ack never pass',async()=>{
   for(const field of ['workerOwnershipProtocol','launchIntent']) {const f=fixture();delete f.j[field];await assert.rejects(reconcileCase(f.s,f.mutation));assert.equal(f.calls.length,0);}

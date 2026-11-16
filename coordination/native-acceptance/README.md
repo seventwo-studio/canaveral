@@ -814,7 +814,15 @@ that omitted state has no reservations. There is no configuration bypass for thi
 prerequisite. The preflight recursively checks supplied roots within depth/file
 bounds, refuses unsafe metadata, unresolved satellite journals, any nonreleased
 resource reservation in discovered SQLite stores and any generic host, machine, image, image-task or inference-job inventory.
-Unreadable/unknown schemas fail closed. It also refuses existing satellite,
+Known database names with damaged or missing SQLite headers, SQLite sidecars and
+unpublished `state.next` candidates require inspection and block admission.
+Recognized SQLite stores with unreadable/unknown schemas or null/unknown
+reservation states fail closed. The scan cannot identify an arbitrarily renamed,
+damaged database from its bytes; complete operator inventory remains required.
+SQLite inventory uses a bounded read-only child with no inherited environment
+hooks. This isolates [Node 24.11's built-in SQLite warning](https://raw.githubusercontent.com/nodejs/node/v24.11.0/lib/sqlite.js)
+from the parent harness's unchanged fatal-warning boundary; other diagnostics
+and malformed reader results are refused. It also refuses existing satellite,
 runner/helper/controller or VZ processes before creating the fresh controller.
 It never clears old held state to make a run fit. Keep unrelated large artifact
 libraries outside these state-only roots; excessive inventories fail closed.
@@ -834,10 +842,15 @@ uncertainty fails and retains evidence for inspection.
 Success requires ordinary completed-report acknowledgement with a held-to-released
 reservation transition, durable stopped/cleaned/released flags, workspace and relay
 removal, identical replay and altered-intent conflict without new reports or journal
-effects. Public result evidence uses `mode`, `reconciliationPassed`, `replayPassed`
+effects. The conflict must carry the production mutation-conflict diagnostic,
+and the cleanup acknowledgment must match the exact assignment. Each dispatch
+attempt retains separate private stdout/stderr rather than overwriting an
+uncertain attempt. Public result evidence uses `mode`, `reconciliationPassed`, `replayPassed`
 and `conflictPassed`; **nativeAcceptance remains false**. Raw requests, paths,
 credentials, child diagnostics and observations stay private. Failures and the
 outer bound preserve unknown resources; a release request is never cleanup proof.
+After the scoped final verdict is saved, the parent exits even if a child ignored
+termination and still holds pipes; that failure cannot certify the child stopped.
 Inspect retained state and reservations before another attempt.
 
 A successful operator run establishes only this installed helper's runtime orphan

@@ -482,12 +482,18 @@ try {
       catch(e:any) {assert.equal(e.code,1);assert.equal(e.stderr ?? '','');openHandles=e.stdout ?? '';}
       assert.equal(openHandles.trim(),'');
       assert.equal((await domain()).reservations,1);
+      let dispatchAttempt=0;
       const scoped = await reconcileCase({
         journal:readJournal, persist:(name,value)=>{
           writeFileSync(pem(name),JSON.stringify(value),{mode:0o600,flag:'wx'});
           for(const path of [pem(name),privateDir]) {const fd=openSync(path,'r');try {fsyncSync(fd);} finally {closeSync(fd);}}
         },
-        dispatch:async name=>{const r=await launch(cfg.satellite,['reconcile',pem('satellite-loss-satellite.json'),pem(name)],name).done;writeFileSync(pem(name+'.stdout'),r.output);return r;},
+        dispatch:async name=>{
+          const attempt=name+'.attempt-'+(++dispatchAttempt);
+          const r=await launch(cfg.satellite,['reconcile',pem('satellite-loss-satellite.json'),pem(name)],attempt).done;
+          writeFileSync(pem(attempt+'.stdout'),r.output);
+          return {...r,diagnostic:readFileSync(pem(attempt+'.stderr'),'utf8')};
+        },
         reports:()=>reports, reservations:async()=>(await domain()).reservations,
         removed:()=>!existsSync(join(state,'workspace')) && !!record.relay && !existsSync(dirname(record.relay)),
       },randomUUID());
@@ -526,10 +532,15 @@ finally {
   for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGTERM');
   for (const c of children) if (c.exitCode === null && c.signalCode === null) await Promise.race([once(c, 'exit'), pause(20000).then(() => { throw Error(); })]);
   } catch { internalFailure(); }
-  if(typeof outerTimer !== 'undefined') clearTimeout(outerTimer);
   // Publish only after every assertion, asynchronous callback and cleanup boundary.
   try { publishResult(); } catch {
     internalFailure();
     try { publishResult(); } catch {}
+  }
+  // A child that ignored termination may still own pipes. In scoped mode the
+  // final persisted verdict ends the parent; it never certifies that child stopped.
+  if(typeof outerTimer !== 'undefined') {
+    clearTimeout(outerTimer);
+    process.exit(process.exitCode ?? 0);
   }
 }

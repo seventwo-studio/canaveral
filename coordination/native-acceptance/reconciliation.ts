@@ -31,7 +31,7 @@ export function reconciliationRequest(j: any, mutationUUID: string) {
 export interface ReconciliationSeams {
   journal(): any;
   persist(name:string, value:unknown):void;
-  dispatch(name:string):Promise<{code:unknown;output:string}>;
+  dispatch(name:string):Promise<{code:unknown;output:string;diagnostic:string}>;
   reports():any[];
   reservations():Promise<number>;
   removed():boolean;
@@ -55,6 +55,8 @@ export async function reconcileCase(s:ReconciliationSeams, mutationUUID:string) 
   const reports = s.reports().slice(before);
   const ack = reports.find(r=>r.response.released === true);
   assert(ack);
+  assert.equal(ack.response.assignmentId,request.assignmentId);
+  assert.equal(ack.body.assignmentId,request.assignmentId);
   assert.equal(ack.body.receipt.cleanup,'complete');
   assert.equal(ack.body.receipt.executionStopped,true);
   assert.equal(ack.body.receipt.workspaceRemoved,true);
@@ -68,6 +70,7 @@ export async function reconcileCase(s:ReconciliationSeams, mutationUUID:string) 
   s.persist('reconcile-conflict.json',{...request,imageDigest:'sha256:'+ (request.imageDigest[7] === '0' ? '1' : '0') + request.imageDigest.slice(8)});
   const conflict = await s.dispatch('reconcile-conflict.json');
   assert.equal(conflict.code,1);
+  assert.match(conflict.diagnostic,/^reconciliation mutation conflicts\s*$/);
   assert.equal(s.reports().length,count);
   assert.equal(JSON.stringify(s.journal()),stable);
   assert.equal(await s.reservations(),0);
