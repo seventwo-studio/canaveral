@@ -1398,6 +1398,9 @@ mod tests {
                 id: id(99)
             })
             .is_err());
+        // A concurrent helper fork can briefly retain a duplicate descriptor.
+        // Shutdown models a disconnected peer across every duplicate.
+        peer.shutdown(Shutdown::Both).unwrap();
         drop(peer);
         assert!(r.step().is_err());
         assert!(r.close().complete());

@@ -94,6 +94,23 @@ fn reconciliation_releases_only_after_proof_and_replays_across_reset() {
     assert_eq!(s.reconcile(&mut w, req).unwrap(), outcome);
 }
 #[test]
+fn launch_intent_before_workspace_creation_stays_held() {
+    let (_tmp, c) = fixture();
+    let mut s = seeded(&c);
+    s.state.launch_intent = true;
+    s.state.worker_ownership_protocol = Some(1);
+    s.save().unwrap();
+    let req = request(&s);
+    let mut w = wire(s.assignment().unwrap().clone());
+    w.cancel = true;
+    assert_eq!(
+        s.reconcile(&mut w, req),
+        Err("workspace missing before deletion intent")
+    );
+    assert!(!s.state.stopped && !s.state.cleaned && !s.state.released);
+}
+
+#[test]
 fn lost_reports_and_missing_storage_retain_exact_intent() {
     let (_tmp, c) = fixture();
     let mut s = held(&c);
@@ -104,7 +121,7 @@ fn lost_reports_and_missing_storage_retain_exact_intent() {
     assert!(s.reconcile(&mut w, req.clone()).is_err());
     let pending = s.state.pending.clone().unwrap();
     drop(s);
-    let mut s = Satellite::open_preflighted(c.clone()).unwrap();
+    let mut s = reopen_after_workers(c.clone());
     assert!(s.reconcile(&mut w, req.clone()).is_err());
     assert_eq!(s.state.pending.as_ref(), Some(&pending));
     std::fs::remove_dir_all(s.workspace()).unwrap();
@@ -160,7 +177,7 @@ fn foreign_handle_and_lost_cleanup_reply_never_bypass_recovery() {
     let pending = s.state.pending.clone().unwrap();
     assert!(s.state.cleaned && !s.state.released);
     drop(s);
-    let mut s = Satellite::open_preflighted(c).unwrap();
+    let mut s = reopen_after_workers(c);
     s.run_once(&mut w).unwrap();
     assert!(s.state.released);
     assert!(

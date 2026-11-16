@@ -18,7 +18,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Per-boot readiness latch. Data is attempted once and never reconnected.
-#[derive(Default)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Lane {
     owner: Option<crate::ownership::Guard>,
     attempted: bool,
@@ -29,9 +29,14 @@ pub(crate) struct Lane {
 }
 impl Lane {
     pub(crate) fn owned(owner: crate::ownership::Guard) -> Self {
-        let mut lane = Self::default();
-        lane.owner = Some(owner);
-        lane
+        Self {
+            owner: Some(owner),
+            attempted: false,
+            initial_ready: false,
+            session: None,
+            worker: None,
+            options: None,
+        }
     }
     #[cfg(test)]
     pub(crate) fn test_lane(stream: UnixStream, binding: Binding) -> Self {
@@ -354,6 +359,7 @@ mod tests {
             s.pump().unwrap();
         }
         assert!(s.ready());
+        peer.shutdown(Shutdown::Write).unwrap();
         drop(peer);
         assert!(s.pump().is_err());
         assert!(!s.ready());
@@ -389,6 +395,7 @@ mod tests {
         lane.pump();
         assert!(lane.commands_ready(true));
         assert!(lane.files_ready());
+        peer.shutdown(Shutdown::Write).unwrap();
         drop(peer);
         lane.pump();
         assert!(lane.session.is_none());

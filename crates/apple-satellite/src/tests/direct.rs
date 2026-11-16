@@ -176,7 +176,11 @@ fn fake_guest(d: &Direct, mode: Mode) -> Arc<Mutex<Vec<Host>>> {
             "memberID":b.member_id.to_string().to_uppercase(),"leaseID":b.lease_id.to_string().to_uppercase(),
             "bootSessionID":boot_id().to_string().to_uppercase(),"bootAttempt":b.boot_attempt.to_string().to_uppercase(),
             "agentSocket":sock});
-        std::fs::write(machine.join("direct-started.json"), started.to_string()).unwrap();
+        // Match the native helper's atomic publication contract. A reader must
+        // never observe the new path before its complete identity is present.
+        let pending = machine.join("direct-started.next");
+        std::fs::write(&pending, started.to_string()).unwrap();
+        std::fs::rename(pending, machine.join("direct-started.json")).unwrap();
         let (mut stream, _) = listener.accept().unwrap();
         let mut decoder = Decoder::default();
         let mut buf = [0u8; 4096];
@@ -423,7 +427,7 @@ fn stalled_handshake_expires_locally_while_controller_is_unreachable() {
         "no cleanup without acknowledgment"
     );
     drop(s);
-    let mut s = Satellite::open_preflighted(d.c.clone()).unwrap();
+    let mut s = reopen_after_workers(d.c.clone());
     w.lose = false;
     s.run_once(&mut w).unwrap();
     for (_, r) in &w.requests {
@@ -488,7 +492,7 @@ fn recovered_ready_launch_reports_unknown_and_never_relaunches_or_execs() {
     std::fs::create_dir(&machine).unwrap();
     std::fs::set_permissions(&machine, std::fs::Permissions::from_mode(0o700)).unwrap();
     drop(s);
-    let mut s = Satellite::open_preflighted(d.c.clone()).unwrap();
+    let mut s = reopen_after_workers(d.c.clone());
     let mut w = wire(s.assignment().unwrap().clone());
     w.lose = true;
     assert!(s.run_once(&mut w).is_err());
@@ -609,7 +613,12 @@ fn command_poll_report_loss_retries_exact_receipt_and_executes_once() {
         reports: vec![],
     };
     satellite.run_once(&mut controller).unwrap();
-    assert!(controller.reports.len() >= 2);
+    assert!(
+        controller.reports.len() >= 2,
+        "lease reports: {:?}; helper calls: {:?}",
+        controller.wire.requests,
+        std::fs::read_to_string(d.root.join("calls"))
+    );
     assert_eq!(
         frames
             .lock()

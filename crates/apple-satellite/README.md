@@ -450,9 +450,11 @@ not release another worker's ownership. Scoped controller/transfer workers finis
 before their owner returns. The helper and bootstrap builder inherit a duplicate
 of that same locked open file description through fork/exec. Only the child
 duplicate has CLOEXEC cleared; the original private descriptor remains CLOEXEC.
-The pinned Swift helper does not close inherited descriptors and retains this
-lock until process exit, including while reading preparation input. No process
-scan or PID assumption is used. A future helper/builder that closes inherited
+Source inspection of the Swift helper shows no inherited-descriptor close loop,
+including while it reads preparation input. Retention by the installed signed
+helper remains unverified and must pass native acceptance step 1 before this
+protocol is used for native reconciliation. No process scan or PID assumption
+is used. A future helper/builder that closes inherited
 unknown descriptors would break this protocol and requires a new design/pin review.
 The native acceptance experiment below must verify the actual installed helper.
 
@@ -476,8 +478,10 @@ block recovery. Helper `inspect` is never called under this lock. The bounded
 lsof scan accepts only the reconciler's exact PID/fd/device/inode record; other
 handles in that PID also block cleanup. Empty output is insufficient because the
 known guard must appear. Unavailable, incomplete or excessive evidence blocks.
-Missing workspace storage is accepted only after durable deletion intent; partial
-removal that lost the machine directory remains conservatively blocked.
+Missing workspace storage is accepted only after durable deletion intent. A crash
+or mkdir failure after launch intent but before workspace creation remains blocked,
+as does partial removal that lost the machine directory. These states retain
+capacity; this command cannot manufacture proof that nothing was created.
 
 Only after these proofs does recovery set executionStopped/dataPlaneClosed and
 reuse ordinary owned cleanup and reporting. Capacity is reclaimed only on the
@@ -492,3 +496,10 @@ Tombstones are retained without automatic garbage collection.
 Portable coverage uses disposable files, fake helpers, socketpairs and controller
 fixtures. It does not establish native VZ/XPC/socket closure or production helper
 inheritance. See the ST-588 experiment in the native acceptance contract.
+
+Parallel transport fixtures explicitly shut down socket peers: a concurrent
+helper fork can temporarily retain a copied descriptor until exec. Expected
+state reopening waits within a fixed bound for the ownership error to clear;
+other errors fail immediately. Start records use atomic publication, matching
+the native helper. Keep ordinary test parallelism enabled when verifying these
+boundaries.

@@ -753,8 +753,9 @@ termination. Abort on any unrelated resource ownership or unavailable proof.
 4. Interrupt after deletion intent, during deletion and after controller report
    commit but before reply. Retry the identical mutation; prove no new effects,
    exact pending report replay, and capacity released only with `released:true`.
-   A partial deletion missing the machine directory may remain blocked; record
-   that boundary rather than resetting state. Replay again after a new claim,
+   A crash after launch intent but before workspace creation, or a partial deletion
+   missing the machine directory, remains blocked; record these held-capacity
+   boundaries rather than resetting state. Replay again after a new claim,
    then alter one request field under the same UUID: only a conflict is allowed.
 5. Verify old journals without the marker and revoked/cross-generation bindings
    remain held. Retain private evidence and finish only the experiment's owned

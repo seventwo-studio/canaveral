@@ -805,11 +805,22 @@ mod tests {
             let mut bytes = [0; 2];
             stream.read_exact(&mut bytes).unwrap();
             assert_eq!(&bytes, b"ok");
+            // A concurrent helper fork may temporarily retain the listener fd
+            // until exec. Refusal must follow within a bound, not immediately.
             drop(listener);
-            assert_eq!(
-                connect(ip, address.port(), Duration::from_secs(1)).unwrap_err(),
-                ErrorCode::ConnectFailed
-            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match connect(ip, address.port(), Duration::from_millis(50)) {
+                    Err(ErrorCode::ConnectFailed) => break,
+                    result => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "listener did not close: {result:?}"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
             assert_eq!(
                 connect(ip, address.port(), Duration::ZERO).unwrap_err(),
                 ErrorCode::ConnectTimeout

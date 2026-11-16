@@ -222,7 +222,7 @@ fn cleanup_and_restart_preserve_unacknowledged_operation_before_a_new_claim() {
     assert!(!s.state.operations.current.as_ref().unwrap().acknowledged);
     let original = controller.operation_reports[0].clone();
     drop(s);
-    let mut s = Satellite::open_preflighted(c).unwrap();
+    let mut s = reopen_after_workers(c);
     assert!(s.run_once(&mut controller).is_err());
     assert_eq!(s.assignment().unwrap().id, assignment.id);
     assert!(controller
@@ -259,7 +259,7 @@ fn durable_replay_membership_has_no_4096_command_cutoff_or_eviction() {
     assert!(s.state.operations.completed.is_empty());
     let claim = s.state.claim_id;
     drop(s);
-    let mut s = Satellite::open_preflighted(c).unwrap();
+    let mut s = reopen_after_workers(c);
     for id in [uuid::Uuid::from_u128(1), cmd.id] {
         assert!(s.dir.operation_completed(claim, assignment, id).unwrap());
     }
@@ -305,7 +305,7 @@ fn history_migrates_legacy_membership_and_refuses_corruption_and_links() {
     let claim = s.state.claim_id;
     let assignment = s.assignment().unwrap().id;
     drop(s);
-    let s = Satellite::open_preflighted(c).unwrap();
+    let s = reopen_after_workers(c);
     assert!(s.state.operations.completed.is_empty());
     assert!(s.dir.operation_completed(claim, assignment, id).unwrap());
     assert!(s
@@ -463,7 +463,7 @@ fn failure_after_durable_poll_intent_recovers_unknown_without_guest_effects() {
         .guest_id
         .is_none());
     drop(s);
-    let mut recovered = Satellite::open_preflighted(c).unwrap();
+    let mut recovered = reopen_after_workers(c);
     assert!(recovered.state.operations.current.is_some());
     let mut w = wire(recovered.assignment().unwrap().clone());
     assert!(recovered.run_once(&mut w).is_err());
