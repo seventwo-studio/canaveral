@@ -143,6 +143,42 @@ test("malformed intent is refused at submission and does not consume the UUID",a
   assert.equal((await f.raw("POST","/v1/requests",req))!.status,201);
 });
 
+for (const kind of ["lease", "linux-lease"] as const) test(`${kind} validates all acquisition fields before consuming a request UUID`, async t => {
+  const f = leaseFixture(t); f.changeOffer({ leaseProtocol: undefined }); f.beat();
+  const invalid = [
+    { templateId: null }, { templateId: "" }, { templateId: 7 },
+    { templateRevision: null }, { templateRevision: "" },
+    { arch: null }, { arch: "x86" }, { arch: ["amd64"] }, { name: null }, { name: "" },
+    { resources: null }, { resources: { cpu: true } }, { resources: { cpu: 0 } }, { resources: { cpu: 1.5 } }, { resources: { gpu: 1 } },
+    { ttlSeconds: null }, { ttlSeconds: "120" }, { ttlSeconds: true }, { ttlSeconds: 0 }, { ttlSeconds: 1.5 }, { ttlSeconds: 2 ** 31 },
+    { requiredCapabilities: null }, { requiredCapabilities: "command" }, { requiredCapabilities: ["unknown"] }, { requiredCapabilities: ["command", "command"] },
+  ];
+  for (const extra of invalid) {
+    const req = envelope(f, { kind });
+    await assert.rejects(f.request("POST", "/v1/requests", { ...req, intent: { ...req.intent, ...extra } }), failure(400), JSON.stringify(extra));
+    await assert.rejects(f.request("GET", `/v1/requests/${req.id}`), failure(404));
+    assert.equal((await f.raw("POST", "/v1/requests", req))!.status, 201);
+  }
+  for (const field of ["templateId", "templateRevision", "arch"]) {
+    const req = envelope(f, { kind });
+    const intent: Record<string, unknown> = { ...req.intent }; delete intent[field];
+    await assert.rejects(f.request("POST", "/v1/requests", { ...req, intent }), failure(400));
+    await assert.rejects(f.request("GET", `/v1/requests/${req.id}`), failure(404));
+    assert.equal((await f.raw("POST", "/v1/requests", req))!.status, 201);
+  }
+});
+
+test("valid acquisition shapes defer application policy and grant checks to admission", async t => {
+  const f = leaseFixture(t);
+  for (const kind of ["lease", "linux-lease"] as const) {
+    const req = envelope(f, { kind });
+    const overLimit = { ...req, intent: { ...req.intent, ttlSeconds: 3601 } };
+    assert.equal((await f.raw("POST", "/v1/requests", overLimit))!.status, 201);
+    assert.equal((await f.request("GET", `/v1/requests/${req.id}`)).state, "rejected");
+    await assert.rejects(f.request("POST", "/v1/requests", req), failure(409, "request_conflict"));
+  }
+});
+
 test("a deadline crossed during the pass expires instead of admitting; admission time is current",t=>{
   const f=leaseFixture(t), app=f.application({maxWaitingRequests:10}), start=f.now();
   const admitted:string[]=[];
