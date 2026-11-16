@@ -180,6 +180,19 @@ function memberId(leaseId: string): string {
 }
 
 const ACQUISITION_FIELDS = ["id", "name", "templateId", "templateRevision", "arch", "resources", "ttlSeconds", "requiredCapabilities"];
+/** State-independent validation shared by direct acquisition and queued submission. */
+function validateAcquisition(value: unknown) {
+  const input = object(value);
+  if (Object.keys(input).some(k => !ACQUISITION_FIELDS.includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
+  const id = machineIdentifier(input.id);
+  if (Object.hasOwn(input, "ttlSeconds")) positive(input.ttlSeconds, "lease TTL", 2 ** 31 - 1);
+  if (input.arch !== "arm64" && input.arch !== "amd64") throw new ServiceError("Lease image architecture must be arm64 or amd64.", 400);
+  const request = validateMachineRequest({ ...Object.fromEntries(Object.entries(input).filter(([k]) => !["ttlSeconds", "requiredCapabilities"].includes(k))), id: memberId(id), name: Object.hasOwn(input, "name") ? input.name : `lease-${id}` });
+  if (!request.templateRevision || !request.arch) throw new ServiceError("Lease image revision and architecture must be explicit.", 400);
+  const required = Object.hasOwn(input, "requiredCapabilities") ? input.requiredCapabilities : [], known = capabilities({ os: "linux", mode: "headless" });
+  if (!Array.isArray(required) || required.some(k => typeof k !== "string" || !Object.hasOwn(known, k)) || new Set(required).size !== required.length) throw new ServiceError("Invalid required capabilities.", 400);
+  return { input, id, request, required };
+}
 export class LegacyLeases implements ControlModule {
   readonly applications: ConsumerIdentities;
   readonly machines: MachineStore;
@@ -201,8 +214,7 @@ export class LegacyLeases implements ControlModule {
       else this.linux.mutate(token, row.id, "release", { id: row.id });
     }, (kind, intent) => {
       if (kind === "linux-lease") { this.linux.validateAcquisition(intent); return; }
-      if (Object.keys(intent).some(k => !ACQUISITION_FIELDS.includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
-      if (Object.hasOwn(intent, "resources")) object(intent.resources);
+      validateAcquisition(intent);
     });
     this.operations = operationModule(store, options);
     registerMachineHooks(store, {
@@ -228,18 +240,11 @@ export class LegacyLeases implements ControlModule {
     return this.acquireAuthorized(value, db => this.applications.admission(db, application));
   }
   private acquireAuthorized(value: unknown, authorize: (db: DatabaseSync) => Application) {
-    const input = object(value);
-    if (Object.keys(input).some(k => !ACQUISITION_FIELDS.includes(k))) throw new ServiceError("Invalid lease acquisition.", 400);
-    const id = machineIdentifier(input.id);
+    const { input, id, request, required } = validateAcquisition(value);
     return this.store.transaction(db => {
       const app = authorize(db), limits = app.limits;
       this.linux.refreshAuthorization(db, this.store.clock());
       const ttl = positive(Object.hasOwn(input, "ttlSeconds") ? input.ttlSeconds : limits.defaultTTLSeconds, "lease TTL", limits.maxTTLSeconds);
-      if (Object.hasOwn(input, "resources")) object(input.resources);
-      const request = validateMachineRequest({ ...Object.fromEntries(Object.entries(input).filter(([k]) => !["ttlSeconds", "requiredCapabilities"].includes(k))), id: memberId(id), name: Object.hasOwn(input, "name") ? input.name : `lease-${id}` });
-      if (!request.templateRevision || !request.arch) throw new ServiceError("Lease image revision and architecture must be explicit.", 400);
-      const required = Object.hasOwn(input, "requiredCapabilities") ? input.requiredCapabilities : [], known = capabilities({ os: "linux", mode: "headless" });
-      if (!Array.isArray(required) || required.some(k => typeof k !== "string" || !Object.hasOwn(known, k)) || new Set(required).size !== required.length) throw new ServiceError("Invalid required capabilities.", 400);
       const frozen = { machine: request, ttlSeconds: ttl, requiredCapabilities: [...required].sort() };
       const old = leaseRow(db, id);
       if (old) {

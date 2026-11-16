@@ -327,6 +327,7 @@ export class LinuxLeases {
     const input = exact(value, ["id", "templateId", "templateRevision", "arch"], "lease acquisition", ["name", "resources", "ttlSeconds", "requiredCapabilities"]);
     const id = identifier(input.id), imageId = text(input.templateId, "templateId"), revision = text(input.templateRevision, "templateRevision"), a = arch(input.arch);
     const name = input.name === undefined ? undefined : text(input.name, "name");
+    if (Object.hasOwn(input, "ttlSeconds")) linuxTTL(input.ttlSeconds, 2 ** 31 - 1);
     const required = input.requiredCapabilities === undefined ? [] : capabilityList(input.requiredCapabilities, "requiredCapabilities");
     const overrides = input.resources === undefined ? {} : exact(input.resources, [], "resources", keys);
     for (const key of Object.keys(overrides)) positive(overrides[key], 1_048_576, key);

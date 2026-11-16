@@ -28,7 +28,7 @@ A macOS workspace and an iOS simulator may be separately leased resources. The d
 - Complete fair waiting/admission behavior without allowing a busy agent to monopolize the pool or silently moving an existing lease. Queued requests must have a defined deadline, cancellation and idempotent recovery contract.
 - Keep reservations until positive owned cleanup. Expiry revokes access and stops owned execution; an unavailable host or unknown stop cannot prove capacity is free.
 
-The embedded host ledger already shares VM/image/inference reservations. The Rust runner domain ledger shares Linux leases and model jobs. Binding both to one physical inventory, rather than relying on duplicate operator declarations, remains delivery work.
+The embedded host ledger shares VM/image/inference reservations. The Rust runner domain ledger shares Linux leases and model jobs. An explicit administrator [host-to-domain mapping](infrastructure.md#host-and-runner-physical-budget) combines both paths transactionally against one CPU/RAM/disk budget. Operators must bind the installed physical inventory correctly; unmapped entries retain independent accounting. Portable contention and restart tests cover the mapping, but do not establish native mixed-workload acceptance or accelerator isolation.
 
 ## Requests and waiting
 
@@ -54,7 +54,7 @@ Canaveral stays independent of any particular installation. This repository ship
 
 ## Delivery sequence
 
-1. Finish the shared-pool substrate: one authoritative ledger per physical machine across both controller paths, Linux/macOS multi-runtime model offers, CPU/RAM/disk placement and tenant quota regression coverage.
+1. Verify the shared-pool substrate: the implemented host/domain mapping, CPU/RAM/disk placement and tenant quotas must cover the selected physical inventory. Linux/macOS multi-runtime model offers and native mixed-workload acceptance remain part of the supported platform boundary.
 2. Add the request queue on that ledger: waiting, fair admission, priority, deadline, cancellation and idempotent recovery.
 3. Make Linux workspace leases usable end to end, then macOS: acquire, verified readiness, repo/build operations, artifacts, renewal, expiry, controller/host loss and owned release. Native deadline and cleanup proof must precede enabling ordinary host lease execution.
 4. Dropped, 2026-11-13: GitHub Actions jobs use the enterprise homelab runners (see GitHub and previews).
