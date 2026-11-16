@@ -23,7 +23,7 @@ export class GuestHTTPS {
       this.origin = new URL(origin);
       // Check the supplied path as well: URL normalization must not erase dot segments.
       if (!/^https:\/\/[^/]+\/?$/.test(origin) || this.origin.protocol !== "https:" || !this.origin.hostname || this.origin.username || this.origin.password || this.origin.pathname !== "/" || (this.origin.port && Number(this.origin.port) < 1)) throw new Error();
-      if (typeof credential !== "string" || !/^[\x21-\x7e]{32,4096}$/.test(credential)) throw new Error();
+      if (typeof credential !== "string" || credential.length < 32 || credential.length > 4096 || /[^\x21-\x7e]/.test(credential)) throw new Error();
       if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout > 120) throw new Error();
       this.ca = caFile === undefined ? undefined : readFileSync(caFile);
       if (this.ca !== undefined && !this.ca.toString("ascii").includes("-----BEGIN CERTIFICATE-----")) throw new Error();
@@ -50,7 +50,8 @@ export class GuestHTTPS {
         headers: { Authorization: this.authorization ?? `Bearer ${this.credential}`, "Content-Type": "application/json", Accept: "application/json", "Accept-Encoding": "identity", Connection: "close", ...(data === undefined ? {} : { "Content-Length": data.length }) } }, response => {
         const bad = (error: ServiceError) => { finish(error); response.destroy(); req.destroy(); };
         const status = response.statusCode ?? 502;
-        if (status === 401) return bad(failure("Native guest request was refused.", 401));
+        if (status === 401 && this.authorization !== undefined) return bad(new ServiceError("Native guest request was refused.", 401,
+          { retryable: false, ...(data === undefined ? {} : { outcome: "unknown" as const }) }));
         if (status >= 300 && status < 400) return bad(failure("Native guest redirects are not followed.", 502, "redirect_refused"));
         const headers = (name: string) => response.rawHeaders.flatMap((v, i, a) => i % 2 === 0 && v.toLowerCase() === name ? [a[i + 1]!] : []);
         const lengths = headers("content-length"), encodings = headers("transfer-encoding"), contentEncodings = headers("content-encoding");

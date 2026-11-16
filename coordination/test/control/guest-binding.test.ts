@@ -23,7 +23,7 @@ test("shared golden bytes and both MAC kinds, strict versioned tuples", () => {
 test("verified binding through macOS adapter over real verified HTTPS", async t => {
   const dir = mkdtempSync(join(tmpdir(), "binding-tls-")), cert = join(dir, "cert.pem"), key = join(dir, "key.pem");
   assert.equal(spawnSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"], { encoding: "utf8" }).status, 0);
-  const credential = "t".repeat(43), assignment = vector.assignment as GuestAssignmentContext;
+  const credential = vector.credential as string, assignment = vector.assignment as GuestAssignmentContext;
   let expected = { ...assignment }, authority = true, incarnation = vector.incarnation, effects = 0, reads = 0;
   let identity: unknown = { ...assignment, incarnation }, raw: string | undefined, onEffect = () => {}, force401 = false;
   const server = createServer({ key: readFileSync(key), cert: readFileSync(cert) }, async (req, res) => {

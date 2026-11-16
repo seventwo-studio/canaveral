@@ -116,6 +116,9 @@ assignment requires a new helper instance. Each helper creates a fresh incarnati
 UUID. The guest app stays in legacy manual mode with no environment, file or
 public enable switch. Its reused cloned Keychain desktop credential is neither a
 fresh assignment secret nor evidence of tenant isolation.
+Bound mode uses the transport's credential shape: 32–4096 printable ASCII
+characters without spaces. The legacy guest app retains its existing credential
+rules. The shared vector uses a credential valid in both implementations.
 
 Bound authentication is `Authorization: Canaveral-Binding-v1 <MAC>`, where MAC is
 unpadded base64url HMAC-SHA256 with the credential's UTF-8 bytes as key. The
@@ -135,6 +138,9 @@ The bracketed line is absent for identity, including its delimiter. There is no
 JSON canonicalization or platform UUID formatting in this encoding. The shared
 `fixtures/guest-binding-v1.json` pins exact bytes and both authenticators; actual
 Swift and TypeScript implementations independently check it.
+The request MAC covers the tuple and incarnation, not the HTTP method, path or
+body. Treat a leaked authentication header as a bearer credential valid for that
+helper incarnation; this protocol does not provide per-request replay protection.
 
 Only bound mode exposes authenticated `GET /v1/identity`, requiring the exact
 target and an empty body. Its response has exactly the tuple keys plus
@@ -144,6 +150,14 @@ request-kind authentication with the pinned incarnation; endpoint bodies and
 schemas stay unchanged. The bridge compares authentication in constant time
 before its first await or route delegation. Bound mode refuses Bearer; legacy
 helpers extract an empty bearer for the binding scheme and reject before effects.
+
+Version 1 does not authenticate the identity response with a response MAC or a
+client nonce. Client-side endpoint authenticity rests on TLS hostname and CA
+verification; the helper accepting the request MAC is not proof to the client
+that the peer possesses the credential. Before adding a production resolver,
+implement a response MAC over a fresh client nonce or require and enforce a
+certificate pinned to the exact assignment. Shared clone certificates or a
+general CA trust store alone cannot satisfy that production gate.
 
 The verifier compares all trusted tuple values, pins the returned incarnation,
 and combines `authority()` with a fresh `expected()` comparison before dispatch

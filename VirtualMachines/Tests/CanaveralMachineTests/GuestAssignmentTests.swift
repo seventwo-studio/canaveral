@@ -34,8 +34,21 @@ private struct BindingDevice: GuestDesktopDevice {
             XCTAssertThrowsError(try GuestAssignmentContext(data:JSONSerialization.data(withJSONObject:bad)))
         }
     }
+    func testBoundCredentialShapePreservesLegacyCompatibility() throws {
+        let v=try vector(), raw=v["assignment"] as! [String:Any]
+        let context=try GuestAssignmentContext(data:JSONSerialization.data(withJSONObject:raw))
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent("Binding-Credentials-\(UUID())")
+        defer { try? FileManager.default.removeItem(at:root) }
+        for token in [String(repeating:"a",count:31),String(repeating:"a",count:4097),String(repeating:"é",count:32),String(repeating:"a",count:31)+" ",String(repeating:"a",count:32)+"\n"] {
+            XCTAssertThrowsError(try DesktopBridge(token:token,device:BindingDevice(),journalURL:root.appendingPathComponent("rejected/receipts.json"),assignment:context))
+        }
+        for count in [32,4096] {
+            _ = try DesktopBridge(token:String(repeating:"a",count:count),device:BindingDevice(),journalURL:root.appendingPathComponent("accepted-\(count)/receipts.json"),assignment:context)
+        }
+        _ = try DesktopBridge(token:String(repeating:"é",count:32),device:BindingDevice(),journalURL:root.appendingPathComponent("legacy/receipts.json"))
+    }
     func testRealBridgeFencesBeforeWorkspaceDelegation() async throws {
-        let v=try vector(), raw=v["assignment"] as! [String:Any], token=String(repeating:"t",count:43)
+        let v=try vector(), raw=v["assignment"] as! [String:Any], token=v["credential"] as! String
         let context=try GuestAssignmentContext(data:JSONSerialization.data(withJSONObject:raw))
         let root=FileManager.default.temporaryDirectory.appendingPathComponent("Binding-\(UUID())")
         defer { try? FileManager.default.removeItem(at:root) }
@@ -49,7 +62,10 @@ private struct BindingDevice: GuestDesktopDevice {
         XCTAssertEqual(identity.status,200); XCTAssertLessThanOrEqual(identity.body.count,4096)
         let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:identity.body) as? [String:Any])
         XCTAssertEqual(Set(fields.keys),["version","machineId","leaseId","fingerprint","launchId","incarnation"])
+        XCTAssertEqual(fields["version"] as? Int,1)
+        for key in ["machineId","leaseId","fingerprint","launchId"] { XCTAssertEqual(fields[key] as? String,raw[key] as? String) }
         let incarnation=try XCTUnwrap(fields["incarnation"] as? String)
+        XCTAssertTrue(GuestAssignmentContext.canonicalUUID(incarnation))
         let auth=try context.authorization(credential:token,incarnation:incarnation)
         var refusals=["Bearer "+token,identityAuth,try context.authorization(credential:token,incarnation:UUID().uuidString.lowercased())]
         for key in ["machineId","leaseId","fingerprint","launchId"] {

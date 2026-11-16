@@ -34,6 +34,11 @@ public actor DesktopBridge {
     private var inspections: [UUID: (snapshot: GuestAccessibilitySnapshot, started: Double)] = [:]
     public init(token: String, device: any GuestDesktopDevice, journalURL: URL, workspace: (any GuestWorkspaceService)? = nil, assignment: GuestAssignmentContext? = nil, displayStream: GuestDisplayStream? = nil, clock: @escaping @Sendable () -> Double = { NativeLeaseClock.now() }) throws {
         guard token.count >= 32 else { throw CanaveralError.invalid("Guest credential is too short.") }
+        if assignment != nil {
+            guard (32...4096).contains(token.utf8.count), token.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e }) else {
+                throw CanaveralError.invalid("Invalid assignment guest credential.")
+            }
+        }
         self.assignment=assignment; self.displayStream=displayStream; self.workspace=workspace; self.token = token; self.device = device; self.journalURL = journalURL; self.clock=clock
         controlURL = journalURL.deletingLastPathComponent().appendingPathComponent("control.json")
         let pendingURL=journalURL.deletingLastPathComponent().appendingPathComponent("control-pending.json")
