@@ -42,6 +42,9 @@ test('inventory module preserves the harness fatal-warning boundary on supported
       await new Promise(r=>setImmediate(r));`;
     const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',timeout:5000});
     assert.equal(child.status,0,child.stderr);assert.equal(child.stderr,'');
+    const warning=spawnSync(process.execPath,['--input-type=module','-e',script+"\nprocess.emitWarning('unexpected parent warning');"],{encoding:'utf8',timeout:5000});
+    assert.equal(warning.status,1);
+    assert.equal(warning.stderr,'native acceptance failed: internal error (details withheld)\n');
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 test('damaged or empty database names, SQLite sidecars and unpublished journals refuse admission',()=>{

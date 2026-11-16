@@ -821,8 +821,9 @@ reservation states fail closed. The scan cannot identify an arbitrarily renamed,
 damaged database from its bytes; complete operator inventory remains required.
 SQLite inventory uses a bounded read-only child with no inherited environment
 hooks. This isolates [Node 24.11's built-in SQLite warning](https://raw.githubusercontent.com/nodejs/node/v24.11.0/lib/sqlite.js)
-from the parent harness's unchanged fatal-warning boundary; other diagnostics
-and malformed reader results are refused. It also refuses existing satellite,
+from the parent harness's unchanged fatal-warning boundary. Only the exact known
+SQLite warning is accepted in the reader; other diagnostics and malformed reader
+results are refused. It also refuses existing satellite,
 runner/helper/controller or VZ processes before creating the fresh controller.
 It never clears old held state to make a run fit. Keep unrelated large artifact
 libraries outside these state-only roots; excessive inventories fail closed.

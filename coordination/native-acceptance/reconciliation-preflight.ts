@@ -5,12 +5,16 @@ import {spawnSync} from 'node:child_process';
 import {requireQuiescent} from './reconciliation.ts';
 // Node 24.11 warns when node:sqlite is imported. Keep that known built-in
 // warning out of the harness's fatal warning boundary without relaxing it.
-// Only this fixed read-only child suppresses ExperimentalWarning; it inherits
-// no environment hooks, and every other diagnostic or malformed result fails.
+// Only this fixed read-only child accepts SQLite's exact built-in warning; it
+// inherits no environment hooks, and every other diagnostic or malformed result fails.
 function sqliteInventory(path:string):number {
   const script=`
     process.removeAllListeners('warning');
-    process.on('warning',()=>{process.exitCode=1;});
+    process.on('warning',warning=>{
+      if(warning.name!=='ExperimentalWarning' || warning.code!==undefined ||
+          warning.message!=='SQLite is an experimental feature and might change at any time')
+        process.exitCode=1;
+    });
     try {
       const {readFileSync}=await import('node:fs');
       const {DatabaseSync}=await import('node:sqlite');
@@ -23,7 +27,7 @@ function sqliteInventory(path:string):number {
       } finally {db.close();}
     } catch {process.exitCode=1;}
   `;
-  const child=spawnSync(process.execPath,['--disable-warning=ExperimentalWarning','--input-type=module','-e',script],{
+  const child=spawnSync(process.execPath,['--input-type=module','-e',script],{
     input:JSON.stringify(path),encoding:'utf8',env:{},timeout:5000,maxBuffer:65536,
   });
   assert.equal(child.status,0);assert.equal(child.stderr,'');
