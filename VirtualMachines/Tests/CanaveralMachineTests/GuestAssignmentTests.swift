@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CryptoKit
 import CanaveralVMCore
 
 private actor BindingWorkspace: GuestWorkspaceService {
@@ -95,7 +96,18 @@ private struct BindingDevice: GuestDesktopDevice {
         for malformed in [request(identityAuth,target:"/v1/identity?x",method:"GET",body:Data()),request(identityAuth,target:"/v1/identity"),request(auth,target:"/v1/identity",method:"GET",body:Data())] {
             let response=await bridge.handle(malformed); XCTAssertNotEqual(response.status,200)
         }
-        for bad in oldHeaders + [identityAuth+"=",identityAuth.replacingOccurrences(of:nonce,with:String(repeating:"A",count:42)+"B"),identityAuth.replacingOccurrences(of:nonce,with:String(repeating:"A",count:5000)),identityAuth.replacingOccurrences(of:"v2",with:"v1"),try context.authorization(credential:String(repeating:"x",count:32),nonce:nonce)] {
+        // A secret holder can sign a noncanonical alias; rejection must not rely on a bad MAC.
+        let aliasNonce=String(repeating:"A",count:42)+"B"
+        let challengeVector=try XCTUnwrap((v["vectors"] as? [[String:String]])?.first { $0["kind"] == "identity-request" })
+        let originalMessage=try XCTUnwrap(challengeVector["canonical"])
+        let aliasMessage=originalMessage.replacingOccurrences(of:"\n"+nonce+"\n",with:"\n"+aliasNonce+"\n")
+        XCTAssertNotEqual(aliasMessage,originalMessage)
+        let aliasMAC=Data(HMAC<SHA256>.authenticationCode(for:Data(aliasMessage.utf8),using:SymmetricKey(data:Data(token.utf8)))).base64URL
+        let aliasAuth="Canaveral-Binding-v2 "+aliasNonce+"."+aliasMAC
+        XCTAssertEqual(aliasAuth.utf8.count,108)
+        XCTAssertFalse(GuestAssignmentContext.canonical32(aliasNonce))
+        XCTAssertNil(context.authenticatedNonce(authorization:aliasAuth,credential:token))
+        for bad in oldHeaders + [aliasAuth,identityAuth+"=",identityAuth.replacingOccurrences(of:nonce,with:aliasNonce),identityAuth.replacingOccurrences(of:nonce,with:String(repeating:"A",count:5000)),identityAuth.replacingOccurrences(of:"v2",with:"v1"),try context.authorization(credential:String(repeating:"x",count:32),nonce:nonce)] {
             let response=await bridge.handle(request(bad,target:"/v1/identity",method:"GET",body:Data())); XCTAssertEqual(response.status,401)
         }
         let before=await workspace.count; XCTAssertEqual(before,0)

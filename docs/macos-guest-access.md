@@ -156,8 +156,10 @@ nonce then incarnation lines; `request` appends one incarnation line. Each
 appended line also ends in LF. The literal `1` is the assignment schema version,
 not the handshake version. Shared `fixtures/guest-binding-v2.json` pins exact
 bytes, MACs for all three purposes and the deterministic identity response DTO.
-Both real implementations verify these vectors; the Swift producer emits the
-shared DTO and the TypeScript parser consumes it.
+Both real implementations verify these vectors. Swift tests pin the producer's
+output to the shared DTO, which TypeScript tests parse and verify by default.
+Setting `CANAVERAL_IDENTITY_DTO` for the Swift and TypeScript tests also checks
+the actual emitted Swift response.
 
 Before its first await or operational delegation, DesktopBridge authenticates
 the exact challenge against its immutable assignment. Only then does it return

@@ -65,7 +65,7 @@ test("guest HTTPS uses verified TLS, independent requests, bounded deadlines, an
       await assert.rejects(client.call("/v1/shell/write", {}), (e: unknown) => e instanceof ServiceError && e.status === 401 && e.code === "unauthenticated" && e.outcome === "unknown" && !e.message.includes("private-secret"));
       reply = (_req, r) => { r.writeHead(401, { "Content-Type": "text/plain" }); r.end("private-secret"); };
       await assert.rejects(client.call("/v1/shell/write", {}), (e: unknown) => e instanceof ServiceError && e.code === "response_invalid" && e.outcome === "unknown");
-      const bound = new GuestHTTPS(origin, credential, cert, 20, "Canaveral-Binding-v1 " + "b".repeat(43)), count = seen.length;
+      const bound = new GuestHTTPS(origin, credential, cert, 20, "Canaveral-Binding-v2 " + "b".repeat(43)), count = seen.length;
       await assert.rejects(bound.call("/v1/shell/write", {}), (e: unknown) => e instanceof ServiceError && e.status === 401 && e.code === "unauthenticated" && e.outcome === "unknown" && e.retryable === false && !e.message.includes("private-secret"));
       assert.equal(seen.length, count + 1);
     });
