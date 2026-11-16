@@ -22,7 +22,7 @@ private struct Preparation: Decodable {
     var leaseID: UUID?
 }
 private struct PowerOffRequest: Decodable { var id: UUID; var boot: Double }
-private struct NativeLaunch: Decodable { var attemptedAt: Double }
+private struct NativeLaunch: Decodable { var attemptedAt: Double; var launchId: String? }
 
 @MainActor private final class NativeLeaseWatch {
     let directory: URL, leaseID: UUID, machineID: UUID
@@ -206,7 +206,14 @@ private struct NativeLaunch: Decodable { var attemptedAt: Double }
                 }
                 let leaseTask = watch?.start()
                 defer { leaseTask?.cancel() }
-                await runtime.boot(leaseAuthorized: { watch?.authorized() ?? true })
+                var media: ValidatedLaunchMedia?
+                if let launchID = launch?.launchId {
+                    let pin = try LaunchMediaPin.load(directory: directory)
+                    media = try ValidatedLaunchMedia(pin: pin, machine: machine, directory: directory, launch: launchID)
+                } else if FileManager.default.fileExists(atPath: directory.appendingPathComponent("guest-launch-pin.json").path) {
+                    throw CanaveralError.invalid("Assigned media requires explicit launch custody.")
+                }
+                await runtime.boot(launchMedia: media, leaseAuthorized: { watch?.authorized() ?? true })
                 guard runtime.virtualMachine != nil, runtime.phase != "Unavailable" else { throw CanaveralError.unavailable(runtime.detail) }
                 let shutdown = directory.appendingPathComponent("shutdown.request")
                 let consoleLog = directory.appendingPathComponent("console.log")

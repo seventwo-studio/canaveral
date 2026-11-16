@@ -666,6 +666,7 @@ export function prebootStorage(machine: RecordValue, folder: string, storage: st
   const owner = readRecord(join(folder, "assignment.json"));
   if (owner.fingerprint !== fingerprint || owner.leaseId !== leaseId) throw new ServiceError("Partial assignment ownership differs.", 409);
   const native = join(storage, id.toUpperCase()); noLinks(storage); noLinks(native);
+  if (present(join(storage, "guest-launch.json")) && !["planned", "sealed"].includes(String(readRecord(join(storage, "guest-launch.json")).state))) throw new ServiceError("Bootstrap builder exclusion is unproven.", 409);
   if (present(storage) && readRecord(join(storage, "canaveral-owner.json")).fingerprint !== fingerprint) throw new ServiceError("Partial storage ownership differs.", 409);
   if (present(dirname(storage)) && readdirSync(dirname(storage)).some(n => n.startsWith(`.removing-${id}-`))) throw new ServiceError("Unexplained removal quarantine blocks preboot cleanup.", 409);
   for (const name of ["runner-launch.json", "status.json", "lease-authorization.json", "lease-fenced.json", "fenced-stop.json", "runner.log"]) if (present(join(native, name))) throw new ServiceError("Partial storage has possible execution evidence.", 409);

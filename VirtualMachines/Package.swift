@@ -7,6 +7,7 @@ let package = Package(
         .library(name: "CanaveralMachines", targets: ["CanaveralMachines"]),
         .executable(name: "CanaveralMachinesApp", targets: ["CanaveralMachinesApp"]),
         .executable(name: "CanaveralMachineHost", targets: ["CanaveralMachineHost"]),
+        .executable(name: "CanaveralAssignedGuest", targets: ["CanaveralAssignedGuest"]),
         .executable(name: "CanaveralGuest", targets: ["CanaveralGuest"]),
         .executable(name: "CanaveralVMCheck", targets: ["CanaveralVMCheck"]),
         .executable(name: "CanaveralVMRunner", targets: ["CanaveralVMRunner"])
@@ -16,7 +17,9 @@ let package = Package(
         .target(name: "CanaveralMachines", dependencies: ["CanaveralVMCore"]),
         .executableTarget(name: "CanaveralMachinesApp", dependencies: ["CanaveralMachines"], path: "Apps/Manager"),
         .executableTarget(name: "CanaveralMachineHost", dependencies: ["CanaveralMachines"], path: "Apps/MachineHost"),
-        .executableTarget(name: "CanaveralGuest", dependencies: ["CanaveralVMCore"], path: "Apps/GuestHelper"),
+        .target(name: "CanaveralGuestDesktop", dependencies: ["CanaveralVMCore"]),
+        .executableTarget(name: "CanaveralAssignedGuest", dependencies: ["CanaveralVMCore", "CanaveralGuestDesktop"], path: "Apps/AssignedGuest"),
+        .executableTarget(name: "CanaveralGuest", dependencies: ["CanaveralVMCore", "CanaveralGuestDesktop"], path: "Apps/GuestHelper"),
         .executableTarget(name: "CanaveralVMCheck", dependencies: ["CanaveralMachines"], path: "Tests/VMConfigurationCheck"),
         .executableTarget(name: "CanaveralVMRunner", dependencies: ["CanaveralVMCore", "CanaveralMachines"], path: "Apps/VMRunner"),
         .testTarget(name: "CanaveralMachineTests", dependencies: ["CanaveralVMCore", "CanaveralMachines"])

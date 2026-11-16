@@ -1,5 +1,5 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +81,9 @@ export function localTemplates(config: Data, systems: string[]): Data[] {
   return list(config.templates).map(v => { const t = object(v); if (!systems.includes(string(t.os)) || t.arch !== arch) throw new ServiceError("Template is incompatible with this native host's OS or architecture.");
     if (!isAbsolute(string(t.image)) || !lstatSync(safePath(string(t.image))).isFile()) throw new ServiceError("Templates require a readable absolute image path."); return t; });
 }
+async function appleISO(config: Data, label: string, output: string, content: string): Promise<void> {
+  await command(config, ["hdiutil", "makehybrid", "-iso", "-joliet", "-default-volume-name", label, "-o", output, content], { env: { ...process.env, LC_ALL: "C", LANG: "C", TMPDIR: dirname(output), TMP: dirname(output), TEMP: dirname(output) } });
+}
 export async function ensureSeed(config: Data, image: Data, machine: Data, storage: string): Promise<string | null> {
   if (!image._userData) return null;
   if (typeof config.ensureSeed === "function") {
@@ -103,13 +106,96 @@ export async function ensureSeed(config: Data, image: Data, machine: Data, stora
     if (windows) { const leaf = join(content, "openstack", "latest"); mkdirSync(leaf, { recursive: true, mode: 0o700 }); writeFileSync(join(leaf, "meta_data.json"), JSON.stringify({ uuid: id, hostname: `cvm-${id.slice(0, 8)}` }), { mode: 0o600 }); writeFileSync(join(leaf, "user_data"), string(image._userData), { mode: 0o600 }); }
     else { writeFileSync(join(content, "meta-data"), JSON.stringify({ "instance-id": id, "local-hostname": `cvm-${id}` }), { mode: 0o600 }); writeFileSync(join(content, "user-data"), string(image._userData), { mode: 0o600 }); if (network) writeFileSync(join(content, "network-config"), JSON.stringify(network), { mode: 0o600 }); }
     const output = join(temporary, "seed.iso"); const platform = config.platform ?? process.platform;
-    if (platform === "darwin") await command(config, ["hdiutil", "makehybrid", "-iso", "-joliet", "-default-volume-name", label, "-o", output, content]);
+    if (platform === "darwin") await appleISO(config, label, output, content);
     else if (platform === "win32") await command(config, ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_ISO, "utf16le").toString("base64")], { env: { ...process.env, CANAVERAL_ISO: JSON.stringify({ directory: content, output, label }) } });
     else await command(config, [typeof config.isoTool === "string" ? config.isoTool : "genisoimage", "-quiet", "-V", label, "-J", "-r", "-o", output, content]);
     safePath(output); if (!lstatSync(output).isFile() || lstatSync(output).size < 32768) throw new ServiceError("Seed generation did not produce an ISO image.");
     const fd = openSync(output, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
     chmodSync(output, 0o600); saveRecord(receipt, { fingerprint }); renameSync(output, target); syncDirectory(storage); return target;
   } finally { rmSync(temporary, { recursive: true, force: true }); }
+}
+
+
+
+export function validateBootstrapISO(bytes: Buffer, payload: Buffer): void {
+  let primary = 0, terminated = false;
+  for (let sector = 16; sector < 32; sector++) {
+    const v = bytes.subarray(sector * 2048, (sector + 1) * 2048);
+    if (v.length !== 2048 || v.subarray(1, 6).toString() !== "CD001" || v[6] !== 1) throw new ServiceError("Invalid raw ISO descriptor.");
+    if (v[0] === 255) { terminated = true; break; }
+    if (v[0] !== 1 && v[0] !== 2) throw new ServiceError("Unexpected ISO descriptor.");
+    const joliet = v[0] === 2;
+    if (!joliet) primary++;
+    const decode = (b: Buffer) => joliet ? Buffer.from(b).swap16().toString("utf16le") : b.toString("ascii");
+    if (decode(v.subarray(40, 72)).trim() !== "CANAVERAL_BOOT") throw new ServiceError("ISO label differs.");
+    const start = v.readUInt32LE(158) * 2048, size = v.readUInt32LE(166);
+    if (size < 1 || size > 65536 || start + size > bytes.length) throw new ServiceError("Invalid ISO root.");
+    let files = 0;
+    for (let offset = start; offset < start + size;) {
+      const length = bytes[offset]!;
+      if (!length) { offset = (Math.floor(offset / 2048) + 1) * 2048; continue; }
+      if (length < 34 || offset + length > start + size) throw new ServiceError("Invalid ISO entry.");
+      const r = bytes.subarray(offset, offset + length), n = r[32]!, name = r.subarray(33, 33 + n); offset += length;
+      if (n === 1 && (name[0] === 0 || name[0] === 1)) continue;
+      if (33 + n > length || r[25]! & 2 || !["ASSIGNMENT.JSON;1", "ASSIGNMENT.JSON"].includes(decode(name).toUpperCase())) throw new ServiceError("Unexpected ISO contents.");
+      const fileStart = r.readUInt32LE(2) * 2048, fileSize = r.readUInt32LE(10);
+      if (++files !== 1 || fileSize !== payload.length || !bytes.subarray(fileStart, fileStart + fileSize).equals(payload)) throw new ServiceError("ISO assignment bytes differ.");
+    }
+    if (files !== 1) throw new ServiceError("ISO assignment missing.");
+  }
+  if (primary !== 1 || !terminated) throw new ServiceError("ISO volume is incomplete.");
+}
+
+/** Private launch custody. Call only under the assignment provider lock. */
+export function guestLaunchReceipt(storage: string, machine: Data): Data | null {
+  const file = join(storage, "guest-launch.json"); if (!present(file)) return null;
+  const stat = lstatSync(safePath(file));
+  if (stat.uid !== process.getuid?.() || (stat.mode & 0o7777) !== 0o600) throw new ServiceError("Private launch receipt ownership differs.");
+  const receipt = readRecord(file), assignment = object(receipt.assignment);
+  if (Object.keys(assignment).sort().join() !== "fingerprint,launchId,leaseId,machineId,version" || receipt.version !== 1 || assignment.version !== 1 || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(assignment.launchId)) || !/^[A-Za-z0-9_-]{43}$/.test(String(receipt.credential)) || Buffer.from(String(receipt.credential), "base64url").toString("base64url") !== receipt.credential) throw new ServiceError("Private launch receipt differs from assignment.");
+  return receipt;
+}
+export function verifyLaunchPin(pin: Data, storage: string): void {
+  const path = safePath(string(pin.path));
+  if (path !== join(storage, "guest-bootstrap", "launch.iso")) throw new ServiceError("Launch media is outside owned storage.");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd), named = lstatSync(path);
+    if (pin.mode !== 256 || pin.nlink !== 1 || !before.isFile() || before.uid !== process.getuid?.() || before.uid !== pin.uid || (before.mode & 0o7777) !== 0o400 || before.nlink !== 1 || String(before.dev) !== pin.dev || String(before.ino) !== pin.ino || before.size !== pin.size || before.dev !== named.dev || before.ino !== named.ino || before.size < 32768 || before.size > 16 * 1024 * 1024) throw new ServiceError("Launch media identity differs.");
+    const bytes = readFileSync(fd), after = fstatSync(fd);
+    if (createHash("sha256").update(bytes).digest("hex") !== pin.sha256 || after.ctimeMs !== before.ctimeMs || after.mtimeMs !== before.mtimeMs) throw new ServiceError("Launch media digest differs.");
+  } finally { closeSync(fd); }
+}
+export async function ensureGuestLaunch(config: Data, machine: Data, storage: string): Promise<Data> {
+  const file = join(storage, "guest-launch.json"), native = join(storage, uuid(machine.id).toUpperCase());
+  if (present(join(native, "runner-launch.json")) || present(native) && readdirSync(native).some(name => name.startsWith("guest-attempt-"))) throw new ServiceError("Native launch attempt blocks media resume.");
+  let receipt = guestLaunchReceipt(storage, machine);
+  if (!receipt) {
+    if (present(join(native, "runner-launch.json")) || present(join(storage, "apple-prepare.json"))) throw new ServiceError("Existing native intent has no launch custody.");
+    receipt = { version: 1, state: "planned", assignment: { version: 1, machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id), fingerprint: assignmentFingerprint(machine), launchId: randomUUID() }, credential: randomBytes(32).toString("base64url") };
+    saveRecord(file, receipt, true);
+  }
+  if (receipt.state === "building") throw new ServiceError("Launch builder outcome is uncertain; rebuild, launch and cleanup are blocked.");
+  if (receipt.state === "sealed") { const pin = object(receipt.pin); if (Object.entries(object(receipt.assignment)).some(([key, value]) => pin[key] !== value)) throw new ServiceError("Sealed launch binding differs."); verifyLaunchPin(object(receipt.pin), storage); return receipt; }
+  if (receipt.state !== "planned" || present(join(native, "runner-launch.json"))) throw new ServiceError("Launch intent cannot resume.");
+  // Mark dispatch BEFORE any builder files/effects. Even failed dispatch stays held.
+  receipt = { ...receipt, state: "building" }; saveRecord(file, receipt);
+  const directory = safePath(join(storage, "guest-bootstrap")), content = join(directory, "content"), output = join(directory, "launch.iso");
+  mkdirSync(directory, { mode: 0o700 }); mkdirSync(content, { mode: 0o700 });
+  const payload = Buffer.from(JSON.stringify({ version: 1, assignment: receipt.assignment, credential: receipt.credential }));
+  if (payload.length > 4096) throw new ServiceError("Launch payload exceeds envelope.");
+  const source = openSync(join(content, "assignment.json"), "wx", 0o600);
+  try { writeFileSync(source, payload); fsyncSync(source); } finally { closeSync(source); } syncDirectory(content);
+  await appleISO(config, "CANAVERAL_BOOT", output, content);
+  safePath(output); const stat = lstatSync(output);
+  if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.size < 32768 || stat.size > 16 * 1024 * 1024) throw new ServiceError("Invalid launch ISO output.");
+  const bytes = readFileSync(output), pvd = bytes.subarray(32768, 34816);
+  if (pvd[0] !== 1 || pvd.subarray(1, 6).toString() !== "CD001" || pvd.subarray(40, 72).toString().trim() !== "CANAVERAL_BOOT") throw new ServiceError("Launch output is not raw ISO9660.");
+  validateBootstrapISO(bytes, payload);
+  const fd = openSync(output, constants.O_RDONLY | constants.O_NOFOLLOW); try { chmodSync(output, 0o400); fsyncSync(fd); } finally { closeSync(fd); }
+  const sealed = lstatSync(output);
+  const pin = { path: output, uid: sealed.uid, mode: 256, nlink: 1, size: sealed.size, sha256: createHash("sha256").update(bytes).digest("hex"), dev: String(sealed.dev), ino: String(sealed.ino), ...object(receipt.assignment) };
+  verifyLaunchPin(pin, storage); receipt = { ...receipt, state: "sealed", pin }; saveRecord(file, receipt); return receipt;
 }
 
 export const WINDOWS_ISO = String.raw`
@@ -173,10 +259,10 @@ export class AppleProvider {
       return await consume();
     } finally { closeSync(fd); }
   }
-  private async diskClosed(path: string, tree = false): Promise<boolean> {
+  private async diskClosed(path: string, tree = false, files?: string[]): Promise<boolean> {
     safePath(path);
-    if (!tree) { const disk = safePath(join(path, "disk.img")); if (!present(disk) || !lstatSync(disk).isFile() || lstatSync(disk).nlink !== 1) return false; }
-    const argv = ["/usr/sbin/lsof", "-F", "p", ...(tree ? ["+D", path] : ["--", join(path, "disk.img")])];
+    if (!tree && !files) { const disk = safePath(join(path, "disk.img")); if (!present(disk) || !lstatSync(disk).isFile() || lstatSync(disk).nlink !== 1) return false; }
+    const argv = ["/usr/sbin/lsof", "-F", "p", ...(tree ? ["+D", path] : ["--", ...(files ?? [join(path, "disk.img")])])];
     if (typeof this.config.probeCommand === "function") {
       const result = object(await this.config.probeCommand(argv, { timeoutMs: 10000 }));
       return result.exitCode === 1 && result.stdout === "" && result.stderr === "";
@@ -357,6 +443,7 @@ export class AppleProvider {
   private async reconcileLocked(machine: Data, image: Data, folder: string): Promise<Data> {
     safePath(folder); if (present(join(folder, "deletion.json"))) throw new ServiceError("Assignment deletion intent blocks preparation and restart.");
     if (!["running", "stopped"].includes(string(machine.desired))) throw new ServiceError("Invalid desired state.", 400);
+    verifyAssignment(machine, folder);
     const storage = this.storage(machine); const path = this.native(machine); const machineFile = join(path, "machine.json");
     if (present(machineFile)) { const lease = readRecord(machineFile).executionLeaseID; const expected = machine.lease ? uuid(object(machine.lease).id) : null;
       if ((lease == null) !== (expected === null) || lease != null && String(lease).toLowerCase() !== expected) throw new ServiceError("Native execution ownership differs; adoption was refused."); }
@@ -387,12 +474,24 @@ export class AppleProvider {
       if (active) { const fd = openSync(safePath(join(path, "shutdown.request")), "a", 0o600); closeSync(fd); return { state: "stopping", detail: "Graceful shutdown requested; positive native stop proof is pending." }; }
       return { state: "unknown", detail: "Native outcome is uncertain; capacity remains reserved." };
     }
+    let guestLaunch: Data | null = null;
+    if (image.os === "macos" && machine.lease) {
+      if (typeof image._leaseAuthorization !== "function") throw new ServiceError("Leased boot requires a local deadline guard.");
+      const auth = object(await image._leaseAuthorization());
+      if (auth.leaseID !== uuid(object(machine.lease).id) || !Number.isSafeInteger(auth.revision) || typeof auth.fenced !== "boolean" || auth.fenced || typeof auth.remainingSeconds !== "number" || !Number.isFinite(auth.remainingSeconds) || !(auth.remainingSeconds > 0)) throw new ServiceError("Lease authorization ended before bootstrap.");
+      if (present(launch) || present(join(folder, "apple-boot-request.json")) || present(join(folder, "provisioning.json")) && readRecord(join(folder, "provisioning.json")).phase === "bootRequested") {
+        guestLaunch = guestLaunchReceipt(storage, machine);
+        if (!guestLaunch || guestLaunch.state !== "sealed") throw new ServiceError("Native launch custody is uncertain.");
+        return { state: "unknown", detail: "Assigned launch was already attempted; relaunch is blocked." };
+      }
+      guestLaunch = await ensureGuestLaunch(this.config, machine, storage);
+    }
     if (!present(machineFile)) {
       if (present(join(storage, "apple-prepare.json"))) throw new ServiceError("Native preparation outcome is uncertain; automatic retry is blocked.");
       const resources = object(machine.resources); const request: Data = { id: uuid(machine.id), name: machine.name, os: image.os, mode: image.mode, cpu: resources.cpu, memoryMiB: resources.memoryMiB, diskGiB: resources.diskGiB, image: image.image, directory: storage };
       if (image.os === "macos" && image.macOSRestoreImage) Object.assign(request, { image: image.macOSRestoreImage, baseDisk: image.image, auxiliaryStorage: image.macOSAuxiliaryStorage, hardwareModel: image.macOSHardwareModel });
       if (machine.lease) { if (typeof image._leaseAuthorization !== "function") throw new ServiceError("Leased boot requires a local deadline guard."); request.leaseID = uuid(object(machine.lease).id); }
-      const seed = await ensureSeed(this.config, image, machine, storage); if (seed) request.seedISO = seed;
+      const seed = image.os === "linux" ? await ensureSeed(this.config, image, machine, storage) : null; if (seed) request.seedISO = seed;
       saveRecord(join(storage, "apple-prepare.json"), { fingerprint: assignmentFingerprint(machine), request }, true);
       await this.run(["prepare"], request);
     }
@@ -401,6 +500,7 @@ export class AppleProvider {
     if (fresh && status?.phase === "Unavailable") return { state: "error", detail: status.detail ?? "" };
     if (locked || present(launch) && (!this.confirmedStopped(path) || !await this.stopProof(machine, path))) return { state: "unknown", detail: "Runner outcome uncertain; automatic relaunch is blocked." };
     for (const name of ["shutdown.request", "power-off.request"]) if (present(join(path, name))) { safePath(join(path, name)); unlinkSync(join(path, name)); }
+    if (guestLaunch) { verifyLaunchPin(object(guestLaunch.pin), storage); const target = join(path, "guest-launch-pin.json"); if (present(target)) { if (legacyDigest(readRecord(target)) !== legacyDigest(guestLaunch.pin)) throw new ServiceError("Native launch pin differs."); } else saveRecord(target, object(guestLaunch.pin), true); }
     const attemptedAt = now;
     if (machine.lease) {
       const binding = { version: 1, machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id), fingerprint: assignmentFingerprint(machine) };
@@ -409,7 +509,7 @@ export class AppleProvider {
       saveRecord(journalPath, { ...previous, phase: "bootRequested", attemptedAt });
     }
     saveRecord(join(folder, "apple-boot-request.json"), { machineId: uuid(machine.id), fingerprint: assignmentFingerprint(machine), attemptedAt });
-    saveRecord(launch, { attemptedAt });
+    saveRecord(launch, { attemptedAt, ...(guestLaunch ? { launchId: object(guestLaunch.assignment).launchId } : {}) });
     if (machine.lease) await this.publishAuthorization(machine, image, path);
     if (typeof this.config.launch === "function") await this.config.launch([string(this.config.runner), "run", path], { log: join(path, "runner.log") });
     else {
@@ -431,10 +531,22 @@ export class AppleProvider {
   private async removeOwnedStorageLocked(machine: Data, _image: Data, folder: string, requestId: string, preboot = false): Promise<Data> {
     requestId = uuid(requestId); verifyAssignment(machine, folder);
     if (machine.desired !== "stopped") throw new ServiceError("Storage removal requires a stopped assignment.");
+    const bootstrapClosed = async () => {
+      const owned = safePath(join(string(this.config.storage), uuid(machine.id)));
+      if (present(join(owned, "guest-launch.json"))) {
+        const receipt = guestLaunchReceipt(owned, machine);
+        if (!["planned", "sealed"].includes(String(receipt?.state))) throw new ServiceError("Builder exclusion is unproven; cleanup is blocked.");
+        if (!await this.diskClosed(owned, false, [join(owned, "guest-launch.json")]) || present(join(owned, "guest-bootstrap")) && !await this.diskClosed(join(owned, "guest-bootstrap"), true)) throw new ServiceError("Bootstrap media handles remain open.");
+      }
+    };
+    await bootstrapClosed();
     if (typeof this.config.removeOwnedStorage === "function") {
       const path = this.native(machine);
-      if (!this.confirmedStopped(path) || !await this.stopProof(machine, path)) throw new ServiceError("Positive runtime and disk-handle stop proof is required before removal.");
-      return object(await this.config.removeOwnedStorage({ machine, folder, requestId, storage: dirname(path), fingerprint: assignmentFingerprint(machine) }));
+      return this.withRuntimeLock(path, async () => {
+        await bootstrapClosed();
+        if (!this.confirmedStopped(path) || !await this.stopProof(machine, path, true)) throw new ServiceError("Positive runtime and disk-handle stop proof is required before removal.");
+        return object(await (this.config.removeOwnedStorage as (value: Data) => Promise<unknown>)({ machine, folder, requestId, storage: dirname(path), fingerprint: assignmentFingerprint(machine) }));
+      });
     }
     const root = safePath(string(this.config.storage)); const id = uuid(machine.id); const storage = safePath(join(root, id)); const quarantineName = `.removing-${id}-${requestId}`; const quarantine = safePath(join(root, quarantineName));
     const receipt = join(folder, "deletion.json"); const expected: Data = { id: requestId, machineId: id, fingerprint: assignmentFingerprint(machine) };
@@ -472,6 +584,7 @@ export class AppleProvider {
         const path = safePath(join(storage, id.toUpperCase()));
         if (preboot && !await this.diskClosed(storage, true)) throw new ServiceError("Partial preparation still has open handles.");
         const quarantineOwned = async () => {
+          await bootstrapClosed();
           if (preboot) verifyPreboot();
           else if (!this.confirmedStopped(path) || !await this.stopProof(machine, path, true)) throw new ServiceError("Native shutdown and closed disk handles are required before removal.");
           saveRecord(receipt, journal);
