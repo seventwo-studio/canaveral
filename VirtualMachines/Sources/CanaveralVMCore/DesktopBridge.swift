@@ -49,10 +49,17 @@ public actor DesktopBridge {
         controlUncertain = FileManager.default.fileExists(atPath: pendingURL.path) || (try? FileManager.default.destinationOfSymbolicLink(atPath:pendingURL.path)) != nil
     }
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        var identityNonce: String?
         if let assignment {
             let identity = request.path == "/v1/identity"
-            guard let expected = try? assignment.authorization(credential:token,incarnation:identity ? nil : incarnation),
-                  Secrets.equal(request.headers["authorization"] ?? "",expected) else { return .error("Guest credential rejected.",status:401) }
+            let auth=request.headers["authorization"] ?? ""
+            if identity {
+                identityNonce=assignment.authenticatedNonce(authorization:auth,credential:token)
+                guard identityNonce != nil else { return .error("Guest credential rejected.",status:401) }
+            } else {
+                guard auth.utf8.count == 64, let expected=try? assignment.authorization(credential:token,incarnation:incarnation),
+                      Secrets.equal(auth,expected) else { return .error("Guest credential rejected.",status:401) }
+            }
         } else {
             guard Secrets.equal(request.bearer, token) else { return .error("Guest credential rejected.", status: 401) }
         }
@@ -61,7 +68,7 @@ public actor DesktopBridge {
         do {
             if request.path == "/v1/identity", let assignment {
                 guard request.method == "GET", request.target == "/v1/identity", request.body.isEmpty else { throw CanaveralError.invalid("Invalid guest identity request.") }
-                return try .json(assignment.identity(incarnation:incarnation))
+                return try .json(assignment.identity(credential:token,nonce:identityNonce!,incarnation:incarnation))
             }
             if (request.path.hasPrefix("/v1/files/") || request.path.hasPrefix("/v1/shell/")), let workspace { return try await workspace.handle(request) }
             if request.path.hasPrefix("/v1/display/"), let displayStream {

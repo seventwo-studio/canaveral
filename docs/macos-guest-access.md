@@ -99,10 +99,10 @@ endpoint binding, permission/readiness checks, input/inspection refresh, capture
 and the full lease lifecycle still require implementation or native acceptance
 before provider acceptance.
 
-## Version 1 helper identity fence (ST-591)
+## Version 2 helper identity challenge (ST-593; supersedes ST-591 wire v1)
 
 `verifiedGuestHelperBinding(expected, endpoint, credential, authority, options)`
-returns the existing `GuestHelperBinding` after a verified TLS identity read.
+returns the existing `GuestHelperBinding` after a verified TLS identity read and fresh challenge proof.
 The internal resolver must supply `expected()` from independently trusted state:
 exact keys `version: 1`, `machineId`, `leaseId`, `fingerprint`, `launchId`.
 UUIDs are lowercase canonical strings; the fingerprint is 64 lowercase SHA256
@@ -120,44 +120,69 @@ Bound mode uses the transport's credential shape: 32–4096 printable ASCII
 characters without spaces. The legacy guest app retains its existing credential
 rules. The shared vector uses a credential valid in both implementations.
 
-Bound authentication is `Authorization: Canaveral-Binding-v1 <MAC>`, where MAC is
-unpadded base64url HMAC-SHA256 with the credential's UTF-8 bytes as key. The
-canonical message is UTF-8, with these LF-separated lines and a final LF:
+Assignment-bound helpers accept only authentication v2. The historical
+`fixtures/guest-binding-v1.json` remains unchanged as downgrade evidence; v1 is
+superseded and has no fallback. Assignment schema remains `version: 1`.
+Legacy manual Bearer mode and CanaveralGuestApp are unchanged; no public switch
+selects bound mode.
+
+Each explicit TypeScript resolution generates 32 cryptographically random bytes
+and encodes them as canonical unpadded base64url (43 characters). Identity is
+exactly `GET /v1/identity`, no query and an empty body, with:
+
+`Authorization: Canaveral-Binding-v2 <nonce>.<identityRequestMAC>`
+
+Ordinary requests use `Authorization: Canaveral-Binding-v2 <requestMAC>`.
+All MACs are HMAC-SHA256 keyed by the credential's UTF-8 bytes, encoded as
+canonical unpadded base64url. Nonce and MAC fields must each decode to exactly
+32 bytes and re-encode identically. Lengths are checked before decoding;
+padding, alternate encodings, extra fields and mixed versions are refused.
+
+Canonical messages are UTF-8 with fixed-order LF-separated lines, including a
+final LF. There is no JSON canonicalization. The common prefix is:
 
 ```
-Canaveral-Binding-v1
-identity OR request
-machineId
-leaseId
-fingerprint
-launchId
-[incarnation, only for request]
+Canaveral-Binding-v2
+<purpose>
+1
+<machineId>
+<leaseId>
+<fingerprint>
+<launchId>
 ```
 
-The bracketed line is absent for identity, including its delimiter. There is no
-JSON canonicalization or platform UUID formatting in this encoding. The shared
-`fixtures/guest-binding-v1.json` pins exact bytes and both authenticators; actual
-Swift and TypeScript implementations independently check it.
-The request MAC covers the tuple and incarnation, not the HTTP method, path or
-body. Treat a leaked authentication header as a bearer credential valid for that
-helper incarnation; this protocol does not provide per-request replay protection.
+Purpose `identity-request` appends one nonce line; `identity-response` appends
+nonce then incarnation lines; `request` appends one incarnation line. Each
+appended line also ends in LF. The literal `1` is the assignment schema version,
+not the handshake version. Shared `fixtures/guest-binding-v2.json` pins exact
+bytes, MACs for all three purposes and the deterministic identity response DTO.
+Both real implementations verify these vectors. Swift tests pin the producer's
+output to the shared DTO, which TypeScript tests parse and verify by default.
+Setting `CANAVERAL_IDENTITY_DTO` for the Swift and TypeScript tests also checks
+the actual emitted Swift response.
 
-Only bound mode exposes authenticated `GET /v1/identity`, requiring the exact
-target and an empty body. Its response has exactly the tuple keys plus
-`incarnation` and fits 4 KiB. This read has no mutation journal or enrollment UUID.
-Identity-kind authentication grants only this read. All other endpoints require
-request-kind authentication with the pinned incarnation; endpoint bodies and
-schemas stay unchanged. The bridge compares authentication in constant time
-before its first await or route delegation. Bound mode refuses Bearer; legacy
-helpers extract an empty bearer for the binding scheme and reject before effects.
+Before its first await or operational delegation, DesktopBridge authenticates
+the exact challenge against its immutable assignment. Only then does it return
+exactly `version`, `machineId`, `leaseId`, `fingerprint`, `launchId`,
+`incarnation`, echoed `nonce` and `proof`, within 4 KiB. Proof is the
+`identity-response` MAC, never a reflected identity-request or request MAC.
+Identity authentication authorizes only this read. Identity reads have no effects
+and need no durable nonce or mutation ledger. All operational endpoints require
+the request MAC for that helper incarnation. Bound mode refuses plain Bearer;
+legacy mode refuses binding authentication before effects.
 
-Version 1 does not authenticate the identity response with a response MAC or a
-client nonce. Client-side endpoint authenticity rests on TLS hostname and CA
-verification; the helper accepting the request MAC is not proof to the client
-that the peer possesses the credential. Before adding a production resolver,
-implement a response MAC over a fresh client nonce or require and enforce a
-certificate pinned to the exact assignment. Shared clone certificates or a
-general CA trust store alone cannot satisfy that production gate.
+Before constructing GuestHelperBinding, TypeScript checks the exact trusted
+tuple and fresh nonce, verifies the response proof with a constant-time MAC
+comparison, and rechecks live authority and expected assignment. A plausible
+unsigned identity, tampering or an old response against a fresh nonce fails
+closed. TLS hostname and CA verification remain required.
+
+This proves only that a holder of the configured secret answered the fresh
+client challenge. It does not prove endpoint placement or channel binding,
+unique credentials across clones, or end-to-end authentication of every later
+response. A proxy can relay a challenge to a secret holder. The request MAC
+covers tuple and incarnation, not HTTP method, path or body; it remains a bearer
+for that incarnation with no per-operation replay protection.
 
 The verifier compares all trusted tuple values, pins the returned incarnation,
 and combines `authority()` with a fresh `expected()` comparison before dispatch
@@ -173,7 +198,7 @@ unconfirmed after revocation.
 
 The helper cannot independently learn host-side revocation. This protocol does
 not enforce native permissions, readiness, lease deadlines, cancellation, owned
-cleanup, disk erasure or capture/clone acceptance. Trusted bootstrap, credential
-isolation, endpoint discovery and those native lifecycle gates remain open.
+cleanup, disk erasure or capture/clone acceptance. Fresh per-assignment secret delivery, trusted launch provenance, production
+resolver/bootstrap, tenant isolation, endpoint discovery and those native lifecycle gates remain open.
 `guestAccess` admission remains Linux-only. Portable protocol verification does
 not establish usable or accepted macOS workspace delivery.
