@@ -111,8 +111,11 @@ The dashboard separates host limits, reservations and observed usage:
 
 Samples are collected every five seconds and persisted at most once per ten
 seconds, with six hours retained per reporting host. The resource endpoint returns
-the latest 360 samples; the dashboard plots the latest 60 available CPU samples
-against actual sample times. Usage older than 30 seconds or from an offline host
+the latest 360 samples; the dashboard shows the latest 60 timestamped reports,
+including unavailable readings. CPU points use actual sample times on a 0–100%
+axis, without connecting or interpolating across gaps. Exact timestamps and values
+are available in a disclosure. Fewer than two measurements stays an explicit
+insufficient-data state. Usage older than 30 seconds or from an offline host
 is explicitly stale. These values do not replace the reservation ledger or
 establish per-VM CPU/RSS attribution, GPU metrics, alerts or billing.
 

@@ -215,7 +215,7 @@ for (const width of [1440, 1133, 390, 320])
     const inventory = page.getByRole("region", { name: "Machines inventory" });
     expect(
       await inventory.evaluate((section) => {
-        const card = section.querySelector('[data-slot="card"]');
+        const card = section.querySelector("[data-machine-id]");
         return (
           section.scrollWidth <= section.clientWidth + 1 &&
           card.scrollWidth <= card.clientWidth + 1
@@ -223,7 +223,10 @@ for (const width of [1440, 1133, 390, 320])
       }),
     ).toBe(true);
     await expect(
-      inventory.getByText("Resources", { exact: true }),
+      inventory
+        .getByText("Resources", { exact: true })
+        .filter({ visible: true })
+        .first(),
     ).toBeVisible();
     await expect(
       inventory.getByRole("button", { name: "Stop Voyager", exact: true }),

@@ -73,9 +73,19 @@ export function WorkspaceSidebar({
           {
             label: "Workspace",
             name: "Main navigation",
-            entries: Object.entries(views).filter(
-              ([key]) => !["hosts", "orchestrators"].includes(key),
-            ),
+            entries: [
+              ...(user.role === "admin"
+                ? [
+                    ["admin", { icon: LayoutDashboard }] as [
+                      string,
+                      { icon: LucideIcon },
+                    ],
+                  ]
+                : []),
+              ...Object.entries(views).filter(
+                ([key]) => !["hosts", "orchestrators"].includes(key),
+              ),
+            ],
           },
           ...(user.role === "admin"
             ? [
@@ -90,7 +100,6 @@ export function WorkspaceSidebar({
                   label: "Administration",
                   name: "Administration navigation",
                   entries: [
-                    ["admin", { icon: LayoutDashboard }],
                     ["users", { icon: Users }],
                     ["api-access", { icon: KeyRound }],
                   ] as Array<[string, { icon: LucideIcon }]>,

@@ -35,7 +35,10 @@ export function StackedResources({
   unavailable?: boolean;
 }) {
   const categories = data?.categories;
-  const limits = allocationLimits(data || host);
+  const limits = allocationLimits({
+    ...(data || host),
+    effectiveCapacity: host.effectiveCapacity,
+  });
   return (
     <section className="min-w-0 space-y-5" aria-label="Resources by category">
       <div>

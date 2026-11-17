@@ -53,6 +53,7 @@ for (const width of [320, 1440])
       if (path.endsWith("/power-off")) {
         requests.push(route.request().postDataJSON());
         if (requests.length === 1) {
+          machine.powerOffRequest = requests[0].id;
           status = 503;
           result = { error: "Response interrupted. Retry the same request." };
         } else
@@ -65,8 +66,14 @@ for (const width of [320, 1440])
       await route.fulfill({ status, json: result });
     });
     await page.goto("/#machines");
+    const more = page.getByRole("button", {
+      name: "More actions for Stuck test VM",
+      exact: true,
+    });
+    await more.focus();
+    await more.press("Enter");
     await page
-      .getByRole("button", { name: "Power off Stuck test VM", exact: true })
+      .getByRole("menuitem", { name: "Power off Stuck test VM", exact: true })
       .click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toContainText("Unsaved changes may be lost");
@@ -77,6 +84,22 @@ for (const width of [320, 1440])
     await expect(dialog.getByRole("alert")).toContainText(
       "Retry the same request",
     );
+    await page.keyboard.press("Escape");
+    await expect(more).toBeFocused();
+    host.online = false;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(
+      page.getByText("Power-off pending", { exact: true }),
+    ).toBeVisible();
+    expect(requests).toHaveLength(1);
+    await more.click();
+    await page
+      .getByRole("menuitem", {
+        name: "Check power-off status Stuck test VM",
+        exact: true,
+      })
+      .click();
+    await expect(dialog).toBeVisible();
     await dialog
       .getByRole("button", { name: "Power off VM", exact: true })
       .click();

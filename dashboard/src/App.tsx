@@ -1,3 +1,6 @@
+import { matchesMachineState } from "./lib/fleet";
+import { MachineInventory } from "./components/machine-inventory";
+import { FleetPulse } from "./components/fleet-pulse";
 import type { FormEvent, ReactNode } from "react";
 import {
   authStatus,
@@ -82,14 +85,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-  CardFooter,
-} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -182,7 +177,7 @@ import {
 const views = {
   machines: {
     icon: Monitor,
-    filters: ["all", "running", "stopped", "attention"],
+    filters: ["all", "ready", "preparing", "running", "stopped", "attention"],
   },
   hosts: {
     icon: Server,
@@ -321,7 +316,8 @@ export function App() {
     refreshing = useRef<Promise<void> | null>(null),
     acting = useRef(false);
   const detailTrigger = useRef<Element | null>(null),
-    stopTrigger = useRef<Element | null>(null);
+    stopTrigger = useRef<Element | null>(null),
+    operationTrigger = useRef<Element | null>(null);
   const hostName = (id: string) =>
     inventory.hosts.find((h) => h.id === id)?.name || "Unknown host";
   async function signOut(reason = "") {
@@ -625,8 +621,7 @@ export function App() {
       (user.role !== "admin" ||
         owner === "all" ||
         (owner === "none" ? m.ownerId === null : m.ownerId === owner)) &&
-      (filter === "all" ||
-        (filter === "attention" ? attention(m) : m.observed === filter)),
+      matchesMachineState(m, filter),
   );
   const hostItems = infrastructureHosts.filter(
     (h) =>
@@ -657,6 +652,16 @@ export function App() {
         : inventory.machines.length;
   return (
     <SidebarProvider>
+      <a
+        href="#workspace-content"
+        onClick={(e) => {
+          e.preventDefault();
+          document.getElementById("workspace-content")?.focus();
+        }}
+        className="sr-only z-50 rounded-sm bg-primary px-4 py-2 text-primary-foreground focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
+      >
+        Skip to content
+      </a>
       <WorkspaceSidebar
         views={
           user.role === "admin"
@@ -751,7 +756,11 @@ export function App() {
             </Button>
           </div>
         </header>
-        <div className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 lg:px-6">
+        <div
+          id="workspace-content"
+          tabIndex={-1}
+          className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 outline-none lg:px-6"
+        >
           {view === "admin" && user.role === "admin" ? (
             <AdminOverview
               key={user.id}
@@ -805,12 +814,16 @@ export function App() {
               }}
             />
           ) : view === "blueprints" ? (
-            <MachineBlueprints
-              key={user.id}
-              sources={templates}
-              admin={user.role === "admin"}
-              onCreate={openCreate}
-            />
+            <>
+              <Notice error>{stale}</Notice>
+              <MachineBlueprints
+                key={user.id}
+                sources={templates}
+                admin={user.role === "admin"}
+                inventoryAvailable={loaded && !stale}
+                onCreate={openCreate}
+              />
+            </>
           ) : resourcePage ? (
             <>
               <div className="min-w-0 space-y-2">
@@ -876,7 +889,7 @@ export function App() {
                     <h1 className="font-display text-3xl font-medium tracking-tight">
                       {title(view)}
                     </h1>
-                    <p className="text-sm text-muted-foreground">
+                    <p className="sr-only">
                       {view === "machines"
                         ? user.role === "admin"
                           ? "Manage every user's machines and their lifecycle."
@@ -896,14 +909,12 @@ export function App() {
                       </Button>
                     )}
                     {view === "templates" && user.role === "admin" && (
-                      <Button
-                        variant="outline"
-                        onClick={() => setImageImport(true)}
-                      >
+                      <Button onClick={() => setImageImport(true)}>
                         Import image
                       </Button>
                     )}
                     <Button
+                      variant={view === "templates" ? "ghost" : "default"}
                       onClick={() =>
                         isInfrastructure
                           ? setConnectionSetup(
@@ -917,7 +928,7 @@ export function App() {
                       }
                       disabled={busy}
                     >
-                      <Plus />
+                      {view === "templates" ? <ArrowUpRight /> : <Plus />}
                       {isInfrastructure
                         ? view === "orchestrators"
                           ? "Add orchestrator"
@@ -939,6 +950,20 @@ export function App() {
                     error
                   >{`Owner names could not be refreshed. User IDs are shown. ${directory.error}`}</Notice>
                 )}
+              {view === "machines" && (
+                <FleetPulse
+                  inventory={inventory}
+                  loaded={loaded}
+                  stale={Boolean(stale)}
+                  showHosts={user.role === "admin"}
+                  activeFilter={!query && owner === "all" ? filter : undefined}
+                  onSelectState={(state) => {
+                    setFilter(state);
+                    setQuery("");
+                    setOwner("all");
+                  }}
+                />
+              )}
               {view !== "templates" && (
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <ToggleGroup
@@ -952,7 +977,13 @@ export function App() {
                     spacing={1}
                     aria-label="Filter inventory"
                   >
-                    {views[view as keyof typeof views].filters.map((f) => (
+                    {[
+                      ...views[view as keyof typeof views].filters,
+                      ...(view === "machines" &&
+                      !views.machines.filters.includes(filter)
+                        ? [filter]
+                        : []),
+                    ].map((f) => (
                       <ToggleGroupItem
                         className="rounded-md text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm"
                         key={f}
@@ -962,7 +993,9 @@ export function App() {
                           ? "All"
                           : f === "attention"
                             ? "Needs attention"
-                            : title(f)}
+                            : f === "running-unready"
+                              ? "Running · not ready"
+                              : title(f).replaceAll("-", " ")}
                       </ToggleGroupItem>
                     ))}
                   </ToggleGroup>
@@ -1000,6 +1033,32 @@ export function App() {
                   </div>
                 </div>
               )}
+              {view !== "templates" &&
+                items.length > 0 &&
+                (query || filter !== "all" || owner !== "all") && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="text-muted-foreground" role="status">
+                      {items.length} of {total} {view} ·{" "}
+                      {filter === "all"
+                        ? "All states"
+                        : filter === "running-unready"
+                          ? "Running · not ready"
+                          : title(filter).replaceAll("-", " ")}
+                      {query ? ` · “${query}”` : ""}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setQuery("");
+                        setFilter("all");
+                        setOwner("all");
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  </div>
+                )}
               {view === "templates" && user.role === "admin" && (
                 <ImageActivity onRefresh={refresh} />
               )}
@@ -1063,6 +1122,20 @@ export function App() {
                               : "Install a base image on a host, then register it with Canaveral."}
                       </EmptyDescription>
                     </EmptyHeader>
+                    {total > 0 && (
+                      <EmptyContent>
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setQuery("");
+                            setFilter("all");
+                            setOwner("all");
+                          }}
+                        >
+                          Clear filters
+                        </Button>
+                      </EmptyContent>
+                    )}
                     {view === "machines" && !total && (
                       <EmptyContent>
                         <Button
@@ -1077,171 +1150,27 @@ export function App() {
                     )}
                   </Empty>
                 ) : view === "machines" ? (
-                  <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,24rem),1fr))] gap-4">
-                    {machineItems.map((m) => (
-                      <Card
-                        key={m.id}
-                        data-machine-id={m.id}
-                        className="min-w-0 rounded-md shadow-none"
-                      >
-                        <CardHeader className="min-w-0">
-                          <div className="flex min-w-0 items-start gap-3">
-                            <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                              <Monitor size={18} />
-                            </span>
-                            <div className="min-w-0 flex-1">
-                              <CardTitle className="min-w-0 font-display text-xl font-medium tracking-tight">
-                                <Button
-                                  variant="link"
-                                  className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-xl text-foreground [overflow-wrap:anywhere]"
-                                  onClick={(event) => {
-                                    detailTrigger.current = event.currentTarget;
-                                    setDetailId(m.id);
-                                  }}
-                                >
-                                  {m.name}
-                                </Button>
-                              </CardTitle>
-                              <CardDescription className="[overflow-wrap:anywhere]">
-                                {m.template.os} · {m.template.arch}
-                              </CardDescription>
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Status text={machineStatus(m)} />
-                            {m.desired !== m.observed &&
-                              !["error", "unknown"].includes(m.observed) && (
-                                <span className="text-xs text-muted-foreground">
-                                  {m.desired === "running" ? "Start" : "Stop"}{" "}
-                                  requested
-                                </span>
-                              )}
-                          </div>
-                        </CardHeader>
-                        <CardContent className="min-w-0">
-                          <dl className="grid min-w-0 grid-cols-2 gap-4 text-sm">
-                            <div className="min-w-0">
-                              <dt className="mb-1 text-xs text-muted-foreground">
-                                Image
-                              </dt>
-                              <dd className="[overflow-wrap:anywhere]">
-                                {m.template.name || m.templateId}
-                                <small className="block text-xs text-muted-foreground">
-                                  {m.template.revision}
-                                </small>
-                              </dd>
-                            </div>
-                            <div className="min-w-0">
-                              <dt className="mb-1 text-xs text-muted-foreground">
-                                Host
-                              </dt>
-                              <dd className="[overflow-wrap:anywhere]">
-                                {hostName(m.hostId)}
-                                <small className="block text-xs text-muted-foreground">
-                                  {provider(
-                                    inventory.hosts.find(
-                                      (h) => h.id === m.hostId,
-                                    )?.provider,
-                                  )}
-                                </small>
-                              </dd>
-                            </div>
-                            <div className="min-w-0">
-                              <dt className="mb-1 text-xs text-muted-foreground">
-                                Resources
-                              </dt>
-                              <dd className="[overflow-wrap:anywhere]">
-                                {m.resources.cpu} vCPU ·{" "}
-                                {memory(m.resources.memoryMiB)}
-                                <small className="block text-xs text-muted-foreground">
-                                  {number(m.resources.diskGiB)} GiB disk
-                                </small>
-                              </dd>
-                            </div>
-                            <div className="min-w-0">
-                              <dt className="mb-1 text-xs text-muted-foreground">
-                                Updated
-                              </dt>
-                              <dd className="[overflow-wrap:anywhere]">
-                                {since(m.updatedAt)}
-                              </dd>
-                            </div>
-                            {user.role === "admin" && (
-                              <div className="col-span-2 min-w-0">
-                                <dt className="mb-1 text-xs text-muted-foreground">
-                                  Owner
-                                </dt>
-                                <dd className="[overflow-wrap:anywhere]">
-                                  {ownerLabel(m, directory.data ?? [])}
-                                </dd>
-                                {m.ownerId === null && (
-                                  <p className="mt-1 text-xs text-muted-foreground">
-                                    Admin-only inventory. This may be
-                                    operator-created or managed by an
-                                    application lease.
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </dl>
-                        </CardContent>
-                        <CardFooter className="flex flex-wrap gap-2">
-                          {m.template.mode !== "device" &&
-                            m.observed !== "stopped" &&
-                            inventory.hosts.some(
-                              (h) =>
-                                h.id === m.hostId &&
-                                h.online &&
-                                ["macos", "apple"].includes(h.provider),
-                            ) && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => setPowerOffId(m.id)}
-                                aria-label={`Power off ${m.name}`}
-                              >
-                                Power off
-                              </Button>
-                            )}
-                          {user.role === "admin" &&
-                            m.template.mode !== "device" && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                disabled={
-                                  m.desired !== "stopped" ||
-                                  m.observed !== "stopped" ||
-                                  !!m.powerOffRequest
-                                }
-                                onClick={() => setCaptureId(m.id)}
-                                aria-label={`Capture ${m.name} as snapshot`}
-                              >
-                                Capture snapshot
-                              </Button>
-                            )}
-                          {(m.template.mode === "device" ||
-                            m.template.guestAccess) && (
-                            <Button
-                              size="sm"
-                              disabled={!m.ready || m.observed !== "running"}
-                              onClick={() => setControlId(m.id)}
-                            >
-                              Control
-                            </Button>
-                          )}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={busy || !!m.powerOffRequest}
-                            aria-label={`${m.desired === "running" ? "Stop" : "Start"} ${m.name}`}
-                            onClick={() => lifecycle(m)}
-                          >
-                            {m.desired === "running" ? "Stop" : "Start"}
-                          </Button>
-                        </CardFooter>
-                      </Card>
-                    ))}
-                  </div>
+                  <MachineInventory
+                    machines={machineItems}
+                    hosts={inventory.hosts}
+                    users={directory.data ?? []}
+                    admin={user.role === "admin"}
+                    busy={busy}
+                    onInspect={(id, trigger) => {
+                      detailTrigger.current = trigger;
+                      setDetailId(id);
+                    }}
+                    onControl={setControlId}
+                    onLifecycle={lifecycle}
+                    onCapture={(id, trigger) => {
+                      operationTrigger.current = trigger;
+                      setCaptureId(id);
+                    }}
+                    onPowerOff={(id, trigger) => {
+                      operationTrigger.current = trigger;
+                      setPowerOffId(id);
+                    }}
+                  />
                 ) : isInfrastructure ? (
                   <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
                     {hostItems.map((h) => (
@@ -1290,6 +1219,7 @@ export function App() {
       {powerOffId && inventory.machines.some((m) => m.id === powerOffId) && (
         <MachinePowerOff
           machine={inventory.machines.find((m) => m.id === powerOffId)!}
+          returnFocus={operationTrigger.current}
           onClose={() => setPowerOffId(null)}
           onRefresh={refresh}
         />
@@ -1308,6 +1238,7 @@ export function App() {
       {captureId && inventory.machines.some((m) => m.id === captureId) && (
         <ImageCapture
           machine={inventory.machines.find((m) => m.id === captureId)!}
+          returnFocus={operationTrigger.current}
           onClose={() => setCaptureId(null)}
           onRefresh={refresh}
         />
@@ -1383,6 +1314,7 @@ export function App() {
                       "Resources",
                       `${detail.resources.cpu} vCPU · ${memory(detail.resources.memoryMiB)} · ${detail.resources.diskGiB} GiB disk`,
                     ],
+                    ["Updated", since(detail.updatedAt)],
                     ["Machine ID", detail.id],
                   ] satisfies Array<[string, ReactNode]>
                 ).map(([k, v]) => (
@@ -1395,6 +1327,13 @@ export function App() {
                   </div>
                 ))}
               </dl>
+              {user.role === "admin" && (
+                <p className="text-sm text-muted-foreground">
+                  Owner: {ownerLabel(detail, directory.data ?? [])}
+                  {detail.ownerId === null &&
+                    ". Admin-only inventory. This may be operator-created or managed by an application lease."}
+                </p>
+              )}
               {detail.detail && <p className="text-sm">{detail.detail}</p>}
               <Notice error>{actionError}</Notice>
               <DialogFooter>
