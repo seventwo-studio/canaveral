@@ -29,6 +29,15 @@ state without that identity requires an explicit `--controller-id` or controller
 configuration; the CLI must not guess or adopt an identity. Back up retained state
 and verify schema compatibility before starting the new controller against it.
 
+The controller checks its configured TLS certificate and key files every ten
+seconds. Renewed matching files replace the context for new TLS connections
+without restarting the controller. An unreadable or mismatched pair leaves the
+current certificate active and emits a fixed warning; the next check retries.
+This follows Kubernetes Secret volume updates, so mount the directory rather
+than a `subPath`. Existing connections continue until their normal closure.
+Certificate issuance, renewal health and expiry monitoring remain operator
+responsibilities; a failed renewal does not extend certificate validity.
+
 In another terminal, verify authenticated access:
 
 ```sh

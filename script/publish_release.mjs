@@ -15,6 +15,11 @@ export const NAMESPACE='ghcr.io/seventwo-studio/canaveral';
 export const IMAGES={orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',kubevirt:NAMESPACE+'/kubevirt'};
 export const DEPLOYMENT=NAMESPACE+'/deploy';
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
+class PublicationFailure extends Error {}
+export class RegistryUnavailable extends PublicationFailure {}
+export function publicationFailure(error) {
+  return error instanceof PublicationFailure ? error.message : 'Release publication failed. Inspect saved metadata, draft and registry state before retrying.';
+}
 /** Describe a registry failure without credentials: status, path and registry error codes only. */
 export function registryFailure(url,status,body) {
   let codes='';
@@ -32,8 +37,8 @@ export class Registry {
   static async get(url,auth) {
     const parsed=new URL(url);
     if(parsed.protocol!=='https:' || parsed.hostname!=='ghcr.io' || parsed.username || parsed.password) throw new Error('Unexpected registry origin.');
-    const response=await fetch(url,{headers:{Authorization:auth,Accept:'application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json','User-Agent':'canaveral-release'},signal:AbortSignal.timeout(30_000),redirect:'error'}).catch(()=>{throw new Error('Registry transport failed.');});
-    if(!response.ok) {const error=new Error(registryFailure(parsed,response.status,await boundedText(response).catch(()=>'')));error.status=response.status;throw error;}
+    const response=await fetch(url,{headers:{Authorization:auth,Accept:'application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json','User-Agent':'canaveral-release'},signal:AbortSignal.timeout(30_000),redirect:'error'}).catch(()=>{throw new RegistryUnavailable('Registry transport failed.');});
+    if(!response.ok) {const error=new PublicationFailure(registryFailure(parsed,response.status,await boundedText(response).catch(()=>'')));error.status=response.status;throw error;}
     const chunks=[];let length=0;
     for await(const chunk of response.body) {
       length+=chunk.length;
@@ -59,6 +64,18 @@ export class Registry {
     if(headers.get('Docker-Content-Digest')!==digest) throw new Error('Registry manifest digest differs.');
     return [uniqueJSON(raw.toString('utf8')),digest];
   }
+}
+// Observe a completed push without repeating its effects. Authentication and
+// malformed responses fail immediately; absence and transport loss are retried.
+export async function publishedManifest(connect,packageName,tag,pause=()=>new Promise(resolve=>setTimeout(resolve,2000))) {
+  for(let attempt=0;attempt<6;attempt++) {
+    try {
+      const registry=await connect(packageName),found=await registry.manifest(tag);
+      if(found) return found;
+    } catch(error) {if(!(error instanceof RegistryUnavailable))throw error;}
+    if(attempt<5) await pause();
+  }
+  throw new PublicationFailure('Published manifest was not visible after six readback attempts.');
 }
 export function checkIdentity(manifest,version,revision,artifact=false) {
   const labels=manifest.annotations??{};
@@ -113,7 +130,11 @@ export function draftRelease(pages,tag,revision) {
 // Never relay subprocess stderr/stdout on failure: remote errors can contain credentials.
 export function capture(command,args) {
   try {return execFileSync(command,args,{cwd:ROOT,encoding:'utf8',maxBuffer:32*1048576,stdio:['ignore','pipe','pipe']}).trim();}
-  catch {throw new Error(command+' operation failed; inspect publication state before retrying.');}
+  catch(error) {
+    const name=['git','docker','gh','flux','cosign'].includes(command)?command:'Subprocess';
+    const status=Number.isInteger(error.status)?String(error.status):'unavailable';
+    throw new PublicationFailure(name+' operation failed (exit '+status+'); inspect publication state before retrying.');
+  }
 }
 export const STABLE_TAG=/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 export function releaseIdentity(tag,configured,lock,revision,tagRevision,remoteTagRevision,eventRevision) {
@@ -132,7 +153,7 @@ export function ensureDraft(pages,tag,revision,create,reload) {
   }
   return draftRelease(pages,tag,revision);
 }
-export async function main(finalize=false,{execute=capture,connect=packageName=>Registry.connect(packageName),root=ROOT}={}) {
+export async function main(finalize=false,{execute=capture,connect=packageName=>Registry.connect(packageName),root=ROOT,pause}={}) {
   const capture=execute,run=(command,args)=>{execute(command,args);};
   const tag=process.env.RELEASE_TAG;
   if(!STABLE_TAG.test(tag??'')) throw new Error('Stable release tag required.');
@@ -148,12 +169,15 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   const dist=join(root,'dist');mkdirSync(dist,{recursive:true});
   const images={};
   for(const [stage,packageName] of Object.entries(IMAGES)) {
+    console.log('Checking '+stage+' image.');
     let registry=await connect(packageName), found=await registry.manifest(version);
     if(found===null) {
       if(finalize) throw new Error('Cannot finalize missing image.');
       const annotations={'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':revision};
+      console.log('Building and publishing '+stage+' image.');
       run('docker',['buildx','build','.', '--target',stage,'--platform','linux/amd64,linux/arm64','--push','--tag',packageName+':'+version,...Object.entries(annotations).flatMap(([k,v])=>['--label',k+'='+v,'--annotation','index:'+k+'='+v])]);
-      registry=await connect(packageName);found=await registry.manifest(version);
+      console.log('Confirming '+stage+' image publication.');
+      found=await publishedManifest(connect,packageName,version,pause);
     }
     if(!found) throw new Error('Image publication did not complete.');
     checkIdentity(found[0],version,revision);images[stage]=packageName+':'+version+'@'+found[1];
@@ -174,7 +198,7 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
     if(!artifact) {
       if(finalize) throw new Error('Cannot finalize missing deployment artifact.');
       run('flux',['push','artifact','oci://'+DEPLOYMENT+':'+candidate,'--path',output,'--source',SOURCE,'--revision',sourceRevision,'--reproducible','--annotations','org.opencontainers.image.version='+version]);
-      artifact=await registry.manifest(candidate);
+      artifact=await publishedManifest(connect,DEPLOYMENT,candidate,pause);
     }
     if(!artifact) throw new Error('Deployment publication did not complete.');
     checkIdentity(artifact[0],version,sourceRevision,true);
@@ -205,4 +229,4 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   }
   console.log((finalize?'Published':'Prepared')+' Canaveral '+version+' at '+revision);
 }
-if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) main(process.argv[2]==='--finalize').catch(()=>{console.error('Release publication failed. Inspect saved metadata, draft and registry state before retrying.');process.exitCode=1;});
+if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) main(process.argv[2]==='--finalize').catch(error=>{console.error(publicationFailure(error));process.exitCode=1;});
