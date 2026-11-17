@@ -86,8 +86,10 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
     if (!current()) throw new ServiceError("Guest assignment authorization ended.", 410);
     try { return await transport.call(path, body); }
     catch (error) {
-      if (options.owner || error instanceof ServiceError && error.status === 401) alive = false;
-      if (options.owner) { options.owner.closed = true; for (const t of options.owner.transports) t.closeAll(); options.owner.transports.clear(); }
+      const definite = error instanceof ServiceError && error.status === 409 && error.outcome === undefined &&
+        typeof error.code === "string" && ["input_busy", "input_stale", "input_reset_uncertain", "capability_unsupported"].includes(error.code);
+      if (!definite && (options.owner || error instanceof ServiceError && error.status === 401)) alive = false;
+      if (options.owner && !definite) { options.owner.closed = true; for (const t of options.owner.transports) t.closeAll(); options.owner.transports.clear(); }
       throw error;
     }
   }, current);

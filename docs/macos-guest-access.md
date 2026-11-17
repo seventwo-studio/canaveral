@@ -422,9 +422,13 @@ do not launch native process helpers.
 
 There is no operation replay or automatic rebind. This implementation deliberately
 retains a failed entry closed while that assignment remains active, including
-transient transport failures. An operator cannot repair a poisoned launch by
-restoring old values. Inactive sweep removes entries only after closing them;
-the Agent's original monotonic assignment guard continues to deny expired or
+transient transport failures.
+Typed definite pre-effect refusals such as `input_busy`, `input_stale`,
+`input_reset_uncertain` and `capability_unsupported` leave a verified binding
+usable; they neither dispatch effects nor indicate transport loss.
+An operator cannot repair a poisoned launch by restoring old values. Inactive
+sweep removes entries only after closing them. The Agent's original monotonic
+assignment guard continues to deny expired or
 revoked work. Closing the provider permanently closes resolution admission.
 
 Portable fixtures inject process/route evidence and a typed socket dial mapping;

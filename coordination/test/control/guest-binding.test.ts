@@ -8,6 +8,7 @@ import { createServer } from "node:https";
 import { guestAssignment, guestBindingAuthorization, guestBindingMAC, guestBindingBytes, verifiedGuestHelperBinding, type GuestAssignmentContext } from "../../src/guest/binding.ts";
 import { GuestHelperAccess } from "../../src/control/sessions.ts";
 import { ServiceError } from "../../src/errors.ts";
+import type { GuestHTTPS } from "../../src/guest/https.ts";
 
 const vector = JSON.parse(readFileSync(join(process.cwd(), "../fixtures/guest-binding-v2.json"), "utf8"));
 test("shared golden bytes and all three MAC purposes, strict versioned tuples", () => {
@@ -34,12 +35,14 @@ test("verified binding through macOS adapter over real verified HTTPS", async t 
   const credential = vector.credential as string, assignment = vector.assignment as GuestAssignmentContext;
   let expected = { ...assignment }, authority = true, incarnation = vector.incarnation, effects = 0, reads = 0;
   let identity: unknown = undefined, raw: string | undefined, onEffect = () => {}, onIdentity = () => {}, verifyRequest = true, force401 = false;
+  let refusal: string | undefined;
   const server = createServer({ key: readFileSync(key), cert: readFileSync(cert) }, async (req, res) => {
     for await (const _ of req) { /* consume exact adapter request */ }
     const isIdentity = req.url === "/v1/identity";
     const nonce = req.headers.authorization?.split(" ")[1]?.split(".")[0];
     const auth = verifyRequest ? guestBindingAuthorization(credential, assignment, isIdentity ? undefined : incarnation, isIdentity ? nonce : undefined) : undefined;
     if (force401 || (verifyRequest && req.headers.authorization !== auth)) { res.writeHead(401); res.end("private-transport-secret"); return; }
+    if (!isIdentity && refusal) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ code: refusal })); return; }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (isIdentity) { reads++; onIdentity(); res.end(raw ?? JSON.stringify(identity === undefined ? { ...assignment, incarnation, nonce, proof: guestBindingMAC(credential, assignment, "identity-response", nonce, incarnation) } : typeof identity === "function" ? identity(nonce) : identity)); }
     else { effects++; onEffect(); res.end(JSON.stringify({ path: "/", entries: [], truncated: false })); }
@@ -48,8 +51,21 @@ test("verified binding through macOS adapter over real verified HTTPS", async t 
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const endpoint = `https://localhost:${address.port}`;
   const resolve = () => verifiedGuestHelperBinding(() => expected, endpoint, credential, () => authority, { caFile: cert });
-  const reset = () => { expected = { ...assignment }; authority = true; incarnation = vector.incarnation; identity = undefined; raw = undefined; onEffect = () => {}; onIdentity = () => {}; verifyRequest = true; force401 = false; };
+  const reset = () => { expected = { ...assignment }; authority = true; incarnation = vector.incarnation; identity = undefined; raw = undefined; onEffect = () => {}; onIdentity = () => {}; verifyRequest = true; force401 = false; refusal = undefined; };
   try {
+    await t.test("owned bindings retain authority after definite pre-effect refusals", async () => {
+      for (const code of ["input_busy", "input_stale", "input_reset_uncertain", "capability_unsupported"]) {
+        reset(); const owner = { closed: false, transports: new Set<GuestHTTPS>() };
+        const binding = await verifiedGuestHelperBinding(() => expected, endpoint, credential, () => authority, { caFile: cert, owner });
+        try {
+          const before = effects; refusal = code;
+          await assert.rejects(binding.call("/v1/files/list", { path: "/" }), (e: unknown) => e instanceof ServiceError && e.code === code && e.outcome === undefined);
+          assert.equal(effects, before); assert.equal(owner.closed, false); assert.equal(binding.authorized(), true);
+          refusal = undefined; await binding.call("/v1/files/list", { path: "/" }); assert.equal(effects, before + 1);
+        } finally { owner.closed = true; for (const transport of owner.transports) transport.closeAll(); reset(); }
+      }
+      reset();
+    });
     await t.test("actual adapter list, macOS-only guard, verified certificate", async () => {
       const binding = await resolve(), access = new GuestHelperAccess(() => binding);
       await access.control({}, { os: "macos" }, "/fixture", { action: "list-files", arguments: { path: "/" } });
