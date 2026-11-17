@@ -108,8 +108,7 @@ exact keys `version: 1`, `machineId`, `leaseId`, `fingerprint`, `launchId`.
 UUIDs are lowercase canonical strings; the fingerprint is 64 lowercase SHA256
 hex digits pinned to the assignment receipt (`assignmentFingerprint` on Apple).
 `launchId` is an opaque future provider-minted UUID. It must not come from a
-host boot clock, endpoint response, or guest assertion. No production source,
-trusted bootstrap delivery or production resolver exists yet.
+host boot clock, endpoint response, or guest assertion. Owned launch-media delivery is described below; no production transport/resolver is bound yet.
 
 `DesktopBridge` accepts an optional immutable `GuestAssignmentContext`. A new
 assignment requires a new helper instance. Each helper creates a fresh incarnation
@@ -198,7 +197,103 @@ unconfirmed after revocation.
 
 The helper cannot independently learn host-side revocation. This protocol does
 not enforce native permissions, readiness, lease deadlines, cancellation, owned
-cleanup, disk erasure or capture/clone acceptance. Fresh per-assignment secret delivery, trusted launch provenance, production
-resolver/bootstrap, tenant isolation, endpoint discovery and those native lifecycle gates remain open.
+cleanup, disk erasure or capture/clone acceptance. Production resolver/transport, native launch delivery acceptance, tenant isolation, endpoint discovery and those native lifecycle gates remain open.
 `guestAccess` admission remains Linux-only. Portable protocol verification does
 not establish usable or accepted macOS workspace delivery.
+
+## Owned assignment delivery (ST-594)
+
+The Apple provider's internal leased macOS path now constructs launch media under
+its assignment/provider lock before native preparation and boot dispatch. This
+path does not enable macOS admission: `guestAccess` remains Linux-only. Production
+transport and resolver selection remain separate work. Guest loopback HTTP is
+not a reachable host HTTPS endpoint.
+
+The provider mints a random launch UUID and 32-byte canonical unpadded base64url
+credential. The exact bounded guest payload is `{version:1,assignment,credential}`;
+`assignment` has the five existing identity keys. `fixtures/guest-bootstrap-v1.json`
+is a public test vector, not an operational credential. The exclusive mode 0600
+`guest-launch.json` receipt is the private source for a future resolver's
+`expected()`. Guest responses and guest files cannot supply that trusted tuple.
+The fresh secret is never a public Machine field, argument, diagnostic, base-image
+change or Keychain value.
+
+Receipt, source JSON, ISO and every intermediate stay below
+`config.storage/<machine UUID>/`. The separate assignment folder retains only
+existing secret-free provisioning/boot/deletion evidence. `guest-bootstrap/content`
+contains only `assignment.json`. The utility is `hdiutil makehybrid -iso -joliet`
+with label `CANAVERAL_BOOT`; the output is raw ISO9660, not a disk image container.
+Both primary and supplementary ISO directory trees must contain exactly the
+expected assignment bytes. A single Joliet descriptor with valid escape bytes
+and case-exact `assignment.json` is required. Linux cloud-init uses its existing
+independent path.
+
+`planned` is durable before local staging. Identical staged input can resume with
+the same secret before dispatch; a local staging failure remains eligible for
+owned cleanup with closed-handle proof. The provider persists `building`
+immediately before invoking the utility. Any subsequent exception, lost
+acknowledgement, invalid output, crash before seal
+or interrupted seal leaves a hold: no rebuild, replacement, relaunch or cleanup.
+A utility might still reopen files after an interrupted host process; observing
+no current handle does not prove builder exclusion. There is no reset or automatic
+repair. Only confirmed utility success, validated bytes, flush, mode 0400 and a
+durably recorded exact pin permit `sealed`; the file and containing directory
+are flushed before that receipt. A sealed intent revalidates the pin
+before reuse. A durable native launch request prevents automatic relaunch even
+when a later status says stopped. Lost prepare and runner results retain the
+existing uncertain-operation guards and provisioning ordering.
+Fresh status from a held runtime remains observable as running or starting;
+the dispatch guard prevents another launch without masking current status or
+blocking lease-fence publication.
+
+Native metadata contains only a separate `LaunchMediaPin`: assignment/launch
+identity, path, uid, mode 0400, nlink 1, size, SHA256 and device/inode. It does not
+use `PinnedBootFile` or filesystem immutable flags. The runner validates the
+explicit launch and machine/lease binding, passes a validated typed argument into
+`MachineConfiguration.build`, and appends a read-only virtio disk after the system
+disk. Descriptor path/identity/digest verification occurs around attachment.
+The runtime consumes a durable exclusive launch attempt with lease authorization
+checks on both sides before VM start. Guest discovery assumes no virtio block
+identifier. Missing metadata cannot cause filename-based attachment.
+
+`CanaveralAssignedGuest` is a separate SwiftPM executable selected only by future
+template qualification. It fails closed on missing/delayed media; it never chooses
+the manual helper, reads or writes its Keychain credential, or displays assignment
+or credential data. It requires a virtual guest and shares the manual helper's
+service lock, so the two cannot bypass input/service ownership. Its mount-table
+selector requires exactly one read-only `cd9660` volume with the fixed label and
+only `assignment.json`; reads are bounded and reject symbolic links, extra files,
+substitution, malformed or ambiguous payloads. Duplicate JSON keys and aliases
+are refused. A per-launch exclusive startup marker prevents replaying a used
+launch; bridge and input/shell journals are per launch. The bound bridge holds the
+secret in memory. The retained media remains secret-bearing until owned erase.
+The existing `CanaveralGuest` manual Keychain behavior stays separate.
+Helper restart or guest reboot cannot reuse a consumed startup marker, so that
+launch's assigned access remains unavailable. The ISO's read-only attachment
+does not restrict its readability by other guest-local users or processes;
+guest account/image qualification remains an isolation gate.
+
+Cleanup checks builder exclusion, receipt and bootstrap-tree handle closure in
+addition to assignment, runtime-lock and native stop proof before quarantine.
+`building` also blocks preboot cleanup. No process-wide lsof exclusion is allowed;
+there is no ad-hoc credential unlink. Existing positive-owned recursive erase
+covers the whole tree and retains only secret-free deletion evidence outside it.
+
+Portable tests use an injected ISO utility, real provider receipts and pins,
+Swift parser/selector/startup coordinator, bound DesktopBridge identity producer,
+typed native attachment construction, provider-written native pin decoding and
+the TypeScript v2 proof parser. The cross-language script also runs in macOS CI. They
+establish plumbing, not a booted guest or usable macOS access. Raw ISO and Joliet
+mount/automount behavior, removable-volume TCC, startup timing, permissions,
+independent deadline/cleanup/erasure enforcement, clone/capture, template
+qualification, production transport/resolver and workspace/native acceptance all
+remain OPEN. No native acceptance or deployment is implied by CI compilation.
+VZ opens media by path. The surrounding pin checks detect ordinary substitution
+but do not prove exclusion of a same-uid swap restored between those checks;
+native attachment and host-ownership acceptance must cover that boundary.
+
+After compiling TypeScript (`tsc -p coordination`), macOS portable checks can run
+`node script/check_guest_bootstrap.mjs` with the intended Xcode toolchain selected.
+It creates an owned library-only SwiftPM scratch package pointing at this checkout,
+uses the injected ISO utility, and removes its fixture tree on completion. It does
+not build an App target, execute CanaveralVMRunner, mount media or boot a VM.

@@ -187,6 +187,8 @@ test("default Apple removal refuses wrong assignment, open disk and replaced qua
 test("pre-boot lease erasure requires positive preparing journal and no contradictory execution records", async t => {
   const f = fixture(t); f.machine.desired = "stopped"; f.machine.lease = { id: randomUUID() }; const leaseId = object(f.machine.lease).id; const fingerprint = assignmentFingerprint(f.machine);
   saveRecord(join(f.folder, "assignment.json"), { fingerprint, leaseId }); saveRecord(join(f.folder, "provisioning.json"), { version: 1, machineId: f.machine.id, leaseId, fingerprint, phase: "preparing" });
+  saveRecord(join(f.storage, "guest-launch.json"), { version: 1, state: "planned", assignment: { version: 1, machineId: f.machine.id, leaseId, fingerprint, launchId: randomUUID() }, credential: Buffer.alloc(32, 9).toString("base64url") });
+  const content = join(f.storage, "guest-bootstrap", "content"); mkdirSync(content, { recursive: true, mode: 0o700 }); writeFileSync(join(content, "assignment.json"), "partial local stage", { mode: 0o600 });
   f.config.probeCommand = async () => ({ exitCode: 1, stdout: "", stderr: "" }); const request = randomUUID(); const quarantine = join(String(f.config.storage), `.removing-${f.machine.id}-${request}`);
   f.config.command = async (args: string[]) => { if (args[1] === "quarantine") { const { renameSync } = await import("node:fs"); renameSync(f.storage, quarantine); } else rmSync(quarantine, { recursive: true }); return ""; };
   mkdirSync(f.path); saveRecord(join(f.path, "runner-launch.json"), { attemptedAt: 999 }); await assert.rejects(f.provider.removeOwnedStorage(f.machine, image, f.folder, request, true), /possible native execution/);

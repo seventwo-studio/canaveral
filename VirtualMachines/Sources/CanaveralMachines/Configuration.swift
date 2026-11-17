@@ -46,7 +46,14 @@ static func workspaceDevice(_ workspace: DirectBootWorkspace, afterAttachment: (
     disk.blockDeviceIdentifier = workspace.serial
     return disk
 }
-    public static func build(machine: Machine, directory: URL, serialAttachment: VZSerialPortAttachment? = nil) throws -> VZVirtualMachineConfiguration {
+    static func launchMediaDevice(_ media: ValidatedLaunchMedia, afterAttachment: () throws -> Void = {}) throws -> VZVirtioBlockDeviceConfiguration {
+        try media.pin.verify()
+        let attachment = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: media.pin.path), readOnly: true)
+        try afterAttachment()
+        try media.pin.verify()
+        return VZVirtioBlockDeviceConfiguration(attachment: attachment)
+    }
+    public static func build(machine: Machine, directory: URL, serialAttachment: VZSerialPortAttachment? = nil, launchMedia: ValidatedLaunchMedia? = nil) throws -> VZVirtualMachineConfiguration {
         try machine.validate()
         try machine.directBoot?.validate(machine: machine)
         let c = VZVirtualMachineConfiguration()
@@ -66,6 +73,10 @@ static func workspaceDevice(_ workspace: DirectBootWorkspace, afterAttachment: (
         if machine.os == .linux, FileManager.default.fileExists(atPath: seed.path) {
             c.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: seed, readOnly: true)))
         }
+        }
+        if let launchMedia {
+            try launchMedia.pin.validate(machine: machine, directory: directory, launch: launchMedia.pin.launchId)
+            c.storageDevices.append(try launchMediaDevice(launchMedia))
         }
         c.networkDevices = try networkDevices(machine: machine)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]

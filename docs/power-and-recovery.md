@@ -103,3 +103,12 @@ waits for a matching acknowledgement before reservations are reclaimed. The
 administrative deletion API above continues to retain assignment metadata.
 Fixture recovery passes; live consumer cleanup and other provider adapters remain
 open. See [owned lease cleanup](leases.md#owned-lease-cleanup).
+
+Assigned macOS launch media (ST-594) adds a builder-exclusion prerequisite to
+owned-storage cleanup. A private `guest-launch.json` in `building` is an unknown
+utility outcome and blocks preboot cleanup, rebuild and relaunch even if lsof is
+currently empty. Only undispatched `planned` or confirmed `sealed` custody can
+advance to the existing owned quarantine path, after receipt/bootstrap handle
+closure and the ordinary runtime/assignment/stop checks. No immutable-file flag
+or per-file credential unlink is used. The full delivery and remaining native
+gates are in [macOS guest access](macos-guest-access.md#owned-assignment-delivery-st-594).

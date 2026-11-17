@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-/// Immutable trusted assignment. There is no production launch source or bootstrap delivery yet.
+/// Immutable trusted assignment. Owned launch media supplies assigned startup; production transport remains gated.
 public struct GuestAssignmentContext: Sendable, Encodable {
     public let version = 1
     public let machineId: String

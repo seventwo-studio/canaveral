@@ -23,7 +23,7 @@ import CanaveralVMCore
     private var stopReason: String?
     @ObservationIgnored private var installer: VZMacOSInstaller?
     public init(directory: URL, storage: StorageLocation? = nil) { self.directory = directory; self.storage = storage; super.init(); machine = try? MachineStore.load(directory: directory) }
-    public func boot(leaseAuthorized: (@MainActor () -> Bool)? = nil) async {
+    public func boot(launchMedia: ValidatedLaunchMedia? = nil, leaseAuthorized: (@MainActor () -> Bool)? = nil) async {
         guard virtualMachine == nil, !busy else { return }; busy = true; defer { busy = false }
         do {
             if let storage { try storage.checkAvailable(); storageLease = try StorageLease(root: storage.root) }
@@ -37,7 +37,7 @@ import CanaveralVMCore
             guard m.installation != .needsReview, !(m.os == .macOS && m.installation == .installing) else { throw CanaveralError.unavailable("Installation was interrupted. Review the guest disk before retrying installation.") }
             machine = m
             if m.mode == .server { serialConsole = SerialConsole() }
-            let vm = VZVirtualMachine(configuration: try MachineConfiguration.build(machine: m, directory: directory, serialAttachment: serialConsole?.attachment))
+            let vm = VZVirtualMachine(configuration: try MachineConfiguration.build(machine: m, directory: directory, serialAttachment: serialConsole?.attachment, launchMedia: launchMedia))
             virtualMachine = vm; vm.delegate = self
             heartbeat = Task { while !Task.isCancelled {
                 if let storage {
@@ -73,6 +73,11 @@ import CanaveralVMCore
                 try DirectBootAttempt.consume(directory: directory, attempt: boot.bootAttempt)
                 // Media flush can block; recheck authority after persisting intent.
                 guard leaseAuthorized?() == true else { throw CanaveralError.unavailable("Lease authorization ended while persisting direct attempt.") }
+            }
+            if let launchMedia {
+                guard leaseAuthorized?() == true else { throw CanaveralError.unavailable("Lease ended before assigned launch.") }
+                try launchMedia.consume(directory: directory)
+                guard leaseAuthorized?() == true else { throw CanaveralError.unavailable("Lease ended while persisting assigned launch.") }
             }
             phase = "Starting"; try await vm.start()
             if let boot = m.directBoot {

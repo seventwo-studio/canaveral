@@ -1,5 +1,6 @@
 import SwiftUI
 import CanaveralVMCore
+import CanaveralGuestDesktop
 import ApplicationServices
 
 @MainActor @Observable final class GuestModel {

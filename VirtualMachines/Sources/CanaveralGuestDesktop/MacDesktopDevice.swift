@@ -4,11 +4,11 @@ import ScreenCaptureKit
 import ApplicationServices
 import CanaveralVMCore
 
-@MainActor final class MacDesktopDevice: GuestDesktopDevice, GuestStreamDevice {
+@MainActor public final class MacDesktopDevice: GuestDesktopDevice, GuestStreamDevice {
     private let inputStateURL: URL?
     private var streamGeometry: MacInputGeometry?
     private var input: GuestDisplayInput<MacInputBackend>?
-    init(inputStateURL: URL? = nil) { self.inputStateURL=inputStateURL }
+    public init(inputStateURL: URL? = nil) { self.inputStateURL=inputStateURL }
     private func inputController(requireState: Bool = false) throws -> GuestDisplayInput<MacInputBackend> {
         guard Self.isVirtualGuest, let inputStateURL else { throw CanaveralError.unavailable("Guest stream input state is unavailable.") }
         if let input { return input }
@@ -29,8 +29,8 @@ import CanaveralVMCore
             guard !state.held, !state.uncertain else { throw CanaveralError.unavailable("Reset owned stream input before legacy input.") }
         }
     }
-    func captureStream() async throws -> GuestStreamFrame { try await captureBoundFrame() }
-    func performStream(_ event: GuestStreamEvent, frame: GuestStreamFrameBinding, expiresAt: Double) async throws {
+    public func captureStream() async throws -> GuestStreamFrame { try await captureBoundFrame() }
+    public func performStream(_ event: GuestStreamEvent, frame: GuestStreamFrameBinding, expiresAt: Double) async throws {
         guard Self.isVirtualGuest, expiresAt.isFinite, NativeLeaseClock.now() < expiresAt else { throw CanaveralError.unavailable("Guest input frame expired.") }
         try frame.validate()
         streamGeometry = .init(displayID:frame.displayID,bounds:CGRect(x:frame.bounds.x,y:frame.bounds.y,width:frame.bounds.width,height:frame.bounds.height),expiresAt:expiresAt)
@@ -43,13 +43,13 @@ import CanaveralVMCore
         case let .text(text): try controller.text(text)
         }
     }
-    func requireNeutralStreamInput() async throws {
+    public func requireNeutralStreamInput() async throws {
         guard Self.isVirtualGuest else { throw GuestStreamRefusal.unsupported }
         let state=try inputController().state
         if state.uncertain { throw GuestStreamRefusal.resetUncertain }
         guard !state.held else { throw GuestStreamRefusal.busy }
     }
-    func performSemantic(_ action: GuestStreamSemanticAction, frame: GuestStreamFrameBinding?, expiresAt: Double?) async throws {
+    public func performSemantic(_ action: GuestStreamSemanticAction, frame: GuestStreamFrameBinding?, expiresAt: Double?) async throws {
         try await requireNeutralStreamInput()
         if case let .accessibility(request,snapshot)=action {
             try await performAccessibility(request,expected:snapshot); return
@@ -66,26 +66,26 @@ import CanaveralVMCore
         case .accessibility: break
         }
     }
-    func resetStreamInput(requireState: Bool) async throws {
+    public func resetStreamInput(requireState: Bool) async throws {
         guard Self.isVirtualGuest else { throw CanaveralError.unavailable("Input reset runs only inside a virtual guest.") }
         streamGeometry = .init(displayID:CGMainDisplayID(),bounds:CGDisplayBounds(CGMainDisplayID()))
         try inputController(requireState:requireState).reset()
     }
     private lazy var accessibility = GuestAccessibilityTree(backend: MacAccessibilityBackend())
-    func inspectAccessibility() async throws -> GuestAccessibilitySnapshot {
+    public func inspectAccessibility() async throws -> GuestAccessibilitySnapshot {
         guard Self.isVirtualGuest else { throw CanaveralError.unavailable("Native accessibility runs only inside a virtual guest.") }
         return try accessibility.inspect()
     }
-    func performAccessibility(_ action: GuestAccessibilityAction, expected: GuestAccessibilitySnapshot) async throws {
+    public func performAccessibility(_ action: GuestAccessibilityAction, expected: GuestAccessibilitySnapshot) async throws {
         guard Self.isVirtualGuest else { throw CanaveralError.unavailable("Native accessibility actions run only inside a virtual guest.") }
         try refuseHeldStreamInput()
         try accessibility.perform(action,expected:expected)
     }
-    nonisolated static var isVirtualGuest: Bool {
+    public nonisolated static var isVirtualGuest: Bool {
         var value: Int32 = 0; var length = MemoryLayout<Int32>.size
         return sysctlbyname("kern.hv_vmm_present", &value, &length, nil, 0) == 0 && value == 1
     }
-    func capture() async throws -> DesktopFrame { try await captureBoundFrame().frame }
+    public func capture() async throws -> DesktopFrame { try await captureBoundFrame().frame }
     private func captureBoundFrame() async throws -> GuestStreamFrame {
         guard Self.isVirtualGuest else { throw CanaveralError.unavailable("The desktop helper runs only inside a virtual guest.") }
         guard CGPreflightScreenCaptureAccess() else { throw CanaveralError.unavailable("Allow Screen Recording for Canaveral Guest in this VM's System Settings.") }
@@ -101,7 +101,7 @@ import CanaveralVMCore
         guard CGMainDisplayID() == identity, CGDisplayBounds(identity) == bounds else { throw CanaveralError.unavailable("Guest display changed during capture.") }
         return .init(frame:DesktopFrame(width:image.width,height:image.height,pngBase64:data.base64EncodedString()),displayID:identity,bounds:.init(x:bounds.minX,y:bounds.minY,width:bounds.width,height:bounds.height))
     }
-    func perform(_ action: DesktopAction) async throws {
+    public func perform(_ action: DesktopAction) async throws {
         guard Self.isVirtualGuest, AXIsProcessTrusted() else { throw CanaveralError.unavailable("Allow Accessibility for Canaveral Guest inside the VM.") }
         try refuseHeldStreamInput()
         try action.validate(); try Task.checkCancellation()
