@@ -1,5 +1,9 @@
 # Base image registry
 
+The [product model](images.md#product-model) distinguishes this discovery catalog
+from the image library of downloaded publisher originals and machine blueprints that
+define resources and optional prepared machine state.
+
 Accepted requirement and local implementation, 2026-11-02. The registry is a
 curated catalogue of official publisher sources, distinct from host-installed
 images and captured images. Open **Images → Base image registry** to search by
@@ -12,13 +16,15 @@ that an installer console or guest-control adapter is available.
 - macOS: the signed Apple runner asks `VZMacOSRestoreImage.latestSupported` for a
   restore archive supported by that Mac. It records OS/build and uses the returned
   Apple CDN URL. ARM64 and Apple hardware are required.
-- Ubuntu: LTS 24.04/26.04 desktop/server ISOs and Ubuntu 24.04 installed cloud disks,
+- Ubuntu: LTS 24.04/26.04 desktop/server ISOs and Ubuntu 24.04 released cloud disks,
   for x86-64 and ARM64. Current filenames and SHA-256 identities come from the
   publisher's checksum manifests. Missing architecture/release variants fail
   explicitly rather than substituting another image.
 - Debian: stable netinst ISOs for x86-64 and ARM64, resolved from official checksum
   manifests. The downloader allows Debian's observed official redirect to
-  `chuangtzu.ftp.acc.umu.se`; unrelated redirect origins are rejected.
+  `chuangtzu.ftp.acc.umu.se` and `saimei.ftp.acc.umu.se`; unrelated redirect origins
+  are rejected. The latter was observed from Debian's official endpoint during
+  metadata/length verification on 2026-11-17.
 - Fedora Workstation: the official release feed selects the newest numeric stable
   release with an ISO for the requested architecture. Beta, RC and compressed disk
   formats do not silently replace a stable ISO. Downloads use Fedora's own origin.
@@ -32,7 +38,7 @@ that an installer console or guest-control adapter is available.
 Official source references:
 [Apple restore API](https://developer.apple.com/documentation/virtualization/vzmacosrestoreimage/latestsupported),
 [Ubuntu releases](https://releases.ubuntu.com/24.04/),
-[Ubuntu cloud images](https://cloud-images.ubuntu.com/noble/current/),
+[Ubuntu released cloud images](https://cloud-images.ubuntu.com/releases/noble/release/),
 [Debian media](https://www.debian.org/CD/),
 [Fedora Workstation](https://fedoraproject.org/workstation/download/),
 [Windows ARM64 ISO](https://www.microsoft.com/en-us/software-download/windows11arm64),

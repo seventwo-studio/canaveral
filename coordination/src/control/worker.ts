@@ -9,6 +9,7 @@ import { createModule as machinesModule, MachineStore } from "./machines.ts";
 import { createModule as lifecycleModule } from "./lifecycle.ts";
 import { createModule as devicesModule } from "./devices.ts";
 import { createModule as imagesModule } from "./images.ts";
+import { createModule as blueprintsModule } from "./blueprints.ts";
 import { createModule as infrastructureModule } from "./infrastructure.ts";
 import { createModule as inferenceModule } from "./inference.ts";
 import { createModule as sessionsModule } from "./sessions.ts";
@@ -35,7 +36,7 @@ const accountRoutes = accountsModule(store, options);
 const machines = machinesModule(store, options);
 if (!(machines instanceof MachineStore)) throw new Error("Controller host authentication is unavailable.");
 const authenticateHost = machines.authenticateHost.bind(machines);
-const modules = [accountRoutes, machines, ...[lifecycleModule, devicesModule, imagesModule,
+const modules = [accountRoutes, machines, blueprintsModule(store), ...[lifecycleModule, devicesModule, imagesModule,
   infrastructureModule, inferenceModule].map(create => create(store, options))];
 modules.push(sessions);
 const leases = new LegacyLeases(store, options);

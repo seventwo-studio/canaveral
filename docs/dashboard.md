@@ -1,5 +1,27 @@
 # Optional web dashboard
 
+## Images and machine blueprints
+
+**Image library** (`#images`, with `#templates` retained as an alias) lists
+downloaded base artifacts from `/v1/image-library`, including those whose host is
+offline. Captured prepared artifacts do not appear as publisher originals. Each
+entry shows its content hash and publisher-checksum or manual-import evidence.
+Administrators open the base image registry or import a downloaded publisher file
+from this page. Imports still require an eligible host and storage reservation.
+
+**Machine blueprints** (`#blueprints`) lists immutable resource presets tied to
+an exact source revision. Administrators create blueprints from library cards or
+select existing prepared captures in **New blueprint**. **New revision** preserves
+the previous version. Users with machine-write permission can create machines
+from an offered blueprint, apply resource overrides and select placement; the
+controller enforces minimums, host capacity and exact source identity.
+
+The stopped-machine action **Capture snapshot** makes a prepared source for a
+blueprint. It does not change the original library image. The existing host
+template/recipe API remains an internal compatibility contract. See
+[images](images.md) and [machine blueprints](templates.md) for immutable storage,
+credential handling and native acceptance boundaries.
+
 ## Administration
 
 Administrators have a visible Administration group in the sidebar. Open `#admin`
@@ -90,7 +112,7 @@ gateway. Browser fixtures use temporary state and a private fixture server;
 live-machine scenarios need their separate explicit authorization. Frontend fixtures do not establish gateway/provider interoperability or native
 platform acceptance.
 
-The dashboard is a separate, stateless service. The orchestrator, CLI and host agents work without it. It displays machines, preparation readiness, host capacity and available images. It can request machine creation, graceful start/stop and host drain/accept. Android devices have a control workspace with screenshots/input, file browsing and multiple persistent shells. iOS supports app-container browsing and discrete controls through a configured simulator host; screenshot tapping is currently Android-only because iOS point scaling is not yet negotiated. Configured local Linux desktops now have a live desktop connection, files, terminals and an accessibility inspector; see [guest access](guest-access.md). Other VM guest connections, general outbound display brokering, image import/build, deletion, snapshots and live resource telemetry remain unimplemented.
+The dashboard is a separate, stateless service. The orchestrator, CLI and host agents work without it. It displays machines, preparation readiness, host capacity and available images. It can request machine creation, graceful start/stop and host drain/accept. Android devices have a control workspace with screenshots/input, file browsing and multiple persistent shells. iOS supports app-container browsing and discrete controls through a configured simulator host; screenshot tapping is currently Android-only because iOS point scaling is not yet negotiated. Configured local Linux desktops now have a live desktop connection, files, terminals and an accessibility inspector; see [guest access](guest-access.md). Per-platform guest control, cold capture and clone acceptance retain their separate runtime requirements. Running-memory snapshots are not implemented.
 
 ## Local create and control
 
@@ -134,10 +156,9 @@ should stop running. Exiting the command closes its shell connections and retain
 devices, disks and placement for restart. Rebuild the frontend to update local
 assets; local mode reads rebuilt assets on subsequent page loads.
 
-Images are the product concept. The current API still stores immutable template
-definitions internally for compatibility; this does not yet provide image lineage,
-import or derived-image creation. That migration is tracked in
-the image contract.
+The registry, downloaded image library and machine blueprints are separate product
+concepts. Immutable host template definitions remain their runtime compatibility
+format. Imported and derived artifact provenance follows the image contract.
 
 ## Frontend development
 

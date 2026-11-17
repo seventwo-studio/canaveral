@@ -434,10 +434,10 @@ export function ImageCapture({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Capture configured VM</DialogTitle>
+          <DialogTitle>Capture prepared snapshot</DialogTitle>
           <DialogDescription>
-            Save {machine.name} as a reusable disk image. The source remains
-            stopped while its disk is copied and verified.
+            Save {machine.name} as a prepared source for a machine blueprint.
+            The source remains stopped while its disk is copied and verified.
           </DialogDescription>
         </DialogHeader>
         {error && (
@@ -449,7 +449,7 @@ export function ImageCapture({
           <div className="space-y-3">
             <p className="text-sm">
               {task.state === "succeeded"
-                ? "Image captured"
+                ? "Prepared snapshot captured"
                 : task.state === "failed"
                   ? "Capture failed"
                   : task.state === "unknown"
@@ -479,7 +479,7 @@ export function ImageCapture({
         ) : (
           <form className="space-y-4" onSubmit={submit}>
             <label className="block space-y-2 text-xs">
-              Image name
+              Snapshot name
               <Input
                 required
                 maxLength={100}
@@ -500,7 +500,7 @@ export function ImageCapture({
               }
             >
               <Camera />
-              Capture image
+              Capture snapshot
             </Button>
           </form>
         )}
