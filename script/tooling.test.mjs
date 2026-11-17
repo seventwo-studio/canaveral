@@ -193,7 +193,7 @@ test('KubeVirt deployment keeps restricted pods, namespace-scoped observation an
 test('registry failures report status, path and registry codes without credentials',()=>{
  const url=new URL('https://ghcr.io/v2/seventwo-studio/canaveral/manifests/0.3.1?token=secret');
  const message=registryFailure(url,403,JSON.stringify({errors:[{code:'DENIED',message:'permission_denied: write_package'}]}));
- assert.equal(message,'Registry request failed: HTTP 403 for /v2/seventwo-studio/canaveral/manifests/0.3.1 (DENIED: permission_denied: write_package).');
+ assert.equal(message,'Registry request failed: HTTP 403 for /v2/seventwo-studio/canaveral/manifests/0.3.1 (DENIED).');
  assert.ok(!message.includes('secret'));
  assert.equal(registryFailure(url,500,'not json'),'Registry request failed: HTTP 500 for /v2/seventwo-studio/canaveral/manifests/0.3.1.');
 });

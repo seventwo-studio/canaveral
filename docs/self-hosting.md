@@ -116,6 +116,11 @@ one replica with a Recreate strategy. It does not need Kubernetes API access or
 KubeVirt. Use `deploy/kubernetes/orchestrator` for a direct installation,
 or the release artifact's namespace-free `orchestrator/` Kustomization for your
 own GitOps setup. Select the matching immutable image digest from `release.json`.
+For published releases from 0.4.0, configure Cosign keyless verification before
+consuming the deployment OCI artifact. The [release signature contract](../script/README.md#deployment-signature-contract)
+specifies the exact GitHub issuer, workflow subject, stable polling example and
+verification conditions. CI publishes artifacts without cluster access; operators
+own reconciliation, credentials, backups and runtime acceptance.
 The `dashboard/` and `kubevirt/` stages are optional. Follow the concrete namespace, credential,
 TLS and persistent-storage steps in [running.md](running.md#kubernetes).
 
