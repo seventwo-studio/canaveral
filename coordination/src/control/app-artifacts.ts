@@ -1,0 +1,132 @@
+/** Machine-scoped CI build delivery. Payloads stay in bounded, private SQLite chunks. */
+import { createHash } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
+import { ServiceError, object } from '../errors.ts';
+import type { SqliteStore } from '../sqlite.ts';
+import { owns, requireScope } from './contracts.ts';
+import type { ControlModule, ControlRequest, Principal } from './contracts.ts';
+import { MachineStore, registerMachineHooks } from './machines.ts';
+import { decodeData, uuid } from './transfers.ts';
+
+import { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from '../app-artifact-contract.ts';
+export { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from '../app-artifact-contract.ts';
+const STORAGE_BYTES = 8 * 1024 ** 3;
+const reservationSql = 'SELECT 0 AS cpu,0 AS memoryMiB,COALESCE(SUM(reserved_disk),0) AS diskGiB FROM app_artifacts WHERE host=? AND state!=\'deleted\'';
+type Artifact = { id: string; machine: string; host: string; binding: string; format: string; bytes: number; sha256: string; received: number; state: string; reserved_disk: number };
+const fail = (status = 400): never => { throw new ServiceError('App artifact request rejected.', status); };
+function fields(body: Record<string, unknown>, keys: string[]): void { if (Object.keys(body).length !== keys.length || keys.some(key => !Object.hasOwn(body, key))) fail(); }
+function integer(value: unknown, min: number, max: number): number { if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) return fail(); return value; }
+function row(db: DatabaseSync, id: string): Artifact { return db.prepare('SELECT * FROM app_artifacts WHERE id=?').get(uuid(id)) as unknown as Artifact ?? fail(404); }
+function machine(db: DatabaseSync, id: string, principal?: Principal) {
+  const m = db.prepare('SELECT m.*,h.enabled FROM machines m JOIN hosts h ON h.id=m.host WHERE m.id=?').get(uuid(id));
+  if (!m || principal && !owns(principal, m.owner)) return fail(404);
+  return m;
+}
+function binding(m: ReturnType<typeof machine>): string { return createHash('sha256').update(JSON.stringify([m.id, m.host, m.owner, m.template, m.request])).digest('hex'); }
+function current(db: DatabaseSync, artifact: Artifact, principal?: Principal) {
+  const m = machine(db, artifact.machine, principal);
+  if (m.host !== artifact.host || binding(m) !== artifact.binding) return fail(409);
+  return m;
+}
+function view(a: Artifact) { return { id: a.id, machineId: a.machine, format: a.format, bytes: a.bytes, sha256: a.sha256, received: a.received, state: a.state, chunkBytes: APP_CHUNK_BYTES }; }
+
+/** Called in the operation submission transaction, before a durable queue entry exists. */
+export function validateUploadedArtifact(db: DatabaseSync, machineId: string, artifactId: unknown): void {
+  const a = row(db, uuid(artifactId)); current(db, a);
+  if (a.machine !== machineId || a.state !== 'ready') fail(409);
+  requireCleanAttempts(db, a);
+}
+
+function requireCleanAttempts(db: DatabaseSync, a: Artifact): void {
+  const operations = db.prepare("SELECT o.* FROM device_operations o WHERE o.machine=? AND json_extract(o.request,'$.action')='install-uploaded' AND json_extract(o.request,'$.arguments.artifact')=?").all(a.machine, a.id);
+  for (const op of operations) {
+    const pending = db.prepare('SELECT 1 FROM control_device_pending WHERE id=?').get(op.id!);
+    const result = op.result ? object(JSON.parse(String(op.result))) : {};
+    if (op.state === 'queued' || !pending && !(op.state === 'succeeded' && result.artifactCleaned === true)) fail(409);
+  }
+}
+
+export function createAppArtifactsModule(store: SqliteStore, machines: MachineStore): ControlModule {
+  store.transaction(db => db.exec(`CREATE TABLE IF NOT EXISTS app_artifacts (
+    id TEXT PRIMARY KEY,machine TEXT NOT NULL,host TEXT NOT NULL,binding TEXT NOT NULL,format TEXT NOT NULL,
+    bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,received INTEGER NOT NULL,state TEXT NOT NULL,reserved_disk INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS app_artifact_chunks (artifact TEXT NOT NULL,offset INTEGER NOT NULL,data BLOB NOT NULL,PRIMARY KEY(artifact,offset));`));
+  registerMachineHooks(store, {
+    additionalReservationsSql: { id: 'app-artifact-scratch-v1', query: reservationSql },
+    additionalReservations: (db, host) => ({ diskGiB: Number(db.prepare(reservationSql).get(host)!.diskGiB) }),
+  });
+  return { handle(req: ControlRequest) {
+    const p = req.parts;
+    const hostRead = req.method === 'GET' && p[0] === 'v1' && p[1] === 'hosts' && p[3] === 'app-artifacts' && p[5] === 'operations' && (p.length === 7 || p.length === 9 && p[7] === 'chunks');
+    const create = req.method === 'POST' && p.length === 4 && p[0] === 'v1' && p[1] === 'machines' && p[3] === 'app-artifacts';
+    const access = p[0] === 'v1' && p[1] === 'app-artifacts' && (p.length === 3 && req.method === 'GET' || p.length === 4 && req.method === 'POST' && ['chunks','complete','delete'].includes(p[3]!));
+    if (!hostRead && !create && !access) return undefined;
+    if (req.query.size) return fail();
+    return store.transaction(db => {
+      if (hostRead) {
+        const hostId = uuid(p[2]); machines.authenticateHost(hostId, req.token);
+        const a = row(db, p[4]!), m = current(db, a);
+        const op = db.prepare('SELECT * FROM device_operations WHERE id=?').get(uuid(p[6]));
+        if (!op || a.host !== hostId || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || a.state !== 'ready' || op.machine !== a.machine || op.host !== hostId || op.state !== 'queued') return fail(403);
+        const request = object(JSON.parse(String(op.request)));
+        if (request.action !== 'install-uploaded' || object(request.arguments).artifact !== a.id || store.clock() >= Number(op.created) + 1800) return fail(403);
+        if (p.length === 7) return { body: view(a) };
+        if (!/^(0|[1-9][0-9]*)$/.test(p[8]!)) return fail();
+        const offset = integer(Number(p[8]), 0, a.bytes - 1);
+        const chunk = db.prepare('SELECT data FROM app_artifact_chunks WHERE artifact=? AND offset=?').get(a.id, offset);
+        if (!chunk || !(chunk.data instanceof Uint8Array)) return fail(404);
+        return { body: { offset, data: Buffer.from(chunk.data).toString('base64') } };
+      }
+      const principal = requireScope(req, 'access');
+      if (create) {
+        fields(req.body, ['id','format','bytes','sha256']);
+        const id = uuid(req.body.id), m = machine(db, p[2]!, principal), template = object(JSON.parse(String(m.template)));
+        const format = req.body.format, size = integer(req.body.bytes, 1, APP_ARTIFACT_BYTES), sha = req.body.sha256;
+        if (format !== (template.os === 'android' ? 'apk' : template.os === 'ios' ? 'ios-app-tar' : null) || typeof sha !== 'string' || !/^[a-f0-9]{64}$/.test(sha)) return fail();
+        // Lease execution remains disabled; this administrative route cannot bypass it.
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id!)) return fail(409);
+        const old = db.prepare('SELECT * FROM app_artifacts WHERE id=?').get(id) as unknown as Artifact | undefined;
+        if (old) { current(db, old, principal); if (old.machine !== m.id || old.format !== format || old.bytes !== size || old.sha256 !== sha) return fail(409); return { body: view(old) }; }
+        const used = Number(db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM app_artifacts WHERE state!='deleted'").get()!.n);
+        if (used + size > STORAGE_BYTES || Number(db.prepare("SELECT COUNT(*) AS n FROM app_artifacts WHERE state!='deleted'").get()!.n) >= 128) return fail(429);
+        // Archive + extracted bytes, plus headroom for bounded filesystem metadata.
+        const reserved = 1 + Math.ceil(2 * size / 1024 ** 3);
+        if (machines.remainingCapacity(db, String(m.host)).diskGiB < reserved) return fail(409);
+        db.prepare("INSERT INTO app_artifacts VALUES (?,?,?,?,?,?,?,0,'uploading',?)").run(id, m.id!, m.host!, binding(m), String(format), size, sha, reserved);
+        return { body: view(row(db, id)), status: 201 };
+      }
+      const a = row(db, p[2]!); current(db, a, principal);
+      if (req.method === 'GET') return { body: view(a) };
+      if (p[3] === 'chunks') {
+        fields(req.body, ['offset','data']);
+        if (a.state !== 'uploading') return fail(409);
+        const offset = integer(req.body.offset, 0, a.bytes - 1), data = decodeData(req.body.data, APP_CHUNK_BYTES);
+        if (data.length !== Math.min(APP_CHUNK_BYTES, a.bytes - offset) || offset % APP_CHUNK_BYTES) return fail();
+        const previous = db.prepare('SELECT data FROM app_artifact_chunks WHERE artifact=? AND offset=?').get(a.id, offset);
+        if (previous) { if (!(previous.data instanceof Uint8Array) || !Buffer.from(previous.data).equals(data)) return fail(409); return { body: view(a) }; }
+        if (offset !== a.received) return fail(409);
+        db.prepare('INSERT INTO app_artifact_chunks VALUES (?,?,?)').run(a.id, offset, data);
+        db.prepare('UPDATE app_artifacts SET received=received+? WHERE id=?').run(data.length, a.id);
+      } else {
+        fields(req.body, []);
+        if (p[3] === 'complete') {
+          if (a.state === 'ready') return { body: view(a) };
+          if (a.state !== 'uploading' || a.received !== a.bytes) return fail(409);
+          const hash = createHash('sha256'); let length = 0;
+          for (const part of db.prepare('SELECT offset,data FROM app_artifact_chunks WHERE artifact=? ORDER BY offset').iterate(a.id)) {
+            if (part.offset !== length || !(part.data instanceof Uint8Array)) return fail(409);
+            hash.update(part.data); length += part.data.byteLength;
+          }
+          if (length !== a.bytes || hash.digest('hex') !== a.sha256) return fail(409);
+          db.prepare("UPDATE app_artifacts SET state='ready' WHERE id=?").run(a.id);
+        } else {
+          // A dispatched failure/unknown may retain native staging; require positive cleanup.
+          requireCleanAttempts(db, a);
+          db.prepare('DELETE FROM app_artifact_chunks WHERE artifact=?').run(a.id);
+          db.prepare("UPDATE app_artifacts SET state='deleted',reserved_disk=0 WHERE id=?").run(a.id);
+        }
+      }
+      return { body: view(row(db, a.id)) };
+    });
+  } };
+}

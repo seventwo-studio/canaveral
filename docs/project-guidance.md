@@ -13,6 +13,7 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 - [consumer operations](consumer-operations.md)
 - [dashboard](dashboard.md)
 - [devices](devices.md)
+- [remote mobile control and CI builds](mobile-control.md)
 - [guest access](guest-access.md)
 - [image registry](image-registry.md)
 - [images](images.md)

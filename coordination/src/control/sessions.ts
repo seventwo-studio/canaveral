@@ -19,6 +19,8 @@ import { legacyDigest } from "./templates.ts";
 import { legacySessionLease, refreshLegacyLeases, legacyMachineReady, leaseEligible, capabilities } from "./leases.ts";
 import { encodeControl, exact, MAX_BINARY_BYTES, MAX_CONTROL_BYTES, SESSION_PROTOCOL, validateRelayMessage, workerError } from "./session-protocol.ts";
 import type { SessionCapability, SessionSide, SessionChannel, SessionMessage } from "./session-protocol.ts";
+import type { RelayCapability } from './session-protocol.ts';
+import type { VideoSessionCommand } from './mobile-video-sessions.ts';
 import { GuestHelperBinding, MAX_INSPECTION_BYTES, validateSnapshot } from "./session-protocol.ts";
 import { GuestChunkFiles } from "../guest/chunk-files.ts";
 import { GuestChunkShells } from "../guest/chunk-shells.ts";
@@ -222,7 +224,8 @@ export class AccessSessions implements SessionModule {
       return this.view(row);
     });
   }
-  sessionCommand(command: SessionCommand): unknown {
+  sessionCommand(command: SessionCommand | VideoSessionCommand): unknown {
+    if (command.type === 'video-sessions.attach' || command.type === 'video-sessions.authorized' || command.type === 'video-sessions.disconnect') throw new ServiceError('Administrative video requires its separate broker.', 400);
     const id = identifier(command.sessionId), generation = identifier(command.generation);
     return this.transaction(db => {
       const row = this.row(db, id);
@@ -280,9 +283,9 @@ export class AccessSessions implements SessionModule {
 }
 export function createModule(store: SqliteStore, options: ControlOptions): SessionModule { return new AccessSessions(store, options); }
 
-export interface SessionCommandClient { request(command: SessionCommand): Promise<unknown> }
+export interface SessionCommandClient { request(command: SessionCommand | VideoSessionCommand): Promise<unknown> }
 interface Pair {
-  view: SessionView; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
+  view: { id: string; generation: string; capability: RelayCapability }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
 }
 /** One assembled input message and one pending socket write per direction. No retry/reconnect. */
 class SocketPeer {
@@ -383,9 +386,10 @@ class SocketPeer {
 }
 
 /** HTTP boundary checks are repeated here before durable attachment, including on direct callers. */
-function upgradeRequest(req: IncomingMessage): { key: string; token: string; command: Extract<SessionCommand, { type: "sessions.attach" }> } {
+type AttachCommand = Extract<SessionCommand | VideoSessionCommand, { type: 'sessions.attach' | 'video-sessions.attach' }>;
+function upgradeRequest(req: IncomingMessage, video = false): { key: string; token: string; command: AttachCommand } {
   const path = req.url ?? "", p = path.split("/");
-  if (req.method !== "GET" || !/^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session attachment path.", 400);
+  if (req.method !== "GET" || !(video ? /^\/v1\/(hosts|machines)\/[0-9a-f-]+\/video-sessions\/[0-9a-f-]+\/[0-9a-f-]+$/ : /^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/).test(path)) throw new ServiceError("Invalid session attachment path.", 400);
   const counts = new Map<string, number>();
   for (let i = 0; i < req.rawHeaders.length; i += 2) { const k = req.rawHeaders[i]!.toLowerCase(); counts.set(k, (counts.get(k) ?? 0) + 1); }
   if ([...counts.values()].some(count => count !== 1) || req.headers.origin !== undefined || req.headers.cookie !== undefined) throw new ServiceError("Session upgrade headers rejected.", 403);
@@ -396,25 +400,26 @@ function upgradeRequest(req: IncomingMessage): { key: string; token: string; com
   const key = h["sec-websocket-key"], authorization = h.authorization;
   if (typeof key !== "string" || !/^[A-Za-z0-9+/]{22}==$/.test(key) || Buffer.from(key, "base64").toString("base64") !== key || !authorization?.startsWith("Bearer ")) throw new ServiceError("Invalid session WebSocket credentials or key.", 400);
   const side: SessionSide = p[2] === "hosts" ? "host" : "consumer";
-  const command: Extract<SessionCommand, { type: "sessions.attach" }> = { type: "sessions.attach", sessionId: identifier(p[5]), generation: identifier(p[6]), side, ownerId: identifier(p[3]), token: authorization.slice(7) };
+  const command: AttachCommand = { type: video ? 'video-sessions.attach' : 'sessions.attach', sessionId: identifier(p[5]), generation: identifier(p[6]), side, ownerId: identifier(p[3]), token: authorization.slice(7) };
   const controller = h["x-canaveral-controller-id"], generation = h["x-canaveral-runner-generation"], incarnation = h["x-canaveral-incarnation-id"];
   if (side === "host" && [controller, generation, incarnation].some(x => x !== undefined)) {
+    if (command.type !== 'sessions.attach') throw new ServiceError('Video host binding headers are unsupported.', 400);
     if (typeof controller !== "string" || typeof generation !== "string" || !/^[1-9][0-9]*$/.test(generation) || !Number.isSafeInteger(Number(generation)) || typeof incarnation !== "string") throw new ServiceError("Invalid runner session binding.", 400);
     command.binding = { controllerId: identifier(controller), runnerId: command.ownerId, generation: Number(generation), incarnationId: identifier(incarnation) };
   }
   return { key, token: command.token, command };
 }
-export function createSessionUpgradeHandler(client: SessionCommandClient): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
+export function createSessionUpgradeHandler(client: SessionCommandClient, options: { video?: boolean } = {}): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
   const pairs = new Map<string, Pair>(); let stopped = false, monitoring = false;
   const disconnect = (pair: Pair): void => {
     if (pair.closed) return;
     pair.closed = true; pair.start();
     for (const p of Object.values(pair.peers)) p.close();
     pairs.delete(pair.view.id + ":" + pair.view.generation);
-    void client.request({ type: "sessions.disconnect", sessionId: pair.view.id, generation: pair.view.generation }).catch(() => {});
+    void client.request({ type: options.video ? 'video-sessions.disconnect' : 'sessions.disconnect', sessionId: pair.view.id, generation: pair.view.generation }).catch(() => {});
   };
   const authorized = async (pair: Pair, ready = false): Promise<boolean> => {
-    const result = await client.request({ type: "sessions.authorized", sessionId: pair.view.id, generation: pair.view.generation, ready }) as { authorized?: boolean };
+    const result = await client.request({ type: options.video ? 'video-sessions.authorized' : 'sessions.authorized', sessionId: pair.view.id, generation: pair.view.generation, ready }) as { authorized?: boolean };
     return result?.authorized === true;
   };
   const timer = setInterval(() => {
@@ -426,14 +431,15 @@ export function createSessionUpgradeHandler(client: SessionCommandClient): { han
   return {
     close(): void { stopped = true; clearInterval(timer); for (const pair of [...pairs.values()]) disconnect(pair); },
     async handle(req, socket, head): Promise<void> {
-      let pair: Pair | undefined, peer: SocketPeer | undefined, claimed: Extract<SessionCommand, { type: "sessions.attach" }> | undefined, upgraded = false;
+      let pair: Pair | undefined, peer: SocketPeer | undefined, claimed: AttachCommand | undefined, upgraded = false;
       socket.on("error", () => {});
       try {
         if (stopped) throw new ServiceError("Session service is shutting down.", 503);
-        const { key, command } = upgradeRequest(req);
+        const { key, command } = upgradeRequest(req, options.video);
         if (head.length > MAX_BINARY_BYTES + 14) throw new ServiceError("Session upgrade input exceeds its budget.", 400);
         socket.pause();
-        const view = await client.request(command) as SessionView; claimed = command;
+        const view = await client.request(command) as Pair['view']; claimed = command;
+        if (options.video && view.capability !== 'video' || !options.video && view.capability === 'video') throw new ServiceError('Session capability differs from its broker.', 409);
         if (stopped || socket.destroyed) throw new ServiceError("Session disconnected during admission.", 410);
         const identity = view.id + ":" + view.generation;
         pair = pairs.get(identity);
@@ -477,7 +483,7 @@ export function createSessionUpgradeHandler(client: SessionCommandClient): { han
         if (pair) disconnect(pair);
         else {
           if (upgraded) peer?.close();
-          if (claimed) void client.request({ type: "sessions.disconnect", sessionId: claimed.sessionId, generation: claimed.generation }).catch(() => {});
+          if (claimed) void client.request({ type: options.video ? 'video-sessions.disconnect' : 'sessions.disconnect', sessionId: claimed.sessionId, generation: claimed.generation }).catch(() => {});
         }
       }
     },
@@ -497,7 +503,7 @@ export class SessionConnection implements SessionChannel {
   private check(): void { if (this.failure) throw this.failure; if (!this.allowed()) throw new ServiceError("Session authorization or connection ended.", 410, { code: "session_disconnected", retryable: false }); }
   static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"] } = {}): Promise<SessionConnection> {
     let url: URL; try { url = new URL(origin); } catch { throw new ServiceError("Invalid session origin.", 400); }
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/sessions|(hosts|machines)\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
     secret(token);
     const allowed = options.authorized ?? (() => true);
     if (!allowed()) throw new ServiceError("Session authorization ended.", 410);

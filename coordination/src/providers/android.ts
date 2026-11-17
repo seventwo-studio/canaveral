@@ -5,6 +5,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
 import { MobileProvider, authorized, canonical, copyUpload, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, NativeChild, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
+import { openAndroidVideo } from './android-video.ts';
+import type { AndroidVideoOptions } from './android-video.ts';
 
 export function quote(value: string): string { return "'" + value.replaceAll("'", "'\"'\"'") + "'"; }
 export interface TransferHelper { data: Buffer; sha256: string }
@@ -185,10 +187,81 @@ export class AndroidProvider extends MobileProvider {
     if (!Number.isSafeInteger(pid) || (pid as number) <= 0 || !this.transport?.processAbsent) return false;
     return await this.transport.processAbsent(pid as number) === true;
   }
+  /** The caller journals this attempt before dispatch. Sources are private verified
+   * uploads, never consumer-selected host paths. Only a verified APK is committed. */
+  async installArtifact(machine: RecordValue, image: RecordValue, _folder: string, source: Download, sha256: string, check: Authorized = () => true): Promise<RecordValue> {
+    let session: string | undefined, serial: string | undefined, pipe: NativePipe | undefined, commitAttempted = false;
+    const recheck = async () => {
+      await authorized(check);
+      if (serial) { await this.owned(machine, serial); await authorized(check); }
+    };
+    try {
+      this.executionAllowed(machine);
+      await authorized(check);
+      const size = integer(source.size, "APK size", 1, 2 * 1024 ** 3);
+      if (!/^[a-f0-9]{64}$/.test(sha256)) throw new ServiceError("Expected a SHA-256 APK digest.", 400);
+      if (!this.transport?.pipe) unsupported("Streaming APK installation requires a native pipe transport.");
+      if (machine.desired !== "running") throw new ServiceError("Android device is stopping or stopped.", 409);
+      if (await source.verify() !== true) throw new ServiceError("Uploaded APK identity could not be verified.", 409);
+      await authorized(check);
+      serial = await this.endpoint(machine, this.storage(machine, image), check);
+      if (!serial || await this.adb(serial, ["shell", "getprop", "sys.boot_completed"]) !== "1") throw new ServiceError("Android device is not ready.");
+      await recheck();
+      const created = await this.adb(serial, ["shell", "pm", "install-create", "-r", "-S", String(size)]);
+      const identity = /^Success: created install session \[([0-9]+)\]$/.exec(created);
+      if (!identity || !Number.isSafeInteger(Number(identity[1])) || Number(identity[1]) > 2147483647) throw new ServiceError("Android install session creation is unconfirmed; inspect before retrying.", 409, { outcome: "unknown" });
+      session = identity[1]!;
+      await recheck();
+      pipe = await this.pipe([this.tool("adb"), "-s", serial, "shell", "-T", "pm", "install-write", "-S", String(size), session, "base.apk", "-"]);
+      const connection = pipe, digest = createHash("sha256"), output: Buffer[] = [];
+      let length = 0;
+      const receive = (async () => {
+        for (;;) {
+          await authorized(check);
+          const bytes = Buffer.from(await connection.read(Math.min(4097 - length, 4096), 30000));
+          await authorized(check);
+          if (!bytes.length) return;
+          length += bytes.length;
+          if (length > 4096) throw new ServiceError("Android install response exceeds its bounded envelope.", 413);
+          output.push(bytes);
+        }
+      })();
+      const send = (async () => {
+        await copyUpload({ read: async count => {
+          const bytes = await source.read(count); digest.update(bytes); return bytes;
+        } }, bytes => writeAll(connection, bytes, check), size, check);
+        await connection.end();
+      })();
+      // A failed branch closes its retained process so the other branch cannot hang.
+      const branches = [send, receive].map(branch => branch.catch(async error => { await connection.close(); throw error; }));
+      const outcomes = await Promise.allSettled(branches);
+      for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+      if (await connection.wait(30000) !== 0 || Buffer.concat(output).toString("utf8").trim() !== `Success: streamed ${size} bytes`) throw new ServiceError("Android APK staging is unconfirmed.", 409, { outcome: "unknown" });
+      await connection.close(); pipe = undefined;
+      await recheck();
+      if (digest.digest("hex") !== sha256 || await source.verify() !== true) throw new ServiceError("Uploaded APK digest or source identity changed; installation was not committed.", 409);
+      await recheck();
+      commitAttempted = true;
+      if (await this.adb(serial, ["shell", "pm", "install-commit", session]) !== "Success") throw new ServiceError("Android installation commit is unconfirmed; inspect before retrying.", 409, { outcome: "unknown" });
+      await recheck();
+      return { installed: true, sha256, bytes: size, artifactCleaned: true };
+    } finally {
+      try {
+        if (pipe) await pipe.close();
+        if (session && serial && !commitAttempted) {
+          // Never abandon after an uncertain commit or after authorization ends.
+          try { await recheck(); await this.adb(serial, ["shell", "pm", "install-abandon", session]); } catch { /* Owned session cleanup needs operator inspection. */ }
+        }
+      } finally { await source.close(); }
+    }
+  }
   displayEpoch(machine: RecordValue, image: RecordValue): RecordValue | undefined {
     const launch = readJson(path.join(this.storage(machine, image), "launch.json"));
     if (!launch || launch.version !== 2 || launch.fingerprint !== digest(this.binding(machine, image))) return undefined;
     return { startedAt: launch.startedAt, identity: digest(launch) };
+  }
+  openVideo(machine: RecordValue, image: RecordValue, folder: string, options: AndroidVideoOptions, check: Authorized): Promise<NativePipe> {
+    return openAndroidVideo(this, machine, image, folder, options, check);
   }
   override async control(machine: RecordValue, image: RecordValue, folder: string, input: DeviceRequest): Promise<RecordValue> {
     this.executionAllowed(machine);

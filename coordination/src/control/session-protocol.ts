@@ -9,6 +9,7 @@ export const INSPECTION_SCHEMA = "canaveral-accessibility-v1";
 export const MAX_INSPECTION_BYTES = 6 * 1_048_576;
 export const MAX_INSPECTION_NODES = 2_000;
 export type SessionCapability = "pty" | "display" | "upload" | "download" | "accessibility";
+export type RelayCapability = SessionCapability | 'video';
 export type SessionSide = "host" | "consumer";
 export type SessionMessage = Record<string, unknown> | Uint8Array;
 export interface SessionChannel {
@@ -47,11 +48,11 @@ export function encodeControl(value: unknown): string {
   return data;
 }
 /** Relay checks preserve worker-owned schemas. Ready may only originate in the broker. */
-export function validateRelayMessage(capability: SessionCapability, side: SessionSide, data: Uint8Array, binary: boolean): SessionMessage {
+export function validateRelayMessage(capability: RelayCapability, side: SessionSide, data: Uint8Array, binary: boolean): SessionMessage {
   if (data.byteLength > (binary ? MAX_BINARY_BYTES : MAX_CONTROL_BYTES)) throw new ServiceError("Session message exceeds its budget.", 400);
   if (binary) {
     if ((capability === "pty" && side === "consumer") || (capability === "upload" && side === "host") ||
-        ((capability === "download" || capability === "accessibility") && side === "consumer"))
+        ((capability === "download" || capability === "accessibility" || capability === 'video') && side === "consumer"))
       throw new ServiceError("Binary payload is not valid in this session direction.", 400);
     return data;
   }
@@ -61,6 +62,19 @@ export function validateRelayMessage(capability: SessionCapability, side: Sessio
   if (value.type === "ready") throw new ServiceError("Ready is reserved to the broker.", 400);
   // JSON permits exponents that overflow IEEE-754 even though NaN/Infinity literals are forbidden.
   encodeControl(value);
+  if (capability === 'video') {
+    if (side === 'consumer') { const v = exact(value, ['type']); if (v.type !== 'ack') throw new ServiceError('Video consumers may only acknowledge completion.', 400); }
+    else if (value.type === 'video') {
+      const v = exact(value, ['type','mediaType','codec','fps']);
+      if (v.mediaType !== 'video/mp4' || v.codec !== 'avc1' || v.fps !== 30) throw new ServiceError('Invalid video metadata.', 400);
+    } else if (value.type === 'finish') {
+      const v = exact(value, ['type','bytes','sha256','cleaned']);
+      if (!Number.isSafeInteger(v.bytes) || Number(v.bytes) < 1 || Number(v.bytes) > 512 * 1024 * 1024 || typeof v.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(v.sha256) || v.cleaned !== true) throw new ServiceError('Invalid video completion.', 400);
+    } else if (value.type === 'error') {
+      const v = exact(value, ['type','code','message','outcome']);
+      if (typeof v.code !== 'string' || !Object.hasOwn(WORKER_MESSAGES, v.code) || typeof v.message !== 'string' || v.outcome !== 'unknown') throw new ServiceError('Invalid video worker error.', 400);
+    } else throw new ServiceError('Invalid video control.', 400);
+  }
   return value;
 }
 export const WORKER_MESSAGES: Readonly<Record<string, string>> = {

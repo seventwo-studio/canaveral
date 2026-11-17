@@ -20,6 +20,8 @@ export interface NativePipe {
   end(): Promise<void>;
   wait(timeoutMs: number): Promise<number>;
   close(): Promise<void>;
+  /** Graceful stop of the retained direct child, with a confirmed zero exit. */
+  interrupt?(): Promise<void>;
   resize?(rows: number, cols: number): Promise<void>;
 }
 export interface NativeChild { pid: number; processStartedAt?: number; stopped(): Promise<boolean> }
@@ -112,7 +114,7 @@ export function deviceDefinition(value: unknown, system: string, arch: string): 
   return result;
 }
 const fields: Record<string, readonly string[]> = {
-  screenshot: [], hierarchy: [], apps: [], logs: [], tap: ["x", "y"], swipe: ["x", "y", "toX", "toY", "durationMs"], text: ["text"], key: ["key"], install: ["artifact"], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"], location: ["latitude", "longitude"], push: ["path", "data"], pull: ["path"], shell: ["argv"], permission: ["app", "permission", "state"], rotate: ["orientation"], accessibility: [], "accessibility-action": ["snapshotId", "nodeId", "nativeAction"], "list-files": ["path"], "shell-open": ["session"], "shell-read": ["session", "offset"], "shell-write": ["session", "text"], "shell-close": ["session"], "shell-resize": ["session", "rows", "cols"],
+  screenshot: [], hierarchy: [], apps: [], logs: [], tap: ["x", "y"], swipe: ["x", "y", "toX", "toY", "durationMs"], text: ["text"], key: ["key"], install: ["artifact"], "install-uploaded": ["artifact"], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"], location: ["latitude", "longitude"], push: ["path", "data"], pull: ["path"], shell: ["argv"], permission: ["app", "permission", "state"], rotate: ["orientation"], accessibility: [], "accessibility-action": ["snapshotId", "nodeId", "nativeAction"], "list-files": ["path"], "shell-open": ["session"], "shell-read": ["session", "offset"], "shell-write": ["session", "text"], "shell-close": ["session"], "shell-resize": ["session", "rows", "cols"],
 };
 export function operationRequest(value: unknown): DeviceRequest {
   const input = object(value);
@@ -122,7 +124,7 @@ export function operationRequest(value: unknown): DeviceRequest {
   const optional = ["push", "pull", "list-files"].includes(action) ? ["app"] : [];
   if (required.some(k => !(k in args)) || Object.keys(args).some(k => !required.includes(k) && !optional.includes(k))) throw new ServiceError(`Invalid arguments for ${action}.`, 400);
   for (const [key, val] of Object.entries(args)) {
-    if (key === "session") uuid(val);
+    if (key === "session" || action === "install-uploaded" && key === "artifact") uuid(val);
     else if (key === "offset") integer(val, key, 0, Number.MAX_SAFE_INTEGER);
     else if (["rows", "cols"].includes(key)) integer(val, key, 1, 500);
     else if (["x", "y", "toX", "toY"].includes(key)) integer(val, key, 0, 32768);
@@ -142,6 +144,7 @@ export function operationRequest(value: unknown): DeviceRequest {
   if (action === "rotate" && !["PORTRAIT", "PORTRAIT_UPSIDE_DOWN", "LANDSCAPE_LEFT", "LANDSCAPE_RIGHT"].includes(args.orientation as string)) throw new ServiceError("Invalid orientation.", 400);
   const normalized = structuredClone(args);
   if ("session" in normalized) normalized.session = uuid(normalized.session);
+  if (action === "install-uploaded") normalized.artifact = uuid(normalized.artifact);
   return { id: uuid(input.id), action, arguments: normalized };
 }
 export function readRegular(file: string, limit: number): Buffer {

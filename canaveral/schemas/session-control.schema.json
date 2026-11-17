@@ -57,6 +57,15 @@
     },
     {
       "$ref": "#/$defs/Action"
+    },
+    {
+      "$ref": "#/$defs/VideoMetadata"
+    },
+    {
+      "$ref": "#/$defs/VideoFinish"
+    },
+    {
+      "$ref": "#/$defs/VideoAck"
     }
   ],
   "$defs": {
@@ -87,7 +96,8 @@
             "display",
             "upload",
             "download",
-            "accessibility"
+            "accessibility",
+            "video"
           ]
         }
       },
@@ -1124,6 +1134,85 @@
           "$ref": "#/$defs/WorkerError"
         }
       ]
+    },
+    "VideoMetadata": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "video"
+        },
+        "mediaType": {
+          "const": "video/mp4"
+        },
+        "codec": {
+          "const": "avc1"
+        },
+        "fps": {
+          "const": 30
+        }
+      },
+      "required": [
+        "type",
+        "mediaType",
+        "codec",
+        "fps"
+      ],
+      "additionalProperties": false
+    },
+    "VideoFinish": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "finish"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "cleaned": {
+          "const": true
+        }
+      },
+      "required": [
+        "type",
+        "bytes",
+        "sha256",
+        "cleaned"
+      ],
+      "additionalProperties": false
+    },
+    "VideoAck": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "ack"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "videoConsumer": {
+      "$ref": "#/$defs/VideoAck"
+    },
+    "videoHost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VideoMetadata"
+        },
+        {
+          "$ref": "#/$defs/VideoFinish"
+        },
+        {
+          "$ref": "#/$defs/WorkerError"
+        }
+      ]
     }
   },
   "x-canaveral-streams": {
@@ -1189,6 +1278,19 @@
       "binary": {
         "consumer": "rfb",
         "host": "rfb",
+        "maxMessageBytes": 65536
+      }
+    },
+    "video": {
+      "consumerControl": {
+        "$ref": "#/$defs/videoConsumer"
+      },
+      "hostControl": {
+        "$ref": "#/$defs/videoHost"
+      },
+      "binary": {
+        "consumer": "forbidden",
+        "host": "fragmented-mp4",
         "maxMessageBytes": 65536
       }
     }
