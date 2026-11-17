@@ -2,6 +2,11 @@
 
 These documents define the TypeScript controller, TypeScript host and SDK, Rust execution components and native bridge contracts. Node.js 24 or later is required for the controller and host. No Python runtime is required by Canaveral services. Swift and C platform bridges remain intentional native dependencies. Native acceptance, provider binding and recovery limits remain explicit; a portable fixture or successful build does not establish platform parity.
 
+Optional Python-based model engines require Canaveral-managed hermetic runtime
+packages with their interpreter and dependencies. They add no user-installed
+interpreter dependency to the controller, host or SDK; see
+[managed model runtimes](model-runtimes.md).
+
 - [access transport](access-transport.md)
 - [user accounts and personal API tokens](accounts-and-tokens.md)
 - [android runtime ownership](android-runtime-ownership.md)
@@ -17,6 +22,7 @@ These documents define the TypeScript controller, TypeScript host and SDK, Rust 
 - [image registry](image-registry.md)
 - [images](images.md)
 - [inference](inference.md)
+- [Managed model runtimes](model-runtimes.md) (bundled and Canaveral-managed engines; host compatibility and native qualification)
 - [Rust model execution](rust-model-execution.md)
 - [model-job wire contract](model-job-contract.md)
 - [TypeScript model-job controller slice](model-controller.md)

@@ -34,14 +34,20 @@ accepting the supplied application ID as authentication would defeat ownership.
 | `cancel` | None |
 | `receipt` | `state`, `cancelRequested`, `stopped`, `cleanup`; `result` only for success |
 
-Submission requires `adapter: "ollama"` and an exact lowercase
+Submission requires `adapter` equal to `"ollama"`, `"llama.cpp"`, `"vllm"` or
+`"mlx"`, and an exact lowercase
 `sha256:` digest with 64 hex digits. `model` is a local operator-configured label:
 1–200 ASCII characters, starting alphanumeric, then alphanumeric or `._:/-`,
 without `cloud` (case insensitive). A label is never a URL, path or download
 instruction, even if its syntax resembles one. The adapter must resolve the
-label and digest against operator-installed inventory. Consumers cannot select
-an executable, command, runtime URL, model path or download source. No runtime
-or weights are installed by this library.
+label and digest against Canaveral-managed local inventory. The controller catalog
+binds the adapter to that model/digest pair; a submission cannot select another
+backend under the same catalog identity. Ollama pins its manifest identity;
+llama.cpp pins GGUF bytes; vLLM/MLX pin a complete local snapshot manifest.
+Runtime/model provisioning remains outside the submission protocol. Consumers cannot select
+an executable, command, runtime URL, model path or download source. The validator installs no runtime
+or weights. Canaveral runtime-package provisioning and owned execution are
+separate components; consumers never supply executable paths or service URLs.
 
 `prompt` contains scalar Unicode, at most 65,536 UTF-8 bytes, and at least one
 character other than ASCII whitespace U+0009–U+000D or U+0020. `maxTokens` is an

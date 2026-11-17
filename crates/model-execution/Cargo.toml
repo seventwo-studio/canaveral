@@ -20,3 +20,8 @@ tempfile = "3"
 
 [build-dependencies]
 cc = "1"
+
+[[test]]
+name = "runtime_fixture"
+path = "tests/runtime_fixture.rs"
+harness = false

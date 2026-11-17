@@ -3,10 +3,11 @@
 `coordination/src/model-jobs.ts` adds an application-owned `model-job/1` ledger to the
 TypeScript controller's owned SQLite worker and HTTP handler. Runner execution happens
 outside the controller: the runner pulls work over the outbound runner routes below.
-This slice contains no executor, model download/load, VM placement or native evidence.
-It is a component of the model lifecycle. The lifecycle is not complete or accepted
-until a runner executor is wired to these routes and end-to-end fixture and native gates
-are reported separately.
+The [Rust model executor](rust-model-execution.md) claims and reports work through
+these routes and owns the local runtime process. The public API integration
+fixture covers the controller-to-executor lifecycle. Model installation, VM
+placement and native runtime acceptance are outside this controller slice;
+portable fixture results and native acceptance remain separate.
 
 ## Running the controller
 
@@ -54,7 +55,7 @@ replay. A changed definition is a 409; entries are immutable in this slice.
 
 | Route | Body | Effect |
 | --- | --- | --- |
-| `/v1/model-catalog` | `{model, digest, adapter: "ollama", resources: {cpu, memoryMiB, diskGiB}}` | Pins a model label and digest with a per-job reservation size |
+| `/v1/model-catalog` | `{model, digest, adapter, resources: {cpu, memoryMiB, diskGiB}}` | Pins a supported adapter (`ollama`, `llama.cpp`, `vllm`, `mlx`), model label and digest with a per-job reservation size |
 | `/v1/resource-domains` | `{id, name, capacity: {cpu, memoryMiB, diskGiB}}` | Defines one physical capacity budget. This activates nothing on its own |
 | `GET /v1/resource-domains/{id}` | — | `{id, name, capacity, reserved, available, reservations}` |
 | `/v1/model-grants` | `{applicationId, model, digest, maxUnfinished}` | Lets one unrevoked application submit one catalogued model. `maxUnfinished` is 1–1024 |
@@ -76,7 +77,8 @@ discovered or approved automatically.
 | `POST /v1/model-jobs/{id}/cancel` | `{version: 1, applicationId, id, message: {type: "cancel"}}` | `job` view |
 
 `applicationId` must be the authenticated application (otherwise 403). The submission
-needs an active grant for its exact model and digest (403). Unfinished jobs per grant
+needs an active grant for its exact model and digest (403), and its adapter must
+match the immutable catalog entry (409). Unfinished jobs per grant
 are bounded (429). The idempotency key is `(applicationId, id)`. A changed submission
 under an existing key is a 409 and never runs again. After a lost reply, resend the
 identical submission.
@@ -108,7 +110,7 @@ the last accepted report number (0 before any report).
 
 | Route | Body | 200 result |
 | --- | --- | --- |
-| `/v1/runners/model-jobs/claim` | `{binding, claimId}` | `{assignment: Assignment \| null}` |
+| `/v1/runners/model-jobs/claim` | `{binding, claimId, adapter?}` | `{assignment: Assignment \| null}` |
 | `/v1/runners/model-jobs/assignments` | `{binding}` | `{assignments: Assignment[]}`: unreleased assignments of this exact binding |
 | `/v1/runners/model-jobs/report` | `{binding, assignmentId, sequence, receipt}` | `{assignmentId, sequence, state, cancelRequested, stopped, cleanup, released}` |
 
@@ -116,10 +118,13 @@ the last accepted report number (0 before any report).
 transaction:
 
 - It returns the existing assignment if `claimId` is already recorded for this binding.
-  A `claimId` recorded for another binding is a 409.
+  A `claimId` recorded for another binding or another adapter is a 409.
 - It requires an unrevoked approval for this exact binding (otherwise 403) and fewer
   than 32 unreleased assignments.
-- It selects the oldest unclaimed, uncancelled job whose model and digest the approval
+- `adapter` defaults to `ollama` for compatibility. Explicit values use the same
+  four identifiers as the catalog. The runner persists its adapter with its claim
+  intent and cannot change it when resolving an uncertain claim.
+- It selects the oldest unclaimed, uncancelled job with the requested adapter whose model and digest the approval
   serves, whose application is unrevoked and whose grant is active.
 - It reserves that job's catalogued resources in the approval's domain only if they fit
   beside every reservation held there, including other runners' reservations in the
@@ -131,9 +136,11 @@ so replaying that `claimId` may claim later. After an uncertain claim, list the
 assignments or replay the same `claimId`. Do not send a fresh `claimId` to make up for
 an uncertain one.
 
-**Execute.** Execute only `job.message` with `adapter: "ollama"`. Resolve the
-`model`/`digest` pair against operator-installed local inventory. Never download a
-model or treat the label as a path or URL. Use `cancelRequested` from claim or from the
+**Execute.** Execute only the bound `job.message` with the runner’s configured
+adapter. Resolve the `model`/`digest` pair against verified local inventory,
+including pinned artifact bytes for llama.cpp/vLLM/MLX. Runtime provisioning
+finishes before claim; generation never downloads a model or treats its public
+label as a path or URL. Use `cancelRequested` from claim or from the
 assignment listing as cancellation intent.
 
 **Report.** `receipt` is a `model-job/1` receipt with the assignment's `applicationId`

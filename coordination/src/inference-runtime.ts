@@ -251,7 +251,7 @@ export class OllamaExecutor implements InferenceExecutor {
 
   private async run(job: ModelJob, control: () => Signal, restriction: () => string | undefined): Promise<ModelJob> {
     const specification = canonicalSubmission(job);
-    if (job.message.type !== "submit") throw failed();
+    if (job.message.type !== "submit" || job.message.adapter !== "ollama") throw failed();
     const submit = job.message, fingerprint = createHash("sha256").update(specification).digest("hex");
     const old = this.store.transaction(db => db.prepare("SELECT fingerprint,receipt,phase FROM ollama_execution_receipts WHERE application=? AND id=?").get(job.applicationId, job.id) as unknown as ExecutionRow | undefined);
     if (old) {

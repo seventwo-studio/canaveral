@@ -4,6 +4,12 @@ Run the controller in Docker and replace its image through your external deploym
 
 Canaveral provides a TypeScript controller, outbound TypeScript hosts, Rust execution components and an optional web dashboard for machine and local-model execution. The controller stores ownership, placements and capacity reservations in SQLite. Hosts advertise installed templates, pull assignments and report state. Lost hosts remain unknown; their machines are never silently duplicated.
 
+[Managed model runtimes](docs/model-runtimes.md) provide host-matched runtime
+packages and execution adapters for Ollama, llama.cpp, vLLM and MLX-LM. Canaveral
+owns runtime provisioning and processes; users do not install a separate engine
+or attach an existing service. Portable protocol/provisioning coverage remains
+separate from native runtime distribution and real-model qualification.
+
 The runtime requires Node.js 24 or later and the Rust binaries needed by the selected backend. Python is not required to run the controller, hosts or SDK. Swift VM/guest services and C platform bridges remain intentional native dependencies. A guest image may independently include Python as a workload tool or distribution prerequisite.
 
 [Accounts and scoped personal tokens](docs/accounts-and-tokens.md) govern private machine ownership. Authorization uses the current account role, credential scope and resource owner. Application, lease, enrollment, runner and guest credentials have separate authority. Callers persist mutation UUIDs and exact requests before dispatch; unknown outcomes require inspection or explicit identical replay where supported.

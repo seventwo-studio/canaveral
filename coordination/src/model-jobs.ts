@@ -5,7 +5,7 @@ import { identifier } from "./consumers.ts";
 import type { ConsumerIdentities } from "./consumers.ts";
 import type { Binding, RunnerEnrollment } from "./enrollment.ts";
 import { object, ServiceError } from "./errors.ts";
-import { modelIdentity, modelJobCanRelease, modelReceiptMatches, parseModelJob, sameModelSubmission } from "./model-job.ts";
+import { modelAdapter, modelIdentity, modelJobCanRelease, modelReceiptMatches, parseModelJob, sameModelSubmission } from "./model-job.ts";
 import type { GenerationResult, ModelJob, ModelJobState } from "./model-job.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { SqliteStore } from "./sqlite.ts";
@@ -105,8 +105,8 @@ export class ModelJobs {
 
   catalog(value: unknown): unknown {
     const input = exact(value, ["model", "digest", "adapter", "resources"], "model catalog");
-    if (!modelIdentity(input.model, input.digest) || input.adapter !== "ollama") throw new ServiceError("Catalog entries pin an ollama model label and sha256 digest.", 400);
-    const amount = resources(input.resources), view = { model: input.model as string, digest: input.digest as string, adapter: "ollama", resources: amount };
+    if (!modelIdentity(input.model, input.digest) || !modelAdapter(input.adapter)) throw new ServiceError("Catalog entries pin a supported adapter, local model label and sha256 digest.", 400);
+    const amount = resources(input.resources), view = { model: input.model as string, digest: input.digest as string, adapter: input.adapter, resources: amount };
     return this.store.transaction(db => {
       const row = db.prepare("SELECT adapter,resources FROM model_catalog WHERE model=? AND digest=?").get(view.model, view.digest) as { adapter: string; resources: string } | undefined;
       if (row && (row.adapter !== view.adapter || row.resources !== JSON.stringify(amount))) throw new ServiceError("Catalog entry already exists with a different definition.", 409);
@@ -199,6 +199,8 @@ export class ModelJobs {
       }
       const grant = db.prepare("SELECT max_unfinished FROM model_grants WHERE application=? AND model=? AND digest=? AND revoked=0").get(application.id, model, digest) as { max_unfinished: number } | undefined;
       if (!grant) throw new ServiceError("The application has no grant for this pinned model.", 403);
+      const catalog = db.prepare("SELECT adapter FROM model_catalog WHERE model=? AND digest=?").get(model, digest) as { adapter: string } | undefined;
+      if (!catalog || job.message.type !== "submit" || catalog.adapter !== job.message.adapter) throw new ServiceError("Submission adapter does not match its pinned catalog entry.", 409);
       const open = db.prepare("SELECT count(*) AS n FROM model_jobs WHERE application=? AND model=? AND digest=? AND closed=0").get(application.id, model, digest) as { n: number };
       if (Number(open.n) >= grant.max_unfinished) throw new ServiceError("The application's unfinished model-job limit is reached.", 429);
       const now = this.now();
@@ -235,13 +237,18 @@ export class ModelJobs {
   /** Claim the oldest eligible job that fits the runner's approved domain, or replay `claimId`. */
   claim(token: string, value: unknown): unknown {
     const runners = this.requireRunners();
-    const input = exact(value, ["binding", "claimId"], "claim"), claim = identifier(input.claimId);
+    const raw = object(value);
+    const input = exact(raw, Object.hasOwn(raw, "adapter") ? ["binding", "claimId", "adapter"] : ["binding", "claimId"], "claim"), claim = identifier(input.claimId);
+    const adapter = Object.hasOwn(input, "adapter") ? input.adapter : "ollama";
+    if (!modelAdapter(adapter)) throw new ServiceError("Unsupported claim adapter.", 400);
     return this.store.transaction(db => {
       const b = runners.verify(db, token, input.binding);
       const previous = db.prepare("SELECT * FROM model_assignments WHERE claim=?").get(claim) as unknown as AssignmentRow | undefined;
       if (previous) {
         if (!sameBinding(previous, b)) throw new ServiceError("Claim ID belongs to another runner binding.", 409);
-        return { assignment: this.assignmentView(db, previous) };
+        const assignment = this.assignmentView(db, previous) as { job: ModelJob };
+        if (assignment.job.message.type !== "submit" || assignment.job.message.adapter !== adapter) throw new ServiceError("Claim adapter changed.", 409);
+        return { assignment };
       }
       const approval = db.prepare("SELECT * FROM model_runner_approvals WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND revoked=0")
         .get(b.controllerId, b.runnerId, b.generation, b.incarnationId) as unknown as ApprovalRow | undefined;
@@ -252,8 +259,12 @@ export class ModelJobs {
       const served = new Set((JSON.parse(approval.models) as Array<[string, string]>).map(m => JSON.stringify(m)));
       const queue = db.prepare(`SELECT j.* FROM model_jobs j WHERE j.closed=0 AND j.state IN ('queued','waitingForResources') AND j.cancel_requested=0
         AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id) ORDER BY j.created, j.rowid`).all() as unknown as JobRow[];
-      const next = queue.find(job => served.has(JSON.stringify([job.model, job.digest])) && this.applications.active(db, job.application) &&
-        !!db.prepare("SELECT 1 FROM model_grants WHERE application=? AND model=? AND digest=? AND revoked=0").get(job.application, job.model, job.digest));
+      const next = queue.find(job => {
+        const submission = parseModelJob(JSON.parse(job.submission) as unknown);
+        return submission.message.type === "submit" && submission.message.adapter === adapter &&
+          served.has(JSON.stringify([job.model, job.digest])) && this.applications.active(db, job.application) &&
+          !!db.prepare("SELECT 1 FROM model_grants WHERE application=? AND model=? AND digest=? AND revoked=0").get(job.application, job.model, job.digest);
+      });
       if (!next) return { assignment: null };
       const entry = db.prepare("SELECT resources FROM model_catalog WHERE model=? AND digest=?").get(next.model, next.digest) as { resources: string } | undefined;
       if (!entry) throw new ServiceError("Model catalog state is unavailable.", 503, { retryable: false });
