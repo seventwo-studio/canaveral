@@ -88,7 +88,9 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
     catch (error) {
       const operation = error instanceof GuestOperationError && error.status !== 401;
       if (!operation && (options.owner || error instanceof ServiceError && error.status === 401)) alive = false;
-      if (options.owner && !operation) { options.owner.closed = true; options.owner.recoverable = error instanceof GuestUnavailableError; for (const t of options.owner.transports) t.closeAll(); options.owner.transports.clear(); }
+      // The first close is authoritative, including explicit cleanup. Errors
+      // from cancelling other requests must not reclassify this generation.
+      if (options.owner && !operation && !options.owner.closed) { options.owner.closed = true; options.owner.recoverable = error instanceof GuestUnavailableError; for (const t of options.owner.transports) t.closeAll(); options.owner.transports.clear(); }
       throw error;
     }
   }, current);

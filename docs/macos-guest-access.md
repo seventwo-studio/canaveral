@@ -429,11 +429,16 @@ not-yet-running or stale status, network interruption and proof-age lapse close
 the old factory and evict that entry. Only a later explicit request may resolve
 again under the original live assignment guard. A failed POST retains its unknown
 outcome; a new binding does not establish whether that operation took effect.
-Authority loss, changed custody or process identity, invalid clock, 401,
-certificate/pin failures and malformed identity, proof or response framing retain
+Once an entry is registered, authority loss, changed custody or process identity,
+invalid clock, 401, certificate/pin failures and malformed identity, proof or response framing retain
 a terminal closed entry while the assignment remains active. Restoring old values
 cannot repair that entry. Pending and active entries compare captured custody
 before sharing a resolution; stale completions cannot evict their replacement.
+The first close fixes the generation's recovery classification; cancellation
+errors from other in-flight requests cannot change it. Evidence failure before
+registration creates no transport or cache entry; a later call repeats preflight.
+Any unsuccessful identity JSON response, including 503, remains terminal after
+registration rather than establishing a verified guest operation error.
 
 A complete, verified JSON error response from the guest fails only its operation,
 including ordinary 400 and code-less 409 responses. It leaves a verified binding

@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:https";
-import { guestAssignment, guestBindingAuthorization, guestBindingMAC, guestBindingBytes, verifiedGuestHelperBinding, type GuestAssignmentContext } from "../../src/guest/binding.ts";
+import { createHash, X509Certificate } from "node:crypto";
+import { guestAssignment, guestBindingAuthorization, guestBindingMAC, guestBindingBytes, pinnedGuestBindingFactory, verifiedGuestHelperBinding, type GuestAssignmentContext } from "../../src/guest/binding.ts";
+import { AppleBindings } from "../../src/providers/apple-binding.ts";
 import { GuestHelperAccess } from "../../src/control/sessions.ts";
 import { ServiceError } from "../../src/errors.ts";
 import type { GuestHTTPS } from "../../src/guest/https.ts";
@@ -28,6 +30,54 @@ test("actual Swift producer DTO is consumed by the real strict parser", () => {
   assert.deepEqual(produced, vector.response);
   assert.deepEqual(guestAssignment(produced, true), vector.response);
   assert.equal(guestBindingMAC(vector.credential, vector.assignment, "identity-response", vector.nonce, vector.incarnation), produced.proof);
+});
+test("the first owner close survives cancellation errors from concurrent requests", async t => {
+  const dir = mkdtempSync(join(tmpdir(),"binding-close-race-")), cert = join(dir,"cert.pem"), key = join(dir,"key.pem");
+  const assignment = vector.assignment as GuestAssignmentContext, credential = vector.credential as string;
+  const serverName = assignment.launchId + ".canaveral.invalid";
+  assert.equal(spawnSync("openssl",["req","-x509","-newkey","rsa:2048","-nodes","-keyout",key,"-out",cert,"-days","2","-subj",`/CN=${serverName}`,"-addext",`subjectAltName=DNS:${serverName}`],{encoding:"utf8"}).status,0);
+  const leafDER = new X509Certificate(readFileSync(cert)).raw;
+  const pinned = {address:"127.0.0.1",serverName,leafDER,sha256:createHash("sha256").update(leafDER).digest("hex")};
+  let arrived!:()=>void, fault = "non-json", operations = 0, healthy = false;
+  const server = createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const identity = req.url === "/v1/identity", nonce = req.headers.authorization?.split(" ")[1]?.split(".")[0];
+    const auth = guestBindingAuthorization(credential,assignment,identity ? undefined : vector.incarnation,identity ? nonce : undefined);
+    if (req.headers.authorization !== auth) { res.writeHead(401);res.end();return; }
+    if (identity) { res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({...assignment,incarnation:vector.incarnation,nonce,proof:guestBindingMAC(credential,assignment,"identity-response",nonce,vector.incarnation)}));return; }
+    operations++;
+    if (JSON.parse(Buffer.concat(chunks).toString()).path === "/slow") { arrived();return; }
+    if (healthy) { res.writeHead(200,{"Content-Type":"application/json"});res.end("{}");return; }
+    res.writeHead(fault === "401" ? 401 : 200,{"Content-Type":"text/plain"});res.end("private-invalid-response");
+  });
+  try {
+    await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+    const address = server.address();assert.ok(address && typeof address !== "string");
+    const endpoint = `https://127.0.0.1:${address.port}`;
+    for (const level of ["owner","resolver"]) for (const cause of ["non-json","401","cleanup"]) await t.test(`${level}: ${cause} closes before the other POST is cancelled`,async()=>{
+      fault=cause;healthy=false;operations=0;let dials=0, factory=pinnedGuestBindingFactory();
+      const authority = {authorized:()=>true,clock:{suspendAware:true,bootId:"fixture-boot",now:()=>10,wall:()=>Date.now()/1000}};
+      const evidence = ()=>({assignment,credential,identity:"same-owned-launch",pinned});
+      const cache = new AppleBindings((next,_evidence,current)=>{dials++;factory=next;return next.resolve(()=>assignment,endpoint,credential,current,pinned,5);});
+      const resolve = ()=>cache.resolve(assignment.machineId,authority,evidence,async()=>"same-process");
+      try {
+        const binding = level === "owner" ? await factory.resolve(()=>assignment,endpoint,credential,()=>true,pinned,5) : await resolve();
+        const received = new Promise<void>(ready=>arrived=ready);
+        const slow = binding.call("/v1/files/list",{path:"/slow"}).catch((error:unknown)=>error);
+        await received;
+        if (cause === "cleanup") factory.closeAll();
+        else await assert.rejects(binding.call("/v1/files/list",{path:"/bad"}),(error:unknown)=>error instanceof ServiceError && error.outcome === "unknown");
+        const cancelled = await slow;
+        assert.ok(cancelled instanceof ServiceError && cancelled.outcome === "unknown");
+        healthy=true;const before=operations;
+        if (level === "owner") assert.equal(factory.recoverable,false);
+        else { assert.equal(await resolve(),binding);assert.equal(dials,1); }
+        assert.equal(binding.authorized(),false);
+        await assert.rejects(binding.call("/v1/files/list",{path:"/now-valid"}));
+        assert.equal(operations,before);
+      } finally { cache.close();factory.closeAll(); }
+    });
+  } finally { server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(dir,{recursive:true,force:true}); }
 });
 test("verified binding through macOS adapter over real verified HTTPS", async t => {
   const dir = mkdtempSync(join(tmpdir(), "binding-tls-")), cert = join(dir, "cert.pem"), key = join(dir, "key.pem");
