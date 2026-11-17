@@ -34,6 +34,14 @@
     "./accessibility-sdk": {
       "types": "./dist/src/accessibility-sdk.d.ts",
       "default": "./dist/src/accessibility-sdk.js"
+    },
+    "./browser-sdk": {
+      "types": "./dist/src/browser-sdk.d.ts",
+      "default": "./dist/src/browser-sdk.js"
+    },
+    "./browser-runtime": {
+      "types": "./dist/src/browser-runtime.d.ts",
+      "default": "./dist/src/browser-runtime.js"
     }
   },
   "scripts": {
@@ -47,5 +55,8 @@
   },
   "files": [
     "dist/src"
-  ]
+  ],
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  }
 }

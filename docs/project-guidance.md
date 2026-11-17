@@ -13,6 +13,7 @@ interpreter dependency to the controller, host or SDK; see
 - [android transfer](android-transfer.md)
 - [applications](applications.md)
 - [client recovery](client-recovery.md)
+- [real browser API and agent-runtime forwarding](browser-api.md)
 - [consumer api](consumer-api.md)
 - [TypeScript consumer SDK](consumer-sdk.md)
 - [consumer operations](consumer-operations.md)
