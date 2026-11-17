@@ -1,4 +1,4 @@
-import { buildLaunchTLS, validateLaunchTLS } from "./guest-tls.ts";
+import { buildLaunchTLS, validateLaunchTLS, verifyLaunchTLSClock, type LaunchTLS } from "./guest-tls.ts";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -184,6 +184,7 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
   }
   if (receipt.version !== 2) throw new ServiceError("Legacy launch custody is cleanup-only.");
   if (["building", "tls-building"].includes(String(receipt.state))) throw new ServiceError("Launch builder outcome is uncertain; rebuild, launch and cleanup are blocked.");
+  if (receipt.tls) verifyLaunchTLSClock(receipt.tls as LaunchTLS);
   if (receipt.state === "sealed") { const pin = object(receipt.pin); if (Object.entries(object(receipt.assignment)).some(([key, value]) => pin[key] !== (key === "version" ? 2 : value))) throw new ServiceError("Sealed launch binding differs."); verifyLaunchPin(object(receipt.pin), storage); validateBootstrapISO(readFileSync(String(pin.path)), Buffer.from(JSON.stringify({ version: 2, assignment: receipt.assignment, credential: receipt.credential, tls: { pkcs12: object(receipt.tls).pkcs12 } }))); return receipt; }
   if (receipt.state !== "planned" || present(join(native, "runner-launch.json"))) throw new ServiceError("Launch intent cannot resume.");
   const directory = safePath(join(storage, "guest-bootstrap")), content = join(directory, "content"), output = join(directory, "launch.iso");
@@ -205,6 +206,7 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
     syncDirectory(tlsDirectory);
     receipt = { ...receipt, state: "planned", tls }; saveRecord(file, receipt);
   }
+  verifyLaunchTLSClock(receipt.tls as LaunchTLS);
   const payload = Buffer.from(JSON.stringify({ version: 2, assignment: receipt.assignment, credential: receipt.credential, tls: { pkcs12: object(receipt.tls).pkcs12 } }));
   if (payload.length > 4096) throw new ServiceError("Launch payload exceeds envelope.");
   const sourcePath = safePath(join(content, "assignment.json")), exists = present(sourcePath);

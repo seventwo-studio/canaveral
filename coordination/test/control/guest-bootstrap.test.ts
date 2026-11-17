@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { AppleProvider, assignmentFingerprint, ensureGuestLaunch, guestLaunchReceipt, readRecord, saveRecord, validateBootstrapISO, verifyLaunchPin, type Data, type CommandOptions } from "../../src/providers/apple.ts";
 import { guestAssignment, guestBindingMAC } from "../../src/guest/binding.ts";
+import { buildLaunchTLS, validateLaunchTLS } from "../../src/providers/guest-tls.ts";
 // Portable ISO utility stand-in. No host utility/mount/VM is executed.
 function iso(payload: Buffer, primaryName = "ASSIGNMENT.JSON;1", jolietName = "assignment.json"): Buffer {
   const b = Buffer.alloc(24 * 2048);
@@ -138,9 +139,19 @@ test("local staging failures stay cleanable and identical staged input resumes b
   await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /staging directory/);
   const receipt = readRecord(join(f.storage, "guest-launch.json")); assert.equal(receipt.state, "planned"); assert.equal(f.builds(), 0);
   unlinkSync(directory); mkdirSync(directory, { mode: 0o700 }); mkdirSync(join(directory, "content"), { mode: 0o700 });
-
+  const tlsDirectory = join(directory, "tls"); mkdirSync(tlsDirectory, { mode: 0o700 });
+  saveRecord(join(f.storage, "guest-launch.json"), { ...receipt, state: "tls-building" });
+  const tls = await buildLaunchTLS(tlsDirectory, String((receipt.assignment as Data).launchId));
+  const staged = { ...receipt, tls }; saveRecord(join(f.storage, "guest-launch.json"), staged);
+  const source = join(directory, "content", "assignment.json"); writeFileSync(source, "{}", { mode: 0o600 });
+  const before = readFileSync(join(f.storage, "guest-launch.json"));
+  await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /staging payload differs/);
+  assert.deepEqual(readFileSync(join(f.storage, "guest-launch.json")), before); assert.equal(f.builds(), 0);
+  const payload = Buffer.from(JSON.stringify({ version: 2, assignment: receipt.assignment, credential: receipt.credential, tls: { pkcs12: tls.pkcs12 } }));
+  writeFileSync(source, payload);
   const sealed = await ensureGuestLaunch(f.config, f.machine, f.storage);
   assert.deepEqual(sealed.assignment, receipt.assignment); assert.equal(sealed.credential, receipt.credential); assert.equal(f.builds(), 1);
+  assert.deepEqual(readFileSync(source), payload);
 });
 test("injected removal retains runtime ownership and repeats media proof before delegation", async t => {
   const f = fixture(t); await ensureGuestLaunch(f.config, f.machine, f.storage); f.machine.desired = "stopped";
@@ -194,6 +205,33 @@ test("shared native MAC vectors", async () => {
   const { guestMAC } = await import("../../src/providers/guest-tls.ts");
   const vectors = JSON.parse(readFileSync(new URL("../../../../fixtures/guest-mac.json", import.meta.url), "utf8"));
   for (const row of vectors) assert.equal(guestMAC(row.machineId), row.mac);
+});
+test("reused PKCS12 must contain the pinned leaf even when both identities are valid", async t => {
+  const f = fixture(t), receipt = await ensureGuestLaunch(f.config, f.machine, f.storage), launchId = String((receipt.assignment as Data).launchId);
+  const directory = join(f.root, "other-tls"); mkdirSync(directory, { mode: 0o700 });
+  const other = await buildLaunchTLS(directory, launchId), original = validateLaunchTLS(receipt.tls, launchId);
+  assert.notEqual(other.sha256, original.sha256);
+  const mixed = { ...other, pkcs12: original.pkcs12 };
+  assert.throws(() => validateLaunchTLS(mixed, launchId), /PKCS12 leaf differs/);
+  assert.throws(() => validateLaunchTLS({ ...original, pkcs12: other.pkcs12 }, launchId), /PKCS12 leaf differs/);
+  saveRecord(join(f.storage, "guest-launch.json"), { ...receipt, tls: mixed });
+  const before = readFileSync(join(f.storage, "guest-launch.json"));
+  await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /PKCS12 leaf differs/);
+  assert.deepEqual(readFileSync(join(f.storage, "guest-launch.json")), before); assert.equal(f.builds(), 1);
+});
+test("certificate clocks gate reuse without blocking expired custody inspection for cleanup", async t => {
+  const f = fixture(t), receipt = await ensureGuestLaunch(f.config, f.machine, f.storage);
+  const { X509Certificate } = await import("node:crypto");
+  const cert = new X509Certificate(Buffer.from(String((receipt.tls as Data).leafDER), "base64url"));
+  const before = readFileSync(join(f.storage, "guest-launch.json"));
+  for (const time of [Date.parse(cert.validFrom) - 1, Date.parse(cert.validTo)]) {
+    const clock = t.mock.method(Date, "now", () => time);
+    try {
+      await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /not currently valid/);
+      assert.deepEqual(guestLaunchReceipt(f.storage, f.machine), receipt);
+    } finally { clock.mock.restore(); }
+  }
+  assert.deepEqual(readFileSync(join(f.storage, "guest-launch.json")), before); assert.equal(f.builds(), 1);
 });
 test("provider refuses wrong certificate profile and replaced private key without publishing", async t => {
   const { spawnSync } = await import("node:child_process");

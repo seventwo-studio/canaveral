@@ -315,8 +315,10 @@ The payload remains at most 4096 bytes; the provider fixture requires at least
 
 `guest-launch.json.tls` privately retains `pkcs12`, exact `leafDER` (both base64url),
 `serverName` and lowercase DER SHA256 `sha256`. The logical name is exactly the
-lowercase launch UUID plus `.canaveral.invalid`. Every launch generates a fresh
-P-256 key and self-signed CA:false leaf with only digitalSignature and serverAuth
+lowercase launch UUID plus `.canaveral.invalid`.
+PKCS12 reuse verifies its actual local certificate against the retained leaf
+through an unconnected in-memory TLS context. It starts no utility or listener.
+Every launch generates a fresh P-256 key and self-signed CA:false leaf with only digitalSignature and serverAuth
 usage and one exact DNS SAN. Node generates the key; absolute `/usr/bin/openssl`
 signs and packs PKCS12. The fixed packaging password is not an authentication
 credential and is nevertheless passed through a private owned file, never argv
@@ -333,6 +335,8 @@ hold and existing local planned-stage cleanup remain. No automatic hold reset
 exists. Certificate validity is two days from signing. A guest clock behind signing
 or beyond expiry refuses TLS; it never extends assignment authority. There is no
 clock-skew relaxation, renewal or fallback for an existing launch.
+Host boot/media reuse also rejects a certificate outside its validity interval;
+custody inspection remains available for positive owned cleanup after expiry.
 
 AssignedGuest requires macOS 15+ and imports with `kSecImportToMemoryOnly=true`.
 It validates the P-256 key, key match, exact name/SAN, CA:false, digitalSignature,
@@ -361,6 +365,8 @@ Legacy origin/trust rules are unchanged. Factory `closeAll()` permanently reject
 new resolutions and closes all owned transports, including identity handshakes
 and active requests. There is no retry, fallback or automatic rebind; lost POST
 acknowledgements remain unknown.
+Completed identity readers are closed and removed from the factory's transport
+registry; retained operational transports close with their owner.
 
 `node script/check_guest_bootstrap.mjs` now also exercises real provider PKCS12,
 Swift import/listener/DesktopBridge and Node GuestHTTPS/v2/GuestHelperAccess file

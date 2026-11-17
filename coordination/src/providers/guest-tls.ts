@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { generateKeyPairSync, X509Certificate, createHash } from "node:crypto";
 import { chmodSync, writeFileSync, readFileSync, openSync, fsyncSync, closeSync, lstatSync } from "node:fs";
 import { join } from "node:path";
-import { createSecureContext } from "node:tls";
+import { createSecureContext, TLSSocket } from "node:tls";
+import { Socket } from "node:net";
 import { ServiceError } from "../errors.ts";
 export const PKCS12_PASSWORD = "canaveral-launch-v2";
 export function launchServerName(launchId: string): string {
@@ -60,6 +61,18 @@ export function validateLaunchTLS(value: unknown, launchId: string): LaunchTLS {
   for (const encoded of [tls.pkcs12, tls.leafDER]) if (typeof encoded !== "string" || encoded.length > 4000 || !/^[A-Za-z0-9_-]+$/.test(encoded) || Buffer.from(encoded, "base64url").toString("base64url") !== encoded) throw new ServiceError("TLS custody encoding differs.");
   const cert = new X509Certificate(Buffer.from(tls.leafDER, "base64url"));
   if (cert.ca || !cert.verify(cert.publicKey) || cert.subjectAltName !== `DNS:${tls.serverName}` || cert.publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1" || cert.keyUsage?.join() !== "1.3.6.1.5.5.7.3.1" || createHash("sha256").update(cert.raw).digest("hex") !== tls.sha256) throw new ServiceError("TLS custody certificate differs.");
-  createSecureContext({ pfx: Buffer.from(tls.pkcs12, "base64url"), passphrase: PKCS12_PASSWORD, minVersion: "TLSv1.3" });
+  // Read the context's local certificate without listening or connecting. Loading
+  // two independently valid containers alone does not bind their certificates.
+  const stream = new Socket();
+  const socket = new TLSSocket(stream, { isServer: true, secureContext: createSecureContext({ pfx: Buffer.from(tls.pkcs12, "base64url"), passphrase: PKCS12_PASSWORD, minVersion: "TLSv1.3" }) });
+  try {
+    if (!socket.getX509Certificate()?.raw.equals(cert.raw)) throw new ServiceError("TLS custody PKCS12 leaf differs.");
+  } finally { socket.destroy(); stream.destroy(); }
   return tls;
+}
+
+/** Clock validity gates boot, not custody inspection or positive owned cleanup. */
+export function verifyLaunchTLSClock(tls: LaunchTLS, now = Date.now()): void {
+  const cert = new X509Certificate(Buffer.from(tls.leafDER, "base64url"));
+  if (!Number.isFinite(now) || !(Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo))) throw new ServiceError("TLS launch certificate is not currently valid.");
 }

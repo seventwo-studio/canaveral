@@ -58,6 +58,7 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
   let alive = !options.owner?.closed;
   let pinned: GuestAssignmentContext;
   try { pinned = guestAssignment(expected()); } catch { throw invalid(); }
+  if (options.pinned && options.pinned.serverName !== pinned.launchId + ".canaveral.invalid") throw invalid();
   const current = (): boolean => {
     if (options.owner?.closed) alive = false;
     if (!alive) return false;
@@ -69,14 +70,16 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
   if (!current()) throw invalid();
   const nonce = randomBytes(32).toString("base64url");
   let identity: GuestHelperIdentity;
+  let reader: GuestHTTPS | undefined;
   try {
-    const reader = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, undefined, nonce), options.pinned);
+    reader = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, undefined, nonce), options.pinned);
     options.owner?.transports.add(reader);
     identity = guestAssignment(await reader.call("/v1/identity", null), true) as GuestHelperIdentity;
     const { incarnation, nonce: echoed, proof, ...tuple } = identity;
     if (!sameAssignment(tuple, pinned) || echoed !== nonce ||
       !timingSafeEqual(canonical32(proof), canonical32(guestBindingMAC(credential, pinned, "identity-response", nonce, incarnation))) || !current()) throw invalid();
   } catch { alive = false; throw invalid(); }
+  finally { if (reader) { reader.closeAll(); options.owner?.transports.delete(reader); } }
   const transport = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, identity.incarnation), options.pinned);
   options.owner?.transports.add(transport);
   return new GuestHelperBinding(async (path, body) => {
