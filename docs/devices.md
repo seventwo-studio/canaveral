@@ -80,6 +80,9 @@ Operations are authenticated administrator actions. Submit one operation with a
 stable request UUID; read its receipt to obtain `queued`, `succeeded`, `failed` or
 `unknown`. Submission is asynchronous, with normal five-second host polling latency.
 This interface provides screenshots and discrete input, rather than a video stream.
+For builds produced on another machine, use the
+[CI upload and installation API](mobile-control.md); it transfers verified builds
+through the controller without direct access to the device host.
 
 ```sh
 node coordination/dist/src/cli.js --token-file ./secrets/admin.token device \
@@ -104,6 +107,7 @@ For actions with arguments, supply a JSON object using `--arguments-file path.js
 | `rotate` | `orientation` | `PORTRAIT`, `PORTRAIT_UPSIDE_DOWN`, `LANDSCAPE_LEFT`, `LANDSCAPE_RIGHT` |
 | `apps` | none | Installed app inventory |
 | `install` | `artifact` | Host-configured artifact ID, for an APK or simulator `.app` |
+| `install-uploaded` | `artifact` UUID | Verified machine-scoped APK or simulator `.app.tar` uploaded through Canaveral |
 | `launch` | `app` | Android `package/activity`; iOS bundle ID |
 | `terminate`, `uninstall` | `app` | Package/bundle ID |
 | `open-url` | `url` | Open URL/deep link on this device |
@@ -128,7 +132,7 @@ scoped to the machine and runner process. Started action receipts still prevent
 replay after a crash; opening an old session UUID does not restore a lost process.
 
 Example tap arguments: `{"x": 180, "y": 300}`. Example installation arguments:
-`{"artifact": "development"}`. Artifact IDs resolve only through the private host
+`{"artifact": "development"}` for `install`. Those artifact IDs resolve through the private host
 `artifacts` mapping. Stage app builds on the host through the normal build/file
 delivery process; control requests cannot name arbitrary host files or SDK targets.
 Android file paths are absolute guest paths, subject to adb's guest permissions.
@@ -155,7 +159,8 @@ Only the assigned host can report a result. Heartbeat request bodies permit 8 Mi
 ordinary POST bodies retain the 1 MiB limit.
 
 New actions require a running device and a fresh host. Each host queue permits up
-to 32 pending actions. An action expires 120 seconds after submission and fails if
+to 32 pending actions. An action expires 120 seconds after submission
+(`install-uploaded`: 30 minutes including artifact transfer) and fails if
 not started by then, or if the device is stopped. Keep host/controller clocks
 synchronized. A stop cannot undo an already started action. During disconnection,
 no new action begins after the host's normal contact lease expires.

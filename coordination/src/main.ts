@@ -86,6 +86,7 @@ export async function startController(config: ControllerConfig) {
   let control: ControlClient | undefined;
   let server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer> | undefined;
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   try {
     await client.ready;
     control = new ControlClient({ path: config.statePath, adminToken, controllerId: config.controllerId,
@@ -97,13 +98,15 @@ export async function startController(config: ControllerConfig) {
     server.on("checkContinue", handler);
     server.on("checkExpectation", handler);
     broker = createSessionUpgradeHandler(control);
-    server.on("upgrade", createControllerUpgradeHandler(broker.handle));
+    videoBroker = createSessionUpgradeHandler(control, { video: true });
+    server.on("upgrade", createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/') ? videoBroker!.handle(req, socket, head) : broker!.handle(req, socket, head)));
     await new Promise<void>((resolve, reject) => {
       const listening = () => { server!.off("error", reject); resolve(); };
       server!.once("error", reject); server!.listen(config.listen.port, config.listen.host, listening);
     });
   } catch (error) {
     broker?.close();
+    videoBroker?.close();
     server?.close();
     await Promise.allSettled([client.close(), control?.close()]);
     throw error;
@@ -117,6 +120,7 @@ export async function startController(config: ControllerConfig) {
     async close(): Promise<void> {
       closing ??= (async () => {
         broker?.close();
+        videoBroker?.close();
         await new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });
         await Promise.all([client.close(), services.close()]);
       })();

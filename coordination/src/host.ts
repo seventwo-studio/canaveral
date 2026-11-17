@@ -1,4 +1,6 @@
 import { GuestHelperAccess } from "./control/sessions.ts";
+import { appArtifactSource } from './app-artifact-source.ts';
+import { serveMobileVideo } from './mobile-video.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -6,7 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createSecureContext } from "node:tls";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { enabledRuntimes, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
@@ -74,7 +76,10 @@ interface Runtime extends NativeProvider {
   confirmExecutionStopped?(machine: RecordValue, folder: string): RecordValue | null;
   readonly state?: string;
   readonly config?: RecordValue;
-  operate?(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, authorized?: () => boolean): Promise<RecordValue>;
+  operate?(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, authorized?: () => boolean, handler?: (request: import('./providers/mobile.ts').DeviceRequest) => Promise<RecordValue>): Promise<RecordValue>;
+  installArtifact?(machine: RecordValue, image: RecordValue, folder: string, source: import('./providers/mobile.ts').Download, sha256: string, authorized: () => boolean): Promise<RecordValue>;
+  openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
+  pipe?(argv: readonly string[]): Promise<import('./providers/mobile.ts').NativePipe>;
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
@@ -185,8 +190,9 @@ export class HostRunner {
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [] };
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; authorized: () => boolean }>();
+  private readonly deviceMachines = new Set<string>();
   private loops: Promise<void>[] = [];
   private stopController = new AbortController();
   private lock: StateLock | undefined;
@@ -462,11 +468,13 @@ export class HostRunner {
     const runtime = this.runtimes.get(name);
     if (!runtime) throw new ServiceError("Assignment runtime is unavailable.", 409, { code: "capability_unsupported" });
     const folder = join(runtime.state ?? this.state, "machines", id); noLinks(folder);
-    return { runtime, image: structuredClone(image), folder };
+    // Mobile storage binds the full public template, including normalized defaults.
+    // Keep private host settings while giving the provider that exact definition.
+    return { runtime, image: structuredClone(['android','ios'].includes(String(image.os)) ? { ...image, ...normalizeTemplate(image) } : image), folder };
   }
   async poll(): Promise<void> {
     if (!this.identity) throw new ServiceError("Host is not connected.", 409);
-    const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports);
+    const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports);
     const sent = this.clock.now();
     // Read the current credential on every heartbeat. Rotation delivery may replace
     // identity.json between requests, but cannot change the host/controller binding.
@@ -477,7 +485,7 @@ export class HostRunner {
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions") };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions') };
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
@@ -638,6 +646,20 @@ export class HostRunner {
       if (!context.authorized()) return { state: "failed", result: { detail: "Operation authorization ended before execution." } };
       const operation = { ...task };
       const backend = this.accessBackend(machine);
+      if (operation.action === 'install-uploaded') {
+        if (!runtime.operate || !runtime.installArtifact || !['android','ios'].includes(String(image.os))) throw new ServiceError('Uploaded app installation is unsupported.', 409);
+        const identity = this.identity;
+        if (!identity) throw new ServiceError('Host identity is unavailable.', 401);
+        return runtime.operate(machine, image, folder, operation, context.authorized, async request => {
+          const artifact = identifier(request.arguments.artifact), hostId = identity.id;
+          const prefix = `/v1/hosts/${hostId}/app-artifacts/${artifact}/operations/${identifier(task.id)}`;
+          const { source, sha256 } = await appArtifactSource(
+            path => this.transport.request('GET', path, {}, identity.credential, context.signal), prefix,
+            { artifact, machine: identifier(machine.id), format: image.os === 'android' ? 'apk' : 'ios-app-tar' }, context.authorized);
+          try { return await runtime.installArtifact!(machine, image, folder, source, sha256, context.authorized); }
+          finally { await source.close(); }
+        });
+      }
       if (runtime.operate && (backend === runtime || image.os !== "macos")) return runtime.operate(machine, image, folder, operation, context.authorized);
       if (backend.control) return { state: "succeeded", result: await backend.control(machine, image, folder, operation) };
       return { state: "failed", result: { detail: "No verified guest or device access transport is configured.", code: "capability_unsupported" } };
@@ -658,6 +680,9 @@ export class HostRunner {
     for (const machine of ordered) {
       const id = String(machine.id), key = `machine:${id}`;
       if (machine.leaseCleanup || this.updateAdmissionBlocked && machine.desired !== "stopped") continue;
+      // Device operations own the same assignment lock. Keep polling/cancellation
+      // active, but wait for the owned operation before reconciling this machine.
+      if (this.deviceMachines.has(id) || machine.desired === 'running' && this.reports.get(id)?.state === 'running' && this.queues.device?.some(o => o.machineId === id && !TERMINAL.has(String(this.deviceReports.get(String(o.id))?.state)))) continue;
       if (machineSlots <= 0 || this.active.has(key) || !this.fresh() && !machine.leaseFenced) continue;
       if (machine.desired === "running" && ["checking", "failed"].includes(String(this.health.status))) continue;
       slots--; machineSlots--; this.machineCursor = (machines.indexOf(machine) + 1) % machines.length;
@@ -681,9 +706,14 @@ export class HostRunner {
       if (machine && this.reports.get(String(machine.id))?.state !== "running" && this.clock.wall() < Number(task.expiresAt)) continue;
       slots--;
       const authorized = (): boolean => this.fresh() && this.queues.device!.some(o => o.id === id) && this.machineAuthorized(String(task.machineId)) && this.clock.wall() < Number(task.expiresAt) && (!task.leaseId || this.consumerOperationAuthorized(task));
-      this.launch(key, authorized, context => this.durableWork("device", task, this.deviceReports, c => this.operate(task, c), context));
+      this.launch(key, authorized, async context => {
+        const machineId = String(task.machineId); this.deviceMachines.add(machineId);
+        try { await this.durableWork('device', task, this.deviceReports, c => this.operate(task, c), context); }
+        finally { this.deviceMachines.delete(machineId); }
+      });
     }
     this.outboundSessions?.step((this.queues.sessions ?? []) as unknown as RunnerSessionJob[]);
+    this.stepVideo();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
       const task = this.queues[kind]?.find(t => !TERMINAL.has(String(target.get(String(t.id))?.state)));
@@ -692,6 +722,58 @@ export class HostRunner {
       const id = identifier(task.id), authorized = (): boolean => this.fresh() && this.queues[kind]!.some(t => t.id === id && t.desired !== "cancelled");
       if (kind === "inference" && adapter) this.launch(`${kind}:${id}`, authorized, async context => this.publish(target, id, await adapter.execute(task, context)));
       else this.launch(`${kind}:${id}`, authorized, context => this.durableWork(kind, task, target, c => adapter ? adapter.execute(task, c) : Promise.resolve({ state: "failed", result: { code: "capability_unsupported", detail: `No ${kind} execution adapter is installed; no effect was started.` } }), context));
+    }
+  }
+  private stepVideo(): void {
+    for (const job of this.queues.video ?? []) {
+      const id = identifier(job.id), key = `video:${id}`, machineId = identifier(job.machineId), generation = identifier(job.generation);
+      if (this.active.has(key) || !this.fresh() || this.updateAdmissionBlocked) continue;
+      const path = join(this.state, 'work', 'video', `${id}.json`);
+      if (present(path)) {
+        const saved = readRecord(path);
+        if (saved.generation === generation && saved.machineId === machineId && saved.cleaned === true && this.identity) {
+          const identity = this.identity;
+          this.launch(key, () => this.fresh(), async () => {
+            await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, cleaned: true }, identity.credential, this.stopController.signal);
+          });
+        }
+        continue; // Only positive cleanup reports repeat; native capture never does.
+      }
+      if (!['pending','attaching','ready'].includes(String(job.state))) continue;
+      const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
+      this.launch(key, allowed, context => this.runVideo(job, path, context));
+    }
+  }
+  private async runVideo(job: RecordValue, path: string, context: HostWorkContext): Promise<void> {
+    const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);
+    if (!identity || !machine || !context.authorized()) return;
+    const { runtime, image, folder } = this.context(machine);
+    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false;
+    saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
+    try {
+      channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/${identifier(job.generation)}`, identity.credential,
+        { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      const ready = await channel.receive(30);
+      if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== job.id || ready.generation !== job.generation || ready.capability !== 'video') throw unknownOutcome('Video peers did not attach.');
+      const encoder = runtime.config?.videoEncoder;
+      if (!runtime.openVideo || !runtime.pipe || typeof encoder !== 'string' || !isAbsolute(encoder) || !['android','ios'].includes(String(image.os))) {
+        cleaned = true; throw new ServiceError('Native video requires an operator-configured encoder and capture adapter.', 409, { code: 'capability_unsupported' });
+      }
+      const options = { fps: 30 as const, durationSeconds: Number(job.durationSeconds), bitRate: Number(job.bitRate) };
+      captureStarted = true;
+      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized());
+      await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), positive => { cleaned = positive; });
+      cleaned = true;
+    } catch {
+      if (!captureStarted) cleaned = true;
+      try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
+    } finally {
+      channel?.close();
+      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned });
+      if (cleaned) {
+        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, { generation: job.generation, cleaned: true }, identity.credential, this.stopController.signal); }
+        catch { this.log('Video cleanup receipt was not acknowledged; its reservation is retained.'); }
+      }
     }
   }
   private async deadlines(): Promise<void> {
@@ -850,7 +932,7 @@ export class HostRunner {
 function objectOrStatus(value: unknown): string { if (value === false) return "failed"; if (value && typeof value === "object" && "status" in value) return String((value as RecordValue).status); return "passed"; }
 function records(value: unknown, label: string): RecordValue[] { if (!Array.isArray(value) || value.length > 10_000) throw new ServiceError(`Invalid ${label}.`, 400); return value.map(v => { const r = object(v); identifier(r.id); return r; }); }
 function recordsWithoutIds(value: unknown): RecordValue[] { if (!Array.isArray(value)) throw new ServiceError("Invalid template catalogue.", 400); return value.map(object); }
-function firstReport(reports: Map<string, RecordValue>): RecordValue { const first = reports.entries().next().value; if (!first) return {}; reports.delete(first[0]); reports.set(first[0], first[1]); return { [first[0]]: first[1] }; }
+function firstReport(reports: Map<string, RecordValue>, terminalOnly = false): RecordValue { const first = [...reports].find(([, report]) => !terminalOnly || ['succeeded','failed','unknown'].includes(String(report.state))); if (!first) return {}; reports.delete(first[0]); reports.set(first[0], first[1]); return { [first[0]]: first[1] }; }
 function delay(ms: number, signal: AbortSignal): Promise<void> { return new Promise(r => { if (signal.aborted) { r(); return; } const done = (): void => { clearTimeout(timer); signal.removeEventListener("abort", done); r(); }; const timer = setTimeout(done, ms); signal.addEventListener("abort", done, { once: true }); }); }
 async function bounded<T>(work: Promise<T>, ms: number): Promise<T> { let timer: NodeJS.Timeout | undefined; try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(unknownOutcome()), ms); })]); } finally { if (timer) clearTimeout(timer); } }
 /** Start outbound workers. The caller owns signals and awaits close() on shutdown. */

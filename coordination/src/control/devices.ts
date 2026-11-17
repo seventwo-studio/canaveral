@@ -8,6 +8,7 @@ import { registerMachineHooks } from "./machines.ts";
 import type { MachineHooks } from "./machines.ts";
 import { refreshConsumerOperations } from "./consumer-operations.ts";
 import { legacyDigest } from "./templates.ts";
+import { validateUploadedArtifact } from './app-artifacts.ts';
 import { decodeData, guestPath, jsonBytes, uuid } from "./transfers.ts";
 
 export const MAX_RESULT = 6 * 1048576;
@@ -23,7 +24,7 @@ interface MachineRow { id: string; host: string; owner: string | null; template:
 const fields: Record<string, readonly string[]> = {
   screenshot: [], hierarchy: [], apps: [], logs: [], accessibility: [],
   tap: ["x", "y"], swipe: ["x", "y", "toX", "toY", "durationMs"], text: ["text"], key: ["key"],
-  install: ["artifact"], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"],
+  install: ["artifact"], 'install-uploaded': ['artifact'], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"],
   location: ["latitude", "longitude"], push: ["path", "data"], pull: ["path"], shell: ["argv"],
   permission: ["app", "permission", "state"], rotate: ["orientation"],
   "accessibility-action": ["snapshotId", "nodeId", "nativeAction"], "list-files": ["path"],
@@ -88,6 +89,7 @@ export function operationRequest(value: unknown): OperationRequest {
   if ("app" in args && !/^[A-Za-z0-9_][A-Za-z0-9_.]*(?:\/[A-Za-z0-9_.$]+)?$/.test(args.app as string)) throw new ServiceError("Invalid app identifier or Android component.", 400);
   if (action === "permission" && !["grant", "revoke", "reset"].includes(args.state as string)) throw new ServiceError("Invalid permission state.", 400);
   if (action === "rotate" && !["PORTRAIT", "PORTRAIT_UPSIDE_DOWN", "LANDSCAPE_LEFT", "LANDSCAPE_RIGHT"].includes(args.orientation as string)) throw new ServiceError("Invalid device orientation.", 400);
+  if (action === 'install-uploaded') result.artifact = uuid(args.artifact);
   return { id: uuid(input.id), action, arguments: result };
 }
 
@@ -126,6 +128,7 @@ function canonical(value: unknown): string {
 export function platformArguments(template: Record<string, unknown>, request: OperationRequest): void {
   const system = template.os, args = request.arguments;
   if (system !== "android" && system !== "ios" && template.guestAccess !== true) throw new ServiceError("This machine has no device or guest access.");
+  if (request.action === 'install-uploaded' && system !== 'android' && system !== 'ios') throw new ServiceError('Uploaded apps require a mobile simulator.', 400);
   if (system === "ios" && request.action.startsWith("shell")) throw new ServiceError("Guest shell is Android-only.", 400);
   if (["push", "pull", "list-files"].includes(request.action)) {
     guestPath(args.path, system === "ios" ? "container" : "absolute", request.action === "list-files");
@@ -159,6 +162,7 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       }
       const row = machine(db, mid, principal);
       platformArguments(object(JSON.parse(row.template)), request);
+      if (request.action === 'install-uploaded') validateUploadedArtifact(db, mid, request.arguments.artifact);
       const now = store.clock();
       if (!row.enabled || row.desired !== "running" || row.observed !== "running" || now - row.seen >= 30) throw new ServiceError("Device must be running on an online host.");
       const count = db.prepare("SELECT count(*) AS n FROM device_operations WHERE host=? AND state='queued'").get(row.host)!.n as number;
@@ -205,7 +209,7 @@ export function assignedDeviceOperations(db: DatabaseSync, hostId: string, now: 
   refreshConsumerOperations(db, now);
   const rows = db.prepare("SELECT * FROM device_operations WHERE host=? AND state='queued' ORDER BY rowid").all(hostId) as unknown as OperationRow[];
   for (const row of rows) {
-    let leaseId: string | undefined, expiresAt = row.created + 120, scopedInvalid = false, scopedDispatched = false;
+    let leaseId: string | undefined, expiresAt = row.created + (JSON.parse(row.request).action === 'install-uploaded' ? 1800 : 120), scopedInvalid = false, scopedDispatched = false;
     if (tableExists(db, "consumer_operations")) {
       const scoped = db.prepare("SELECT * FROM consumer_operations WHERE id=?").get(row.id) as { lease: string; credential: string; dispatched: number } | undefined;
       if (scoped) {

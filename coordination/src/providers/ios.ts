@@ -1,10 +1,14 @@
 /** Xcode simulator lifecycle and idb control, always bound to one owned UDID. */
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
 import { MobileProvider, MAX_OUTPUT, atomicUpload, authorized, confined, containerParts, decodeData, digest, encoded, locked, operationRequest, readJson, readRegular, saveJson, text, unsupported, uuid } from "./mobile.ts";
-import type { Authorized, ByteReader, DeviceRequest, Download, RecordValue, RunOptions } from "./mobile.ts";
+import type { Authorized, ByteReader, DeviceRequest, Download, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
+import { materializeIosApp } from "./ios-artifact.ts";
+import { openIosVideo } from "./ios-video.ts";
+import type { IosVideoOptions } from "./ios-video.ts";
 
 export class IosProvider extends MobileProvider {
   override readonly kind = "ios";
@@ -77,11 +81,14 @@ export class IosProvider extends MobileProvider {
       return { state: "running" };
     });
   }
-  private async ready(machine: RecordValue, image: RecordValue): Promise<string> {
+  async ready(machine: RecordValue, image: RecordValue): Promise<string> {
     this.executionAllowed(machine);
     const device = await this.owned(machine, image, this.storage(machine, image));
     if (!device || device.state !== "Booted") throw new ServiceError("iOS simulator is not booted.");
     return uuid(device.udid);
+  }
+  async openVideo(machine: RecordValue, image: RecordValue, folder: string, options: IosVideoOptions, check: Authorized): Promise<NativePipe> {
+    return openIosVideo(this, machine, image, folder, options, check);
   }
   async containerRoot(udid: string, app: unknown): Promise<string> {
     const bundle = text(app, "app bundle ID");
@@ -89,6 +96,60 @@ export class IosProvider extends MobileProvider {
     const root = await this.simctl(["get_app_container", uuid(udid), bundle, "data"]);
     if (!path.isAbsolute(root) || root.includes("\0")) throw new ServiceError("Simulator returned an invalid data container.");
     return root;
+  }
+  /** The caller's durable operation journal owns dispatch and never retries uncertain installs. */
+  async installArtifact(machine: RecordValue, image: RecordValue, _folder: string, source: Download, sha256: string, check: Authorized = () => true): Promise<RecordValue> {
+    let stage: string | undefined, identity: string | undefined;
+    const bytes = source.size;
+    try {
+      await authorized(check);
+      const maximum = this.config.maxArtifactBytes ?? 2 * 1024 ** 3;
+      if (typeof maximum !== "number" || !Number.isSafeInteger(maximum) || maximum < 1024 || !Number.isSafeInteger(bytes) || bytes < 1024 || bytes > maximum || !/^[a-f0-9]{64}$/.test(sha256)) throw new ServiceError("Invalid iOS application artifact size or digest.", 400);
+      const id = await this.ready(machine, image), storage = this.storage(machine, image);
+      stage = await fsp.mkdtemp(path.join(storage, ".artifact-"));
+      await fsp.chmod(stage, 0o700);
+      const info = await fsp.lstat(stage, { bigint: true }); identity = `${info.dev}:${info.ino}`;
+      const archivePath = path.join(stage, "application.tar"), archive = await fsp.open(archivePath, "wx", 0o600), hash = createHash("sha256");
+      try {
+        if (await source.verify() !== true) throw new ServiceError("Application artifact source identity is unverified.", 409);
+        let remaining = bytes;
+        while (remaining) {
+          await authorized(check);
+          const chunk = await source.read(Math.min(65536, remaining));
+          await authorized(check);
+          if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > Math.min(65536, remaining)) throw new ServiceError("Application artifact length differs from its declaration.", 400);
+          hash.update(chunk); let written = 0;
+          while (written < chunk.length) {
+            await authorized(check); const result = await archive.write(chunk, written, chunk.length - written);
+            if (!result.bytesWritten) throw new ServiceError("Application artifact staging was interrupted.", 409);
+            written += result.bytesWritten;
+          }
+          remaining -= chunk.length;
+        }
+        if (await source.verify() !== true || hash.digest("hex") !== sha256) throw new ServiceError("Application artifact changed or failed its SHA-256 checksum.", 400);
+        await authorized(check); await archive.sync();
+      } finally { await archive.close(); }
+      const destination = path.join(stage, "bundle"); await fsp.mkdir(destination, { mode: 0o700 });
+      const app = await materializeIosApp(archivePath, destination, { maxBytes: bytes, authorized: check });
+      await authorized(check);
+      if (await this.ready(machine, image) !== id) throw new ServiceError("Simulator identity changed before application installation.", 409);
+      await authorized(check); await this.simctl(["install", id, app]); await authorized(check);
+      if (await this.ready(machine, image) !== id) throw new ServiceError("Simulator identity changed during application installation.", 409, { outcome: "unknown" });
+    } finally {
+      try { await source.close(); }
+      finally {
+        if (stage) {
+          try {
+            const current = await fsp.lstat(stage, { bigint: true });
+            if (!current.isDirectory() || `${current.dev}:${current.ino}` !== identity) throw new Error("stage identity changed");
+            await fsp.rm(stage, { recursive: true });
+            try { await fsp.lstat(stage); throw new Error("stage still exists"); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+          } catch { throw new ServiceError("Application artifact staging cleanup is unconfirmed; inspect before retrying.", 409, { outcome: "unknown" }); }
+        }
+      }
+    }
+    return { installed: true, sha256, bytes, artifactCleaned: true };
   }
   override async displayDensity(machine: RecordValue, image: RecordValue): Promise<number> {
     const id = await this.ready(machine, image), info = object(JSON.parse(await this.idb(id, ["describe", "--json"]))), screen = object(info.screen_dimensions ?? {}), density = screen.density;

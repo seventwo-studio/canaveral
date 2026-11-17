@@ -4,7 +4,7 @@
 import { deflateSync, inflateSync } from 'node:zlib';
 import { ConsumerConfigurationError } from './consumer-client.ts';
 import { checked, controlBytes, identifier, interrupted, record, Serial, SessionError, timeout, validText } from './sdk.ts';
-import type { SessionChannel } from './sdk.ts';
+import type { SessionChannel, Writer } from './sdk.ts';
 export interface DecodedImage { width: number; height: number; rgb: Uint8Array }
 export interface DisplayOptions {
   timeoutMs?: number;
@@ -13,6 +13,48 @@ export interface DisplayOptions {
    * Without it only Raw/DesktopSize is negotiated, avoiding unsupported JPEG traffic.
    */
   decodeImage?: (data: Uint8Array, format: 'PNG' | 'JPEG', width: number, height: number, maxBytes: number) => DecodedImage;
+}
+export interface FrameOptions {
+  /** Minimum time between captures. Consumer backpressure can make captures slower. */
+  intervalMs?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+export interface DisplayFrame { index: number; timestampMs: number; width: number; height: number; png: Buffer }
+export interface RecordingOptions extends FrameOptions {
+  /** APNG requires the exact frame count before its first frame is written. */
+  frameCount: number;
+  /** Maximum encoded output, including headers. Default 256 MiB, maximum 1 GiB. */
+  maxBytes?: number;
+}
+export interface DisplayRecording { mediaType: 'image/apng'; frames: number; bytes: number; width: number; height: number; durationMs: number }
+function frameOptions(options: FrameOptions): { intervalMs: number; timeoutMs: number } {
+  const intervalMs = options.intervalMs ?? 250, timeoutMs = options.timeoutMs ?? 30000;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > 60000) throw new ConsumerConfigurationError('Choose a frame interval from 1 to 60000 milliseconds.');
+  timeout(timeoutMs);
+  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new ConsumerConfigurationError('Use an AbortSignal for capture cancellation.');
+  return { intervalMs, timeoutMs };
+}
+function cancelled(): SessionError { return new SessionError('Display capture was cancelled; any recording output is incomplete.', 'capture_cancelled', undefined, false); }
+function abortable<T>(work: () => Promise<T>, signal?: AbortSignal, onAbort?: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { onAbort?.(); reject(cancelled()); };
+    if (signal?.aborted) { reject(cancelled()); return; }
+    signal?.addEventListener('abort', abort, { once: true });
+    Promise.resolve().then(() => {
+      if (signal?.aborted) throw cancelled();
+      return work();
+    }).then(resolve, reject).finally(() => signal?.removeEventListener('abort', abort));
+  });
+}
+function waitFrame(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(cancelled()); return; }
+    const done = () => { signal?.removeEventListener('abort', abort); resolve(); };
+    const timer = setTimeout(done, Math.max(0, ms));
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(cancelled()); };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 export type OwnershipState = 'owned' | 'busy' | 'view-only' | 'reset-uncertain' | 'stale' | 'not-ready' | 'closed';
 export interface ActionReceipt extends Record<string, unknown> { type: 'action-result'; id: string; state: 'succeeded' | 'failed' | 'unknown'; result: Record<string, unknown> }
@@ -179,6 +221,63 @@ export class DisplayClient {
         if (!this.#missing.includes(1)) return encodePng(this.width, this.height, this.#rgb);
       }
     });
+  }
+  /** Pull-driven capture: at most one frame is requested for each iterator next(). */
+  frames(options: FrameOptions = {}): AsyncGenerator<DisplayFrame, void, unknown> {
+    const { intervalMs, timeoutMs } = frameOptions(options), self = this;
+    return (async function* () {
+      const started = performance.now(); let index = 0, previous = -Infinity;
+      for (;;) {
+        if (options.signal?.aborted) throw cancelled();
+        const delay = intervalMs - (performance.now() - previous);
+        if (delay > 0) await waitFrame(delay, options.signal);
+        if (self.closed) throw new SessionError('Display connection ended; capture is incomplete.', 'session_disconnected', self.connection.sessionId, false);
+        previous = performance.now();
+        const png = await abortable(() => self.screenshot(timeoutMs), options.signal, () => self.close());
+        if (options.signal?.aborted) throw cancelled();
+        yield { index: index++, timestampMs: performance.now() - started, width: png.readUInt32BE(16), height: png.readUInt32BE(20), png };
+      }
+    })();
+  }
+  /** Stream a finite APNG to a caller-owned sink. Failure leaves incomplete output. */
+  async record(writer: Writer, options: RecordingOptions): Promise<DisplayRecording> {
+    const { intervalMs, timeoutMs } = frameOptions(options), maxBytes = options.maxBytes ?? 268435456;
+    if (!writer || typeof writer.write !== 'function' || !Number.isSafeInteger(options.frameCount) || options.frameCount < 1 || options.frameCount > 10000 ||
+        !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1073741824) throw new ConsumerConfigurationError('Choose a recording writer, 1–10000 frames and an output budget of at most 1 GiB.');
+    let bytes = 0, count = 0, width = 0, height = 0, sequence = 0;
+    const write = async (chunk: Buffer) => {
+      if (bytes + chunk.length > maxBytes) throw new SessionError('Recording exceeded its encoded byte budget; output is incomplete.', 'recording_incomplete', undefined, false);
+      for (let at = 0; at < chunk.length;) {
+        const part = chunk.subarray(at, Math.min(chunk.length, at + 65536));
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const accepted = await abortable(() => Promise.race([
+            Promise.resolve().then(() => writer.write(part)),
+            new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new SessionError('Recording output timed out; output is incomplete.', 'recording_incomplete', undefined, false)), timeoutMs); }),
+          ]), options.signal);
+          if (!Number.isSafeInteger(accepted) || accepted < 1 || accepted > part.length) throw new SessionError('Recording writer returned an invalid byte count; output is incomplete.', 'recording_incomplete', undefined, false);
+          at += accepted; bytes += accepted;
+        } catch (error) {
+          if (error instanceof SessionError) throw error;
+          throw new SessionError('Recording output failed; output is incomplete.', 'recording_incomplete', undefined, false);
+        } finally { if (timer) clearTimeout(timer); }
+      }
+    };
+    for await (const frame of this.frames(options)) {
+      if (!count) {
+        width = frame.width; height = frame.height;
+        const animation = Buffer.alloc(8); animation.writeUInt32BE(options.frameCount); animation.writeUInt32BE(1, 4);
+        await write(Buffer.concat([frame.png.subarray(0, 33), pngChunk('acTL', animation)]));
+      } else if (frame.width !== width || frame.height !== height) throw new SessionError('Display dimensions changed during recording; output is incomplete.', 'recording_incomplete', undefined, false);
+      const control = Buffer.alloc(26); control.writeUInt32BE(sequence++); control.writeUInt32BE(width, 4); control.writeUInt32BE(height, 8);
+      control.writeUInt16BE(intervalMs, 20); control.writeUInt16BE(1000, 22);
+      await write(pngChunk('fcTL', control));
+      if (!count) await write(frame.png.subarray(33, -12));
+      else { const seq = Buffer.alloc(4); seq.writeUInt32BE(sequence++); await write(pngChunk('fdAT', Buffer.concat([seq, frame.png.subarray(41, -16)]))); }
+      if (++count === options.frameCount) break;
+    }
+    await write(pngChunk('IEND', Buffer.alloc(0)));
+    return { mediaType: 'image/apng', frames: count, bytes, width, height, durationMs: count * intervalMs };
   }
   #inputControl(action: 'take' | 'release', timeoutMs: number): Promise<OwnershipState> {
     timeout(timeoutMs);

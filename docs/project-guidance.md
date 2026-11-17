@@ -19,6 +19,7 @@ interpreter dependency to the controller, host or SDK; see
 - [consumer operations](consumer-operations.md)
 - [dashboard](dashboard.md)
 - [devices](devices.md)
+- [remote mobile control and CI builds](mobile-control.md)
 - [guest access](guest-access.md)
 - [image registry](image-registry.md)
 - [images](images.md)

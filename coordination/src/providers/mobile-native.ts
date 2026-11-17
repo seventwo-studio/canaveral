@@ -60,6 +60,11 @@ export class NodeMobilePipe implements NativePipe {
     await timeout(new Promise<void>((resolve, reject) => { this.child.stdin.once("error", reject); this.child.stdin.end(() => { this.child.stdin.off("error", reject); resolve(); }); }), 30000);
   }
   async wait(ms: number): Promise<number> { const result = await timeout(this.completion, ms); if (result.error) throw result.error; return result.code; }
+  async interrupt(): Promise<void> {
+    // The retained ChildProcess, never a recovered PID or a process-name match.
+    if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGINT');
+    if (await this.wait(5000) !== 0) throw new ServiceError('Native capture did not acknowledge graceful termination.', 409, { outcome: 'unknown' });
+  }
   async close(): Promise<void> {
     if (this.closed) return; this.closed = true;
     this.child.stdin.destroy(); this.child.stdout.destroy();

@@ -38,6 +38,14 @@
       "types": "./coordination/dist/src/accessibility-sdk.d.ts",
       "default": "./coordination/dist/src/accessibility-sdk.js"
     },
+    "./app-artifacts": {
+      "types": "./coordination/dist/src/app-artifact-client.d.ts",
+      "default": "./coordination/dist/src/app-artifact-client.js"
+    },
+    "./video-sdk": {
+      "types": "./coordination/dist/src/video-sdk.d.ts",
+      "default": "./coordination/dist/src/video-sdk.js"
+    },
     "./browser-sdk": {
       "types": "./coordination/dist/src/browser-sdk.d.ts",
       "default": "./coordination/dist/src/browser-sdk.js"

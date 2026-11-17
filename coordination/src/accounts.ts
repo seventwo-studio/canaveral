@@ -184,6 +184,11 @@ export class Accounts {
   principalDb(db: DatabaseSync, value: unknown, sessionOnly = false): AccountPrincipal {
     let hashed: string;
     try { hashed = tokenHash(secret(value)); } catch { throw new ServiceError("Credential rejected.", 401); }
+    return this.principalHashDb(db, hashed, sessionOnly);
+  }
+  /** Internal session revalidation without persisting the bearer credential. */
+  principalHashDb(db: DatabaseSync, hashed: string, sessionOnly = false): AccountPrincipal {
+    if (!/^[a-f0-9]{64}$/.test(hashed)) throw new ServiceError('Credential rejected.', 401);
     const now = this.store.clock();
     const session = db.prepare("SELECT u.*,s.expires FROM user_sessions s JOIN users u ON u.id=s.user WHERE s.token_hash=? AND s.expires>?").get(hashed, now) as (UserRow & { expires: number }) | undefined;
     if (session?.status === "active") {

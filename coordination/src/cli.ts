@@ -28,6 +28,8 @@ machine ID | job ID | cancel-job ID | start ID | stop ID | drain ID | accept ID
 create NAME --template ID --request-id UUID [--cpu N --memory-mib N --disk-gib N]
 generate --model ID --prompt-file FILE --request-id UUID [--max-tokens N]
 device ID ACTION --request-id UUID [--arguments-file FILE]
+app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
+app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
 image capture --request-file FILE | image-task ID
@@ -63,6 +65,8 @@ const schemas: Record<string, Schema> = {
   create: { positional: 1, values: ["template", "cpu", "memory-mib", "disk-gib", "template-revision", "arch", "host-id", "request-id"], required: ["template", "request-id"] },
   device: { positional: 2, values: ["arguments-file", "request-id"], required: ["request-id"] },
   operation: { positional: 1, values: ["output"] },
+  'app-upload': { positional: 2, values: ['format','request-id'], required: ['format','request-id'] },
+  'app-artifact': { positional: 1, flags: ['delete'] },
   template: { actions: ["validate", "prepare"], positional: 1, values: ["cache"] },
   start: { positional: 1 }, stop: { positional: 1 }, drain: { positional: 1 }, accept: { positional: 1 },
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
@@ -299,7 +303,7 @@ async function credentialRequest(destination: string, client: RequestClient, rou
     throw error;
   }
 }
-const deviceActions = ["screenshot", "hierarchy", "apps", "logs", "tap", "swipe", "text", "key", "install", "uninstall", "launch", "terminate", "open-url", "location", "push", "pull", "shell", "permission", "rotate", "accessibility", "accessibility-action", "list-files", "shell-open", "shell-read", "shell-write", "shell-resize", "shell-close"];
+const deviceActions = ["screenshot", "hierarchy", "apps", "logs", "tap", "swipe", "text", "key", "install", "install-uploaded", "uninstall", "launch", "terminate", "open-url", "location", "push", "pull", "shell", "permission", "rotate", "accessibility", "accessibility-action", "list-files", "shell-open", "shell-read", "shell-write", "shell-resize", "shell-close"];
 async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
   const client = io.client(args.url, await credential(args), args.allowHttp);
   let result: Record<string, unknown>;
@@ -317,6 +321,14 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
     const body: Record<string, unknown> = { id: uuid(option(args, "request-id")), model: option(args, "model"), prompt, maxTokens: numberOption(args, "max-tokens", 600) };
     if (args.options.digest) body.digest = option(args, "digest"); if (args.options["host-id"]) body.hostId = uuid(option(args, "host-id"));
     result = await client.request("POST", "/v1/jobs", body);
+  } else if (args.command === 'app-upload') {
+    const { uploadAppArtifactFile } = await import('./app-artifact-client.ts');
+    const format = option(args, 'format');
+    if (format !== 'apk' && format !== 'ios-app-tar') throw new CliError('Use apk or ios-app-tar.');
+    result = { ...await uploadAppArtifactFile(client, { machineId: uuid(positional(args)), file: expandPath(positional(args, 1)), id: uuid(option(args, 'request-id')), format }) };
+  } else if (args.command === 'app-artifact') {
+    const path = `/v1/app-artifacts/${uuid(positional(args))}`;
+    result = args.options.delete ? await client.request('POST', path + '/delete', {}) : await client.request('GET', path);
   } else if (args.command === "device") {
     const action = positional(args, 1); if (!deviceActions.includes(action)) throw new CliError("Unsupported device action.");
     const { operationRequest } = await import("./control/devices.ts");

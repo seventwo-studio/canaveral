@@ -26,6 +26,7 @@ proof. Session admission and peer attachment retain their
 | Download | Begin with path | Size; finish with count/digest; worker error | Host file bytes only |
 | Accessibility | Empty begin | Snapshot schema/size; finish; worker error | Host snapshot bytes only |
 | Display | Take/release input; discrete action; receipt lookup | Ownership; action result; worker error | RFB in both directions |
+| Administrative video | Completion acknowledgement | MP4 metadata; verified finish; worker error | Host fragmented MP4 only |
 
 The `x-canaveral-streams` metadata records these bindings. Binary data is carried
 as WebSocket bytes, not as base64 inside JSON. Display binary messages contain an
@@ -87,3 +88,11 @@ These are isolated fixture proofs. Actual native adapters, separate-network TLS,
 RFB interoperability, live client examples, recovery and portable release remain
 acceptance gates. No live runner gains consumer execution support from loading
 this schema.
+
+Administrative `video` is a separate relay capability from consumer lease access.
+Its session identities, finite capture limits, credential revalidation and cleanup
+reservations follow [remote mobile control](mobile-control.md#native-video-sessions).
+Validate `videoConsumer` and `videoHost` for its controls. Binary MP4 fragments are
+opaque to the relay; the SDK verifies the byte count, digest and bounded MP4 box
+envelope. A valid box envelope does not prove video decoding or a measured frame
+rate. Display input ownership and consumer lease eligibility remain independent.
