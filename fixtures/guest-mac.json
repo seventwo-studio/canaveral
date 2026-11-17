@@ -1,0 +1,5 @@
+[
+  {"machineId":"12345678-9abc-4def-8123-123456789abc","mac":"02:12:34:56:78:9a"},
+  {"machineId":"00000000-0000-4000-8000-000000000000","mac":"02:00:00:00:00:00"},
+  {"machineId":"ffffffff-ffff-4fff-8fff-ffffffffffff","mac":"02:ff:ff:ff:ff:ff"}
+]

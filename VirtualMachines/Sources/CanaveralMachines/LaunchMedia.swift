@@ -39,7 +39,7 @@ public struct LaunchMediaPin: Codable, Sendable, Equatable {
     }
     public func validate(machine: Machine, directory: URL, launch: String) throws {
         guard machine.os == .macOS, machine.executionLeaseID?.uuidString.lowercased() == leaseId,
-              machine.id.uuidString.lowercased() == machineId, launch == launchId, version == 1,
+              machine.id.uuidString.lowercased() == machineId, launch == launchId, version == 2,
               GuestAssignmentContext.canonicalUUID(launchId), mode == 256, nlink == 1,
               path == directory.deletingLastPathComponent().appendingPathComponent("guest-bootstrap/launch.iso").path else {
             throw CanaveralError.invalid("Launch media assignment differs.")
@@ -51,7 +51,7 @@ public struct LaunchMediaPin: Codable, Sendable, Equatable {
     /// Reject symlinks, writable files and foreign writable directories before VZ opens them.
     public func verify() throws {
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count > 1, components.first == "", !path.utf8.contains(0),
+        guard version == 2, components.count > 1, components.first == "", !path.utf8.contains(0),
               components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
               DirectBoot.digestIsValid(sha256), size > 0 else { throw CanaveralError.invalid("Invalid pinned artifact.") }
         #if os(macOS)

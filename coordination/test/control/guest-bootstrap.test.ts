@@ -72,7 +72,7 @@ test("Swift bound bridge proof is checked using expected private custody only", 
 });
 test("durable planned intent resumes with identical launch and secret before any dispatch", async t => {
   const f = fixture(t), assignment = { version: 1, machineId: f.machine.id, leaseId: (f.machine.lease as Data).id, fingerprint: assignmentFingerprint(f.machine), launchId: randomUUID() }, credential = Buffer.alloc(32, 9).toString("base64url");
-  saveRecord(join(f.storage, "guest-launch.json"), { version: 1, state: "planned", assignment, credential }, true);
+  saveRecord(join(f.storage, "guest-launch.json"), { version: 2, state: "planned", assignment, credential }, true);
   const receipt = await ensureGuestLaunch(f.config, f.machine, f.storage);
   assert.deepEqual(receipt.assignment, assignment); assert.equal(receipt.credential, credential); assert.equal(f.builds(), 1);
 });
@@ -138,7 +138,7 @@ test("local staging failures stay cleanable and identical staged input resumes b
   await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /staging directory/);
   const receipt = readRecord(join(f.storage, "guest-launch.json")); assert.equal(receipt.state, "planned"); assert.equal(f.builds(), 0);
   unlinkSync(directory); mkdirSync(directory, { mode: 0o700 }); mkdirSync(join(directory, "content"), { mode: 0o700 });
-  writeFileSync(join(directory, "content", "assignment.json"), JSON.stringify({ version: 1, assignment: receipt.assignment, credential: receipt.credential }), { mode: 0o600 });
+
   const sealed = await ensureGuestLaunch(f.config, f.machine, f.storage);
   assert.deepEqual(sealed.assignment, receipt.assignment); assert.equal(sealed.credential, receipt.credential); assert.equal(f.builds(), 1);
 });
@@ -153,4 +153,71 @@ test("injected removal retains runtime ownership and repeats media proof before 
   assert.equal((await f.provider.removeOwnedStorage(f.machine, {}, f.folder, randomUUID())).state, "complete"); assert.equal(removals, 1); assert.equal(held, false);
   f.config.probeCommand = async () => ({ exitCode: held ? 0 : 1, stdout: held ? "p123\n" : "", stderr: "" });
   await assert.rejects(f.provider.removeOwnedStorage(f.machine, {}, f.folder, randomUUID()), /handles/); assert.equal(removals, 1);
+});
+
+test("v2 identity has explicit payload margin and exact retained profile; v1 is cleanup-only", async t => {
+  const f = fixture(t), receipt = await ensureGuestLaunch(f.config, f.machine, f.storage);
+  const payload = readFileSync(join(f.storage, "guest-bootstrap/content/assignment.json"));
+  assert.ok(payload.length <= 3584, `bootstrap must retain at least 512 bytes of margin: ${payload.length}`);
+  assert.equal(JSON.parse(payload.toString()).version, 2);
+  const tls = receipt.tls as Data;
+  const { X509Certificate, createHash } = await import("node:crypto");
+  const cert = new X509Certificate(Buffer.from(String(tls.leafDER), "base64url"));
+  assert.equal(cert.ca, false); assert.equal(cert.checkHost(String(tls.serverName)), tls.serverName);
+  assert.equal(createHash("sha256").update(cert.raw).digest("hex"), tls.sha256);
+  assert.equal(Buffer.from(String(tls.pkcs12), "base64url").toString("base64url"), tls.pkcs12);
+  const before = Buffer.from(payload);
+  await ensureGuestLaunch(f.config, f.machine, f.storage); assert.deepEqual(payload, before);
+  saveRecord(join(f.storage, "guest-launch.json"), { ...receipt, version: 1 });
+  await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /cleanup-only/);
+});
+test("TLS signing and packing interruption retain durable hold against replacement and cleanup", async t => {
+  const { spawnSync } = await import("node:child_process");
+  for (const failAt of [1, 2, 3]) {
+    const f = fixture(t); let calls = 0;
+    f.config.tlsCommand = async (argv: string[]) => {
+      assert.equal(readRecord(join(f.storage, "guest-launch.json")).state, "tls-building");
+      const credential = String(readRecord(join(f.storage, "guest-launch.json")).credential);
+      assert.equal(argv.join(" ").includes(credential), false); assert.equal(argv.join(" ").includes("canaveral-launch-v2"), false);
+      if (++calls === failAt) throw new Error("interrupted TLS fixture");
+      const result = spawnSync(argv[0]!, argv.slice(1), { env: {}, stdio: "ignore" }); assert.equal(result.status, 0);
+    };
+    await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /interrupted TLS/);
+    const before = readFileSync(join(f.storage, "guest-launch.json"));
+    await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /uncertain/);
+    assert.deepEqual(readFileSync(join(f.storage, "guest-launch.json")), before);
+    f.machine.desired = "stopped";
+    await assert.rejects(f.provider.removeOwnedStorage(f.machine, {}, f.folder, randomUUID(), true), /exclusion/);
+  }
+});
+test("shared native MAC vectors", async () => {
+  const { guestMAC } = await import("../../src/providers/guest-tls.ts");
+  const vectors = JSON.parse(readFileSync(new URL("../../../../fixtures/guest-mac.json", import.meta.url), "utf8"));
+  for (const row of vectors) assert.equal(guestMAC(row.machineId), row.mac);
+});
+test("provider refuses wrong certificate profile and replaced private key without publishing", async t => {
+  const { spawnSync } = await import("node:child_process");
+  const { generateKeyPairSync } = await import("node:crypto");
+  const { openSync, closeSync } = await import("node:fs");
+  for (const variant of ["ca", "usage", "eku", "san", "key"]) {
+    const f = fixture(t);
+    f.config.tlsCommand = async (argv: string[], output?: string) => {
+      if (argv[1] === "req") {
+        const profile = argv[argv.indexOf("-config") + 1]!;
+        let text = readFileSync(profile, "utf8");
+        if (variant === "ca") text = text.replace("CA:false", "CA:true");
+        if (variant === "usage") text = text.replace("critical,digitalSignature", "critical,keyEncipherment");
+        if (variant === "eku") text = text.replace("serverAuth", "clientAuth");
+        if (variant === "san") text = text.replace("subjectAltName=DNS:", "subjectAltName=DNS:wrong-");
+        writeFileSync(profile, text);
+        if (variant === "key") writeFileSync(argv[argv.indexOf("-key") + 1]!, generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ type: "pkcs8", format: "pem" }));
+      }
+      const fd = output === undefined ? undefined : openSync(output, "wx", 0o600);
+      try { const result = spawnSync(argv[0]!, argv.slice(1), { env: {}, stdio: ["ignore", fd ?? "ignore", "ignore"] }); assert.equal(result.status, 0); }
+      finally { if (fd !== undefined) closeSync(fd); }
+    };
+    await assert.rejects(ensureGuestLaunch(f.config, f.machine, f.storage), /TLS.*(profile|usage)/);
+    assert.equal(readRecord(join(f.storage, "guest-launch.json")).state, "tls-building");
+    assert.equal(f.builds(), 0);
+  }
 });
