@@ -38,6 +38,14 @@
     "./video-sdk": {
       "types": "./dist/src/video-sdk.d.ts",
       "default": "./dist/src/video-sdk.js"
+    },
+    "./browser-sdk": {
+      "types": "./dist/src/browser-sdk.d.ts",
+      "default": "./dist/src/browser-sdk.js"
+    },
+    "./browser-runtime": {
+      "types": "./dist/src/browser-runtime.d.ts",
+      "default": "./dist/src/browser-runtime.js"
     }
   },
   "scripts": {
@@ -51,5 +59,8 @@
   },
   "files": [
     "dist/src"
-  ]
+  ],
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  }
 }

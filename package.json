@@ -45,6 +45,14 @@
     "./video-sdk": {
       "types": "./coordination/dist/src/video-sdk.d.ts",
       "default": "./coordination/dist/src/video-sdk.js"
+    },
+    "./browser-sdk": {
+      "types": "./coordination/dist/src/browser-sdk.d.ts",
+      "default": "./coordination/dist/src/browser-sdk.js"
+    },
+    "./browser-runtime": {
+      "types": "./coordination/dist/src/browser-runtime.d.ts",
+      "default": "./coordination/dist/src/browser-runtime.js"
     }
   },
   "files": [
@@ -70,5 +78,8 @@
     "test:remote-tls": "node script/check_remote_tls.mjs",
     "test:package": "node --test script/package_checks.test.mjs"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  }
 }
