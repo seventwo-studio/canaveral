@@ -206,11 +206,13 @@ not establish usable or accepted macOS workspace delivery.
 The Apple provider's internal leased macOS path now constructs launch media under
 its assignment/provider lock before native preparation and boot dispatch. This
 path does not enable macOS admission: `guestAccess` remains Linux-only. Production
-transport and resolver selection remain separate work. Guest loopback HTTP is
-not a reachable host HTTPS endpoint.
+transport and resolver selection remain separate work. AssignedGuest now has the private TLS listener described below; this does not
+resolve a guest route or connect the production host access path.
 
 The provider mints a random launch UUID and 32-byte canonical unpadded base64url
-credential. The exact bounded guest payload is `{version:1,assignment,credential}`;
+credential. The original bounded guest payload was `{version:1,assignment,credential}`;
+that historical format is cleanup-only. New launches use the TLS-bearing v2
+format documented below;
 `assignment` has the five existing identity keys. `fixtures/guest-bootstrap-v1.json`
 is a public test vector, not an operational credential. The exclusive mode 0600
 `guest-launch.json` receipt is the private source for a future resolver's
@@ -297,3 +299,88 @@ After compiling TypeScript (`tsc -p coordination`), macOS portable checks can ru
 It creates an owned library-only SwiftPM scratch package pointing at this checkout,
 uses the injected ISO utility, and removes its fixture tree on completion. It does
 not build an App target, execute CanaveralVMRunner, mount media or boot a VM.
+
+## Per-launch private TLS transport (ST-596, first ST-595 slice)
+
+New private receipts and bootstrap payloads use version 2. The assignment inside
+still uses schema 1. The exact media JSON is
+`{version:2,assignment,credential,tls:{pkcs12:<canonical unpadded base64url>}}`.
+The parser rejects all v1 media; old receipts remain readable for owned cleanup
+only. They cannot be upgraded, recertified, attached or launched. The native
+`LaunchMediaPin.version` is now 2 and the runner rejects historical pins.
+The historical v1 vector is retained. The v2 static vector tests syntax only;
+interoperability uses fresh provider-generated identities, not that vector.
+The payload remains at most 4096 bytes; the provider fixture requires at least
+512 bytes of unused space.
+
+`guest-launch.json.tls` privately retains `pkcs12`, exact `leafDER` (both base64url),
+`serverName` and lowercase DER SHA256 `sha256`. The logical name is exactly the
+lowercase launch UUID plus `.canaveral.invalid`.
+PKCS12 reuse verifies its actual local certificate against the retained leaf
+through an unconnected in-memory TLS context. It starts no utility or listener.
+Every launch generates a fresh P-256 key and self-signed CA:false leaf with only digitalSignature and serverAuth
+usage and one exact DNS SAN. Node generates the key; absolute `/usr/bin/openssl`
+signs and packs PKCS12. The fixed packaging password is not an authentication
+credential and is nevertheless passed through a private owned file, never argv
+or environment. All inputs, outputs and utility diagnostics remain inside owned
+`guest-bootstrap/tls`; utility stderr/stdout are discarded except the public
+certificate inspection output, directed to an owned file. All retained files
+remain secret-bearing until the entire owned storage tree is erased.
+
+Before the first utility, custody durably enters `tls-building`. It spans signing,
+packing and profile validation. Any interruption or unconfirmed result keeps the
+hold and blocks regeneration, replacement, launch and cleanup. Confirmed validated
+completion returns to `planned` with stable TLS custody. The separate ISO `building`
+hold and existing local planned-stage cleanup remain. No automatic hold reset
+exists. Certificate validity is two days from signing. A guest clock behind signing
+or beyond expiry refuses TLS; it never extends assignment authority. There is no
+clock-skew relaxation, renewal or fallback for an existing launch.
+Host boot/media reuse also rejects a certificate outside its validity interval;
+custody inspection remains available for positive owned cleanup after expiry.
+
+AssignedGuest requires macOS 15+ and imports with `kSecImportToMemoryOnly=true`.
+It validates the P-256 key, key match, exact name/SAN, CA:false, digitalSignature,
+serverAuth and SSL trust against only that leaf. It waits at most 20 seconds for
+exactly one up nonloopback interface matching the UUID-derived native MAC and
+exactly one RFC1918 IPv4, consumes the startup marker, then binds only that
+address on 8767. There is no automatic rebind. Readiness is announced only by
+NWListener readiness. Manual LoopbackServer and the manual app are unchanged.
+
+BoundTLSServer requires TLS 1.3. It owns and closes every delivered connection,
+with 32 total and 8 unauthenticated/handshaking peers. Network.framework's native
+new-connection limit decrements per delivery, rather than tracking concurrent
+peers; the server uses its own concurrent admission accounting. Deadlines are
+5 seconds for handshake, 5 for head/authentication, 15 for body, 30 for handler
+work and 15 for response write. The head including terminator is at most 4 KiB.
+Before head authentication, the total buffered initial chunk is at most 4 KiB,
+including any coalesced body bytes. No further body reads occur until authentication.
+Bodies remain limited to 1,000,000 bytes. Identity has no body. The dedicated
+header-authentication method never dispatches an operation; DesktopBridge retains
+its full-request guard. Closing sockets cancels tasks but cannot prove a native
+operation stopped.
+
+The internal pinned binding factory dials a literal address, verifies the derived
+logical name and exact leaf DER, and uses only that leaf as trust with TLS 1.3.
+Legacy origin/trust rules are unchanged. Factory `closeAll()` permanently rejects
+new resolutions and closes all owned transports, including identity handshakes
+and active requests. There is no retry, fallback or automatic rebind; lost POST
+acknowledgements remain unknown.
+Completed identity readers are closed and removed from the factory's transport
+registry; retained operational transports close with their owner.
+
+`node script/check_guest_bootstrap.mjs` now also exercises real provider PKCS12,
+Swift import/listener/DesktopBridge and Node GuestHTTPS/v2/GuestHelperAccess file
+reads on localhost, plus shared MAC vectors. macOS CI runs it with jobs=2.
+The disposable import uses no persistent or temporary Keychain import. On the
+tested Security implementation the key nevertheless reports `isPermanent=1`;
+that attribute does not establish nonpersistence. Narrow own-key lookup must be
+absent or explicitly inaccessible. This is limited evidence, not a Keychain audit.
+
+ST-595 remains open. Strict NAT lease parsing, native routing, provider binding
+cache, Agent mixed-runtime wiring and the streamDownload session-authority fix
+belong to the second PR. Native NAT exposure/reachability, DHCP format, guest
+firewall/Local Network permission, getifaddrs behavior, TCC, automount/timing and
+readiness, independent deadlines/cleanup/erasure, capture/clone/template
+qualification and workspace acceptance remain open. A pinned certificate proves
+possession of a launch key; it does not prove physical placement or isolation.
+No admission or production guest-access gate changes here.

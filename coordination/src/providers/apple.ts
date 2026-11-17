@@ -1,3 +1,4 @@
+import { buildLaunchTLS, validateLaunchTLS, verifyLaunchTLSClock, type LaunchTLS } from "./guest-tls.ts";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -156,10 +157,12 @@ export function guestLaunchReceipt(storage: string, machine: Data): Data | null 
   const stat = lstatSync(safePath(file));
   if (stat.uid !== process.getuid?.() || (stat.mode & 0o7777) !== 0o600) throw new ServiceError("Private launch receipt ownership differs.");
   const receipt = readRecord(file), assignment = object(receipt.assignment);
-  if (Object.keys(assignment).sort().join() !== "fingerprint,launchId,leaseId,machineId,version" || receipt.version !== 1 || assignment.version !== 1 || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(assignment.launchId)) || !/^[A-Za-z0-9_-]{43}$/.test(String(receipt.credential)) || Buffer.from(String(receipt.credential), "base64url").toString("base64url") !== receipt.credential) throw new ServiceError("Private launch receipt differs from assignment.");
+  if (Object.keys(assignment).sort().join() !== "fingerprint,launchId,leaseId,machineId,version" || (receipt.version !== 1 && receipt.version !== 2) || assignment.version !== 1 || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(assignment.launchId)) || !/^[A-Za-z0-9_-]{43}$/.test(String(receipt.credential)) || Buffer.from(String(receipt.credential), "base64url").toString("base64url") !== receipt.credential) throw new ServiceError("Private launch receipt differs from assignment.");
+  if (receipt.version === 2 && (receipt.tls || receipt.state === "sealed")) validateLaunchTLS(receipt.tls, String(assignment.launchId));
   return receipt;
 }
 export function verifyLaunchPin(pin: Data, storage: string): void {
+  if (pin.version !== 2) throw new ServiceError("Legacy launch media is cleanup-only.");
   const path = safePath(string(pin.path));
   if (path !== join(storage, "guest-bootstrap", "launch.iso")) throw new ServiceError("Launch media is outside owned storage.");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -176,11 +179,13 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
   let receipt = guestLaunchReceipt(storage, machine);
   if (!receipt) {
     if (present(join(native, "runner-launch.json")) || present(join(storage, "apple-prepare.json"))) throw new ServiceError("Existing native intent has no launch custody.");
-    receipt = { version: 1, state: "planned", assignment: { version: 1, machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id), fingerprint: assignmentFingerprint(machine), launchId: randomUUID() }, credential: randomBytes(32).toString("base64url") };
+    receipt = { version: 2, state: "planned", assignment: { version: 1, machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id), fingerprint: assignmentFingerprint(machine), launchId: randomUUID() }, credential: randomBytes(32).toString("base64url") };
     saveRecord(file, receipt, true);
   }
-  if (receipt.state === "building") throw new ServiceError("Launch builder outcome is uncertain; rebuild, launch and cleanup are blocked.");
-  if (receipt.state === "sealed") { const pin = object(receipt.pin); if (Object.entries(object(receipt.assignment)).some(([key, value]) => pin[key] !== value)) throw new ServiceError("Sealed launch binding differs."); verifyLaunchPin(object(receipt.pin), storage); return receipt; }
+  if (receipt.version !== 2) throw new ServiceError("Legacy launch custody is cleanup-only.");
+  if (["building", "tls-building"].includes(String(receipt.state))) throw new ServiceError("Launch builder outcome is uncertain; rebuild, launch and cleanup are blocked.");
+  if (receipt.tls) verifyLaunchTLSClock(receipt.tls as LaunchTLS);
+  if (receipt.state === "sealed") { const pin = object(receipt.pin); if (Object.entries(object(receipt.assignment)).some(([key, value]) => pin[key] !== (key === "version" ? 2 : value))) throw new ServiceError("Sealed launch binding differs."); verifyLaunchPin(object(receipt.pin), storage); validateBootstrapISO(readFileSync(String(pin.path)), Buffer.from(JSON.stringify({ version: 2, assignment: receipt.assignment, credential: receipt.credential, tls: { pkcs12: object(receipt.tls).pkcs12 } }))); return receipt; }
   if (receipt.state !== "planned" || present(join(native, "runner-launch.json"))) throw new ServiceError("Launch intent cannot resume.");
   const directory = safePath(join(storage, "guest-bootstrap")), content = join(directory, "content"), output = join(directory, "launch.iso");
   // Local staging has no subprocess to outlive this lock. A failed or partial
@@ -191,8 +196,18 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
     const stat = lstatSync(path);
     if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o7777) !== 0o700) throw new ServiceError("Launch staging directory differs.");
   }
-  if (present(output) || readdirSync(directory).some(name => name !== "content") || readdirSync(content).some(name => name !== "assignment.json")) throw new ServiceError("Unexpected launch staging contents.");
-  const payload = Buffer.from(JSON.stringify({ version: 1, assignment: receipt.assignment, credential: receipt.credential }));
+  if (present(output) || readdirSync(directory).some(name => !["content", "tls"].includes(name)) || readdirSync(content).some(name => name !== "assignment.json")) throw new ServiceError("Unexpected launch staging contents.");
+  if (!receipt.tls) {
+    const tlsDirectory = join(directory, "tls");
+    if (present(tlsDirectory)) throw new ServiceError("Unexpected TLS staging contents.");
+    mkdirSync(tlsDirectory, { mode: 0o700 }); syncDirectory(directory);
+    receipt = { ...receipt, state: "tls-building" }; saveRecord(file, receipt);
+    const tls = await buildLaunchTLS(tlsDirectory, String(object(receipt.assignment).launchId), typeof config.tlsCommand === "function" ? config.tlsCommand as (argv: string[], output?: string) => Promise<void> : undefined);
+    syncDirectory(tlsDirectory);
+    receipt = { ...receipt, state: "planned", tls }; saveRecord(file, receipt);
+  }
+  verifyLaunchTLSClock(receipt.tls as LaunchTLS);
+  const payload = Buffer.from(JSON.stringify({ version: 2, assignment: receipt.assignment, credential: receipt.credential, tls: { pkcs12: object(receipt.tls).pkcs12 } }));
   if (payload.length > 4096) throw new ServiceError("Launch payload exceeds envelope.");
   const sourcePath = safePath(join(content, "assignment.json")), exists = present(sourcePath);
   const source = openSync(sourcePath, exists ? constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK : "wx", 0o600);
@@ -215,7 +230,7 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
   const fd = openSync(output, constants.O_RDONLY | constants.O_NOFOLLOW); try { chmodSync(output, 0o400); fsyncSync(fd); } finally { closeSync(fd); }
   syncDirectory(directory);
   const sealed = lstatSync(output);
-  const pin = { path: output, uid: sealed.uid, mode: 256, nlink: 1, size: sealed.size, sha256: createHash("sha256").update(bytes).digest("hex"), dev: String(sealed.dev), ino: String(sealed.ino), ...object(receipt.assignment) };
+  const pin = { path: output, uid: sealed.uid, mode: 256, nlink: 1, size: sealed.size, sha256: createHash("sha256").update(bytes).digest("hex"), dev: String(sealed.dev), ino: String(sealed.ino), ...object(receipt.assignment), version: 2 };
   verifyLaunchPin(pin, storage); receipt = { ...receipt, state: "sealed", pin }; saveRecord(file, receipt); return receipt;
 }
 

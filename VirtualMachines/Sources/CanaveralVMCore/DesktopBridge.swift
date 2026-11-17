@@ -48,6 +48,19 @@ public actor DesktopBridge {
         if FileManager.default.fileExists(atPath: controlURL.path) { userControl = try JSONDecoder().decode(DesktopControlState.self, from: Data(contentsOf: controlURL)).userControl }
         controlUncertain = FileManager.default.fileExists(atPath: pendingURL.path) || (try? FileManager.default.destinationOfSymbolicLink(atPath:pendingURL.path)) != nil
     }
+    /// Header-only authentication; never dispatches an operation to inspect a head.
+    public func authenticateHead(_ request: HTTPRequest) -> Bool {
+        guard !closing, request.headers["origin"] == nil else { return false }
+        let auth = request.headers["authorization"] ?? ""
+        if let assignment {
+            if request.path == "/v1/identity" {
+                return request.method == "GET" && request.target == "/v1/identity" && assignment.authenticatedNonce(authorization: auth, credential: token) != nil
+            }
+            guard let expected = try? assignment.authorization(credential: token, incarnation: incarnation) else { return false }
+            return Secrets.equal(auth, expected)
+        }
+        return false
+    }
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
         var identityNonce: String?
         if let assignment {

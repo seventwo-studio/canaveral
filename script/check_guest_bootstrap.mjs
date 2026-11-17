@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'canaveral-bootstrap-check-'));
 const exchange = join(scratch, 'exchange', 'storage', '11111111-1111-4111-8111-111111111111');
-const env = { ...process.env, CANAVERAL_FIXTURE_ROOT: root, CANAVERAL_BOOTSTRAP_EXCHANGE: exchange };
+const env = { ...process.env, CANAVERAL_FIXTURE_ROOT: root, CANAVERAL_BOOTSTRAP_EXCHANGE: exchange, CANAVERAL_NODE: process.execPath };
 function run(executable, args, cwd, extra = {}) {
   const result = spawnSync(executable, args, { cwd, env: { ...env, ...extra }, stdio: 'inherit' });
   if (result.error || result.status !== 0) throw new Error('Bootstrap portable check failed.');
@@ -29,6 +29,7 @@ let package = Package(name: "BootstrapChecks", platforms: [.macOS("26.0")], targ
 .testTarget(name: "BootstrapTests", dependencies: ["CanaveralVMCore", "CanaveralMachines", "CanaveralGuestDesktop"])
 ])
 `);
+  writeFileSync(join(scratch, 'Tests', 'BootstrapTests', 'GuestTLSTests.swift'), readFileSync(join(root, 'VirtualMachines/Tests/CanaveralMachineTests/GuestTLSTests.swift')));
   const coordination = join(root, 'coordination');
   run(process.execPath, ['--test', '--test-name-pattern=real provider', 'dist/test/control/guest-bootstrap.test.js'], coordination);
   run('swift', ['test', '--package-path', scratch, '--jobs', '2'], root);

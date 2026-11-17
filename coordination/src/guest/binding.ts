@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { GuestHelperBinding } from "../control/session-protocol.ts";
 import { ServiceError } from "../errors.ts";
-import { GuestHTTPS, authorized, type Authority } from "./https.ts";
+import { GuestHTTPS, authorized, type Authority, type PinnedGuestEndpoint } from "./https.ts";
 
 export interface GuestAssignmentContext {
   readonly version: 1;
@@ -54,11 +54,13 @@ function sameAssignment(a: GuestAssignmentContext, b: GuestAssignmentContext): b
 }
 /** No production caller supplies trusted launch state yet. Resolution is explicit and never retried. */
 export async function verifiedGuestHelperBinding(expected: () => GuestAssignmentContext, endpoint: string, credential: string,
-  authority: Authority, options: { caFile?: string; timeout?: number } = {}): Promise<GuestHelperBinding> {
-  let alive = true;
+  authority: Authority, options: { caFile?: string; timeout?: number; pinned?: PinnedGuestEndpoint; owner?: { transports: Set<GuestHTTPS>; closed: boolean } } = {}): Promise<GuestHelperBinding> {
+  let alive = !options.owner?.closed;
   let pinned: GuestAssignmentContext;
   try { pinned = guestAssignment(expected()); } catch { throw invalid(); }
+  if (options.pinned && options.pinned.serverName !== pinned.launchId + ".canaveral.invalid") throw invalid();
   const current = (): boolean => {
+    if (options.owner?.closed) alive = false;
     if (!alive) return false;
     try {
       if (!authorized(authority) || !sameAssignment(guestAssignment(expected()), pinned)) alive = false;
@@ -68,17 +70,33 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
   if (!current()) throw invalid();
   const nonce = randomBytes(32).toString("base64url");
   let identity: GuestHelperIdentity;
+  let reader: GuestHTTPS | undefined;
   try {
-    const reader = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, undefined, nonce));
+    reader = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, undefined, nonce), options.pinned);
+    options.owner?.transports.add(reader);
     identity = guestAssignment(await reader.call("/v1/identity", null), true) as GuestHelperIdentity;
     const { incarnation, nonce: echoed, proof, ...tuple } = identity;
     if (!sameAssignment(tuple, pinned) || echoed !== nonce ||
       !timingSafeEqual(canonical32(proof), canonical32(guestBindingMAC(credential, pinned, "identity-response", nonce, incarnation))) || !current()) throw invalid();
   } catch { alive = false; throw invalid(); }
-  const transport = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, identity.incarnation));
+  finally { if (reader) { reader.closeAll(); options.owner?.transports.delete(reader); } }
+  const transport = new GuestHTTPS(endpoint, credential, options.caFile, options.timeout, guestBindingAuthorization(credential, pinned, identity.incarnation), options.pinned);
+  options.owner?.transports.add(transport);
   return new GuestHelperBinding(async (path, body) => {
     if (!current()) throw new ServiceError("Guest assignment authorization ended.", 410);
     try { return await transport.call(path, body); }
     catch (error) { if (error instanceof ServiceError && error.status === 401) alive = false; throw error; }
   }, current);
+}
+
+/** Close is available during the identity handshake, before a binding exists. */
+export function pinnedGuestBindingFactory() {
+  const owner = { transports: new Set<GuestHTTPS>(), closed: false };
+  return {
+    closeAll() { owner.closed = true; for (const transport of owner.transports) transport.closeAll(); owner.transports.clear(); },
+    async resolve(expected: () => GuestAssignmentContext, endpoint: string, credential: string, authority: Authority, pinned: PinnedGuestEndpoint, timeout = 20) {
+      if (pinned.serverName !== guestAssignment(expected()).launchId + ".canaveral.invalid") throw invalid();
+      return verifiedGuestHelperBinding(expected, endpoint, credential, authority, { pinned, timeout, owner });
+    },
+  };
 }

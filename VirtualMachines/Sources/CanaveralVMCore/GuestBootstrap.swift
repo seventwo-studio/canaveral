@@ -6,16 +6,23 @@ import Darwin
 public struct GuestBootstrap: Sendable {
     public let assignment: GuestAssignmentContext
     public let credential: String
+    public let pkcs12: Data
     public init(data: Data) throws {
         guard data.count <= 4096, Self.uniqueKeys(data),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == ["version", "assignment", "credential"],
-              let version = object["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1,
+              Set(object.keys) == ["version", "assignment", "credential", "tls"],
+              let version = object["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version == 2,
               let assignment = object["assignment"] as? [String: Any],
               let credential = object["credential"] as? String, GuestAssignmentContext.canonical32(credential) else {
             throw CanaveralError.invalid("Assignment media is invalid.")
         }
         self.assignment = try GuestAssignmentContext(data: JSONSerialization.data(withJSONObject: assignment))
+        guard let tls = object["tls"] as? [String: Any], Set(tls.keys) == ["pkcs12"],
+              let encoded = tls["pkcs12"] as? String, encoded.utf8.count <= 3734,
+              encoded.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
+              let decoded = Data(base64Encoded: encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/") + String(repeating: "=", count: (4 - encoded.count % 4) % 4)),
+              decoded.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") == encoded else { throw CanaveralError.invalid("TLS bootstrap is invalid.") }
+        self.pkcs12 = decoded
         self.credential = credential
     }
 

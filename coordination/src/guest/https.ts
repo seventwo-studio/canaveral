@@ -1,6 +1,9 @@
+import { X509Certificate, createHash, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
+import type { ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { readFileSync } from "node:fs";
-import { createSecureContext } from "node:tls";
+import { checkServerIdentity, createSecureContext } from "node:tls";
 import { ServiceError, object } from "../errors.ts";
 import { jsonBytes } from "../control/transfers.ts";
 
@@ -13,11 +16,16 @@ export function validUnicode(value: string): boolean { return !/[\uD800-\uDBFF](
 export function integer(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum; }
 export function sameUUID(value: unknown, expected: string): boolean { return typeof value === "string" && value.toLowerCase() === expected.toLowerCase(); }
 
+export interface PinnedGuestEndpoint { address: string; serverName: string; leafDER: Buffer; sha256: string }
+
 /** Assignment owner supplies the endpoint and credential. No proxy, redirect, connection pool or replay. */
 export class GuestHTTPS {
   private readonly origin: URL;
+  private closed = false;
+  private readonly active = new Set<ClientRequest>();
+  closeAll(): void { this.closed = true; for (const req of this.active) req.destroy(); this.active.clear(); }
   private readonly ca: Buffer | undefined;
-  constructor(origin: string, private readonly credential: string, caFile?: string, readonly timeout = 20, private readonly authorization?: string) {
+  constructor(origin: string, private readonly credential: string, caFile?: string, readonly timeout = 20, private readonly authorization?: string, private readonly pinned?: PinnedGuestEndpoint) {
     try {
       if (typeof origin !== "string" || !/^https:\/\//.test(origin) || /[\s\x00-\x20?#\\]/.test(origin)) throw new Error();
       this.origin = new URL(origin);
@@ -25,12 +33,19 @@ export class GuestHTTPS {
       if (!/^https:\/\/[^/]+\/?$/.test(origin) || this.origin.protocol !== "https:" || !this.origin.hostname || this.origin.username || this.origin.password || this.origin.pathname !== "/" || (this.origin.port && Number(this.origin.port) < 1)) throw new Error();
       if (typeof credential !== "string" || credential.length < 32 || credential.length > 4096 || /[^\x21-\x7e]/.test(credential)) throw new Error();
       if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout > 120) throw new Error();
-      this.ca = caFile === undefined ? undefined : readFileSync(caFile);
+      if (pinned) {
+        this.pinned = Object.freeze({ ...pinned, leafDER: Buffer.from(pinned.leafDER) });
+        if (caFile !== undefined || !isIP(pinned.address) || this.origin.hostname !== pinned.address || !/^[0-9a-f-]{36}\.canaveral\.invalid$/.test(pinned.serverName)) throw new Error();
+        const cert = new X509Certificate(pinned.leafDER);
+        if (cert.checkHost(pinned.serverName) !== pinned.serverName || createHash("sha256").update(cert.raw).digest("hex") !== pinned.sha256) throw new Error();
+        this.ca = Buffer.from(cert.toString());
+      } else this.ca = caFile === undefined ? undefined : readFileSync(caFile);
       if (this.ca !== undefined && !this.ca.toString("ascii").includes("-----BEGIN CERTIFICATE-----")) throw new Error();
       createSecureContext(this.ca === undefined ? {} : { ca: this.ca });
     } catch { throw new ServiceError("Invalid native guest HTTPS origin, credential, timeout or certificate trust.", 400, { retryable: false }); }
   }
   readonly call: GuestRequest = async (path, body) => {
+    if (this.closed) throw new ServiceError("Owned guest transport is closed.", 410);
     if (typeof path !== "string" || !/^\/v1\/[a-z]+(?:\/[a-z]+)*$/.test(path)) throw new ServiceError("Invalid native guest protocol path.", 400);
     if (body !== null) object(body);
     const data = body === null ? undefined : jsonBytes(body, MAX_REQUEST);
@@ -40,13 +55,18 @@ export class GuestHTTPS {
       let settled = false;
       const finish = (error?: unknown, value?: Record<string, unknown>) => {
         if (settled) return;
-        settled = true; clearTimeout(timer);
+        settled = true; clearTimeout(timer); this.active.delete(req);
         if (error) reject(error); else resolve(value!);
       };
       // A wall deadline covers DNS, handshake, headers and a trickled response, rather than socket inactivity.
       const timer = setTimeout(() => { finish(failure("Native guest response was not confirmed; inspect before another command.", 503, "transport_interrupted")); req.destroy(); }, this.timeout * 1000);
       const req = httpsRequest(this.origin, { method: data === undefined ? "GET" : "POST", path, agent: false,
-        rejectUnauthorized: true, ...(this.ca === undefined ? {} : { ca: this.ca }),
+        rejectUnauthorized: true, ...(this.pinned ? { minVersion: "TLSv1.3" as const, servername: this.pinned.serverName,
+          checkServerIdentity: (_: string, cert: import("node:tls").PeerCertificate) => {
+            const expected = this.pinned!;
+            if (!cert.raw || cert.raw.length !== expected.leafDER.length || !timingSafeEqual(cert.raw, expected.leafDER)) return new Error("Guest leaf differs.");
+            return checkServerIdentity(expected.serverName, cert);
+          } } : {}), ...(this.ca === undefined ? {} : { ca: this.ca }),
         headers: { Authorization: this.authorization ?? `Bearer ${this.credential}`, "Content-Type": "application/json", Accept: "application/json", "Accept-Encoding": "identity", Connection: "close", ...(data === undefined ? {} : { "Content-Length": data.length }) } }, response => {
         const bad = (error: ServiceError) => { finish(error); response.destroy(); req.destroy(); };
         const status = response.statusCode ?? 502;
@@ -87,6 +107,8 @@ export class GuestHTTPS {
           } catch (error) { finish(error instanceof ServiceError && error.status !== 400 ? error : failure("Native guest response JSON is invalid.")); }
         });
       });
+      this.active.add(req);
+      if (this.closed) req.destroy();
       req.on("error", () => finish(failure("Native guest response was not confirmed; inspect before another command.", 503, "transport_interrupted")));
       req.end(data);
     });

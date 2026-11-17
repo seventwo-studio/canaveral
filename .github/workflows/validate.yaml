@@ -261,8 +261,8 @@ jobs:
           test "$(sw_vers -productVersion | cut -d. -f1)" -ge 26
           xcodebuild -version
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 26
-          swift build --package-path VirtualMachines
-          swift test --package-path VirtualMachines --filter 'DirectBoot|SerialConsoleTests|GuestAssignmentTests|GuestBootstrapTests'
+          swift build --package-path VirtualMachines --jobs 2
+          swift test --package-path VirtualMachines --jobs 2 --filter 'DirectBoot|SerialConsoleTests|GuestAssignmentTests|GuestBootstrapTests|GuestTLSTests'
           npm ci --prefix coordination
           npm run build --prefix coordination
           node script/check_guest_bootstrap.mjs

@@ -112,3 +112,10 @@ advance to the existing owned quarantine path, after receipt/bootstrap handle
 closure and the ordinary runtime/assignment/stop checks. No immutable-file flag
 or per-file credential unlink is used. The full delivery and remaining native
 gates are in [macOS guest access](macos-guest-access.md#owned-assignment-delivery-st-594).
+
+Per-launch macOS TLS custody adds `tls-building` before signing or PKCS12 packing.
+It has the same indefinite uncertainty exclusion as launch-media `building`:
+no replacement, regeneration, launch or owned cleanup after an unconfirmed utility
+result. Only confirmed signing/packing/profile validation records stable TLS
+custody and returns to local `planned` staging. V1 custody is cleanup-only;
+recovery never retrofits a certificate. See [macOS guest access](macos-guest-access.md#per-launch-private-tls-transport-st-596-first-st-595-slice).

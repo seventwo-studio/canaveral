@@ -7,7 +7,7 @@ import ApplicationServices
     static let shared=AssignedGuestModel()
     var status = "Starting guest helper…"
     private var running: Task<Void, Never>?
-    private var server: LoopbackServer?
+    private var server: BoundTLSServer?
     private var shells: GuestShells?
     private var displayStream: GuestDisplayStream?
     private var serviceLock: GuestServiceLock?
@@ -19,7 +19,7 @@ import ApplicationServices
             serviceLock=try GuestServiceLock(state:root)
             let bootstrap = try AssignedGuestStartup.start(isVirtualGuest: MacDesktopDevice.isVirtualGuest, mounts: GuestBootstrapSelector.systemMounts) { $0 }
             let launchRoot = root.appendingPathComponent("assigned/" + bootstrap.assignment.launchId)
-            try GuestAssignedLaunchAttempt.consume(state: launchRoot)
+            let identity = try GuestTLSIdentity(pkcs12: bootstrap.pkcs12, launchId: bootstrap.assignment.launchId)
             let state = launchRoot
             let files = try GuestFiles(root:URL(fileURLWithPath:"/"), state:state.appendingPathComponent("file-transfers"), permitted:{ MacDesktopDevice.isVirtualGuest })
             let home = FileManager.default.homeDirectoryForCurrentUser
@@ -33,9 +33,15 @@ import ApplicationServices
             displayStream=stream
             let bridge = try DesktopBridge(token: bootstrap.credential, device: device, journalURL: state.appendingPathComponent("inputs.json"), workspace:GuestWorkspace(files:files,shells:terminals), assignment: bootstrap.assignment, displayStream:stream)
             self.bridge=bridge
-            let listener = try LoopbackServer(port: 8767) { await bridge.handle($0) }; server = listener
-            running = Task { do { try await listener.run() } catch { status = "Guest helper could not start" } }
-            status = "Guest helper ready"
+            running = Task {
+                do {
+                    let address = try await GuestInterface.wait(machineId: bootstrap.assignment.machineId)
+                    try GuestAssignedLaunchAttempt.consume(state: launchRoot)
+                    let listener = try BoundTLSServer(address: address, port: 8767, identity: identity, authenticate: { await bridge.authenticateHead($0) }, handler: { await bridge.handle($0) })
+                    server = listener
+                    try await listener.run { Task { @MainActor in self.status = "Guest helper ready" } }
+                } catch { status = "Guest helper could not start" }
+            }
         } catch { status = "Guest helper could not start" }
     }
     func stop() async -> Bool {

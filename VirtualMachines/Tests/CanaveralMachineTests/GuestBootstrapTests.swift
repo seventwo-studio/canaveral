@@ -12,7 +12,7 @@ private struct BootstrapDevice: GuestDesktopDevice {
 @MainActor final class GuestBootstrapTests: XCTestCase {
     func payload() throws -> Data {
         let root = ProcessInfo.processInfo.environment["CANAVERAL_FIXTURE_ROOT"] ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
-        return try Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent("fixtures/guest-bootstrap-v1.json"))
+        return try Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent("fixtures/guest-bootstrap-v2.json"))
     }
     func testStrictPayloadAndSelectorNoFallback() throws {
         let bytes = try payload(), valid = GuestBootstrapMount(path: "/fixture", filesystem: "cd9660", label: "CANAVERAL_BOOT", readOnly: true)
@@ -23,7 +23,7 @@ private struct BootstrapDevice: GuestDesktopDevice {
             XCTAssertFalse(started)
         }
         XCTAssertThrowsError(try AssignedGuestStartup.start(isVirtualGuest: false, mounts: { [valid] }, read: { _ in bytes }) { _ in XCTFail() })
-        let duplicate = String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "\"version\": 1", with: "\"version\": 1, \"version\": 1")
+        let duplicate = String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "\"version\": 2", with: "\"version\": 2, \"version\": 2")
         XCTAssertThrowsError(try GuestBootstrap(data: Data(duplicate.utf8)))
         var object = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
         for (key, value) in [("extra", 1 as Any), ("version", true), ("credential", "not-canonical")] {
@@ -85,7 +85,7 @@ private struct BootstrapDevice: GuestDesktopDevice {
         var machine = Machine(name: "fixture", os: .macOS, cpuCount: 2, memoryGiB: 4, diskGiB: 8)
         machine.executionLeaseID = UUID()
         let metadata = try FileManager.default.attributesOfItem(atPath: path.path), launch = UUID().uuidString.lowercased()
-        let raw: [String: Any] = ["path": path.path, "size": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "uid": getuid(), "mode": 256, "nlink": 1, "dev": String((metadata[.systemNumber] as! NSNumber).uint64Value), "ino": String((metadata[.systemFileNumber] as! NSNumber).uint64Value), "version": 1, "machineId": machine.id.uuidString.lowercased(), "leaseId": machine.executionLeaseID!.uuidString.lowercased(), "fingerprint": String(repeating: "a", count: 64), "launchId": launch]
+        let raw: [String: Any] = ["path": path.path, "size": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "uid": getuid(), "mode": 256, "nlink": 1, "dev": String((metadata[.systemNumber] as! NSNumber).uint64Value), "ino": String((metadata[.systemFileNumber] as! NSNumber).uint64Value), "version": 2, "machineId": machine.id.uuidString.lowercased(), "leaseId": machine.executionLeaseID!.uuidString.lowercased(), "fingerprint": String(repeating: "a", count: 64), "launchId": launch]
         let pin = try JSONDecoder().decode(LaunchMediaPin.self, from: JSONSerialization.data(withJSONObject: raw))
         let directory = root.appendingPathComponent(machine.id.uuidString)
         let validated = try ValidatedLaunchMedia(pin: pin, machine: machine, directory: directory, launch: launch)
