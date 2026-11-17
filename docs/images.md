@@ -1,5 +1,53 @@
 # Base and captured image contract
 
+## Product model
+
+Accepted product requirement, 2026-11-17. Canaveral separates three concepts:
+
+| Concept | Contents | User action |
+| --- | --- | --- |
+| Image registry | Discoverable OS downloads from their original publishers, with OS/version, architecture, media format, source and verification information. Entries can require a publisher download flow. | Browse/filter available sources and download an image. |
+| Image library | Downloaded, unmodified publisher artifacts, pinned to their exact version and content identity, with provenance and storage availability. | Choose a local base for a VM or blueprint. |
+| Machine blueprints | Versioned machine definitions with CPU, memory and disk defaults/constraints, an exact base reference, and optionally a captured prepared machine state. | Create a machine with the intended resources and software state. |
+
+The registry should cover supported Windows, Linux and macOS sources and be
+extensible as publishers add releases and architectures. A listing does not mean
+that every source can be downloaded automatically or run on every host. Official
+source, publisher checksum match and native boot acceptance are distinct evidence.
+
+Library originals remain immutable. Installing an OS, adding software or configuring
+a machine happens on its own writable VM disk. Capturing that prepared machine
+produces a derived artifact for a blueprint; it must not replace or appear as an
+unmodified publisher image in the library. A blueprint can reference the captured
+artifact rather than duplicate its bytes. Separate product views do not require
+separate physical artifact stores.
+
+A machine blueprint pins the base or prepared-state artifact and its revision.
+New registry releases become new download choices; they do not silently replace
+library bytes, existing blueprint revisions or running machine state. Prepared-state reuse must
+preserve the ownership, credential and independent-clone acceptance requirements
+below. The initial snapshot scope is stopped-machine disk capture, with required
+platform companion artifacts; it does not include running memory.
+
+### Current implementation boundary
+
+The image API/storage model contains both `base` imports and `derived` captures,
+and adapts images to an internal host template format. `GET /v1/image-library`
+returns only registered base imports, including offline-host records. The
+dashboard's **Image library** displays their digest and available publisher
+evidence; manual file imports explicitly lack verified publisher provenance.
+Locally configured recipes are source choices for blueprints, not downloaded
+originals in this library. Administrators retain import/capture authority.
+
+**Machine blueprints** persist independently of host configuration and reference
+either an exact source image or a captured prepared state. Source bytes remain
+in the artifact store. See the [blueprint API](templates.md#machine-blueprint-api).
+Existing `/v1/templates`, host configuration and CLI definitions remain compatible.
+Native installation, capture and independent-clone acceptance remain separate
+platform gates; the product separation does not remove those requirements.
+
+## Implementation evidence
+
 The artifact library, reservation/build contracts and dashboard/API publication have fixture coverage. Native configured-file capture and independent clone isolation require further acceptance; fixture results do not establish these guarantees.
 
 ## Image identity and media

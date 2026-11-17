@@ -40,7 +40,9 @@ for (const width of [390, 1440])
       preparation: { state: "ready" },
       updatedAt: Date.now() / 1000,
     };
-    const templates = [base];
+    const templates = [base],
+      images = [],
+      blueprints = [];
     let uploaded = 0,
       capture = null;
     await page.route("**/api/v1/**", async (route) => {
@@ -54,6 +56,17 @@ for (const width of [390, 1440])
       if (path === "hosts") result = { hosts: [host] };
       if (path === "machines") result = { machines: [source] };
       if (path === "templates") result = { templates };
+      if (path === "image-library") result = { images };
+      if (path === "blueprints") {
+        if (route.request().method() === "POST") {
+          const spec = route.request().postDataJSON();
+          result = {
+            ...spec,
+            image: templates.find((t) => t.id === spec.source.id),
+          };
+          blueprints.push(result);
+        } else result = { blueprints };
+      }
       if (path === "image-tasks") result = { tasks: capture ? [capture] : [] };
       if (path.endsWith("/images/import")) {
         const metadata = JSON.parse(
@@ -67,6 +80,7 @@ for (const width of [390, 1440])
           kind: "base",
           revision: "1",
         };
+        images.push({ ...result, hostId: host.id });
         templates.push({
           ...base,
           ...metadata,
@@ -138,31 +152,55 @@ for (const width of [390, 1440])
       .click();
     await page
       .getByRole("button", {
-        name: "Capture Existing Linux as image",
+        name: "Capture Existing Linux as snapshot",
         exact: true,
       })
       .click();
     const captureDialog = page.getByRole("dialog", {
-      name: "Capture configured VM",
+      name: "Capture prepared snapshot",
     });
     await captureDialog
-      .getByLabel("Image name", { exact: true })
+      .getByLabel("Snapshot name", { exact: true })
       .fill("Configured snapshot");
     await captureDialog
-      .getByRole("button", { name: "Capture image", exact: true })
+      .getByRole("button", { name: "Capture snapshot", exact: true })
       .click();
     await expect(
-      captureDialog.getByText("Image captured", { exact: true }),
+      captureDialog.getByText("Prepared snapshot captured", { exact: true }),
     ).toBeVisible();
     await captureDialog
       .getByRole("button", { name: "Done", exact: true })
       .click();
     if (width < 768)
       await page.getByRole("button", { name: "Toggle Sidebar" }).click();
-    await page.getByRole("link", { name: /Images/ }).click();
+    await page
+      .getByRole("link", { name: "Image library", exact: true })
+      .click();
     await expect(
       page.getByText("Configured snapshot", { exact: true }),
+    ).not.toBeVisible();
+    if (width < 768)
+      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+    await page
+      .getByRole("link", { name: "Machine blueprints", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "New blueprint", exact: true })
+      .click();
+    const blueprint = page.getByRole("dialog", {
+      name: "New machine blueprint",
+    });
+    await blueprint
+      .getByLabel("Blueprint name", { exact: true })
+      .fill("Development environment");
+    await blueprint
+      .getByLabel("Source image or prepared snapshot")
+      .selectOption({ index: 2 });
+    await blueprint.getByRole("button", { name: "Save blueprint" }).click();
+    await expect(
+      page.getByText("Development environment", { exact: true }),
     ).toBeVisible();
+    expect(blueprints[0].source.id).toBe(capture.id);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

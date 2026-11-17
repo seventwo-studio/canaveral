@@ -44,6 +44,26 @@ async function call(port: number, method: string, path: string, value?: unknown,
   });
 }
 
+test("HTTP blueprint creation reaches persistence, pins resources and delivers the original source assignment", async t => {
+  const f = await fixture(t), host = randomUUID(), credential = key();
+  const offer = { name: "Blueprint fixture", provider: "libvirt", capacity: { cpu: 8, memoryMiB: 8192, diskGiB: 100 }, templates: [{ id: "prepared", revision: "7", os: "linux", arch: "amd64", mode: "headless", imageKind: "derived", minimum: { cpu: 1, memoryMiB: 512, diskGiB: 8 } }] };
+  assert.equal((await f.request("POST", "/v1/hosts/enroll", { id: host, credential, offer }, f.enrollment)).status, 200);
+  const spec = { id: randomUUID(), name: "Development", revision: "1", source: { id: "prepared", revision: "7", arch: "amd64" }, defaults: { cpu: 2, memoryMiB: 2048, diskGiB: 16 } };
+  assert.equal((await f.request("POST", "/v1/blueprints", spec, f.admin)).status, 200);
+  assert.equal((await f.request("POST", "/v1/blueprints", { ...spec, name: "Replacement" }, f.admin)).status, 409);
+  const listed = await f.request("GET", "/v1/blueprints", undefined, f.admin);
+  assert.equal(listed.body.blueprints[0].id, spec.id);
+  const intent = { id: randomUUID(), name: "Workbench", blueprintId: spec.id, blueprintRevision: "1" };
+  const created = await f.request("POST", "/v1/machines", intent, f.admin);
+  assert.equal(created.status, 200); assert.deepEqual(created.body.resources, spec.defaults);
+  assert.equal(created.body.templateId, "prepared"); assert.equal(created.body.template.revision, "7");
+  const heartbeat = await f.request("POST", `/v1/hosts/${host}/heartbeat`, { offer, reports: {} }, credential);
+  assert.equal(heartbeat.status, 200); assert.equal(heartbeat.body.machines[0].id, intent.id);
+  assert.equal(heartbeat.body.machines[0].templateId, "prepared");
+  assert.deepEqual((await f.request("POST", "/v1/machines", intent, f.admin)).body, created.body);
+  assert.equal((await f.request("GET", "/v1/blueprints", undefined, credential)).status, 401);
+});
+
 test("controller config preserves strict fields and accepts only explicit enrollment token paths", () => {
   const base = { statePath: "/tmp/fixture.sqlite", adminTokenFile: "/tmp/admin.token", controllerId: randomUUID(), listen: { host: "127.0.0.1", port: 0 } };
   assert.deepEqual(parseControllerConfig(base), base);
@@ -58,7 +78,7 @@ test("one listener reaches all control inventories and legacy identity consumer 
   const f = await fixture(t);
   const setup = await f.request("POST", "/v1/auth/setup", { username: "admin", password }, f.admin);
   assert.equal(setup.status, 200); assert.equal(setup.body.user.role, "admin"); const token = setup.body.token as string;
-  for (const [route, field] of [["/v1/machines", "machines"], ["/v1/hosts", "hosts"], ["/v1/templates", "templates"], ["/v1/images", "images"],
+  for (const [route, field] of [["/v1/machines", "machines"], ["/v1/hosts", "hosts"], ["/v1/templates", "templates"], ["/v1/images", "images"], ["/v1/image-library", "images"], ["/v1/blueprints", "blueprints"],
     ["/v1/image-tasks", "tasks"], ["/v1/connection-setups", "setups"], ["/v1/models", "models"], ["/v1/jobs", "jobs"], ["/v1/users", "users"], ["/v1/consumers", "consumers"]]) {
     const result = await f.request("GET", route!, undefined, token); assert.equal(result.status, 200, `${route}: ${JSON.stringify(result.body)}`); assert.ok(Array.isArray(result.body[field!]));
   }

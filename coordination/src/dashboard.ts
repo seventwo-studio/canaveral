@@ -195,10 +195,10 @@ function routeAllowed(method: string, route: string): boolean {
   if (method === "GET" && new RegExp(`^/api/v1/updates/(?:releases|rollouts)(?:/${UUID})?$`).test(route)) return true;
   if (method === "POST" && (route === "/api/v1/updates/releases" || route === "/api/v1/updates/rollouts" || new RegExp(`^/api/v1/updates/rollouts/${UUID}/cancel$`).test(route))) return true;
   if (method === "GET") return ["/api/v1/auth/status", "/api/v1/auth/session", "/api/v1/auth/tokens", "/api/v1/users", "/api/v1/admin/tokens",
-    "/api/v1/hosts", "/api/v1/machines", "/api/v1/templates", "/api/v1/connection-setups", "/api/v1/images", "/api/v1/image-tasks", "/api/v1/image-registry"].includes(route) ||
+    "/api/v1/hosts", "/api/v1/machines", "/api/v1/templates", "/api/v1/blueprints", "/api/v1/connection-setups", "/api/v1/images", "/api/v1/image-library", "/api/v1/image-tasks", "/api/v1/image-registry"].includes(route) ||
     new RegExp(`^/api/v1/(?:image-tasks/${UUID}|hosts/${UUID}/resources|operations/${UUID}|machines/${UUID}(?:/(?:accessibility|desktop|files/download/[A-Za-z0-9_-]+|shells/${UUID}/stream))?)$`).test(route);
   if (method === "POST") return ["/api/v1/auth/login", "/api/v1/auth/setup", "/api/v1/auth/claim", "/api/v1/auth/claim/info", "/api/v1/auth/logout",
-    "/api/v1/auth/password", "/api/v1/auth/tokens", "/api/v1/users", "/api/v1/machines", "/api/v1/connection-setups", "/api/v1/images/captures", "/api/v1/image-registry/imports"].includes(route) ||
+    "/api/v1/auth/password", "/api/v1/auth/tokens", "/api/v1/users", "/api/v1/machines", "/api/v1/blueprints", "/api/v1/connection-setups", "/api/v1/images/captures", "/api/v1/image-registry/imports"].includes(route) ||
     new RegExp(`^/api/v1/(?:(?:auth|admin)/tokens/${UUID}/revoke|users/${UUID}/(?:update|invite|reset-password|revoke-invite)|machines/${UUID}/(?:desired|operations|power-off|delete|authorize|files/upload)|hosts/${UUID}/(?:accepting|checks|limits|images/import)|connection-setups/${UUID}/revoke)$`).test(route);
   return false;
 }

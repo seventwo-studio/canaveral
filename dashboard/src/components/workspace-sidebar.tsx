@@ -116,8 +116,10 @@ export function WorkspaceSidebar({
                             : key === "api-access"
                               ? "API access"
                               : key === "templates"
-                                ? "Images"
-                                : key.charAt(0).toUpperCase() + key.slice(1)
+                                ? "Image library"
+                                : key === "blueprints"
+                                  ? "Machine blueprints"
+                                  : key.charAt(0).toUpperCase() + key.slice(1)
                         }
                       >
                         <a
@@ -138,8 +140,11 @@ export function WorkspaceSidebar({
                               : key === "api-access"
                                 ? "API access"
                                 : key === "templates"
-                                  ? "Images"
-                                  : key.charAt(0).toUpperCase() + key.slice(1)}
+                                  ? "Image library"
+                                  : key === "blueprints"
+                                    ? "Machine blueprints"
+                                    : key.charAt(0).toUpperCase() +
+                                      key.slice(1)}
                           </span>
                         </a>
                       </SidebarMenuButton>

@@ -71,7 +71,7 @@ export function catalogue(): RegistryEntry[] {
   add("macos-supported", "macOS · latest supported restore", "Apple", "macos", "arm64", "installer", "ipsw", "https://developer.apple.com/documentation/virtualization/installing-macos-on-a-virtual-machine", "apple", "Resolved by Apple on the selected Apple silicon Mac. Installation and guest access have separate runtime requirements.");
   for (const arch of ["amd64", "arm64"] as const) {
     for (const release of ["24.04", "26.04"]) for (const flavor of ["desktop", "server"]) add(`ubuntu-${release}-${flavor}-${arch}`, `Ubuntu ${release} LTS · ${flavor}`, "Canonical", "linux", arch, "installer", "iso", `https://releases.ubuntu.com/${release}/`, "ubuntu-iso", "Installation media requires an installer console; guest services start after installation.", { release, flavor });
-    add(`ubuntu-noble-cloud-${arch}`, "Ubuntu 24.04 LTS · cloud disk", "Canonical", "linux", arch, "disk", "qcow2", "https://cloud-images.ubuntu.com/noble/current/", "ubuntu-cloud", "Installed cloud disk; Linux guest services require configured preparation.");
+    add(`ubuntu-noble-cloud-${arch}`, "Ubuntu 24.04 LTS · cloud disk", "Canonical", "linux", arch, "disk", "qcow2", "https://cloud-images.ubuntu.com/releases/noble/release/", "ubuntu-cloud", "Installed cloud disk; Linux guest services require configured preparation.");
     add(`debian-stable-netinst-${arch}`, "Debian stable · network installer", "Debian", "linux", arch, "installer", "iso", "https://www.debian.org/CD/netinst/", "debian", "Small installer; downloads packages during installation.");
     add(`fedora-workstation-${arch}`, "Fedora Workstation · stable", "Fedora Project", "linux", arch, "installer", "iso", "https://fedoraproject.org/workstation/download/", "fedora", "Latest stable Workstation ISO; prereleases are excluded.");
     add(`windows-11-iso-${arch}`, "Windows 11 · installation ISO", "Microsoft", "windows", arch, "installer", "iso", `https://www.microsoft.com/en-us/software-download/windows11${arch === "arm64" ? "arm64" : ""}`, null, "Choose edition and language on Microsoft’s site, then import the downloaded ISO. Activation and runtime support are separate.");
@@ -85,7 +85,7 @@ export function registryEntry(id: unknown): RegistryEntry {
   if (!result) throw new ServiceError("Unknown base image registry entry.", 404);
   return result;
 }
-const publisherHosts = new Set(["releases.ubuntu.com", "cdimage.ubuntu.com", "cloud-images.ubuntu.com", "cdimage.debian.org", "chuangtzu.ftp.acc.umu.se", "fedoraproject.org", "dl.fedoraproject.org", "download.fedoraproject.org"]);
+const publisherHosts = new Set(["releases.ubuntu.com", "cdimage.ubuntu.com", "cloud-images.ubuntu.com", "cdimage.debian.org", "chuangtzu.ftp.acc.umu.se", "saimei.ftp.acc.umu.se", "fedoraproject.org", "dl.fedoraproject.org", "download.fedoraproject.org"]);
 export function allowedUrl(value: unknown): value is string {
   if (typeof value !== "string") return false;
   try {
@@ -315,8 +315,12 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
     if (req.method === "POST" && parts.join("/") === "image-registry/imports") {
       requireAdmin(req); return { body: controller.createRegistryImport(req.body, req) };
     }
-    if (req.method !== "GET" || !((parts.length === 1 && ["images", "image-tasks", "image-registry"].includes(parts[0]!)) || (parts.length === 2 && parts[0] === "image-tasks"))) return undefined;
+    if (req.method !== "GET" || !((parts.length === 1 && ["images", "image-library", "image-tasks", "image-registry"].includes(parts[0]!)) || (parts.length === 2 && parts[0] === "image-tasks"))) return undefined;
     return store.transaction(db => {
+      if (parts[0] === "image-library") {
+        requireScope(req, "read");
+        return { body: { images: db.prepare("SELECT * FROM images ORDER BY rowid DESC").all().map(row => ({ hostId: String(row.host), ...validateImage(JSON.parse(String(row.metadata))) })).filter(image => image.kind === "base") } };
+      }
       requireAdmin(req);
       if (parts[0] === "image-registry") return { body: { entries: catalogue() } };
       if (parts[0] === "images") return { body: { images: db.prepare("SELECT * FROM images ORDER BY rowid DESC").all().map(row => ({ hostId: row.host, ...validateImage(JSON.parse(String(row.metadata))) })) } };
@@ -820,7 +824,7 @@ export async function resolveRegistrySource(item: RegistryEntry, io: RegistryRes
   let url: string, version: string, sha256: string | null = null;
   if (["ubuntu-iso", "ubuntu-cloud", "debian"].includes(item.resolver ?? "")) {
     let root: string, pattern: RegExp;
-    if (item.resolver === "ubuntu-cloud") { root = "https://cloud-images.ubuntu.com/noble/current/"; pattern = new RegExp(`^noble-server-cloudimg-${item.arch}\\.img$`); }
+    if (item.resolver === "ubuntu-cloud") { root = "https://cloud-images.ubuntu.com/releases/noble/release/"; pattern = new RegExp(`^ubuntu-24\\.04-server-cloudimg-${item.arch}\\.img$`); }
     else if (item.resolver === "debian") { root = `https://cdimage.debian.org/debian-cd/current/${item.arch}/iso-cd/`; pattern = new RegExp(`^debian-[0-9.]+-${item.arch}-netinst\\.iso$`); }
     else {
       const release = String(item.release), flavor = item.flavor === "desktop" ? "desktop" : "live-server";

@@ -15,6 +15,7 @@ import { initializeInfrastructure, claimSetup, healthReady, recordInfrastructure
 import { recordPreparation } from "./preparation.ts";
 import { reportImageTasks, assignedImageTasks, acknowledgedImages, validateCatalogueOffer } from "./images.ts";
 import { reportInferenceJobs, assignedInferenceJobs } from "./inference.ts";
+import { blueprint, initializeBlueprints } from "./blueprints.ts";
 
 import { PhysicalDomains, physicalBudget } from "../physical-domains.ts";
 
@@ -124,9 +125,16 @@ export function validateOffer(value: unknown): Json {
   return result;
 }
 export function validateMachineRequest(value: unknown): Json {
-  const input = object(value); fields(input, ["id", "name", "templateId", "resources", "templateRevision", "hostId", "arch"]);
+  const input = object(value); fields(input, ["id", "name", "templateId", "resources", "templateRevision", "hostId", "arch", "blueprintId", "blueprintRevision"]);
   const overrides = object(input.resources === undefined ? {} : input.resources); fields(overrides, [...resourceKeys]);
-  const result: Json = { id: machineIdentifier(input.id), name: text(input.name, "machine name"), templateId: text(input.templateId, "template id"), resources: Object.fromEntries(Object.entries(overrides).map(([key, v]) => [key, integer(v, key)])) };
+  const result: Json = { id: machineIdentifier(input.id), name: text(input.name, "machine name"), resources: Object.fromEntries(Object.entries(overrides).map(([key, v]) => [key, integer(v, key)])) };
+  if (input.blueprintId !== undefined) {
+    if (input.templateId !== undefined || input.templateRevision !== undefined || input.arch !== undefined) failure("Choose either a pinned blueprint or an image source.");
+    result.blueprintId = machineIdentifier(input.blueprintId); result.blueprintRevision = text(input.blueprintRevision, "blueprint revision");
+  } else {
+    if (input.blueprintRevision !== undefined) failure("Blueprint revision requires a blueprint ID.");
+    result.templateId = text(input.templateId, "template id");
+  }
   if ("templateRevision" in input) result.templateRevision = text(input.templateRevision, "template revision");
   if (input.hostId != null) result.hostId = machineIdentifier(input.hostId);
   if (input.arch != null) { if (!["arm64", "amd64"].includes(String(input.arch))) failure("Invalid architecture."); result.arch = input.arch; }
@@ -146,6 +154,7 @@ function persistedOffer(value: unknown): Json | undefined {
  * Initialization migrates the eight-column Python machines table in place.
  */
 export function initializeMachines(db: DatabaseSync): void {
+  initializeBlueprints(db);
   db.exec(`CREATE TABLE IF NOT EXISTS hosts (id TEXT PRIMARY KEY,credential TEXT NOT NULL,offer TEXT NOT NULL,seen REAL NOT NULL,enabled INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY,request TEXT NOT NULL,host TEXT NOT NULL,template TEXT NOT NULL,desired TEXT NOT NULL,observed TEXT NOT NULL,detail TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS templates (id TEXT NOT NULL,revision TEXT NOT NULL,arch TEXT NOT NULL,definition TEXT NOT NULL,PRIMARY KEY(id,revision,arch));`);
@@ -367,6 +376,8 @@ export class MachineStore implements ControlModule {
       const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(old.host!);
       return this.machine(db, old, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
     }
+    if (leased && request.blueprintId) failure("Application leases require their approved image policy, not a machine blueprint.", 400);
+    const preset = request.blueprintId ? blueprint(db, request.blueprintId, request.blueprintRevision) : null;
     const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
     for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
       if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
@@ -376,17 +387,17 @@ export class MachineStore implements ControlModule {
       const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
       for (const image of advertised.templates) {
         if (leased && !machineLeaseEligible(advertised, image)) continue;
-        if (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision) continue;
-        const size: Resources = { ...(image.defaults ?? image.minimum), ...request.resources };
-        if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => image.minimum[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
+        if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
+        const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
+        if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
       }
     }
     if (!candidates.length) failure("No online accepting host offers this template and enough unreserved capacity.", 409);
-    if (!request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
+    if (!preset && !request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
     candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
     const selected = candidates[0]!;
 
-    db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);
+    db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, ...(preset ? { templateId: selected.image.id, templateRevision: selected.image.revision, arch: selected.image.arch } : {}), resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);
     return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, true);
   }
   enable(id: string, enabled: unknown, req: ControlRequest): Json {
