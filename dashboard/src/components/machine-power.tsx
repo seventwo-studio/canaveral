@@ -15,10 +15,12 @@ export function MachinePowerOff({
   machine,
   onClose,
   onRefresh,
+  returnFocus,
 }: {
   machine: MachinePowerTarget;
   onClose: () => void;
   onRefresh: () => void | Promise<void>;
+  returnFocus?: Element | null;
 }) {
   const intent = useRef(machine.powerOffRequest || crypto.randomUUID());
   const [busy, setBusy] = useState(false),
@@ -51,9 +53,20 @@ export function MachinePowerOff({
         if (!open && !busy) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent
+        onCloseAutoFocus={(event) => {
+          if (returnFocus instanceof HTMLElement && returnFocus.isConnected) {
+            event.preventDefault();
+            returnFocus.focus();
+          }
+        }}
+      >
         <DialogHeader>
-          <DialogTitle>Power off {machine.name}?</DialogTitle>
+          <DialogTitle>
+            {machine.powerOffRequest
+              ? `Check power-off status for ${machine.name}`
+              : `Power off ${machine.name}?`}
+          </DialogTitle>
           <DialogDescription>
             This cuts power to the VM. Unsaved changes may be lost, and a
             captured disk may require filesystem recovery. Use Stop for a

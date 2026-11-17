@@ -135,3 +135,24 @@ test("host limits require matching save amounts and respect a smaller host offer
     limits,
   );
 });
+
+test("mapped physical budgets cap every resource without widening offered or saved limits", () => {
+  const limits = { cpu: 6, memoryMiB: 6144, diskGiB: 80 };
+  const effectiveCapacity = { cpu: 2, memoryMiB: 2048, diskGiB: 40 };
+  expect(
+    allocationLimits({ capacity: amounts, limits, effectiveCapacity }),
+  ).toEqual(effectiveCapacity);
+  expect(
+    allocationLimits({ capacity: amounts, limits, effectiveCapacity: amounts }),
+  ).toEqual(limits);
+  expect(
+    allocationLimits({ capacity: limits, effectiveCapacity: amounts }),
+  ).toEqual(limits);
+  expect(allocationLimits({ capacity: amounts })).toEqual(amounts);
+  expect(
+    allocationLimits({
+      capacity: amounts,
+      effectiveCapacity: { cpu: 0, memoryMiB: 0, diskGiB: 0 },
+    }),
+  ).toEqual({ cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});

@@ -344,7 +344,7 @@ describe("dashboard contracts", () => {
   });
   it("keeps sessions out of persistent storage and discards inventory on sign-out", async () => {
     const user = await login();
-    expect(screen.getByText("Preparing")).toBeTruthy();
+    expect(screen.getAllByText("Preparing").length).toBeGreaterThan(0);
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
     expect(calls.find((c) => c.path === "hosts")!.credentials).toBe(

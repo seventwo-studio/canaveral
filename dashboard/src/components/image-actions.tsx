@@ -365,10 +365,12 @@ export function ImageCapture({
   machine,
   onClose,
   onRefresh,
+  returnFocus,
 }: {
   machine: { id: string; name: string; desired: string; observed: string };
   onClose: () => void;
   onRefresh: Refresh;
+  returnFocus?: Element | null;
 }) {
   const [name, setName] = useState(`${machine.name} image`),
     [task, setTask] = useState<ImageTask | null>(null),
@@ -432,7 +434,14 @@ export function ImageCapture({
         if (!open) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent
+        onCloseAutoFocus={(event) => {
+          if (returnFocus instanceof HTMLElement && returnFocus.isConnected) {
+            event.preventDefault();
+            returnFocus.focus();
+          }
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Capture prepared snapshot</DialogTitle>
           <DialogDescription>

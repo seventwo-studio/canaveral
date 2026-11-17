@@ -233,13 +233,21 @@ it("shows unavailable overview counts instead of claiming zero state", async () 
     json({ error: "Older server has no administration endpoint" }, 404);
   render(<Harness overview />);
   await screen.findByText(/API access could not be refreshed/);
-  expect(screen.getAllByText("—")).toHaveLength(4);
+  for (const label of [
+    "Users",
+    "Active administrators",
+    "Active API tokens",
+    "Pending invitations",
+    "Disabled accounts",
+  ]) {
+    expect(screen.getByText(label).nextElementSibling?.textContent).toBe("—");
+  }
   expect(screen.getByText(/Load inventory to review/)).toBeTruthy();
 });
 it.each([
-  [{ status: "passed", fresh: false }, "Environment checks are stale"],
-  [{ status: "checking", fresh: true }, "Environment checks in progress"],
-  [undefined, "Placement not ready"],
+  [{ status: "passed", fresh: false }, "Checks stale"],
+  [{ status: "checking", fresh: true }, "Checking…"],
+  [undefined, "Not ready for placement"],
 ] as const)(
   "flags online connections fenced by placement checks (%s)",
   async (health, detail) => {
@@ -276,7 +284,9 @@ it.each([
         onRefresh={vi.fn()}
       />,
     );
-    await screen.findByText(detail);
+    await within(
+      screen.getByRole("region", { name: "Needs attention" }),
+    ).findByText(detail);
     expect(
       screen
         .getByRole("link", { name: "Review Blocked host" })

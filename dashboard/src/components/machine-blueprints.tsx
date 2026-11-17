@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { api, errorMessage, memory } from "@/lib/api";
+import { Search, RefreshCw } from "lucide-react";
+import { api, errorMessage, memory, number, provider } from "@/lib/api";
 import {
   blueprint,
   blueprints,
@@ -11,6 +12,9 @@ import type { Blueprint, LibraryImage } from "@/lib/blueprints";
 import type { GroupedImage } from "@/lib/inventory";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Badge } from "./ui/badge";
+import { Alert, AlertDescription } from "./ui/alert";
+import { InputGroup, InputGroupInput, InputGroupAddon } from "./ui/input-group";
 import {
   Card,
   CardHeader,
@@ -27,11 +31,98 @@ import {
   DialogDescription,
 } from "./ui/dialog";
 import { Field, FieldLabel, FieldDescription, FieldGroup } from "./ui/field";
-import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "./ui/empty";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from "./ui/empty";
 
 const sourceKey = (
   source: { id: string; revision: string; arch: string } | undefined,
 ) => (source ? JSON.stringify([source.id, source.revision, source.arch]) : "");
+
+function CatalogueNotice({
+  error,
+  loaded,
+  name,
+}: {
+  error: string;
+  loaded: boolean;
+  name: string;
+}) {
+  return error ? (
+    <Alert variant="destructive" role="alert">
+      <AlertDescription>
+        {loaded
+          ? `${name} could not be refreshed. Showing the last snapshot.`
+          : `${name} could not be loaded.`}
+        <details className="mt-1 text-xs">
+          <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Connection details
+          </summary>
+          <p className="mt-2 break-words">{error}</p>
+        </details>
+      </AlertDescription>
+    </Alert>
+  ) : null;
+}
+
+function CatalogueToolbar({
+  query,
+  onQuery,
+  label,
+  placeholder,
+  loaded,
+  count,
+  total,
+  refreshing,
+  onRefresh,
+}: {
+  query: string;
+  onQuery: (value: string) => void;
+  label: string;
+  placeholder: string;
+  loaded: boolean;
+  count: number;
+  total: number;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
+        <InputGroup className="w-full sm:w-72">
+          <InputGroupInput
+            aria-label={label}
+            placeholder={placeholder}
+            value={query}
+            onChange={(e) => onQuery(e.target.value)}
+          />
+          <InputGroupAddon>
+            <Search aria-hidden="true" />
+          </InputGroupAddon>
+        </InputGroup>
+        {loaded && (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {count} of {total}
+          </span>
+        )}
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={refreshing}
+        aria-label={`Refresh ${label.replace(/^Search /, "")}`}
+        onClick={onRefresh}
+      >
+        <RefreshCw aria-hidden="true" />
+        {refreshing ? "Refreshing…" : "Refresh"}
+      </Button>
+    </div>
+  );
+}
 
 export function ImageLibrary({
   sources,
@@ -45,105 +136,173 @@ export function ImageLibrary({
   const [images, setImages] = useState<LibraryImage[]>([]),
     [error, setError] = useState(""),
     [loaded, setLoaded] = useState(false),
+    [refreshing, setRefreshing] = useState(true),
+    [reload, setReload] = useState(0),
     [query, setQuery] = useState("");
   useEffect(() => {
-    let alive = true;
-    const refresh = () =>
-      api("image-library", undefined, libraryImages)
-        .then((value) => {
-          if (alive) {
-            setImages(value);
-            setLoaded(true);
-            setError("");
-          }
-        })
-        .catch((e) => {
-          if (alive) setError(errorMessage(e));
-        });
+    let alive = true,
+      epoch = 0,
+      inFlight = false;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      const request = ++epoch;
+      setRefreshing(true);
+      try {
+        const value = await api("image-library", undefined, libraryImages);
+        if (alive && request === epoch) {
+          setImages(value);
+          setLoaded(true);
+          setError("");
+        }
+      } catch (e) {
+        if (alive && request === epoch) setError(errorMessage(e));
+      } finally {
+        inFlight = false;
+        if (alive && request === epoch) setRefreshing(false);
+      }
+    };
     void refresh();
     const timer = setInterval(() => {
-      void refresh();
+      if (!document.hidden) void refresh();
     }, 5000);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [reload]);
   const visible = images.filter((i) =>
     [i.name, i.os, i.arch, i.registry?.version]
       .join(" ")
       .toLowerCase()
-      .includes(query.toLowerCase()),
+      .includes(query.trim().toLowerCase()),
   );
   return (
-    <>
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          Could not refresh the library. {error}
-        </p>
-      )}
-      <Input
-        aria-label="Search image library"
+    <div className="min-w-0 space-y-4">
+      <CatalogueNotice error={error} loaded={loaded} name="Image library" />
+      <CatalogueToolbar
+        query={query}
+        onQuery={setQuery}
+        label="Search image library"
         placeholder="Search images…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        loaded={loaded}
+        count={visible.length}
+        total={images.length}
+        refreshing={refreshing}
+        onRefresh={() => setReload((v) => v + 1)}
       />
-      {!loaded && !error ? (
-        <p>Loading image library…</p>
-      ) : !visible.length ? (
-        <Empty>
+      {!loaded ? (
+        <Empty className="min-h-60 border">
           <EmptyHeader>
-            <EmptyTitle>No downloaded images</EmptyTitle>
+            <EmptyTitle role={error ? undefined : "status"}>
+              {error ? "Image library unavailable" : "Loading image library…"}
+            </EmptyTitle>
+            {error && (
+              <EmptyDescription>
+                Retry to load your downloaded images.
+              </EmptyDescription>
+            )}
+          </EmptyHeader>
+          {error && (
+            <EmptyContent>
+              <Button
+                variant="outline"
+                disabled={refreshing}
+                onClick={() => setReload((v) => v + 1)}
+              >
+                Retry image library
+              </Button>
+            </EmptyContent>
+          )}
+        </Empty>
+      ) : !visible.length ? (
+        <Empty className="min-h-60 border">
+          <EmptyHeader>
+            <EmptyTitle role="heading" aria-level={2}>
+              {images.length ? "No matching images" : "No downloaded images"}
+            </EmptyTitle>
             <EmptyDescription>
-              Download an original from the registry or import a publisher file.
+              {images.length
+                ? "Try another name, OS or architecture."
+                : "Download an original from the registry or import a publisher file."}
             </EmptyDescription>
           </EmptyHeader>
+          {query && (
+            <EmptyContent>
+              <Button variant="outline" onClick={() => setQuery("")}>
+                Clear search
+              </Button>
+            </EmptyContent>
+          )}
         </Empty>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-2 xl:grid-cols-3">
           {visible.map((i) => {
             const source = sources.find((s) => s.id === i.id);
             const available = source?.hosts.some(
               (h) => h.id === i.hostId && h.online && h.accepting,
             );
             return (
-              <Card key={i.id} className="min-w-0">
-                <CardHeader>
-                  <CardTitle className="break-words">{i.name}</CardTitle>
+              <Card key={i.id} className="min-w-0 gap-4 shadow-none">
+                <CardHeader className="min-w-0">
+                  <CardTitle className="break-words font-display text-xl font-medium">
+                    {i.name}
+                  </CardTitle>
                   <CardDescription>
-                    {i.os} · {i.arch} ·{" "}
-                    {i.mediaType === "installer" ? "Installer" : "Boot disk"} ·{" "}
-                    {i.format.toUpperCase()}
+                    {provider(i.os)} · {i.arch} · {i.format.toUpperCase()}
                   </CardDescription>
+                  <Badge variant="outline" className="mt-1">
+                    {available ? "Available on host" : "Awaiting host"}
+                  </Badge>
                 </CardHeader>
-                <CardContent className="space-y-2 text-xs text-muted-foreground">
-                  <p>
+                <CardContent className="min-w-0 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      {i.mediaType === "installer" ? "Installer" : "Boot disk"}
+                    </span>
+                    <span className="tabular-nums">
+                      {i.bytes >= 1073741824
+                        ? `${number(i.bytes / 1073741824)} GiB`
+                        : i.bytes >= 1048576
+                          ? `${number(i.bytes / 1048576)} MiB`
+                          : `${i.bytes.toLocaleString()} bytes`}
+                    </span>
+                  </div>
+                  <p className="text-muted-foreground">
                     {i.registry
                       ? i.registry.publisherSha256
                         ? "Publisher SHA-256 matched"
                         : "Apple restore source · local SHA-256 recorded"
                       : "Manual import · publisher provenance unverified"}
                   </p>
-                  <p className="break-all">SHA-256: {i.sha256}</p>
-                  <p>
-                    {i.bytes.toLocaleString()} bytes ·{" "}
-                    {available
-                      ? "Available on host"
-                      : "Awaiting an accepting host"}
-                  </p>
-                  {i.registry && (
-                    <a
-                      className="break-all underline"
-                      href={i.registry.url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Original download · {i.registry.version}
-                    </a>
-                  )}
+                  <details className="min-w-0 border-t pt-3">
+                    <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      Source & checksum
+                    </summary>
+                    <dl className="mt-3 space-y-2">
+                      <div>
+                        <dt className="text-muted-foreground">SHA-256</dt>
+                        <dd className="mt-1 break-all">{i.sha256}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-muted-foreground">Size</dt>
+                        <dd>{i.bytes.toLocaleString()} bytes</dd>
+                      </div>
+                    </dl>
+                    {i.registry && (
+                      <a
+                        className="mt-3 inline-block break-all underline underline-offset-4"
+                        href={i.registry.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Original download · {i.registry.version}
+                      </a>
+                    )}
+                  </details>
                 </CardContent>
                 {admin && (
-                  <CardFooter>
+                  <CardFooter className="mt-auto">
                     <Button
                       variant="outline"
                       disabled={!source || !!error}
@@ -160,7 +319,7 @@ export function ImageLibrary({
           })}
         </div>
       )}
-    </>
+    </div>
   );
 }
 
@@ -168,27 +327,35 @@ export function MachineBlueprints({
   sources,
   admin,
   onCreate,
+  inventoryAvailable = true,
 }: {
   sources: GroupedImage[];
   admin: boolean;
   onCreate: (offer: GroupedImage) => void;
+  inventoryAvailable?: boolean;
 }) {
   const [items, setItems] = useState<Blueprint[]>([]),
     [error, setError] = useState(""),
     [loaded, setLoaded] = useState(false),
+    [refreshing, setRefreshing] = useState(true),
     [editing, setEditing] = useState<Blueprint | "new" | null>(null),
     [query, setQuery] = useState("");
-  const alive = useRef(true);
+  const alive = useRef(true),
+    epoch = useRef(0);
   const refresh = async () => {
+    const request = ++epoch.current;
+    setRefreshing(true);
     try {
       const value = await api("blueprints", undefined, blueprints);
-      if (alive.current) {
+      if (alive.current && request === epoch.current) {
         setItems(value);
         setLoaded(true);
         setError("");
       }
     } catch (e) {
-      if (alive.current) setError(errorMessage(e));
+      if (alive.current && request === epoch.current) setError(errorMessage(e));
+    } finally {
+      if (alive.current && request === epoch.current) setRefreshing(false);
     }
   };
   useEffect(() => {
@@ -196,86 +363,160 @@ export function MachineBlueprints({
     void refresh();
     return () => {
       alive.current = false;
+      ++epoch.current;
     };
   }, []);
   const visible = items.filter((b) =>
     [b.name, b.revision, b.image.os, b.image.arch]
       .join(" ")
       .toLowerCase()
-      .includes(query.toLowerCase()),
+      .includes(query.trim().toLowerCase()),
   );
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="font-display text-3xl font-medium">
-            Machine blueprints
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Reusable resources and a pinned OS image or prepared snapshot.
-          </p>
-        </div>
+        <h1 className="font-display text-3xl font-medium">
+          Machine blueprints
+        </h1>
         {admin && (
           <Button onClick={() => setEditing("new")}>New blueprint</Button>
         )}
       </div>
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          Could not refresh blueprints. {error}
-        </p>
+      <CatalogueNotice error={error} loaded={loaded} name="Blueprints" />
+      {!inventoryAvailable && (
+        <Alert role="status">
+          <AlertDescription>
+            Host availability unavailable. Refresh inventory from the workspace
+            header before creating a machine.
+          </AlertDescription>
+        </Alert>
       )}
-      <Input
-        aria-label="Search machine blueprints"
+      <CatalogueToolbar
+        query={query}
+        onQuery={setQuery}
+        label="Search machine blueprints"
         placeholder="Search blueprints…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        loaded={loaded}
+        count={visible.length}
+        total={items.length}
+        refreshing={refreshing}
+        onRefresh={() => {
+          void refresh();
+        }}
       />
-      {!loaded && !error ? (
-        <p>Loading blueprints…</p>
-      ) : !visible.length ? (
-        <Empty>
+      {!loaded ? (
+        <Empty className="min-h-60 border">
           <EmptyHeader>
-            <EmptyTitle>No machine blueprints</EmptyTitle>
+            <EmptyTitle role={error ? undefined : "status"}>
+              {error ? "Blueprints unavailable" : "Loading blueprints…"}
+            </EmptyTitle>
+            {error && (
+              <EmptyDescription>
+                Retry to load saved machine definitions.
+              </EmptyDescription>
+            )}
+          </EmptyHeader>
+          {error && (
+            <EmptyContent>
+              <Button
+                variant="outline"
+                disabled={refreshing}
+                onClick={() => {
+                  void refresh();
+                }}
+              >
+                Retry blueprints
+              </Button>
+            </EmptyContent>
+          )}
+        </Empty>
+      ) : !visible.length ? (
+        <Empty className="min-h-60 border">
+          <EmptyHeader>
+            <EmptyTitle role="heading" aria-level={2}>
+              {items.length
+                ? "No matching blueprints"
+                : "No machine blueprints"}
+            </EmptyTitle>
             <EmptyDescription>
-              Choose a downloaded image or a captured prepared machine, then
-              save its resource settings.
+              {items.length
+                ? "Try another name, OS or architecture."
+                : "Save resource settings for a downloaded image or prepared snapshot."}
             </EmptyDescription>
           </EmptyHeader>
+          {query && (
+            <EmptyContent>
+              <Button variant="outline" onClick={() => setQuery("")}>
+                Clear search
+              </Button>
+            </EmptyContent>
+          )}
         </Empty>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-2 xl:grid-cols-3">
           {visible.map((b) => {
             const offered = blueprintOffer(b, sources),
-              available = offered.hosts.some((h) => h.online && h.accepting);
+              available =
+                inventoryAvailable &&
+                offered.hosts.some((h) => h.online && h.accepting);
             return (
               <Card
                 key={JSON.stringify([b.id, b.revision])}
-                className="min-w-0"
+                className="min-w-0 gap-4 shadow-none"
               >
-                <CardHeader>
-                  <CardTitle className="break-words">{b.name}</CardTitle>
+                <CardHeader className="min-w-0">
+                  <CardTitle className="break-words font-display text-xl font-medium">
+                    {b.name}
+                  </CardTitle>
                   <CardDescription>
-                    Revision {b.revision} · {b.image.os} · {b.image.arch}
+                    Revision {b.revision} · {provider(b.image.os)} ·{" "}
+                    {b.image.arch}
                   </CardDescription>
+                  <Badge
+                    variant="outline"
+                    className="mt-1 max-w-full whitespace-normal"
+                  >
+                    {!inventoryAvailable
+                      ? "Host availability unavailable"
+                      : available
+                        ? "Available"
+                        : "Awaiting host"}
+                  </Badge>
                 </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <p>
-                    {b.defaults.cpu} vCPU · {memory(b.defaults.memoryMiB)} ·{" "}
-                    {b.defaults.diskGiB} GiB disk
-                  </p>
-                  <p className="break-words text-muted-foreground">
+                <CardContent className="min-w-0 space-y-3 text-xs">
+                  <dl className="grid grid-cols-3 gap-3">
+                    <div>
+                      <dt className="text-muted-foreground">CPU</dt>
+                      <dd className="mt-1 tabular-nums">
+                        {b.defaults.cpu} vCPU
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Memory</dt>
+                      <dd className="mt-1 tabular-nums">
+                        {memory(b.defaults.memoryMiB)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Disk</dt>
+                      <dd className="mt-1 tabular-nums">
+                        {b.defaults.diskGiB} GiB
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="break-words border-t pt-3 text-muted-foreground">
                     {b.image.imageKind === "derived"
                       ? "Prepared snapshot"
                       : "Source image"}
                     : {b.image.name || b.source.id} · {b.source.revision}
                   </p>
-                  {!available && (
+                  {inventoryAvailable && !available && (
                     <p className="text-muted-foreground">
                       No accepting host offers this source revision.
                     </p>
                   )}
                 </CardContent>
-                <CardFooter className="flex flex-wrap gap-2">
+                <CardFooter className="mt-auto flex flex-wrap gap-2">
                   <Button
                     disabled={!available || !!error}
                     onClick={() => onCreate(offered)}

@@ -60,9 +60,8 @@ export function HostLimits({
     >
       <h2 className="text-sm font-medium">Canaveral host limits</h2>
       <p className="text-xs text-muted-foreground">
-        Set how much CPU, memory and disk Canaveral can allocate on this host
-        across all its runtimes. New allocations also need to fit the capacity
-        offered by the host.
+        Allocation budget across this host’s runtimes. Host capacity still
+        applies.
       </p>
       <div className="grid gap-3 sm:grid-cols-3">
         {resourceFields.map(([key, label]) => (
@@ -91,9 +90,8 @@ export function HostLimits({
         ))}
       </div>
       <p className="text-xs text-muted-foreground">
-        Lowering a limit keeps existing workloads and blocks allocations that
-        would exceed it. These limits control scheduling; they do not throttle
-        measured host usage.
+        Lower limits keep existing workloads and block allocations over budget.
+        Limits affect scheduling, not measured usage.
       </p>
       {error && (
         <p role="alert" className="text-xs text-destructive">

@@ -64,6 +64,7 @@ export interface Host extends CatalogueHost {
   placementReady?: boolean;
   overcommitted?: boolean;
   capacity: Resources;
+  effectiveCapacity?: Resources;
   reserved?: Resources;
   limits?: Resources;
   usage?: HostUsage;
@@ -301,11 +302,18 @@ const resourceKeys = ["cpu", "memoryMiB", "diskGiB"] as const;
 export function allocationLimits(host: {
   capacity: Resources;
   limits?: Resources;
+  effectiveCapacity?: Resources;
 }): Resources {
   const limits = host.limits || host.capacity;
+  // Mapped domains share their admission budget with runner reservations.
+  const effective = host.effectiveCapacity || host.capacity;
   return {
-    cpu: Math.min(host.capacity.cpu, limits.cpu),
-    memoryMiB: Math.min(host.capacity.memoryMiB, limits.memoryMiB),
-    diskGiB: Math.min(host.capacity.diskGiB, limits.diskGiB),
+    cpu: Math.min(host.capacity.cpu, limits.cpu, effective.cpu),
+    memoryMiB: Math.min(
+      host.capacity.memoryMiB,
+      limits.memoryMiB,
+      effective.memoryMiB,
+    ),
+    diskGiB: Math.min(host.capacity.diskGiB, limits.diskGiB, effective.diskGiB),
   };
 }
