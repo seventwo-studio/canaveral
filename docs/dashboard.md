@@ -30,6 +30,39 @@ attention states and links to the existing operational controls. Counts use the
 current inventory and credential snapshots. Unavailable data stays unavailable;
 these are not historical utilization or audit charts.
 
+The machine workspace and administration overview share a **Fleet pulse**.
+Its donut partitions the full inventory snapshot (before search and owner filters),
+with exact counts and state labels. Selecting a state clears existing search and
+owner filters and shows that group; **Running** in the chart means running but not
+ready/preparing, while the inventory's **Running** filter includes all running
+machines. **Needs attention** keeps the existing error/unknown/setup-failed rules.
+Administrators see per-host CPU, memory and disk reservations against effective
+limits, including reduced shared physical budgets, with exceptions first. The summary initially shows three connections on
+wide screens. On narrow screens, **Show host reservations** expands a one-connection
+summary so the machine list stays near the fleet status; **Show all** expands the
+remaining connections. Missing
+reservations stay unavailable, over-limit amounts remain visible, and retained
+snapshots are labeled when refresh fails. These are reservations, not utilization.
+
+Machine inventory uses aligned rows with a shared header on wide screens and
+labeled fields on narrow screens. Ready machines with guest access lead with
+**Control**; stopped machines lead with **Start**; other states lead with
+**Details**. Ordinary lifecycle controls remain visible. **More actions** holds
+capture and power-off controls with their existing eligibility and confirmations.
+A pending power-off request exposes **Check power-off status**, including while the
+host is offline; reopening retains its durable request identity.
+Image revisions, update age and the unowned-machine explanation stay in details.
+Menu-to-dialog transitions restore focus to the originating menu button.
+
+The sidebar places **Overview** first for administrators. The overview leads with
+attention states, then access counts and fleet charts. It never reports an all-clear
+from unavailable inventory; stale snapshots retain their qualification. Library
+and blueprint searches distinguish no matches from an empty collection, and
+initial failures from retained stale results. Blueprint creation stays disabled
+while its host-offer inventory is unavailable or stale. Retry and clear-search controls stay
+next to the affected content; full image hashes and download evidence disclose
+under **Source & checksum** while verification status stays visible.
+
 `#admin/users` provides user search and status filters, machine ownership counts,
 invitations, recovery and role/status controls. Disable, password reset and role
 changes require a confirmation naming the account and consequences. Invitations

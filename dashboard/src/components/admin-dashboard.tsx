@@ -1,5 +1,6 @@
+import { hostIssue } from "@/lib/fleet";
+import { FleetPulse } from "./fleet-pulse";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, KeyRound, Monitor, Server, Users } from "lucide-react";
 import type { Inventory, User } from "@/lib/inventory";
 import type { Host } from "@/lib/infrastructure";
 import { api, attention, errorMessage, machineStatus } from "@/lib/api";
@@ -123,19 +124,6 @@ export function useAdminUsers(
   return useAdminResource(user, "users", adminUsers, onDenied, refreshKey);
 }
 type Directory = ReturnType<typeof useAdminUsers>;
-function hostIssue(host: Host) {
-  if (!host.online) return "Offline";
-  if (!host.enabled) return "Draining";
-  if (host.overcommitted) return "Overcommitted";
-  if (host.placementReady === false || host.health?.status === "failed") {
-    if (host.health?.fresh === false) return "Environment checks are stale";
-    if (host.health?.status === "checking")
-      return "Environment checks in progress";
-    if (host.health?.status === "failed") return "Environment checks failed";
-    return "Placement not ready";
-  }
-  return null;
-}
 function ErrorNotice({ children }: { children: string }) {
   return children ? (
     <Alert variant="destructive" role="alert">
@@ -185,49 +173,12 @@ export function AdminOverview({
   const activeTokens = tokens.data?.filter(
     (t) => tokenState(t) === "Active",
   ).length;
-  const metrics = [
-    {
-      label: "Machines",
-      value: loaded ? inventory.machines.length : "—",
-      detail: loaded
-        ? `${inventory.machines.filter((m) => m.ready).length} ready`
-        : "Inventory unavailable",
-      href: "#machines",
-      icon: Monitor,
-    },
-    {
-      label: "Users",
-      value: users?.length ?? "—",
-      detail: users
-        ? `${users.filter((u) => u.status === "pending").length} pending`
-        : "User directory unavailable",
-      href: "#admin/users",
-      icon: Users,
-    },
-    {
-      label: "Active API tokens",
-      value: activeTokens ?? "—",
-      detail: "Across all user accounts",
-      href: "#admin/tokens",
-      icon: KeyRound,
-    },
-    {
-      label: "Infrastructure",
-      value: loaded ? inventory.hosts.length : "—",
-      detail: loaded
-        ? `${inventory.hosts.filter((h) => h.online).length} online connections`
-        : "Inventory unavailable",
-      href: "#hosts",
-      icon: Server,
-    },
-  ];
   return (
     <>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <Heading
-          title="Administration"
-          description="Manage access, review the fleet and keep infrastructure ready."
-        />
+        <h1 className="font-display text-3xl font-medium tracking-tight">
+          Overview
+        </h1>
         <Button
           variant="outline"
           onClick={() => {
@@ -255,38 +206,19 @@ export function AdminOverview({
           Refreshing administration…
         </p>
       )}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {metrics.map(({ label, value, detail, href, icon: Icon }) => (
-          <Card key={label} className="rounded-md shadow-none">
-            <CardHeader className="pb-2">
-              <CardDescription className="flex items-center justify-between">
-                <span>{label}</span>
-                <Icon className="size-4" />
-              </CardDescription>
-              <CardTitle className="font-display text-3xl font-medium">
-                {value}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="mb-3 text-xs text-muted-foreground">{detail}</p>
-              <a
-                className="inline-flex items-center gap-1 text-sm underline-offset-4 hover:underline"
-                href={href}
-              >
-                View {label.toLowerCase()}
-                <ArrowUpRight className="size-3" />
-              </a>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
       <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-        <Card className="min-w-0 rounded-md shadow-none">
+        <Card
+          role="region"
+          aria-label="Needs attention"
+          className="min-w-0 rounded-md shadow-none"
+        >
           <CardHeader>
-            <CardTitle>Needs attention</CardTitle>
-            <CardDescription>
-              Current machine and infrastructure state.
-            </CardDescription>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle>Needs attention</CardTitle>
+              <Badge variant="outline">
+                {loaded ? problemMachines.length + problemHosts.length : "—"}
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent className="space-y-3">
             {!loaded ? (
@@ -297,8 +229,9 @@ export function AdminOverview({
               <>
                 {!problemMachines.length && !problemHosts.length && (
                   <p className="text-sm text-muted-foreground">
-                    No machine or infrastructure alerts in the current
-                    inventory.
+                    {stale
+                      ? "No alerts in the last inventory snapshot."
+                      : "No alerts in the current inventory."}
                   </p>
                 )}
                 {problemMachines.map((m) => (
@@ -352,16 +285,40 @@ export function AdminOverview({
         <Card className="rounded-md shadow-none">
           <CardHeader>
             <CardTitle>Access management</CardTitle>
-            <CardDescription>
-              Users see their own machines. Administrators can manage the fleet.
-            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              {users
-                ? `${users.filter((u) => u.role === "admin" && u.status === "active").length} active administrators · ${users.filter((u) => u.status === "disabled").length} disabled accounts`
-                : "Refresh the user directory to review account status."}
-            </p>
+            {(directory.error || tokens.error) && (
+              <p className="text-xs text-destructive">
+                Access counts show the last available snapshot.
+              </p>
+            )}
+            <dl className="grid grid-cols-2 gap-4 text-xs">
+              {[
+                ["Users", users?.length ?? "—"],
+                [
+                  "Active administrators",
+                  users?.filter(
+                    (u) => u.role === "admin" && u.status === "active",
+                  ).length ?? "—",
+                ],
+                ["Active API tokens", activeTokens ?? "—"],
+                [
+                  "Pending invitations",
+                  users?.filter((u) => u.status === "pending").length ?? "—",
+                ],
+                [
+                  "Disabled accounts",
+                  users?.filter((u) => u.status === "disabled").length ?? "—",
+                ],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd className="mt-1 font-display text-2xl tabular-nums">
+                    {value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
             <div className="flex flex-wrap gap-2">
               <Button asChild>
                 <a href="#admin/users">Manage users</a>
@@ -370,27 +327,15 @@ export function AdminOverview({
                 <a href="#admin/tokens">Review API access</a>
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Invitations and password resets are delivered manually. API tokens
-              are created by their owners and can be revoked here.
-            </p>
-            <div className="flex flex-wrap gap-4 border-t pt-4 text-sm">
-              <a href="#machines" className="underline underline-offset-4">
-                All machines
-              </a>
-              <a href="#hosts" className="underline underline-offset-4">
-                Hosts and limits
-              </a>
-              <a href="#orchestrators" className="underline underline-offset-4">
-                Orchestrators
-              </a>
-              <a href="#images" className="underline underline-offset-4">
-                Images and imports
-              </a>
-            </div>
           </CardContent>
         </Card>
       </div>
+      <FleetPulse
+        inventory={inventory}
+        loaded={loaded}
+        stale={Boolean(stale)}
+        showHosts
+      />
     </>
   );
 }

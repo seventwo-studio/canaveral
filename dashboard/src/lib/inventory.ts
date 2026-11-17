@@ -228,6 +228,10 @@ export function hostsResponse(value: unknown): Host[] {
       ...h,
       platform: h.platform ?? undefined,
       capacity: resources(h.capacity),
+      effectiveCapacity:
+        h.effectiveCapacity === undefined
+          ? undefined
+          : resources(h.effectiveCapacity),
       reserved: h.reserved == null ? undefined : resources(h.reserved),
       health: h.health ?? undefined,
       usage: h.usage == null ? undefined : hostUsage(h.usage),

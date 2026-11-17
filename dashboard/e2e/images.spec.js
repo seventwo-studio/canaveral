@@ -150,15 +150,24 @@ for (const width of [390, 1440])
       .filter({ hasText: "Machines" })
       .last()
       .click();
+    const more = page.getByRole("button", {
+      name: "More actions for Existing Linux",
+      exact: true,
+    });
+    await more.click();
     await page
-      .getByRole("button", {
-        name: "Capture Existing Linux as snapshot",
-        exact: true,
-      })
+      .getByRole("menuitem", { name: "Capture snapshot", exact: true })
       .click();
     const captureDialog = page.getByRole("dialog", {
       name: "Capture prepared snapshot",
     });
+    await expect(captureDialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(more).toBeFocused();
+    await more.press("Enter");
+    await page
+      .getByRole("menuitem", { name: "Capture snapshot", exact: true })
+      .press("Enter");
     await captureDialog
       .getByLabel("Snapshot name", { exact: true })
       .fill("Configured snapshot");

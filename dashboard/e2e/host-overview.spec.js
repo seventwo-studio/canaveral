@@ -4,7 +4,7 @@ import { test, expect } from "@playwright/test";
 for (const width of [320, 768, 1440]) {
   test(`host overview stacks categories and scopes machines/images at ${width}px`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width, height: 1000 });
     const categories = [
       {
@@ -48,6 +48,12 @@ for (const width of [320, 768, 1440]) {
       enabled: true,
       capacity: { cpu: 8, memoryMiB: 16384, diskGiB: 192 },
       reserved: { cpu: 6, memoryMiB: 10240, diskGiB: 189 },
+      usage: {
+        scope: "host",
+        fresh: true,
+        receivedAt: Date.now() / 1000,
+        cpuPercent: 42,
+      },
     };
     const other = { ...host, id: "other", name: "Other host" };
     const machine = (id, name, hostId, observed, system = "linux") => ({
@@ -140,7 +146,12 @@ for (const width of [320, 768, 1440]) {
             .filter((m) => m.hostId === "mac")
             .map((m) => ({ ...m, computeReserved: m.observed === "running" })),
           images,
-          samples: [],
+          samples: [
+            { receivedAt: host.usage.receivedAt - 30, cpuPercent: 0 },
+            { receivedAt: host.usage.receivedAt - 20, cpuPercent: 75 },
+            { receivedAt: host.usage.receivedAt - 10, cpuPercent: null },
+            { receivedAt: host.usage.receivedAt, cpuPercent: 42 },
+          ],
         };
       await route.fulfill({ json: result });
     });
@@ -174,6 +185,22 @@ for (const width of [320, 768, 1440]) {
       );
     expect(segments.find((s) => s.id === "virtualMachines").width).toBe(500);
     expect(segments.find((s) => s.id === "simulators").width).toBe(250);
+    const cpu = page.getByRole("img", {
+      name: "CPU utilization history, reported samples from zero to one hundred percent",
+    });
+    await expect(cpu).toBeVisible();
+    await expect(cpu.locator("circle[data-value]")).toHaveCount(3);
+    await expect(cpu.locator("circle[data-value='0']")).toHaveCount(1);
+    if (width === 1440)
+      await page.screenshot({
+        path: testInfo.outputPath("host-overview.png"),
+        fullPage: true,
+      });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    ).toBe(true);
     const members = page.getByRole("region", { name: "Host machines" });
     await expect(members).toContainText("2 running · 3 assigned");
     for (const name of [

@@ -143,7 +143,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Verify the installed Playwright matches the browser image
         run: node -e "if (require('@playwright/test/package.json').version !== '1.64.1') throw new Error('Update the pinned Playwright CI image with the dependency')"
-      - run: npm audit --audit-level=moderate
+      - name: Audit dashboard dependencies with the approved expiring exception
+        run: node ../script/check_dashboard_audit.mjs
       - run: npm run typecheck
       - run: npm test
       - run: npm run build && git diff --exit-code -- ../canaveral/web

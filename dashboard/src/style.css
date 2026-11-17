@@ -61,6 +61,8 @@
   --accent: #1a1a1a;
   --accent-foreground: #fafafa;
   --destructive: #ef9e8b;
+  --state-ready: #a7d5bc;
+  --state-pending: #e3c38c;
   --border: #ffffff14;
   --input: #ffffff29;
   --ring: #ff7a1a;

@@ -32,6 +32,7 @@ import { api, errorMessage, memory, number, provider, since } from "@/lib/api";
 import { Button } from "./ui/button";
 import { StackedResources, HostMachines, HostImages } from "./host-overview";
 import { HostLimits } from "./host-limits";
+import { CpuHistory } from "./cpu-history";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
@@ -120,13 +121,18 @@ function Usage({ host }: { host: Host }) {
         Usage not reported. Update the runner to enable telemetry.
       </p>
     );
+  const fresh =
+    host.online && u.fresh && Date.now() / 1000 - u.receivedAt <= 30;
   return (
     <div className="space-y-3">
-      <p className="text-[10px] text-muted-foreground">
+      <p className="text-xs text-muted-foreground">
         {u.scope === "runner"
           ? "Runner usage · not cluster capacity"
           : "Physical host usage · includes other workloads"}{" "}
-        · {u.fresh ? "Live" : "Stale"} · {since(u.receivedAt)}
+        · {fresh ? "Latest report" : "Stale report"} ·{" "}
+        {u.receivedAt === 0
+          ? new Date(0).toLocaleString()
+          : since(u.receivedAt)}
       </p>
       <dl className="grid min-w-0 grid-cols-1 gap-3 min-[420px]:grid-cols-3 opacity-90">
         <Metric label="CPU busy">
@@ -181,14 +187,19 @@ function Usage({ host }: { host: Host }) {
             Attribution not reported. Update the runner.
           </p>
         )}
-        <p className="text-[10px] text-muted-foreground">
-          {u.canaveral?.scope === "runner-and-owned-processes"
-            ? "Runner tree and verified assigned VM processes. "
-            : "Runner process tree only. "}
-          Other detached runtimes, system-managed simulators and separately
-          running services may be excluded. CPU is a share of host capacity; RSS
-          may count shared memory more than once.
-        </p>
+        <details className="text-xs text-muted-foreground">
+          <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Measurement scope
+          </summary>
+          <p className="mt-2">
+            {u.canaveral?.scope === "runner-and-owned-processes"
+              ? "Runner tree and verified assigned VM processes. "
+              : "Runner process tree only. "}
+            Other detached runtimes, system-managed simulators and separately
+            running services may be excluded. CPU is a share of host capacity;
+            RSS may count shared memory more than once.
+          </p>
+        </details>
       </section>
     </div>
   );
@@ -495,12 +506,6 @@ export function InfrastructureDetails({
       setChecking(false);
     }
   }
-  const samples = (data?.samples || [])
-    .filter((s): s is typeof s & { cpuPercent: number } => s.cpuPercent != null)
-    .slice(0, 60)
-    .sort((a, b) => a.receivedAt - b.receivedAt);
-  const min = samples[0]?.receivedAt ?? 0,
-    span = Math.max(1, (samples.at(-1)?.receivedAt || 0) - min);
   return (
     <div className="min-w-0 space-y-6" aria-label={`${host.name} overview`}>
       {error && (
@@ -558,39 +563,23 @@ export function InfrastructureDetails({
             {host.usage?.cluster && (
               <NamespaceResources cluster={host.usage.cluster} />
             )}
-            {samples.length > 1 && (
-              <figure>
-                <svg
-                  viewBox="0 0 600 100"
-                  className="h-28 w-full rounded-md border"
-                  role="img"
-                  aria-label="CPU utilization history, from zero to one hundred percent"
-                >
-                  <polyline
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    points={samples
-                      .map(
-                        (s) =>
-                          `${((s.receivedAt - min) / span) * 600},${100 - s.cpuPercent}`,
-                      )
-                      .join(" ")}
-                  />
-                </svg>
-                <figcaption className="mt-1 text-[10px] text-muted-foreground">
-                  CPU 0–100% · {since(min)} to{" "}
-                  {since(samples.at(-1)?.receivedAt)} · gaps follow sampling
-                  times
-                </figcaption>
-              </figure>
-            )}
-            <p className="text-xs text-muted-foreground">
-              Usage includes other workloads. Shared resource domain:{" "}
-              {host.usage?.domain || "unknown"}. Do not sum physical usage from
-              runners on the same host. KubeVirt runner measurements are
-              separate from namespace usage and quotas.
-            </p>
+            <CpuHistory
+              samples={data?.samples ?? []}
+              host={host}
+              stale={Boolean(error)}
+              loading={!data && !error}
+            />
+            <details className="text-xs text-muted-foreground">
+              <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                Shared resource accounting
+              </summary>
+              <p className="mt-2">
+                Shared resource domain: {host.usage?.domain || "unknown"}. Do
+                not sum physical usage from runners on the same host. KubeVirt
+                runner measurements are separate from namespace usage and
+                quotas.
+              </p>
+            </details>
           </section>
         </div>
         <aside
@@ -636,9 +625,18 @@ export function InfrastructureDetails({
                       {c.status}
                     </span>
                   </div>
-                  <p className="mt-2 break-words text-xs text-muted-foreground">
-                    {c.detail}
-                  </p>
+                  {c.status === "passed" ? (
+                    <details className="mt-2 text-xs text-muted-foreground">
+                      <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                        Check details
+                      </summary>
+                      <p className="mt-2 break-words">{c.detail}</p>
+                    </details>
+                  ) : (
+                    <p className="mt-2 break-words text-xs text-muted-foreground">
+                      {c.detail}
+                    </p>
+                  )}
                 </li>
               ))}
             </ul>

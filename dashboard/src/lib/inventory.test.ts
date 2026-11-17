@@ -56,6 +56,30 @@ test("inventory preserves offline hosts, withheld image admission and unknown gu
     capabilities: machine.capabilities,
   });
 });
+
+test("host inventory validates optional shared physical capacity instead of silently using the larger host offer", () => {
+  const effectiveCapacity = { cpu: 1, memoryMiB: 1024, diskGiB: 16 };
+  expect(
+    hostsResponse({ hosts: [{ ...host, effectiveCapacity }] })[0]
+      ?.effectiveCapacity,
+  ).toEqual(effectiveCapacity);
+  expect(
+    hostsResponse({ hosts: [host] })[0]?.effectiveCapacity,
+  ).toBeUndefined();
+  for (const invalid of [
+    null,
+    {},
+    { ...effectiveCapacity, cpu: "1" },
+    { ...effectiveCapacity, cpu: -1 },
+    { ...effectiveCapacity, memoryMiB: Infinity },
+    { ...effectiveCapacity, diskGiB: NaN },
+    { ...effectiveCapacity, cpu: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    expect(() =>
+      hostsResponse({ hosts: [{ ...host, effectiveCapacity: invalid }] }),
+    ).toThrow();
+  }
+});
 test("machine ownership preserves null and unavailable values and rejects invalid IDs", () => {
   expect(
     machinesResponse({ machines: [{ ...machine, ownerId: null }] })[0]?.ownerId,
