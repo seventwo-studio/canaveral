@@ -108,7 +108,7 @@ impl ModelJob {
                     prompt,
                     max_tokens,
                 } => {
-                    adapter == "ollama"
+                    matches!(adapter.as_str(), "ollama" | "llama.cpp" | "vllm" | "mlx")
                         && model_name(model)
                         && digest.len() == 71
                         && digest.starts_with("sha256:")

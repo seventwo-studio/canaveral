@@ -89,6 +89,19 @@ function assertStopped(f: ReturnType<typeof fixture>): void {
   assert.equal(readdirSync(f.state).filter(path => path.startsWith("work-")).length, 0);
 }
 
+test("legacy Ollama executor rejects other adapters before launch intent or runtime checks", async t => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "canaveral-adapter-rejection-"));
+  const executor = new OllamaExecutor({ runtime: "ollama", executable: join(root, "missing-runtime"),
+    modelsDirectory: join(root, "missing-models"), models: [model], nativeHelper: join(root, "missing-helper") }, join(root, "state"));
+  t.after(async () => { await executor.close(); rmSync(root, { recursive: true, force: true }); });
+  for (const adapter of ["llama.cpp", "vllm", "mlx"]) {
+    await assert.rejects(executor.execute(submission({ adapter }), () => "continue", () => undefined));
+  }
+  const db = new DatabaseSync(join(root, "state/execution.sqlite"));
+  try { assert.equal(db.prepare("SELECT count(*) AS n FROM ollama_execution_receipts").get()!.n, 0); }
+  finally { db.close(); }
+});
+
 test("default JSON-configured executor serves exact installed model and persists terminal results without replay", async t => {
   const f = fixture(t), job = submission();
   const previousSecret = process.env.EXAMPLE_PROVIDER_SECRET, previousProxy = process.env.HTTP_PROXY, previousNode = process.env.NODE_OPTIONS;

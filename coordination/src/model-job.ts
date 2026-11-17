@@ -1,4 +1,7 @@
 /** Experimental model-job/1. Parsing grants neither ownership nor execution. */
+export const MODEL_ADAPTERS = ["ollama", "llama.cpp", "vllm", "mlx"] as const;
+export type ModelAdapter = typeof MODEL_ADAPTERS[number];
+export function modelAdapter(value: unknown): value is ModelAdapter { return typeof value === "string" && (MODEL_ADAPTERS as readonly string[]).includes(value); }
 export type ModelJobState = "queued" | "waitingForResources" | "running" | "unknown" | "succeeded" | "failed" | "cancelled";
 export interface GenerationResult {
   readonly model: string;
@@ -6,7 +9,7 @@ export interface GenerationResult {
   readonly usage: Readonly<{ inputTokens: number; outputTokens: number }>;
 }
 export type ModelJobMessage =
-  | Readonly<{ type: "submit"; adapter: "ollama"; model: string; digest: string; prompt: string; maxTokens: number }>
+  | Readonly<{ type: "submit"; adapter: ModelAdapter; model: string; digest: string; prompt: string; maxTokens: number }>
   | Readonly<{ type: "cancel" }>
   | Readonly<{ type: "receipt"; state: ModelJobState; cancelRequested: boolean; stopped: boolean;
       cleanup: "pending" | "complete"; result?: GenerationResult }>;
@@ -61,7 +64,7 @@ export function parseModelJob(input: unknown): ModelJob {
   switch (msg.type) {
     case "submit":
       keys(msg, ["type", "adapter", "model", "digest", "prompt", "maxTokens"]);
-      valid = msg.adapter === "ollama" && model(msg.model) && typeof msg.digest === "string" &&
+      valid = modelAdapter(msg.adapter) && model(msg.model) && typeof msg.digest === "string" &&
         /^sha256:[a-f0-9]{64}(?![\s\S])/.test(msg.digest) && text(msg.prompt, 65536, true) && integer(msg.maxTokens, 1, 4096);
       break;
     case "cancel":

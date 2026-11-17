@@ -12,6 +12,8 @@ pub struct RunnerConfig {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Claim {
+    #[serde(default)]
+    adapter: runtime_backend::Backend,
     binding: Binding,
     id: uuid::Uuid,
 }
@@ -139,7 +141,10 @@ fn run_once_inner(config: RunnerConfig, ready: Option<impl FnOnce() -> Result<()
     let prior_claim = executor.directory.read_optional("claim.json")?;
     if let Some(bytes) = &prior_claim {
         let claim: Claim = serde_json::from_slice(bytes).map_err(|_| "corrupt claim")?;
-        if claim.binding != config.binding || claim.id.is_nil() {
+        if claim.binding != config.binding
+            || claim.id.is_nil()
+            || claim.adapter != config.execution.backend
+        {
             return Err("claim binding changed");
         }
     }
@@ -157,8 +162,11 @@ fn run_once_inner(config: RunnerConfig, ready: Option<impl FnOnce() -> Result<()
         )?;
     }
     if let Some(ready) = ready {
-        executor.prepare();
-        executor.staged.as_ref().map_err(|error| *error)?;
+        // Reconciliation must not depend on, or replace, an uncertain runtime.
+        if !executor.blocked() {
+            executor.prepare();
+            executor.staged.as_ref().map_err(|error| *error)?;
+        }
         ready()?;
     }
     if let Some(j) = executor.journal() {
@@ -178,16 +186,16 @@ fn run_once_inner(config: RunnerConfig, ready: Option<impl FnOnce() -> Result<()
     executor.staged.as_ref().map_err(|error| *error)?;
     let mut claim: Claim = match executor.directory.read_optional("claim.json")? {
         Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt claim")?,
-        None => new_claim(config.binding.clone())?,
+        None => new_claim(config.binding.clone(), config.execution.backend)?,
     };
-    if claim.binding != config.binding {
+    if claim.binding != config.binding || claim.adapter != config.execution.backend {
         return Err("claim binding changed");
     }
     if executor
         .journal()
         .is_some_and(|j| j.assignment.claim_id == claim.id.to_string())
     {
-        claim = new_claim(config.binding.clone())?;
+        claim = new_claim(config.binding.clone(), config.execution.backend)?;
     }
     executor.directory.write(
         "claim.json",
@@ -197,7 +205,7 @@ fn run_once_inner(config: RunnerConfig, ready: Option<impl FnOnce() -> Result<()
     let claim_started = clock::Clock::now();
     let response = controller.post(
         "/v1/runners/model-jobs/claim",
-        serde_json::json!({"binding":config.binding,"claimId":claim.id}),
+        serde_json::json!({"binding":config.binding,"claimId":claim.id,"adapter":config.execution.backend}),
     )?;
     let value = response.get("assignment").ok_or("invalid claim response")?;
     if value.is_null() {
@@ -288,12 +296,13 @@ fn run_once_inner(config: RunnerConfig, ready: Option<impl FnOnce() -> Result<()
     report(&controller, j)?;
     executor.acknowledge()
 }
-fn new_claim(binding: Binding) -> Result<Claim> {
+fn new_claim(binding: Binding, adapter: runtime_backend::Backend) -> Result<Claim> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|_| "randomness unavailable")?;
     bytes[6] = (bytes[6] & 15) | 64;
     bytes[8] = (bytes[8] & 63) | 128;
     Ok(Claim {
+        adapter,
         binding,
         id: uuid::Uuid::from_bytes(bytes),
     })
@@ -495,6 +504,10 @@ mod update_tests {
             binding,
             ca_file: None,
             execution: Config {
+                backend: Default::default(),
+                acceleration: Default::default(),
+                model_files: BTreeMap::new(),
+                runtime_packages: vec![],
                 executable,
                 executable_sha256: format!(
                     "{:x}",
@@ -544,6 +557,113 @@ mod update_tests {
         .unwrap();
         drop(dir);
         assert_eq!(update_status(&c), Ok(false)); // Missing receipt after dispatch cannot become idle.
+    }
+    #[test]
+    fn managed_unknown_report_never_restages_missing_or_foreign_packages() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        for foreign in [false, true] {
+            let (_temp, mut c) = fixture();
+            let app = uuid::Uuid::from_u128(10).to_string();
+            let id = uuid::Uuid::from_u128(11).to_string();
+            let job: ModelJob = serde_json::from_value(serde_json::json!({"version":1,"applicationId":app,"id":id,"message":{"type":"submit","adapter":"ollama","model":"fixture:1","digest":format!("sha256:{}", "ab".repeat(32)),"prompt":"fixture","maxTokens":1}})).unwrap();
+            let assignment = Assignment {
+                id: id.clone(),
+                claim_id: app.clone(),
+                domain_id: app,
+                sequence: 0,
+                closed: false,
+                cancel_requested: false,
+                job: job.clone(),
+            };
+            let mut executor = Executor::open(c.execution.clone()).unwrap();
+            executor
+                .persist(Journal {
+                    binding: c.binding.clone(),
+                    assignment,
+                    sequence: 1,
+                    receipt: receipt(&job, State::Unknown, false, false, Cleanup::Pending, None)
+                        .unwrap(),
+                    pending: true,
+                    launch_intent: false,
+                    stop_confirmed: false,
+                    cleanup_confirmed: false,
+                })
+                .unwrap();
+            drop(executor);
+            let sentinel = c.execution.state_dir.join("runtime-package");
+            fs::create_dir(&sentinel).unwrap();
+            fs::write(
+                sentinel.join("retained"),
+                b"uncertain runtime must stay intact",
+            )
+            .unwrap();
+            c.execution.executable = PathBuf::new();
+            c.execution.executable_sha256.clear();
+            c.execution.runtime_packages = vec![crate::runtime_package::RuntimePackage {
+                os: if foreign {
+                    if std::env::consts::OS == "macos" {
+                        "linux"
+                    } else {
+                        "macos"
+                    }
+                } else {
+                    std::env::consts::OS
+                }
+                .into(),
+                arch: std::env::consts::ARCH.into(),
+                root: sentinel.join("missing"),
+                base_url: None,
+                executables: vec![],
+                entrypoint: "bin/runtime".into(),
+                files: BTreeMap::from([("bin/runtime".into(), "ab".repeat(32))]),
+            }];
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            c.controller = format!("http://{}", listener.local_addr().unwrap());
+            let mut proof = serde_json::to_value(&c.binding).unwrap();
+            proof["credentialRevision"] = serde_json::json!(1);
+            let server = std::thread::spawn(move || {
+                for route in ["authenticate", "model-jobs/report"] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut b = [0];
+                    while !bytes.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut b).unwrap();
+                        bytes.push(b[0]);
+                    }
+                    let header = String::from_utf8_lossy(&bytes);
+                    assert!(header.starts_with(&format!("POST /v1/runners/{route} ")));
+                    let length: usize = header
+                        .to_ascii_lowercase()
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    let mut payload = vec![0; length];
+                    stream.read_exact(&mut payload).unwrap();
+                    let body = if route == "authenticate" { proof.clone() } else { serde_json::json!({"assignmentId":id,"sequence":1,"state":"unknown","cancelRequested":false,"stopped":false,"cleanup":"pending","released":false}) }.to_string();
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+                }
+            });
+            let called = std::cell::Cell::new(false);
+            run_once_with_ready(c, || {
+                called.set(true);
+                Ok(())
+            })
+            .unwrap();
+            assert!(called.get());
+            assert_eq!(
+                fs::read(sentinel.join("retained")).unwrap(),
+                b"uncertain runtime must stay intact"
+            );
+            server.join().unwrap();
+        }
     }
     #[test]
     fn readiness_requires_current_binding_authentication_before_any_claim() {

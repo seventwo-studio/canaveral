@@ -30,6 +30,16 @@ source checkout before importing either package.
 - `npm run check:no-python` scans tracked and new files for forbidden extensions,
   interpreter entry points and embedded source. It intentionally fails while
   legacy reference sources remain in the checkout.
+- `node script/package_model_runtime.mjs --inputs /absolute/prepared-engine --output /absolute/new-package --os linux --arch x86_64 --entrypoint bin/engine`
+  assembles a complete, pinned model runtime package offline. It copies all regular
+  single-linked assets, retains executable metadata and includes license files
+  present in the input. Add `--base-url https://releases.example/engine/version/`
+  to generate a downloadable package descriptor; otherwise the descriptor names
+  the bundled output assets. It does not execute, download, install or publish
+  an engine. Distribution maintainers must prepare a relocatable dependency
+  closure, normalize upstream symlink layouts into regular assets, review license
+  notices and include the descriptor in trusted Canaveral release configuration.
+  An arbitrary existing runtime installation is not the user setup flow.
 - `npm run test:remote-tls -- --url https://controller.example --token-file /private/operator.token --ca-file /private/ca.crt`
   is an optional operator-selected, read-only acceptance check. It verifies trusted
   TLS and authenticated inventory; it establishes no native runtime acceptance.

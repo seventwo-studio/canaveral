@@ -16,11 +16,11 @@ use std::{
     },
     path::{Component, Path, PathBuf},
 };
-fn name(s: &std::ffi::OsStr) -> Result<CString> {
+pub(super) fn name(s: &std::ffi::OsStr) -> Result<CString> {
     use std::os::unix::ffi::OsStrExt;
     CString::new(s.as_bytes()).map_err(|_| invalid())
 }
-fn openat(parent: &File, n: &CString, flags: i32) -> Result<File> {
+pub(super) fn openat(parent: &File, n: &CString, flags: i32) -> Result<File> {
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
@@ -153,6 +153,97 @@ impl Directory {
         self.check()?;
         Ok(file)
     }
+    pub fn package_workspace(&self) -> Result<File> {
+        self.check()?;
+        self.remove_package("runtime-package.next")?;
+        let n = name("runtime-package.next".as_ref())?;
+        if unsafe { libc::mkdirat(self.dir.as_raw_fd(), n.as_ptr(), 0o700) } != 0 {
+            return Err(invalid());
+        }
+        io(self.dir.sync_all())?;
+        let dir = openat(&self.dir, &n, libc::O_RDONLY | libc::O_DIRECTORY)?;
+        private(&dir, true)?;
+        self.check()?;
+        Ok(dir)
+    }
+    fn remove_package(&self, n: &str) -> Result<()> {
+        let n = name(n.as_ref())?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                self.dir.as_raw_fd(),
+                n.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                return Ok(());
+            }
+            return Err(invalid());
+        }
+        // A replaced link or file is never traversed or adopted as a package.
+        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(invalid());
+        }
+        remove_tree(&self.dir, &n)
+    }
+    pub fn cached_package(&self, cache: &str) -> Result<Option<File>> {
+        self.check()?;
+        let n = name(cache.as_ref())?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                self.dir.as_raw_fd(),
+                n.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                return Ok(None);
+            }
+            return Err(invalid());
+        }
+        let dir = openat(&self.dir, &n, libc::O_RDONLY | libc::O_DIRECTORY)?;
+        private(&dir, true)?;
+        Ok(Some(dir))
+    }
+    pub fn publish_package(&self, cache: &str) -> Result<()> {
+        self.check()?;
+        if self.cached_package(cache)?.is_some() {
+            return Err("runtime cache changed during installation");
+        }
+        if unsafe {
+            libc::renameat(
+                self.dir.as_raw_fd(),
+                name("runtime-package.next".as_ref())?.as_ptr(),
+                self.dir.as_raw_fd(),
+                name(cache.as_ref())?.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(invalid());
+        }
+        io(self.dir.sync_all())?;
+        self.check()
+    }
+    pub fn prune_packages(&self, current: &str) -> Result<()> {
+        self.check()?;
+        for entry in entries(&self.dir)? {
+            if entry != current
+                && entry
+                    .strip_prefix("runtime-package.")
+                    .is_some_and(super::runtime_package::hash_valid)
+            {
+                self.remove_package(&entry)?;
+            }
+        }
+        io(self.dir.sync_all())?;
+        self.check()
+    }
     pub fn cleanup_workspace(&self) -> Result<()> {
         self.check()?;
         remove_tree(&self.dir, &name("workspace".as_ref())?)?;
@@ -237,6 +328,58 @@ impl Directory {
         }
         result
     }
+}
+
+pub(super) fn entries(dir: &File) -> Result<Vec<String>> {
+    let duplicate = unsafe { libc::dup(dir.as_raw_fd()) };
+    if duplicate < 0 {
+        return Err(invalid());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        unsafe {
+            libc::close(duplicate);
+        }
+        return Err(invalid());
+    }
+    let result = (|| {
+        let mut names = Vec::new();
+        unsafe {
+            libc::rewinddir(stream);
+        }
+        loop {
+            // Distinguish a directory read error from normal end-of-directory.
+            #[cfg(target_os = "linux")]
+            unsafe {
+                *libc::__errno_location() = 0;
+            }
+            #[cfg(target_os = "macos")]
+            unsafe {
+                *libc::__error() = 0;
+            }
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                if std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != 0 {
+                    return Err(invalid());
+                }
+                break;
+            }
+            let value = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if value.to_bytes() == b"." || value.to_bytes() == b".." {
+                continue;
+            }
+            let value = value.to_str().map_err(|_| invalid())?;
+            if names.len() >= 131072 {
+                return Err(invalid());
+            }
+            names.push(value.to_owned());
+        }
+        Ok(names)
+    })();
+    unsafe {
+        libc::closedir(stream);
+    }
+    result
 }
 
 pub(super) fn trust_file(path: &Path, secret: bool) -> Result<Vec<u8>> {

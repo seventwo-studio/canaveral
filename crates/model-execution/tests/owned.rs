@@ -31,6 +31,10 @@ fn config(dir: &std::path::Path) -> Config {
     let executable = std::env::current_exe().unwrap();
     let bytes = fs::read(&executable).unwrap();
     Config {
+        backend: Default::default(),
+        acceleration: Default::default(),
+        model_files: BTreeMap::new(),
+        runtime_packages: vec![],
         executable,
         executable_sha256: format!("{:x}", Sha256::digest(bytes)),
         models_dir: models,
@@ -52,6 +56,13 @@ fn serve() {
         return;
     };
     assert_eq!(std::env::var("OLLAMA_NOPRUNE").unwrap(), "1");
+    let exe = std::env::current_exe().unwrap();
+    if exe.file_name().unwrap() == "requires-assets" {
+        assert_eq!(
+            fs::read(exe.parent().unwrap().join("assets/marker")).unwrap(),
+            b"pinned adjacent fixture asset"
+        );
+    }
     let listener = TcpListener::bind(host).unwrap();
     fs::write(
         std::path::Path::new(&std::env::var("HOME").unwrap()).join("runtime.pid"),
@@ -436,4 +447,167 @@ fn model_tree_symlink_is_rejected_without_mutation() {
         .unwrap()
         .file_type()
         .is_symlink());
+}
+
+fn packaged_config(dir: &std::path::Path) -> Config {
+    use canaveral_model_execution::runtime_package::RuntimePackage;
+    let mut cfg = config(dir);
+    let root = dir.canonicalize().unwrap().join("package");
+    fs::create_dir_all(root.join("bin/assets")).unwrap();
+    fs::copy(&cfg.executable, root.join("bin/requires-assets")).unwrap();
+    fs::write(
+        root.join("bin/assets/marker"),
+        b"pinned adjacent fixture asset",
+    )
+    .unwrap();
+    fs::write(root.join("unlisted"), b"must never be staged").unwrap();
+    cfg.runtime_packages = vec![RuntimePackage {
+        os: std::env::consts::OS.into(),
+        arch: std::env::consts::ARCH.into(),
+        root: root.clone(),
+        base_url: None,
+        executables: vec![],
+        entrypoint: "bin/requires-assets".into(),
+        files: BTreeMap::from([
+            ("bin/requires-assets".into(), cfg.executable_sha256.clone()),
+            (
+                "bin/assets/marker".into(),
+                format!("{:x}", Sha256::digest(b"pinned adjacent fixture asset")),
+            ),
+        ]),
+    }];
+    cfg.executable = Default::default();
+    cfg.executable_sha256.clear();
+    cfg
+}
+#[test]
+fn packaged_runtime_requires_pinned_adjacent_asset_and_rejects_cache_tampering() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = packaged_config(dir.path());
+    let mut executor = Executor::open(cfg.clone()).unwrap();
+    let receipt = executor
+        .execute(binding(), assignment(JOB, "success"), || Control::Continue)
+        .unwrap();
+    assert!(
+        matches!(
+            receipt.receipt.message,
+            Message::Receipt {
+                state: State::Succeeded,
+                ..
+            }
+        ),
+        "{:?}",
+        receipt.receipt
+    );
+    let staged = fs::read_dir(&cfg.state_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("runtime-package.")
+        })
+        .unwrap();
+    assert_eq!(
+        fs::read(staged.join("bin/assets/marker")).unwrap(),
+        b"pinned adjacent fixture asset"
+    );
+    assert!(!staged.join("unlisted").exists());
+    executor.acknowledge().unwrap();
+    drop(executor);
+    fs::write(staged.join("old-unlisted"), b"stale").unwrap();
+    let mut executor = Executor::open(cfg).unwrap();
+    executor
+        .execute(
+            binding(),
+            assignment("33333333-3333-4333-8333-333333333333", "success"),
+            || Control::Continue,
+        )
+        .unwrap();
+    assert!(matches!(
+        executor.journal().unwrap().receipt.message,
+        Message::Receipt {
+            state: State::Failed,
+            ..
+        }
+    ));
+    assert!(staged.join("old-unlisted").exists());
+}
+#[test]
+fn packaged_runtime_rejects_tampered_linked_and_unsafe_assets() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for mode in [
+        "tampered",
+        "symlink",
+        "hardlink",
+        "writable",
+        "parent-link",
+        "prefix",
+        "mixed",
+        "foreign",
+        "duplicate",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = packaged_config(dir.path());
+        let package = &mut cfg.runtime_packages[0];
+        let asset = package.root.join("bin/assets/marker");
+        match mode {
+            "tampered" => fs::write(&asset, b"changed").unwrap(),
+            "symlink" => {
+                fs::remove_file(&asset).unwrap();
+                symlink(package.root.join("unlisted"), &asset).unwrap();
+            }
+            "hardlink" => fs::hard_link(&asset, package.root.join("hardlink")).unwrap(),
+            "writable" => fs::set_permissions(&asset, fs::Permissions::from_mode(0o666)).unwrap(),
+            "parent-link" => {
+                fs::rename(
+                    package.root.join("bin/assets"),
+                    package.root.join("actual-assets"),
+                )
+                .unwrap();
+                symlink(
+                    package.root.join("actual-assets"),
+                    package.root.join("bin/assets"),
+                )
+                .unwrap();
+            }
+            "prefix" => {
+                package.files.insert("bin".into(), "ab".repeat(32));
+            }
+            "mixed" => cfg.executable = "/invalid/mixed".into(),
+            "foreign" => {
+                package.arch = if std::env::consts::ARCH == "aarch64" {
+                    "x86_64"
+                } else {
+                    "aarch64"
+                }
+                .into()
+            }
+            "duplicate" => cfg.runtime_packages.push(cfg.runtime_packages[0].clone()),
+            _ => unreachable!(),
+        }
+        let result = Executor::open(cfg.clone());
+        if ["prefix", "mixed"].contains(&mode) {
+            assert!(result.is_err(), "{mode}");
+            continue;
+        }
+        let mut executor = result.unwrap();
+        let receipt = executor
+            .execute(binding(), assignment(JOB, "success"), || Control::Continue)
+            .unwrap();
+        assert!(
+            matches!(
+                receipt.receipt.message,
+                Message::Receipt {
+                    state: State::Failed,
+                    ..
+                }
+            ),
+            "{mode}: {:?}",
+            receipt.receipt
+        );
+        assert!(!cfg.state_dir.join("workspace").exists());
+    }
 }

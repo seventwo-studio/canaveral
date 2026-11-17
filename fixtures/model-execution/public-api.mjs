@@ -8,6 +8,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import http from 'node:http';
 const [main,runner,runtime]=process.argv.slice(2).map(p=>resolve(p));
+const backendRuntime=process.argv[5] && resolve(process.argv[5]);
 assert(main&&runner&&runtime,'controller main.js, Rust executable and owned test executable required');
 const dir=realpathSync(mkdtempSync(join(tmpdir(),'canaveral-rust-model-fixture-')));
 mkdirSync(join(dir,'models'),{mode:0o700});
@@ -101,6 +102,52 @@ try {
    assert(delayedListings>0);const stopped=await inspect(stalledJob);assert.equal(stopped.state,'failed',diagnostic);assert.equal(stopped.reservationHeld,false);
    assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});assert(!existsSync(join(dir,'stalled-state','workspace')));
  } finally {stalled.closeAllConnections();await new Promise(r=>stalled.close(r));}
+ // Managed backend packages cross the real application/runner HTTP boundary.
+ // These native HTTP fixture processes load no weights or actual engine libraries.
+ if (backendRuntime) {
+   const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+   const backends=['llama.cpp',...(process.platform==='linux'?['vllm']:[]),...(process.platform==='darwin'&&process.arch==='arm64'?['mlx']:[])];
+   for (const backend of backends) {
+     const name='fixture-'+backend.replaceAll('.','-')+':1';
+     const root=join(dir,'package-'+backend),models=join(dir,'models-'+backend);
+     mkdirSync(root,{mode:0o700});mkdirSync(models,{mode:0o700});
+     const runtimeBytes=readFileSync(backendRuntime);
+     writeFileSync(join(root,'engine'),runtimeBytes,{mode:0o700});
+     let artifact,pin;
+     if (backend==='llama.cpp') {
+       const bytes=Buffer.from('fixture GGUF, no model weights');
+       writeFileSync(join(models,'model.gguf'),bytes,{mode:0o600});pin=hash(bytes);
+       artifact={path:'model.gguf',files:{'model.gguf':pin}};
+     } else {
+       const snapshot=join(models,'snapshot');mkdirSync(snapshot,{mode:0o700});
+       const files={};
+       for (const [path,bytes] of [['config.json','{}'],['weights.safetensors','fixture, no weights']]) {
+         writeFileSync(join(snapshot,path),bytes,{mode:0o600});files[path]=hash(bytes);
+       }
+       pin=hash(JSON.stringify(files));artifact={path:'snapshot',files};
+     }
+     const digest='sha256:'+pin;
+     await call('/v1/model-catalog',{model:name,digest,adapter:backend,resources});
+     await call('/v1/model-grants',{applicationId:appId,model:name,digest,maxUnfinished:2});
+     const binding={controllerId,runnerId:randomUUID(),generation:1,incarnationId:randomUUID()},id=randomUUID(),credential=randomBytes(32).toString('base64url');
+     const issued=await call('/v1/runner-enrollments',{id,...binding,ttlSeconds:60});
+     await call('/v1/runner-enrollments/consume',{id,...binding,credential},issued.enrollmentToken);
+     await call('/v1/model-runner-approvals',{binding,domainId,models:[{model:name,digest}]});
+     const credentialFile=join(dir,'credential-'+backend);writeFileSync(credentialFile,credential,{mode:0o600});
+     const configPath=join(dir,'runner-'+backend+'.json');
+     const execution={backend,runtimePackages:[{os:process.platform==='darwin'?'macos':'linux',arch:process.arch==='arm64'?'aarch64':'x86_64',root,entrypoint:'engine',files:{engine:hash(runtimeBytes)}}],modelsDir:models,inventory:{[name]:digest},modelFiles:{[name]:artifact},stateDir:join(dir,'state-'+backend),startupMs:3000,executionMs:3000,contactMs:1000,stopMs:1000,responseBytes:262144,contextTokens:8192};
+     writeFileSync(configPath,JSON.stringify({controller:origin,binding,credentialFile,caFile:null,execution}),{mode:0o600});
+     for (let turn=0;turn<2;turn++) {
+       const id=randomUUID();
+       await call('/v1/model-jobs',{version:1,applicationId:appId,id,message:{type:'submit',adapter:backend,model:name,digest,prompt:'success',maxTokens:64}},app.credential);
+       const result=await run(configPath);assert.equal(result.code,0,result.errors);
+       const view=await inspect(id);assert.equal(view.state,'succeeded',result.errors);
+       assert.equal(view.result.model,name);assert.equal(view.result.text,'owned fixture output');
+       assert.deepEqual(view.result.usage,{inputTokens:5,outputTokens:2});assert.equal(view.reservationHeld,false);
+       if(turn===0)rmSync(root,{recursive:true}); // A verified managed installation survives source removal.
+     }
+   }
+ }
  // Drop only the report response after the real controller commits it.
  let dropRoute='/claim';
  proxy=http.createServer((req,res)=>{const upstream=http.request({hostname:'127.0.0.1',port,path:req.url,method:req.method,headers:req.headers},reply=>{if(req.url.endsWith(dropRoute)){reply.resume();reply.on('end',()=>res.destroy());}else{res.writeHead(reply.statusCode,reply.headers);reply.pipe(res);}});req.pipe(upstream);upstream.on('error',()=>res.destroy());});await new Promise(r=>proxy.listen(0,'127.0.0.1',r));
