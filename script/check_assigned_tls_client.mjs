@@ -47,7 +47,7 @@ ip_address=${route}
 lease=0xfffffff0
 }
 `};
-  const owned = new AppleBindings((factory,evidence,current)=>{dials++;assert.equal(evidence.pinned.address,route);return factory.resolve(()=>evidence.assignment,origin,evidence.credential,current,{...evidence.pinned,address:'127.0.0.1'},2);});
+  const owned = new AppleBindings((factory,evidence,current,endpoint)=>{dials++;assert.equal(evidence.pinned.address,route);assert.equal(endpoint,`https://${route}:8767`);return factory.resolve(()=>evidence.assignment,origin,evidence.credential,current,{...evidence.pinned,address:'127.0.0.1'},2);});
   const provider = new AppleProvider(config,root,owned), authority = {clock,authorized:()=>live};
   const providerAccess = new GuestHelperAccess((m,i,f)=>provider.guestHelperBinding(m,i,f,authority));
   await Promise.all(Array.from({length:4},()=>providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}})));

@@ -12,8 +12,8 @@ interface Entry { close(): void; promise: Promise<GuestHelperBinding> }
 export class AppleBindings {
   private entries = new Map<string, Entry>();
   private closed = false;
-  constructor(private readonly dial: (factory: ReturnType<typeof pinnedGuestBindingFactory>, evidence: AppleBindingEvidence, current: () => boolean) => Promise<GuestHelperBinding> =
-    (factory, evidence, current) => factory.resolve(() => evidence.assignment, `https://${evidence.pinned.address}:8769`, evidence.credential, current, evidence.pinned, 2)) {}
+  constructor(private readonly dial: (factory: ReturnType<typeof pinnedGuestBindingFactory>, evidence: AppleBindingEvidence, current: () => boolean, endpoint: string) => Promise<GuestHelperBinding> =
+    (factory, evidence, current, endpoint) => factory.resolve(() => evidence.assignment, endpoint, evidence.credential, current, evidence.pinned, 2)) {}
   resolve(id: string, authority: OwnedGuestAuthority, evidence: () => AppleBindingEvidence, probe: () => Promise<string>): Promise<GuestHelperBinding> {
     if (this.closed) return Promise.reject(new ServiceError("Owned resolver is closed.",410));
     const old = this.entries.get(id); if (old) return old.promise;
@@ -49,7 +49,7 @@ export class AppleBindings {
     entry.promise = (async () => {
       try {
         initial = evidence(); check(false); await refresh(); check(); initial = evidence();
-        const binding = await this.dial(factory, initial, () => current());
+        const binding = await this.dial(factory, initial, () => current(), `https://${initial.pinned.address}:8767`);
         check(); maintain(); return binding;
       } catch (error) { close(); throw error; }
     })();
