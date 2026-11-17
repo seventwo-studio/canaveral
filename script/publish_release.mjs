@@ -116,10 +116,10 @@ export function capture(command,args) {
   catch {throw new Error(command+' operation failed; inspect publication state before retrying.');}
 }
 export const STABLE_TAG=/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
-export function releaseIdentity(tag,configured,lock,revision,tagRevision,remoteTagRevision) {
+export function releaseIdentity(tag,configured,lock,revision,tagRevision,remoteTagRevision,eventRevision) {
   if(!STABLE_TAG.test(tag??'')) throw new Error('Stable release tag required.');
   if(configured!==tag.slice(1) || lock.version!==configured || lock.packages?.['']?.version!==configured) throw new Error('Release tag differs from package/lock version.');
-  if(!/^[a-f0-9]{40}$/.test(revision) || tagRevision!==revision || remoteTagRevision!==revision) throw new Error('Checked-out release identity differs.');
+  if(!/^[a-f0-9]{40}$/.test(revision) || tagRevision!==revision || remoteTagRevision!==revision || eventRevision!==undefined && eventRevision!==revision) throw new Error('Checked-out release identity differs.');
 }
 export function remoteTag(output,tag) {
   const refs=new Map(output.split('\n').filter(Boolean).map(line=>line.split(/\s+/).reverse()));
@@ -141,7 +141,7 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   const revision=capture('git',['rev-parse','HEAD']);
   run('git',['fetch','--no-tags','origin','+refs/heads/main:refs/remotes/origin/main']);
   run('git',['merge-base','--is-ancestor',revision,'origin/main']);
-  releaseIdentity(tag,configured,lock,revision,capture('git',['rev-parse','refs/tags/'+tag+'^{commit}']),remoteTag(capture('git',['ls-remote','origin','refs/tags/'+tag,'refs/tags/'+tag+'^{}']),tag));
+  releaseIdentity(tag,configured,lock,revision,capture('git',['rev-parse','refs/tags/'+tag+'^{commit}']),remoteTag(capture('git',['ls-remote','origin','refs/tags/'+tag,'refs/tags/'+tag+'^{}']),tag),process.env.GITHUB_SHA);
   const releases=()=>uniqueJSON(capture('gh',['api','--paginate','--slurp','repos/seventwo-studio/canaveral/releases?per_page=100']));
   if(finalize) draftRelease(releases(),tag,revision);
   else ensureDraft(releases(),tag,revision,args=>run('gh',args),releases);
@@ -162,19 +162,40 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   try {
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,output);
     for(const stage of ['orchestrator','dashboard','kubevirt']) run('kubectl',['kustomize',join(output,stage)]);
-    const registry=await connect(DEPLOYMENT);let artifact=await registry.manifest(version);
+    const registry=await connect(DEPLOYMENT), candidate='candidate-'+version+'-'+revision;
+    let artifact=await registry.manifest(candidate);
+    const stable=await registry.manifest(version);
     const sourceRevision=tag+'@sha1:'+revision;
+    if(stable) {
+      checkIdentity(stable[0],version,sourceRevision,true);
+      if(artifact && stable[1]!==artifact[1]) throw new Error('Stable deployment differs from its candidate.');
+      artifact=stable;
+    }
     if(!artifact) {
       if(finalize) throw new Error('Cannot finalize missing deployment artifact.');
-      run('flux',['push','artifact','oci://'+DEPLOYMENT+':'+version,'--path',output,'--source',SOURCE,'--revision',sourceRevision,'--reproducible','--annotations','org.opencontainers.image.version='+version]);
-      artifact=await registry.manifest(version);
+      run('flux',['push','artifact','oci://'+DEPLOYMENT+':'+candidate,'--path',output,'--source',SOURCE,'--revision',sourceRevision,'--reproducible','--annotations','org.opencontainers.image.version='+version]);
+      artifact=await registry.manifest(candidate);
     }
     if(!artifact) throw new Error('Deployment publication did not complete.');
     checkIdentity(artifact[0],version,sourceRevision,true);
+    // Registry annotations are insufficient on retries: compare the actual
+    // immutable bundle contents, with no ignored paths, to the rebuilt source.
+    run('flux',['diff','artifact','oci://'+DEPLOYMENT+'@'+artifact[1],'--path',output,'--ignore-paths','']);
     result.deployment={url:'oci://'+DEPLOYMENT,tag:version,digest:artifact[1]};
     const text=JSON.stringify(result,null,2)+'\n';
     if(finalize && readFileSync(metadata,'utf8')!==text) throw new Error('Prepared release metadata differs.');
     if(!finalize) writeFileSync(metadata,text);
+    if(finalize) {
+      run('cosign',['verify','--new-bundle-format=false','--certificate-oidc-issuer','https://token.actions.githubusercontent.com','--certificate-identity',SOURCE+'/.github/workflows/release.yaml@refs/tags/'+tag,DEPLOYMENT+'@'+artifact[1]]);
+      // Only complete, verified candidates enter the stable semver feed.
+      // A failed signing/provenance step leaves no new selectable version.
+      draftRelease(releases(),tag,revision);
+      const current=await registry.manifest(version);
+      if(current && current[1]!==artifact[1]) throw new Error('Stable deployment changed before promotion.');
+      if(!current) run('flux',['tag','artifact','oci://'+DEPLOYMENT+'@'+artifact[1],'--tag',version]);
+      const promoted=await registry.manifest(version);
+      if(!promoted || promoted[1]!==artifact[1]) throw new Error('Stable deployment promotion was not confirmed.');
+    }
   } finally {rmSync(temporary,{recursive:true,force:true});}
   // Recheck immediately before touching release assets; published releases are never edited.
   draftRelease(releases(),tag,revision);

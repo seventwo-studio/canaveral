@@ -81,15 +81,19 @@ reused: immutable identity guards reject another source revision.
    Dispatch from main or a different tag is rejected, preserving one signing
    identity for automatic and manual runs. No run creates or moves a Git tag.
 4. The runner fetches main and checks ancestry, package/lock versions and local
-   and remote tag resolution. It builds three repo-scoped GHCR images for
+   and remote tag resolution against the immutable workflow event SHA. It builds three repo-scoped GHCR images for
    linux/amd64 and linux/arm64, then a namespace-free Flux deployment artifact
-   at ghcr.io/seventwo-studio/canaveral/deploy:0.4.0. The deployment bundle pins
+   under candidate-0.4.0-FULL_SOURCE_SHA in ghcr.io/seventwo-studio/canaveral/deploy.
+   This non-semver staging tag cannot enter the stable subscription. The deployment bundle pins
    each image by digest; kubectl, Flux and Cosign are version-pinned.
-5. The workflow signs the deployment manifest at its immutable digest using
-   GitHub OIDC, verifies that signature with the exact issuer and tag-scoped
-   workflow identity, and retains signed SLSA provenance for all four digests.
-   Only after those steps succeed does --finalize revalidate release/registry
-   identity and prepared metadata, upload release.json and publish the draft.
+5. After attaching signed SLSA provenance for all four digests, the workflow
+   signs the deployment manifest at its immutable digest using GitHub OIDC.
+   --finalize verifies that signature with the exact issuer and tag-scoped
+   workflow identity, revalidates release/registry identity and prepared metadata,
+   compares the complete artifact against the rebuilt source with no ignored paths,
+   then promotes the same digest to the stable 0.4.0 tag. It confirms promotion,
+   uploads release.json and publishes the draft. Reused artifacts get the same
+   source-content check; matching annotations alone are insufficient.
    `node script/publish_release.mjs` only prepares artifacts; --finalize is the
    workflow's final step, not a substitute for signing and provenance.
 
@@ -100,6 +104,10 @@ mismatches require a new reviewed version. Completed GitHub releases are rejecte
 on retry, including same-source releases, and are never reopened or overwritten.
 A lost final acknowledgement requires inspection rather than another publication.
 Never delete a signature or disable verification to recover a failed release.
+Stable v* Git tags require administrator-only creation and a separate active
+ruleset blocking all updates and deletions, with no bypass. Consumers trust the
+tag-scoped workflow identity, so a writer must not be able to tag an unreviewed
+replacement workflow. Preserve those repository controls before publication.
 
 CI needs no cluster access or deployment credentials. Publication and portable
 validation do not establish installed-cluster or native runtime acceptance.
@@ -108,10 +116,12 @@ validation do not establish installed-cluster or native runtime acceptance.
 
 Cosign installer v4.1.3 is pinned by commit; Cosign v3.1.4 uses
 --new-bundle-format=false and --use-signing-config=false when signing. This
-retains the legacy registry signature format consumed by Flux source-controller
-v1.7.x (including v1.7.4), rather than relying on newer Sigstore bundle support.
-Signatures and provenance attestations coexist; GitHub build provenance alone
-is not an OCIRepository Cosign signature.
+retains legacy registry signatures for older source controllers. Flux
+source-controller v1.9.3 checks Sigstore bundle referrers first when present,
+and otherwise checks legacy signatures. Signatures and provenance coexist;
+the first live consumer must verify the final artifact with all provenance
+attached and report SourceVerified=True and Ready=True. A legacy cosign verify
+alone does not establish that consumer path.
 
 The certificate issuer is exactly https://token.actions.githubusercontent.com.
 For v0.4.0 the certificate subject is exactly:

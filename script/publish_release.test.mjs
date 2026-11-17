@@ -10,7 +10,7 @@ const draft={id:1,tag_name:tag,draft:true,target_commitish:sha};
 test('strict stable versions and package/lock/tag identities fail closed',()=>{
  releaseIdentity(tag,version,lock,sha,sha,sha);
  for(const bad of ['v01.4.0','v0.04.0','v0.4.00','v0.4.0-rc.1','v0.4.0+build','0.4.0','v0.4.0\n',undefined]) assert.throws(()=>releaseIdentity(bad,version,lock,sha,sha,sha));
- for(const args of [[tag,'0.3.4',lock,sha,sha,sha],[tag,version,{...lock,version:'0.3.4'},sha,sha,sha],[tag,version,{version},sha,sha,sha],[tag,version,lock,sha,other,sha],[tag,version,lock,sha,sha,other],[tag,version,lock,sha,sha,undefined]])assert.throws(()=>releaseIdentity(...args));
+ for(const args of [[tag,'0.3.4',lock,sha,sha,sha],[tag,version,{...lock,version:'0.3.4'},sha,sha,sha],[tag,version,{version},sha,sha,sha],[tag,version,lock,sha,other,sha],[tag,version,lock,sha,sha,other],[tag,version,lock,sha,sha,undefined],[tag,version,lock,sha,sha,sha,other]])assert.throws(()=>releaseIdentity(...args));
  assert.equal(remoteTag(`${other}\trefs/tags/${tag}\n${sha}\trefs/tags/${tag}^{}`,tag),sha);
  assert.equal(remoteTag(`${sha}\trefs/tags/${tag}`,tag),sha);
  assert.equal(remoteTag('',tag),undefined);
@@ -21,13 +21,15 @@ test('missing draft is created for exact commit and reloaded; conflicts never cr
  for(const rows of [[draft,draft],[{...draft,draft:false}],[{...draft,target_commitish:'main'}],[{...draft,target_commitish:other}]])assert.throws(()=>ensureDraft([rows],tag,sha,()=>assert.fail('created conflicting release'),()=>assert.fail('reloaded conflict')));
  assert.throws(()=>ensureDraft([[]],tag,sha,()=>{},()=>[[{...draft,draft:false}]]));
 });
-function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false,conflict=false}={}) {
+function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false,conflict=false,failContent=false,failSignature=false}={}) {
  const root=mkdtempSync(join(tmpdir(),'canaveral-publish-test-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
  writeFileSync(join(root,'package.json'),JSON.stringify({version}));writeFileSync(join(root,'package-lock.json'),JSON.stringify(lock));
  const previous=process.env.RELEASE_TAG;process.env.RELEASE_TAG=tag;t.after(()=>{if(previous===undefined)delete process.env.RELEASE_TAG;else process.env.RELEASE_TAG=previous;});
+ const event=process.env.GITHUB_SHA;process.env.GITHUB_SHA=sha;t.after(()=>{if(event===undefined)delete process.env.GITHUB_SHA;else process.env.GITHUB_SHA=event;});
  const calls=[],manifests=new Map();let rows=existing;
  const manifest=(artifact=false)=>[{annotations:{'org.opencontainers.image.source':conflict?'different':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':artifact?tag+'@sha1:'+sha:sha},...(artifact?{layers:[{mediaType:'application/vnd.cncf.flux.content.v1.tar+gzip'}]}:{manifests:['amd64','arm64'].map(architecture=>({platform:{os:'linux',architecture}}))})},'sha256:'+'c'.repeat(64)];
- if(!missing)for(const name of [...Object.values(IMAGES),DEPLOYMENT])manifests.set(name,manifest(name===DEPLOYMENT));
+ const candidate='candidate-'+version+'-'+sha;
+ if(!missing) {for(const name of Object.values(IMAGES))manifests.set(name,manifest());manifests.set(DEPLOYMENT+':'+candidate,manifest(true));}
  const execute=(command,args)=>{
   calls.push([command,...args]);
   if(command==='git') {
@@ -41,17 +43,25 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
    if(args[1]==='edit')rows=[{...draft,draft:false}];
   }
   if(command==='docker')manifests.set(args[args.indexOf('--tag')+1].split(':')[0],manifest());
-  if(command==='flux')manifests.set(DEPLOYMENT,manifest(true));
+  if(command==='flux') {
+   if(args[0]==='push')manifests.set(DEPLOYMENT+':'+candidate,manifest(true));
+   if(args[0]==='diff' && failContent)throw new Error('bundle bytes differ');
+   if(args[0]==='tag')manifests.set(DEPLOYMENT+':'+version,manifest(true));
+  }
+  if(command==='cosign' && failSignature)throw new Error('signature unverified');
   return '';
  };
- return {root,execute,connect:async name=>({manifest:async()=>manifests.get(name)??null}),calls,manifests};
+ return {root,execute,connect:async name=>({manifest:async ref=>manifests.get(name===DEPLOYMENT?name+':'+ref:name)??null}),calls,manifests};
 }
 test('prepare creates draft and missing artifacts; retry reuses digests; finalize alone publishes',async t=>{
  const f=fixture(t,{existing:[],missing:true});await main(false,f);
- assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);assert.equal(f.calls.filter(c=>c[0]==='flux').length,1);
+ assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
+ assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
  assert.ok(!f.calls.some(c=>c[0]==='gh' && ['upload','edit'].includes(c[2])));
- f.calls.length=0;await main(false,f);assert.ok(!f.calls.some(c=>['docker','flux'].includes(c[0])));
+ f.calls.length=0;await main(false,f);assert.ok(!f.calls.some(c=>c[0]==='docker'||c[0]==='flux'&&c[1]!=='diff'));
  await main(true,f);assert.equal(f.calls.filter(c=>c[0]==='gh' && c[2]==='edit').length,1);
+ assert.ok(f.calls.findIndex(c=>c[0]==='cosign')<f.calls.findIndex(c=>c[0]==='flux'&&c[1]==='tag'));
+ assert.equal(f.manifests.has(DEPLOYMENT+':'+version),true);
  // A completed release is never reopened, reuploaded or overwritten, even at the same source.
  f.calls.length=0;await assert.rejects(main(false,f),/unfinished draft/);assert.ok(!f.calls.some(c=>['docker','flux'].includes(c[0]) || c[2]==='upload'));
 });
@@ -65,6 +75,22 @@ test('finalization rejects missing artifacts and changed prepared metadata witho
  writeFileSync(join(f.root,'dist/release.json'),'{}');await assert.rejects(main(true,f),/metadata differs/);
  assert.ok(!f.calls.some(c=>c[0]==='gh' && ['upload','edit'].includes(c[2])));
 });
+test('unverified or substituted candidate content never enters the stable feed',async t=>{
+ for(const options of [{failContent:true},{failSignature:true}])await t.test(JSON.stringify(options),async t=>{
+  const f=fixture(t,options);
+  if(options.failContent)await assert.rejects(main(false,f),/bytes differ/);
+  else {await main(false,f);await assert.rejects(main(true,f),/signature unverified/);}
+  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
+  assert.ok(!f.calls.some(c=>c[0]==='flux'&&c[1]==='tag'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+ });
+});
+test('stable-candidate digest conflicts refuse promotion even with matching annotations',async t=>{
+ const f=fixture(t);await main(false,f);
+ const candidate=f.manifests.get(DEPLOYMENT+':candidate-'+version+'-'+sha);
+ f.manifests.set(DEPLOYMENT+':'+version,[candidate[0],'sha256:'+'d'.repeat(64)]);
+ await assert.rejects(main(true,f),/differs from its candidate/);
+ assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+});
 test('subprocess and network failures cannot echo secrets',async t=>{
  assert.throws(()=>capture(process.execPath,['-e','console.error("secret-value");process.exit(1)']),e=>!e.message.includes('secret-value'));
  const previous=globalThis.fetch;t.after(()=>globalThis.fetch=previous);globalThis.fetch=async()=>{throw new Error('secret-value');};
@@ -75,7 +101,9 @@ test('workflow keeps tag identity, signing and provenance ahead of final publica
  const w=readFileSync(new URL('../.github/workflows/release.yaml',import.meta.url),'utf8');
  assert.match(w,/push:\n    tags: \['v\*'\]/);assert.match(w,/GITHUB_REF" == "refs\/tags\/\$RELEASE_TAG/);
  assert.match(w,/cosign sign --yes --new-bundle-format=false --use-signing-config=false/);
- assert.match(w,/cosign verify --new-bundle-format=false --certificate-oidc-issuer https:\/\/token.actions.githubusercontent.com --certificate-identity "\$identity"/);
- assert.ok(w.indexOf('cosign verify')<w.indexOf('Attest deploy provenance'));assert.ok(w.indexOf('Attest deploy provenance')<w.indexOf('node script/publish_release.mjs --finalize'));
+ assert.match(w,/ref: \$\{\{ github.sha \}\}/);
+ assert.ok(w.indexOf('Attest deploy provenance')<w.indexOf('cosign sign'));
+ assert.ok(w.indexOf('cosign sign')<w.indexOf('node script/publish_release.mjs --finalize'));
+ assert.ok(!w.slice(w.indexOf('env:'),w.indexOf('concurrency:')).includes('GITHUB_TOKEN'));
  assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,4);
 });
