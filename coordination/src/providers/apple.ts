@@ -118,14 +118,17 @@ export async function ensureSeed(config: Data, image: Data, machine: Data, stora
 
 
 export function validateBootstrapISO(bytes: Buffer, payload: Buffer): void {
-  let primary = 0, terminated = false;
+  let primary = 0, supplementary = 0, terminated = false;
   for (let sector = 16; sector < 32; sector++) {
     const v = bytes.subarray(sector * 2048, (sector + 1) * 2048);
     if (v.length !== 2048 || v.subarray(1, 6).toString() !== "CD001" || v[6] !== 1) throw new ServiceError("Invalid raw ISO descriptor.");
     if (v[0] === 255) { terminated = true; break; }
     if (v[0] !== 1 && v[0] !== 2) throw new ServiceError("Unexpected ISO descriptor.");
     const joliet = v[0] === 2;
-    if (!joliet) primary++;
+    if (joliet) {
+      supplementary++;
+      if (v[88] !== 0x25 || v[89] !== 0x2f || ![0x40, 0x43, 0x45].includes(v[90]!)) throw new ServiceError("Invalid Joliet descriptor.");
+    } else primary++;
     const decode = (b: Buffer) => joliet ? Buffer.from(b).swap16().toString("utf16le") : b.toString("ascii");
     if (decode(v.subarray(40, 72)).trim() !== "CANAVERAL_BOOT") throw new ServiceError("ISO label differs.");
     const start = v.readUInt32LE(158) * 2048, size = v.readUInt32LE(166);
@@ -137,13 +140,14 @@ export function validateBootstrapISO(bytes: Buffer, payload: Buffer): void {
       if (length < 34 || offset + length > start + size) throw new ServiceError("Invalid ISO entry.");
       const r = bytes.subarray(offset, offset + length), n = r[32]!, name = r.subarray(33, 33 + n); offset += length;
       if (n === 1 && (name[0] === 0 || name[0] === 1)) continue;
-      if (33 + n > length || r[25]! & 2 || !["ASSIGNMENT.JSON;1", "ASSIGNMENT.JSON"].includes(decode(name).toUpperCase())) throw new ServiceError("Unexpected ISO contents.");
+      const names = joliet ? ["assignment.json;1", "assignment.json"] : ["ASSIGNMENT.JSON;1", "ASSIGNMENT.JSON"];
+      if (33 + n > length || joliet && n % 2 !== 0 || r[25]! & 2 || !names.includes(decode(name))) throw new ServiceError("Unexpected ISO contents.");
       const fileStart = r.readUInt32LE(2) * 2048, fileSize = r.readUInt32LE(10);
       if (++files !== 1 || fileSize !== payload.length || !bytes.subarray(fileStart, fileStart + fileSize).equals(payload)) throw new ServiceError("ISO assignment bytes differ.");
     }
     if (files !== 1) throw new ServiceError("ISO assignment missing.");
   }
-  if (primary !== 1 || !terminated) throw new ServiceError("ISO volume is incomplete.");
+  if (primary !== 1 || supplementary !== 1 || !terminated) throw new ServiceError("ISO volume is incomplete.");
 }
 
 /** Private launch custody. Call only under the assignment provider lock. */
@@ -178,14 +182,30 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
   if (receipt.state === "building") throw new ServiceError("Launch builder outcome is uncertain; rebuild, launch and cleanup are blocked.");
   if (receipt.state === "sealed") { const pin = object(receipt.pin); if (Object.entries(object(receipt.assignment)).some(([key, value]) => pin[key] !== value)) throw new ServiceError("Sealed launch binding differs."); verifyLaunchPin(object(receipt.pin), storage); return receipt; }
   if (receipt.state !== "planned" || present(join(native, "runner-launch.json"))) throw new ServiceError("Launch intent cannot resume.");
-  // Mark dispatch BEFORE any builder files/effects. Even failed dispatch stays held.
-  receipt = { ...receipt, state: "building" }; saveRecord(file, receipt);
   const directory = safePath(join(storage, "guest-bootstrap")), content = join(directory, "content"), output = join(directory, "launch.iso");
-  mkdirSync(directory, { mode: 0o700 }); mkdirSync(content, { mode: 0o700 });
+  // Local staging has no subprocess to outlive this lock. A failed or partial
+  // stage remains planned and cleanable; resume accepts only identical bytes.
+  for (const path of [directory, content]) {
+    safePath(path);
+    if (!present(path)) { mkdirSync(path, { mode: 0o700 }); syncDirectory(dirname(path)); }
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o7777) !== 0o700) throw new ServiceError("Launch staging directory differs.");
+  }
+  if (present(output) || readdirSync(directory).some(name => name !== "content") || readdirSync(content).some(name => name !== "assignment.json")) throw new ServiceError("Unexpected launch staging contents.");
   const payload = Buffer.from(JSON.stringify({ version: 1, assignment: receipt.assignment, credential: receipt.credential }));
   if (payload.length > 4096) throw new ServiceError("Launch payload exceeds envelope.");
-  const source = openSync(join(content, "assignment.json"), "wx", 0o600);
-  try { writeFileSync(source, payload); fsyncSync(source); } finally { closeSync(source); } syncDirectory(content);
+  const sourcePath = safePath(join(content, "assignment.json")), exists = present(sourcePath);
+  const source = openSync(sourcePath, exists ? constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK : "wx", 0o600);
+  try {
+    if (exists) {
+      const stat = fstatSync(source);
+      if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o7777) !== 0o600 || stat.nlink !== 1 || stat.size !== payload.length || !readFileSync(source).equals(payload)) throw new ServiceError("Launch staging payload differs.");
+    } else writeFileSync(source, payload);
+    fsyncSync(source);
+  } finally { closeSync(source); }
+  syncDirectory(content);
+  // Persist dispatch intent immediately before the utility can outlive us.
+  receipt = { ...receipt, state: "building" }; saveRecord(file, receipt);
   await appleISO(config, "CANAVERAL_BOOT", output, content);
   safePath(output); const stat = lstatSync(output);
   if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.size < 32768 || stat.size > 16 * 1024 * 1024) throw new ServiceError("Invalid launch ISO output.");
@@ -193,6 +213,7 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
   if (pvd[0] !== 1 || pvd.subarray(1, 6).toString() !== "CD001" || pvd.subarray(40, 72).toString().trim() !== "CANAVERAL_BOOT") throw new ServiceError("Launch output is not raw ISO9660.");
   validateBootstrapISO(bytes, payload);
   const fd = openSync(output, constants.O_RDONLY | constants.O_NOFOLLOW); try { chmodSync(output, 0o400); fsyncSync(fd); } finally { closeSync(fd); }
+  syncDirectory(directory);
   const sealed = lstatSync(output);
   const pin = { path: output, uid: sealed.uid, mode: 256, nlink: 1, size: sealed.size, sha256: createHash("sha256").update(bytes).digest("hex"), dev: String(sealed.dev), ino: String(sealed.ino), ...object(receipt.assignment) };
   verifyLaunchPin(pin, storage); receipt = { ...receipt, state: "sealed", pin }; saveRecord(file, receipt); return receipt;
@@ -476,15 +497,19 @@ export class AppleProvider {
     }
     let guestLaunch: Data | null = null;
     if (image.os === "macos" && machine.lease) {
-      if (typeof image._leaseAuthorization !== "function") throw new ServiceError("Leased boot requires a local deadline guard.");
-      const auth = object(await image._leaseAuthorization());
-      if (auth.leaseID !== uuid(object(machine.lease).id) || !Number.isSafeInteger(auth.revision) || typeof auth.fenced !== "boolean" || auth.fenced || typeof auth.remainingSeconds !== "number" || !Number.isFinite(auth.remainingSeconds) || !(auth.remainingSeconds > 0)) throw new ServiceError("Lease authorization ended before bootstrap.");
-      if (present(launch) || present(join(folder, "apple-boot-request.json")) || present(join(folder, "provisioning.json")) && readRecord(join(folder, "provisioning.json")).phase === "bootRequested") {
+      const assignedAttempted = present(launch) || present(join(folder, "apple-boot-request.json")) || present(join(folder, "provisioning.json")) && readRecord(join(folder, "provisioning.json")).phase === "bootRequested";
+      if (assignedAttempted) {
         guestLaunch = guestLaunchReceipt(storage, machine);
         if (!guestLaunch || guestLaunch.state !== "sealed") throw new ServiceError("Native launch custody is uncertain.");
+        if (active) return { state: status?.phase === "Running" ? "running" : "starting", detail: status?.detail ?? "" };
+        if (fresh && status?.phase === "Unavailable") return { state: "error", detail: status.detail ?? "" };
         return { state: "unknown", detail: "Assigned launch was already attempted; relaunch is blocked." };
+      } else {
+        if (typeof image._leaseAuthorization !== "function") throw new ServiceError("Leased boot requires a local deadline guard.");
+        const auth = object(await image._leaseAuthorization());
+        if (auth.leaseID !== uuid(object(machine.lease).id) || !Number.isSafeInteger(auth.revision) || typeof auth.fenced !== "boolean" || auth.fenced || typeof auth.remainingSeconds !== "number" || !Number.isFinite(auth.remainingSeconds) || !(auth.remainingSeconds > 0)) throw new ServiceError("Lease authorization ended before bootstrap.");
+        guestLaunch = await ensureGuestLaunch(this.config, machine, storage);
       }
-      guestLaunch = await ensureGuestLaunch(this.config, machine, storage);
     }
     if (!present(machineFile)) {
       if (present(join(storage, "apple-prepare.json"))) throw new ServiceError("Native preparation outcome is uncertain; automatic retry is blocked.");

@@ -180,6 +180,8 @@ test("provisioning phase stays sticky and contradictory launch metadata blocks p
   const root = fixture(t), m = lease(), folder = join(root, "machines", String(m.id)), storage = join(root, "storage", String(m.id)); privateDirectory(folder); privateDirectory(storage);
   saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(m), leaseId: (m.lease as RecordValue).id }); saveRecord(join(storage, "canaveral-owner.json"), { fingerprint: assignmentFingerprint(m) });
   const journal = recordPreparation(m, folder, true); assert.equal(journal.phase, "preparing"); assert.equal(prebootStorage(m, folder, storage), true);
+  saveRecord(join(storage, "guest-launch.json"), { state: "building" }); assert.throws(() => prebootStorage(m, folder, storage), /builder exclusion/);
+  saveRecord(join(storage, "guest-launch.json"), { state: "planned" }); assert.equal(prebootStorage(m, folder, storage), true);
   const native = join(storage, String(m.id).toUpperCase()); saveRecord(join(native, "runner-launch.json"), { attemptedAt: 1000 }); assert.throws(() => prebootStorage(m, folder, storage));
   saveRecord(join(folder, "provisioning.json"), { ...journal, phase: "bootRequested" }); assert.equal(recordPreparation(m, folder, true).phase, "bootRequested"); assert.equal(prebootStorage(m, folder, storage), false);
 });

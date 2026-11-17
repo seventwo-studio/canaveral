@@ -224,19 +224,27 @@ existing secret-free provisioning/boot/deletion evidence. `guest-bootstrap/conte
 contains only `assignment.json`. The utility is `hdiutil makehybrid -iso -joliet`
 with label `CANAVERAL_BOOT`; the output is raw ISO9660, not a disk image container.
 Both primary and supplementary ISO directory trees must contain exactly the
-expected assignment bytes. Linux cloud-init uses its existing independent path.
+expected assignment bytes. A single Joliet descriptor with valid escape bytes
+and case-exact `assignment.json` is required. Linux cloud-init uses its existing
+independent path.
 
-`planned` is durable before builder effects. It can resume with the same secret
-only before dispatch. The provider persists `building` before invoking the
-utility. Any exception, lost acknowledgement, invalid output, crash before seal
+`planned` is durable before local staging. Identical staged input can resume with
+the same secret before dispatch; a local staging failure remains eligible for
+owned cleanup with closed-handle proof. The provider persists `building`
+immediately before invoking the utility. Any subsequent exception, lost
+acknowledgement, invalid output, crash before seal
 or interrupted seal leaves a hold: no rebuild, replacement, relaunch or cleanup.
 A utility might still reopen files after an interrupted host process; observing
 no current handle does not prove builder exclusion. There is no reset or automatic
 repair. Only confirmed utility success, validated bytes, flush, mode 0400 and a
-durably recorded exact pin permit `sealed`. A sealed intent revalidates the pin
+durably recorded exact pin permit `sealed`; the file and containing directory
+are flushed before that receipt. A sealed intent revalidates the pin
 before reuse. A durable native launch request prevents automatic relaunch even
 when a later status says stopped. Lost prepare and runner results retain the
 existing uncertain-operation guards and provisioning ordering.
+Fresh status from a held runtime remains observable as running or starting;
+the dispatch guard prevents another launch without masking current status or
+blocking lease-fence publication.
 
 Native metadata contains only a separate `LaunchMediaPin`: assignment/launch
 identity, path, uid, mode 0400, nlink 1, size, SHA256 and device/inode. It does not
@@ -260,6 +268,10 @@ are refused. A per-launch exclusive startup marker prevents replaying a used
 launch; bridge and input/shell journals are per launch. The bound bridge holds the
 secret in memory. The retained media remains secret-bearing until owned erase.
 The existing `CanaveralGuest` manual Keychain behavior stays separate.
+Helper restart or guest reboot cannot reuse a consumed startup marker, so that
+launch's assigned access remains unavailable. The ISO's read-only attachment
+does not restrict its readability by other guest-local users or processes;
+guest account/image qualification remains an isolation gate.
 
 Cleanup checks builder exclusion, receipt and bootstrap-tree handle closure in
 addition to assignment, runtime-lock and native stop proof before quarantine.
@@ -269,12 +281,16 @@ covers the whole tree and retains only secret-free deletion evidence outside it.
 
 Portable tests use an injected ISO utility, real provider receipts and pins,
 Swift parser/selector/startup coordinator, bound DesktopBridge identity producer,
-typed native attachment construction and the TypeScript v2 proof parser. They
+typed native attachment construction, provider-written native pin decoding and
+the TypeScript v2 proof parser. The cross-language script also runs in macOS CI. They
 establish plumbing, not a booted guest or usable macOS access. Raw ISO and Joliet
 mount/automount behavior, removable-volume TCC, startup timing, permissions,
 independent deadline/cleanup/erasure enforcement, clone/capture, template
 qualification, production transport/resolver and workspace/native acceptance all
 remain OPEN. No native acceptance or deployment is implied by CI compilation.
+VZ opens media by path. The surrounding pin checks detect ordinary substitution
+but do not prove exclusion of a same-uid swap restored between those checks;
+native attachment and host-ownership acceptance must cover that boundary.
 
 After compiling TypeScript (`tsc -p coordination`), macOS portable checks can run
 `node script/check_guest_bootstrap.mjs` with the intended Xcode toolchain selected.

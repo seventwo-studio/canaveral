@@ -54,6 +54,15 @@ private struct BootstrapDevice: GuestDesktopDevice {
         defer { try? FileManager.default.removeItem(at: root) }
         let mount = GuestBootstrapMount(path: "/fixture", filesystem: "cd9660", label: "CANAVERAL_BOOT", readOnly: true)
         let bootstrap = try AssignedGuestStartup.start(isVirtualGuest: true, mounts: { [mount] }, read: { _ in bytes }) { $0 }
+        if let exchange {
+            let directory = URL(fileURLWithPath: exchange).appendingPathComponent(bootstrap.assignment.machineId.uppercased())
+            let pin = try LaunchMediaPin.load(directory: directory)
+            try pin.verify()
+            XCTAssertEqual(pin.machineId, bootstrap.assignment.machineId)
+            XCTAssertEqual(pin.leaseId, bootstrap.assignment.leaseId)
+            XCTAssertEqual(pin.fingerprint, bootstrap.assignment.fingerprint)
+            XCTAssertEqual(pin.launchId, bootstrap.assignment.launchId)
+        }
         try GuestAssignedLaunchAttempt.consume(state: root.appendingPathComponent(bootstrap.assignment.launchId))
         XCTAssertThrowsError(try GuestAssignedLaunchAttempt.consume(state: root.appendingPathComponent(bootstrap.assignment.launchId)))
         let bridge = try DesktopBridge(token: bootstrap.credential, device: BootstrapDevice(), journalURL: root.appendingPathComponent(bootstrap.assignment.launchId + "/inputs.json"), assignment: bootstrap.assignment)
