@@ -471,3 +471,47 @@ test("Linux readiness remains visible separately from lease lifecycle", async ()
   expect(label.parentElement?.textContent).toBe("ReadyNo");
   expect(screen.getByText("ready")).toBeTruthy();
 });
+
+test("confirmed actions queue fresh inventory behind an in-flight refresh", async () => {
+  let finish!: (value: unknown) => void;
+  let reads = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/v1/admin/system") {
+        reads++;
+        if (reads === 2)
+          return new Promise((done) => {
+            finish = done;
+          });
+        return response(
+          reads > 2
+            ? { ...snapshot, leases: [{ ...lease, state: "released" }] }
+            : snapshot,
+        );
+      }
+      const body = JSON.parse(String(init?.body));
+      return response({
+        id: lease.id,
+        requestId: body.id,
+        action: "release",
+        state: "released",
+      });
+    }),
+  );
+  render(<SystemControl user={user} onDenied={vi.fn()} />);
+  await screen.findByRole("button", { name: "Release lease" });
+  fireEvent.click(screen.getByRole("button", { name: "Refresh system" }));
+  await waitFor(() => expect(reads).toBe(2));
+  fireEvent.click(screen.getByRole("button", { name: "Release lease" }));
+  fireEvent.click(
+    within(screen.getByRole("alertdialog")).getByRole("button", {
+      name: "Release lease",
+    }),
+  );
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  finish(response(snapshot));
+  await screen.findByText("released");
+  expect(reads).toBe(3);
+  expect(screen.queryByRole("button", { name: "Release lease" })).toBeNull();
+});

@@ -108,4 +108,4 @@ whether another page exists. Each collection is independently ordered and bounde
 these are current pages rather than a transactional snapshot spanning navigation.
 System refreshes the visible page every five seconds while the tab is visible.
 A failed refresh retains the last good page with a stale notice. Inspect subsequent
-pages explicitly to see older records.
+pages explicitly to see additional records, ordered by identity.

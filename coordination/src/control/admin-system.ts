@@ -104,7 +104,7 @@ export class AdminSystem implements ControlModule {
         db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(expired ? "expired" : "cancelled", expired ? "deadline" : "administrator_cancelled", row.application!,id);
         return expired ? "expired" : "cancelled";
       }
-      if (row.state === "admitted") { this.release(db,id,String(row.application)); return "release_requested"; }
+      if (row.state === "admitted") return this.release(db,id,String(row.application));
       return String(row.state);
     }
     const models = legacyTable(db,"model_jobs") ? db.prepare("SELECT application,state FROM model_jobs WHERE id=?"+(applicationId === undefined ? "" : " AND application=?")).all(id,...(applicationId === undefined ? [] : [applicationId])) : [];

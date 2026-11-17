@@ -154,6 +154,7 @@ function SystemControlPage({
   const [busy, setBusy] = useState(false);
   const mounted = useRef(false);
   const loading = useRef(false);
+  const refreshQueued = useRef(false);
   const acting = useRef(false);
   const denied = useRef(false);
   const deniedCallback = useRef(onDenied);
@@ -175,8 +176,12 @@ function SystemControlPage({
     }
     return false;
   }
-  async function refresh() {
-    if (!current() || loading.current || user.role !== "admin") return;
+  async function refresh(afterMutation = false) {
+    if (!current() || user.role !== "admin") return;
+    if (loading.current) {
+      if (afterMutation) refreshQueued.current = true;
+      return;
+    }
     loading.current = true;
     try {
       const next = await api(
@@ -198,6 +203,10 @@ function SystemControlPage({
       if (current() && !handleDenied(e)) setError(errorMessage(e));
     } finally {
       loading.current = false;
+      if (refreshQueued.current) {
+        refreshQueued.current = false;
+        if (current()) void refresh();
+      }
     }
   }
   useEffect(() => {
@@ -244,7 +253,7 @@ function SystemControlPage({
       );
       setIntent(null);
       setUncertain(false);
-      void refresh();
+      void refresh(true);
     } catch (e) {
       if (!current() || handleDenied(e)) return;
       const definite =

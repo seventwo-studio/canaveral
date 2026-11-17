@@ -143,3 +143,18 @@ test("application-qualified cancellation distinguishes shared request/job UUIDs 
   }
   assert.throws(()=>f.call("POST",`/v1/admin/applications/${f.app.id}/revoke`,{id:randomUUID(),applicationId:f.app.id}),failure(400));
 });
+
+test("admitted request cancellation reports an already-terminal lease accurately",async t=>{
+  const f=adminFixture(t);
+  for(const state of ["released","expired","failed"]){
+    const lease=await f.request("POST","/v1/leases",f.acquire());f.ready(lease);
+    f.call("POST",`/v1/admin/leases/${lease.id}/release`,{id:randomUUID()});
+    f.store.transaction(db=>{
+      db.prepare("UPDATE leases SET state=? WHERE id=?").run(state,lease.id);
+      db.prepare("INSERT INTO requests VALUES (?,?,'lease','{}','{}',0,NULL,NULL,'admitted',1,?,NULL,NULL,NULL)").run(f.app.id,lease.id,f.now());
+    });
+    const mutation={id:randomUUID(),applicationId:f.app.id},path=`/v1/admin/requests/${lease.id}/cancel`;
+    const receipt=f.call("POST",path,mutation);assert.equal(receipt.state,state);
+    assert.deepEqual(f.call("POST",path,mutation),receipt);
+  }
+});
