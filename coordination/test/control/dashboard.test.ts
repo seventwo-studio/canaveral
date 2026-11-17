@@ -333,3 +333,33 @@ test("idle attached WebSockets reauthorize and terminate on revocation; native t
     assert.ok(f.calls.filter(call => call.path.endsWith("/authorize")).length >= 3);
   } finally { await f.close(); }
 });
+
+test("operational admin gateway keeps exact routes, cookie origin checks and upstream authority",async()=>{
+  const f=await fixture();
+  try {
+    const cookie={Cookie:`canaveral_session=${session}`};
+    for(const path of ["/api/v1/admin/system","/api/v1/admin/system/pages/1","/api/v1/admin/configuration","/api/v1/admin/configuration/pages/2","/api/v1/consumers",`/api/v1/resource-domains/${machine}`])assert.equal((await fetch(f.url,path,{headers:cookie})).status,200);
+    for(const path of [`/api/v1/admin/leases/${machine}/release`,`/api/v1/admin/sessions/${machine}/close`,`/api/v1/admin/jobs/${machine}/cancel`,`/api/v1/admin/requests/${machine}/cancel`,`/api/v1/admin/applications/${machine}/revoke`]){
+      assert.equal((await fetch(f.url,path,{body:{id:randomUUID()},headers:cookie})).status,403);
+      assert.equal((await fetch(f.url,path,{body:{id:randomUUID()},headers:{...cookie,Origin:f.url}})).status,200);
+    }
+    for(const path of ["/api/v1/admin/arbitrary",`/api/v1/admin/leases/${machine}/renew`,`/api/v1/admin/operations/${machine}/cancel`])assert.equal((await fetch(f.url,path,{body:{},headers:{...cookie,Origin:f.url}})).status,404);
+    assert.ok(f.calls.every(c=>c.origin===undefined&&c.cookie===undefined));
+    f.state.revoked=true;assert.equal((await fetch(f.url,"/api/v1/admin/system",{headers:cookie})).status,401);
+  }finally{await f.close();}
+});
+
+test("every API workspace action resolves to an allowed gateway route",async()=>{
+  // Dynamic source import keeps the independent frontend catalog out of this
+  // package's compilation while checking the shipped descriptor paths directly.
+  const {apiActions,actionPath}=await import(new URL("../../../../dashboard/src/lib/api-workspace.ts",import.meta.url).href);
+  const f=await fixture();
+  try{
+    for(const action of apiActions){
+      const route="/api/v1/"+actionPath(action,action.identifier==="SHA-256" ? "a".repeat(64) : machine,foreignMachine);
+      const response=await fetch(f.url,route,{...(action.method==="POST" ? {body:{id:randomUUID()}} : {}),token:operator});
+      assert.notEqual(response.status,404,`${action.id}: ${action.method} ${route}`);
+      assert.ok(f.calls.some(call=>call.path===route.slice(4)&&call.method===action.method),`forwarded ${action.id}`);
+    }
+  }finally{await f.close();}
+});

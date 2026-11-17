@@ -122,3 +122,24 @@ test("image folding preserves architecture and each host's admission state", () 
   ]);
   expect(grouped[1]?.arch).toBe("amd64");
 });
+
+test("HTTP errors preserve uncertain outcomes independently of refusal status", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        response(
+          { error: "Unconfirmed", outcome: "unknown", retryable: false },
+          409,
+        ),
+      ),
+  );
+  await expect(
+    api("admin/leases/lease/release", { id: "request" }),
+  ).rejects.toMatchObject({
+    status: 409,
+    outcome: "unknown",
+    retryable: false,
+  });
+});

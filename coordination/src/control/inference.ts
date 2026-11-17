@@ -169,7 +169,7 @@ export function initializeInference(db: DatabaseSync): boolean {
       WHERE state IN ('succeeded','failed','cancelled') AND id NOT IN (SELECT job FROM inference_control_receipts);`);
   return true;
 }
-function jobView(db: DatabaseSync, row: JobRow, now: number, assignment = false, includeResult = true): InferenceJob | InferenceAssignment {
+export function jobView(db: DatabaseSync, row: JobRow, now: number, assignment = false, includeResult = true): InferenceJob | InferenceAssignment {
   const { report, sequence } = currentReceipt(db, row, includeResult && !assignment), held = !released(report);
   const result: InferenceJob = { id: row.id, hostId: row.host, model: (JSON.parse(row.request) as InferenceRequest).model,
     definition: inferenceOffer({ runtime: "ollama", models: [JSON.parse(row.definition)] }).models[0]!, desired: row.desired,

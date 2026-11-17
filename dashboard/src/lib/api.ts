@@ -47,7 +47,21 @@ export async function api(
             ? detail
             : "The request could not be completed.",
         ),
-        { status: response.status },
+        {
+          status: response.status,
+          ...(result !== null &&
+          typeof result === "object" &&
+          "outcome" in result &&
+          result.outcome === "unknown"
+            ? { outcome: "unknown" }
+            : {}),
+          ...(result !== null &&
+          typeof result === "object" &&
+          "retryable" in result &&
+          typeof result.retryable === "boolean"
+            ? { retryable: result.retryable }
+            : {}),
+        },
       );
     }
     return decode ? decode(result) : result;
