@@ -160,6 +160,14 @@ The registry, downloaded image library and machine blueprints are separate produ
 concepts. Immutable host template definitions remain their runtime compatibility
 format. Imported and derived artifact provenance follows the image contract.
 
+## System activity and API configuration
+
+Administrators can open **System** for applications, leases, waiting requests, jobs,
+operations and access sessions, and **Configuration** for named administrative API
+actions. Closing an access session retains the lease; releasing a lease requests
+cleanup. See the [API coverage and authority map](dashboard-api-coverage.md) for
+credential boundaries and native acceptance limits.
+
 ## Frontend development
 
 The dashboard uses React, Tailwind CSS v4 and checked-in shadcn/ui components

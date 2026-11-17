@@ -28,13 +28,17 @@ type View =
   | "tokens"
   | "users"
   | "admin"
-  | "api-access";
+  | "api-access"
+  | "system"
+  | "configuration";
 import { AccountPage, TokensPage, UsersPage } from "@/components/accounts";
 import {
   AdminOverview,
   AdminTokensPage,
   useAdminUsers,
 } from "@/components/admin-dashboard";
+import { SystemControl } from "@/components/system-control";
+import { ApiWorkspace } from "@/components/api-workspace";
 import { ownerLabel } from "@/lib/admin";
 import {
   ImageLibrary,
@@ -209,8 +213,14 @@ const currentView = (): View => {
         : "admin";
   return name === "images"
     ? "templates"
-    : ["account", "tokens", "users", "api-access"].includes(name) ||
-        Object.hasOwn(views, name)
+    : [
+          "account",
+          "tokens",
+          "users",
+          "api-access",
+          "system",
+          "configuration",
+        ].includes(name) || Object.hasOwn(views, name)
       ? (name as View)
       : "machines";
 };
@@ -301,9 +311,15 @@ export function App() {
   const [powerOffId, setPowerOffId] = useState<string | null>(null);
   const view: View =
     user?.role !== "admin" &&
-    ["hosts", "orchestrators", "users", "admin", "api-access"].includes(
-      requestedView,
-    )
+    [
+      "hosts",
+      "orchestrators",
+      "users",
+      "admin",
+      "api-access",
+      "system",
+      "configuration",
+    ].includes(requestedView)
       ? "machines"
       : requestedView;
   const isInfrastructure = view === "hosts" || view === "orchestrators";
@@ -691,7 +707,13 @@ export function App() {
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem className="hidden sm:block">
-                {["admin", "users", "api-access"].includes(view) ? (
+                {[
+                  "admin",
+                  "users",
+                  "api-access",
+                  "system",
+                  "configuration",
+                ].includes(view) ? (
                   <a href="#admin">Administration</a>
                 ) : isInfrastructure ? (
                   "Infrastructure"
@@ -752,7 +774,27 @@ export function App() {
           </div>
         </header>
         <div className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 lg:px-6">
-          {view === "admin" && user.role === "admin" ? (
+          {view === "system" && user.role === "admin" ? (
+            <SystemControl
+              key={user.id}
+              user={user}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : view === "configuration" && user.role === "admin" ? (
+            <ApiWorkspace
+              key={user.id}
+              user={user}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : view === "admin" && user.role === "admin" ? (
             <AdminOverview
               key={user.id}
               user={user}

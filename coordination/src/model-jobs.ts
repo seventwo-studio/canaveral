@@ -67,6 +67,15 @@ function canonicalResult(result: GenerationResult | undefined): string | null {
   return result ? JSON.stringify({ model: result.model, text: result.text, usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens } }) : null;
 }
 
+/** Shared consumer/operator cancellation transition; claimed reservations require runner receipts. */
+export function cancelModelJob(db: DatabaseSync, application: string, id: string, now: number): void {
+  const job = db.prepare("SELECT state,cancel_requested FROM model_jobs WHERE application=? AND id=?").get(application,id);
+  if (!job) throw new ServiceError("Unknown model job.",404);
+  if (terminal(String(job.state)) || job.cancel_requested) return;
+  if (db.prepare("SELECT 1 FROM model_assignments WHERE application=? AND job=?").get(application,id)) db.prepare("UPDATE model_jobs SET cancel_requested=1,updated=? WHERE application=? AND id=?").run(now,application,id);
+  else db.prepare("UPDATE model_jobs SET cancel_requested=1,state='cancelled',stopped=1,cleanup='complete',closed=1,updated=? WHERE application=? AND id=?").run(now,application,id);
+}
+
 /** Application-owned model-job ledger with claim-time admission against operator-approved
  * runner bindings and their shared physical resource domains. Every effect runs inside one
  * BEGIN IMMEDIATE transaction that also re-verifies the caller's credential. It never retries,
@@ -223,11 +232,7 @@ export class ModelJobs {
       const application = this.applications.verify(db, token);
       if (request.applicationId !== application.id || request.id !== id) throw new ServiceError("Cancellation must name the authenticated application and path job ID.", 403);
       const job = this.owned(db, application.id, id);
-      if (!terminal(job.state) && !job.cancel_requested) {
-        const now = this.now();
-        if (this.assignment(db, job)) db.prepare("UPDATE model_jobs SET cancel_requested=1,updated=? WHERE application=? AND id=?").run(now, job.application, job.id);
-        else db.prepare("UPDATE model_jobs SET cancel_requested=1,state='cancelled',stopped=1,cleanup='complete',closed=1,updated=? WHERE application=? AND id=?").run(now, job.application, job.id);
-      }
+      cancelModelJob(db, job.application, job.id, this.now());
       return this.view(db, this.owned(db, application.id, id));
     });
   }

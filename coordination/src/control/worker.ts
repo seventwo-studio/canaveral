@@ -15,6 +15,7 @@ import { createModule as blueprintsModule } from "./blueprints.ts";
 import { createModule as infrastructureModule } from "./infrastructure.ts";
 import { createModule as inferenceModule } from "./inference.ts";
 import { createModule as sessionsModule } from "./sessions.ts";
+import { AdminSystem } from "./admin-system.ts";
 import { LegacyLeases } from "./leases.ts";
 import { createModule as updatesModule } from "./updates.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
@@ -49,6 +50,7 @@ modules.push(videoSessions);
 modules.push(sessions);
 const leases = new LegacyLeases(store, options);
 modules.push(leases);
+modules.push(new AdminSystem(leases));
 modules.push(updatesModule(store, options));
 
 function principal(token: string): Principal {

@@ -182,6 +182,27 @@ export class LinuxLeases {
     });
   }
 
+  /** Internal operator adapter: caller must authenticate an administrator in this transaction. */
+  administrativeRelease(db: DatabaseSync, id: string): void {
+    this.refresh(db, this.now());
+    const lease = this.row(db, identifier(id));
+    if (!lease) throw new ServiceError("Unknown lease.", 404);
+    this.end(db, lease, "released", this.now());
+    this.refreshOperations(db, this.now());
+    this.refreshTransfers(db, this.now());
+  }
+
+  /** Safe derived status for the administrator, retaining binding fencing. */
+  administrativeStatus(db: DatabaseSync, id: string): {runtimeState:string; ready:boolean} {
+    const lease = this.row(db, identifier(id));
+    if (!lease) throw new ServiceError("Unknown lease.",404);
+    const view = this.view(db,lease) as {runtimeState:string;members:{ready:boolean}[]};
+    return {runtimeState:view.runtimeState,ready:view.members[0]!.ready};
+  }
+
+  /** Refresh lifecycle without accepting or minting a consumer credential. */
+  administrativeRefresh(db: DatabaseSync): void { this.refresh(db, this.now()); }
+
   private now(): number { return this.store.clock(); }
   private requireRunners(): RunnerEnrollment {
     if (!this.runners) throw new ServiceError("Runner lease work requires a configured controller identity.", 503, { retryable: false });

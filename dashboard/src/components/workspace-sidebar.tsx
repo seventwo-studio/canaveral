@@ -5,6 +5,8 @@ import {
   LayoutDashboard,
   Users,
   KeyRound,
+  Activity,
+  Settings,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -91,6 +93,8 @@ export function WorkspaceSidebar({
                   name: "Administration navigation",
                   entries: [
                     ["admin", { icon: LayoutDashboard }],
+                    ["system", { icon: Activity }],
+                    ["configuration", { icon: Settings }],
                     ["users", { icon: Users }],
                     ["api-access", { icon: KeyRound }],
                   ] as Array<[string, { icon: LucideIcon }]>,

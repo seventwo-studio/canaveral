@@ -137,7 +137,49 @@ async function login() {
   return user;
 }
 describe("dashboard contracts", () => {
-  it.each(["admin", "admin/users", "admin/tokens"])(
+  it.each([
+    ["system", "System control", "admin/system"],
+    ["configuration", "API controls", "admin/configuration"],
+  ])(
+    "opens the administrator %s workspace from a deep link",
+    async (hash, heading, endpoint) => {
+      const original = handler;
+      handler = (path, options) =>
+        path === "admin/system"
+          ? json({
+              applications: [],
+              leases: [],
+              requests: [],
+              jobs: [],
+              operations: [],
+              sessions: [],
+            })
+          : path === "consumers"
+            ? json({ applications: [] })
+            : original(path, options);
+      location.hash = hash!;
+      render(<App />);
+      await userEvent.type(await screen.findByLabelText("Username"), "admin");
+      await userEvent.type(
+        screen.getByLabelText("Password"),
+        "a sufficiently long password",
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await screen.findByRole("heading", { name: heading });
+      expect(
+        screen.getByRole("navigation", { name: "Administration navigation" }),
+      ).toBeTruthy();
+      if (hash === "configuration")
+        await userEvent.click(
+          screen.getAllByRole("button", { name: /^Refresh$/ }).at(-1)!,
+        );
+      await waitFor(() =>
+        expect(calls.some((call) => call.path === endpoint)).toBe(true),
+      );
+    },
+  );
+
+  it.each(["admin", "admin/users", "admin/tokens", "system", "configuration"])(
     "blocks ordinary-user deep link %s before requesting admin data",
     async (hash) => {
       const original = handler;
@@ -155,7 +197,16 @@ describe("dashboard contracts", () => {
       location.hash = hash;
       await login();
       expect(
-        calls.some((c) => ["hosts", "users", "admin/tokens"].includes(c.path)),
+        calls.some((c) =>
+          [
+            "hosts",
+            "users",
+            "admin/tokens",
+            "admin/system",
+            "admin/configuration",
+            "consumers",
+          ].includes(c.path),
+        ),
       ).toBe(false);
       expect(
         screen.queryByRole("navigation", { name: "Administration navigation" }),
