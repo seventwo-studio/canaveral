@@ -46,12 +46,12 @@ source checkout before importing either package.
   The optional workflow input uses a public CA and the separately configured
   `CANAVERAL_ACCEPTANCE_TOKEN` Actions secret. No acceptance command deploys a service.
 
-Release publication is separate: `node script/publish_release.mjs` requires
-explicit operator authorization, an exact reviewed release tag already on main,
-a matching package version, one unfinished draft for that commit, and configured
-registry credentials. It validates immutable source labels and content digests
-before reusing existing images or publishing a Flux artifact. The portable tests
-exercise bundle and validation functions without publishing anything.
+Release publication is separate from builds. Pushing an authorized stable release
+tag starts the publication workflow. It requires a matching root package/lock
+version, exact remote tag identity and main ancestry. It creates a missing
+exact-commit draft, but rejects duplicate, conflicting or already published
+releases. Existing image and Flux artifact identities and digests are checked
+before reuse. Portable tests exercise these guards without publishing anything.
 
 Container controllers bind a non-loopback interface and therefore require TLS.
 Compose takes `CANAVERAL_TLS_DIRECTORY`, containing `server.crt`, `server.key`,
@@ -64,36 +64,105 @@ inputs are examples requiring operator provisioning, not deployment acceptance.
 
 ## Release procedure
 
-The next source release is 0.3.3. The 0.3.0, 0.3.1 and 0.3.2 tags and drafts stopped before publication and are not reused. Internal coordination/dashboard npm packages
-keep their independent private 0.1.0 versions; package checks do not couple them
-to the root version. Do not reuse historical 0.2.2 registry tags after the history
-rewrite: immutable identity checks intentionally reject another source revision.
+The next source release is 0.4.0. Internal coordination/dashboard npm packages
+keep their independent private 0.1.0 versions. Historical version tags are not
+reused: immutable identity guards reject another source revision.
 
-1. Merge the reviewed change into `main` and require green validation at the
-   selected full commit. Verify root `package.json` and lockfile match the release.
-2. With separate release authorization, create `v0.3.3` on that exact commit and
-   push the tag. Create one **draft** GitHub release with that tag and set its
-   target to the full commit SHA (not the string `main`). Add reviewed notes.
-3. Dispatch **Publish Canaveral release** from `main`, supplying `v0.3.3`.
-   The GitHub-hosted runner checks out that tag, verifies its main ancestry and
-   draft identity, and uses `GITHUB_TOKEN` with contents/package write permission.
-   Docker buildx and QEMU build `linux/amd64,linux/arm64`; kubectl and Flux are
-   version-pinned with verified checksums. No cluster credentials are needed.
-4. The script publishes `ghcr.io/seventwo-studio/canaveral/orchestrator`,
-   `/dashboard` and `/kubevirt`. These repo-scoped packages are created by this
-   repository's `GITHUB_TOKEN`, which links them to the repository and grants its
-   workflows write access; the older top-level `canaveral*` packages are unused. It pins their
-   version/digests into the namespace-free `orchestrator/`, `dashboard/` and
-   `kubevirt/` Kustomizations, publishes `ghcr.io/seventwo-studio/canaveral/deploy:0.3.3` as a Flux OCI artifact,
-   uploads `release.json` and publishes the draft. Review the metadata/digests
-   before selecting them in an installation-specific GitOps overlay.
-5. The workflow then records signed SLSA build provenance for each image and the
-   deployment artifact and pushes it to the registry. Verify a digest before use:
-   `gh attestation verify oci://ghcr.io/seventwo-studio/canaveral/orchestrator@sha256:<digest> --repo seventwo-studio/canaveral`.
-   Provenance proves where and how the digest was built, not that it runs correctly.
+1. Merge the reviewed release preparation into main and require green validation
+   at the selected full commit. Verify root package.json and package-lock.json,
+   including the lockfile root package entry, all declare 0.4.0.
+2. With separate release authorization, create v0.4.0 on that exact commit and
+   push it. This push authorizes automatic publication. An optional pre-existing
+   draft must target the full commit SHA, never the string main. The workflow
+   otherwise creates an exact-commit draft after validating release identity.
+3. To retry a failed unfinished release, dispatch **Publish Canaveral release**
+   on the same tag, supplying that tag as input:
+   `gh workflow run release.yaml --ref v0.4.0 -f tag=v0.4.0`.
+   Dispatch from main or a different tag is rejected, preserving one signing
+   identity for automatic and manual runs. No run creates or moves a Git tag.
+4. The runner fetches main and checks ancestry, package/lock versions and local
+   and remote tag resolution. It builds three repo-scoped GHCR images for
+   linux/amd64 and linux/arm64, then a namespace-free Flux deployment artifact
+   at ghcr.io/seventwo-studio/canaveral/deploy:0.4.0. The deployment bundle pins
+   each image by digest; kubectl, Flux and Cosign are version-pinned.
+5. The workflow signs the deployment manifest at its immutable digest using
+   GitHub OIDC, verifies that signature with the exact issuer and tag-scoped
+   workflow identity, and retains signed SLSA provenance for all four digests.
+   Only after those steps succeed does --finalize revalidate release/registry
+   identity and prepared metadata, upload release.json and publish the draft.
+   `node script/publish_release.mjs` only prepares artifacts; --finalize is the
+   workflow's final step, not a substitute for signing and provenance.
 
-Dispatch is publication authorization, not a preview. No workflow run creates a
-release tag or deploys to Kubernetes. A failed run may have published some images;
-inspect the registry and draft before retrying the same exact commit. Identity
-mismatches require a new reviewed version, never overwriting an old tag. Release
-publication and portable validation do not establish installed-cluster acceptance.
+A failed run may leave some immutable images or an unsigned deployment artifact
+and an unfinished draft. Inspect registry state and retry the same exact commit;
+matching artifacts are reused and missing artifacts are completed. Identity
+mismatches require a new reviewed version. Completed GitHub releases are rejected
+on retry, including same-source releases, and are never reopened or overwritten.
+A lost final acknowledgement requires inspection rather than another publication.
+Never delete a signature or disable verification to recover a failed release.
+
+CI needs no cluster access or deployment credentials. Publication and portable
+validation do not establish installed-cluster or native runtime acceptance.
+
+### Deployment signature contract
+
+Cosign installer v4.1.3 is pinned by commit; Cosign v3.1.4 uses
+--new-bundle-format=false and --use-signing-config=false when signing. This
+retains the legacy registry signature format consumed by Flux source-controller
+v1.7.x (including v1.7.4), rather than relying on newer Sigstore bundle support.
+Signatures and provenance attestations coexist; GitHub build provenance alone
+is not an OCIRepository Cosign signature.
+
+The certificate issuer is exactly https://token.actions.githubusercontent.com.
+For v0.4.0 the certificate subject is exactly:
+
+`https://github.com/seventwo-studio/canaveral/.github/workflows/release.yaml@refs/tags/v0.4.0`
+
+A consumer can poll stable releases with this public source definition. The
+matchers are anchored Go regular expressions; omit verify.secretRef for keyless
+verification. Narrow ref and subject to one version for a fixed release.
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: canaveral-release
+spec:
+  interval: 5m
+  url: oci://ghcr.io/seventwo-studio/canaveral/deploy
+  ref:
+    semver: '>=0.4.0'
+  layerSelector:
+    mediaType: application/vnd.cncf.flux.content.v1.tar+gzip
+    operation: extract
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token[.]actions[.]githubusercontent[.]com$'
+        subject: '^https://github[.]com/seventwo-studio/canaveral/[.]github/workflows/release[.]yaml@refs/tags/v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'
+```
+
+Require SourceVerified=True with reason Succeeded and Ready=True for the selected
+revision before treating the source as admitted. Verification checks the signed
+manifest digest, Fulcio certificate chain, issuer/subject and Rekor transparency
+log evidence using Sigstore's public trust infrastructure. The stable matcher
+trusts this workflow for all stable releases; it does not independently bind the
+certificate's tag string to the selected artifact version. Compare release.json,
+selected version, source revision and digest for a fixed promotion. Version tags
+before 0.4.0 are outside this signing contract.
+
+To verify a fixed digest independently with the pinned Cosign version:
+
+```sh
+cosign verify --new-bundle-format=false \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/seventwo-studio/canaveral/.github/workflows/release.yaml@refs/tags/v0.4.0 \
+  ghcr.io/seventwo-studio/canaveral/deploy@sha256:<digest>
+gh attestation verify oci://ghcr.io/seventwo-studio/canaveral/deploy@sha256:<digest> --repo seventwo-studio/canaveral
+```
+
+Actual public signing and Flux reconciliation remain release/operator acceptance
+checks; portable tests validate workflow ordering and guards, not live trust or
+runtime acceptance. See [Flux keyless verification](https://fluxcd.io/flux/components/source/ocirepositories/#keyless-verification),
+[Cosign signing options](https://github.com/sigstore/cosign/blob/v3.1.4/cmd/cosign/cli/options/sign.go)
+and the [official installer](https://github.com/sigstore/cosign-installer/tree/756fe2d284c7292c4e9b62c8a28f1e5629c59532).

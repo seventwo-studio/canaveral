@@ -6,7 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ROOT, run } from './tasks.mjs';
+import { ROOT } from './tasks.mjs';
 import { uniqueJSON } from './json.mjs';
 export const SOURCE='https://github.com/seventwo-studio/canaveral';
 // Repo-scoped names: packages first pushed by this repository's GITHUB_TOKEN are linked to it
@@ -18,7 +18,7 @@ const DIGEST=/^sha256:[a-f0-9]{64}$/;
 /** Describe a registry failure without credentials: status, path and registry error codes only. */
 export function registryFailure(url,status,body) {
   let codes='';
-  try {codes=(JSON.parse(body).errors??[]).slice(0,3).map(e=>[e.code,e.message].filter(v=>typeof v==='string').join(': ').slice(0,200)).join('; ');} catch {}
+  try {codes=(JSON.parse(body).errors??[]).slice(0,3).map(e=>typeof e.code==='string' && /^[A-Z_]{1,64}$/.test(e.code) ? e.code : 'UNKNOWN').join('; ');} catch {}
   return 'Registry request failed: HTTP '+status+' for '+url.pathname+(codes?' ('+codes+')':'')+'.';
 }
 /** Read at most 4 KiB of an error body, then stop the transfer. */
@@ -32,7 +32,7 @@ export class Registry {
   static async get(url,auth) {
     const parsed=new URL(url);
     if(parsed.protocol!=='https:' || parsed.hostname!=='ghcr.io' || parsed.username || parsed.password) throw new Error('Unexpected registry origin.');
-    const response=await fetch(url,{headers:{Authorization:auth,Accept:'application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json','User-Agent':'canaveral-release'},signal:AbortSignal.timeout(30_000),redirect:'error'});
+    const response=await fetch(url,{headers:{Authorization:auth,Accept:'application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json','User-Agent':'canaveral-release'},signal:AbortSignal.timeout(30_000),redirect:'error'}).catch(()=>{throw new Error('Registry transport failed.');});
     if(!response.ok) {const error=new Error(registryFailure(parsed,response.status,await boundedText(response).catch(()=>'')));error.status=response.status;throw error;}
     const chunks=[];let length=0;
     for await(const chunk of response.body) {
@@ -110,24 +110,50 @@ export function draftRelease(pages,tag,revision) {
   if(matches.length!==1 || matches[0].draft!==true || matches[0].target_commitish!==revision) throw new Error('One unfinished draft targeting the exact source commit is required.');
   return matches[0];
 }
-const capture=(command,args)=>execFileSync(command,args,{cwd:ROOT,encoding:'utf8',maxBuffer:8*1048576}).trim();
-export async function main() {
+// Never relay subprocess stderr/stdout on failure: remote errors can contain credentials.
+export function capture(command,args) {
+  try {return execFileSync(command,args,{cwd:ROOT,encoding:'utf8',maxBuffer:32*1048576,stdio:['ignore','pipe','pipe']}).trim();}
+  catch {throw new Error(command+' operation failed; inspect publication state before retrying.');}
+}
+export const STABLE_TAG=/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+export function releaseIdentity(tag,configured,lock,revision,tagRevision,remoteTagRevision) {
+  if(!STABLE_TAG.test(tag??'')) throw new Error('Stable release tag required.');
+  if(configured!==tag.slice(1) || lock.version!==configured || lock.packages?.['']?.version!==configured) throw new Error('Release tag differs from package/lock version.');
+  if(!/^[a-f0-9]{40}$/.test(revision) || tagRevision!==revision || remoteTagRevision!==revision) throw new Error('Checked-out release identity differs.');
+}
+export function remoteTag(output,tag) {
+  const refs=new Map(output.split('\n').filter(Boolean).map(line=>line.split(/\s+/).reverse()));
+  return refs.get('refs/tags/'+tag+'^{}')??refs.get('refs/tags/'+tag);
+}
+export function ensureDraft(pages,tag,revision,create,reload) {
+  if(!pages.flat().some(r=>r.tag_name===tag)) {
+    create(['release','create',tag,'--verify-tag','--draft','--target',revision,'--title',tag,'--notes','Release metadata and signed deployment artifact are prepared by the release workflow.']);
+    pages=reload();
+  }
+  return draftRelease(pages,tag,revision);
+}
+export async function main(finalize=false,{execute=capture,connect=packageName=>Registry.connect(packageName),root=ROOT}={}) {
+  const capture=execute,run=(command,args)=>{execute(command,args);};
   const tag=process.env.RELEASE_TAG;
-  if(!/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag??'')) throw new Error('Stable release tag required.');
-  const version=tag.slice(1), configured=uniqueJSON(readFileSync(join(ROOT,'package.json'),'utf8')).version;
-  if(configured!==version) throw new Error('Release tag differs from package version.');
+  if(!STABLE_TAG.test(tag??'')) throw new Error('Stable release tag required.');
+  const version=tag.slice(1), configured=uniqueJSON(readFileSync(join(root,'package.json'),'utf8')).version;
+  const lock=uniqueJSON(readFileSync(join(root,'package-lock.json'),'utf8'));
   const revision=capture('git',['rev-parse','HEAD']);
+  run('git',['fetch','--no-tags','origin','+refs/heads/main:refs/remotes/origin/main']);
   run('git',['merge-base','--is-ancestor',revision,'origin/main']);
-  if(capture('git',['rev-parse',tag+'^{commit}'])!==revision) throw new Error('Checked-out release identity differs.');
-  draftRelease(uniqueJSON(capture('gh',['api','--paginate','--slurp','repos/seventwo-studio/canaveral/releases?per_page=100'])),tag,revision);
-  const dist=join(ROOT,'dist');mkdirSync(dist,{recursive:true});
+  releaseIdentity(tag,configured,lock,revision,capture('git',['rev-parse','refs/tags/'+tag+'^{commit}']),remoteTag(capture('git',['ls-remote','origin','refs/tags/'+tag,'refs/tags/'+tag+'^{}']),tag));
+  const releases=()=>uniqueJSON(capture('gh',['api','--paginate','--slurp','repos/seventwo-studio/canaveral/releases?per_page=100']));
+  if(finalize) draftRelease(releases(),tag,revision);
+  else ensureDraft(releases(),tag,revision,args=>run('gh',args),releases);
+  const dist=join(root,'dist');mkdirSync(dist,{recursive:true});
   const images={};
   for(const [stage,packageName] of Object.entries(IMAGES)) {
-    let registry=await Registry.connect(packageName), found=await registry.manifest(version);
+    let registry=await connect(packageName), found=await registry.manifest(version);
     if(found===null) {
+      if(finalize) throw new Error('Cannot finalize missing image.');
       const annotations={'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':revision};
       run('docker',['buildx','build','.', '--target',stage,'--platform','linux/amd64,linux/arm64','--push','--tag',packageName+':'+version,...Object.entries(annotations).flatMap(([k,v])=>['--label',k+'='+v,'--annotation','index:'+k+'='+v])]);
-      registry=await Registry.connect(packageName);found=await registry.manifest(version);
+      registry=await connect(packageName);found=await registry.manifest(version);
     }
     if(!found) throw new Error('Image publication did not complete.');
     checkIdentity(found[0],version,revision);images[stage]=packageName+':'+version+'@'+found[1];
@@ -136,18 +162,26 @@ export async function main() {
   try {
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,output);
     for(const stage of ['orchestrator','dashboard','kubevirt']) run('kubectl',['kustomize',join(output,stage)]);
-    const registry=await Registry.connect(DEPLOYMENT);let artifact=await registry.manifest(version);
+    const registry=await connect(DEPLOYMENT);let artifact=await registry.manifest(version);
     const sourceRevision=tag+'@sha1:'+revision;
     if(!artifact) {
+      if(finalize) throw new Error('Cannot finalize missing deployment artifact.');
       run('flux',['push','artifact','oci://'+DEPLOYMENT+':'+version,'--path',output,'--source',SOURCE,'--revision',sourceRevision,'--reproducible','--annotations','org.opencontainers.image.version='+version]);
       artifact=await registry.manifest(version);
     }
     if(!artifact) throw new Error('Deployment publication did not complete.');
     checkIdentity(artifact[0],version,sourceRevision,true);
     result.deployment={url:'oci://'+DEPLOYMENT,tag:version,digest:artifact[1]};
-    writeFileSync(metadata,JSON.stringify(result,null,2)+'\n');
+    const text=JSON.stringify(result,null,2)+'\n';
+    if(finalize && readFileSync(metadata,'utf8')!==text) throw new Error('Prepared release metadata differs.');
+    if(!finalize) writeFileSync(metadata,text);
   } finally {rmSync(temporary,{recursive:true,force:true});}
-  run('gh',['release','upload',tag,metadata,'--clobber']);run('gh',['release','edit',tag,'--draft=false']);
-  console.log('Published Canaveral '+version+' at '+revision);
+  // Recheck immediately before touching release assets; published releases are never edited.
+  draftRelease(releases(),tag,revision);
+  if(finalize) {
+    run('gh',['release','upload',tag,metadata,'--clobber']);
+    run('gh',['release','edit',tag,'--draft=false']);
+  }
+  console.log((finalize?'Published':'Prepared')+' Canaveral '+version+' at '+revision);
 }
-if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) main().catch(error=>{console.error('Release publication failed: '+(error instanceof Error ? error.message : 'unknown error')+' Inspect saved metadata and registry state before retrying.');process.exitCode=1;});
+if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) main(process.argv[2]==='--finalize').catch(()=>{console.error('Release publication failed. Inspect saved metadata, draft and registry state before retrying.');process.exitCode=1;});
