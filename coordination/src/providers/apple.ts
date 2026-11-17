@@ -1,10 +1,14 @@
+import { AppleBindings, requireRunningAppleStatus, type OwnedGuestAuthority } from "./apple-binding.ts";
+import { appleNATAddress, readAppleNAT } from "./apple-nat.ts";
+import { guestMAC } from "./guest-tls.ts";
+import type { GuestAssignmentContext } from "../guest/binding.ts";
 import { buildLaunchTLS, validateLaunchTLS, verifyLaunchTLSClock, type LaunchTLS } from "./guest-tls.ts";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ServiceError, object } from "../errors.ts";
+import { GuestUnavailableError, ServiceError, object } from "../errors.ts";
 
 export type Data = Record<string, unknown>;
 export interface CommandOptions { input?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number }
@@ -272,7 +276,55 @@ $result = $image.CreateResultImage()
 export interface RuntimeProof { boot: number; processExited: boolean; runtimeUnlocked: boolean; diskHandlesClosed: boolean }
 export class AppleProvider {
   readonly kind = "apple";
-  constructor(readonly config: Data, readonly state: string) {}
+  private readonly bindings: AppleBindings;
+  async closeMachine(id: string): Promise<void> { this.bindings.closeMachine(id); }
+  async sweep(active: Set<string>): Promise<void> { this.bindings.sweep(active); }
+  async close(): Promise<void> { this.bindings.close(); }
+  guestHelperBinding(machine: Data, image: Data, folder: string, authority: OwnedGuestAuthority) {
+    if (image.os !== "macos" || !machine.lease) throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"});
+    let allowed = false; try { allowed = authority.authorized() === true; } catch { /* unavailable authority denies access */ }
+    if (!allowed) throw new ServiceError("Owned macOS authority ended.",410,{retryable:false});
+    // No storage creation or adoption on this path, including after disappearance.
+    const storage = join(string(this.config.storage), uuid(machine.id)), path = join(storage, uuid(machine.id).toUpperCase());
+    const route = () => appleNATAddress(typeof this.config.readNATLeases === "function" ? String(this.config.readNATLeases()) : readAppleNAT(), guestMAC(uuid(machine.id)), authority.clock.wall());
+    let address: string | undefined;
+    const custody = () => {
+      if (!authority.authorized() || present(join(folder,"deletion.json"))) throw new ServiceError("Assignment ended.",410);
+      verifyAssignment(machine,folder); this.native(machine);
+      for (const directory of [storage,path,folder]) { const st=lstatSync(safePath(directory)); if (!st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o077)) throw new ServiceError("Owned access directory is not private."); }
+      const receipt = readRecord(join(storage,"guest-launch.json")), assignment = object(receipt.assignment);
+      const definition = readRecord(join(path,"machine.json")), launch = readRecord(join(path,"runner-launch.json")), pin = readRecord(join(path,"guest-launch-pin.json"));
+      const status = readRecord(join(path,"status.json"));
+      if (receipt.version !== 2 || receipt.state !== "sealed" || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || launch.launchId !== assignment.launchId || uuid(definition.id) !== uuid(machine.id) || uuid(definition.executionLeaseID) !== assignment.leaseId || definition.macAddress !== guestMAC(uuid(machine.id)) || legacyDigest(pin) !== legacyDigest(receipt.pin)) throw new ServiceError("Native launch custody differs.");
+      requireRunningAppleStatus(status,authority.clock.wall());
+      const media = lstatSync(safePath(String(pin.path)));
+      if (media.isSymbolicLink() || !media.isFile() || String(media.dev) !== pin.dev || String(media.ino) !== pin.ino || media.size !== pin.size || (media.mode & 0o7777) !== 0o400) throw new ServiceError("Launch media changed.");
+      return { receipt, assignment, identity: legacyDigest({ receipt, definition, launch, pin, assignment: readRecord(join(folder,"assignment.json")), media: {dev:String(media.dev),ino:String(media.ino),mtime:media.mtimeMs,ctime:media.ctimeMs}, records: [join(storage,"guest-launch.json"),join(path,"machine.json"),join(path,"runner-launch.json"),join(path,"guest-launch-pin.json"),join(folder,"assignment.json")].map(file => { const st=lstatSync(safePath(file)); if (!st.isFile() || st.uid !== process.getuid?.() || st.nlink !== 1 || (st.mode & (file === join(storage,"guest-launch.json") ? 0o077 : 0o022))) throw new ServiceError("Custody record ownership differs."); return [st.dev,st.ino,st.mode,st.mtimeMs,st.ctimeMs]; }), config: {runner:this.config.runner, storage:this.config.storage, nativeHelper:this.config.nativeHelper ?? null}, pid:status.pid }) };
+    };
+    // Factory registration precedes all asynchronous process and TLS work.
+    let validated = false;
+    return this.bindings.resolve(uuid(machine.id), authority, () => {
+      const value = custody();
+      if (!validated) {
+        const receipt = guestLaunchReceipt(storage,machine);
+        if (!receipt) throw new ServiceError("Owned launch custody is missing.");
+        verifyLaunchPin(object(receipt.pin),storage);
+        validated = true;
+      }
+      const tls = value.receipt.tls as LaunchTLS;
+      return { assignment: value.assignment as unknown as GuestAssignmentContext, credential: String(value.receipt.credential), identity: value.identity,
+        pinned: {address: address ?? "", serverName:tls.serverName, leafDER:Buffer.from(tls.leafDER,"base64url"), sha256:tls.sha256} };
+    }, async () => {
+      const before = custody(); const observed = route();
+      if (address !== undefined && address !== observed) throw new GuestUnavailableError("Native guest route changed.",503,{retryable:false});
+      address = observed;
+      const processes = await this.resourceProcesses(machine,image,folder,750);
+      if (!authority.authorized() || custody().identity !== before.identity || processes.length !== 1) throw new ServiceError("Native running process is unproven.");
+      const proof = object(processes[0]);
+      return legacyDigest({pid:proof.pid,birth:proof.birth,route:observed});
+    });
+  }
+  constructor(readonly config: Data, readonly state: string, bindings = new AppleBindings()) { this.bindings = bindings; }
   name(machine: Data): string { return `cvm-${uuid(machine.id)}`; }
   storage(machine: Data): string { return ownedStorage(this.config, machine); }
   private native(machine: Data, create = false): string { const root = create ? this.storage(machine) : ownedStorage(this.config, machine, false); return safePath(join(root, uuid(machine.id).toUpperCase())); }
@@ -414,7 +466,7 @@ export class AppleProvider {
     const path = this.native(machine); if (!present(join(path, "runner-launch.json"))) return null;
     const launch = readRecord(join(path, "runner-launch.json")); return { startedAt: launch.attemptedAt, identity: legacyDigest(launch) };
   }
-  async resourceProcesses(machine: Data, _image: Data, folder: string): Promise<unknown[]> {
+  async resourceProcesses(machine: Data, _image: Data, folder: string, probeTimeout = 5000): Promise<unknown[]> {
     verifyAssignment(machine, folder); const path = this.native(machine); const definition = readRecord(join(path, "machine.json"));
     if (uuid(definition.id) !== uuid(machine.id) || (definition.executionLeaseID == null) !== !machine.lease || machine.lease && uuid(definition.executionLeaseID) !== uuid(object(machine.lease).id)) throw new ServiceError("Runtime observation identity differs from the assignment.");
     const launch = readRecord(join(path, "runner-launch.json")); const status = readRecord(join(path, "status.json"));
@@ -422,12 +474,12 @@ export class AppleProvider {
     if (this.processExited(status.pid)) return [];
     const snapshot = (): Data => {
       if (typeof this.config.processSnapshot === "function") return object(this.config.processSnapshot(status.pid));
-      try { return object(JSON.parse(execFileSync(this.helper(), ["process", String(status.pid)], { timeout: 5000, maxBuffer: 65536, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))); }
+      try { return object(JSON.parse(execFileSync(this.helper(), ["process", String(status.pid)], { timeout: probeTimeout, maxBuffer: 65536, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))); }
       catch { throw new ServiceError("Native process telemetry is unavailable.", 503); }
     };
     const native = structuredClone(snapshot()); const born = Number(native.seconds) + Number(native.micros) / 1e6;
     const argv = list(native.argvHex).map(v => Buffer.from(string(v), "hex").toString("utf8")); const executable = Buffer.from(string(native.executableHex), "hex").toString("utf8");
-    if (native.pid !== status.pid || native.uid !== process.getuid?.() || !Number.isFinite(born) || born < launch.attemptedAt - 1 || born > launch.attemptedAt + 10 || executable !== realpathSync(string(this.config.runner)) || argv.length !== 3 || argv[1] !== "run" || argv[2] !== path) throw new ServiceError("Runtime telemetry executable, arguments or birth differs.");
+    if (native.pid !== status.pid || native.uid !== process.getuid?.() || !Number.isSafeInteger(native.seconds) || !Number.isSafeInteger(native.micros) || Number(native.micros) < 0 || Number(native.micros) >= 1e6 || !Number.isFinite(born) || born < launch.attemptedAt - 1 || born > launch.attemptedAt + 10 || executable !== realpathSync(string(this.config.runner)) || argv.length !== 3 || argv[1] !== "run" || argv[2] !== path) throw new ServiceError("Runtime telemetry executable, arguments or birth differs.");
     for (const key of ["userNanoseconds", "systemNanoseconds", "rssBytes"]) if (typeof native[key] !== "number" || !Number.isFinite(native[key]) || Number(native[key]) < 0) throw new ServiceError("Native process resource counters are unavailable.");
     const verify = (): boolean => {
       try {
@@ -566,9 +618,11 @@ export class AppleProvider {
     return this.withRuntimeLock(path, async () => { if (!this.confirmedStopped(path) || !await this.stopProof(machine, path, true)) throw new ServiceError("Native shutdown and closed disk handles are unconfirmed."); return consume(safePath(join(path, "disk.img")), "raw"); });
   }
   async removeOwnedStorage(machine: Data, image: Data, folder: string, requestId: string, preboot = false): Promise<Data> {
+    this.bindings.closeMachine(uuid(machine.id));
     return this.withFileLock(join(safePath(folder), "provider.lock"), () => this.removeOwnedStorageLocked(machine, image, folder, requestId, preboot));
   }
   private async removeOwnedStorageLocked(machine: Data, _image: Data, folder: string, requestId: string, preboot = false): Promise<Data> {
+    this.bindings.closeMachine(uuid(machine.id));
     requestId = uuid(requestId); verifyAssignment(machine, folder);
     if (machine.desired !== "stopped") throw new ServiceError("Storage removal requires a stopped assignment.");
     const bootstrapClosed = async () => {

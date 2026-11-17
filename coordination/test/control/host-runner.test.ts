@@ -24,6 +24,17 @@ function fakeTransport(reply: () => RecordValue = () => ({ machines: [] })): Hos
 const providerFactory: NonNullable<HostDependencies["providerFactory"]> = () => ({ kind: "libvirt", check: async () => ({}), reconcile: async m => ({ state: m.desired }) });
 async function drain(): Promise<void> { await new Promise(r => setTimeout(r, 20)); }
 
+test("a failed runtime sweep does not stop Linux scheduling and remains a shutdown failure", async t => {
+  const {config,image,clock} = setup(t), running = machine(image), stopped = {...machine(image),desired:"stopped"};
+  let reconciled=0, shells=0, sweeps=0;
+  const runner = new HostRunner(config,{clock,transport:fakeTransport(()=>({machines:[running,stopped]})),providerFactory:()=>({kind:"libvirt",check:async()=>({}),
+    reconcile:async m=>{reconciled++;return {state:m.desired};},sweep:async()=>{sweeps++;throw Error("fixture sweep failure");},closeShells:async()=>{shells++;}})});
+  await runner.initializeProviders(); await runner.connect(); await runner.checkEnvironment(); await runner.poll();
+  await runner.step(); await drain(); assert.equal(reconciled,2); assert.ok(shells>0);
+  await runner.step(); await drain(); assert.ok(reconciled>=4); assert.ok(sweeps>=2);
+  await assert.rejects(runner.close(),(error:unknown)=>error instanceof ServiceError && error.code==="host_shutdown_incomplete");
+});
+
 test('physical Linux and Mac offers include models beside VM and simulator runtimes', t => {
   const { config } = setup(t);
   const inference = { runtime: 'ollama', executable: '/private/ollama', modelsDirectory: '/private/models', models: [{ id: 'fixture:1', digest: 'sha256:' + 'a'.repeat(64), resources: { cpu: 2, memoryMiB: 2048, diskGiB: 8 } }] };
@@ -143,4 +154,39 @@ test("guest preparation receives cloneable data and verified health determines a
     guest: { prepare: async (_machine, definition) => { prepared++; return structuredClone(definition); }, control: async () => ({ ready: true, mode: "headless" }) } });
   await runner.initializeProviders(); runner.assignments = [m]; runner.lastContact = 10;
   const report = await runner.reconcile(m); assert.equal(prepared, 1); assert.equal(report.accessReady, true); assert.equal((report.preparation as RecordValue).state, "ready"); await runner.close();
+});
+
+test('mixed runtime selection captures macOS authority and retains old backends for shutdown', async t => {
+  const {config,clock,image:linux} = setup(t);
+  const mac = {...linux,id:'mac',os:'macos',mode:'desktop',arch:'arm64'};
+  const lin = {...linux,arch:'arm64',guestAccess:true};
+  const m=machine(mac), l=machine(lin); m.lease={id:randomUUID(),revision:1,state:'ready',controllerNow:1000,authorizationDeadline:1060};
+  const authorities: Array<import('../../src/providers/apple-binding.ts').OwnedGuestAuthority> = [];
+  const {GuestHelperBinding}=await import('../../src/control/session-protocol.ts');
+  let closed=0,swept=0,files=0;
+  const runtime={kind:'apple',check:async()=>({}),reconcile:async()=>({state:'running'}),guestHelperBinding:async(_m:RecordValue,_i:RecordValue,_f:string,a:import('../../src/providers/apple-binding.ts').OwnedGuestAuthority)=>{authorities.push(a);return new GuestHelperBinding(async(path,body)=>{
+    if(path.endsWith("/shell/close"))return {closed:true};
+    if(path.endsWith("/upload/begin"))return {id:body!.id,state:"receiving",bytes:0};
+    if(path.endsWith("/upload/finish"))return {id:body!.id,state:"committed",bytes:0,sha256:body!.sha256,durable:true};
+    if(path.endsWith("/download/begin"))return {id:body!.id,state:"reading",bytes:0};
+    if(path.endsWith("/download/finish"))return {id:body!.id,state:"verified",bytes:0,sha256:"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"};
+    files++;return {path:"/",entries:[],truncated:false};},a.authorized);},close:async()=>{closed++;},sweep:async()=>{swept++;}};
+  const runner=new HostRunner({...config,provider:'macos',runtimes:{apple:{}},templates:[mac,lin]}, {clock,transport:fakeTransport(()=>({machines:[m,l]})),providerFactory:()=>runtime});
+  await runner.initializeProviders();await runner.connect();await runner.poll();
+  const selected=runner.accessBackend(m), linuxBackend=runner.accessBackend(l);
+  assert.notEqual(selected,linuxBackend);
+  await runner.guestAccess.control(m,mac,runner.context(m).folder,{action:'list-files',arguments:{path:'/'}});
+  assert.equal(files,1);assert.equal(authorities[0]!.clock,clock);assert.equal(authorities[0]!.authorized(),true);
+  const folder=runner.context(m).folder;
+  assert.deepEqual(await runner.guestAccess.streamUpload!(m,mac,folder,'/empty',undefined,{read:()=>Buffer.alloc(0)},0,()=>true),{uploaded:0,durable:true});
+  const download=await runner.guestAccess.streamDownload!(m,mac,folder,'/empty',undefined,()=>true);assert.equal(await download.verify(),true);await download.close();
+  const desktop=await runner.guestAccess.desktop!(m,mac,folder);await desktop.close();
+  const session=(runner as unknown as {sessionBackend(job:import('../../src/control/sessions.ts').RunnerSessionJob):import('../../src/control/sessions.ts').RunnerSessionBackend}).sessionBackend({id:randomUUID(),generation:randomUUID(),leaseId:(m.lease as RecordValue).id as string,machineId:String(m.id),capability:'pty'});
+  const originalRuntime=runner.runtimes.get('apple')!;runner.runtimes.clear();
+  assert.deepEqual(await session.control!('shell-close',{session:randomUUID()}),{closed:true});runner.runtimes.set('apple',originalRuntime);
+  runner.assignments=[{...m,lease:{...m.lease as RecordValue,id:randomUUID()}}];
+  assert.equal(authorities[0]!.authorized(),false,'same machine must not authorize a captured old lease');
+  runner.assignments=[{...m,resources:{cpu:2,memoryMiB:1024,diskGiB:8}}];
+  assert.equal(authorities[0]!.authorized(),false,'current fingerprint is authoritative');
+  runner.runtimes.clear();runner.assignments=[];await runner.close();assert.equal(closed,1);assert.ok(swept>0);
 });

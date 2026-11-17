@@ -6,6 +6,11 @@ import tls from 'node:tls';
 import net from 'node:net';
 import { X509Certificate } from 'node:crypto';
 import { pinnedGuestBindingFactory, guestBindingAuthorization } from '../coordination/dist/src/guest/binding.js';
+import { AppleProvider, readRecord, saveRecord } from '../coordination/dist/src/providers/apple.js';
+import { AppleBindings } from '../coordination/dist/src/providers/apple-binding.js';
+import { guestMAC } from '../coordination/dist/src/providers/guest-tls.js';
+import { dirname } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { GuestHTTPS } from '../coordination/dist/src/guest/https.js';
 import { GuestHelperAccess } from '../coordination/dist/src/control/sessions.js';
 const watchdog = setTimeout(() => { console.error("Assigned TLS fixture exceeded its deadline"); process.exit(1); }, 30_000); watchdog.unref();
@@ -23,6 +28,49 @@ try {
   let bytes = Buffer.alloc(0);
   while (true) { const chunk = await download.read(65536); if (!chunk.length) break; bytes = Buffer.concat([bytes, chunk]); }
   assert.equal(await download.verify(), true); await download.close(); assert.equal(bytes.toString(), 'fixture bytes');
+  // Full production provider custody/process/NAT resolver. Only the fixture dial
+  // maps its synthetic private route to this localhost listener; TLS/v2 stays real.
+  {
+  const root = dirname(dirname(storage)), folder = join(root,'assignment');
+  const saved = readRecord(join(folder,'assignment.json'));
+  const machine = {id:receipt.assignment.machineId,lease:{id:receipt.assignment.leaseId},template:{id:'mac',revision:'1'},resources:{cpu:2,memoryMiB:1024,diskGiB:8},desired:'running'};
+  assert.equal(saved.fingerprint,receipt.assignment.fingerprint);
+  const native = join(storage,machine.id.toUpperCase()), launch = readRecord(join(native,'runner-launch.json'));
+  saveRecord(join(native,'machine.json'),{id:machine.id,executionLeaseID:machine.lease.id,macAddress:guestMAC(machine.id)});
+  saveRecord(join(native,'status.json'),{phase:'Running',runnerProtocol:1,runtimeState:1,pid:1234,updatedAt:Date.now()/1000-978307200});
+  saveRecord(join(native,'guest-launch-pin.json'),receipt.pin);
+  let born = Math.floor(launch.attemptedAt), route = '192.168.64.2', live = true, probes = 0, dials = 0, routeReady = false, transportReady = false;
+  const clock = {suspendAware:true,bootId:'fixture-boot',now:()=>performance.now()/1000,wall:()=>Date.now()/1000};
+  const config = {storage:dirname(storage),runner:process.execPath,processAbsent:()=>false,processSnapshot:()=>{probes++;return {pid:1234,uid:process.getuid(),seconds:born,micros:0,executableHex:Buffer.from(process.execPath).toString('hex'),argvHex:[process.execPath,'run',native].map(v=>Buffer.from(v).toString('hex')),userNanoseconds:0,systemNanoseconds:0,rssBytes:0};},readNATLeases:()=>routeReady ? `{
+hw_address=1,${guestMAC(machine.id)}
+ip_address=${route}
+lease=0xfffffff0
+}
+` : ''};
+  const notReady = net.createServer(); await new Promise(r=>notReady.listen(0,'127.0.0.1',r));
+  const notReadyOrigin = `https://127.0.0.1:${notReady.address().port}`; await new Promise(r=>notReady.close(r));
+  const owned = new AppleBindings((factory,evidence,current,endpoint)=>{dials++;assert.equal(evidence.pinned.address,route);assert.equal(endpoint,`https://${route}:8767`);return factory.resolve(()=>evidence.assignment,transportReady ? origin : notReadyOrigin,evidence.credential,current,{...evidence.pinned,address:'127.0.0.1'},2);});
+  const provider = new AppleProvider(config,root,owned), authority = {clock,authorized:()=>live};
+  const providerAccess = new GuestHelperAccess((m,i,f)=>provider.guestHelperBinding(m,i,f,authority));
+  const list = ()=>providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}});
+  const statusFile = join(native,'status.json'), status = readRecord(statusFile);
+  saveRecord(statusFile,{...status,updatedAt:Date.now()/1000-978307200-8});
+  await assert.rejects(list()); assert.equal(dials,0); saveRecord(statusFile,status);
+  await assert.rejects(list()); assert.equal(dials,0); assert.equal(probes,0);
+  routeReady=true; await assert.rejects(list()); assert.equal(dials,1); assert.equal(probes,2);
+  transportReady=true;
+  await Promise.all(Array.from({length:4},()=>providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}})));
+  assert.equal(dials,2);assert.equal(probes,4);
+  const ownedDownload = await providerAccess.streamDownload(machine,image,folder,'/hello',undefined,()=>live);
+  assert.equal(Buffer.from(await ownedDownload.read(65536)).toString(),'fixture bytes');assert.equal(await ownedDownload.verify(),true);await ownedDownload.close();
+  born += 20;
+  await new Promise(r=>setTimeout(r,1100));
+  await assert.rejects(providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}}));
+  born -= 20;
+  await assert.rejects(providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}}));
+  assert.equal(dials,2,'a reverted process proof must not repair a closed launch');
+  await provider.close();
+  }
   await assert.rejects(factory.resolve(expected, origin, 'x'.repeat(43), () => true, pinned));
   assert.throws(() => new GuestHTTPS(origin, receipt.credential, undefined, 2, undefined, { ...pinned, serverName: 'bad.canaveral.invalid' }));
   assert.throws(() => new GuestHTTPS(origin, receipt.credential, undefined, 2, undefined, { ...pinned, sha256: '0'.repeat(64) }));

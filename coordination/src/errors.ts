@@ -20,6 +20,11 @@ export class ServiceError extends Error {
   }
 }
 
+/** A complete, verified guest JSON response that refused one operation. */
+export class GuestOperationError extends ServiceError {}
+/** A later explicit request may resolve anew; the current request is never replayed. */
+export class GuestUnavailableError extends ServiceError {}
+
 export function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new ServiceError("Expected a JSON object.", 400);

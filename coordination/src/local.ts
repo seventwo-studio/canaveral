@@ -204,6 +204,7 @@ export interface LocalAttachedHost extends CliService {
   guard: { allowed(id: string): boolean; beginExecution(id: string, leaseId: string): void };
   readonly stopping?: boolean;
   readonly guestAccess?: LocalAccess | undefined;
+  accessBackend?(machine: Json): LocalAccess | LocalRuntime;
   context(machine: Json): { runtime: LocalRuntime; image: Json; folder: string };
   refreshImages?(): void;
   importImage?(metadata: Json, source: ByteReader, size: number, authorized: Check): Promise<Json>;
@@ -252,7 +253,7 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
   }
   function backend(context: AttachedContext): LocalAccess | LocalRuntime {
     const { runtime, host, image } = context;
-    return runtime.access ?? (image.guestAccess ? host.guestAccess : undefined) ?? runtime;
+    return runtime.access ?? (image.os === "macos" || image.guestAccess ? host.accessBackend?.(context.machine) : undefined) ?? (image.os !== "macos" && image.guestAccess ? host.guestAccess : undefined) ?? runtime;
   }
   async function control(context: AttachedContext, request: Json, check: Check): Promise<Json> {
     if (!check()) throw new ServiceError("Attached environment authorization ended.", 410);
@@ -447,7 +448,7 @@ async function attachLocalDisplay(request: StreamAttachment, factory: () => Prom
     if (previous) return previous.report ? JSON.parse(String(previous.report)) as { state: "succeeded" | "failed" | "unknown"; result?: unknown } : { state: "unknown" as const };
     let report: { state: "succeeded" | "failed" | "unknown"; result?: unknown };
     try {
-      const access = context.runtime.access ?? (context.image.guestAccess ? context.host.guestAccess : undefined) ?? context.runtime;
+      const access = context.runtime.access ?? (context.image.os === "macos" || context.image.guestAccess ? context.host.accessBackend?.(context.machine) : undefined) ?? (context.image.os !== "macos" && context.image.guestAccess ? context.host.guestAccess : undefined) ?? context.runtime;
       if (context.runtime.operate) report = await context.runtime.operate(context.machine, context.image, context.folder, { ...operation, machineId: machine, expiresAt: Date.now() / 1000 + 30 }, check, effect ? r => effect(r) : undefined);
       else if (effect) report = { state: "succeeded", result: await effect(operation) };
       else if (access.control) report = { state: "succeeded", result: await access.control(context.machine, context.image, context.folder, operation as unknown as Json) };

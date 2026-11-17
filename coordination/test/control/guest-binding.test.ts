@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:https";
-import { guestAssignment, guestBindingAuthorization, guestBindingMAC, guestBindingBytes, verifiedGuestHelperBinding, type GuestAssignmentContext } from "../../src/guest/binding.ts";
+import { createHash, X509Certificate } from "node:crypto";
+import { guestAssignment, guestBindingAuthorization, guestBindingMAC, guestBindingBytes, pinnedGuestBindingFactory, verifiedGuestHelperBinding, type GuestAssignmentContext } from "../../src/guest/binding.ts";
+import { AppleBindings } from "../../src/providers/apple-binding.ts";
 import { GuestHelperAccess } from "../../src/control/sessions.ts";
 import { ServiceError } from "../../src/errors.ts";
+import type { GuestHTTPS } from "../../src/guest/https.ts";
 
 const vector = JSON.parse(readFileSync(join(process.cwd(), "../fixtures/guest-binding-v2.json"), "utf8"));
 test("shared golden bytes and all three MAC purposes, strict versioned tuples", () => {
@@ -28,18 +31,70 @@ test("actual Swift producer DTO is consumed by the real strict parser", () => {
   assert.deepEqual(guestAssignment(produced, true), vector.response);
   assert.equal(guestBindingMAC(vector.credential, vector.assignment, "identity-response", vector.nonce, vector.incarnation), produced.proof);
 });
+test("the first owner close survives cancellation errors from concurrent requests", async t => {
+  const dir = mkdtempSync(join(tmpdir(),"binding-close-race-")), cert = join(dir,"cert.pem"), key = join(dir,"key.pem");
+  const assignment = vector.assignment as GuestAssignmentContext, credential = vector.credential as string;
+  const serverName = assignment.launchId + ".canaveral.invalid";
+  assert.equal(spawnSync("openssl",["req","-x509","-newkey","rsa:2048","-nodes","-keyout",key,"-out",cert,"-days","2","-subj",`/CN=${serverName}`,"-addext",`subjectAltName=DNS:${serverName}`],{encoding:"utf8"}).status,0);
+  const leafDER = new X509Certificate(readFileSync(cert)).raw;
+  const pinned = {address:"127.0.0.1",serverName,leafDER,sha256:createHash("sha256").update(leafDER).digest("hex")};
+  let arrived!:()=>void, fault = "non-json", operations = 0, healthy = false;
+  const server = createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const identity = req.url === "/v1/identity", nonce = req.headers.authorization?.split(" ")[1]?.split(".")[0];
+    const auth = guestBindingAuthorization(credential,assignment,identity ? undefined : vector.incarnation,identity ? nonce : undefined);
+    if (req.headers.authorization !== auth) { res.writeHead(401);res.end();return; }
+    if (identity) { res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({...assignment,incarnation:vector.incarnation,nonce,proof:guestBindingMAC(credential,assignment,"identity-response",nonce,vector.incarnation)}));return; }
+    operations++;
+    if (JSON.parse(Buffer.concat(chunks).toString()).path === "/slow") { arrived();return; }
+    if (healthy) { res.writeHead(200,{"Content-Type":"application/json"});res.end("{}");return; }
+    res.writeHead(fault === "401" ? 401 : 200,{"Content-Type":"text/plain"});res.end("private-invalid-response");
+  });
+  try {
+    await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+    const address = server.address();assert.ok(address && typeof address !== "string");
+    const endpoint = `https://127.0.0.1:${address.port}`;
+    for (const level of ["owner","resolver"]) for (const cause of ["non-json","401","cleanup"]) await t.test(`${level}: ${cause} closes before the other POST is cancelled`,async()=>{
+      fault=cause;healthy=false;operations=0;let dials=0, factory=pinnedGuestBindingFactory();
+      const authority = {authorized:()=>true,clock:{suspendAware:true,bootId:"fixture-boot",now:()=>10,wall:()=>Date.now()/1000}};
+      const evidence = ()=>({assignment,credential,identity:"same-owned-launch",pinned});
+      const cache = new AppleBindings((next,_evidence,current)=>{dials++;factory=next;return next.resolve(()=>assignment,endpoint,credential,current,pinned,5);});
+      const resolve = ()=>cache.resolve(assignment.machineId,authority,evidence,async()=>"same-process");
+      try {
+        const binding = level === "owner" ? await factory.resolve(()=>assignment,endpoint,credential,()=>true,pinned,5) : await resolve();
+        const received = new Promise<void>(ready=>arrived=ready);
+        const slow = binding.call("/v1/files/list",{path:"/slow"}).catch((error:unknown)=>error);
+        await received;
+        if (cause === "cleanup") factory.closeAll();
+        else await assert.rejects(binding.call("/v1/files/list",{path:"/bad"}),(error:unknown)=>error instanceof ServiceError && error.outcome === "unknown");
+        const cancelled = await slow;
+        assert.ok(cancelled instanceof ServiceError && cancelled.outcome === "unknown");
+        healthy=true;const before=operations;
+        if (level === "owner") assert.equal(factory.recoverable,false);
+        else { assert.equal(await resolve(),binding);assert.equal(dials,1); }
+        assert.equal(binding.authorized(),false);
+        await assert.rejects(binding.call("/v1/files/list",{path:"/now-valid"}));
+        assert.equal(operations,before);
+      } finally { cache.close();factory.closeAll(); }
+    });
+  } finally { server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(dir,{recursive:true,force:true}); }
+});
 test("verified binding through macOS adapter over real verified HTTPS", async t => {
   const dir = mkdtempSync(join(tmpdir(), "binding-tls-")), cert = join(dir, "cert.pem"), key = join(dir, "key.pem");
   assert.equal(spawnSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"], { encoding: "utf8" }).status, 0);
   const credential = vector.credential as string, assignment = vector.assignment as GuestAssignmentContext;
   let expected = { ...assignment }, authority = true, incarnation = vector.incarnation, effects = 0, reads = 0;
   let identity: unknown = undefined, raw: string | undefined, onEffect = () => {}, onIdentity = () => {}, verifyRequest = true, force401 = false;
+  let refusal: string | undefined;
+  let refusalStatus = 409, disconnect = false;
   const server = createServer({ key: readFileSync(key), cert: readFileSync(cert) }, async (req, res) => {
     for await (const _ of req) { /* consume exact adapter request */ }
     const isIdentity = req.url === "/v1/identity";
     const nonce = req.headers.authorization?.split(" ")[1]?.split(".")[0];
     const auth = verifyRequest ? guestBindingAuthorization(credential, assignment, isIdentity ? undefined : incarnation, isIdentity ? nonce : undefined) : undefined;
     if (force401 || (verifyRequest && req.headers.authorization !== auth)) { res.writeHead(401); res.end("private-transport-secret"); return; }
+    if (!isIdentity && disconnect) { req.socket.destroy(); return; }
+    if (!isIdentity && refusal) { res.writeHead(refusalStatus, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ...(refusal === "ordinary" ? {} : {code:refusal}), message: "private-guest-diagnostic" })); return; }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (isIdentity) { reads++; onIdentity(); res.end(raw ?? JSON.stringify(identity === undefined ? { ...assignment, incarnation, nonce, proof: guestBindingMAC(credential, assignment, "identity-response", nonce, incarnation) } : typeof identity === "function" ? identity(nonce) : identity)); }
     else { effects++; onEffect(); res.end(JSON.stringify({ path: "/", entries: [], truncated: false })); }
@@ -48,8 +103,50 @@ test("verified binding through macOS adapter over real verified HTTPS", async t 
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const endpoint = `https://localhost:${address.port}`;
   const resolve = () => verifiedGuestHelperBinding(() => expected, endpoint, credential, () => authority, { caFile: cert });
-  const reset = () => { expected = { ...assignment }; authority = true; incarnation = vector.incarnation; identity = undefined; raw = undefined; onEffect = () => {}; onIdentity = () => {}; verifyRequest = true; force401 = false; };
+  const reset = () => { expected = { ...assignment }; authority = true; incarnation = vector.incarnation; identity = undefined; raw = undefined; onEffect = () => {}; onIdentity = () => {}; verifyRequest = true; force401 = false; refusal = undefined; refusalStatus = 409; disconnect = false; };
   try {
+    await t.test("an interrupted owned POST closes its generation without replay and permits a fresh explicit handshake", async () => {
+      reset(); const owner = {closed:false,recoverable:false,transports:new Set<GuestHTTPS>()};
+      const binding = await verifiedGuestHelperBinding(() => expected,endpoint,credential,()=>authority,{caFile:cert,owner});
+      const before = effects, beforeReads = reads;
+      try {
+        disconnect = true;
+        await assert.rejects(binding.call("/v1/files/list",{path:"/"}),(e:unknown)=>e instanceof ServiceError && e.outcome === "unknown" && !e.retryable);
+        assert.equal(owner.closed,true); assert.equal(owner.recoverable,true); assert.equal(binding.authorized(),false);
+        assert.equal(effects,before); assert.equal(reads,beforeReads);
+        disconnect = false; assert.equal(binding.authorized(),false);
+        const fresh = await resolve(); await fresh.call("/v1/files/list",{path:"/"});
+        assert.equal(reads,beforeReads+1); assert.equal(effects,before+1);
+      } finally { for (const transport of owner.transports) transport.closeAll(); reset(); }
+    });
+    await t.test("verified guest application errors fail only the operation, while 401 remains terminal", async () => {
+      for (const status of [400, 403, 404, 409, 500]) {
+        reset(); const owner = { closed: false, transports: new Set<GuestHTTPS>() };
+        const binding = await verifiedGuestHelperBinding(() => expected, endpoint, credential, () => authority, { caFile: cert, owner });
+        try {
+          refusal = "ordinary"; refusalStatus = status;
+          await assert.rejects(binding.call("/v1/files/list", { path: "/missing" }), (e: unknown) => e instanceof ServiceError && e.status === status && e.outcome === "unknown" && !e.message.includes("private"));
+          assert.equal(owner.closed, false); assert.equal(binding.authorized(), true);
+          refusal = undefined; await binding.call("/v1/files/list", { path: "/" });
+          force401 = true; await assert.rejects(binding.call("/v1/files/list", { path: "/" }));
+          assert.equal(owner.closed, true); assert.equal(binding.authorized(), false);
+          reset(); assert.equal(binding.authorized(), false);
+        } finally { owner.closed = true; for (const transport of owner.transports) transport.closeAll(); reset(); }
+      }
+    });
+    await t.test("owned bindings retain authority after definite pre-effect refusals", async () => {
+      for (const code of ["input_busy", "input_stale", "input_reset_uncertain", "capability_unsupported"]) {
+        reset(); const owner = { closed: false, transports: new Set<GuestHTTPS>() };
+        const binding = await verifiedGuestHelperBinding(() => expected, endpoint, credential, () => authority, { caFile: cert, owner });
+        try {
+          const before = effects; refusal = code;
+          await assert.rejects(binding.call("/v1/files/list", { path: "/" }), (e: unknown) => e instanceof ServiceError && e.code === code && e.outcome === undefined);
+          assert.equal(effects, before); assert.equal(owner.closed, false); assert.equal(binding.authorized(), true);
+          refusal = undefined; await binding.call("/v1/files/list", { path: "/" }); assert.equal(effects, before + 1);
+        } finally { owner.closed = true; for (const transport of owner.transports) transport.closeAll(); reset(); }
+      }
+      reset();
+    });
     await t.test("actual adapter list, macOS-only guard, verified certificate", async () => {
       const binding = await resolve(), access = new GuestHelperAccess(() => binding);
       await access.control({}, { os: "macos" }, "/fixture", { action: "list-files", arguments: { path: "/" } });

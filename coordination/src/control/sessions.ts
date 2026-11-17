@@ -618,8 +618,8 @@ export class GuestHelperAccess {
     this.app(app); const b = await this.binding(machine, image, folder);
     return new GuestChunkFiles((route, body) => b.call(route, body)).upload(path, reader, size, () => authorized() && b.authorized());
   }
-  async streamDownload(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, path: string, app?: string): Promise<VerifiedDownload> {
+  async streamDownload(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, path: string, app?: string, authorized: () => boolean = () => true): Promise<VerifiedDownload> {
     this.app(app); const b = await this.binding(machine, image, folder);
-    return new GuestChunkFiles((route, body) => b.call(route, body)).download(path, b.authorized);
+    return new GuestChunkFiles((route, body) => b.call(route, body)).download(path, () => authorized() && b.authorized());
   }
 }

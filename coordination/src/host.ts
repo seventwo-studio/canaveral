@@ -1,3 +1,6 @@
+import { GuestHelperAccess } from "./control/sessions.ts";
+import type { GuestHelperBinding } from "./control/session-protocol.ts";
+import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -65,6 +68,8 @@ export interface HostDependencies {
   log?: (message: string) => void;
 }
 interface Runtime extends NativeProvider {
+  guestHelperBinding?(machine: RecordValue, image: RecordValue, folder: string, authority: OwnedGuestAuthority): Promise<GuestHelperBinding>;
+  closeMachine?(id: string): Promise<void>;
   updateStopped?(machine: RecordValue, image: RecordValue, folder: string): Promise<boolean>;
   confirmExecutionStopped?(machine: RecordValue, folder: string): RecordValue | null;
   readonly state?: string;
@@ -194,6 +199,49 @@ export class HostRunner {
   private concurrency: number;
   private log: (message: string) => void;
   private guest: GuestAccess | undefined;
+  private readonly retainedAccess = new Set<Runtime | GuestAccess>();
+  private readonly appleAccess = new Map<Runtime, GuestAccess>();
+  private readonly accessMachines = new Map<Runtime, Map<string, RecordValue>>();
+  private readonly unsupportedAccess: GuestAccess = {control: async () => { throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"}); }};
+  private accessAuthority(machine: RecordValue): () => boolean {
+    const id = String(machine.id), lease = object(machine.lease ?? {}).id, fingerprint = assignmentFingerprint(machine);
+    return () => {
+      const current = this.assignments.find(m => m.id === id);
+      return !!current && object(current.lease ?? {}).id === lease && assignmentFingerprint(current) === fingerprint && this.machineAuthorized(id);
+    };
+  }
+  accessBackend(machine: RecordValue): Runtime | GuestAccess {
+    const {runtime, image} = this.context(machine); this.retainedAccess.add(runtime);
+    let machines = this.accessMachines.get(runtime);
+    if (!machines) { machines = new Map(); this.accessMachines.set(runtime,machines); }
+    machines.set(String(machine.id), machine);
+    let backend: Runtime | GuestAccess;
+    if (this.dependencies.guest) backend = this.dependencies.guest;
+    else if (image.os === "macos" && runtime.guestHelperBinding) {
+      let adapter = this.appleAccess.get(runtime);
+      if (!adapter) {
+        adapter = new GuestHelperAccess((m,i,f) => runtime.guestHelperBinding!(m,i,f,{authorized:this.accessAuthority(m),clock:this.clock}));
+        this.appleAccess.set(runtime,adapter);
+      }
+      backend = adapter;
+    } else if (image.os === "macos") {
+      backend = this.dependencies.providerFactory ? runtime : this.unsupportedAccess;
+    } else backend = image.os === "linux" ? this.guest ?? runtime : runtime;
+    this.retainedAccess.add(backend); return backend;
+  }
+  private async closeAccessShells(machine: RecordValue): Promise<void> {
+    const retained = [...this.accessMachines].filter(([,machines]) => machines.has(String(machine.id)));
+    if (retained.length) { for (const [runtime,machines] of retained) await runtime.closeShells?.(machines.get(String(machine.id))!); }
+    else await this.context(machine).runtime.closeShells?.(machine);
+  }
+  private async sweepAccess(active: Set<string>): Promise<void> {
+    let failed = false;
+    for (const backend of new Set([...this.retainedAccess, ...this.runtimes.values(), ...(this.guest ? [this.guest] : [])])) { try { await backend.sweep?.(active); } catch { failed = true; } }
+    if (failed) throw unknownOutcome("Runtime access closure is unconfirmed.");
+  }
+  private async closeMachineAccess(id: string): Promise<void> {
+    for (const backend of new Set([...this.retainedAccess, ...this.runtimes.values(), ...(this.guest ? [this.guest] : [])])) await backend.closeMachine?.(id);
+  }
   private outboundSessions: RunnerSessions | undefined;
   private displayControls: DisplayControls | undefined;
   private usage = new ProcessUsageCollector();
@@ -300,7 +348,7 @@ export class HostRunner {
   private sessionBackend(job: RunnerSessionJob): RunnerSessionBackend {
     const machine = this.assignments.find(m => m.id === job.machineId);
     if (!machine) throw new ServiceError("Session assignment is unavailable.", 410);
-    const { runtime, image, folder } = this.context(machine), backend = this.guest ?? runtime;
+    const { image, folder } = this.context(machine), backend = this.accessBackend(machine);
     const control = async (action: string, args: RecordValue): Promise<RecordValue> => {
       if (!this.sessionAuthorized(job) && action !== "shell-close") throw new ServiceError("Session authorization ended.", 410);
       if (!backend.control) throw new ServiceError("Assignment has no verified guest control transport.", 409, { code: "capability_unsupported" });
@@ -309,13 +357,13 @@ export class HostRunner {
     return {
       control,
       upload: async (path, app, reader, size, authorized) => {
-        if (!backend.streamUpload) throw new ServiceError("Assignment has no streaming upload transport.", 409);
+        if (!backend.streamUpload) throw new ServiceError("Assignment has no streaming upload transport.", 409, { code: "capability_unsupported" });
         const result = await backend.streamUpload(machine, image, folder, path, app, reader, size, authorized);
         if (result.uploaded !== size || result.durable !== true) throw unknownOutcome("Upload publication is unconfirmed.");
         return { uploaded: size, durable: true };
       },
       download: async (path, app) => {
-        if (!backend.streamDownload) throw new ServiceError("Assignment has no streaming download transport.", 409);
+        if (!backend.streamDownload) throw new ServiceError("Assignment has no streaming download transport.", 409, { code: "capability_unsupported" });
         return backend.streamDownload(machine, image, folder, path, app, () => this.sessionAuthorized(job)) as Promise<SessionDownload>;
       },
       inspect: () => control("accessibility", {}),
@@ -326,7 +374,14 @@ export class HostRunner {
       },
     };
   }
-  get guestAccess(): GuestAccess | undefined { return this.guest; }
+  get guestAccess(): GuestAccess {
+    return {
+      control: (m,i,f,o) => { const b=this.accessBackend(m); if (!b.control) throw new ServiceError("Access unsupported.",409,{code:"capability_unsupported"}); return b.control(m,i,f,o); },
+      streamUpload: (m,i,f,p,a,r,n,ok) => { const b=this.accessBackend(m); if (!b.streamUpload) throw new ServiceError("Upload unsupported.",409,{code:"capability_unsupported"}); return b.streamUpload(m,i,f,p,a,r,n,ok); },
+      streamDownload: (m,i,f,p,a,ok) => { const b=this.accessBackend(m); if (!b.streamDownload) throw new ServiceError("Download unsupported.",409,{code:"capability_unsupported"}); return b.streamDownload(m,i,f,p,a,ok); },
+      desktop: (m,i,f) => { const b=this.accessBackend(m); if (!b.desktop) throw new ServiceError("Desktop unsupported.",409,{code:"capability_unsupported"}); return b.desktop(m,i,f); },
+    };
+  }
   get stopping(): boolean { return this.stopController.signal.aborted; }
   async accessControl(machineId: string, operation: RecordValue): Promise<RecordValue> {
     if (this.updateAdmissionBlocked) throw new ServiceError("Host update admission is fenced.", 409);
@@ -336,8 +391,9 @@ export class HostRunner {
     this.updateEpoch++; this.updateExternalWork++;
     try { return await assignmentAccess(machine, folder, async () => {
       if (!this.machineAuthorized(id)) throw new ServiceError("Assignment access ended.", 410);
-      if (this.guest) return this.guest.control(machine, image, folder, operation);
-      if (runtime.operate) { const report = await runtime.operate(machine, image, folder, { ...operation, id: operation.id ?? randomUUID(), expiresAt: operation.expiresAt ?? this.clock.wall() + 30 }, () => this.machineAuthorized(id)); if (report.state !== "succeeded") throw unknownOutcome("Guest operation was not confirmed."); return object(report.result); }
+      const backend = this.accessBackend(machine);
+      if (backend.control) return backend.control(machine, image, folder, operation);
+      if (backend === runtime && runtime.operate) { const report = await runtime.operate(machine, image, folder, { ...operation, id: operation.id ?? randomUUID(), expiresAt: operation.expiresAt ?? this.clock.wall() + 30 }, () => this.machineAuthorized(id)); if (report.state !== "succeeded") throw unknownOutcome("Guest operation was not confirmed."); return object(report.result); }
       throw new ServiceError("Verified assignment access is unavailable.", 409, { code: "capability_unsupported" });
     }); } finally { this.updateExternalWork--; }
   }
@@ -462,7 +518,7 @@ export class HostRunner {
       const nativeCleanup = runtime.kind === "apple" || runtime.kind === "libvirt" && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
-          this.outboundSessions?.closeMachine(id); await this.guest?.closeMachine?.(id); await runtime.closeShells?.(machine);
+          this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
           const active = new Set(this.assignments.filter(m => m.id !== id && this.machineAuthorized(String(m.id))).map(m => String(m.id))); await runtime.sweep?.(active);
         },
         ...(nativeCleanup && runtime.removeOwnedStorage ? {
@@ -505,7 +561,8 @@ export class HostRunner {
       if (context && !context.authorized()) throw new ServiceError("Assignment authorization ended.", 410);
       if (image.source && !image.image && !image.catalogueImageId) throw new ServiceError("Prepare and verify the configured base image before runtime creation.", 409);
       if (image.catalogueImageId) this.library.verifyDefinition(image);
-      if (image.guestAccess && this.guest?.prepare) image = await this.guest.prepare(current, image, folder);
+      const backend = this.accessBackend(current);
+      if (image.guestAccess && "prepare" in backend && backend.prepare) image = await backend.prepare(current, image, folder);
       if (leaseAuthorization) image = { ...image, _leaseAuthorization: leaseAuthorization };
       const prepared = image.prepare ? object(image.prepare) : undefined;
       let preparation: RecordValue | undefined;
@@ -519,9 +576,9 @@ export class HostRunner {
       }
       const result = await runtime.reconcile(current, image, folder);
       if (prepared && preparation) {
-        if (result.state === "running" && image.guestAccess && this.guest) {
+        if (result.state === "running" && image.guestAccess && backend.control) {
           result.accessReady = false;
-          try { if (guestReady(await this.guest.control(current, image, folder, { action: "health", arguments: {} }), image)) { preparation.state = "ready"; result.accessReady = true; } }
+          try { if (guestReady(await backend.control!(current, image, folder, { action: "health", arguments: {} }), image)) { preparation.state = "ready"; result.accessReady = true; } }
           catch { result.detail = "Waiting for the verified guest preparation connection."; }
         }
         if (result.state === "running" && prepared.driver === "ssh") {
@@ -580,8 +637,9 @@ export class HostRunner {
     return assignmentAccess(machine, folder, async () => {
       if (!context.authorized()) return { state: "failed", result: { detail: "Operation authorization ended before execution." } };
       const operation = { ...task };
-      if (runtime.operate) return runtime.operate(machine, image, folder, operation, context.authorized);
-      if (this.guest) return { state: "succeeded", result: await this.guest.control(machine, image, folder, operation) };
+      const backend = this.accessBackend(machine);
+      if (runtime.operate && (backend === runtime || image.os !== "macos")) return runtime.operate(machine, image, folder, operation, context.authorized);
+      if (backend.control) return { state: "succeeded", result: await backend.control(machine, image, folder, operation) };
       return { state: "failed", result: { detail: "No verified guest or device access transport is configured.", code: "capability_unsupported" } };
     });
   }
@@ -589,8 +647,7 @@ export class HostRunner {
     this.cancelUnauthorized();
     const machines = this.guard.assignments(this.assignments);
     const activeIds = new Set(machines.filter(m => this.machineAuthorized(String(m.id))).map(m => String(m.id)));
-    await Promise.all([...this.runtimes.values()].map(async runtime => { try { await runtime.sweep?.(activeIds); } catch { this.log("Runtime connection closure is unconfirmed."); } }));
-    await this.guest?.sweep?.(activeIds);
+    try { await this.sweepAccess(activeIds); } catch { this.log("Runtime connection closure is unconfirmed."); }
     for (const machine of machines) if (!activeIds.has(String(machine.id))) {
       try { await this.context(machine).runtime.closeShells?.(machine); } catch { this.log("Owned shell closure remains unconfirmed."); }
     }
@@ -732,8 +789,7 @@ export class HostRunner {
         if (!stopped || epoch !== this.updateEpoch || !eligible()) return negative;
       }
       // Only stopped assignments reach helper closure; a live VM is never closed for an update.
-      await this.guest?.sweep?.(new Set());
-      for (const runtime of this.runtimes.values()) await runtime.sweep?.(new Set());
+      await this.sweepAccess(new Set());
       for (const machine of retained.values()) await this.context(machine).runtime.closeShells?.(machine);
     } catch { return negative; }
     return epoch === this.updateEpoch && eligible() ? { idle: true, workloadsStopped: true } : negative;
@@ -779,12 +835,11 @@ export class HostRunner {
     let failed = false;
     const cleanup = async (work: () => Promise<unknown>): Promise<void> => { try { await bounded(work(), 5000); } catch { failed = true; this.log("Host cleanup was not confirmed; inspect retained state."); } };
     await cleanup(() => this.processes.close());
-    if (this.guest?.sweep) await cleanup(() => this.guest!.sweep!(new Set()));
-    for (const runtime of this.runtimes.values()) if (runtime.sweep) await cleanup(() => runtime.sweep!(new Set()));
-    for (const machine of this.guard.assignments(this.assignments)) await cleanup(async () => this.context(machine).runtime.closeShells?.(machine));
+    await cleanup(() => this.sweepAccess(new Set()));
+    for (const machine of this.guard.assignments(this.assignments)) await cleanup(() => this.closeAccessShells(machine));
     if (this.outboundSessions) await cleanup(() => this.outboundSessions!.close());
     if (this.displayControls) await cleanup(async () => this.displayControls!.close());
-    for (const adapter of [this.guest, this.inferenceAdapter, this.imageAdapter, this.sessionAdapter, ...this.runtimes.values()]) if (adapter?.close) await cleanup(() => adapter.close!());
+    for (const adapter of [this.guest, this.inferenceAdapter, this.imageAdapter, this.sessionAdapter, ...new Set([...this.runtimes.values(), ...this.retainedAccess])]) if (adapter?.close) await cleanup(() => adapter.close!());
     await cleanup(() => Promise.all([...this.loops, ...[...this.active.values()].map(w => w.promise)]));
     // A still-running in-process adapter could mutate state. Keep the lock until
     // that work settles; do not let another host adopt it after a timeout.

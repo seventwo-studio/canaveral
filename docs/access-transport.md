@@ -324,3 +324,31 @@ responsive. Preserve existing dashboard and administrative machine access.
 Live platform acceptance remains separate: Linux and Android local controls do
 not prove Windows/macOS guest services, tvOS input, paired Watch lifecycle or a
 native installer console. Record those gates in their platform issues.
+
+### Owned macOS runtime selection (ST-597)
+
+The Agent selects access by actual assigned image and runtime. macOS uses the
+Apple provider's owned v2 binding through `GuestHelperAccess`; the automatically
+created Linux guest adapter cannot service macOS. Explicitly injected trusted
+adapters retain their existing role. Unsupported transports return
+`capability_unsupported`. Sessions capture their selected adapter; shutdown and
+cleanup also sweep retained instances after runtime configuration changes.
+The local connector uses this selection for macOS and flagged guest-access images;
+unflagged Linux keeps its native local runtime. Other operating systems use their
+runtime adapters. The Agent's guest-access facade dispatches by assigned OS too.
+Retained adapters remain reachable for teardown. A failed connection sweep is
+logged during the scheduler tick and does not prevent other machines from
+reconciling or closing shells. Update and shutdown still require confirmed closure.
+Runtime/machine associations and retired adapter instances currently remain in
+memory for the Agent's lifetime; pruning after confirmed teardown remains open.
+
+The resolver receives an internal typed authority containing the Agent's trusted
+ExecutionClock. Its closure compares the captured lease UUID and assignment
+fingerprint against current Agent state, desired/cleanup/deletion state, lease
+guard and controller-contact freshness. A machine UUID alone is insufficient.
+No configuration flag enables this access or consumer execution admission.
+
+Guest downloads compose session and binding authority. The shared transfer reader
+checks authority after blocking responses, before returning buffered bytes and
+before accepting verification. Revocation is sticky for that reader; partial
+readonly bytes never imply successful completion.

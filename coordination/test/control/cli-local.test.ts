@@ -73,6 +73,16 @@ test("local guestAccess machines use their attached guest transport for files an
   assert.equal(await f.connectors.upload!.check(f.id), true); assert.equal(await f.connectors.shell!.check(f.id), true);
   await f.connectors.shell!.attach(f.attachment()); assert.equal(f.actions.at(-1)!.action, "shell-read");
 }));
+test("local backend selection preserves unflagged Linux and uses owned macOS access", async () => withFixture(async f => {
+  let selected = 0;
+  f.host.accessBackend = () => { selected++; return {kind:"unsupported"}; };
+  f.mutate(machine => { machine.template = { ...(machine.template as Json), os: "linux", mode: "desktop" }; });
+  assert.equal(await f.connectors.upload!.check(f.id), true); assert.equal(selected,0);
+  f.mutate(machine => { machine.template = { ...(machine.template as Json), guestAccess:true }; });
+  assert.equal(await f.connectors.upload!.check(f.id), false); assert.equal(selected,1);
+  f.mutate(machine => { machine.template = { ...(machine.template as Json), os:"macos", guestAccess:false }; });
+  assert.equal(await f.connectors.upload!.check(f.id), false); assert.equal(selected,2);
+}));
 test("local image importer publishes through controller reservation and immutable host library", async () => withFixture(async f => {
   const { MachineStore } = await import("../../src/control/machines.ts");
   const { secret } = await import("../../src/errors.ts");
