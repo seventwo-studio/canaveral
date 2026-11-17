@@ -181,3 +181,26 @@ checks; portable tests validate workflow ordering and guards, not live trust or
 runtime acceptance. See [Flux keyless verification](https://fluxcd.io/flux/components/source/ocirepositories/#keyless-verification),
 [Cosign signing options](https://github.com/sigstore/cosign/blob/v3.1.4/cmd/cosign/cli/options/sign.go)
 and the [official installer](https://github.com/sigstore/cosign-installer/tree/756fe2d284c7292c4e9b62c8a28f1e5629c59532).
+
+## Temporary dashboard audit exception
+
+Approved by the project owner on 2026-11-17 for release v0.4.2, expiring at
+**2026-11-24 00:00 UTC** (at most seven days).
+`node script/check_dashboard_audit.mjs` still runs production and full npm audits.
+It excepts only [GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+and its reviewed development-only chain: picomatch 4.0.7, fdir 6.5.0,
+tinyglobby 0.2.17, Vite 7.3.7 and Vitest 4.1.12. This is risk acceptance, not a fix;
+source-checkout builds and CI still execute the affected tools. Dashboard runtime
+artifacts contain static output rather than these development dependencies.
+
+The exception pins the entire dashboard lockfile SHA-256, installed versions,
+lockfile development-only flags, node paths and advisory propagation edges. All
+production advisories, unrelated advisories (including new ones on these packages),
+audit failures, unknown reports, changed dependency evidence and expired use fail
+closed. CI prints an explicit warning when the exception is used. No generic
+package or development-dependency suppression is authorized.
+
+When an official patched release is available, update and re-audit the tooling,
+remove the exception and restore the direct full audit in CI. Do not refresh the
+lock fingerprint or extend the expiry without a new review and owner approval.
+The gate tests run with the existing `npm run test:tools` command.
