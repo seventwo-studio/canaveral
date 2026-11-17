@@ -1,9 +1,13 @@
 # Rust owned model execution
 
 `canaveral-model-execution` connects the TypeScript controller's public runner
-claim, assignment-list and report routes to an owned Ollama `serve` process.
-It reuses `execution-core::model_job` and `runner-client::Binding`. It does not
-install a runtime, download weights, enroll a runner or advertise capacity.
+claim, assignment-list and report routes to owned Ollama, llama.cpp, vLLM or
+MLX-LM runtime processes.
+It reuses `execution-core::model_job` and `runner-client::Binding`. Runtime
+packages are supplied through Canaveral's trusted distribution configuration;
+users do not install a separate engine or attach an existing service. See the
+[managed runtime requirements](model-runtimes.md). Model downloads, runner
+enrollment and capacity advertisement remain separate lifecycle concerns.
 
 Build with the repository's pinned Rust toolchain. Run one assignment with:
 
@@ -17,7 +21,7 @@ reconcile a lost reply. A successful invocation may mean no eligible job, a
 completed assignment, or an acknowledged unknown receipt. Inspect the controller
 job state to distinguish them. An unresolved assignment blocks new claims.
 
-The operator supplies every field in this configuration. Paths are absolute;
+The operator supplies the configuration below. Paths are absolute;
 the state directory must be owned by the effective user with mode 0700 and have an existing parent. The credential
 file must be owned by that user, private, regular and single-linked. Credential,
 CA and state paths reject symlinks in every component. Ancestors must be owned
@@ -39,8 +43,13 @@ budgets below are explicit operator limits, not capacity measurements.
   },
   "caFile": "/absolute/private/controller-ca.pem",
   "execution": {
-    "executable": "/absolute/operator/ollama",
-    "executableSha256": "<64 lowercase hex digits>",
+    "backend": "ollama",
+    "runtimePackages": [{
+      "os": "macos", "arch": "aarch64",
+      "root": "/absolute/canaveral/bundled/ollama",
+      "entrypoint": "ollama",
+      "files": { "ollama": "<64 lowercase hex digits>" }
+    }],
     "modelsDir": "/absolute/operator/installed-models",
     "inventory": { "operator-model:tag": "sha256:<64 lowercase hex digits>" },
     "stateDir": "/absolute/private/model-execution",
@@ -51,18 +60,189 @@ budgets below are explicit operator limits, not capacity measurements.
 }
 ```
 
+This abbreviated package lists only its entrypoint; real release manifests must
+also list every required backend library and helper. A legacy single-executable
+configuration can use `executable` and `executableSha256` instead of
+`runtimePackages`, for existing Ollama deployments only. It does not provide the
+managed product setup flow.
+
 `caFile` may be omitted or null to use system roots. Plain HTTP is accepted only
 for an IP-literal loopback origin. Redirects, proxy inheritance and automatic
 HTTP retries are disabled. The executable takes no consumer-supplied command,
-runtime endpoint, path or download source. Its bytes are copied into the private executor state while hashing and fsynced
-before the HTTP claim request. Staging errors abort before claiming: queued
-application jobs and reservations remain unchanged. The verified artifact is reused only within that invocation;
+runtime endpoint, path or download source. Runtime assets are verified and fsynced
+in private executor state before the HTTP claim request. Installation errors abort
+before claiming: queued application jobs and reservations remain unchanged.
+Managed installations are revalidated and reused between invocations;
 restart never restages while reconciling an unresolved assignment. Execution
-requires the operator's SHA-256 to match. It must be a self-contained executable that supports `serve`, remains
-in the owned process group and keeps its generation listener in the leader.
-Native distribution compatibility is unproven on both Linux and macOS.
-Distributions needing adjacent executable assets are unsupported; copying one
-binary has not qualified any packaged Ollama release.
+requires the trusted release's SHA-256 to match. The runtime must remain
+in the owned process group and keep its generation listener in the leader.
+Native distribution compatibility is unproven on both Linux and macOS. For a
+distribution with adjacent libraries or other assets, use a host-matched runtime
+package below instead of the single-executable configuration.
+
+## Host-matched runtime packages
+
+Use Ollama's packaged native backends for the host: Metal on supported Apple
+hardware, or supported CUDA, ROCm and Vulkan backends on Linux. Ollama discovers
+compatible accelerators and selects model offloading; Canaveral does not infer
+driver compatibility or safe model fit from a GPU name. See upstream
+[hardware support](https://docs.ollama.com/gpu) and
+[Linux distribution packaging](https://docs.ollama.com/linux).
+
+In internal `execution` configuration, replace `executable` and
+`executableSha256` with `runtimePackages`. Each entry identifies a release package and
+pins every required file, including the entrypoint. Other execution fields,
+including the model inventory and budgets, stay required.
+
+```json
+{
+  "runtimePackages": [
+    {
+      "os": "macos",
+      "arch": "aarch64",
+      "root": "/absolute/operator/ollama-macos-arm64",
+      "entrypoint": "ollama",
+      "files": {
+        "ollama": "<64 lowercase hex digits>",
+        "lib/required-backend.dylib": "<64 lowercase hex digits>"
+      }
+    },
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "root": "/absolute/operator/ollama-linux-amd64",
+      "entrypoint": "bin/ollama",
+      "executables": ["lib/ollama/required-runner"],
+      "files": {
+        "bin/ollama": "<64 lowercase hex digits>",
+        "lib/ollama/required-backend.so": "<64 lowercase hex digits>",
+        "lib/ollama/required-runner": "<64 lowercase hex digits>"
+      }
+    }
+  ],
+  "acceleration": "auto"
+}
+```
+
+The asset names above illustrate layout, not a distribution's actual file list.
+Canaveral's distribution must provide the package for its pinned runtime release, retaining all executable,
+library and backend paths it requires, and hash each file. Platform identifiers
+are `macos`/`linux`; architecture identifiers are `aarch64`/`x86_64`. Exactly one
+package must match the executor's OS and architecture. Missing or ambiguous
+matches fail before claim; another platform's package is never a fallback.
+Labels identify operator intent, not independently verified binary compatibility.
+
+For a downloadable release, omit `root` and supply `baseUrl`, a credential-free
+HTTPS directory ending in `/`. Canaveral fetches the listed relative assets
+automatically; it accepts no redirects, proxy inheritance, URL credentials,
+query strings or fragments. Each file is streamed and verified before the
+installation is published. Requests have a 120-second timeout and 10-second
+connection timeout, within a ten-minute installation deadline.
+
+The executor stages only the pinned files into private state while preserving
+their relative layout. It verifies hashes, trusted ownership and permissions and
+rejects links and unsafe relative paths. Declare executable helpers in
+`executables`; the entrypoint is always executable. Files receive mode 0500
+(executable) or 0400 (other), directories 0700. Limits are 16 package candidates,
+4,096 files per package, 2 GiB per file and 8 GiB total. Package staging failures consume no new
+job or reservation. Package paths and hashes remain operator configuration; a
+consumer cannot choose them. Do not combine package configuration with the legacy
+executable/hash fields. Bundled assets are supplied by Canaveral; the managed
+provisioner handles downloadable release assets. Driver and model preparation
+remain separate from runtime package installation. A content-addressed installed
+cache preserves the package layout. Every reuse verifies its exact file set,
+hashes and modes, with no download or copy. Changed releases publish a verified
+new cache before obsolete caches are removed; a failed installation preserves
+the prior version. Tampering in an existing cache fails closed.
+
+Package entrypoints must have an ELF header on Linux or Mach-O/fat binary header
+on macOS. Script entrypoints that depend on an ambient interpreter are rejected.
+Header checks do not verify the executable architecture, dynamic dependencies,
+code signature or runtime compatibility; those remain release qualification work.
+
+`acceleration` defaults to `auto`, which leaves hardware selection to Ollama's
+installed backends. Set it to `cpu` to disable CUDA, ROCm and Vulkan device
+selection and submit `num_gpu: 0`, including on Metal hosts. Provider credentials,
+proxy settings and caller backend overrides are not inherited. There is no
+automatic retry with another package or backend after execution starts.
+
+An automatic selection is not evidence that generation used a GPU, that GPU
+memory fits the model, or that this is the fastest configuration. Qualify the
+actual runtime release, driver, model, context size and concurrent workloads on
+each host before offering its capacity. Account for staged runtime package disk
+usage separately from per-job temporary disk reservations. The existing native
+isolation gate remains open; package pinning does not isolate the model API or
+make model weights immutable. This configuration applies to the Rust executor;
+the legacy TypeScript embedded host inference adapter is a separate path.
+
+## Backend and model configuration
+
+`backend` is `ollama` (default), `llama.cpp`, `vllm` or `mlx`. It must match the
+immutable catalog adapter and the submitted job adapter. Runner claims include
+this backend, so an approved worker does not reserve jobs for another engine.
+Use separate managed workers with one shared physical resource domain when
+several backends serve the same host.
+
+All non-Ollama backends require managed runtime packages. The entrypoint is a
+native server or a Canaveral-packaged hermetic launcher with its own interpreter
+and dependency closure. A host interpreter, user virtual environment, script
+shebang pointing outside the package, or adjacent unlisted runtime library does
+not satisfy this contract. Packages must be relocatable and preserve the process
+leader/listener and owned-group topology; unverified topology fails closed.
+
+`llama.cpp` accepts one local GGUF per model. Add `modelFiles` alongside the
+existing `inventory`:
+
+```json
+{
+  "backend": "llama.cpp",
+  "inventory": { "local-model:1": "sha256:<GGUF file SHA-256>" },
+  "modelFiles": {
+    "local-model:1": {
+      "path": "local-model.gguf",
+      "files": { "local-model.gguf": "<GGUF file SHA-256>" }
+    }
+  }
+}
+```
+
+Paths are relative to the private model root, never supplied by consumers.
+Split GGUF and multimodal asset sets are not supported by this adapter.
+`vllm` and `mlx` use local snapshot directories instead: `path` names a snapshot
+subdirectory and `files` pins every file relative to that subdirectory. At least
+`config.json` and one `.safetensors` file are required; a working tokenizer and
+all runtime-required files must also be packaged. The inventory digest is SHA-256
+of compact UTF-8 JSON for the sorted path-to-hash map (Rust `BTreeMap` order, no
+whitespace). Each file and the whole snapshot identity are verified before claim.
+Keep snapshots immutable during use; verification does not establish OS-level
+immutability. No remote model identifier or trust-remote-code flag is passed.
+
+MLX-LM is restricted to Apple Silicon macOS; vLLM to Linux. CPU policy is accepted
+for Ollama and llama.cpp and rejected for MLX-LM/vLLM. llama.cpp uses zero GPU
+layers in CPU mode. Automatic selection delegates accelerator discovery to the
+packaged engine; it does not establish a measured accelerator budget.
+
+llama.cpp, vLLM and MLX-LM use nonstreaming `/v1/completions`, with one plain prompt
+and one choice. Results require a matching private model identity, terminal
+`stop`/`length`, bounded text and measured prompt/completion usage. MLX-LM receives
+only the fixed `default_model` alias; its public model label is restored after
+validating that private identity. Other request aliases could load a different
+model and are never forwarded. llama.cpp/vLLM receive a fresh private bearer key
+for their owned listener. Ollama and upstream MLX-LM have no equivalent API-key
+boundary here; their native ingress isolation gate remains open.
+
+llama.cpp's context size and vLLM's maximum model length use `contextTokens`.
+Upstream MLX-LM does not enforce this context budget through this adapter;
+its output token limit and execution deadline are bounded, but context/KV-memory
+acceptance remains open. None of these protocol limits constitutes a RAM/VRAM
+hard limit. The Python-based packages do not add a Python requirement to the
+controller, host agent or SDK.
+
+Upstream protocol references: [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md),
+[vLLM server](https://docs.vllm.ai/en/latest/cli/serve/), and
+[MLX-LM server](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/server.py).
+
+## Ollama protocol
 
 Each child has a cleared environment, private HOME/TMPDIR, one model/parallel
 request, cloud disabled, `OLLAMA_NOPRUNE=1` and a fresh IPv4 loopback port.
@@ -171,6 +351,20 @@ unpublished-candidate recovery and durable no-replay behavior. A stalled
 assignment-list response cannot postpone the public fixture's generation deadline;
 cancellation checks both PID disappearance and workspace removal.
 
+Build the `runtime_fixture` test target and pass its compiler artifact path as a
+fourth argument to `public-api.mjs` to exercise managed backend packages through
+the application/controller/runner HTTP flow. This runs llama.cpp's strategy on
+every supported host, vLLM's on Linux and MLX-LM's on Apple Silicon macOS, using
+only disposable protocol executables. It verifies a second job succeeds from
+the installed cache after bundled source assets are removed. The executor's
+unit fixtures exercise all protocol strategies independent of production host
+policy; this does not grant platform compatibility.
+
+Managed provisioning fixtures cover downloaded asset hashes, cache reuse,
+redirect/credential rejection, helper modes, tampering and failed version
+installation. The offline distribution packager is covered by
+`node --test script/package_model_runtime.test.mjs`.
+
 Fixture results establish no native model quality, model/runtime installation,
 hardware fit, Linux/macOS distribution qualification, escaped-process containment,
 suspend timing under real sleep, shared VM admission or production cutover.
@@ -190,3 +384,11 @@ writable inventory. Native acceptance must prove an isolated ingress boundary an
 immutable/read-only model inventory (including installed blob integrity), in
 addition to runtime distribution and resource fit. Those enforcement mechanisms
 are not implemented here; loopback fixtures do not close this gate.
+
+Upstream MLX-LM also lacks an API-key boundary in this integration. vLLM's bearer
+key protects the `/v1` routes used here, but other same-listener endpoints can
+remain unauthenticated; see [vLLM security](https://docs.vllm.ai/en/latest/usage/security/).
+A successful authenticated completion does not establish full server isolation.
+Native qualification must check all reachable endpoints, runtime subprocess
+topology and package dependency closure for each backend. No maintained native
+engine releases or model weights are included in the portable fixtures.

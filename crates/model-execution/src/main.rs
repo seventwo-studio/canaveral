@@ -131,7 +131,7 @@ fn main() {
 }
 #[cfg(not(unix))]
 fn main() {
-    eprintln!("owned Ollama execution is unsupported on this platform");
+    eprintln!("owned model execution is unsupported on this platform");
     std::process::exit(1);
 }
 

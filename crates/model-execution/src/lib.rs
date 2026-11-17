@@ -1,4 +1,4 @@
-//! Owned, non-streaming Ollama execution. No runtime installation or capacity discovery.
+//! Owned, non-streaming model execution with managed runtime provisioning.
 #![cfg(unix)]
 use canaveral_execution_core::model_job::{
     Cleanup, GenerationResult, Message, ModelJob, State, Usage,
@@ -36,8 +36,18 @@ pub struct Assignment {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub backend: runtime_backend::Backend,
+    #[serde(default)]
+    pub acceleration: runtime_policy::Acceleration,
+    #[serde(default)]
+    pub model_files: BTreeMap<String, runtime_backend::ModelFiles>,
+    #[serde(default)]
     pub executable: PathBuf,
+    #[serde(default)]
     pub executable_sha256: String,
+    #[serde(default)]
+    pub runtime_packages: Vec<runtime_package::RuntimePackage>,
     pub models_dir: PathBuf,
     pub inventory: BTreeMap<String, String>,
     pub state_dir: PathBuf,
@@ -109,15 +119,9 @@ fn receipt(
 }
 impl Executor {
     pub fn open(config: Config) -> Result<Self> {
-        if !config.executable.is_absolute()
-            || !config.models_dir.is_absolute()
-            || !config.state_dir.is_absolute()
-            || config.executable_sha256.len() != 64
-            || !config
-                .executable_sha256
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        runtime_package::validate(&config)?;
+        config.backend.validate(&config)?;
+        if !config.models_dir.is_absolute() || !config.state_dir.is_absolute() {
             return Err("absolute operator paths and pinned runtime hash required");
         }
         if [
@@ -244,10 +248,17 @@ impl Executor {
         }) {
             return Err("execution replay refused");
         }
-        let Message::Submit { model, digest, .. } = &a.job.message else {
+        let Message::Submit {
+            adapter,
+            model,
+            digest,
+            ..
+        } = &a.job.message
+        else {
             return Err("submission required");
         };
-        let valid_model = self.config.inventory.get(model) == Some(digest);
+        let valid_model = adapter == self.config.backend.adapter()
+            && self.config.inventory.get(model) == Some(digest);
         let mut j = Journal {
             binding,
             assignment: a.clone(),
@@ -323,6 +334,10 @@ impl Executor {
     }
     fn stage_runtime(&self) -> Result<PathBuf> {
         validate_models(&self.config.models_dir)?;
+        self.config.backend.verify_models(&self.config)?;
+        if let Some(package) = runtime_package::select(&self.config.runtime_packages)? {
+            return runtime_package::stage(package, &self.directory, &self.config.state_dir);
+        }
         let mut executable = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
@@ -366,14 +381,7 @@ impl Executor {
         scope: &mut Option<Scope>,
         control: &mut F,
     ) -> Result<GenerationResult> {
-        let Message::Submit {
-            model,
-            digest,
-            prompt,
-            max_tokens,
-            ..
-        } = &job.message
-        else {
+        let Message::Submit { model, digest, .. } = &job.message else {
             return Err("submission required");
         };
         self.directory.check()?;
@@ -385,25 +393,32 @@ impl Executor {
             .port();
         let host = format!("127.0.0.1:{port}");
         let mut cmd = Command::new(staged);
-        cmd.arg("serve")
-            .env_clear()
+        cmd.env_clear()
             .env("HOME", work)
             .env("TMPDIR", work)
-            .env("OLLAMA_HOST", &host)
-            .env("OLLAMA_MODELS", &self.config.models_dir)
-            .env("OLLAMA_NO_CLOUD", "1")
-            .env("OLLAMA_NOPRUNE", "1")
-            .env("OLLAMA_NUM_PARALLEL", "1")
-            .env("OLLAMA_MAX_LOADED_MODELS", "1")
-            .env(
-                "OLLAMA_CONTEXT_LENGTH",
-                self.config.context_tokens.to_string(),
-            )
             .current_dir(work)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|_| "runtime secret unavailable")?;
+        let key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let key_file = work.join("runtime.key");
+        if self.config.backend.authenticated() {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key_file)
+                .map_err(|_| "runtime key unavailable")?;
+            file.write_all(key.as_bytes())
+                .map_err(|_| "runtime key write failed")?;
+            file.sync_all().map_err(|_| "runtime key sync failed")?;
+        }
+        self.config
+            .backend
+            .configure(&mut cmd, &self.config, model, port, &key, &key_file)?;
         check(control)?;
         drop(listener);
         let start = clock::Clock::now();
@@ -439,10 +454,11 @@ impl Executor {
             if pending_tags.is_none() {
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
                 let c = client.clone();
-                let url = format!("{base}/api/tags");
+                let url = format!("{base}{}", self.config.backend.inventory_route());
+                let auth = self.config.backend.authenticated().then(|| key.clone());
                 let bound = self.config.response_bytes;
                 std::thread::spawn(move || {
-                    let _ = tx.send(get_json(&c, &url, bound));
+                    let _ = tx.send(get_json(&c, &url, bound, auth.as_deref()));
                 });
                 pending_tags = Some(rx);
             }
@@ -455,25 +471,19 @@ impl Executor {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let installed = tags
-            .get("models")
-            .and_then(|m| m.as_array())
-            .is_some_and(|models| {
-                models.iter().any(|v| {
-                    v.get("name").and_then(|v| v.as_str()) == Some(model)
-                        && v.get("digest")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|d| d == digest || format!("sha256:{d}") == *digest)
-                })
-            });
+        let installed = self
+            .config
+            .backend
+            .inventory_matches(&self.config, &tags, model, digest);
         if !installed {
             return Err("runtime model identity mismatch");
         }
         if !socket_owner::owned(scope.as_ref().unwrap().child.id(), port) {
             return Err("runtime socket ownership lost");
         }
-        let url = format!("{base}/api/generate");
-        let body = serde_json::json!({"model":model,"prompt":prompt,"stream":false,"keep_alive":0,"options":{"num_predict":max_tokens,"num_ctx":self.config.context_tokens}});
+        let url = format!("{base}{}", self.config.backend.generation_route());
+        let body = self.config.backend.request(&self.config, job)?;
+        let auth = self.config.backend.authenticated().then_some(key);
         let timeout = self.config.execution_ms;
         let bound = self.config.response_bytes;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -489,7 +499,16 @@ impl Executor {
                     .build()
                     .map_err(|_| "HTTP client failed")?;
                 decode(
-                    c.post(url).json(&body).send().map_err(|e| {
+                    {
+                        let request = c.post(url).json(&body);
+                        let request = if let Some(auth) = auth {
+                            request.bearer_auth(auth)
+                        } else {
+                            request
+                        };
+                        request.send()
+                    }
+                    .map_err(|e| {
                         if e.is_timeout() {
                             "generation deadline"
                         } else {
@@ -526,32 +545,7 @@ impl Executor {
                 e
             }
         })?;
-        if v.get("done") != Some(&serde_json::Value::Bool(true))
-            || v.get("model").and_then(|v| v.as_str()) != Some(model)
-        {
-            return Err("invalid generation identity");
-        }
-        let count = |key| {
-            v.get(key)
-                .and_then(|v| v.as_u64())
-                .filter(|n| *n <= 2147483648)
-                .ok_or("missing token measurement")
-        };
-        let r = GenerationResult {
-            model: model.clone(),
-            text: v
-                .get("response")
-                .and_then(|v| v.as_str())
-                .ok_or("missing text")?
-                .into(),
-            usage: Usage {
-                input_tokens: count("prompt_eval_count")?,
-                output_tokens: count("eval_count")?,
-            },
-        };
-        if r.usage.output_tokens > *max_tokens {
-            return Err("output token budget exceeded");
-        }
+        let r = self.config.backend.result(job, &v)?;
         receipt(
             job,
             State::Succeeded,
@@ -586,9 +580,22 @@ fn decode(response: reqwest::blocking::Response, bound: u64) -> Result<serde_jso
         .map(|value| value.0)
         .map_err(|_| "invalid runtime JSON")
 }
-fn get_json(client: &Client, url: &str, bound: u64) -> Result<serde_json::Value> {
+fn get_json(
+    client: &Client,
+    url: &str,
+    bound: u64,
+    auth: Option<&str>,
+) -> Result<serde_json::Value> {
     decode(
-        client.get(url).send().map_err(|_| "runtime unavailable")?,
+        {
+            let request = client.get(url);
+            let request = if let Some(auth) = auth {
+                request.bearer_auth(auth)
+            } else {
+                request
+            };
+            request.send().map_err(|_| "runtime unavailable")?
+        },
         bound,
     )
 }
@@ -661,6 +668,9 @@ impl Drop for Scope {
     }
 }
 pub mod controller;
+pub mod runtime_backend;
+pub mod runtime_package;
+pub mod runtime_policy;
 mod socket_owner;
 
 mod clock;

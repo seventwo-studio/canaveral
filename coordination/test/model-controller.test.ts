@@ -159,6 +159,30 @@ test("controller config is explicit: loopback plain HTTP only, absolute paths, e
   assert.equal(parseControllerConfig({ ...base, listen: { host: "0.0.0.0", port: 8443 }, tls: { certFile: "/c.pem", keyFile: "/k.pem" } }).tls?.certFile, "/c.pem");
 });
 
+test("catalog binds adapters and claims filter incompatible backends before reservation", async t => {
+  const f = await fixture(t), app = await f.application();
+  await f.grant(app.id);
+  const domain = await f.domain(JOB_RESOURCES), runner = await f.enroll();
+  await f.approve(runner, domain);
+  const wrong = f.submission(app.id); wrong.message.adapter = "llama.cpp";
+  assert.equal((await f.post("/v1/model-jobs", wrong, app.credential)).status, 409);
+  const job = f.submission(app.id);
+  assert.equal((await f.post("/v1/model-jobs", job, app.credential)).status, 201);
+  const claimId = randomUUID();
+  assert.equal((await f.post("/v1/runners/model-jobs/claim", { binding: runner.binding, claimId, adapter: "llama.cpp" }, runner.credential)).body.assignment, null);
+  assert.equal((await f.inspectDomain(domain)).reservations, 0);
+  assert.equal((await f.claim(runner, claimId)).status, 200);
+  assert.equal((await f.inspectDomain(domain)).reservations, 1);
+  assert.equal((await f.post("/v1/runners/model-jobs/claim", { binding: runner.binding, claimId, adapter: "llama.cpp" }, runner.credential)).status, 409);
+  for (const adapter of ["llama.cpp", "vllm", "mlx"]) {
+    const model = `fixture-${adapter.replace(".", "-")}:1`;
+    assert.equal((await f.post("/v1/model-catalog", { model, digest: DIGEST, adapter, resources: JOB_RESOURCES }, f.admin)).status, 200);
+    assert.equal((await f.post("/v1/model-grants", { applicationId: app.id, model, digest: DIGEST, maxUnfinished: 1 }, f.admin)).status, 200);
+    const submission = f.submission(app.id); submission.message.adapter = adapter; submission.message.model = model;
+    assert.equal((await f.post("/v1/model-jobs", submission, app.credential)).status, 201);
+  }
+});
+
 test("two runners on one physical domain contend transactionally across independent controller processes", async t => {
   const f = await fixture(t), second = await f.start();
   const app = await f.application();
@@ -304,6 +328,9 @@ test("cross-application, cross-runner, role and stale-generation authority are d
   await f.approve(r1, domain); await f.approve(r2, domain);
   const job = f.submission(a.id);
   assert.equal((await f.post("/v1/model-jobs", f.submission(b.id), b.credential)).status, 403);
+  const unlisted = f.submission(b.id);
+  unlisted.message.model = "unlisted-model:1";
+  assert.equal((await f.post("/v1/model-jobs", unlisted, b.credential)).status, 403);
   assert.equal((await f.post("/v1/model-jobs", job, b.credential)).status, 403);
   assert.equal((await f.post("/v1/model-jobs", job, f.admin)).status, 401);
   assert.equal((await f.post("/v1/model-jobs", job, a.credential)).status, 201);
