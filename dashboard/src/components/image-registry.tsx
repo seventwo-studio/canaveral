@@ -136,8 +136,8 @@ export function BaseImageRegistry({
         <DialogHeader>
           <DialogTitle>Base image registry</DialogTitle>
           <DialogDescription>
-            Official OS sources. Import a base image onto a host, configure a
-            machine, then capture your own reusable image.
+            Download original OS images to your library. Use a machine blueprint
+            for resource presets and prepared snapshots.
           </DialogDescription>
         </DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
@@ -297,6 +297,13 @@ export function BaseImageRegistry({
                   <p className="break-words text-xs leading-relaxed text-muted-foreground">
                     {e.note}
                   </p>
+                  <p className="text-xs text-muted-foreground">
+                    {e.resolver === "apple"
+                      ? "Apple restore source; local content hash recorded after download."
+                      : e.resolver
+                        ? "Publisher SHA-256 required before adding to the library."
+                        : "Verify the download with the publisher before importing."}
+                  </p>
                   <p className="text-[10px] text-muted-foreground">
                     Starting size: {e.minimum.cpu} vCPU ·{" "}
                     {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB disk
@@ -320,6 +327,7 @@ export function BaseImageRegistry({
                       <Button
                         size="sm"
                         variant="outline"
+                        disabled={e.status === "unavailable"}
                         onClick={() => onImportFile(e)}
                       >
                         Import downloaded file

@@ -36,10 +36,10 @@ test("an uncertain capture remains a recovery outcome without offering another c
       onRefresh={refreshed}
     />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Capture image" }));
+  fireEvent.click(screen.getByRole("button", { name: "Capture snapshot" }));
   expect(await screen.findByText("Capture needs recovery")).toBeTruthy();
   expect(screen.getByText("Publication needs inspection.")).toBeTruthy();
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(refreshed).not.toHaveBeenCalled();
-  expect(screen.queryByRole("button", { name: "Capture image" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Capture snapshot" })).toBeNull();
 });

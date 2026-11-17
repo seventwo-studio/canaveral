@@ -23,6 +23,7 @@ type View =
   | "hosts"
   | "orchestrators"
   | "templates"
+  | "blueprints"
   | "account"
   | "tokens"
   | "users"
@@ -35,6 +36,11 @@ import {
   useAdminUsers,
 } from "@/components/admin-dashboard";
 import { ownerLabel } from "@/lib/admin";
+import {
+  ImageLibrary,
+  MachineBlueprints,
+  BlueprintEditor,
+} from "@/components/machine-blueprints";
 import { ClaimScreen, takeClaim } from "@/components/claim-screen";
 interface CreateConfig {
   templates: GroupedImage[];
@@ -44,9 +50,11 @@ interface CreateConfig {
 interface CreateSpec {
   id: string;
   name: string;
-  templateId: string;
-  templateRevision: string;
-  arch: string;
+  templateId?: string;
+  templateRevision?: string;
+  arch?: string;
+  blueprintId?: string;
+  blueprintRevision?: string;
   resources: Resources;
   hostId?: string;
 }
@@ -184,6 +192,7 @@ const views = {
     icon: Orbit,
     filters: ["all", "online", "offline", "draining"],
   },
+  blueprints: { icon: Layers, filters: [] },
   templates: {
     icon: Layers,
     filters: ["all", "headless", "desktop", "device"],
@@ -286,6 +295,9 @@ export function App() {
     ),
     [captureId, setCaptureId] = useState<string | null>(null);
   const [registryOpen, setRegistryOpen] = useState(false);
+  const [blueprintSource, setBlueprintSource] = useState<GroupedImage | null>(
+    null,
+  );
   const [powerOffId, setPowerOffId] = useState<string | null>(null);
   const view: View =
     user?.role !== "admin" &&
@@ -327,6 +339,7 @@ export function App() {
     setConnectionSetup(null);
     setImageImport(false);
     setRegistryOpen(false);
+    setBlueprintSource(null);
     setPowerOffId(null);
     setCaptureId(null);
     setStop(null);
@@ -565,7 +578,7 @@ export function App() {
     if (!busy) {
       setActionError("");
       setCreate({
-        templates: templates.filter(eligible),
+        templates: t?.blueprintId ? [t] : templates.filter(eligible),
         selected: t,
         returnFocus: document.activeElement,
       });
@@ -648,7 +661,11 @@ export function App() {
         views={
           user.role === "admin"
             ? views
-            : { machines: views.machines, templates: views.templates }
+            : {
+                machines: views.machines,
+                templates: views.templates,
+                blueprints: views.blueprints,
+              }
         }
         view={view}
         counts={{
@@ -658,7 +675,6 @@ export function App() {
           orchestrators: inventory.hosts.filter(
             (h) => infrastructureKind(h) === "orchestrator",
           ).length,
-          templates: templates.length,
         }}
         user={user}
         onSignOut={() => signOut()}
@@ -788,6 +804,13 @@ export function App() {
                 );
               }}
             />
+          ) : view === "blueprints" ? (
+            <MachineBlueprints
+              key={user.id}
+              sources={templates}
+              admin={user.role === "admin"}
+              onCreate={openCreate}
+            />
           ) : resourcePage ? (
             <>
               <div className="min-w-0 space-y-2">
@@ -860,7 +883,7 @@ export function App() {
                           : "Manage your machines and their lifecycle."
                         : isInfrastructure
                           ? "Connect infrastructure, verify capabilities and track resources."
-                          : "Base images available on your hosts."}
+                          : "Downloaded OS originals, separate from prepared machine snapshots."}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -888,7 +911,9 @@ export function App() {
                                 ? "orchestrator"
                                 : "host",
                             )
-                          : openCreate()
+                          : view === "templates"
+                            ? (location.hash = "blueprints")
+                            : openCreate()
                       }
                       disabled={busy}
                     >
@@ -897,7 +922,9 @@ export function App() {
                         ? view === "orchestrators"
                           ? "Add orchestrator"
                           : "Add host"
-                        : "Create machine"}
+                        : view === "templates"
+                          ? "Machine blueprints"
+                          : "Create machine"}
                     </Button>
                   </div>
                 </div>
@@ -912,65 +939,67 @@ export function App() {
                     error
                   >{`Owner names could not be refreshed. User IDs are shown. ${directory.error}`}</Notice>
                 )}
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <ToggleGroup
-                  className="max-w-full flex-wrap rounded-sm border bg-muted p-1"
-                  type="single"
-                  value={filter}
-                  onValueChange={(value) => {
-                    if (value) setFilter(value);
-                  }}
-                  size="sm"
-                  spacing={1}
-                  aria-label="Filter inventory"
-                >
-                  {views[view as keyof typeof views].filters.map((f) => (
-                    <ToggleGroupItem
-                      className="rounded-md text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm"
-                      key={f}
-                      value={f}
-                    >
-                      {f === "all"
-                        ? "All"
-                        : f === "attention"
-                          ? "Needs attention"
-                          : title(f)}
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-                <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
-                  {view === "machines" && user.role === "admin" && (
-                    <label className="shrink-0 text-xs">
-                      <span className="sr-only">Machine owner</span>
-                      <select
-                        aria-label="Machine owner"
-                        className="h-9 max-w-48 rounded-md border bg-background px-2 text-sm"
-                        value={owner}
-                        onChange={(e) => setOwner(e.target.value)}
+              {view !== "templates" && (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <ToggleGroup
+                    className="max-w-full flex-wrap rounded-sm border bg-muted p-1"
+                    type="single"
+                    value={filter}
+                    onValueChange={(value) => {
+                      if (value) setFilter(value);
+                    }}
+                    size="sm"
+                    spacing={1}
+                    aria-label="Filter inventory"
+                  >
+                    {views[view as keyof typeof views].filters.map((f) => (
+                      <ToggleGroupItem
+                        className="rounded-md text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm"
+                        key={f}
+                        value={f}
                       >
-                        <option value="all">All owners</option>
-                        <option value="none">No user owner</option>
-                        {(directory.data ?? []).map((u) => (
-                          <option key={u.id} value={u.id}>
-                            {u.username}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  <InputGroup className="w-full sm:w-64">
-                    <InputGroupInput
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                      aria-label={`Search ${view === "templates" ? "images" : view}`}
-                      placeholder={`Search ${view === "templates" ? "images" : view}…`}
-                    />
-                    <InputGroupAddon>
-                      <Search />
-                    </InputGroupAddon>
-                  </InputGroup>
+                        {f === "all"
+                          ? "All"
+                          : f === "attention"
+                            ? "Needs attention"
+                            : title(f)}
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
+                  <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+                    {view === "machines" && user.role === "admin" && (
+                      <label className="shrink-0 text-xs">
+                        <span className="sr-only">Machine owner</span>
+                        <select
+                          aria-label="Machine owner"
+                          className="h-9 max-w-48 rounded-md border bg-background px-2 text-sm"
+                          value={owner}
+                          onChange={(e) => setOwner(e.target.value)}
+                        >
+                          <option value="all">All owners</option>
+                          <option value="none">No user owner</option>
+                          {(directory.data ?? []).map((u) => (
+                            <option key={u.id} value={u.id}>
+                              {u.username}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <InputGroup className="w-full sm:w-64">
+                      <InputGroupInput
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        aria-label={`Search ${view}`}
+                        placeholder={`Search ${view}…`}
+                      />
+                      <InputGroupAddon>
+                        <Search />
+                      </InputGroupAddon>
+                    </InputGroup>
+                  </div>
                 </div>
-              </div>
+              )}
               {view === "templates" && user.role === "admin" && (
                 <ImageActivity onRefresh={refresh} />
               )}
@@ -982,7 +1011,14 @@ export function App() {
                 }
                 aria-label={`${title(view)} inventory`}
               >
-                {!loaded ? (
+                {view === "templates" ? (
+                  <ImageLibrary
+                    key={user.id}
+                    sources={templates}
+                    admin={user.role === "admin"}
+                    onBlueprint={setBlueprintSource}
+                  />
+                ) : !loaded ? (
                   <Empty className="min-h-80">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
@@ -1015,9 +1051,7 @@ export function App() {
                         role="heading"
                         aria-level={2}
                       >
-                        {total
-                          ? `No matching ${view === "templates" ? "images" : view}`
-                          : `No ${view === "templates" ? "images" : view} yet`}
+                        {total ? `No matching ${view}` : `No ${view} yet`}
                       </EmptyTitle>
                       <EmptyDescription>
                         {total
@@ -1180,9 +1214,9 @@ export function App() {
                                   !!m.powerOffRequest
                                 }
                                 onClick={() => setCaptureId(m.id)}
-                                aria-label={`Capture ${m.name} as image`}
+                                aria-label={`Capture ${m.name} as snapshot`}
                               >
-                                Capture image
+                                Capture snapshot
                               </Button>
                             )}
                           {(m.template.mode === "device" ||
@@ -1222,89 +1256,29 @@ export function App() {
                       />
                     ))}
                   </div>
-                ) : (
-                  <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-                    {imageItems.map((t) => (
-                      <Card
-                        className="rounded-md shadow-none"
-                        key={JSON.stringify([t.id, t.revision, t.arch])}
-                      >
-                        <CardHeader>
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                              <Layers size={20} />
-                            </span>
-                            <Badge variant="outline">{title(t.mode)}</Badge>
-                          </div>
-                          <CardTitle className="font-display text-xl font-medium tracking-tight">
-                            {t.name || t.id}
-                          </CardTitle>
-                          <CardDescription>
-                            {t.imageKind === "derived"
-                              ? "Captured image"
-                              : "Base image"}{" "}
-                            ·{" "}
-                            {t.mediaType === "installer"
-                              ? "OS installer"
-                              : "Boot disk"}{" "}
-                            · Revision {t.revision}
-                          </CardDescription>
-                        </CardHeader>
-                        <CardContent className="grid gap-4">
-                          <div className="flex flex-wrap gap-2">
-                            <Badge variant="secondary">{t.os}</Badge>
-                            <Badge variant="secondary">{t.arch}</Badge>
-                          </div>
-                          <p className="text-sm">
-                            {(t.defaults || t.minimum).cpu} vCPU ·{" "}
-                            {memory((t.defaults || t.minimum).memoryMiB)} ·{" "}
-                            {(t.defaults || t.minimum).diskGiB} GiB
-                          </p>
-                          <p className="break-all text-xs text-muted-foreground">
-                            {t.device?.systemImage ||
-                              t.device?.runtime ||
-                              `${t.os} base image · ${t.arch}`}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            {!t.preparationDriver ||
-                            t.preparationDriver === "none"
-                              ? "No preparation required"
-                              : `Preparation: ${t.preparationDriver}`}
-                          </p>
-                        </CardContent>
-                        <CardFooter className="flex-wrap justify-between gap-3 text-xs text-muted-foreground">
-                          <span>
-                            {
-                              t.hosts.filter((h) => h.online && h.accepting)
-                                .length
-                            }{" "}
-                            accepting hosts
-                          </span>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={busy || !eligible(t)}
-                            onClick={() => openCreate(t)}
-                          >
-                            Use image
-                            <ArrowUpRight size={13} />
-                          </Button>
-                        </CardFooter>
-                      </Card>
-                    ))}
-                  </div>
-                )}
+                ) : null}
               </section>
-              {loaded && (
+              {loaded && view !== "templates" && (
                 <p className="text-xs text-muted-foreground" role="status">
-                  {items.length} of {total}{" "}
-                  {view === "templates" ? "images" : view}
+                  {items.length} of {total} {view}
                 </p>
               )}
             </>
           )}
         </div>
       </SidebarInset>
+      {blueprintSource && user.role === "admin" && (
+        <BlueprintEditor
+          sources={templates.filter((t) => t.mode !== "device")}
+          previous={null}
+          initialSource={blueprintSource}
+          onClose={() => setBlueprintSource(null)}
+          onSaved={() => {
+            setBlueprintSource(null);
+            location.hash = "blueprints";
+          }}
+        />
+      )}
       {imageImport && (
         <ImageImport
           preset={typeof imageImport === "object" ? imageImport : null}
@@ -1522,9 +1496,16 @@ function CreateMachine({
     const data = new FormData(e.currentTarget);
     const spec: Omit<CreateSpec, "id"> = {
       name: String(data.get("name") ?? "").trim(),
-      templateId: template.id,
-      templateRevision: template.revision,
-      arch: template.arch,
+      ...(template.blueprintId
+        ? {
+            blueprintId: template.blueprintId,
+            blueprintRevision: template.blueprintRevision,
+          }
+        : {
+            templateId: template.id,
+            templateRevision: template.revision,
+            arch: template.arch,
+          }),
       resources: {
         cpu: Number(data.get("cpu")),
         memoryMiB: Number(data.get("memory")),
@@ -1570,7 +1551,7 @@ function CreateMachine({
         <DialogHeader>
           <DialogTitle>Create a machine</DialogTitle>
           <DialogDescription className="sr-only">
-            Choose an image, resources and placement.
+            Choose a source, resources and placement.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} onChange={changed} className="space-y-6">
@@ -1589,7 +1570,9 @@ function CreateMachine({
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="machine-template">Base image</FieldLabel>
+                <FieldLabel htmlFor="machine-template">
+                  {template?.blueprintId ? "Machine blueprint" : "Base image"}
+                </FieldLabel>
                 <Select
                   value={index}
                   onValueChange={(v) => {

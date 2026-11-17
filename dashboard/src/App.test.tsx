@@ -220,13 +220,49 @@ describe("dashboard contracts", () => {
     expect(
       screen.queryByRole("button", { name: /Capture Voyager/ }),
     ).toBeNull();
-    await actor.click(screen.getByRole("link", { name: "Images" }));
-    await screen.findByRole("button", { name: "Use image" });
+    await actor.click(screen.getByRole("link", { name: "Image library" }));
+    await screen.findByRole("heading", { name: "Image library" });
     expect(screen.queryByRole("button", { name: "Import image" })).toBeNull();
     expect(calls.some((c) => c.path.startsWith("image-tasks"))).toBe(false);
     await actor.click(screen.getByRole("button", { name: "Account menu" }));
     expect(screen.queryByRole("menuitem", { name: "Users" })).toBeNull();
     expect(screen.getByRole("menuitem", { name: "API tokens" })).toBeTruthy();
+  });
+  it("creates a machine from a pinned blueprint with its resource defaults", async () => {
+    const original = handler;
+    const blueprint = {
+      id: "blueprint",
+      name: "Prepared development",
+      revision: "3",
+      source: {
+        id: template.id,
+        revision: template.revision,
+        arch: template.arch,
+      },
+      image: template,
+      minimum: template.minimum,
+      defaults: { cpu: 3, memoryMiB: 2048, diskGiB: 20 },
+    };
+    handler = (path, options) =>
+      path === "blueprints"
+        ? json({ blueprints: [blueprint] })
+        : original(path, options);
+    const actor = await login();
+    await actor.click(screen.getByRole("link", { name: "Machine blueprints" }));
+    await actor.click(
+      await screen.findByRole("button", { name: "Create machine" }),
+    );
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByLabelText("Machine blueprint")).toBeTruthy();
+    await actor.type(dialog.getByLabelText("Machine name"), "Workbench");
+    await actor.click(dialog.getByRole("button", { name: "Create machine" }));
+    const posted = calls.find(
+      (c) => c.path === "machines" && c.method === "POST",
+    )!.value!;
+    expect(posted.blueprintId).toBe("blueprint");
+    expect(posted.blueprintRevision).toBe("3");
+    expect(posted.resources).toEqual(blueprint.defaults);
+    expect(posted.templateId).toBeUndefined();
   });
   it("fails closed for a login response without account authority", async () => {
     const original = handler;

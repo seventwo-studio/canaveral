@@ -262,9 +262,18 @@ for (const width of [1440, 1133, 390, 320])
     });
     if (width < 768)
       await page.getByRole("button", { name: "Toggle Sidebar" }).click();
-    await page.getByRole("link", { name: /Images/ }).click();
-    await expect(page.getByRole("button", { name: "Use image" })).toBeVisible();
-    await page.getByRole("button", { name: "Use image" }).click();
+    await page
+      .getByRole("link", { name: "Image library", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "Image library", exact: true }),
+    ).toBeVisible();
+    if (width < 768)
+      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+    await page.getByRole("link", { name: "Machines", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Create machine", exact: true })
+      .click();
     await expect(
       page.getByRole("combobox", { name: "Base image", exact: true }),
     ).toContainText("2026.11");

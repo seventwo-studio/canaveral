@@ -23,6 +23,8 @@ export interface Machine extends WorkspaceMachine {
   template: WorkspaceMachine["template"] & { name?: string; revision?: string };
 }
 export interface ImageOffer {
+  blueprintId?: string;
+  blueprintRevision?: string;
   id: string;
   revision: string;
   os: string;

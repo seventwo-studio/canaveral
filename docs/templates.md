@@ -1,4 +1,58 @@
-# Image preparation compatibility
+# Machine blueprints and image preparation compatibility
+
+The accepted [product model](images.md#product-model) separates downloadable
+publisher sources, a library of downloaded originals and machine blueprints. A
+blueprint owns the machine resource defaults/constraints and can reference a
+captured prepared machine state. Publisher originals remain unchanged. The
+CLI/JSON definitions remain a host compatibility format. Native snapshot
+acceptance is separate from blueprint persistence and resource admission.
+
+## Machine blueprint API
+
+`GET /v1/blueprints` lists saved revisions for credentials with machine-read
+permission. Administrators create immutable revisions with `POST /v1/blueprints`:
+
+```json
+{
+  "id": "ad3f39de-2718-44fa-a678-ab07622087aa",
+  "revision": "1",
+  "name": "Linux development",
+  "source": { "id": "registered-image-id", "revision": "1", "arch": "arm64" },
+  "minimum": { "cpu": 2, "memoryMiB": 4096, "diskGiB": 32 },
+  "defaults": { "cpu": 4, "memoryMiB": 8192, "diskGiB": 64 }
+}
+```
+
+The source tuple must already be registered through a host offer. The controller
+pins its full public definition, including any artifact checksum and preparation
+digest. Private paths, credentials and preparation contents never enter the
+blueprint. Source choices can include downloaded base media, prepared captures
+and existing operator-configured VM definitions. Mobile SDK profiles remain in
+their existing device workflow.
+
+Minimums cannot be smaller than the source minimums. Defaults must satisfy those
+constraints and the source's memory granularity. The same ID/revision/body is an
+idempotent save; changed contents require a new revision. The dashboard offers
+**New revision** for this purpose. Removing an online source offer does not remove
+the blueprint or allow it to substitute a newer source.
+
+Create a machine with `POST /v1/machines`, supplying caller `id`, `name`,
+`blueprintId` and explicit `blueprintRevision`, with optional resource overrides
+and `hostId`. A blueprint request cannot also select a template or architecture.
+Admission uses the exact pinned source definition, blueprint defaults/minimums
+and the host's remaining capacity. The assignment preserves the source template
+ID expected by existing hosts and records the blueprint ID/revision alongside it.
+Retries keep the original machine allocation even after newer blueprint revisions
+are saved or the host drains. Current authorization and machine ownership still
+apply to retries. Generic application leases retain their existing approved-image
+policy; this API does not bypass lease eligibility.
+
+In the dashboard, create a blueprint from an image-library card, or open
+**Machine blueprints → New blueprint** to select a prepared snapshot. Capture a
+confirmed stopped machine first to make that prepared source available. A capture
+is an artifact for a blueprint, not a new publisher original.
+
+## Host definition compatibility
 
 Images and base images define the starting computer. The existing template CLI
 and JSON definitions remain an internal compatibility format for base OS,

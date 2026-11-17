@@ -27,6 +27,8 @@ test("registry catalogue distinguishes manual media and source validation reject
   assert.equal(registryEntry("windows-11-iso-arm64").resolver, null);
   for (const url of ["https://127.0.0.1/private", "http://cloud-images.ubuntu.com/disk", "https://user@cloud-images.ubuntu.com/disk", "https://cloud-images.ubuntu.com:8443/disk", "https://cloud-images.ubuntu.com/disk#fragment", "https://cloud-images.ubuntu.com.attacker.example/disk"]) assert.equal(allowedUrl(url), false);
   assert.equal(allowedUrl("https://chuangtzu.ftp.acc.umu.se/debian.iso"), true);
+  assert.equal(allowedUrl("https://saimei.ftp.acc.umu.se/debian.iso"), true);
+  assert.equal(allowedUrl("https://saimei.ftp.acc.umu.se.attacker.example/debian.iso"), false);
   const entry = registryEntry("ubuntu-noble-cloud-amd64");
   assert.throws(() => validateEntrySource(entry, { ...pinned, url: "https://cdn-apple.com/file" }));
   assert.throws(() => validateEntrySource(entry, { ...pinned, sha256: null }));
@@ -55,6 +57,19 @@ test("publisher manifests select newest numeric release and matching stable arch
   await assert.rejects(resolveRegistrySource(registryEntry("windows-11-iso-amd64")), /file import/);
 });
 
+test("Ubuntu cloud discovery uses released publisher images rather than the daily channel", async () => {
+  for (const arch of ["amd64", "arm64"]) {
+    const source = await resolveRegistrySource(registryEntry(`ubuntu-noble-cloud-${arch}`), {
+      metadata: async url => {
+        assert.equal(url, "https://cloud-images.ubuntu.com/releases/noble/release/SHA256SUMS");
+        return `${digest} *ubuntu-24.04-server-cloudimg-${arch}.img\n${"b".repeat(64)} *noble-server-cloudimg-${arch}.img\n`;
+      },
+      length: async url => { assert.equal(url, `https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-${arch}.img`); return 512; },
+    });
+    assert.equal(source.sha256, digest);
+  }
+});
+
 test("publisher redirects are checked before dispatch, including Debian's allowed redirect", async t => {
   const calls: string[] = [];
   t.mock.method(globalThis, "fetch", async (url: string) => { calls.push(url); return new Response(null, { status: 302, headers: { location: "https://127.0.0.1/private" } }); });
@@ -62,6 +77,11 @@ test("publisher redirects are checked before dispatch, including Debian's allowe
   calls.length = 0;
   t.mock.method(globalThis, "fetch", async (url: string) => {
     calls.push(url); return calls.length === 1 ? new Response(null, { status: 302, headers: { location: "https://chuangtzu.ftp.acc.umu.se/image.iso" } }) : new Response("fixture");
+  });
+  assert.equal((await openSource("https://cdimage.debian.org/image.iso")).status, 200); assert.equal(calls.length, 2);
+  calls.length = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    calls.push(url); return calls.length === 1 ? new Response(null, { status: 302, headers: { location: "https://saimei.ftp.acc.umu.se/image.iso" } }) : new Response("fixture");
   });
   assert.equal((await openSource("https://cdimage.debian.org/image.iso")).status, 200); assert.equal(calls.length, 2);
 });

@@ -69,10 +69,12 @@ export async function api(
 }
 export const title = (value?: string | null): string =>
   value === "templates"
-    ? "Images"
-    : value
-      ? value.charAt(0).toUpperCase() + value.slice(1)
-      : "Unknown";
+    ? "Image library"
+    : value === "blueprints"
+      ? "Machine blueprints"
+      : value
+        ? value.charAt(0).toUpperCase() + value.slice(1)
+        : "Unknown";
 export const number = (value: number | bigint): string =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value);
 export const memory = (value: number): string =>

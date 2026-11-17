@@ -110,6 +110,9 @@ test("cookie login/claim credentials remain server side, current authorization a
     assert.equal((await fetch(f.url, "/api/v1/machines", { body: {}, headers: cookie })).status, 403);
     assert.equal((await fetch(f.url, "/api/v1/machines", { token: operator, headers: cookie })).status, 400);
     assert.equal((await fetch(f.url, "/api/v1/machines", { headers: cookie })).status, 200);
+    for (const route of ["/api/v1/blueprints", "/api/v1/image-library"]) assert.equal((await fetch(f.url, route, { headers: cookie })).status, 200);
+    assert.equal((await fetch(f.url, "/api/v1/blueprints", { body: { id: machine }, headers: { ...cookie, Origin: f.url } })).status, 200);
+    assert.ok(f.calls.some(call => call.method === "POST" && call.path === "/v1/blueprints" && call.token === session));
     const status = await fetch(f.url, "/api/v1/auth/status", { headers: cookie });
     assert.equal(status.json().setupAllowed, true); assert.deepEqual(status.json().user, { id: "alice", role: "user" });
     const logout = await fetch(f.url, "/api/v1/auth/logout", { body: {}, headers: { ...cookie, Origin: f.url } });
