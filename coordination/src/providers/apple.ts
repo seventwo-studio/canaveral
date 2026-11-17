@@ -1,4 +1,4 @@
-import { AppleBindings, type OwnedGuestAuthority } from "./apple-binding.ts";
+import { AppleBindings, requireRunningAppleStatus, type OwnedGuestAuthority } from "./apple-binding.ts";
 import { appleNATAddress, readAppleNAT } from "./apple-nat.ts";
 import { guestMAC } from "./guest-tls.ts";
 import type { GuestAssignmentContext } from "../guest/binding.ts";
@@ -8,7 +8,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ServiceError, object } from "../errors.ts";
+import { GuestUnavailableError, ServiceError, object } from "../errors.ts";
 
 export type Data = Record<string, unknown>;
 export interface CommandOptions { input?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number }
@@ -281,7 +281,9 @@ export class AppleProvider {
   async sweep(active: Set<string>): Promise<void> { this.bindings.sweep(active); }
   async close(): Promise<void> { this.bindings.close(); }
   guestHelperBinding(machine: Data, image: Data, folder: string, authority: OwnedGuestAuthority) {
-    if (image.os !== "macos" || !machine.lease || !authority.authorized()) throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"});
+    if (image.os !== "macos" || !machine.lease) throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"});
+    let allowed = false; try { allowed = authority.authorized() === true; } catch { /* unavailable authority denies access */ }
+    if (!allowed) throw new ServiceError("Owned macOS authority ended.",410,{retryable:false});
     // No storage creation or adoption on this path, including after disappearance.
     const storage = join(string(this.config.storage), uuid(machine.id)), path = join(storage, uuid(machine.id).toUpperCase());
     const route = () => appleNATAddress(typeof this.config.readNATLeases === "function" ? String(this.config.readNATLeases()) : readAppleNAT(), guestMAC(uuid(machine.id)), authority.clock.wall());
@@ -293,7 +295,8 @@ export class AppleProvider {
       const receipt = readRecord(join(storage,"guest-launch.json")), assignment = object(receipt.assignment);
       const definition = readRecord(join(path,"machine.json")), launch = readRecord(join(path,"runner-launch.json")), pin = readRecord(join(path,"guest-launch-pin.json"));
       const status = readRecord(join(path,"status.json"));
-      if (receipt.version !== 2 || receipt.state !== "sealed" || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || launch.launchId !== assignment.launchId || uuid(definition.id) !== uuid(machine.id) || uuid(definition.executionLeaseID) !== assignment.leaseId || definition.macAddress !== guestMAC(uuid(machine.id)) || status.phase !== "Running" || legacyDigest(pin) !== legacyDigest(receipt.pin)) throw new ServiceError("Native launch custody differs.");
+      if (receipt.version !== 2 || receipt.state !== "sealed" || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || launch.launchId !== assignment.launchId || uuid(definition.id) !== uuid(machine.id) || uuid(definition.executionLeaseID) !== assignment.leaseId || definition.macAddress !== guestMAC(uuid(machine.id)) || legacyDigest(pin) !== legacyDigest(receipt.pin)) throw new ServiceError("Native launch custody differs.");
+      requireRunningAppleStatus(status,authority.clock.wall());
       const media = lstatSync(safePath(String(pin.path)));
       if (media.isSymbolicLink() || !media.isFile() || String(media.dev) !== pin.dev || String(media.ino) !== pin.ino || media.size !== pin.size || (media.mode & 0o7777) !== 0o400) throw new ServiceError("Launch media changed.");
       return { receipt, assignment, identity: legacyDigest({ receipt, definition, launch, pin, assignment: readRecord(join(folder,"assignment.json")), media: {dev:String(media.dev),ino:String(media.ino),mtime:media.mtimeMs,ctime:media.ctimeMs}, records: [join(storage,"guest-launch.json"),join(path,"machine.json"),join(path,"runner-launch.json"),join(path,"guest-launch-pin.json"),join(folder,"assignment.json")].map(file => { const st=lstatSync(safePath(file)); if (!st.isFile() || st.uid !== process.getuid?.() || st.nlink !== 1 || (st.mode & (file === join(storage,"guest-launch.json") ? 0o077 : 0o022))) throw new ServiceError("Custody record ownership differs."); return [st.dev,st.ino,st.mode,st.mtimeMs,st.ctimeMs]; }), config: {runner:this.config.runner, storage:this.config.storage, nativeHelper:this.config.nativeHelper ?? null}, pid:status.pid }) };
@@ -303,7 +306,8 @@ export class AppleProvider {
     return this.bindings.resolve(uuid(machine.id), authority, () => {
       const value = custody();
       if (!validated) {
-        const receipt = guestLaunchReceipt(storage,machine)!;
+        const receipt = guestLaunchReceipt(storage,machine);
+        if (!receipt) throw new ServiceError("Owned launch custody is missing.");
         verifyLaunchPin(object(receipt.pin),storage);
         validated = true;
       }
@@ -312,7 +316,7 @@ export class AppleProvider {
         pinned: {address: address ?? "", serverName:tls.serverName, leafDER:Buffer.from(tls.leafDER,"base64url"), sha256:tls.sha256} };
     }, async () => {
       const before = custody(); const observed = route();
-      if (address !== undefined && address !== observed) throw new ServiceError("Native guest route changed.");
+      if (address !== undefined && address !== observed) throw new GuestUnavailableError("Native guest route changed.",503,{retryable:false});
       address = observed;
       const processes = await this.resourceProcesses(machine,image,folder,750);
       if (!authority.authorized() || custody().identity !== before.identity || processes.length !== 1) throw new ServiceError("Native running process is unproven.");

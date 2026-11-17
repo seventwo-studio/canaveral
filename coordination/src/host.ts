@@ -357,13 +357,13 @@ export class HostRunner {
     return {
       control,
       upload: async (path, app, reader, size, authorized) => {
-        if (!backend.streamUpload) throw new ServiceError("Assignment has no streaming upload transport.", 409);
+        if (!backend.streamUpload) throw new ServiceError("Assignment has no streaming upload transport.", 409, { code: "capability_unsupported" });
         const result = await backend.streamUpload(machine, image, folder, path, app, reader, size, authorized);
         if (result.uploaded !== size || result.durable !== true) throw unknownOutcome("Upload publication is unconfirmed.");
         return { uploaded: size, durable: true };
       },
       download: async (path, app) => {
-        if (!backend.streamDownload) throw new ServiceError("Assignment has no streaming download transport.", 409);
+        if (!backend.streamDownload) throw new ServiceError("Assignment has no streaming download transport.", 409, { code: "capability_unsupported" });
         return backend.streamDownload(machine, image, folder, path, app, () => this.sessionAuthorized(job)) as Promise<SessionDownload>;
       },
       inspect: () => control("accessibility", {}),
@@ -647,7 +647,7 @@ export class HostRunner {
     this.cancelUnauthorized();
     const machines = this.guard.assignments(this.assignments);
     const activeIds = new Set(machines.filter(m => this.machineAuthorized(String(m.id))).map(m => String(m.id)));
-    await this.sweepAccess(activeIds);
+    try { await this.sweepAccess(activeIds); } catch { this.log("Runtime connection closure is unconfirmed."); }
     for (const machine of machines) if (!activeIds.has(String(machine.id))) {
       try { await this.context(machine).runtime.closeShells?.(machine); } catch { this.log("Owned shell closure remains unconfirmed."); }
     }

@@ -37,21 +37,30 @@ try {
   assert.equal(saved.fingerprint,receipt.assignment.fingerprint);
   const native = join(storage,machine.id.toUpperCase()), launch = readRecord(join(native,'runner-launch.json'));
   saveRecord(join(native,'machine.json'),{id:machine.id,executionLeaseID:machine.lease.id,macAddress:guestMAC(machine.id)});
-  saveRecord(join(native,'status.json'),{phase:'Running',pid:1234,updatedAt:launch.attemptedAt-978307200});
+  saveRecord(join(native,'status.json'),{phase:'Running',runnerProtocol:1,runtimeState:1,pid:1234,updatedAt:Date.now()/1000-978307200});
   saveRecord(join(native,'guest-launch-pin.json'),receipt.pin);
-  let born = Math.floor(launch.attemptedAt), route = '192.168.64.2', live = true, probes = 0, dials = 0;
+  let born = Math.floor(launch.attemptedAt), route = '192.168.64.2', live = true, probes = 0, dials = 0, routeReady = false, transportReady = false;
   const clock = {suspendAware:true,bootId:'fixture-boot',now:()=>performance.now()/1000,wall:()=>Date.now()/1000};
-  const config = {storage:dirname(storage),runner:process.execPath,processAbsent:()=>false,processSnapshot:()=>{probes++;return {pid:1234,uid:process.getuid(),seconds:born,micros:0,executableHex:Buffer.from(process.execPath).toString('hex'),argvHex:[process.execPath,'run',native].map(v=>Buffer.from(v).toString('hex')),userNanoseconds:0,systemNanoseconds:0,rssBytes:0};},readNATLeases:()=>`{
+  const config = {storage:dirname(storage),runner:process.execPath,processAbsent:()=>false,processSnapshot:()=>{probes++;return {pid:1234,uid:process.getuid(),seconds:born,micros:0,executableHex:Buffer.from(process.execPath).toString('hex'),argvHex:[process.execPath,'run',native].map(v=>Buffer.from(v).toString('hex')),userNanoseconds:0,systemNanoseconds:0,rssBytes:0};},readNATLeases:()=>routeReady ? `{
 hw_address=1,${guestMAC(machine.id)}
 ip_address=${route}
 lease=0xfffffff0
 }
-`};
-  const owned = new AppleBindings((factory,evidence,current,endpoint)=>{dials++;assert.equal(evidence.pinned.address,route);assert.equal(endpoint,`https://${route}:8767`);return factory.resolve(()=>evidence.assignment,origin,evidence.credential,current,{...evidence.pinned,address:'127.0.0.1'},2);});
+` : ''};
+  const notReady = net.createServer(); await new Promise(r=>notReady.listen(0,'127.0.0.1',r));
+  const notReadyOrigin = `https://127.0.0.1:${notReady.address().port}`; await new Promise(r=>notReady.close(r));
+  const owned = new AppleBindings((factory,evidence,current,endpoint)=>{dials++;assert.equal(evidence.pinned.address,route);assert.equal(endpoint,`https://${route}:8767`);return factory.resolve(()=>evidence.assignment,transportReady ? origin : notReadyOrigin,evidence.credential,current,{...evidence.pinned,address:'127.0.0.1'},2);});
   const provider = new AppleProvider(config,root,owned), authority = {clock,authorized:()=>live};
   const providerAccess = new GuestHelperAccess((m,i,f)=>provider.guestHelperBinding(m,i,f,authority));
+  const list = ()=>providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}});
+  const statusFile = join(native,'status.json'), status = readRecord(statusFile);
+  saveRecord(statusFile,{...status,updatedAt:Date.now()/1000-978307200-8});
+  await assert.rejects(list()); assert.equal(dials,0); saveRecord(statusFile,status);
+  await assert.rejects(list()); assert.equal(dials,0); assert.equal(probes,0);
+  routeReady=true; await assert.rejects(list()); assert.equal(dials,1); assert.equal(probes,2);
+  transportReady=true;
   await Promise.all(Array.from({length:4},()=>providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}})));
-  assert.equal(dials,1);assert.equal(probes,2);
+  assert.equal(dials,2);assert.equal(probes,4);
   const ownedDownload = await providerAccess.streamDownload(machine,image,folder,'/hello',undefined,()=>live);
   assert.equal(Buffer.from(await ownedDownload.read(65536)).toString(),'fixture bytes');assert.equal(await ownedDownload.verify(),true);await ownedDownload.close();
   born += 20;
@@ -59,7 +68,7 @@ lease=0xfffffff0
   await assert.rejects(providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}}));
   born -= 20;
   await assert.rejects(providerAccess.control(machine,image,folder,{action:'list-files',arguments:{path:'/'}}));
-  assert.equal(dials,1,'a reverted process proof must not repair a closed launch');
+  assert.equal(dials,2,'a reverted process proof must not repair a closed launch');
   await provider.close();
   }
   await assert.rejects(factory.resolve(expected, origin, 'x'.repeat(43), () => true, pinned));

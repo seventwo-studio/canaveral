@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { appleNATAddress } from "../../src/providers/apple-nat.ts";
-import { AppleBindings, type AppleBindingEvidence } from "../../src/providers/apple-binding.ts";
+import { AppleBindings, requireRunningAppleStatus, type AppleBindingEvidence } from "../../src/providers/apple-binding.ts";
+import { GuestUnavailableError, ServiceError } from "../../src/errors.ts";
 import { randomUUID, createHash } from "node:crypto";
 import { GuestHelperAccess } from "../../src/control/sessions.ts";
 import { GuestHelperBinding } from "../../src/control/session-protocol.ts";
@@ -15,7 +16,8 @@ test("strict Apple NAT supported evidence and complete refusal matrix", () => {
 function pendingFixture() {
   const bindings = new AppleBindings(); let now = 10, allowed = true, identity = "original", finish!: (v:string)=>void, probes=0;
   const authority = { authorized:()=>allowed, clock:{suspendAware:true,bootId:randomUUID(),now:()=>now,wall:()=>1000} };
-  const evidence = (): AppleBindingEvidence => ({assignment:{version:1,machineId:randomUUID(),leaseId:randomUUID(),launchId:randomUUID(),fingerprint:"a".repeat(64)},credential:"x".repeat(43),identity,pinned:{address:"192.168.64.2",serverName:"fixture",sha256:"",leafDER:Buffer.alloc(0)}});
+  const assignment = {version:1 as const,machineId:randomUUID(),leaseId:randomUUID(),launchId:randomUUID(),fingerprint:"a".repeat(64)};
+  const evidence = (): AppleBindingEvidence => ({assignment,credential:"x".repeat(43),identity,pinned:{address:"192.168.64.2",serverName:assignment.launchId+".canaveral.invalid",sha256:"",leafDER:Buffer.alloc(0)}});
   const probe=()=>{probes++;return new Promise<string>(r=>finish=r);};
   return {bindings,authority,evidence,probe,finish:()=>finish("process"),probes:()=>probes,setNow:(v:number)=>now=v,revoke:()=>allowed=false,change:()=>identity="changed"};
 }
@@ -23,6 +25,53 @@ test("pending resolve deduplicates and cleanup rejects late probes without hands
   const f=pendingFixture(), first=f.bindings.resolve("owned",f.authority,f.evidence,f.probe);
   assert.equal(f.bindings.resolve("owned",f.authority,f.evidence,f.probe),first);assert.equal(f.probes(),1);
   f.bindings.closeMachine("owned"); f.finish(); await assert.rejects(first); assert.equal(f.bindings.resolve("owned",f.authority,f.evidence,f.probe),first);
+});
+
+test("transient pre-verification failures need a later explicit call and never replay the failed call", async () => {
+  for (const phase of ["probe", "dial"]) {
+    const f = pendingFixture(); let probes = 0, dials = 0;
+    const bindings = new AppleBindings(async (_factory, _evidence, current) => {
+      if (++dials === 1 && phase === "dial") throw new GuestUnavailableError("not ready",503);
+      return new GuestHelperBinding(async () => ({}), current);
+    });
+    const probe = async () => { if (++probes === 1 && phase === "probe") throw new GuestUnavailableError("route not ready",503); return "birth"; };
+    try {
+      await assert.rejects(bindings.resolve("owned", f.authority, f.evidence, probe));
+      assert.equal(probes,1); assert.equal(dials,phase === "probe" ? 0 : 1);
+      await new Promise(r => setImmediate(r)); assert.equal(probes,1);
+      const binding = await bindings.resolve("owned", f.authority, f.evidence, probe);
+      assert.equal(binding.authorized(),true); assert.equal(probes,2);
+    } finally { bindings.close(); }
+  }
+});
+test("proof lapse closes the old binding but a live guard permits a new explicit resolution", async () => {
+  const f = pendingFixture(); let dials = 0;
+  const bindings = new AppleBindings(async (_factory,_evidence,current) => { dials++; return new GuestHelperBinding(async()=>({}),current); });
+  try {
+    const old = await bindings.resolve("owned",f.authority,f.evidence,async()=>"birth");
+    f.setNow(12); assert.equal(old.authorized(),false); assert.equal(dials,1);
+    const fresh = await bindings.resolve("owned",f.authority,f.evidence,async()=>"birth");
+    assert.notEqual(fresh,old); assert.equal(fresh.authorized(),true); assert.equal(old.authorized(),false); assert.equal(dials,2);
+    f.revoke(); assert.equal(fresh.authorized(),false);
+    await assert.rejects(bindings.resolve("owned",f.authority,f.evidence,async()=>"birth"));
+  } finally { bindings.close(); }
+});
+test("custody and authentication failures remain terminal and raw resolver diagnostics are redacted", async () => {
+  const f = pendingFixture(); let dials=0;
+  const bindings = new AppleBindings(async()=>{dials++;throw new ServiceError("identity failed",401);});
+  try {
+    const first = bindings.resolve("owned",f.authority,f.evidence,async()=>"birth"); await assert.rejects(first);
+    assert.equal(bindings.resolve("owned",f.authority,f.evidence,async()=>"birth"),first); assert.equal(dials,1);
+  } finally { bindings.close(); }
+  const unavailable = new AppleBindings();
+  try { await assert.rejects(unavailable.resolve("owned",f.authority,()=>{throw new Error("/private/secret-state");},async()=>"birth"), (error: unknown) => error instanceof ServiceError && !error.message.includes("secret-state")); }
+  finally { unavailable.close(); }
+});
+test("running proof needs a fresh Swift heartbeat and actual running runtime state", () => {
+  const status = {phase:"Running",runnerProtocol:1,runtimeState:1,updatedAt:1000-978307200};
+  requireRunningAppleStatus(status,1000); requireRunningAppleStatus(status,1007.99);
+  for (const wall of [1008,994.99,NaN,Infinity]) assert.throws(()=>requireRunningAppleStatus(status,wall));
+  for (const bad of [{...status,phase:"Starting"},{...status,runtimeState:0},{...status,runtimeState:2},{...status,runnerProtocol:undefined},{...status,updatedAt:NaN}]) assert.throws(()=>requireRunningAppleStatus(bad,1000));
 });
 test("custody, authority, suspend age, backward, nonfinite and changed boot invalidate pending proofs",async()=>{
   for (const change of [(f:ReturnType<typeof pendingFixture>)=>f.change(),(f:ReturnType<typeof pendingFixture>)=>f.revoke(),(f:ReturnType<typeof pendingFixture>)=>f.setNow(12),(f:ReturnType<typeof pendingFixture>)=>f.setNow(9),(f:ReturnType<typeof pendingFixture>)=>f.setNow(NaN),(f:ReturnType<typeof pendingFixture>)=>f.authority.clock.bootId=randomUUID()]) {
@@ -63,4 +112,19 @@ test('maintenance never overlaps probes and suspend expiry cannot be refreshed',
   now=11;t.mock.timers.tick(1000);await Promise.resolve();assert.equal(probes,2);
   now=12;t.mock.timers.tick(1000);await Promise.resolve();assert.equal(binding.authorized(),false);assert.equal(probes,2);
   finish();await Promise.resolve();await Promise.resolve();now=10;assert.equal(binding.authorized(),false);bindings.close();
+});
+test("proof maintenance runs during the initial handshake without resolving twice", async t => {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  const f = pendingFixture(); let now=10,probes=0,dials=0,finish!:()=>void;
+  const authority = {...f.authority,clock:{...f.authority.clock,now:()=>now}};
+  const bindings = new AppleBindings(async(_factory,_evidence,current)=>{
+    dials++; await new Promise<void>(resolve=>finish=resolve); return new GuestHelperBinding(async()=>({}),current);
+  });
+  try {
+    const pending = bindings.resolve("owned",authority,f.evidence,async()=>{probes++;return "birth";});
+    await new Promise(r=>setImmediate(r)); assert.equal(dials,1);
+    for (const second of [11,12,13]) { now=second;t.mock.timers.tick(1000);await new Promise(r=>setImmediate(r)); }
+    assert.equal(probes,4); assert.equal(dials,1);
+    finish(); assert.equal((await pending).authorized(),true);
+  } finally { bindings.close(); }
 });

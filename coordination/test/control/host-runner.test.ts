@@ -24,6 +24,17 @@ function fakeTransport(reply: () => RecordValue = () => ({ machines: [] })): Hos
 const providerFactory: NonNullable<HostDependencies["providerFactory"]> = () => ({ kind: "libvirt", check: async () => ({}), reconcile: async m => ({ state: m.desired }) });
 async function drain(): Promise<void> { await new Promise(r => setTimeout(r, 20)); }
 
+test("a failed runtime sweep does not stop Linux scheduling and remains a shutdown failure", async t => {
+  const {config,image,clock} = setup(t), running = machine(image), stopped = {...machine(image),desired:"stopped"};
+  let reconciled=0, shells=0, sweeps=0;
+  const runner = new HostRunner(config,{clock,transport:fakeTransport(()=>({machines:[running,stopped]})),providerFactory:()=>({kind:"libvirt",check:async()=>({}),
+    reconcile:async m=>{reconciled++;return {state:m.desired};},sweep:async()=>{sweeps++;throw Error("fixture sweep failure");},closeShells:async()=>{shells++;}})});
+  await runner.initializeProviders(); await runner.connect(); await runner.checkEnvironment(); await runner.poll();
+  await runner.step(); await drain(); assert.equal(reconciled,2); assert.ok(shells>0);
+  await runner.step(); await drain(); assert.ok(reconciled>=4); assert.ok(sweeps>=2);
+  await assert.rejects(runner.close(),(error:unknown)=>error instanceof ServiceError && error.code==="host_shutdown_incomplete");
+});
+
 test('physical Linux and Mac offers include models beside VM and simulator runtimes', t => {
   const { config } = setup(t);
   const inference = { runtime: 'ollama', executable: '/private/ollama', modelsDirectory: '/private/models', models: [{ id: 'fixture:1', digest: 'sha256:' + 'a'.repeat(64), resources: { cpu: 2, memoryMiB: 2048, diskGiB: 8 } }] };

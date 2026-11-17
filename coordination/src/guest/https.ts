@@ -4,7 +4,7 @@ import type { ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { readFileSync } from "node:fs";
 import { checkServerIdentity, createSecureContext } from "node:tls";
-import { ServiceError, object } from "../errors.ts";
+import { GuestOperationError, GuestUnavailableError, ServiceError, object } from "../errors.ts";
 import { jsonBytes } from "../control/transfers.ts";
 
 export type GuestRequest = (path: string, body: Record<string, unknown> | null) => Promise<Record<string, unknown>>;
@@ -51,6 +51,8 @@ export class GuestHTTPS {
     const data = body === null ? undefined : jsonBytes(body, MAX_REQUEST);
     const failure = (message: string, status = 502, code = "response_invalid") => new ServiceError(message, status,
       { code, retryable: false, ...(data === undefined ? {} : { outcome: "unknown" as const }) });
+    const unavailable = () => new GuestUnavailableError("Native guest response was not confirmed; inspect before another command.", 503,
+      { code: "transport_interrupted", retryable: false, ...(data === undefined ? {} : { outcome: "unknown" as const }) });
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       let settled = false;
       const finish = (error?: unknown, value?: Record<string, unknown>) => {
@@ -59,7 +61,7 @@ export class GuestHTTPS {
         if (error) reject(error); else resolve(value!);
       };
       // A wall deadline covers DNS, handshake, headers and a trickled response, rather than socket inactivity.
-      const timer = setTimeout(() => { finish(failure("Native guest response was not confirmed; inspect before another command.", 503, "transport_interrupted")); req.destroy(); }, this.timeout * 1000);
+      const timer = setTimeout(() => { finish(unavailable()); req.destroy(); }, this.timeout * 1000);
       const req = httpsRequest(this.origin, { method: data === undefined ? "GET" : "POST", path, agent: false,
         rejectUnauthorized: true, ...(this.pinned ? { minVersion: "TLSv1.3" as const, servername: this.pinned.serverName,
           checkServerIdentity: (_: string, cert: import("node:tls").PeerCertificate) => {
@@ -89,7 +91,7 @@ export class GuestHTTPS {
           if (count > limit) return bad(failure("Native guest response exceeds its protocol envelope.", 413));
           chunks.push(chunk);
         });
-        response.on("error", () => finish(failure("Native guest response was interrupted.", 503, "transport_interrupted")));
+        response.on("error", () => finish(unavailable()));
         response.on("end", () => {
           if (settled) return;
           try {
@@ -100,7 +102,7 @@ export class GuestHTTPS {
             if (status !== 200) {
               const code = value.code;
               const refusal = status === 409 && typeof code === "string" && ["input_busy", "input_stale", "input_reset_uncertain", "capability_unsupported"].includes(code);
-              finish(new ServiceError("Native guest request was refused.", status, { retryable: false, ...(refusal ? { code } : data === undefined ? {} : { outcome: "unknown" as const }) }));
+              finish(new GuestOperationError("Native guest request was refused.", status, { retryable: false, ...(refusal ? { code } : data === undefined ? {} : { outcome: "unknown" as const }) }));
               return;
             }
             finish(undefined, value);
@@ -109,7 +111,8 @@ export class GuestHTTPS {
       });
       this.active.add(req);
       if (this.closed) req.destroy();
-      req.on("error", () => finish(failure("Native guest response was not confirmed; inspect before another command.", 503, "transport_interrupted")));
+      req.on("error", (error: NodeJS.ErrnoException) => finish(["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN", "ENOTFOUND"].includes(error.code ?? "")
+        ? unavailable() : failure("Native guest response was not confirmed; inspect before another command.", 503, "transport_interrupted")));
       req.end(data);
     });
   };

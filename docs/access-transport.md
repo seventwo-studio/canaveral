@@ -333,7 +333,14 @@ created Linux guest adapter cannot service macOS. Explicitly injected trusted
 adapters retain their existing role. Unsupported transports return
 `capability_unsupported`. Sessions capture their selected adapter; shutdown and
 cleanup also sweep retained instances after runtime configuration changes.
-The local connector and the Agent's guest-access facade use the same selection.
+The local connector uses this selection for macOS and flagged guest-access images;
+unflagged Linux keeps its native local runtime. Other operating systems use their
+runtime adapters. The Agent's guest-access facade dispatches by assigned OS too.
+Retained adapters remain reachable for teardown. A failed connection sweep is
+logged during the scheduler tick and does not prevent other machines from
+reconciling or closing shells. Update and shutdown still require confirmed closure.
+Runtime/machine associations and retired adapter instances currently remain in
+memory for the Agent's lifetime; pruning after confirmed teardown remains open.
 
 The resolver receives an internal typed authority containing the Agent's trusted
 ExecutionClock. Its closure compares the captured lease UUID and assignment

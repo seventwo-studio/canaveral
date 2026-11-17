@@ -412,24 +412,36 @@ handshake. Identity includes assignment, certificate/receipt, native machine and
 launch records, PID, media and relevant runtime configuration; maintenance binds
 process birth and route. Native PID/UID/birth/executable/argv proof reuses resource
 attribution, with 750 ms per native helper observation. A probe has a one-second
-asynchronous deadline and must complete within two suspend-aware seconds from
-dispatch. Synchronous native observations remain individually bounded; elapsed
-clock validation additionally rejects delayed completion. Maintenance targets
-one-second dispatch intervals, never overlaps and cannot refresh an expired proof.
-Nonfinite/backward time, changed boot, failed authority/custody/process/route proof
-close the factory. Cheap checks precede effects and acknowledgements; file chunks
-do not launch native process helpers.
+asynchronous deadline and must finish in under one suspend-aware second. Its
+result expires two suspend-aware seconds after dispatch. Running status must also
+have runner protocol 1, runtime state 1, phase `Running` and a wall-clock heartbeat
+younger than eight seconds, allowing at most five seconds of future skew. Wall
+freshness does not replace suspend-aware proof age. Synchronous native observations
+remain individually bounded; elapsed clock validation additionally rejects delayed
+completion. Maintenance starts before the TLS handshake, targets one-second
+dispatch intervals, never overlaps and cannot refresh an expired proof.
+Checks precede effects and acknowledgements; file chunks do not launch native
+process-attribution helpers. Custody reads and the native clock still perform
+synchronous work; responsiveness under concurrent transfers remains unmeasured.
 
-There is no operation replay or automatic rebind. This implementation deliberately
-retains a failed entry closed while that assignment remains active, including
-transient transport failures.
-Typed definite pre-effect refusals such as `input_busy`, `input_stale`,
-`input_reset_uncertain` and `capability_unsupported` leave a verified binding
-usable; they neither dispatch effects nor indicate transport loss.
-An operator cannot repair a poisoned launch by restoring old values. Inactive
-sweep removes entries only after closing them. The Agent's original monotonic
-assignment guard continues to deny expired or
-revoked work. Closing the provider permanently closes resolution admission.
+There is no operation replay or automatic rebind. Missing or changed route,
+not-yet-running or stale status, network interruption and proof-age lapse close
+the old factory and evict that entry. Only a later explicit request may resolve
+again under the original live assignment guard. A failed POST retains its unknown
+outcome; a new binding does not establish whether that operation took effect.
+Authority loss, changed custody or process identity, invalid clock, 401,
+certificate/pin failures and malformed identity, proof or response framing retain
+a terminal closed entry while the assignment remains active. Restoring old values
+cannot repair that entry. Pending and active entries compare captured custody
+before sharing a resolution; stale completions cannot evict their replacement.
+
+A complete, verified JSON error response from the guest fails only its operation,
+including ordinary 400 and code-less 409 responses. It leaves a verified binding
+usable. The typed refusals `input_busy`, `input_stale`, `input_reset_uncertain` and
+`capability_unsupported` retain their existing outcome-free handling; other POST
+errors remain unknown. Inactive sweep removes entries only after closing them.
+The Agent's monotonic assignment guard continues to deny expired or revoked work.
+Closing the provider permanently closes resolution admission.
 
 Portable fixtures inject process/route evidence and a typed socket dial mapping;
 the Swift localhost exchange still uses actual provider-generated receipt,

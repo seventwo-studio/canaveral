@@ -1,8 +1,8 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { noLinks } from "../runtime-process.ts";
-import { ServiceError } from "../errors.ts";
+import { GuestUnavailableError } from "../errors.ts";
 const limit = 256 * 1024;
-const refuse = (): never => { throw new ServiceError("Owned Apple NAT evidence is unavailable or ambiguous.", 503, { retryable: false }); };
+const refuse = (): never => { throw new GuestUnavailableError("Owned Apple NAT evidence is unavailable or ambiguous.", 503, { retryable: false }); };
 function ipv4(value: string): boolean {
   if (!/^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$/.test(value)) return false;
   const [a, b, c, d] = value.split(".").map(Number);
