@@ -64,26 +64,26 @@ inputs are examples requiring operator provisioning, not deployment acceptance.
 
 ## Release procedure
 
-The next source release is 0.4.0. Internal coordination/dashboard npm packages
+The next source release is 0.4.1. Internal coordination/dashboard npm packages
 keep their independent private 0.1.0 versions. Historical version tags are not
 reused: immutable identity guards reject another source revision.
 
 1. Merge the reviewed release preparation into main and require green validation
    at the selected full commit. Verify root package.json and package-lock.json,
-   including the lockfile root package entry, all declare 0.4.0.
-2. With separate release authorization, create v0.4.0 on that exact commit and
+   including the lockfile root package entry, all declare 0.4.1.
+2. With separate release authorization, create v0.4.1 on that exact commit and
    push it. This push authorizes automatic publication. An optional pre-existing
    draft must target the full commit SHA, never the string main. The workflow
    otherwise creates an exact-commit draft after validating release identity.
 3. To retry a failed unfinished release, dispatch **Publish Canaveral release**
    on the same tag, supplying that tag as input:
-   `gh workflow run release.yaml --ref v0.4.0 -f tag=v0.4.0`.
+   `gh workflow run release.yaml --ref v0.4.1 -f tag=v0.4.1`.
    Dispatch from main or a different tag is rejected, preserving one signing
    identity for automatic and manual runs. No run creates or moves a Git tag.
 4. The runner fetches main and checks ancestry, package/lock versions and local
    and remote tag resolution against the immutable workflow event SHA. It builds three repo-scoped GHCR images for
    linux/amd64 and linux/arm64, then a namespace-free Flux deployment artifact
-   under candidate-0.4.0-FULL_SOURCE_SHA in ghcr.io/seventwo-studio/canaveral/deploy.
+   under candidate-0.4.1-FULL_SOURCE_SHA in ghcr.io/seventwo-studio/canaveral/deploy.
    This non-semver staging tag cannot enter the stable subscription. The deployment bundle pins
    each image by digest; kubectl, Flux and Cosign are version-pinned.
 5. After attaching signed SLSA provenance for all four digests, the workflow
@@ -91,14 +91,19 @@ reused: immutable identity guards reject another source revision.
    --finalize verifies that signature with the exact issuer and tag-scoped
    workflow identity, revalidates release/registry identity and prepared metadata,
    compares the complete artifact against the rebuilt source with no ignored paths,
-   then promotes the same digest to the stable 0.4.0 tag. It confirms promotion,
+   then promotes the same digest to the stable 0.4.1 tag. It confirms promotion,
    uploads release.json and publishes the draft. Reused artifacts get the same
    source-content check; matching annotations alone are insufficient.
    `node script/publish_release.mjs` only prepares artifacts; --finalize is the
    workflow's final step, not a substitute for signing and provenance.
 
 A failed run may leave some immutable images or an unsigned deployment artifact
-and an unfinished draft. Inspect registry state and retry the same exact commit;
+and an unfinished draft. After a completed push, the publisher makes at most six
+manifest readback attempts, two seconds apart, reconnecting each time. Only
+absence or transport loss is retried; authentication and malformed evidence fail closed.
+The push is never repeated within that operation. Fixed stage names and command
+exit statuses identify failures without logging subprocess output or credentials.
+Inspect registry state and retry the same exact commit;
 matching artifacts are reused and missing artifacts are completed. Identity
 mismatches require a new reviewed version. Completed GitHub releases are rejected
 on retry, including same-source releases, and are never reopened or overwritten.
@@ -124,9 +129,9 @@ attached and report SourceVerified=True and Ready=True. A legacy cosign verify
 alone does not establish that consumer path.
 
 The certificate issuer is exactly https://token.actions.githubusercontent.com.
-For v0.4.0 the certificate subject is exactly:
+For v0.4.1 the certificate subject is exactly:
 
-`https://github.com/seventwo-studio/canaveral/.github/workflows/release.yaml@refs/tags/v0.4.0`
+`https://github.com/seventwo-studio/canaveral/.github/workflows/release.yaml@refs/tags/v0.4.1`
 
 A consumer can poll stable releases with this public source definition. The
 matchers are anchored Go regular expressions; omit verify.secretRef for keyless
@@ -166,7 +171,7 @@ To verify a fixed digest independently with the pinned Cosign version:
 ```sh
 cosign verify --new-bundle-format=false \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/seventwo-studio/canaveral/.github/workflows/release.yaml@refs/tags/v0.4.0 \
+  --certificate-identity https://github.com/seventwo-studio/canaveral/.github/workflows/release.yaml@refs/tags/v0.4.1 \
   ghcr.io/seventwo-studio/canaveral/deploy@sha256:<digest>
 gh attestation verify oci://ghcr.io/seventwo-studio/canaveral/deploy@sha256:<digest> --repo seventwo-studio/canaveral
 ```

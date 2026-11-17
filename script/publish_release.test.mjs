@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { main, capture, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure } from './publish_release.mjs';
+import { main, capture, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure, RegistryUnavailable, publishedManifest, publicationFailure } from './publish_release.mjs';
 const sha='a'.repeat(40),other='b'.repeat(40),tag='v0.4.0',version='0.4.0';
 const lock={version,packages:{'':{version}}};
 const draft={id:1,tag_name:tag,draft:true,target_commitish:sha};
@@ -65,6 +65,36 @@ test('prepare creates draft and missing artifacts; retry reuses digests; finaliz
  // A completed release is never reopened, reuploaded or overwritten, even at the same source.
  f.calls.length=0;await assert.rejects(main(false,f),/unfinished draft/);assert.ok(!f.calls.some(c=>['docker','flux'].includes(c[0]) || c[2]==='upload'));
 });
+test('post-push readback tolerates absence without rebuilding or promoting',async t=>{
+ const f=fixture(t,{missing:true});let waits=0;
+ const connect=f.connect,reads=new Map();
+ f.pause=async()=>{waits++;};
+ f.connect=async name=>({manifest:async ref=>{
+  const found=await (await connect(name)).manifest(ref);
+  if(!found)return null;
+  const key=name+ref,n=(reads.get(key)??0)+1;reads.set(key,n);
+  return n<3?null:found;
+ }});
+ await main(false,f);
+ assert.equal(waits,8);
+ assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);
+ assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
+ assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
+});
+test('post-push readback is bounded and refuses authentication or malformed evidence immediately',async()=>{
+ let reads=0,waits=0;
+ await assert.rejects(publishedManifest(async()=>({manifest:async()=>{reads++;return null;}}),'pkg','tag',async()=>{waits++;}),/six readback attempts/);
+ assert.equal(reads,6);assert.equal(waits,5);
+ for(const message of ['authentication failed','malformed response']) {
+  reads=0;waits=0;
+  await assert.rejects(publishedManifest(async()=>({manifest:async()=>{reads++;throw new Error(message);}}),'pkg','tag',async()=>{waits++;}),new RegExp(message));
+  assert.equal(reads,1);assert.equal(waits,0);
+ }
+ reads=0;waits=0;
+ const found=[{},'sha256:'+'c'.repeat(64)];
+ assert.equal(await publishedManifest(async()=>({manifest:async()=>{reads++;if(reads<3)throw new RegistryUnavailable('Registry transport failed.');return found;}}),'pkg','tag',async()=>{waits++;}),found);
+ assert.equal(reads,3);assert.equal(waits,2);
+});
 test('non-main, moved remote tag, conflicting release and foreign image stop publication',async t=>{
  for(const options of [{failAncestry:true},{remote:other},{existing:[{...draft,draft:false}]},{existing:[{...draft,target_commitish:other}]},{existing:[draft,draft]},{conflict:true}])await t.test(JSON.stringify(options),async t=>{
   const f=fixture(t,options);await assert.rejects(main(false,f));assert.ok(!f.calls.some(c=>['docker','flux'].includes(c[0]) || (c[0]==='gh' && c[1]==='release')));
@@ -92,7 +122,8 @@ test('stable-candidate digest conflicts refuse promotion even with matching anno
  assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
 });
 test('subprocess and network failures cannot echo secrets',async t=>{
- assert.throws(()=>capture(process.execPath,['-e','console.error("secret-value");process.exit(1)']),e=>!e.message.includes('secret-value'));
+ assert.throws(()=>capture(process.execPath,['-e','console.error("secret-value");process.exit(7)']),e=>!publicationFailure(e).includes('secret-value')&&publicationFailure(e).includes('exit 7'));
+ assert.ok(!publicationFailure(new Error('secret-value')).includes('secret-value'));
  const previous=globalThis.fetch;t.after(()=>globalThis.fetch=previous);globalThis.fetch=async()=>{throw new Error('secret-value');};
  await assert.rejects(Registry.get('https://ghcr.io/token','secret-value'),e=>!e.message.includes('secret-value'));
  assert.ok(!registryFailure(new URL('https://ghcr.io/v2/example'),'403',JSON.stringify({errors:[{code:'secret-value',message:'secret-value'}]})).includes('secret-value'));

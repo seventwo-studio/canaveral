@@ -13,6 +13,7 @@ import { IdentityClient } from "./identity-client.ts";
 import { ControlClient } from "./control/client.ts";
 import { createControllerHandler, createControllerUpgradeHandler } from "./control/http.ts";
 import { createSessionUpgradeHandler } from "./control/sessions.ts";
+import { controllerTLS, controllerTLSReloader } from "./tls-reload.ts";
 
 /** Explicit controller configuration. Nothing is discovered, adopted or defaulted to live state. */
 export interface ControllerConfig {
@@ -81,7 +82,7 @@ export async function startController(config: ControllerConfig) {
   const enrollmentToken = config.enrollmentTokenFile === undefined ? undefined
     : secret(readFileSync(config.enrollmentTokenFile, "utf8").replace(/\r?\n$/, ""));
   if (adminToken === enrollmentToken) fail("admin and enrollment credentials must differ");
-  const tls = config.tls ? { cert: readFileSync(config.tls.certFile), key: readFileSync(config.tls.keyFile), minVersion: "TLSv1.2" as const } : undefined;
+  const tls = config.tls ? controllerTLS(config.tls) : undefined;
   const client = new IdentityClient({ path: config.statePath, adminToken, controllerId: config.controllerId });
   let control: ControlClient | undefined;
   let server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer> | undefined;
@@ -114,11 +115,13 @@ export async function startController(config: ControllerConfig) {
   const listener = server;
   const services = control;
   const address = listener.address() as AddressInfo;
+  const reloader = config.tls && tls ? controllerTLSReloader(listener as ReturnType<typeof createHttpsServer>, config.tls, tls) : undefined;
   let closing: Promise<void> | undefined;
   return {
     address,
     async close(): Promise<void> {
       closing ??= (async () => {
+        reloader?.close();
         broker?.close();
         videoBroker?.close();
         await new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });
