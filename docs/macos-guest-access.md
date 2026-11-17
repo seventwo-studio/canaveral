@@ -376,11 +376,63 @@ tested Security implementation the key nevertheless reports `isPermanent=1`;
 that attribute does not establish nonpersistence. Narrow own-key lookup must be
 absent or explicitly inaccessible. This is limited evidence, not a Keychain audit.
 
-ST-595 remains open. Strict NAT lease parsing, native routing, provider binding
-cache, Agent mixed-runtime wiring and the streamDownload session-authority fix
-belong to the second PR. Native NAT exposure/reachability, DHCP format, guest
+ST-597 implements the second integration slice below. ST-595 remains open until
+independent review, merge and acceptance reconciliation. Native NAT
+exposure/reachability, DHCP format, guest
 firewall/Local Network permission, getifaddrs behavior, TCC, automount/timing and
 readiness, independent deadlines/cleanup/erasure, capture/clone/template
 qualification and workspace acceptance remain open. A pinned certificate proves
 possession of a launch key; it does not prove physical placement or isolation.
 No admission or production guest-access gate changes here.
+
+
+## Owned provider resolver (ST-597)
+
+AppleProvider resolves only existing owned storage; resolution never creates or
+adopts native records. It requires sealed private v2 custody, exact machine/lease/
+fingerprint/launch, native deterministic MAC and media pin. Initial media contents
+are verified against custody; subsequent cheap checks bind record contents and
+file identity/ownership plus media inode, size, mode and timestamps. Native
+launch and machine changes or disappearance permanently invalidate an observed
+binding. v1 remains cleanup-only.
+
+The separate bounded NAT parser accepts only bootpd blocks with exact
+`hw_address=1,<expected lowercase native MAC>`, canonical RFC1918 IPv4 and
+unexpired hexadecimal `lease` (Unix seconds). There must be exactly one matching
+record, and no other unexpired or unknown-expiry claimant for its address.
+Malformed blocks/duplicates, stale matching records, ff/DUID, name-only,
+loopback/link-local and discovery fallbacks are refused. Production reads only
+`/private/var/db/dhcpd_leases`: no symlinks, root-owned single-link regular file,
+no group/world writes, stable bounded reads capped at 256 KiB. Unsupported native
+formats remain an acceptance gate. Linux `guestHost` is unchanged.
+
+One factory and epoch entry per positively authorized machine deduplicates pending
+and active resolution. Registration precedes every asynchronous probe or TLS
+handshake. Identity includes assignment, certificate/receipt, native machine and
+launch records, PID, media and relevant runtime configuration; maintenance binds
+process birth and route. Native PID/UID/birth/executable/argv proof reuses resource
+attribution, with 750 ms per native helper observation. A probe has a one-second
+asynchronous deadline and must complete within two suspend-aware seconds from
+dispatch. Synchronous native observations remain individually bounded; elapsed
+clock validation additionally rejects delayed completion. Maintenance targets
+one-second dispatch intervals, never overlaps and cannot refresh an expired proof.
+Nonfinite/backward time, changed boot, failed authority/custody/process/route proof
+close the factory. Cheap checks precede effects and acknowledgements; file chunks
+do not launch native process helpers.
+
+There is no operation replay or automatic rebind. This implementation deliberately
+retains a failed entry closed while that assignment remains active, including
+transient transport failures. An operator cannot repair a poisoned launch by
+restoring old values. Inactive sweep removes entries only after closing them;
+the Agent's original monotonic assignment guard continues to deny expired or
+revoked work. Closing the provider permanently closes resolution admission.
+
+Portable fixtures inject process/route evidence and a typed socket dial mapping;
+the Swift localhost exchange still uses actual provider-generated receipt,
+PKCS12, media pin, provider custody and process guards, pinned TLS/v2 factory and
+GuestHelperAccess file operations. The dial maps only the synthetic private route
+to the disposable localhost listener. It establishes no native NAT reachability,
+firewall/permission/Keychain/OS-profile compatibility, getifaddrs behavior,
+TCC/automount/timing/readiness, independent lifecycle/erasure, capture/clone/template
+qualification or workspace acceptance. Linux-only guestAccess and ordinary host
+execution admission remain closed.

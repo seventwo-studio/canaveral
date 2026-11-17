@@ -119,3 +119,11 @@ no replacement, regeneration, launch or owned cleanup after an unconfirmed utili
 result. Only confirmed signing/packing/profile validation records stable TLS
 custody and returns to local `planned` staging. V1 custody is cleanup-only;
 recovery never retrofits a certificate. See [macOS guest access](macos-guest-access.md#per-launch-private-tls-transport-st-596-first-st-595-slice).
+
+Owned Apple helper TLS factories are registered before asynchronous proof and
+identity work. Cleanup closes pending and active factories before provider locks,
+stop observation or storage erasure, including direct provider removal calls.
+Resolver maintenance acquires no provider/runtime locks. Agent shutdown retains
+and closes adapters selected by older operations after runtime changes. Socket
+closure is access cancellation only: native process exit, runtime-lock exclusion,
+closed disk handles and owned erasure remain separate positive cleanup proofs.

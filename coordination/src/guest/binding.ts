@@ -52,7 +52,7 @@ export function guestBindingAuthorization(credential: string, context: GuestAssi
 function sameAssignment(a: GuestAssignmentContext, b: GuestAssignmentContext): boolean {
   return keys.every(k => a[k as keyof GuestAssignmentContext] === b[k as keyof GuestAssignmentContext]);
 }
-/** No production caller supplies trusted launch state yet. Resolution is explicit and never retried. */
+/** Resolution is explicit and never retries an operation. */
 export async function verifiedGuestHelperBinding(expected: () => GuestAssignmentContext, endpoint: string, credential: string,
   authority: Authority, options: { caFile?: string; timeout?: number; pinned?: PinnedGuestEndpoint; owner?: { transports: Set<GuestHTTPS>; closed: boolean } } = {}): Promise<GuestHelperBinding> {
   let alive = !options.owner?.closed;
@@ -85,7 +85,11 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
   return new GuestHelperBinding(async (path, body) => {
     if (!current()) throw new ServiceError("Guest assignment authorization ended.", 410);
     try { return await transport.call(path, body); }
-    catch (error) { if (error instanceof ServiceError && error.status === 401) alive = false; throw error; }
+    catch (error) {
+      if (options.owner || error instanceof ServiceError && error.status === 401) alive = false;
+      if (options.owner) { options.owner.closed = true; for (const t of options.owner.transports) t.closeAll(); options.owner.transports.clear(); }
+      throw error;
+    }
   }, current);
 }
 
@@ -93,6 +97,7 @@ export async function verifiedGuestHelperBinding(expected: () => GuestAssignment
 export function pinnedGuestBindingFactory() {
   const owner = { transports: new Set<GuestHTTPS>(), closed: false };
   return {
+    get closed() { return owner.closed; },
     closeAll() { owner.closed = true; for (const transport of owner.transports) transport.closeAll(); owner.transports.clear(); },
     async resolve(expected: () => GuestAssignmentContext, endpoint: string, credential: string, authority: Authority, pinned: PinnedGuestEndpoint, timeout = 20) {
       if (pinned.serverName !== guestAssignment(expected()).launchId + ".canaveral.invalid") throw invalid();

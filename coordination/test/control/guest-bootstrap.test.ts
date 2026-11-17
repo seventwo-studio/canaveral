@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, readdirSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { AppleProvider, assignmentFingerprint, ensureGuestLaunch, guestLaunchReceipt, readRecord, saveRecord, validateBootstrapISO, verifyLaunchPin, type Data, type CommandOptions } from "../../src/providers/apple.ts";
@@ -25,11 +25,11 @@ function iso(payload: Buffer, primaryName = "ASSIGNMENT.JSON;1", jolietName = "a
 function fixture(t: { after(f: () => void): void }, exchange = "") {
   const root = exchange ? dirname(dirname(exchange)) : mkdtempSync(join(realpathSync(tmpdir()), "bootstrap-")); mkdirSync(root, { recursive: true }); if (!exchange) t.after(() => rmSync(root, { recursive: true, force: true }));
   const machine: Data = { id: exchange ? basename(exchange) : randomUUID(), lease: { id: randomUUID() }, name: "fixture", template: { id: "mac", revision: "1" }, resources: { cpu: 2, memoryMiB: 1024, diskGiB: 8 }, desired: "running" };
-  const folder = join(root, "assignment"); mkdirSync(folder); saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(machine), leaseId: (machine.lease as Data).id });
+  const folder = join(root, "assignment"); mkdirSync(folder, { mode: 0o700 }); saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(machine), leaseId: (machine.lease as Data).id });
   let builds = 0;
   const config: Data = { storage: join(root, "storage"), runner: "/fixture/runner", withFileLock: async (_: string, f: () => unknown) => f(), command: async (args: string[], opts: CommandOptions) => {
     if (args[0] === "hdiutil") { builds++; const receipt = readRecord(join(storage, "guest-launch.json")); assert.equal(receipt.state, "building"); assert.ok(!JSON.stringify(args).includes(String(receipt.credential))); const payload = readFileSync(join(args.at(-1)!, "assignment.json")); writeFileSync(args[args.indexOf("-o") + 1]!, iso(payload), { mode: 0o600 }); return ""; }
-    if (args[1] === "prepare") { const request = JSON.parse(opts.input!); assert.equal(request.seedISO, undefined); mkdirSync(native); saveRecord(join(native, "machine.json"), { executionLeaseID: (machine.lease as Data).id }); writeFileSync(join(native, "native-prepared"), ""); return ""; }
+    if (args[1] === "prepare") { const request = JSON.parse(opts.input!); assert.equal(request.seedISO, undefined); mkdirSync(native, { mode: 0o700 }); saveRecord(join(native, "machine.json"), { executionLeaseID: (machine.lease as Data).id }); writeFileSync(join(native, "native-prepared"), ""); return ""; }
     if (args[1] === "lease-clock") return JSON.stringify({ version: 1, continuous: 1, bootSessionID: randomUUID() });
     return '{"locked":false}';
   }, launch: async () => {} };
@@ -155,7 +155,7 @@ test("local staging failures stay cleanable and identical staged input resumes b
 });
 test("injected removal retains runtime ownership and repeats media proof before delegation", async t => {
   const f = fixture(t); await ensureGuestLaunch(f.config, f.machine, f.storage); f.machine.desired = "stopped";
-  mkdirSync(f.native); saveRecord(join(f.native, "runner-launch.json"), { attemptedAt: 1 }); saveRecord(join(f.native, "status.json"), { phase: "Stopped", updatedAt: 1000 - 978307200 });
+  mkdirSync(f.native, { mode: 0o700 }); saveRecord(join(f.native, "runner-launch.json"), { attemptedAt: 1 }); saveRecord(join(f.native, "status.json"), { phase: "Stopped", updatedAt: 1000 - 978307200 });
   f.config.runtimeProof = async () => ({ boot: 1, processExited: true, runtimeUnlocked: true, diskHandlesClosed: true });
   let held = false, removals = 0, probes = 0;
   f.config.withRuntimeLock = async (_: string, consume: () => Promise<unknown>) => { held = true; try { return await consume(); } finally { held = false; } };
@@ -258,4 +258,23 @@ test("provider refuses wrong certificate profile and replaced private key withou
     assert.equal(readRecord(join(f.storage, "guest-launch.json")).state, "tls-building");
     assert.equal(f.builds(), 0);
   }
+});
+
+test('Apple access resolves no missing storage and rejects native launch, PID and custody substitutions before TLS',async t=>{
+  const f=fixture(t), receipt=await ensureGuestLaunch(f.config,f.machine,f.storage);
+  f.config.runner=process.execPath;f.config.processAbsent=()=>false;
+  const assignment=receipt.assignment as Data, now=Math.floor(Date.now()/1000);
+  const {guestMAC}=await import('../../src/providers/guest-tls.ts');
+  f.config.readNATLeases=()=>`{\nhw_address=1,${guestMAC(String(f.machine.id))}\nip_address=192.168.64.2\nlease=0xfffffff0\n}\n`;
+  mkdirSync(f.native, { mode: 0o700 });
+  const definition={id:f.machine.id,executionLeaseID:(f.machine.lease as Data).id,macAddress:guestMAC(String(f.machine.id))};
+  const launch={attemptedAt:now,launchId:assignment.launchId};
+  const status={phase:'Running',pid:1234,updatedAt:now-978307200};
+  const snapshot={pid:1234,uid:process.getuid?.(),seconds:now,micros:0,executableHex:Buffer.from(process.execPath).toString('hex'),argvHex:[process.execPath,'run',f.native].map(v=>Buffer.from(v).toString('hex')),userNanoseconds:0,systemNanoseconds:0,rssBytes:0};
+  const authority={authorized:()=>true,clock:{suspendAware:true,bootId:randomUUID(),now:()=>10,wall:()=>now}};
+  for(const change of [()=>saveRecord(join(f.native,'runner-launch.json'),{...launch,launchId:randomUUID()}),()=>saveRecord(join(f.native,'machine.json'),{...definition,id:randomUUID()}),()=>saveRecord(join(f.native,'machine.json'),{...definition,executionLeaseID:randomUUID()}),()=>saveRecord(join(f.native,'machine.json'),{...definition,macAddress:'02:00:00:00:00:00'}),()=>saveRecord(join(f.native,'status.json'),{...status,phase:'Stopped'}),()=>{f.config.processSnapshot=()=>({...snapshot,seconds:now+20});},()=>{f.config.processSnapshot=()=>({...snapshot,argvHex:[process.execPath,'run','/foreign'].map(v=>Buffer.from(v).toString('hex'))});},()=>{f.config.processSnapshot=()=>({...snapshot,pid:2222});},()=>saveRecord(join(f.native,'guest-launch-pin.json'),{...receipt.pin as Data,sha256:'0'.repeat(64)})]){
+    saveRecord(join(f.native,'machine.json'),definition);saveRecord(join(f.native,'runner-launch.json'),launch);saveRecord(join(f.native,'status.json'),status);saveRecord(join(f.native,'guest-launch-pin.json'),receipt.pin as Data);f.config.processSnapshot=()=>snapshot;
+    change();const provider=new AppleProvider(f.config,f.root);await assert.rejects(provider.guestHelperBinding(f.machine,{os:'macos'},f.folder,authority));await provider.close();
+  }
+  const missing={...f.machine,id:randomUUID()};const provider=new AppleProvider(f.config,f.root);await assert.rejects(provider.guestHelperBinding(missing,{os:'macos'},f.folder,authority));assert.equal(readdirSync(f.config.storage as string).length,1);await provider.close();
 });
