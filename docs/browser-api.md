@@ -41,6 +41,57 @@ sandbox; it does not add `--no-sandbox`. The worker's own network access is
 independent of agent-runtime forwarding. Arbitrary pages and page JavaScript must
 not have access to worker credentials, metadata endpoints or internal services.
 
+## Build the ARM64 browser VM disk
+
+On an ARM64 Linux builder with libguestfs tools, QEMU utilities, curl, GNU
+coreutils, and outbound HTTPS, run from the checkout:
+
+```sh
+tools/browser-image/build.sh browser-worker.qcow2
+```
+
+The [build recipe](../tools/browser-image/build.sh) verifies the dated Debian 13
+genericcloud ARM64 disk and Node 24.11.0 archive against the repository’s
+existing SHA-512 and SHA-256 pins before customization. It expands the root
+partition on a standalone 16 GiB qcow2 disk, uses a dated Debian package
+snapshot, installs the coordination lockfile, and installs the ARM64 archives selected by that Playwright release.
+Each browser archive, the Chromium headless shell and FFmpeg are SHA-256
+verified against the [browser lockfile](../tools/browser-image/browsers.lock) before extraction. The build checks the installed executable
+paths and qcow2 structure before publishing the output and printing its SHA-256.
+The inputs select fixed releases. Filesystem metadata can vary across builds.
+
+Record the prepared disk digest and verify it before copying. Give each instance
+its own writable disk and UEFI variable store, and record their ownership before
+launch. After shutdown, confirm the owned VM has stopped before removing its
+disk and firmware state. Retain the ownership record when shutdown is uncertain. Use ARM64 UEFI and a
+virtio disk and network interface. Before starting services, inject these
+root-owned files (mode 0600) into the guest’s `/etc/canaveral-browser/`
+through private instance provisioning:
+
+- `token` holds a unique high-entropy application key of at least 32 characters.
+  Provision the same value in the controller’s worker credential file.
+- `origin` holds the controller-reachable HTTPS origin, such as
+  `https://browser-worker.example.internal`.
+- `fullchain.pem` and `key.pem` hold the certificate chain for that hostname
+  and its private key. Configure the controller to trust the issuing CA.
+
+Restrict inbound TCP 443 to the controller at the VM network boundary and
+block guest access to metadata and private services before boot. Provision
+credentials offline on the private instance disk before first boot. Configure
+DHCP on the guest network and private DNS so the certificate hostname resolves
+to that instance from the controller. Apply ingress and egress policy on the
+hypervisor or upstream network before connecting the NIC. The worker and nginx
+units check for their provisioning files at boot. nginx forwards HTTP
+and WebSocket upgrades to loopback. systemd loads the worker credentials,
+runs the authenticated worker as browser-runtime, and starts each browser under
+the separate browser UID through a private launch socket. Launcher services
+are bound to the worker lifecycle and share its resource slice. Reconcile outstanding boots after a restart.
+
+The build requires a Linux libguestfs appliance and access to the pinned
+downloads. Native acceptance requires a separately authorized boot, a TLS
+connection from the controller, sandboxed launches of all three engines,
+WebSocket attachment and process cleanup after a worker crash.
+
 ## HTTP lifecycle
 
 All routes reject browser Origin headers. Requests use bearer headers; secrets
