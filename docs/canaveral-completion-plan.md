@@ -1,8 +1,28 @@
 # Canaveral development platform plan
 
-The first priority is to let development agents acquire Linux and macOS workspaces, run app/backend builds, collect artifacts and release their resources. iOS simulators, Android emulators and local models use the same resource-control principles. Managed updates support that platform; expanding updater coverage is secondary.
+The first milestone is to start each resource type from the Canaveral dashboard and verify that it works on a compatible node. GitHub, Ambiently and other connectors are deferred until the resource workflows have been verified and the next milestone is chosen.
+
+The first dashboard acceptance target is the entire homelab. Its Mac Studio is the designated node for all macOS and iOS workloads in this milestone. The operator's infrastructure configuration supplies the node identity. Record which workload each compatible node actually runs during acceptance.
+
+The dashboard asks for inputs specific to the resource being launched. For an iOS simulator, the operator selects a simulator runtime. For a computer, the operator selects a machine image. Whether operators can also constrain placement to a particular pool remains open.
 
 This plan describes remaining delivery work. Passing fixtures, controller routes or a configurable adapter do not establish a usable native development environment.
+
+## Platform scope agreed on 18 November 2026
+
+Canaveral is a self-hosted compute platform. Operators can place the controller independently of the machines that execute work. Nodes connect back to the controller and advertise what they can run. The deployment target includes native machines, Docker and Kubernetes, with KubeVirt as a possible VM backend. A workload can require a particular OS, runtime or device.
+
+| Workload | Intended use |
+| --- | --- |
+| Agent environments | Lease a microVM or a simpler execution environment suited to the task. |
+| Browser sessions | Start a browser for an agent, open a preview or a forwarded development server, interact with the page, capture a screenshot and release the browser. See the [browser API and native acceptance limits](browser-api.md). |
+| Website previews | Serve static output or keep a dynamic application running from a container, Node.js, Bun or another application runtime. |
+| Full desktops | Give an agent interactive access to a Linux, Windows or macOS desktop. |
+| CI builds | Run Linux and macOS builds and return artifacts. Windows build support is under consideration. |
+| Model execution | Run text, audio, video and image models on compatible nodes. |
+| Mobile devices | Lease Android emulators and iOS simulators to development agents, CI and unattended workflows, including marketing capture. See [mobile control](mobile-control.md). |
+
+A pool specifies its resource capacity and its priority level for issuing leases. Priority applies only when creating a lease. Once issued, a lease keeps its allocation for its agreed lifetime unless released or cancelled through its own lifecycle. A higher-priority request waits if capacity is occupied. For example, an arriving release build cannot displace a simulator test. Pools on the same machine share its physical capacity budget. The current [request contract](requests.md) implements waiting-request priority for supported lease kinds. Platform-wide pool levels remain a delivery requirement.
 
 ## Agent workflow
 
@@ -15,7 +35,7 @@ An agent selects a pinned template/model and required capabilities, supplies a s
 | iOS simulator | Exact owned runtime/device identity on Apple hardware, app install/launch, logs, screenshots and bounded controls |
 | Android emulator | Private AVD and pinned system image, owned serial/ports, app install/launch, logs and bounded controls |
 | Model execution | Pinned installed model, bounded inference, scoped results and positive stop/cleanup before releasing capacity |
-| Preview service | A long-lived box tied to one pull request, reachable on a private per-PR hostname, slept when idle and destroyed on close |
+| Preview service | A dashboard-started static site or dynamic service reachable at a private preview URL |
 
 A macOS workspace and an iOS simulator may be separately leased resources. The design must not assume nested virtualization or expose unrestricted host device access. Agent-provider credentials are supplied through an explicit secret boundary, never baked into shared images.
 
@@ -34,7 +54,7 @@ The embedded host ledger shares VM/image/inference reservations. The Rust runner
 
 Durable `lease` and `linux-lease` requests wait when capacity or application limits are full. Linux workspace boxes share bounded admission with direct acquisition. Previews and queued model calls remain open.
 
-Every consumer uses one request model. A request is a box, a preview or a model call. It carries a caller UUID, pinned template or model, resources, priority, deadline and optional source context. Requests beyond current capacity are accepted and wait instead of failing. Admission is fair per application, bounded by its limits, and a waiting request can be cancelled or expire at its deadline. Replaying the same UUID and specification returns the same request. Admission and reservation happen in one transaction against the single per-machine ledger, so the two existing ledgers must be bound first.
+The target is one request model across consumers. Under that model, a request is a box, a preview or a model call. It carries a caller UUID, pinned template or model, resources, priority, deadline and optional source context. Requests beyond current capacity are accepted and wait instead of failing. Admission is fair per application, bounded by its limits, and a waiting request can be cancelled or expire at its deadline. Replaying the same UUID and specification returns the same request. Admission and reservation happen in one transaction against the single per-machine ledger, so the two existing ledgers must be bound first.
 
 ## GitHub and previews
 
@@ -42,7 +62,7 @@ Every consumer uses one request model. A request is a box, a preview or a model 
 
 Deferred option: the homelab runners are Linux containers on Kubernetes (amd64 and arm64, Ubuntu 22.04 runner image), so they cannot run jobs that need macOS on Apple hardware. Those are Xcode builds, Swift tests that use the Virtualization framework, iOS simulators and code signing. Today these jobs run on GitHub-hosted macOS runners. If that stops being enough, a Canaveral macOS workspace on Apple hardware could host a short-lived runner for them.
 
-**Previews:** accepted direction, 2026-11-11. Not implemented.
+**Deferred GitHub preview lifecycle.** The PR automation design of 11 November 2026 applies to a future connector. Dashboard previews start independently of a pull request.
 
 - A preview is a request tied to one pull request. The controller routes a per-PR hostname to the declared port over the existing outbound host connection and posts the URL as a deployment. Previews are private-network only for now; public exposure needs separate authentication and fork rules.
 - The controller polls the GitHub API for pull-request state, without webhooks. A new push updates the preview, and closing the pull request destroys it.
@@ -53,6 +73,8 @@ Deferred option: the homelab runners are Linux containers on Kubernetes (amd64 a
 Canaveral stays independent of any particular installation. This repository ships the controller, hosts, generic deployment inputs and examples. Site-specific manifests, hostnames, capacity limits, images and credentials belong to the operator's own infrastructure repository.
 
 ## Delivery sequence
+
+Start each workload through the dashboard, inspect its readiness, exercise it and release it. For desktops, connect and interact. For builds, retrieve an artifact. For static and dynamic previews, open the served site. Apply the following backend work to support those dashboard checks.
 
 1. Verify the shared-pool substrate: the implemented host/domain mapping, CPU/RAM/disk placement and tenant quotas must cover the selected physical inventory. Linux/macOS multi-runtime model offers and native mixed-workload acceptance remain part of the supported platform boundary.
 2. Add the request queue on that ledger: waiting, fair admission, priority, deadline, cancellation and idempotent recovery.
@@ -92,7 +114,7 @@ Existing portable tests cover many authority, reservation, command/session and r
 - Mobile: acquire each supported simulator/emulator, install/launch a fixture app, retrieve logs/screenshots, exercise scoped input and positively reclaim the exact instance.
 - Models: run a pinned real model while development/simulator work exists, preserve headroom and prove cancellation/cleanup before reservation release.
 - Scheduling: concurrent requests cannot overspend the same physical budget; constrained and busy hosts are avoided; quotas, draining and fair waiting have observable outcomes. Over-requesting queues work and every waiting request is admitted, cancelled or expired.
-- Previews: a preview URL resolves only on the private network, follows new pushes and disappears when its pull request closes.
+- Previews: start static and dynamic previews from the dashboard, open each private URL, then stop the preview and verify its route is removed.
 - Recovery: expiry, disconnected clients, worker/controller restart and lost receipts do not resurrect a lease, replay effects or release unknown resources.
 - Run relevant portable checks for every change. Native experiments, signing, service installation and deployment require concrete operator authorization under `AGENTS.md`.
 
