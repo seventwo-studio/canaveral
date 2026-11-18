@@ -4,6 +4,10 @@ export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninte
 # Use the same signed Debian archive snapshot on every build.
 rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list
 echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261002T000000Z/ trixie main' >/etc/apt/sources.list
+policy=/usr/sbin/policy-rc.d
+if [ -e "$policy" ] || [ -L "$policy" ]; then mv "$policy" "$policy.browser-build"; fi
+printf '#!/bin/sh\nexit 101\n' > "$policy"
+chmod 0755 "$policy"
 apt-get update
 apt-get install -y nginx xz-utils curl unzip
 tar xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local
@@ -30,3 +34,5 @@ mkdir -p /etc/systemd/system/nginx.service.d
 printf '[Unit]\nConditionPathExists=/etc/canaveral-browser/fullchain.pem\nConditionPathExists=/etc/canaveral-browser/key.pem\n' >/etc/systemd/system/nginx.service.d/browser.conf
 systemctl enable browser.service nginx.service
 apt-get clean
+rm "$policy"
+if [ -e "$policy.browser-build" ] || [ -L "$policy.browser-build" ]; then mv "$policy.browser-build" "$policy"; fi

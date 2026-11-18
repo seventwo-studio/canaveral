@@ -43,18 +43,23 @@ not have access to worker credentials, metadata endpoints or internal services.
 
 ## Build the ARM64 browser VM disk
 
-On an ARM64 Linux builder with libguestfs tools, QEMU utilities, curl, GNU
-coreutils, and outbound HTTPS, run from the checkout:
+Use a disposable native ARM64 Linux runner with root access, outbound HTTPS,
+loop-device partition scanning, ext4, udev and systemd-nspawn namespace support.
+On Ubuntu 24.04 install `qemu-utils cloud-guest-utils gdisk fdisk e2fsprogs
+util-linux mount udev systemd-container curl ca-certificates coreutils bash`.
+Allow space for the downloaded base, the sparse 16 GiB raw working disk and
+the final qcow2. Run from the checkout:
 
 ```sh
-tools/browser-image/build.sh browser-worker.qcow2
+sudo bash tools/browser-image/build.sh browser-worker.qcow2
 ```
 
 The [build recipe](../tools/browser-image/build.sh) verifies the dated Debian 13
 genericcloud ARM64 disk and Node 24.11.0 archive against the repository’s
 existing SHA-512 and SHA-256 pins before customization. It expands the root
-partition on a standalone 16 GiB qcow2 disk, uses a dated Debian package
+partition in place on a derived raw disk, retaining GPT partition numbers, uses a dated Debian package
 snapshot, installs the coordination lockfile, and installs the ARM64 archives selected by that Playwright release.
+Only the build container shares runner networking. Its temporary resolver and service-start policy are removed before conversion to qcow2.
 Each browser archive, the Chromium headless shell and FFmpeg are SHA-256
 verified against the [browser lockfile](../tools/browser-image/browsers.lock) before extraction. The build checks the installed executable
 paths and qcow2 structure before publishing the output and printing its SHA-256.

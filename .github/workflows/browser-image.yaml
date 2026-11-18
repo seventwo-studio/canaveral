@@ -33,21 +33,17 @@ jobs:
       - name: Install disk construction tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-system-arm qemu-efi-aarch64 qemu-utils linux-image-generic
+          sudo apt-get install -y --no-install-recommends qemu-utils cloud-guest-utils gdisk fdisk e2fsprogs util-linux mount udev systemd-container curl ca-certificates coreutils bash
       - name: Build and verify ARM64 disk
-        env:
-          LIBGUESTFS_BACKEND: direct
         run: |
-          if [[ ! -c /dev/kvm ]]; then export LIBGUESTFS_HV="$PWD/tools/browser-image/qemu-tcg.sh"; fi
-          sudo --preserve-env=LIBGUESTFS_BACKEND,LIBGUESTFS_HV libguestfs-test-tool --timeout 300
-          sudo --preserve-env=LIBGUESTFS_BACKEND,LIBGUESTFS_HV bash tools/browser-image/build.sh browser-worker.qcow2
+          sudo bash tools/browser-image/build.sh browser-worker.qcow2
           sudo chmod 0444 browser-worker.qcow2
           sha256sum browser-worker.qcow2 > browser-worker.qcow2.sha256
       - name: Verify disposable ARM64 browser guest
         if: ${{ inputs.verify_guest == true }}
         timeout-minutes: 40
         run: |
-          sudo apt-get install -y --no-install-recommends imagemagick
+          sudo apt-get install -y --no-install-recommends imagemagick libguestfs-tools qemu-system-arm qemu-efi-aarch64 linux-image-generic
           sudo bash tools/browser-image/ci/acceptance.sh browser-worker.qcow2
           sha256sum -c browser-worker.qcow2.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
