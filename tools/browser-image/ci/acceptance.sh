@@ -41,20 +41,23 @@ guest=$!
 guest_status=0
 wait "$guest" || guest_status=$?
 guest=
-# The guest writes the marker only after both browser lifecycles pass.
+# The guest writes the marker only after all browser lifecycles pass.
 stage=$(virt-cat -a disk /root/trial/result) || stage=unknown
 if (( guest_status != 0 )); then
-  case "$stage" in credentials|startup|session|isolation|passed) ;; *) stage=unknown ;; esac
+  case "$stage" in credentials|startup|session|chromium|firefox|webkit|isolation|passed) ;; *) stage=unknown ;; esac
   echo "Browser guest exited with status $guest_status during $stage" >&2
   exit "$guest_status"
 fi
 case "$stage" in
   passed) ;;
-  credentials|startup|session|isolation) echo "Guest failed during $stage" >&2; exit 1 ;;
+  credentials|startup|session|chromium|firefox|webkit|isolation) echo "Guest failed during $stage" >&2; exit 1 ;;
   *) echo "Missing guest acceptance receipt" >&2; exit 1 ;;
 esac
-virt-cat -a disk /root/trial/page.png > page.png
-test "$(identify -format '%m %wx%h' page.png)" = 'PNG 96x64'
 convert -size 48x64 xc:'#135389' xc:'#e7a729' +append -depth 8 rgb:expected.rgb
-convert page.png -depth 8 rgb:actual.rgb
-cmp expected.rgb actual.rgb
+for engine in chromium firefox webkit; do
+  virt-cat -a disk "/root/trial/$engine.png" > page.png
+  test "$(identify -format '%m %wx%h' page.png)" = 'PNG 96x64'
+  convert page.png -depth 8 rgb:actual.rgb
+  cmp expected.rgb actual.rgb
+  echo "$engine passed authenticated launch, attachment, stop and 6,144 RGB pixels"
+done

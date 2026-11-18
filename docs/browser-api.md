@@ -97,16 +97,19 @@ boot trial also requires libguestfs and QEMU. Full acceptance requires a TLS
 connection from the controller, sandboxed launches of all three engines,
 WebSocket attachment and process cleanup after a worker crash.
 
-## Launch Chromium from the dashboard
+## Launch a browser from the dashboard
 
-Open a ready Mac host that advertises the browser runtime and select **Launch
-Chromium**. The configured worker VM must already be running. The dashboard
+Open a ready Mac host that advertises the browser runtime. Choose Chromium
+(the default), Firefox or WebKit and launch the selected engine.
+The configured worker VM must already be running. The dashboard
 requests a five-minute session and displays its expiry, Playwright endpoint and
-scoped key. To attach with the worker's Playwright version, supply those values
-to your client:
+scoped key. Use the matching Playwright version and engine to attach. For
+example, after selecting Firefox:
 
 ```js
-const browser = await chromium.connect(endpoint, {
+import { firefox } from 'playwright-core';
+
+const browser = await firefox.connect(endpoint, {
   headers: { Authorization: `Bearer ${key}` },
 });
 ```
@@ -286,5 +289,10 @@ operator credential on attachment and rejected the scoped key after stop. This
 trial used synthetic host enrollment and heartbeat, a loopback dashboard TLS
 proxy and restricted guest networking.
 
-Firefox, WebKit and access from a persistently deployed controller still require
-native verification. [CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)
+On the same homelab disk, Chromium, Firefox and WebKit each accepted a scoped
+Playwright connection through the guest's loopback TLS gateway, rendered all
+6,144 expected screenshot pixels and released their launcher cgroup after stop.
+The disk digest matched before and after the trial. Firefox and WebKit still
+need external controller attachment and worker-crash verification. Acceptance
+through a persistently deployed controller remains open for all engines.
+[CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)

@@ -4,11 +4,23 @@ import type { Host } from "@/lib/infrastructure";
 import { record } from "@/lib/types";
 import { Button } from "./ui/button";
 
-function browserReceipt(value: unknown, hostId: string, id: string) {
+const engines = {
+  chromium: "Chromium",
+  firefox: "Firefox",
+  webkit: "WebKit",
+} as const;
+type Engine = keyof typeof engines;
+
+function browserReceipt(
+  value: unknown,
+  hostId: string,
+  id: string,
+  engine: Engine,
+) {
   const r = record(value);
   if (
     r.id !== id ||
-    r.engine !== "chromium" ||
+    r.engine !== engine ||
     typeof r.key !== "string" ||
     !r.key ||
     typeof r.endpoint !== "string" ||
@@ -30,6 +42,7 @@ function browserReceipt(value: unknown, hostId: string, id: string) {
 }
 
 export function BrowserLaunch({ host }: { host: Host }) {
+  const [engine, setEngine] = useState<Engine>("chromium");
   const [id, setId] = useState("");
   const [receipt, setReceipt] = useState<ReturnType<
     typeof browserReceipt
@@ -83,9 +96,9 @@ export function BrowserLaunch({ host }: { host: Host }) {
           await api(
             action === "launch" ? collection : item,
             action === "launch"
-              ? { id: browserId, engine: "chromium", ttlSeconds: 300 }
+              ? { id: browserId, engine, ttlSeconds: 300 }
               : undefined,
-            (value) => browserReceipt(value, host.id, browserId),
+            (value) => browserReceipt(value, host.id, browserId, engine),
           ),
         );
       }
@@ -98,11 +111,26 @@ export function BrowserLaunch({ host }: { host: Host }) {
 
   if (!eligible && !id) return null;
   return (
-    <section aria-label="Chromium browser" className="space-y-3">
-      <div className="flex flex-wrap gap-2">
+    <section aria-label="Browser session" className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-2 text-sm">
+          Browser engine
+          <select
+            className="h-9 rounded-md border bg-background px-2"
+            value={engine}
+            disabled={busy || Boolean(id)}
+            onChange={(event) => setEngine(event.target.value as Engine)}
+          >
+            {Object.entries(engines).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
         {eligible && !receipt && (
           <Button disabled={busy} onClick={() => run("launch")}>
-            {id ? "Retry launch" : "Launch Chromium"}
+            {id ? "Retry launch" : `Launch ${engines[engine]}`}
           </Button>
         )}
         {id && (
