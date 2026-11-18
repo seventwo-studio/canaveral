@@ -289,5 +289,10 @@ operator credential on attachment and rejected the scoped key after stop. This
 trial used synthetic host enrollment and heartbeat, a loopback dashboard TLS
 proxy and restricted guest networking.
 
-Firefox, WebKit and access from a persistently deployed controller still require
-native verification. [CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)
+On the same homelab disk, Chromium, Firefox and WebKit each accepted a scoped
+Playwright connection through the guest's loopback TLS gateway, rendered all
+6,144 expected screenshot pixels and released their launcher cgroup after stop.
+The disk digest matched before and after the trial. Firefox and WebKit still
+need external controller attachment and worker-crash verification. Acceptance
+through a persistently deployed controller remains open for all engines.
+[CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)
