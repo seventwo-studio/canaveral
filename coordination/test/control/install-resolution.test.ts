@@ -112,6 +112,10 @@ test('positive runner evidence plus an owner decision releases the reservation; 
   await assert.rejects(f.call('POST', f.resolve, { ...decision, id: randomUUID() }), status(409));
   await assert.rejects(f.call('POST', f.resolve, decision, other), status(404));
   await assert.rejects(f.call('POST', f.ops, f.inspection()), status(409));
+  // A request UUID already used for an operation the caller cannot see is not-found, not conflict.
+  const hidden = randomUUID();
+  f.store.transaction(db => db.prepare('INSERT INTO device_operation_resolutions VALUES (?,?,?,?,?,?,?)').run(hidden, randomUUID(), 'abandoned', null, 'foreign', '{}', 1000));
+  await assert.rejects(f.call('POST', f.resolve, { ...decision, id: hidden }), status(404));
 
   // The install outcome stays unknown; the decision is attached as an audit record.
   const receipt = await f.call('GET', `/v1/operations/${f.install.id}`);
@@ -135,6 +139,10 @@ test('only an administrator can abandon unproven cleanup, and machine deletion w
   assert.deepEqual(await f.call('POST', f.resolve, decision, admin), record);
   assert.equal((await f.call('GET', `/v1/operations/${f.install.id}`)).resolution.decision, 'abandoned');
   assert.equal(f.available(), reserved);
+  // An abandoned stage may remain, so the same artifact cannot be installed again under one reservation.
+  f.store.transaction(db => db.prepare("UPDATE machines SET desired='running' WHERE id=?").run(f.machine.id)); f.observe('running');
+  await assert.rejects(f.call('POST', f.ops, { id: randomUUID(), action: 'install-uploaded', arguments: { artifact: f.artifact } }), status(409));
+  f.store.transaction(db => db.prepare("UPDATE machines SET desired='stopped' WHERE id=?").run(f.machine.id)); f.observe('stopped');
   assert.equal((await f.call('POST', `/v1/app-artifacts/${f.artifact}/delete`)).state, 'deleted');
   assert.equal(f.available(), initial);
   assert.equal((await f.call('POST', `/v1/machines/${f.machine.id}/delete`, deletion)).state, 'queued');
@@ -155,7 +163,7 @@ function providerFixture(t: TestContext, platform: 'ios' | 'android') {
     const operation = { id: randomUUID(), action: 'inspect-install', arguments: args, expiresAt: Date.now() / 1000 + 60 };
     return provider.operate(machine, image, root, operation, () => true, request => provider.inspectInstall(machine, image, request.arguments));
   };
-  return { provider, dir, install, fingerprint, inspect, receipt: path.join(dir, 'operations', install.id + '.json') };
+  return { provider, machine, image, root, dir, install, fingerprint, inspect, receipt: path.join(dir, "operations", install.id + ".json") };
 }
 
 test('iOS inspection proves cleanup only from an absent journal, a cleaned receipt or no remaining stage', async t => {
@@ -189,6 +197,19 @@ test('Android inspection cannot see package-session staging and confirms only un
   assert.deepEqual([uncertain.result.providerReceipt, uncertain.result.artifactCleaned], ['unknown', false]);
   saveJson(f.receipt, { fingerprint: f.fingerprint, report: { state: 'succeeded', result: { installed: true, artifactCleaned: true } } });
   assert.equal((await f.inspect()).result.artifactCleaned, true);
+});
+
+test('an Android install that fails before creating a package session records positive cleanup evidence', async t => {
+  const f = providerFixture(t, 'android');
+  let closed = 0;
+  const source = { size: 4, read: async () => Buffer.alloc(0), verify: async () => true, close: async () => { closed++; } };
+  const sha256 = createHash('sha256').update('fake').digest('hex');
+  // The fixture transport has no native pipe, so installation fails before install-create.
+  const failed = await f.provider.operate(f.machine, f.image, f.root, { ...f.install, expiresAt: Date.now() / 1000 + 60 }, () => true,
+    () => (f.provider as AndroidProvider).installArtifact(f.machine, f.image, f.root, source, sha256));
+  assert.equal(failed.state, 'unknown'); assert.equal(failed.result.artifactCleaned, true); assert.equal(closed, 1);
+  const inspected = await f.inspect();
+  assert.deepEqual([inspected.result.providerReceipt, inspected.result.stagedArtifacts, inspected.result.artifactCleaned], ['unknown', 'not-inspectable', true]);
 });
 
 /** Real loopback controller, runner, journals and CLI; no native SDK or device. */

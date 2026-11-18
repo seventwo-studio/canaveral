@@ -185,6 +185,13 @@ export async function locked<T>(file: string, body: () => Promise<T>): Promise<T
   try { return await body(); } finally { fs.closeSync(fd); fs.unlinkSync(file); }
 }
 export async function authorized(check: Authorized): Promise<void> { if (!await check()) throw new ServiceError("Mobile operation authorization ended.", 401); }
+const notStaged = new WeakSet<object>();
+/** Marks an install failure that provably happened before any artifact stage was created.
+ * operate() then records `artifactCleaned:true` beside the failure for later inspection. */
+export function markNotStaged(error: unknown): unknown {
+  if (typeof error === "object" && error !== null) notStaged.add(error);
+  return error;
+}
 export async function writeAll(pipe: Pick<NativePipe, "write">, bytes: Uint8Array, check: Authorized): Promise<void> {
   let offset = 0;
   while (offset < bytes.length) {
@@ -325,6 +332,8 @@ export class MobileProvider {
         } catch (error) {
           report = { state: error instanceof ServiceError && error.code === "input_rejected" ? "failed" : "unknown", result: { detail: error instanceof Error ? error.message.slice(0, 2000) : "Device action interrupted; inspect before retrying." } };
           if (error instanceof ServiceError && error.code === "input_rejected") report.result.code = error.code;
+          // Positive evidence only: the install failed before any device-side stage could exist.
+          if (typeof error === "object" && error !== null && notStaged.has(error)) report.result.artifactCleaned = true;
         }
       }
       try { if (Buffer.byteLength(canonical(report.result)) > MAX_RESULT) throw new Error("envelope"); }
@@ -346,10 +355,13 @@ export class MobileProvider {
     const report = saved?.report === undefined ? undefined : object(saved.report);
     const providerReceipt = saved ? report ? String(report.state) : "started" : partial ? "partial" : "absent";
     const stagedArtifacts = await this.stagedArtifacts(dir);
-    const artifactCleaned = providerReceipt === "absent" || report?.state === "succeeded" && object(report.result ?? {}).artifactCleaned === true || stagedArtifacts === "absent";
+    // A failed or unknown report counts only when the provider recorded that no stage was created.
+    const artifactCleaned = providerReceipt === "absent" || report !== undefined && object(report.result ?? {}).artifactCleaned === true || stagedArtifacts === "absent";
     return { operation, artifact, providerReceipt, stagedArtifacts, artifactCleaned };
   }
-  /** Platforms that stage on host storage override this; others cannot prove stage absence. */
+  /** Platforms that stage on host storage override this; others cannot prove stage absence.
+   * Note: evidence is read from the current storage root; changing a runner's configured
+   * storage root voids inspection evidence for installs journaled under the old root. */
   async stagedArtifacts(_dir: string): Promise<"absent" | "present" | "not-inspectable"> { return "not-inspectable"; }
   operationReceipt(machine: RecordValue, image: RecordValue, operationId: string): OperationReport {
     return (readJson(path.join(this.storage(machine, image), "operations", uuid(operationId) + ".json"))?.report as OperationReport | undefined) ?? { state: "unknown", result: { detail: "No completed local receipt is available. Inspect before retrying." } };

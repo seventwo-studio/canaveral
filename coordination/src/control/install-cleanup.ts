@@ -15,13 +15,17 @@ export function initializeInstallResolutions(db: DatabaseSync): void {
 }
 
 /** Clean means: never dispatched, succeeded with positive artifact cleanup, or an
- * explicit operator resolution exists. Absence of a dispatch record is not cleanup. */
-export function installAttemptClean(db: DatabaseSync, op: InstallAttempt): boolean {
+ * explicit operator resolution exists. Absence of a dispatch record is not cleanup.
+ * `confirmedOnly` excludes `abandoned` decisions, whose stage may still exist; repeat
+ * installs of the same artifact use it so one reservation never covers two stages. */
+export function installAttemptClean(db: DatabaseSync, op: InstallAttempt, confirmedOnly = false): boolean {
   if (op.state === 'queued') return false;
   if (db.prepare('SELECT 1 FROM control_device_pending WHERE id=?').get(op.id)) return true;
   const result = op.result ? object(JSON.parse(op.result)) : {};
   if (op.state === 'succeeded' && result.artifactCleaned === true) return true;
-  return tableExists(db, 'device_operation_resolutions') && !!db.prepare('SELECT 1 FROM device_operation_resolutions WHERE operation=?').get(op.id);
+  if (!tableExists(db, 'device_operation_resolutions')) return false;
+  const decision = (db.prepare('SELECT decision FROM device_operation_resolutions WHERE operation=?').get(op.id) as { decision: string } | undefined)?.decision;
+  return decision !== undefined && (!confirmedOnly || decision === 'cleanup-confirmed');
 }
 
 export function installAttempts(db: DatabaseSync, machineId: string, artifactId?: string): InstallAttempt[] {

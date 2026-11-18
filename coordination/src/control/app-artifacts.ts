@@ -35,7 +35,8 @@ function view(a: Artifact) { return { id: a.id, machineId: a.machine, format: a.
 export function validateUploadedArtifact(db: DatabaseSync, machineId: string, artifactId: unknown): void {
   const a = row(db, uuid(artifactId)); current(db, a);
   if (a.machine !== machineId || a.state !== 'ready') fail(409);
-  requireCleanAttempts(db, a);
+  // An abandoned stage may still exist; only confirmed cleanup admits another install.
+  if (installAttempts(db, a.machine, a.id).some(op => !installAttemptClean(db, op, true))) fail(409);
 }
 
 function requireCleanAttempts(db: DatabaseSync, a: Artifact): void {

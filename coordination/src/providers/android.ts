@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
 import { assignmentFingerprint } from "../runtime-process.ts";
-import { MobileProvider, authorized, canonical, copyUpload, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
+import { MobileProvider, authorized, canonical, copyUpload, markNotStaged, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, NativeChild, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
 import { openAndroidVideo } from './android-video.ts';
 import type { AndroidVideoOptions } from './android-video.ts';
@@ -242,7 +242,7 @@ export class AndroidProvider extends MobileProvider {
   /** The caller journals this attempt before dispatch. Sources are private verified
    * uploads, never consumer-selected host paths. Only a verified APK is committed. */
   async installArtifact(machine: RecordValue, image: RecordValue, _folder: string, source: Download, sha256: string, check: Authorized = () => true): Promise<RecordValue> {
-    let session: string | undefined, serial: string | undefined, pipe: NativePipe | undefined, commitAttempted = false;
+    let session: string | undefined, serial: string | undefined, pipe: NativePipe | undefined, commitAttempted = false, createAttempted = false;
     const recheck = async () => {
       await authorized(check);
       if (serial) { await this.owned(machine, serial); await authorized(check); }
@@ -259,6 +259,8 @@ export class AndroidProvider extends MobileProvider {
       serial = await this.endpoint(machine, this.storage(machine, image), check);
       if (!serial || await this.adb(serial, ["shell", "getprop", "sys.boot_completed"]) !== "1") throw new ServiceError("Android device is not ready.");
       await recheck();
+      // From here a package session may exist on the device, so failures stay uncertain.
+      createAttempted = true;
       const created = await this.adb(serial, ["shell", "pm", "install-create", "-r", "-S", String(size)]);
       const identity = /^Success: created install session \[([0-9]+)\]$/.exec(created);
       if (!identity || !Number.isSafeInteger(Number(identity[1])) || Number(identity[1]) > 2147483647) throw new ServiceError("Android install session creation is unconfirmed; inspect before retrying.", 409, { outcome: "unknown" });
@@ -297,6 +299,9 @@ export class AndroidProvider extends MobileProvider {
       if (await this.adb(serial, ["shell", "pm", "install-commit", session]) !== "Success") throw new ServiceError("Android installation commit is unconfirmed; inspect before retrying.", 409, { outcome: "unknown" });
       await recheck();
       return { installed: true, sha256, bytes: size, artifactCleaned: true };
+    } catch (error) {
+      // Before install-create nothing reached the device; the upload has no device-side stage.
+      throw createAttempted ? error : markNotStaged(error);
     } finally {
       try {
         if (pipe) await pipe.close();

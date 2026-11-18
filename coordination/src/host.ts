@@ -1,5 +1,6 @@
 import { GuestHelperAccess } from "./control/sessions.ts";
 import { appArtifactSource } from './app-artifact-source.ts';
+import { markNotStaged } from './providers/mobile.ts';
 import { serveMobileVideo } from './mobile-video.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
@@ -658,9 +659,11 @@ export class HostRunner {
         return runtime.operate(machine, image, folder, operation, context.authorized, async request => {
           const artifact = identifier(request.arguments.artifact), hostId = identity.id;
           const prefix = `/v1/hosts/${hostId}/app-artifacts/${artifact}/operations/${identifier(task.id)}`;
+          // A failure while opening the controller download precedes any provider stage.
           const { source, sha256 } = await appArtifactSource(
             path => this.transport.request('GET', path, {}, identity.credential, context.signal), prefix,
-            { artifact, machine: identifier(machine.id), format: image.os === 'android' ? 'apk' : 'ios-app-tar' }, context.authorized);
+            { artifact, machine: identifier(machine.id), format: image.os === 'android' ? 'apk' : 'ios-app-tar' }, context.authorized)
+            .catch((error: unknown) => { throw markNotStaged(error); });
           try { return await runtime.installArtifact!(machine, image, folder, source, sha256, context.authorized); }
           finally { await source.close(); }
         });

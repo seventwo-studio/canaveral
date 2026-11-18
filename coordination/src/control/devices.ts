@@ -154,6 +154,11 @@ function resolveInstall(db: DatabaseSync, req: ControlRequest, operationId: stri
   if (decision !== "cleanup-confirmed" && decision !== "abandoned") throw new ServiceError("Resolution decision must be cleanup-confirmed or abandoned.", 400);
   if (decision === "abandoned") requireScope(req, "admin");
   const prior = db.prepare("SELECT * FROM device_operation_resolutions WHERE id=? OR operation=?").all(id, op.id) as unknown as ResolutionRow[];
+  // Hide another account's resolution identity, as machine lookup does.
+  for (const old of prior) if (old.operation !== op.id) {
+    const other = db.prepare("SELECT machine FROM device_operations WHERE id=?").get(old.operation) as { machine: string } | undefined;
+    try { if (!other) throw new Error("hidden"); machine(db, other.machine, principal); } catch { throw new ServiceError("Unknown device operation.", 404); }
+  }
   for (const old of prior) {
     if (old.id !== id) throw new ServiceError("This operation already has a resolution. Reuse its request ID.", 409);
     if (old.operation !== op.id || old.decision !== decision || old.inspection !== inspection || old.reason !== reason) throw new ServiceError("Request identity already belongs to another resolution.", 409);
@@ -167,7 +172,7 @@ function resolveInstall(db: DatabaseSync, req: ControlRequest, operationId: stri
     const inspected = evidence ? object(JSON.parse(evidence.request)) : {};
     if (!evidence || evidence.machine !== op.machine || inspected.action !== "inspect-install" || object(inspected.arguments).operation !== op.id) throw new ServiceError("Inspection does not belong to this install.", 409);
     const result = evidence.result === null ? {} : object(JSON.parse(evidence.result));
-    if (decision === "cleanup-confirmed" && (evidence.state !== "succeeded" || result.operation !== op.id || result.artifactCleaned !== true))
+    if (decision === "cleanup-confirmed" && (evidence.state !== "succeeded" || result.operation !== op.id || result.artifact !== object(request.arguments).artifact || result.artifactCleaned !== true))
       throw new ServiceError("Cleanup confirmation requires a succeeded inspection with positive cleanup evidence.", 409);
   }
   const decidedBy = JSON.stringify({ kind: principal.kind, userId: principal.user?.id ?? null, username: principal.user?.username ?? null });

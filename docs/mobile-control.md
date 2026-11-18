@@ -164,10 +164,15 @@ scratch may be released. Two steps keep evidence and decision separate.
    which stages in private `.artifact-*` directories of the assignment's storage.
    It is `not-inspectable` for Android, whose staging lives in an emulator package
    session. `artifactCleaned` is true only when the journal is absent, because the
-   provider never started that install; or the saved report confirmed
-   `artifactCleaned`; or the platform shows that no stage remains. A busy lock or
-   a mismatched journal makes the inspection `unknown`; submit another inspection
-   UUID later. Inspection removes nothing.
+   provider never started that install; or the saved report, whatever its state,
+   recorded `artifactCleaned`; or the platform shows that no stage remains. A failed
+   or unknown install report records `artifactCleaned:true` only when the failure
+   provably preceded any stage: the controller download could not be opened, or on
+   Android the failure came before `pm install-create`. A busy lock or a mismatched
+   journal makes the inspection `unknown`; submit another inspection UUID later.
+   Inspection removes nothing. Evidence is read from the runner's current storage
+   root, so changing a runner's configured storage root voids inspection for
+   installs journaled under the old root; abandon those instead.
 2. **Decide.** `POST /v1/operations/{install}/resolve` with
    `{id, decision, inspection, reason}` records one append-only decision per install.
    `cleanup-confirmed` requires `inspection` to name a succeeded `inspect-install`
@@ -175,13 +180,17 @@ scratch may be released. Two steps keep evidence and decision separate.
    it. `abandoned` accepts `inspection` as optional evidence (`null` permitted) and
    requires administrator authority, because it releases scratch whose native
    cleanup is unproven. The operator then owns any residue, for example by deleting
-   the machine. Both decisions need a non-empty `reason` of up to 1000 characters.
+   the machine. An abandoned install still blocks another install of the same
+   artifact, so one reservation never covers two stages; it unblocks only artifact
+   and machine deletion. `cleanup-confirmed` also requires the inspection to name
+   the install's artifact. Both decisions need a non-empty `reason` of up to 1000 characters.
    The controller stores the deciding principal (`kind`, `userId`, `username`) and
    time.
 
 Repeating the same request UUID and body returns the saved decision, so a lost
 response is safe to retry. A different body under that UUID, or a second UUID for
-an already resolved install, returns conflict. Other accounts receive not-found.
+an already resolved install, returns conflict. Other accounts receive not-found,
+including when a request UUID already names a resolution they cannot see.
 `GET /v1/operations/{install}` then includes `resolution`. Deleting the artifact
 remains a separate, explicit step; only that step releases the reservation.
 CLI: `device MACHINE inspect-install --request-id UUID --arguments-file FILE`, then
