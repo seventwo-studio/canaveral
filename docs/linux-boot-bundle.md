@@ -101,10 +101,17 @@ Ordinary workspace clippy/tests automatically include boot-bundle through its wo
 
 Ordinary workspace tests validate protocol, canonical bytes, binding, exact probe comparison, host refusal and Linux mount-contract parsing. They never run namespace-wide kills on the host. The example `namespace-supervision` includes the production runtime source with normal compilation: no test replacement for kill(-1), waitpid(-1), privilege drop or reactor paths. It checks inherited original namespace descriptors and refuses unless it is Linux PID1 in distinct PID, mount and network namespaces. It mounts only private namespace tmpfs/proc, then tests real uid 1000 execution, missing executable/cwd, symlink cwd escape, zero-credit silent exit, late/unknown cancel, timeout, active cancel, setsid escape, repeated orphan reaping during a long command, and stalled-output/fragmented-input expiry. It is namespace coverage, not microVM acceptance or a boot-mount test.
 
-Exact proposed action for a separately approved disposable Linux test lane (not added to untrusted PR CI):
+On 18 November 2026, the ARM64 homelab namespace trial started the preview
+binary through the PID1 reactor. Its HTTP response reported uid 1000,
+`/workspace` and the requested path. After cancellation the reactor confirmed
+termination and the listener refused a fresh connection. The trial used Linux
+namespaces. Full workspace image boot and private dashboard routing remain open.
+
+Run the fixture on a disposable Linux test host:
 
 ```sh
-cargo build -p canaveral-guest-agent --example namespace-supervision --locked
+cargo build -p canaveral-guest-agent --bin canaveral-guest-agent --example namespace-supervision --locked
+CANAVERAL_NAMESPACE_FIXTURE=1 node fixtures/guest-agent/namespace.mjs
 ```
 
 Running the example requires a matching namespace launcher with the explicit

@@ -49,7 +49,9 @@ fn main() {
             "fixture needs separate namespaces"
         );
     }
-    let root = std::path::Path::new("/tmp/canaveral-namespace-fixture");
+    let agent =
+        std::fs::canonicalize(std::env::args_os().nth(1).expect("guest binary path")).unwrap();
+    let root = std::path::Path::new("/workspace");
     // Never write or mount on the host filesystem: private tmpfs is mandatory.
     unsafe {
         assert_eq!(
@@ -68,15 +70,54 @@ fn main() {
                 c"/tmp".as_ptr(),
                 c"tmpfs".as_ptr(),
                 libc::MS_NOSUID | libc::MS_NODEV,
-                c"size=16777216,mode=1777".as_ptr().cast()
+                c"size=134217728,mode=1777".as_ptr().cast()
             ),
             0
         );
     }
-    std::fs::create_dir(root).unwrap();
+    // Construct /workspace even on VMs without that mountpoint, entirely inside tmpfs.
+    let stage = std::path::Path::new("/tmp/fixture-root");
+    std::fs::create_dir(stage).unwrap();
+    for dir in ["usr", "proc", "dev", "workspace", "sbin"] {
+        std::fs::create_dir(stage.join(dir)).unwrap();
+    }
+    for dir in ["usr", "proc"] {
+        assert!(std::process::Command::new("mount")
+            .arg("--bind")
+            .arg(format!("/{dir}"))
+            .arg(stage.join(dir))
+            .status()
+            .unwrap()
+            .success());
+    }
+    for dir in ["bin", "lib", "lib64"] {
+        std::os::unix::fs::symlink(format!("usr/{dir}"), stage.join(dir)).unwrap();
+    }
+    File::create(stage.join("dev/null")).unwrap();
+    assert!(std::process::Command::new("mount")
+        .args(["--bind", "/dev/null"])
+        .arg(stage.join("dev/null"))
+        .status()
+        .unwrap()
+        .success());
+    std::fs::copy(agent, stage.join("sbin/canaveral-guest-agent")).unwrap();
+    assert!(std::process::Command::new("ip")
+        .args(["link", "set", "lo", "up"])
+        .status()
+        .unwrap()
+        .success());
+    std::env::set_current_dir(stage).unwrap();
     unsafe {
+        assert_eq!(libc::chroot(c".".as_ptr()), 0);
+        assert_eq!(libc::chdir(c"/".as_ptr()), 0);
         assert_eq!(
-            libc::chown(c"/tmp/canaveral-namespace-fixture".as_ptr(), 1000, 1000),
+            libc::mount(
+                c"tmpfs".as_ptr(),
+                c"/workspace".as_ptr(),
+                c"tmpfs".as_ptr(),
+                libc::MS_NODEV | libc::MS_NOSUID,
+                c"size=16777216,uid=1000,gid=1000".as_ptr().cast()
+            ),
             0
         );
     }
@@ -120,6 +161,85 @@ fn main() {
             },
         );
         assert!(matches!(read(&mut host), Guest::Ready { .. }));
+        use base64::Engine;
+        use std::net::{TcpListener, TcpStream};
+        let port = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let address = ("127.0.0.1", port);
+        let id = Uuid::from_u128(9);
+        let script = "require('http').createServer((q,r)=>r.end(process.getuid()+' '+process.cwd()+' '+q.url)).listen(process.argv[1]*1,'127.0.0.1')";
+        send(
+            &mut host,
+            Host::Credit {
+                version: 1,
+                bytes: 4096,
+            },
+        );
+        send(
+            &mut host,
+            Host::Exec {
+                version: 1,
+                id,
+                argv: vec![
+                    "/sbin/canaveral-guest-agent".into(),
+                    "--preview-service".into(),
+                    port.to_string(),
+                    "node".into(),
+                    "-e".into(),
+                    script.into(),
+                    port.to_string(),
+                ],
+                cwd: "/workspace".into(),
+                env: Default::default(),
+                timeout_ms: 15000,
+            },
+        );
+        let ready = format!("previewReady {port}\n");
+        let mut receipt = Vec::new();
+        while receipt.len() < ready.len() {
+            match read(&mut host) {
+                Guest::Output {
+                    id: output_id,
+                    stream,
+                    data,
+                    ..
+                } if output_id == id && stream == "stdout" => receipt.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .unwrap(),
+                ),
+                other => panic!("expected preview readiness, received {other:?}"),
+            }
+        }
+        assert_eq!(receipt, ready.as_bytes());
+        let path = format!("/fixture-{port}");
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 ") || headers.starts_with("HTTP/1.0 200 "));
+        assert_eq!(body, format!("1000 /workspace {path}"));
+        send(&mut host, Host::Cancel { version: 1, id });
+        assert!(
+            matches!(read(&mut host), Guest::Exit { id: exit_id, termination_confirmed: true,
+            timed_out: false, .. } if exit_id == id)
+        );
+        assert_eq!(
+            TcpStream::connect(address).unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+        println!("previewReady {port}, GET 200 {body}, cancel confirmed, listener refused");
         for (n, program, cwd, script, failed, timeout) in [
             (10,"/missing/program","/workspace","",true,1000),
             (11,"/bin/sh","/workspace/missing","",true,1000),

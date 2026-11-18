@@ -64,6 +64,15 @@ Deferred option: the homelab runners are Linux containers on Kubernetes (amd64 a
 
 **Deferred GitHub preview lifecycle.** The PR automation design of 11 November 2026 applies to a future connector. Dashboard previews start independently of a pull request.
 
+For dashboard previews, first verify that a leased workspace can start a
+foreground HTTP service, report readiness on its declared loopback port and
+reclaim the process on release or expiry. The existing
+[command operation](linux-command-operations.md) finishes with a bounded
+command receipt. That receipt alone cannot establish continuing service
+readiness. End-to-end acceptance also requires a private preview URL that
+serves both a static site's assets and a dynamic response generated inside the
+workspace. Verify that releasing the lease closes access to that URL.
+
 - A preview is a request tied to one pull request. The controller routes a per-PR hostname to the declared port over the existing outbound host connection and posts the URL as a deployment. Previews are private-network only for now; public exposure needs separate authentication and fork rules.
 - The controller polls the GitHub API for pull-request state, without webhooks. A new push updates the preview, and closing the pull request destroys it.
 - The GitHub credential is chosen together with previews. It stays behind the explicit secret boundary and never enters images or request bodies.

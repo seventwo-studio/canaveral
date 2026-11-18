@@ -215,3 +215,27 @@ If getifaddrs/RTM_GET evidence has not completed within that period, the
 satellite closes all live flows with `route_denied`. A stalled evidence
 worker prevents positive joined cleanup evidence; it is never replaced by
 an unbounded series of workers. Native acceptance remains required.
+
+## Foreground HTTP preview on Linux
+
+On guest builds containing the preview wrapper, after authenticated control
+ready, grant output credit and send ordinary exec with cwd `/workspace`,
+empty env, a fresh increasing command UUID and a timeoutMs covering the
+service lifetime. The argv is
+`["/sbin/canaveral-guest-agent","--preview-service","3000","node","server.js"]`.
+Replace the port and foreground command arguments as needed. Configure the
+application itself to listen on the declared IPv4 loopback endpoint.
+The wrapper refuses an occupied port and probes GET / for up to ten seconds.
+An HTTP/1.0 or HTTP/1.1 final status (200–599) indicates HTTP availability.
+This probe does not authenticate the listener or restrict application sockets.
+
+Accumulate decoded stdout by exec UUID through the newline. The one readiness
+line is `previewReady 3000\n`. Application stdout/stderr are discarded.
+Observe exit even after readiness. Probe or launch failure inside the wrapper
+exits nonzero. The exec ID is the preview ID and consumes the single execution
+slot. Retain the ID through stop. Never replay start after an uncertain send:
+the existing exec replay rule fences duplicates. Send cancel with that same ID
+and await terminationConfirmed on exit. Repeated cancel of the last completed
+ID is harmless. Expiry, disconnect and timeout use the ordinary supervised
+process cleanup and fencing contract. This mode introduces no new frame types
+and requires a guest build known to contain the wrapper.
