@@ -13,11 +13,16 @@ echo 'subjectAltName=IP:127.0.0.1' > extensions
 openssl x509 -req -in tls.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 1 \
   -extfile extensions -out fullchain.pem
 echo startup > /root/trial/result
-systemctl start browser.service nginx.service
+systemctl --no-block start browser.service nginx.service
+ready=false
 for attempt in {1..60}; do
-  if [[ $(curl -s --cacert ca.pem -o /dev/null -w '%{http_code}' https://127.0.0.1/v1/browsers) == 403 ]]; then break; fi
+  if [[ $(curl -s --max-time 2 --cacert ca.pem -o /dev/null -w '%{http_code}' https://127.0.0.1/v1/browsers) == 403 ]]; then
+    ready=true
+    break
+  fi
   sleep 1
 done
+[[ $ready == true ]]
 echo session > /root/trial/result
 NODE_EXTRA_CA_CERTS="$PWD/ca.pem" /usr/local/bin/node /opt/worker/trial.mjs
 echo isolation > /root/trial/result

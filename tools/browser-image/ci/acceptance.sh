@@ -38,10 +38,16 @@ timeout --kill-after=15s 25m qemu-system-aarch64 -machine virt "${accel[@]}" -sm
   -drive if=pflash,format=raw,file=vars.fd -drive if=virtio,format=qcow2,file=disk \
   -nic none -display none -serial none -monitor none -no-reboot &
 guest=$!
-wait "$guest"
+guest_status=0
+wait "$guest" || guest_status=$?
 guest=
 # The guest writes the marker only after both browser lifecycles pass.
-stage=$(virt-cat -a disk /root/trial/result)
+stage=$(virt-cat -a disk /root/trial/result) || stage=unknown
+if (( guest_status != 0 )); then
+  case "$stage" in credentials|startup|session|isolation|passed) ;; *) stage=unknown ;; esac
+  echo "Browser guest exited with status $guest_status during $stage" >&2
+  exit "$guest_status"
+fi
 case "$stage" in
   passed) ;;
   credentials|startup|session|isolation) echo "Guest failed during $stage" >&2; exit 1 ;;
