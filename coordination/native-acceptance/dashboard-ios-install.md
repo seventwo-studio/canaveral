@@ -46,3 +46,14 @@ The provider operation journal directory was created but holds no receipt. Befor
 - Native recurrence of the reconcile/install race, which this run did not reproduce under the fix.
 - Reconciliation of the earlier orphan.
 - Native video, input, consumer leases and remote hosts.
+
+## Orphan reconciliation attempt, 18 November 2026 (23:31 CET)
+
+Stopped before any change to the orphan; its resources were left as they were. The supported API offers no way to resolve or abandon an unknown device operation, and the upload cannot be deleted while that operation stays unknown.
+
+- Code path: reportDeviceOperations ignores reports for terminal rows, and unknown is terminal. No controller, admin or host route changes a device operation after it is terminal. requireCleanAttempts rejects upload deletion unless every install attempt either succeeded with artifactCleaned or was never dispatched. Operation ffc954eb-… is in control_device_dispatch, so it was dispatched.
+- Evidence: a temporary controller was started on a private copy of the retained database (db, admin and enroll files only), using the retained controller identity. No runner was started. On that copy, GET /v1/operations/ffc954eb-… returned unknown ("Dispatched work outcome requires inspection; it is not replayed.") and GET /v1/app-artifacts/b300c9dc-… returned ready (59,904 bytes). POST /v1/app-artifacts/b300c9dc-…/delete returned 409, and POST /v1/operations/ffc954eb-…/resolve returned 404. The copy was then removed.
+- The retained controller and runner were not restarted. A runner restart would reconcile the booted simulator without making the cleanup possible. Deleting the machine alone would leave the ready upload and its 2 GiB scratch reservation, and would remove the native state that the unknown outcome needs for inspection.
+- device_list after the attempt: cvm-1d3f99f7-… (F2BFC9A6-…) was still booted. The six stock simulators were present and shut down: iPhone 18 Pro, iPhone 18 Pro Max, Ambiently Audit iPhone 17e, iPhone 17e, Ambiently Audit iPhone SE (3rd generation), and iPad Air 11-inch (M4).
+
+Gap: clearing this orphan needs either an authorized operator recovery route for unknown install operations, with an inspection record, or explicit authorization for an out-of-band path. Either is a product or operator decision, not a small fix. The state directory dashboard-ios-install-Lv6iy4 is retained.
