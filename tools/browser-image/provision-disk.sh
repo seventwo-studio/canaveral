@@ -25,9 +25,9 @@ mount -t ext4 "${loop}p1" "$root"
 install -d "$root/opt/worker"
 cp "$here/browsers.lock" "$here"/*.mjs "$repo"/coordination/{package.json,package-lock.json,src/browser-runtime.ts,src/browser-playwright.ts} "$root/opt/worker/"
 cp "$here"/{browser.service,browser-launch.socket,browser-launch@.service,canaveral.slice} "$root/etc/systemd/system/"
-cp "$tmp/node.tar.xz" "$root/tmp/node.tar.xz"
-cp "$here/gateway.conf" "$root/tmp/browser-gateway"
-cp "$here/provision.sh" "$root/tmp/provision.sh"
+cp "$tmp/node.tar.xz" "$root/opt/worker/node.tar.xz"
+cp "$here/gateway.conf" "$root/opt/worker/browser-gateway"
+cp "$here/provision.sh" "$root/opt/worker/provision.sh"
 
 # nspawn supplies private PID, mount, /dev, /proc and /run views. Build-time
 # package downloads use host networking. No checkout or host credentials bind in.
@@ -37,6 +37,6 @@ if [[ -e $resolver || -L $resolver ]]; then mv "$resolver" "$tmp/resolv.original
 install -m 0644 /etc/resolv.conf "$resolver"
 systemd-nspawn --quiet --settings=no --register=no --link-journal=no \
   --directory="$root" --as-pid2 --resolv-conf=off \
-  /bin/sh /tmp/provision.sh
-rm "$root/tmp/provision.sh" "$resolver"
+  /bin/sh /opt/worker/provision.sh
+rm "$root/opt/worker/provision.sh" "$resolver"
 if [[ -e $tmp/resolv.original || -L $tmp/resolv.original ]]; then mv "$tmp/resolv.original" "$resolver"; fi

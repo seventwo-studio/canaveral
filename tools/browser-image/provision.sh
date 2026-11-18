@@ -10,8 +10,8 @@ printf '#!/bin/sh\nexit 101\n' > "$policy"
 chmod 0755 "$policy"
 apt-get update
 apt-get install -y nginx xz-utils curl unzip
-tar xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local
-rm /tmp/node.tar.xz
+tar xJf /opt/worker/node.tar.xz --strip-components=1 -C /usr/local
+rm /opt/worker/node.tar.xz
 cd /opt/worker
 npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 export PLAYWRIGHT_BROWSERS_PATH=/opt/browsers
@@ -29,7 +29,7 @@ useradd --system --create-home --home-dir /var/lib/browser --shell /usr/sbin/nol
 useradd --system --user-group --no-create-home --shell /usr/sbin/nologin browser-runtime
 install -d -m 0700 /etc/canaveral-browser
 rm -f /etc/nginx/sites-enabled/default
-mv /tmp/browser-gateway /etc/nginx/conf.d/browser.conf
+mv /opt/worker/browser-gateway /etc/nginx/conf.d/browser.conf
 mkdir -p /etc/systemd/system/nginx.service.d
 printf '[Unit]\nConditionPathExists=/etc/canaveral-browser/fullchain.pem\nConditionPathExists=/etc/canaveral-browser/key.pem\n' >/etc/systemd/system/nginx.service.d/browser.conf
 systemctl enable browser.service nginx.service
