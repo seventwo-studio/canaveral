@@ -153,7 +153,7 @@ for (const width of [1440, 1133, 390, 320])
       "script-src 'self'",
     );
     await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();
-    await page.evaluate(() => document.fonts.ready);
+    await page.evaluate(() => document.fonts.load('14px "Geist Mono"'));
     expect(
       await page.evaluate(() => document.fonts.check('14px "Geist Mono"')),
     ).toBe(true);
@@ -161,8 +161,10 @@ for (const width of [1440, 1133, 390, 320])
       await page
         .locator("label, input, button")
         .evaluateAll((elements) =>
-          elements.every((element) =>
-            getComputedStyle(element).fontFamily.includes("Geist Mono"),
+          elements.every(
+            (element) =>
+              getComputedStyle(element).fontFamily ===
+              getComputedStyle(document.body).fontFamily,
           ),
         ),
     ).toBe(true);
@@ -200,15 +202,27 @@ for (const width of [1440, 1133, 390, 320])
       ),
     ).toBe(true);
     const filters = page.getByRole("radiogroup", { name: "Filter inventory" });
-    await filters.getByRole("radio", { name: "Stopped", exact: true }).click();
+    const state = page.getByRole("combobox", { name: "Machine state" });
+    const stopped = filters.getByRole("radio", {
+      name: "Stopped",
+      exact: true,
+    });
+    if (width < 768) {
+      await state.selectOption("stopped");
+    } else {
+      await stopped.click();
+    }
     await expect(
       page.getByRole("heading", { name: "No matching machines" }),
     ).toBeVisible();
-    await filters.getByRole("radio", { name: "Stopped", exact: true }).click();
-    await expect(
-      filters.getByRole("radio", { name: "Stopped", exact: true }),
-    ).toBeChecked();
-    await filters.getByRole("radio", { name: "All", exact: true }).click();
+    if (width < 768) {
+      await expect(state).toHaveValue("stopped");
+      await state.selectOption("all");
+    } else {
+      await stopped.click();
+      await expect(stopped).toBeChecked();
+      await filters.getByRole("radio", { name: "All", exact: true }).click();
+    }
     await expect(
       page.getByRole("button", { name: "Voyager", exact: true }),
     ).toBeVisible();

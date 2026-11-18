@@ -5,7 +5,7 @@ for (const width of [320, 768, 1440]) {
   test(`fleet pulse remains readable at ${width}px`, async ({
     page,
   }, testInfo) => {
-    await page.setViewportSize({ width, height: 1100 });
+    await page.setViewportSize({ width, height: width === 320 ? 700 : 1100 });
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const host = {
@@ -80,6 +80,11 @@ for (const width of [320, 768, 1440]) {
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+    if (width === 320) {
+      await expect(
+        page.getByRole("button", { name: "Details Workspace 1", exact: true }),
+      ).toBeInViewport({ ratio: 1 });
+    }
     await page.screenshot({
       path: testInfo.outputPath("workspace.png"),
       fullPage: true,
@@ -133,11 +138,22 @@ for (const width of [320, 768, 1440]) {
       .getByRole("button", { name: "Clear filters", exact: true })
       .click();
     await expect(inventory.locator("[data-machine-id]")).toHaveCount(4);
-    await page.keyboard.press("Control+Home");
-    await page.goto("/#admin");
+    await page.evaluate(() =>
+      window.scrollTo(0, document.documentElement.scrollHeight),
+    );
+    if (width < 768) {
+      const navigation = page.getByRole("button", { name: "Toggle Sidebar" });
+      await expect(navigation).toBeInViewport();
+      await navigation.click();
+      await page.getByRole("link", { name: "Overview", exact: true }).click();
+    } else {
+      await page.goto("/#admin");
+    }
     await expect(
       page.getByText("Access management", { exact: true }),
     ).toBeVisible();
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    await expect(page.locator("#workspace-content")).toBeFocused();
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

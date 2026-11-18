@@ -21,19 +21,7 @@ import { record } from "@/lib/types";
 import type { AuthState } from "@/lib/types";
 import type { Host } from "@/lib/infrastructure";
 import type { RegistryEntry, Resources } from "@/lib/catalogue";
-type View =
-  | "machines"
-  | "hosts"
-  | "orchestrators"
-  | "templates"
-  | "blueprints"
-  | "account"
-  | "tokens"
-  | "users"
-  | "admin"
-  | "api-access"
-  | "system"
-  | "configuration";
+type View = keyof typeof destinations;
 import { AccountPage, TokensPage, UsersPage } from "@/components/accounts";
 import {
   AdminOverview,
@@ -76,14 +64,12 @@ const statusCode = (error: unknown) =>
 import { useEffect, useRef, useState } from "react";
 import {
   Rocket,
-  Monitor,
-  Server,
-  Layers,
   ArrowUpRight,
   Plus,
   Search,
   RefreshCw,
   Orbit,
+  CircleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -129,7 +115,7 @@ import {
 } from "@/components/image-actions";
 import { MachineControl } from "@/components/machine-control";
 import { LoginScreen } from "@/components/login-screen";
-import { WorkspaceSidebar } from "@/components/workspace-sidebar";
+import { destinations, WorkspaceSidebar } from "@/components/workspace-sidebar";
 import {
   SidebarProvider,
   SidebarInset,
@@ -180,20 +166,16 @@ import {
 
 const views = {
   machines: {
-    icon: Monitor,
     filters: ["all", "ready", "preparing", "running", "stopped", "attention"],
   },
   hosts: {
-    icon: Server,
     filters: ["all", "online", "offline", "draining"],
   },
   orchestrators: {
-    icon: Orbit,
     filters: ["all", "online", "offline", "draining"],
   },
-  blueprints: { icon: Layers, filters: [] },
+  blueprints: { filters: [] },
   templates: {
-    icon: Layers,
     filters: ["all", "headless", "desktop", "device"],
   },
 };
@@ -235,6 +217,12 @@ const currentInfrastructure = () => {
 };
 const eligible = (t: GroupedImage) =>
   t.hosts.some((h) => h.online && h.accepting);
+function filterLabel(value: string) {
+  if (value === "attention") return "Needs attention";
+  if (value === "running-unready") return "Running · not ready";
+  return title(value).replaceAll("-", " ");
+}
+
 function Notice({
   children,
   error = false,
@@ -248,7 +236,8 @@ function Notice({
       variant={error ? "destructive" : "default"}
       role={error ? "alert" : "status"}
     >
-      <AlertDescription className="text-inherit">{children}</AlertDescription>
+      {error && <CircleAlert aria-hidden="true" />}
+      <AlertDescription className="text-foreground">{children}</AlertDescription>
     </Alert>
   ) : null;
 }
@@ -480,9 +469,6 @@ export function App() {
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
-  useEffect(() => {
-    document.title = `Canaveral · ${infrastructureId ? "Overview · " : ""}${view === "admin" ? "Administration" : view === "api-access" ? "API access" : title(view)}`;
-  }, [view, infrastructureId]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (acting.current || !["setup", "login"].includes(auth)) return;
@@ -601,6 +587,22 @@ export function App() {
   const resourceHost = infrastructureHosts.find(
     (host) => host.id === infrastructureId,
   );
+  const locationLabel = resourcePage
+    ? `${resourceHost?.name || "Overview"} · ${destinations[view].label}`
+    : destinations[view].label;
+  const routeKey = infrastructureId ? `${view}/${infrastructureId}` : view;
+  const previousRoute = useRef(routeKey);
+  useEffect(() => {
+    document.title = `Canaveral · ${locationLabel}`;
+  }, [locationLabel]);
+  useEffect(() => {
+    if (previousRoute.current === routeKey) return;
+    previousRoute.current = routeKey;
+    const content = document.getElementById("workspace-content");
+    if (!content) return;
+    document.documentElement.scrollTop = 0;
+    content.focus({ preventScroll: true });
+  }, [routeKey]);
   if (claim)
     return (
       <ClaimScreen
@@ -666,6 +668,16 @@ export function App() {
       : isInfrastructure
         ? infrastructureHosts.length
         : inventory.machines.length;
+  const viewFilters = Object.hasOwn(views, view)
+    ? views[view as keyof typeof views].filters
+    : [];
+  const filters = viewFilters.map((value) => ({
+    value,
+    label: filterLabel(value),
+  }));
+  if (view === "machines" && !views.machines.filters.includes(filter)) {
+    filters.push({ value: filter, label: filterLabel(filter) });
+  }
   return (
     <SidebarProvider>
       <a
@@ -679,30 +691,21 @@ export function App() {
         Skip to content
       </a>
       <WorkspaceSidebar
-        views={
-          user.role === "admin"
-            ? views
-            : {
-                machines: views.machines,
-                templates: views.templates,
-                blueprints: views.blueprints,
-              }
-        }
         view={view}
-        counts={{
+        counts={loaded && !stale ? {
           machines: inventory.machines.length,
           hosts: inventory.hosts.filter((h) => infrastructureKind(h) === "host")
             .length,
           orchestrators: inventory.hosts.filter(
             (h) => infrastructureKind(h) === "orchestrator",
           ).length,
-        }}
+        } : {}}
         user={user}
         onSignOut={() => signOut()}
       />
       <SidebarInset className="min-w-0 md:rounded-sm">
         <header
-          className={`flex shrink-0 items-center gap-2 border-b px-4 lg:px-6 ${view === "hosts" && !resourcePage ? "min-h-14 flex-wrap py-2" : "h-14"}`}
+          className={`sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b px-4 lg:px-6 ${view === "hosts" && !resourcePage ? "min-h-14 flex-wrap py-2" : "h-14"}`}
         >
           <SidebarTrigger className="-ml-1" />
           <Separator
@@ -712,41 +715,25 @@ export function App() {
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem className="hidden sm:block">
-                {[
-                  "admin",
-                  "users",
-                  "api-access",
-                  "system",
-                  "configuration",
-                ].includes(view) ? (
-                  <a href="#admin">Administration</a>
-                ) : isInfrastructure ? (
-                  "Infrastructure"
-                ) : (
-                  "Workspace"
-                )}
+                {destinations[view].group}
               </BreadcrumbItem>
               <BreadcrumbSeparator className="hidden sm:block" />
               <BreadcrumbItem>
                 {resourcePage ? (
-                  <BreadcrumbLink href={`#${view}`}>
-                    {title(view)}
+                  <BreadcrumbLink href={destinations[view].href}>
+                    {destinations[view].label}
                   </BreadcrumbLink>
                 ) : (
-                  <BreadcrumbPage>
-                    {view === "admin"
-                      ? "Overview"
-                      : view === "api-access"
-                        ? "API access"
-                        : title(view)}
-                  </BreadcrumbPage>
+                  <BreadcrumbPage>{destinations[view].label}</BreadcrumbPage>
                 )}
               </BreadcrumbItem>
               {resourcePage && (
                 <>
                   <BreadcrumbSeparator />
                   <BreadcrumbItem>
-                    <BreadcrumbPage>Overview</BreadcrumbPage>
+                    <BreadcrumbPage className="block max-w-[28vw] truncate">
+                      {resourceHost?.name || "Overview"}
+                    </BreadcrumbPage>
                   </BreadcrumbItem>
                 </>
               )}
@@ -765,23 +752,27 @@ export function App() {
                 </Button>
               </>
             )}
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={stale ? "Retry connection" : "Refresh"}
-              onClick={() => {
-                void refresh();
-                void directory.refresh();
-              }}
-            >
-              <RefreshCw />
-            </Button>
+            {view !== "admin" && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="size-11 md:size-8"
+                aria-label={stale ? "Retry connection" : "Refresh"}
+                title={stale ? "Retry connection" : "Refresh"}
+                onClick={() => {
+                  void refresh();
+                  void directory.refresh();
+                }}
+              >
+                <RefreshCw />
+              </Button>
+            )}
           </div>
         </header>
         <div
           id="workspace-content"
           tabIndex={-1}
-          className="flex min-w-0 flex-1 flex-col gap-6 px-4 py-6 outline-none lg:px-6"
+          className="flex min-w-0 flex-1 flex-col gap-3 px-4 py-4 outline-none md:gap-4 md:py-5 lg:gap-5 lg:px-6"
         >
           {view === "system" && user.role === "admin" ? (
             <SystemControl
@@ -926,7 +917,7 @@ export function App() {
               {view === "hosts" ? (
                 <h1 className="sr-only">Hosts</h1>
               ) : (
-                <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="space-y-1">
                     <h1 className="font-display text-3xl font-medium tracking-tight">
                       {title(view)}
@@ -957,6 +948,11 @@ export function App() {
                     )}
                     <Button
                       variant={view === "templates" ? "ghost" : "default"}
+                      className={
+                        view === "machines"
+                          ? "max-sm:px-2.5 max-sm:text-xs"
+                          : undefined
+                      }
                       onClick={() =>
                         isInfrastructure
                           ? setConnectionSetup(
@@ -988,9 +984,11 @@ export function App() {
               {view === "machines" &&
                 user.role === "admin" &&
                 directory.error && (
-                  <Notice
-                    error
-                  >{`Owner names could not be refreshed. User IDs are shown. ${directory.error}`}</Notice>
+                  <Notice error>
+                    {directory.data
+                      ? "Showing the last available owner names. Refresh to try again."
+                      : "Owner names unavailable. Refresh to try again."}
+                  </Notice>
                 )}
               {view === "machines" && (
                 <FleetPulse
@@ -1007,61 +1005,9 @@ export function App() {
                 />
               )}
               {view !== "templates" && (
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <ToggleGroup
-                    className="max-w-full flex-wrap rounded-sm border bg-muted p-1"
-                    type="single"
-                    value={filter}
-                    onValueChange={(value) => {
-                      if (value) setFilter(value);
-                    }}
-                    size="sm"
-                    spacing={1}
-                    aria-label="Filter inventory"
-                  >
-                    {[
-                      ...views[view as keyof typeof views].filters,
-                      ...(view === "machines" &&
-                      !views.machines.filters.includes(filter)
-                        ? [filter]
-                        : []),
-                    ].map((f) => (
-                      <ToggleGroupItem
-                        className="rounded-md text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm"
-                        key={f}
-                        value={f}
-                      >
-                        {f === "all"
-                          ? "All"
-                          : f === "attention"
-                            ? "Needs attention"
-                            : f === "running-unready"
-                              ? "Running · not ready"
-                              : title(f).replaceAll("-", " ")}
-                      </ToggleGroupItem>
-                    ))}
-                  </ToggleGroup>
-                  <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
-                    {view === "machines" && user.role === "admin" && (
-                      <label className="shrink-0 text-xs">
-                        <span className="sr-only">Machine owner</span>
-                        <select
-                          aria-label="Machine owner"
-                          className="h-9 max-w-48 rounded-md border bg-background px-2 text-sm"
-                          value={owner}
-                          onChange={(e) => setOwner(e.target.value)}
-                        >
-                          <option value="all">All owners</option>
-                          <option value="none">No user owner</option>
-                          {(directory.data ?? []).map((u) => (
-                            <option key={u.id} value={u.id}>
-                              {u.username}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-                    <InputGroup className="w-full sm:w-64">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="grid w-full min-w-0 grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap">
+                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-9 md:w-56 xl:w-64">
                       <InputGroupInput
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
@@ -1072,7 +1018,58 @@ export function App() {
                         <Search />
                       </InputGroupAddon>
                     </InputGroup>
+                    {view === "machines" && (
+                      <select
+                        aria-label="Machine state"
+                        className="h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:hidden"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      >
+                        {filters.map(({ value, label }) => (
+                          <option key={value} value={value}>
+                            {value === "all" ? "All states" : label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {view === "machines" && user.role === "admin" && (
+                      <select
+                        aria-label="Machine owner"
+                        className="h-10 min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9 md:max-w-44"
+                        value={owner}
+                        onChange={(e) => setOwner(e.target.value)}
+                      >
+                        <option value="all">All owners</option>
+                        <option value="none">No user owner</option>
+                        {(directory.data ?? []).map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.username}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
+                  <ToggleGroup
+                    className={`max-w-full flex-wrap rounded-md border bg-muted p-0.5 ${view === "machines" ? "hidden md:flex" : ""}`}
+                    type="single"
+                    value={filter}
+                    onValueChange={(value) => {
+                      if (value) setFilter(value);
+                    }}
+                    size="sm"
+                    spacing={1}
+                    aria-label="Filter inventory"
+                  >
+                    {filters.map(({ value, label }) => (
+                      <ToggleGroupItem
+                        className="rounded-md text-muted-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-xs"
+                        key={value}
+                        value={value}
+                      >
+                        {label}
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
                 </div>
               )}
               {view !== "templates" &&
@@ -1081,11 +1078,7 @@ export function App() {
                   <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="text-muted-foreground" role="status">
                       {items.length} of {total} {view} ·{" "}
-                      {filter === "all"
-                        ? "All states"
-                        : filter === "running-unready"
-                          ? "Running · not ready"
-                          : title(filter).replaceAll("-", " ")}
+                      {filter === "all" ? "All states" : filterLabel(filter)}
                       {query ? ` · “${query}”` : ""}
                     </span>
                     <Button

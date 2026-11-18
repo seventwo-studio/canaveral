@@ -616,9 +616,9 @@ export function InfrastructureDetails({
                 <li key={c.id} className="rounded-md border p-3">
                   <div className="flex items-center gap-2 text-xs">
                     {c.status === "passed" ? (
-                      <Check className="size-3 text-emerald-500" />
+                      <Check className="size-3 text-[var(--state-ready)]" />
                     ) : (
-                      <AlertTriangle className="size-3 text-amber-500" />
+                      <AlertTriangle className="size-3 text-[var(--state-pending)]" />
                     )}
                     <span className="font-medium">{c.label}</span>
                     <span className="ml-auto text-muted-foreground">

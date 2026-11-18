@@ -36,11 +36,11 @@ test.describe("real account controller and gateway", () => {
       page.getByRole("button", { name: "Account menu" }),
     ).toBeVisible();
     await expect(
-      page.getByText("Admin private machine", { exact: true }),
+      page.getByRole("button", { name: "Admin private machine", exact: true }),
     ).toBeVisible();
     await page.getByRole("link", { name: "Overview", exact: true }).click();
     await expect(
-      page.getByRole("heading", { name: "Administration", exact: true }),
+      page.getByRole("heading", { name: "Overview", exact: true }),
     ).toBeVisible();
     await expect(
       page.getByRole("link", { name: "Manage users", exact: true }),
@@ -246,7 +246,7 @@ test.describe("real account controller and gateway", () => {
       }
       await page.getByRole("link", { name: "Overview", exact: true }).click();
       await expect(
-        page.getByRole("heading", { name: "Administration", exact: true }),
+        page.getByRole("heading", { name: "Overview", exact: true }),
       ).toBeVisible();
       if (process.env.CANAVERAL_DASHBOARD_SCREENSHOTS) {
         await page.screenshot({

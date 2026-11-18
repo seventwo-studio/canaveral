@@ -253,7 +253,7 @@ export function DesktopView({
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-4 py-2">
         <div className="flex items-center gap-2 text-xs">
           <span
-            className={`size-2 rounded-full ${status === "connected" ? "bg-emerald-500" : "bg-muted-foreground"}`}
+            className={`size-2 rounded-full ${status === "connected" ? "bg-[var(--state-ready)]" : "bg-muted-foreground"}`}
           />
           {status === "connected"
             ? control
@@ -364,7 +364,7 @@ export function DesktopView({
       <div className="relative min-h-0 min-w-0 flex-1">
         <div ref={target} className="absolute inset-0 overflow-hidden" />
         {status !== "connected" && (
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-muted-foreground">
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-neutral-950 p-6 text-center text-neutral-300">
             <Monitor className="size-8" />
             <p className="text-sm">
               {status === "connecting"

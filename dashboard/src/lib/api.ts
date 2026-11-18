@@ -75,7 +75,9 @@ export async function api(
     throw new Error(
       path.startsWith("auth/")
         ? "Canaveral is unavailable. Try again."
-        : "Connection interrupted. The outcome may be unknown. Retry the same request to check it safely.",
+        : value === undefined
+          ? "Could not load data. Try refreshing."
+          : "Connection interrupted. The outcome may be unknown. Retry the same request to check it safely.",
     );
   } finally {
     clearTimeout(timeout);
