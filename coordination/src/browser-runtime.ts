@@ -39,6 +39,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): { server: 
     for (const socket of entry.sockets ?? []) socket.destroy();
     entry.cleanup ??= (async () => {
       await entry.pending;
+      if (entry.failed) throw new Error('Browser launch cleanup is unconfirmed.');
       if (entry.server) await entry.server.close();
       delete entry.server;
     })().finally(() => { delete entry.cleanup; });

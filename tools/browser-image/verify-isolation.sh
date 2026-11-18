@@ -13,6 +13,7 @@ for file in /etc/canaveral-browser/token /proc/"$worker"/environ; do
   test -r "$file"
   runuser -u browser -- test ! -r "$file"
 done
+launch_browser() {
 /usr/local/bin/node --input-type=module <<'JS'
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -22,7 +23,29 @@ const result = await fetch('http://127.0.0.1:9333/v1/browsers', {
   body: JSON.stringify({ engine: 'chromium', ttlSeconds: 120, id: randomUUID() }),
 });
 if (result.status !== 201) throw new Error('Chromium launch failed: ' + result.status);
+console.log((await result.json()).id);
 JS
+}
+first=$(launch_browser)
+first_group=/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$(launcher_units)")
+test -d "$first_group"
+BROWSER_ID="$first" /usr/local/bin/node --input-type=module <<'JS'
+import { readFileSync } from 'node:fs';
+const id = process.env.BROWSER_ID;
+const token = readFileSync('/etc/canaveral-browser/token', 'utf8').trim();
+const response = await fetch('http://127.0.0.1:9333/v1/browsers/' + id, {
+  method: 'DELETE', headers: { authorization: 'Bearer ' + token },
+});
+const receipt = await response.json();
+if (response.status !== 200 || receipt.id !== id || receipt.state !== 'closed') throw new Error('Stop unconfirmed');
+JS
+for attempt in $(seq 1 20); do
+  [ -d "$first_group" ] || break
+  sleep 1
+done
+test ! -d "$first_group"
+test "$(systemctl show -p MainPID --value browser.service)" = "$worker"
+launch_browser >/dev/null
 unit=$(launcher_units)
 launcher=$(systemctl show -p MainPID --value "$unit")
 for name in token origin; do

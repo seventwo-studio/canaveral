@@ -63,7 +63,9 @@ test('failed launch is retained and never silently retried', async () => {
     const response = await f.call('/v1/browsers', 'POST', body);
     assert.equal(response.status, 503); assert.equal((await response.text()).includes('private'), false);
     assert.equal((await f.call('/v1/browsers', 'POST', body)).status, 410); assert.equal(launches, 1);
-  } finally { await f.runtime.close(); }
+    assert.equal((await f.call(`/v1/browsers/${body.id}`, 'DELETE')).status, 503);
+    assert.equal((await f.call('/v1/browsers', 'POST', { ...body, id: randomUUID() })).status, 429);
+  } finally { await assert.rejects(f.runtime.close(), /cleanup is unconfirmed/); }
 });
 test('WebSocket gateway requires the session key and strips credentials upstream', async () => {
   const upstream = createServer(); let authorization: string | undefined;
