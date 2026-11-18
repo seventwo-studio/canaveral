@@ -43,10 +43,10 @@ export async function uploadWorkspaceFile(client:TransferClient,intent:Extract<T
   if(t.state!=='committed'||!t.durable||t.bytes!==offset||t.sha256!==intent.sha256) throw new Error('Upload publication unconfirmed');
   return t;
 }
-export async function downloadWorkspaceFile(client:TransferClient,intent:Extract<TransferIntent,{direction:'download'}>,persist:(chunk:Uint8Array)=>Promise<void>,journal:TransferJournal,wait:TransferWait):Promise<FileTransfer> {
+export async function downloadWorkspaceFile(client:TransferClient,intent:Extract<TransferIntent,{direction:'download'}>,persist:(chunk:Uint8Array)=>Promise<void>,journal:TransferJournal,wait:TransferWait,maxBytes = Number.MAX_SAFE_INTEGER):Promise<FileTransfer> {
   await journal.save(intent); await client.createTransfer(intent); let step=1,offset=0;
   const begin=await execute(client,intent.id,step++,{action:'beginDownload',path:intent.path},journal,wait),bytes=begin.bytes;
-  if(typeof bytes!=='number'||!Number.isSafeInteger(bytes)||bytes<0) throw new Error('Invalid download size');
+  if(typeof bytes!=='number'||!Number.isSafeInteger(bytes)||bytes<0||bytes>maxBytes) throw new Error('Invalid download size');
   const h=createHash('sha256');
   while(offset<bytes) {
     const r=await execute(client,intent.id,step++,{action:'read',offset,maxBytes:65536},journal,wait);
