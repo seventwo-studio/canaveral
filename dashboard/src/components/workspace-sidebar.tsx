@@ -52,6 +52,13 @@ export const destinations = {
     icon: Monitor,
     adminOnly: false,
   },
+  previews: {
+    group: "Workspace",
+    label: "Workspace previews",
+    href: "#previews",
+    icon: Rocket,
+    adminOnly: false,
+  },
   templates: {
     group: "Machine sources",
     label: "Image library",
