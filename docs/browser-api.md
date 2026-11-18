@@ -97,16 +97,19 @@ boot trial also requires libguestfs and QEMU. Full acceptance requires a TLS
 connection from the controller, sandboxed launches of all three engines,
 WebSocket attachment and process cleanup after a worker crash.
 
-## Launch Chromium from the dashboard
+## Launch a browser from the dashboard
 
-Open a ready Mac host that advertises the browser runtime and select **Launch
-Chromium**. The configured worker VM must already be running. The dashboard
+Open a ready Mac host that advertises the browser runtime. Choose Chromium
+(the default), Firefox or WebKit and launch the selected engine.
+The configured worker VM must already be running. The dashboard
 requests a five-minute session and displays its expiry, Playwright endpoint and
-scoped key. To attach with the worker's Playwright version, supply those values
-to your client:
+scoped key. Use the matching Playwright version and engine to attach. For
+example, after selecting Firefox:
 
 ```js
-const browser = await chromium.connect(endpoint, {
+import { firefox } from 'playwright-core';
+
+const browser = await firefox.connect(endpoint, {
   headers: { Authorization: `Bearer ${key}` },
 });
 ```
