@@ -2,6 +2,14 @@ name: Validate Canaveral
 on:
   workflow_dispatch:
     inputs:
+      build_browser_image:
+        description: Build and retain the ARM64 browser VM disk
+        type: boolean
+        default: false
+      verify_browser_vm:
+        description: Build the disk and test one disposable ARM64 browser VM
+        type: boolean
+        default: false
       tls_controller_url:
         description: Optional existing HTTPS controller for read-only acceptance
         required: false
@@ -17,6 +25,11 @@ concurrency:
   group: validate-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  browser-vm-image:
+    if: github.event_name == 'workflow_dispatch' && (inputs.build_browser_image || inputs.verify_browser_vm)
+    uses: ./.github/workflows/browser-image.yaml
+    with:
+      verify_guest: ${{ inputs.verify_browser_vm }}
   typescript:
     name: TypeScript controller, SDK and guest services
     runs-on: ubuntu-24.04
@@ -318,16 +331,23 @@ jobs:
           done
   ci-required:
     if: ${{ always() }}
-    needs: [typescript, rust, validate, dashboard, container-images, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance, remote-tls-acceptance]
+    needs: [typescript, rust, validate, dashboard, container-images, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance, remote-tls-acceptance, browser-vm-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Require every prerequisite to succeed
         env:
           RESULTS: ${{ toJSON(needs) }}
+          IMAGE_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_browser_image || inputs.verify_browser_vm) }}
         run: |
           node --input-type=module <<'JSCODE'
           const results = JSON.parse(process.env.RESULTS);
           console.log(JSON.stringify(results, null, 2));
-          if (!Object.keys(results).length || Object.entries(results).some(([name, job]) => job.result !== 'success' && !(name === 'remote-tls-acceptance' && job.result === 'skipped'))) process.exit(1);
+          const optionalJobs = new Set(['remote-tls-acceptance']);
+          if (process.env.IMAGE_REQUESTED !== 'true') optionalJobs.add('browser-vm-image');
+          for (const [name, job] of Object.entries(results)) {
+            if (job.result === 'success' || (optionalJobs.has(name) && job.result === 'skipped')) continue;
+            process.exitCode = 1;
+          }
+          if (!Object.keys(results).length) process.exitCode = 1;
           JSCODE

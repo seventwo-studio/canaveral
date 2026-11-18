@@ -1,0 +1,7 @@
+[Unit]
+Description=Disposable browser acceptance trial
+After=browser.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /root/trial/guest.sh

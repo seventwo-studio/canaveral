@@ -1,0 +1,6 @@
+[Unit]
+Description=Aggregate browser worker resource limits
+
+[Slice]
+MemoryMax=4G
+CPUQuota=200%

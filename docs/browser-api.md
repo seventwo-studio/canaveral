@@ -41,6 +41,62 @@ sandbox; it does not add `--no-sandbox`. The worker's own network access is
 independent of agent-runtime forwarding. Arbitrary pages and page JavaScript must
 not have access to worker credentials, metadata endpoints or internal services.
 
+## Build the ARM64 browser VM disk
+
+Use a disposable native ARM64 Linux runner with root access, outbound HTTPS,
+loop-device partition scanning, ext4, udev and systemd-nspawn namespace support.
+On Ubuntu 24.04 install `qemu-utils cloud-guest-utils gdisk fdisk e2fsprogs
+util-linux mount udev systemd-container curl ca-certificates coreutils bash`.
+Allow space for the downloaded base, the sparse 16 GiB raw working disk and
+the final qcow2. Run from the checkout:
+
+```sh
+sudo bash tools/browser-image/build.sh browser-worker.qcow2
+```
+
+The [build recipe](../tools/browser-image/build.sh) verifies the dated Debian 13
+genericcloud ARM64 disk and Node 24.11.0 archive against the repository’s
+existing SHA-512 and SHA-256 pins before customization. It expands the root
+partition in place on a derived raw disk, retaining GPT partition numbers, uses a dated Debian package
+snapshot, installs the coordination lockfile, and installs the ARM64 archives selected by that Playwright release.
+Only the build container shares runner networking. Its temporary resolver and service-start policy are removed before conversion to qcow2.
+Each browser archive, the Chromium headless shell and FFmpeg are SHA-256
+verified against the [browser lockfile](../tools/browser-image/browsers.lock) before extraction. The build checks the installed executable
+paths and qcow2 structure before publishing the output and printing its SHA-256.
+The inputs select fixed releases. Filesystem metadata can vary across builds.
+
+Record the prepared disk digest and verify it before copying. Give each instance
+its own writable disk and UEFI variable store, and record their ownership before
+launch. After shutdown, confirm the owned VM has stopped before removing its
+disk and firmware state. Retain the ownership record when shutdown is uncertain. Use ARM64 UEFI and a
+virtio disk and network interface. Before starting services, inject these
+root-owned files (mode 0600) into the guest’s `/etc/canaveral-browser/`
+through private instance provisioning:
+
+- `token` holds a unique high-entropy application key of at least 32 characters.
+  Provision the same value in the controller’s worker credential file.
+- `origin` holds the controller-reachable HTTPS origin, such as
+  `https://browser-worker.example.internal`.
+- `fullchain.pem` and `key.pem` hold the certificate chain for that hostname
+  and its private key. Configure the controller to trust the issuing CA.
+
+Restrict inbound TCP 443 to the controller at the VM network boundary and
+block guest access to metadata and private services before boot. Provision
+credentials offline on the private instance disk before first boot. Configure
+DHCP on the guest network and private DNS so the certificate hostname resolves
+to that instance from the controller. Apply ingress and egress policy on the
+hypervisor or upstream network before connecting the NIC. The worker and nginx
+units check for their provisioning files at boot. nginx forwards HTTP
+and WebSocket upgrades to loopback. systemd loads the worker credentials,
+runs the authenticated worker as browser-runtime, and starts each browser under
+the separate browser UID through a private launch socket. Launcher services
+are bound to the worker lifecycle and share its resource slice. Reconcile outstanding boots after a restart.
+
+The build provisions the disk with systemd-nspawn on ARM64 Linux. The disposable
+boot trial also requires libguestfs and QEMU. Full acceptance requires a TLS
+connection from the controller, sandboxed launches of all three engines,
+WebSocket attachment and process cleanup after a worker crash.
+
 ## HTTP lifecycle
 
 All routes reject browser Origin headers. Requests use bearer headers; secrets
@@ -194,5 +250,11 @@ startup, expiry, uncertain cleanup, the WebSocket gateway, exact forwarding rule
 context configuration, tabs, evaluation and pointer dispatch. Package checks
 verify the new entrypoints without launching browsers. These checks do not prove
 real rendering, browser sandbox availability, cross-network forwarding, hot reload,
-frame/shadow behavior, screenshots or process supervision. Native and deployed
-acceptance remain outstanding. Track delivery in [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding).
+frame/shadow behavior, screenshots or process supervision.
+
+On 18 November 2026, a disposable ARM64 CI guest built from `eaf5f62`
+launched Chromium, accepted an authenticated Playwright connection through its
+local TLS gateway and rendered a screenshot matching the expected pixels. The
+trial verified launcher cgroup removal after normal closure and after killing the
+worker. Firefox, WebKit and access from a deployed controller still require
+native verification. [CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)

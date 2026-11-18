@@ -1,0 +1,9 @@
+[Unit]
+Description=Private browser launch socket
+
+[Socket]
+ListenStream=/run/canaveral-browser-launch.sock
+SocketMode=0600
+SocketUser=browser-runtime
+Accept=yes
+MaxConnections=32

@@ -1,0 +1,26 @@
+[Unit]
+Description=Canaveral Playwright worker
+Requires=browser-launch.socket
+After=browser-launch.socket
+ConditionPathExists=/etc/canaveral-browser/token
+ConditionPathExists=/etc/canaveral-browser/origin
+
+[Service]
+User=browser-runtime
+Group=browser-runtime
+WorkingDirectory=/opt/worker
+Slice=canaveral.slice
+LoadCredential=token:/etc/canaveral-browser/token
+LoadCredential=origin:/etc/canaveral-browser/origin
+ExecStart=/usr/local/bin/node /opt/worker/start.mjs
+Restart=on-failure
+KillMode=control-group
+TimeoutStopSec=15
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+MemoryMax=4G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

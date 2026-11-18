@@ -1,0 +1,24 @@
+[Unit]
+Description=Isolated Playwright browser launcher
+BindsTo=browser.service
+PartOf=browser.service
+After=browser.service
+
+[Service]
+User=browser
+Group=browser
+Slice=canaveral.slice
+WorkingDirectory=/opt/worker
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/browsers
+StandardInput=socket
+StandardOutput=null
+ExecStart=/usr/local/bin/node /opt/worker/launcher.mjs
+KillMode=control-group
+TimeoutStopSec=5
+PrivateTmp=yes
+ProtectProc=invisible
+SocketBindDeny=tcp:9333
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/browser
+InaccessiblePaths=/etc/canaveral-browser -/run/credentials
