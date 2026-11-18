@@ -321,6 +321,13 @@ fn reactor_inner(
     let mut authority: Option<Authority> = None;
     let mut deferred_ready = None;
     let mut running: Option<Running> = None;
+    let mut preview_port: Option<u16> = None;
+    let mut preview_line = Vec::new();
+    let withdraw_preview = || {
+        if let Some(state) = data_ready {
+            *state.preview.lock().unwrap() = None;
+        }
+    };
     let mut last_id = Uuid::nil();
     let mut completed_id = Uuid::nil();
     let mut credit = 0u64;
@@ -342,9 +349,11 @@ fn reactor_inner(
                 // cancelled process into a timed-out execution.
                 r.reap_orphans()?;
                 if r.exited()? {
+                    withdraw_preview();
                     r.kill();
                 }
                 if !r.killed && time.saturating_sub(r.start) >= r.timeout {
+                    withdraw_preview();
                     r.timed_out = true;
                     r.kill();
                 }
@@ -449,6 +458,18 @@ fn reactor_inner(
                                 } else {
                                     (cwd, env)
                                 };
+                                preview_line.clear();
+                                preview_port = match argv.as_slice() {
+                                    [agent, flag, port, _, ..]
+                                        if agent == "/sbin/canaveral-guest-agent"
+                                            && flag == "--preview-service" =>
+                                    {
+                                        port.parse::<u16>()
+                                            .ok()
+                                            .filter(|n| *n != 0 && n.to_string() == *port)
+                                    }
+                                    _ => None,
+                                };
                                 match Running::start(id, argv, cwd, env, timeout_ms, root) {
                                     Ok(r) => running = Some(r),
                                     Err(e) if e.is::<SpawnFailed>() => {
@@ -461,6 +482,7 @@ fn reactor_inner(
                             Host::Cancel { id, .. }
                                 if running.as_ref().is_some_and(|r| r.id == id) =>
                             {
+                                withdraw_preview();
                                 running.as_mut().unwrap().kill();
                             }
                             Host::Cancel { id, .. }
@@ -513,6 +535,28 @@ fn reactor_inner(
                         match read {
                             Ok(0) => r.eof[stream] = true,
                             Ok(n) => {
+                                if stream == 0 && !r.killed {
+                                    if let (Some(port), Some(state)) = (preview_port, data_ready) {
+                                        let expected = format!("previewReady {port}\n");
+                                        if preview_line.len() + n <= expected.len() {
+                                            preview_line.extend_from_slice(&buffer[..n]);
+                                        } else {
+                                            preview_port = None;
+                                        }
+                                        if preview_port.is_some()
+                                            && preview_line == expected.as_bytes()
+                                        {
+                                            let expiry = authority
+                                                .as_ref()
+                                                .unwrap()
+                                                .deadline()
+                                                .min(r.start.saturating_add(r.timeout));
+                                            *state.preview.lock().unwrap() =
+                                                Some((r.id, port, expiry));
+                                            preview_port = None;
+                                        }
+                                    }
+                                }
                                 credit -= n as u64;
                                 r.counts[stream] += n as u64;
                                 pending = encode(&Guest::Output {
@@ -530,6 +574,7 @@ fn reactor_inner(
                         }
                     }
                     if r.eof == [true; 2] && pending.is_empty() && r.exited()? {
+                        withdraw_preview();
                         let receipt = r.finish()?;
                         let confirmed = matches!(
                             receipt,
@@ -554,6 +599,11 @@ fn reactor_inner(
             if let Some(r) = &running {
                 if !r.killed {
                     deadline = deadline.min(r.start.saturating_add(r.timeout));
+                }
+            }
+            if let Some(state) = data_ready {
+                if let Some((_, _, expiry)) = state.preview.lock().unwrap().as_mut() {
+                    *expiry = deadline;
                 }
             }
             // Child exit/adoption has no pipe event if a descendant retains the pipe.
@@ -586,6 +636,7 @@ fn reactor_inner(
             }
         }
     })();
+    withdraw_preview();
     if let Some(a) = authority.as_mut() {
         a.fence();
     }

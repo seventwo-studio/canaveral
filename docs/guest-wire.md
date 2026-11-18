@@ -239,3 +239,28 @@ and await terminationConfirmed on exit. Repeated cancel of the last completed
 ID is harmless. Expiry, disconnect and timeout use the ordinary supervised
 process cleanup and fencing contract. This mode introduces no new frame types
 and requires a guest build known to contain the wrapper.
+
+### Bounded preview HTTP exchange
+
+After both handshakes and the previewReady line, a satellite with a known
+supporting guest build may send one request at a time on the workspace data
+socket. Existing data framing, version 1, and handshake bytes apply. There
+is no automatic feature negotiation. Old peers receive no extension frames
+unless they initiate an exchange.
+
+    {"type":"previewRequest","version":1,"id":"<request UUID>","execId":"<preview exec UUID>","method":"GET","target":"/path?query"}
+
+Use a fresh non-nil request UUID for correlation. Method is GET or HEAD.
+Target is 1–4096 visible ASCII bytes starting with a single slash, with no
+fragment or backslash. There are no request headers, body, port or upstream
+fields. The agent sends HTTP/1.0 with Host set to the declared IPv4 loopback
+endpoint and Connection: close. Redirects are returned directly.
+
+    {"type":"previewResponse","version":1,"id":"<request UUID>","data":"<standard padded base64>"}
+
+Data carries the entire raw upstream HTTP response through EOF, including
+headers, capped at 65536 decoded bytes. Empty data signals failure (including
+inactive exec, timeout, or oversized response). Treat all upstream bytes as
+untrusted HTTP, validate framing before serving, and discard responses after
+local stop or expiry. The guest caps the exchange at 500 ms. Native acceptance
+of this extension remains pending.

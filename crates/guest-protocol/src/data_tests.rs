@@ -289,3 +289,29 @@ fn cursor_hash_empty_and_multistep_streams() {
             .unwrap();
     }
 }
+
+#[test]
+fn preview_request_confinement() {
+    for (method, target, valid) in [
+        ("GET", "/?q=ok", true),
+        ("HEAD", "/", true),
+        ("POST", "/", false),
+        ("GET", "//other", false),
+        ("GET", "http://other/", false),
+        ("GET", "/x\r\nInjected", false),
+        ("GET", "/a#b", false),
+    ] {
+        let frame = Frame::PreviewRequest {
+            version: 1,
+            id: id(1),
+            exec_id: id(2),
+            method: method.into(),
+            target: target.into(),
+        };
+        assert_eq!(frame.validate(Sender::Host).is_ok(), valid);
+        assert!(frame.validate(Sender::Guest).is_err());
+        let mut json = serde_json::to_value(frame).unwrap();
+        json["port"] = 1234.into();
+        assert!(serde_json::from_value::<Frame>(json).is_err());
+    }
+}

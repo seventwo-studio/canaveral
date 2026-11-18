@@ -116,7 +116,7 @@ fn main() {
                 c"/workspace".as_ptr(),
                 c"tmpfs".as_ptr(),
                 libc::MS_NODEV | libc::MS_NOSUID,
-                c"size=16777216,uid=1000,gid=1000".as_ptr().cast()
+                c"size=16777216,uid=1000,gid=1000,mode=0700".as_ptr().cast()
             ),
             0
         );
@@ -140,7 +140,47 @@ fn main() {
     let (mut host, guest) = UnixStream::pair().unwrap();
     host.set_read_timeout(Some(std::time::Duration::from_secs(10)))
         .unwrap();
-    let binding = launch.binding.clone();
+    use canaveral_guest_protocol::data::{self as wire, Frame, Sender};
+    fn exchange(socket: &mut UnixStream, frame: Frame) -> Frame {
+        socket
+            .write_all(&wire::encode(&frame, Sender::Host).unwrap())
+            .unwrap();
+        let mut decoder = wire::Decoder::default();
+        loop {
+            let mut bytes = vec![0; decoder.needed()];
+            socket.read_exact(&mut bytes).unwrap();
+            if let Some(frame) = decoder.feed(&bytes, Sender::Guest).unwrap() {
+                return frame;
+            }
+        }
+    }
+    let workspace: canaveral_guest_protocol::bundle::WorkspaceLaunch = serde_json::from_slice(
+        include_bytes!("../../guest-protocol/fixtures/launch-v2.json"),
+    )
+    .unwrap();
+    let binding = workspace.binding.clone();
+    let nonce = workspace.data.nonce.clone();
+    let ready_state = data::Readiness::new();
+    let data_state = ready_state.clone();
+    let (mut channel, data_guest) = UnixStream::pair().unwrap();
+    channel
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    let data_launch = workspace.clone();
+    let worker = thread::spawn(move || {
+        let proxy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        data::session(
+            File::from(std::os::fd::OwnedFd::from(data_guest)),
+            proxy,
+            &data_launch,
+            &data_state,
+            file_executor::linux::start(
+                workspace::confined::Root::new(File::open(root).unwrap()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+    });
     fn read(s: &mut UnixStream) -> Guest {
         let mut n = [0; 4];
         s.read_exact(&mut n).unwrap();
@@ -156,9 +196,13 @@ fn main() {
             &mut host,
             Host::Hello {
                 version: 1,
-                binding,
+                binding: binding.clone(),
                 remaining_ms: 20000,
             },
+        );
+        assert!(
+            matches!(exchange(&mut channel, Frame::DataHello { version: 1, binding: binding.clone(), nonce: nonce.clone() }),
+            Frame::DataReady { version: 1, binding: actual, nonce: echoed } if actual == binding && echoed == nonce)
         );
         assert!(matches!(read(&mut host), Guest::Ready { .. }));
         use base64::Engine;
@@ -215,18 +259,27 @@ fn main() {
             }
         }
         assert_eq!(receipt, ready.as_bytes());
-        let path = format!("/fixture-{port}");
-        let mut stream = TcpStream::connect(address).unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .unwrap();
-        write!(
-            stream,
-            "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let challenge = std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap();
+        let path = format!("/fixture?nonce={}", challenge.trim());
+        let mut get = |request_id| {
+            let response = exchange(
+                &mut channel,
+                Frame::PreviewRequest {
+                    version: 1,
+                    id: request_id,
+                    exec_id: id,
+                    method: "GET".into(),
+                    target: path.clone(),
+                },
+            );
+            match response {
+                Frame::PreviewResponse { id, data, .. } if id == request_id => {
+                    wire::payload(&data, true).unwrap()
+                }
+                other => panic!("unexpected preview response {other:?}"),
+            }
+        };
+        let response = String::from_utf8(get(Uuid::from_u128(101))).unwrap();
         let (headers, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(headers.starts_with("HTTP/1.1 200 ") || headers.starts_with("HTTP/1.0 200 "));
         assert_eq!(body, format!("1000 /workspace {path}"));
@@ -239,7 +292,37 @@ fn main() {
             TcpStream::connect(address).unwrap_err().kind(),
             std::io::ErrorKind::ConnectionRefused
         );
-        println!("previewReady {port}, GET 200 {body}, cancel confirmed, listener refused");
+        let replacement = TcpListener::bind(address).unwrap();
+        replacement.set_nonblocking(true).unwrap();
+        assert!(get(Uuid::from_u128(102)).is_empty());
+        assert_eq!(
+            replacement.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        println!("previewReady {port}, authenticated GET 200 {body}, cancel confirmed, post-stop GET denied without connecting to rebound port");
+    });
+    let result = runtime::workspace_session(
+        File::from(std::os::fd::OwnedFd::from(guest)),
+        &workspace,
+        &ready_state,
+    );
+    driver.join().unwrap();
+    worker.join().unwrap();
+    assert!(result.is_err());
+    let (mut host, guest) = UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let binding = launch.binding.clone();
+    let driver = thread::spawn(move || {
+        send(
+            &mut host,
+            Host::Hello {
+                version: 1,
+                binding,
+                remaining_ms: 20000,
+            },
+        );
+        assert!(matches!(read(&mut host), Guest::Ready { .. }));
         for (n, program, cwd, script, failed, timeout) in [
             (10,"/missing/program","/workspace","",true,1000),
             (11,"/bin/sh","/workspace/missing","",true,1000),

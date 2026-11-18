@@ -19,7 +19,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Per-boot readiness latch. Data is attempted once and never reconnected.
 #[cfg_attr(test, derive(Default))]
-pub(crate) struct Lane {
+pub struct Lane {
+    preview_digest: Option<String>,
     owner: Option<crate::ownership::Guard>,
     attempted: bool,
     initial_ready: bool,
@@ -28,8 +29,9 @@ pub(crate) struct Lane {
     options: Option<(bool, Vec<String>, Duration)>,
 }
 impl Lane {
-    pub(crate) fn owned(owner: crate::ownership::Guard) -> Self {
+    pub(crate) fn owned(owner: crate::ownership::Guard, preview_digest: Option<String>) -> Self {
         Self {
+            preview_digest,
             owner: Some(owner),
             attempted: false,
             initial_ready: false,
@@ -42,6 +44,7 @@ impl Lane {
     pub(crate) fn test_lane(stream: UnixStream, binding: Binding) -> Self {
         let session = Session::new(stream, binding, "b".repeat(64)).unwrap();
         Self {
+            preview_digest: None,
             owner: None,
             attempted: true,
             worker: Some(crate::reactor::spawn(
@@ -55,6 +58,27 @@ impl Lane {
             session: None,
             options: None,
         }
+    }
+    /// The supporting digest must come from trusted operator build evidence.
+    pub fn preview_request(
+        &self,
+        control: &guest::Session,
+        exec: uuid::Uuid,
+        method: &str,
+        target: &str,
+    ) -> Result<crate::reactor::PreviewReply> {
+        self.worker
+            .as_ref()
+            .ok_or("data unavailable")?
+            .preview_request(
+                control,
+                self.preview_digest
+                    .as_deref()
+                    .ok_or("preview build unavailable")?,
+                exec,
+                method,
+                target,
+            )
     }
     pub(crate) fn send_transfer(&self, frame: Frame) -> Result<()> {
         self.worker
@@ -144,7 +168,7 @@ impl Drop for Lane {
 pub struct Session {
     stream: Option<UnixStream>,
     decoder: Decoder,
-    hello: Binding,
+    pub(crate) hello: Binding,
     nonce: String,
     output: Vec<u8>,
     sent: usize,

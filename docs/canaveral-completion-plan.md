@@ -73,6 +73,12 @@ readiness. End-to-end acceptance also requires a private preview URL that
 serves both a static site's assets and a dynamic response generated inside the
 workspace. Verify that releasing the lease closes access to that URL.
 
+The guest supports a [bounded HTTP exchange](guest-wire.md#bounded-preview-http-exchange)
+for GET and HEAD requests to a ready service. Each response, including its
+headers, must fit within 64 KiB and arrive within 500 ms. Larger assets and
+streaming responses need additional transport support. Dashboard launch,
+private URL routing and owner authentication remain open.
+
 - A preview is a request tied to one pull request. The controller routes a per-PR hostname to the declared port over the existing outbound host connection and posts the URL as a deployment. Previews are private-network only for now; public exposure needs separate authentication and fork rules.
 - The controller polls the GitHub API for pull-request state, without webhooks. A new push updates the preview, and closing the pull request destroys it.
 - The GitHub credential is chosen together with previews. It stays behind the explicit secret boundary and never enters images or request bodies.

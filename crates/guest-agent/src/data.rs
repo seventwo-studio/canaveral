@@ -162,6 +162,7 @@ impl Output {
 /// Set only after dataReady is fully written. Cleared on every exit, including
 /// parser errors. The boot latch is separate: later loss must not revoke commands.
 pub(crate) struct Readiness {
+    pub preview: std::sync::Mutex<Option<(Uuid, u16, u64)>>,
     pub files: AtomicBool,
     pub initial: AtomicBool,
     pub stop: AtomicBool,
@@ -169,10 +170,66 @@ pub(crate) struct Readiness {
 impl Readiness {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            preview: Default::default(),
             files: AtomicBool::new(false),
             initial: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         })
+    }
+}
+// Keep the authority lock across each bounded write so revocation cannot
+// race a later upstream dispatch. Reads recheck the lease before delivery.
+fn preview_http(ready: &Readiness, exec: Uuid, method: &str, target: &str) -> Result<Vec<u8>> {
+    use std::time::Duration;
+    let deadline = now() + 500;
+    let authority = || -> Result<_> {
+        let guard = ready.preview.lock().unwrap();
+        let (_, port, expiry) = guard
+            .filter(|(id, _, _)| *id == exec)
+            .ok_or("inactive preview")?;
+        let left = deadline.min(expiry).saturating_sub(now());
+        if left == 0 || ready.stop.load(Ordering::Acquire) {
+            return Err("expired preview".into());
+        }
+        Ok((guard, port, Duration::from_millis(left)))
+    };
+    let (port, timeout) = {
+        let (_guard, port, timeout) = authority()?;
+        (port, timeout)
+    };
+    let address = (std::net::Ipv4Addr::LOCALHOST, port).into();
+    let mut upstream = TcpStream::connect_timeout(&address, timeout)?;
+    let request =
+        format!("{method} {target} HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+    {
+        let (_guard, _, left) = authority()?;
+        upstream.set_write_timeout(Some(left.min(Duration::from_millis(20))))?;
+        if upstream.write(request.as_bytes())? != request.len() {
+            return Err("short preview write".into());
+        }
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let left = authority()?.2;
+        upstream.set_read_timeout(Some(left.min(Duration::from_millis(20))))?;
+        match upstream.read(&mut buffer) {
+            Ok(0) => {
+                drop(authority()?);
+                return Ok(bytes);
+            }
+            Ok(n) if bytes.len() + n <= data::MAX_CHUNK => bytes.extend_from_slice(&buffer[..n]),
+            Ok(_) => return Err("preview response too large".into()),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 pub(crate) fn session(
@@ -248,6 +305,21 @@ pub(crate) fn session(
                                 }
                             }
                             match frame {
+                                Frame::PreviewRequest {
+                                    id,
+                                    exec_id,
+                                    method,
+                                    target,
+                                    ..
+                                } => {
+                                    let bytes = preview_http(ready, exec_id, &method, &target)
+                                        .unwrap_or_default();
+                                    output.queue(Frame::PreviewResponse {
+                                        version: 1,
+                                        id,
+                                        data: STANDARD.encode(bytes),
+                                    })?;
+                                }
                                 Frame::TransferRequest { .. } | Frame::TransferCancel { .. } => {
                                     if let Some(receipt) = files.dispatch(frame)? {
                                         output.queue(receipt)?;
@@ -702,6 +774,80 @@ mod tests {
             },
         );
         assert!(matches!(receive(host), Frame::DataReady { .. }));
+    }
+    #[test]
+    fn authenticated_preview_exchange() {
+        let (mut host, _, ready, worker) = pair(false);
+        hello(&mut host);
+        let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        let exec = Uuid::from_u128(12);
+        let request = |host: &mut UnixStream, number| {
+            let id = Uuid::from_u128(number);
+            send(
+                host,
+                Frame::PreviewRequest {
+                    version: 1,
+                    id,
+                    exec_id: exec,
+                    method: "HEAD".into(),
+                    target: "/check?q=1".into(),
+                },
+            );
+            match receive(host) {
+                Frame::PreviewResponse {
+                    id: echoed, data, ..
+                } if echoed == id => STANDARD.decode(data).unwrap(),
+                _ => panic!("missing preview response"),
+            }
+        };
+        assert!(request(&mut host, 1).is_empty());
+        *ready.preview.lock().unwrap() = Some((exec, port, now() + 3000));
+        let redirect = b"HTTP/1.0 302 Found\r\nLocation: /next\r\n\r\n";
+        let upstream = std::thread::spawn(move || {
+            let (mut socket, _) = endpoint.accept().unwrap();
+            let expected = format!(
+                "HEAD /check?q=1 HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            );
+            let mut wire = vec![0; expected.len()];
+            socket.read_exact(&mut wire).unwrap();
+            assert_eq!(wire, expected.as_bytes());
+            socket.write_all(redirect).unwrap();
+        });
+        assert_eq!(request(&mut host, 2), redirect);
+        upstream.join().unwrap();
+        *ready.preview.lock().unwrap() = Some((exec, port, now()));
+        assert!(request(&mut host, 3).is_empty());
+        drop(host);
+        worker.join().unwrap();
+    }
+    #[test]
+    fn preview_discards_oversize_stalled_and_revoked_responses() {
+        for scenario in ["oversize", "stall", "revoke"] {
+            let ready = Readiness::new();
+            let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = endpoint.local_addr().unwrap().port();
+            let exec = Uuid::from_u128(42);
+            *ready.preview.lock().unwrap() = Some((exec, port, now() + 3000));
+            let state = ready.clone();
+            let upstream = std::thread::spawn(move || {
+                let (mut socket, _) = endpoint.accept().unwrap();
+                let mut first = [0; 1];
+                socket.read_exact(&mut first).unwrap();
+                match scenario {
+                    "oversize" => {
+                        let _ = socket.write_all(&vec![1; data::MAX_CHUNK + 1]);
+                    }
+                    "stall" => std::thread::sleep(Duration::from_millis(650)),
+                    _ => {
+                        *state.preview.lock().unwrap() = None;
+                        let _ = socket.write_all(b"revoked");
+                    }
+                }
+            });
+            assert!(preview_http(&ready, exec, "GET", "/").is_err());
+            upstream.join().unwrap();
+        }
     }
     fn tunnel(address: std::net::SocketAddr) -> TcpStream {
         let mut client = TcpStream::connect(address).unwrap();

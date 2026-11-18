@@ -503,3 +503,28 @@ state reopening waits within a fixed bound for the ownership error to clear;
 other errors fail immediately. Start records use atomic publication, matching
 the native helper. Keep ordinary test parallelism enabled when verifying these
 boundaries.
+
+### Guest HTTP preview integration
+
+On a verified boot-bundle inventory entry, the operator can set
+`previewBundleDigest` to the exact 64-character lowercase manifest digest
+of a guest build known to implement the preview exchange. Omission disables
+requests. The satellite compares this pin with the authenticated launch
+binding. The control session tracks the wrapper's exec UUID and exact stdout
+readiness line. Cancellation, exit, control loss and session disposal revoke
+that exec's outstanding replies.
+
+Controller integration remains pending. Dispatch the foreground wrapper using
+the existing durable command path, retain the operation-to-guest-exec mapping,
+and deliver authorized GET/HEAD work to the live supervisor over the scoped
+controller transport. Check lease, member, boot attempt and preview ownership
+before calling `data::Lane::preview_request`. Poll the returned handle while
+continuing control supervision. The host allows one second including queue
+time and discards expired replies. A missing guest reply holds the preview
+slot for the boot while transfer and egress handling continue.
+
+Before serving a result, recheck controller authorization and expiry, validate
+the untrusted HTTP framing and apply the serving layer's header and origin
+policy. Empty responses and expired or revoked handles are failures. Stop uses
+ordinary cancel and awaits termination evidence. The integration uses the
+private data socket. Native guest-to-controller acceptance remains pending.
