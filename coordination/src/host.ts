@@ -702,6 +702,9 @@ export class HostRunner {
       if (slots <= 0) break;
       const id = identifier(task.id), key = `device:${id}`;
       if (this.active.has(key) || TERMINAL.has(String(this.deviceReports.get(id)?.state))) continue;
+      // Reconciliation owns the same assignment lock; dispatching now would turn a
+      // busy lock into an uncertain outcome. Wait for it, as reconciliation waits for operations.
+      if (this.active.has(`machine:${String(task.machineId)}`)) continue;
       const machine = this.assignments.find(m => m.id === task.machineId);
       if (machine && this.reports.get(String(machine.id))?.state !== "running" && this.clock.wall() < Number(task.expiresAt)) continue;
       slots--;
