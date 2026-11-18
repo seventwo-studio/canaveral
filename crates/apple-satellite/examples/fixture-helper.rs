@@ -209,7 +209,7 @@ mod fixture {
         let folder = PathBuf::from(r["directory"].as_str().ok_or("directory")?).join(&id);
         if let Some(boot) = r.get("directBoot") {
             if r.get("image").is_some()
-                || boot["version"] != 1
+                || (boot["version"] != 1 && boot["version"] != 2)
                 || boot["initrd"].is_null()
                 || boot["memberID"].as_str().map(str::to_uppercase) != Some(id.clone())
                 || boot["leaseID"] != r["leaseID"]
@@ -311,6 +311,8 @@ mod fixture {
             return fence(dir, &guard);
         }
         let relay = match &direct {
+            // The workspace fixture driver owns both socket peers and the real HTTP service.
+            Some(boot) if boot["version"] == 2 => None,
             Some(boot) => Some(relay::start(dir, boot, &guard.session)?),
             None => None,
         };

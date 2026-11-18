@@ -228,3 +228,34 @@ Public operation receipts include `dispatchedAt` (UTC timestamp) once the runner
 has received the command. It remains present on terminal receipts. This proves
 handoff, not successful guest execution; native expiry acceptance requires this
 receipt before expiry plus independent native cleanup evidence.
+
+### Preview dispatch contract
+
+A workspace runner advertises `ready.preview: true` only when the installed
+bundle is pinned for preview HTTP and its authenticated data channel is live.
+The runner polls for a specific active operation after its supervised command
+has produced the exact readiness receipt described in [guest wire](guest-wire.md#bounded-preview-http-exchange).
+
+The runner posts to `/v1/runners/linux-leases/previews/poll` with the existing
+operation binding (`binding`, `assignmentId`, `bootAttempt`, `bundleDigest`)
+and `operationId`. An idle reply contains `dispatch: null`. A work reply
+contains `controllerNow` and a `dispatch` object with `id`, `operationId`,
+`leaseId`, `memberId`, `assignmentId`, `bootAttempt`, `bundleDigest`,
+`method`, `target` and `expiresAt`. Both times are UTC seconds. The runner
+checks the binding and starts its local deadline from the time it sent the
+poll, so transit time counts toward the budget.
+
+The runner posts to `/v1/runners/linux-leases/previews/report` with the same
+binding, `operationId`, `dispatchId` and `responseBase64`. The response is the
+bounded raw guest HTTP response in standard base64, or null on failure.
+The controller rechecks authority before delivering a reply. Late reports
+cannot satisfy another request.
+
+Lease clients request a resource with GET or HEAD at
+`/v1/leases/{leaseId}/previews/{operationId}/{path}` using the lease bearer
+key. The controller passes the path and query to the guest. It allows one
+pending request per operation and at most 32 across the controller. The
+response carries the upstream status, content type and bounded body. The
+controller discards upstream cookies and rejects encoded or ambiguously
+framed bodies. This endpoint serves credentialed API clients. A private
+dashboard preview origin still requires its own routing and authentication.

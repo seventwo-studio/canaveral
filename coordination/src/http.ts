@@ -43,6 +43,7 @@ function respond(response: ServerResponse, value: unknown, status = 200): void {
 
 // POST routes whose proof is checked by the worker rather than the administrator pre-check.
 const selfAuthenticated = [
+  "/v1/runners/linux-leases/previews/poll", "/v1/runners/linux-leases/previews/report",
   "/v1/runners/linux-leases/transfers/poll", "/v1/runners/linux-leases/transfers/report",
   "/v1/runners/linux-leases/operations/poll", "/v1/runners/linux-leases/operations/report",
   "/v1/auth/login", "/v1/runner-enrollments/consume", "/v1/runners/authenticate",
@@ -54,6 +55,7 @@ const leaseAdministration: Record<string, IdentityCommand["type"]> = {
   "/v1/linux-lease-runner-approvals": "leases.approve", "/v1/linux-lease-runner-approvals/revoke": "leases.approvalRevoke",
 };
 const leaseBody: Record<string, IdentityCommand["type"]> = {
+  "/v1/runners/linux-leases/previews/poll": "leases.pollPreview", "/v1/runners/linux-leases/previews/report": "leases.reportPreview",
   "/v1/runners/linux-leases/transfers/poll": "leases.pollTransfer", "/v1/runners/linux-leases/transfers/report": "leases.reportTransfer",
   "/v1/runners/linux-leases/operations/poll": "leases.pollOperation", "/v1/runners/linux-leases/operations/report": "leases.reportOperation",
   "/v1/leases": "leases.acquire", "/v1/runners/linux-leases/claim": "leases.claim",
@@ -107,6 +109,18 @@ export function createIdentityHandler(identities: IdentityClient, parsedBody?: (
       const path = "/" + (request.url ?? "").split(/[?#]/, 1)[0]!.replace(/^\/+|\/+$/g, "");
       const query = new URLSearchParams((request.url ?? "").split("#", 1)[0]!.split("?").slice(1).join("?"));
       if (request.method === "GET" && path === "/healthz") { respond(response, { ok: true }); return; }
+      const preview = new RegExp(`^/v1/leases/(${LEASE_ID})/previews/(${LEASE_ID})(/.*)$`).exec(request.url ?? "");
+      if (preview && (request.method === "GET" || request.method === "HEAD")) {
+        if (request.headers.cookie || request.headers["transfer-encoding"] || Number(request.headers["content-length"] ?? 0) !== 0)
+          throw new ServiceError("Invalid preview request framing.",400);
+        const result = await identities.request({type:"leases.preview",token,id:preview[1]!,operationId:preview[2]!,method:request.method,target:preview[3]!}) as import("./linux-preview.ts").PreviewResponse;
+        if (!response.destroyed) {
+          response.writeHead(result.status,{...(result.contentLength === undefined ? {} : {"Content-Length":result.contentLength}),"Content-Type":result.contentType,"Cache-Control":"no-store","Connection":"close",
+            "Content-Security-Policy":"sandbox; default-src 'none'","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"});
+          response.end(Buffer.from(result.body));
+        }
+        return;
+      }
       const transferRoute = /^\/v1\/leases\/([0-9a-f-]+)\/transfers(?:\/([0-9a-f-]+)(?:\/steps(?:\/([0-9]+))?)?)?$/.exec(path);
       let command: IdentityCommand;
       if (request.method === "GET" && path === "/v1/auth/status") command = { type: "status" };

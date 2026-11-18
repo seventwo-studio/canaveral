@@ -859,3 +859,30 @@ exclusion and this single reconciliation path. Prepare-input descriptor retentio
 broader VZ/XPC/lsof topology variants and APFS interrupted deletion/power loss
 remain open. Existing ordinary host/controller execution gates stay closed; this
 case cannot establish full platform acceptance.
+
+## Controller preview dispatch trial (2026-11-18)
+
+On the arm64 Mac, set `CANAVERAL_PREVIEW_FIXTURE=1` when invoking the existing
+`fixtures/apple-satellite/public-api.mjs` command with its usual five paths.
+This mode starts an ephemeral TLS controller, Rust runner identity client and
+Rust Apple satellite. A fixture helper and two private Unix socket peers stand
+in for native launch and guest transport. A separate Node HTTP process serves
+requests from a disposable host workspace. The trial uses the fixture clock.
+
+The satellite advertised transport capability before receiving the command.
+The first preview poll followed the guest peer's readiness receipt. The current
+lease key received HTTP 200 with the service working directory and fresh query
+nonce. The application key and rotated lease key both received 401 without a
+guest request. After confirmed operation exit, the old URL returned 409 and
+the replacement listener on the same port received zero connections. Release
+finished with the helper gone, workspace and relay removed, and zero reservations.
+
+A separate rerun of the cached Linux PID1 namespace fixture returned HTTP 200
+from UID 1000 in /workspace, confirmed cancellation and refused a request to
+the rebound port. The disposable Lima VM returned to its initial stopped state.
+The controller trial used a simulated guest, and the namespace trial used a
+fixture host. Native acceptance still requires an installed workspace v2
+bundle containing the preview-capable Linux guest agent, its verified canonical
+manifest digest configured as the satellite inventory previewBundleDigest,
+and a trial over the production helper and virtio-vsock. The installed ST-535
+bundles predate the preview implementation.

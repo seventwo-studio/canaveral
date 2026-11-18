@@ -1,4 +1,6 @@
 export type IdentityCommand =
+  | { type: "leases.preview"; token:string; id:string; operationId:string; method:string; target:string }
+  | { type: "leases.pollPreview" | "leases.reportPreview"; token:string; body:unknown }
   | { type: "leases.createTransfer" | "leases.createTransferStep"; token:string; id:string; transferId?:string; body:unknown }
   | { type: "leases.transfer"; token:string; id:string; transferId:string; step?:number }
   | { type: "leases.pollTransfer" | "leases.reportTransfer"; token:string; body:unknown }

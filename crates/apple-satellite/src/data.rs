@@ -42,9 +42,10 @@ impl Lane {
     }
     #[cfg(test)]
     pub(crate) fn test_lane(stream: UnixStream, binding: Binding) -> Self {
+        let preview_digest = Some(binding.bundle_digest.clone());
         let session = Session::new(stream, binding, "b".repeat(64)).unwrap();
         Self {
-            preview_digest: None,
+            preview_digest,
             owner: None,
             attempted: true,
             worker: Some(crate::reactor::spawn(
@@ -66,6 +67,7 @@ impl Lane {
         exec: uuid::Uuid,
         method: &str,
         target: &str,
+        deadline: Duration,
     ) -> Result<crate::reactor::PreviewReply> {
         self.worker
             .as_ref()
@@ -78,6 +80,7 @@ impl Lane {
                 exec,
                 method,
                 target,
+                deadline,
             )
     }
     pub(crate) fn send_transfer(&self, frame: Frame) -> Result<()> {
@@ -147,6 +150,12 @@ impl Lane {
                 self.initial_ready |= session.ready();
             }
         }
+    }
+    pub(crate) fn preview_ready(&self, digest: &str) -> bool {
+        self.preview_digest.as_deref() == Some(digest)
+            && self.worker.as_ref().is_some_and(|w| {
+                w.authority.permits() && w.ready.load(std::sync::atomic::Ordering::Acquire)
+            })
     }
     pub(crate) fn files_ready(&self) -> bool {
         self.worker

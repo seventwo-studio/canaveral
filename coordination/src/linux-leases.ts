@@ -1,3 +1,4 @@
+import { parsePreview, type PreviewResponse } from "./linux-preview.ts";
 import { LinuxTransfers, transferError, transferUUID } from "./linux-transfers.ts";
 import { applicationLeaseUsage, legacyTable, mergedLeasePage, refreshLegacyLeases } from "./control/leases.ts";
 import { operationObject, operationArgv, operationReceipt } from "./linux-operations.ts";
@@ -46,7 +47,7 @@ interface AssignmentRow extends WorkspaceRow { workspace_removed: number; data_p
 }
 interface Receipt {
   leaseId: string; memberId: string; backend: Backend; imageDigest: string; observedRevision: number;
-  runtimeState: typeof RUNTIME[number]; ready: { command: boolean; pty: boolean; files: boolean };
+  runtimeState: typeof RUNTIME[number]; ready: { preview?: boolean; command: boolean; pty: boolean; files: boolean };
   failure: typeof FAILURE[number] | null; executionStopped: boolean; storageRemoved: boolean; credentialsErased: boolean;
   cleanup: typeof CLEANUP[number]; workspaceRemoved?: boolean; dataPlaneClosed?: boolean;
 }
@@ -118,13 +119,13 @@ function runtimeRank(state: string): number {
 function parseReceipt(value: unknown): Receipt {
   const r = exact(value, ["leaseId", "memberId", "backend", "imageDigest", "observedRevision", "runtimeState", "ready", "failure",
     "executionStopped", "storageRemoved", "credentialsErased", "cleanup"], "linux lease receipt", ["workspaceRemoved", "dataPlaneClosed"]);
-  const ready = exact(r.ready, HEADLESS, "ready capabilities");
+  const ready = exact(r.ready, HEADLESS, "ready capabilities", ["preview"]);
   if (typeof r.imageDigest !== "string" || !DIGEST.test(r.imageDigest)) throw new ServiceError("Invalid image digest.", 400);
   return {
     leaseId: identifier(r.leaseId), memberId: identifier(r.memberId), backend: backend(r.backend), imageDigest: r.imageDigest,
     observedRevision: positive(r.observedRevision, Number.MAX_SAFE_INTEGER, "observedRevision"),
     runtimeState: oneOf(r.runtimeState, RUNTIME, "runtimeState"),
-    ready: { command: bool(ready.command, "ready.command"), pty: bool(ready.pty, "ready.pty"), files: bool(ready.files, "ready.files") },
+    ready: { ...(ready.preview === undefined ? {} : { preview: bool(ready.preview,"ready.preview") }), command: bool(ready.command, "ready.command"), pty: bool(ready.pty, "ready.pty"), files: bool(ready.files, "ready.files") },
     failure: r.failure === null ? null : oneOf(r.failure, FAILURE, "failure"),
     executionStopped: bool(r.executionStopped, "executionStopped"), storageRemoved: bool(r.storageRemoved, "storageRemoved"),
     ...(Object.hasOwn(r, "workspaceRemoved") ? { workspaceRemoved: bool(r.workspaceRemoved, "workspaceRemoved") } : {}),
@@ -135,7 +136,7 @@ function parseReceipt(value: unknown): Receipt {
 /** Fixed key order for exact replay comparison. */
 function canonical(r: Receipt): string {
   return JSON.stringify([r.leaseId, r.memberId, r.backend, r.imageDigest, r.observedRevision, r.runtimeState,
-    r.ready.command, r.ready.pty, r.ready.files, r.failure, r.executionStopped, r.storageRemoved, r.credentialsErased, r.cleanup, ...(r.workspaceRemoved === undefined ? [] : [r.workspaceRemoved, r.dataPlaneClosed])]);
+    r.ready.command, r.ready.pty, r.ready.files, r.failure, r.executionStopped, r.storageRemoved, r.credentialsErased, r.cleanup, ...(r.workspaceRemoved === undefined ? [] : [r.workspaceRemoved, r.dataPlaneClosed]), ...(r.ready.preview ? [true] : [])]);
 }
 
 /** Headless Linux guest leases on explicitly approved kubevirt or Apple Virtualization runner
@@ -514,6 +515,7 @@ export class LinuxLeases {
       if (sequence !== assignment.sequence + 1) throw new ServiceError("Report sequence must advance by exactly one.", 409);
       if (r.observedRevision > lease.revision || r.observedRevision < assignment.observed_revision) throw new ServiceError("Observed revision is stale or from the future.", 409);
       if (runtimeRank(r.runtimeState) < runtimeRank(lease.runtime) || (lease.runtime === "stopped" && r.runtimeState !== "stopped")) throw new ServiceError("Runtime state cannot regress.", 409);
+      if (r.ready.preview && (lease.workspace_version !== 1 || lease.backend !== "appleVirtualization" || !r.ready.files)) throw new ServiceError("Preview requires a live workspace data channel.",409);
       const offered = JSON.parse(lease.capabilities) as string[];
       for (const c of HEADLESS) {
         if (r.ready[c] && (r.runtimeState !== "running" || !offered.includes(c))) throw new ServiceError("Ready capabilities require a running runtime and a catalogued capability.", 409);
@@ -621,6 +623,66 @@ export class LinuxLeases {
       return this.operationView(row);
     });
   }
+  private readonly previews = new Map<string, {
+    id: string; method: string; target: string; deadline: number; claimed: boolean;
+    finish: (data: unknown) => void;
+  }>();
+
+  private previewOperation(db: DatabaseSync, lease: LeaseRow, operationId: string, now: number) {
+    const op = this.operationRow(db, identifier(operationId));
+    if (!op || op.lease !== lease.id) throw new ServiceError("Unknown preview.",404);
+    const a = this.assignmentRow(db, op.assignment)!;
+    const argv = JSON.parse(op.argv) as string[];
+    if (!this.commandEligible(db, lease, a) || lease.workspace_version !== 1 || JSON.parse(a.report!)[16] !== true ||
+        op.credential !== lease.credential || op.state !== "queued" || op.dispatched === null || !op.execution_deadline || now >= op.execution_deadline ||
+        argv.length < 4 || argv[0] !== "/sbin/canaveral-guest-agent" || argv[1] !== "--preview-service" ||
+        !/^[0-9]+$/.test(argv[2]!) || Number(argv[2]) < 1 || Number(argv[2]) > 65535)
+      throw new ServiceError("Preview unavailable.",409);
+    return op;
+  }
+
+  preview(token: string, leaseId: string, operationId: string, method: string, target: string): Promise<PreviewResponse> {
+    if (!["GET","HEAD"].includes(method) || target.length > 4096 || !/^\/(?!\/)[!-~]*$/.test(target) || /[#\\]/.test(target))
+      throw new ServiceError("Invalid preview target.",400);
+    operationId = identifier(operationId);
+    this.transaction((db,now) => this.previewOperation(db,this.operationAccess(db,leaseId,token),operationId,now));
+    if (this.previews.has(operationId) || this.previews.size >= 32) throw new ServiceError("Preview busy.",429);
+    return new Promise((resolve,reject) => {
+      const deadline = performance.now() + 1000;
+      const timeout = setTimeout(() => {
+        this.previews.delete(operationId);
+        reject(new ServiceError("Preview timed out.",504));
+      },1000);
+      this.previews.set(operationId,{id:randomUUID(),method,target,deadline,claimed:false,finish:data => {
+        clearTimeout(timeout);
+        this.previews.delete(operationId);
+        try { resolve(parsePreview(data,method)); } catch (error) { reject(error); }
+      }});
+    });
+  }
+
+  runnerPreview(token: string, value: unknown, report: boolean) {
+    const r = operationObject(value,["binding","assignmentId","bootAttempt","bundleDigest","operationId",...(report ? ["dispatchId","responseBase64"] : [])]);
+    const operationId = identifier(r.operationId);
+    const {op,a,lease,boot,digest,now} = this.transaction((db,now) => {
+      const tuple = this.operationBinding(db,token,r);
+      const op = this.previewOperation(db,tuple.lease,operationId,now);
+      if (op.assignment !== tuple.a.id) throw new ServiceError("Wrong preview assignment.",409);
+      return {...tuple,op,now};
+    });
+    const pending = this.previews.get(operationId);
+    const remaining = pending ? (pending.deadline - performance.now()) / 1000 : 0;
+    if (report) {
+      if (!pending?.claimed || remaining <= 0 || pending.id !== r.dispatchId) throw new ServiceError("Unknown preview dispatch.",409);
+      pending.finish(r.responseBase64);
+      return {};
+    }
+    if (!pending || remaining <= 0 || pending.claimed) return {dispatch:null};
+    pending.claimed = true;
+    return {controllerNow:now,dispatch:{id:pending.id,operationId,leaseId:lease.id,memberId:lease.member,assignmentId:a.id,
+      bootAttempt:boot,bundleDigest:digest,method:pending.method,target:pending.target,expiresAt:Math.min(now+remaining,lease.expires,op.execution_deadline!)}};
+  }
+
   private operationBinding(db: DatabaseSync, token: string, r: Record<string, unknown>): { a: AssignmentRow; lease: LeaseRow; boot: string; digest: string } {
     const b = this.requireRunners().verify(db, token, r.binding), a = this.assignmentRow(db, identifier(r.assignmentId));
     if (!a) throw new ServiceError("Unknown assignment.", 404);

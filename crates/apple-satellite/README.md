@@ -514,12 +514,12 @@ binding. The control session tracks the wrapper's exec UUID and exact stdout
 readiness line. Cancellation, exit, control loss and session disposal revoke
 that exec's outstanding replies.
 
-Controller integration remains pending. Dispatch the foreground wrapper using
-the existing durable command path, retain the operation-to-guest-exec mapping,
-and deliver authorized GET/HEAD work to the live supervisor over the scoped
-controller transport. Check lease, member, boot attempt and preview ownership
-before calling `data::Lane::preview_request`. Poll the returned handle while
-continuing control supervision. The host allows one second including queue
+The assignment supervisor reports preview capability after the pinned bundle and
+live data channel match. After wrapper readiness it polls the controller for the
+active command operation on an independent worker. Each dispatch must match the
+command, lease, member, assignment and launch binding. The supervisor maps the
+operation to its live guest exec, passes the dispatch deadline to the data lane,
+and polls the reply while continuing command and lease supervision. The host allows one second including queue
 time and discards expired replies. A missing guest reply holds the preview
 slot for the boot while transfer and egress handling continue.
 
