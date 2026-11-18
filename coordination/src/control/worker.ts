@@ -28,6 +28,7 @@ const options: ControlOptions = {
   adminToken: secret(workerData.adminToken), controllerId: identifier(workerData.controllerId),
   ...(workerData.enrollmentToken === undefined ? {} : { enrollmentToken: secret(workerData.enrollmentToken) }),
   ...(workerData.updatePublicKeys === undefined ? {} : { updatePublicKeys: workerData.updatePublicKeys as Record<string, string> }),
+  ...(Array.isArray(workerData.browserHosts) ? { browserHosts: workerData.browserHosts.map(identifier) } : {}),
 };
 if (options.adminToken === options.enrollmentToken) throw new Error("Admin and enrollment credentials must be different.");
 const operatorHash = createHash("sha256").update(options.adminToken, "ascii").digest();

@@ -105,6 +105,8 @@ const providers: Readonly<Record<string, string>> = {
   kubevirt: "KubeVirt",
   android: "Android Emulator",
   ios: "iOS Simulator",
+  browser: "Browsers",
+  inference: "AI inference",
 };
 export const provider = (value?: string): string | undefined =>
   providers[value ?? ""] || value;

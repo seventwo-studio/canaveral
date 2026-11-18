@@ -3,7 +3,7 @@ import { constants, promises as fs, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { ServiceError } from "./errors.ts";
+import { secret, ServiceError } from "./errors.ts";
 import type { ParseArgsConfig } from "node:util";
 import {
   CliClient, CliError, credential, expandPath, handleAccount, metadata, option, positional,
@@ -20,6 +20,7 @@ dashboard [--bind IP] [--port PORT]       Start the optional dashboard
 local [--state DIR]                      Isolated loopback controller, dashboard and optional host
 host --config FILE --state DIR           Run a host (--setup-file FILE is also supported)
 host --config FILE --state DIR --check   Inspect without enrollment or starting machines
+promote-macos --config FILE --state DIR [--model-domain ID]
 login --username NAME --output-file FILE [--password-file FILE]
 logout | account password | users [list|create|update|invite|reset-password|revoke-invite]
 tokens [list|create|revoke] | admin create|setup-link|recover
@@ -50,10 +51,11 @@ configured runtimes. Missing support fails closed; local never downloads runtime
 type Schema = { flags?: string[]; values?: string[]; required?: string[]; positional?: number; actions?: string[]; defaultAction?: string };
 const schemas: Record<string, Schema> = {
   init: { positional: 1 },
-  serve: { values: ["config", "bind", "port", "database", "admin-token-file", "enrollment-token-file", "controller-id", "tls-cert-file", "tls-key-file", "update-trust-file"] },
+  serve: { values: ["config", "bind", "port", "database", "admin-token-file", "enrollment-token-file", "controller-id", "tls-cert-file", "tls-key-file", "update-trust-file", "browser-gateway-config"] },
   dashboard: { values: ["bind", "port", "bootstrap-token-file"] },
   local: { values: ["state", "api-port", "dashboard-port", "linux-image", "apple-runner", "android-sdk", "guest-helper-manifest", "controller-id"] },
   host: { flags: ["check"], values: ["config", "setup-file", "state", "ca-file", "enrollment-token-file"], required: ["state"] },
+  "promote-macos": { values: ["config", "state", "model-domain"], required: ["config", "state"] },
   admin: { actions: ["create", "setup-link", "recover"], values: ["username", "password-file", "user-id", "dashboard-url", "output-file"] },
   login: { values: ["username", "password-file", "output-file"], required: ["username", "output-file"] },
   logout: {}, account: { actions: ["password"], values: ["current-password-file", "password-file"] },
@@ -258,6 +260,7 @@ async function controllerConfig(args: CliArguments): Promise<Record<string, unkn
   const config: Record<string, unknown> = { statePath, adminTokenFile: resolve(expandPath(admin)), enrollmentTokenFile: resolve(expandPath(enrollment)), controllerId,
     listen: { host: option(args, "bind", "127.0.0.1"), port: numberOption(args, "port", 8765, 1, 65535) } };
   if (args.options["update-trust-file"]) config.updatePublicKeys = await jsonFile(option(args, "update-trust-file"));
+  if (args.options["browser-gateway-config"]) config.browserGateway = await jsonFile(option(args, "browser-gateway-config"));
   if (args.options["tls-cert-file"] || args.options["tls-key-file"]) config.tls = { certFile: resolve(expandPath(option(args, "tls-cert-file"))), keyFile: resolve(expandPath(option(args, "tls-key-file"))) };
   return config;
 }
@@ -289,6 +292,45 @@ function canonical(value: unknown): string {
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
   if (value && typeof value === "object") return "{" + Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k,v]) => JSON.stringify(k) + ":" + canonical(v)).join(",") + "}";
   return JSON.stringify(value);
+}
+async function promoteMacHost(args: CliArguments, io: CliIO): Promise<void> {
+  const { loadHost } = await import("./control/templates.ts");
+  const { hostOffer } = await import("./host.ts");
+  const { readRecord, saveRecord, StateLock, syncDirectory } = await import("./runtime-process.ts");
+  if (!args.tokenFile || args.allowHttp || new URL(args.url).protocol !== "https:") throw new CliError("Supply an operator token file and an HTTPS controller origin.");
+  const state = realpathSync(resolve(expandPath(option(args, "state"))));
+  const file = resolve(expandPath(option(args, "config")));
+  const config = loadHost(await jsonFile(file), dirname(file));
+  const offer = hostOffer(config);
+  if (offer.provider !== "macos" || realpathSync(String(record(record(config.runtimes).android).stateDirectory)) !== state) {
+    throw new CliError("The macOS config must retain the Android runner's existing stateDirectory.");
+  }
+  if (await exists(join(state, "agent.lock"))) throw new CliError("A historical native lock requires offline migration.");
+  const lock = new StateLock(join(state, "host-runner.sqlite"));
+  try {
+    const identityPath = join(state, "identity.json"), pendingPath = join(state, "macos-promotion.json");
+    const identity = readRecord(identityPath);
+    if (!identity || identity.orchestrator !== new URL(args.url).origin) throw new CliError("The saved identity belongs to a different controller.");
+    const id = uuid(String(identity.id));
+    const pending = (await exists(pendingPath)) ? readRecord(pendingPath) : undefined;
+    const modelDomainId = args.options["model-domain"] ? uuid(option(args, "model-domain")) : undefined;
+    const migration = pending ?? { id, offer, modelDomainId, credential: secret(identity.credential), replacementCredential: randomBytes(32).toString("base64url") };
+    if (migration.id !== id || migration.modelDomainId !== modelDomainId || canonical(migration.offer) !== canonical(offer)
+      || (migration.credential !== identity.credential && migration.replacementCredential !== identity.credential)) {
+      throw new CliError("The saved migration request differs from this identity or offer. Resume with the original configuration.");
+    }
+    if (!pending) saveRecord(pendingPath, migration);
+    const proof = await privateInput(args.tokenFile);
+    const reply = await io.client(args.url, proof, false).request("POST", `/v1/hosts/${id}/promote-macos`, {
+      offer, credential: secret(migration.credential), replacementCredential: secret(migration.replacementCredential),
+      ...(modelDomainId ? { modelDomainId } : {}),
+    });
+    if (reply.id !== id || reply.provider !== "macos") throw new CliError("Mac host migration was not confirmed. Keep the saved request and retry it.", 502, id, "unknown");
+    saveRecord(identityPath, { ...identity, credential: migration.replacementCredential });
+    await fs.unlink(pendingPath);
+    syncDirectory(state);
+    io.stdout(JSON.stringify({ id, provider: "macos" }) + "\n");
+  } finally { lock.close(); }
 }
 async function credentialRequest(destination: string, client: RequestClient, route: string, body: Record<string, unknown>, io: CliIO, resourceId: string): Promise<Record<string, unknown>> {
   let received = false;
@@ -407,6 +449,7 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
     if (argv.includes("--help") || argv.includes("-h")) { io.stdout(HELP); return 0; }
     const args = parseCli(argv);
     if (args.command === "init") { await initialize(positional(args)); io.stdout("Created private credential files in " + positional(args) + "\n"); return 0; }
+    if (args.command === "promote-macos") { await promoteMacHost(args, io); return 0; }
     if (["serve", "dashboard", "host", "local"].includes(args.command)) {
       const lifecycle = signals(io.signal); let service: CliService | undefined;
       try {

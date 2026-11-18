@@ -20,7 +20,7 @@ export interface ControlResponse { status?: number; body: unknown }
 export interface ControlModule {
   handle(request: ControlRequest): ControlResponse | undefined | Promise<ControlResponse | undefined>;
 }
-export interface ControlOptions { adminToken: string; enrollmentToken?: string; controllerId: string; updatePublicKeys?: Record<string, string> }
+export interface ControlOptions { adminToken: string; enrollmentToken?: string; controllerId: string; updatePublicKeys?: Record<string, string>; browserHosts?: string[] }
 export type ModuleFactory = (store: SqliteStore, options: ControlOptions) => ControlModule;
 
 export function requireScope(request: ControlRequest, action: "read" | "write" | "access" | "admin"): Principal {

@@ -13,6 +13,8 @@ import { IdentityClient } from "./identity-client.ts";
 import { ControlClient } from "./control/client.ts";
 import { createControllerHandler, createControllerUpgradeHandler } from "./control/http.ts";
 import { createSessionUpgradeHandler } from "./control/sessions.ts";
+import { createBrowserGateway, parseBrowserGateway } from "./control/browser-gateway.ts";
+import type { BrowserGatewayConfig } from "./control/browser-gateway.ts";
 import { controllerTLS, controllerTLSReloader } from "./tls-reload.ts";
 
 /** Explicit controller configuration. Nothing is discovered, adopted or defaulted to live state. */
@@ -21,6 +23,7 @@ export interface ControllerConfig {
   adminTokenFile: string;
   enrollmentTokenFile?: string;
   updatePublicKeys?: Record<string, string>;
+  browserGateway?: BrowserGatewayConfig;
   controllerId: string;
   listen: { host: string; port: number };
   tls?: { certFile: string; keyFile: string };
@@ -56,7 +59,7 @@ export function parseUpdatePublicKeys(value: unknown): Record<string, string> {
 }
 
 export function parseControllerConfig(value: unknown): ControllerConfig {
-  const input = record(value, ["statePath", "adminTokenFile", "controllerId", "listen"], ["tls", "enrollmentTokenFile", "updatePublicKeys"]);
+  const input = record(value, ["statePath", "adminTokenFile", "controllerId", "listen"], ["tls", "enrollmentTokenFile", "updatePublicKeys", "browserGateway"]);
   const listen = record(input.listen, ["host", "port"]);
   if (typeof listen.host !== "string" || !isIP(listen.host)) fail("listen.host must be an IP literal");
   if (typeof listen.port !== "number" || !Number.isSafeInteger(listen.port) || listen.port < 0 || listen.port > 65535) fail("listen.port must be 0-65535");
@@ -68,6 +71,7 @@ export function parseControllerConfig(value: unknown): ControllerConfig {
   };
   if (input.enrollmentTokenFile !== undefined) config.enrollmentTokenFile = path(input.enrollmentTokenFile, "enrollmentTokenFile");
   if (input.updatePublicKeys !== undefined) config.updatePublicKeys = parseUpdatePublicKeys(input.updatePublicKeys);
+  if (input.browserGateway !== undefined) config.browserGateway = parseBrowserGateway(input.browserGateway);
   if (input.tls !== undefined) {
     const tls = record(input.tls, ["certFile", "keyFile"]);
     config.tls = { certFile: path(tls.certFile, "tls.certFile"), keyFile: path(tls.keyFile, "tls.keyFile") };
@@ -88,24 +92,40 @@ export async function startController(config: ControllerConfig) {
   let server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer> | undefined;
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async hostId => {
+    const response = await control?.request({ type: "http", method: "GET", path: "/v1/hosts", query: "", token: adminToken, body: {} });
+    const inventory = response?.body as { hosts: { id: string; platform: string | null; placementReady: boolean }[] } | undefined;
+    return inventory?.hosts.some(host => host.id === hostId && host.platform === "macos" && host.placementReady) === true;
+  }) : undefined;
   try {
     await client.ready;
     control = new ControlClient({ path: config.statePath, adminToken, controllerId: config.controllerId,
       ...(enrollmentToken === undefined ? {} : { enrollmentToken }),
-      ...(config.updatePublicKeys === undefined ? {} : { updatePublicKeys: config.updatePublicKeys }) });
+      ...(config.updatePublicKeys === undefined ? {} : { updatePublicKeys: config.updatePublicKeys }),
+      ...(config.browserGateway ? { browserHosts: Object.keys(config.browserGateway.workers) } : {}) });
     await control.ready;
-    const handler = createControllerHandler(control, client);
+    const handleController = createControllerHandler(control, client);
+    const handler: typeof handleController = (req, res) => {
+      if (browsers?.matches(req)) { void browsers.handle(req, res); return; }
+      handleController(req, res);
+    };
     server = limitServer(tls ? createHttpsServer(tls, handler) : createHttpServer(handler));
     server.on("checkContinue", handler);
     server.on("checkExpectation", handler);
     broker = createSessionUpgradeHandler(control);
     videoBroker = createSessionUpgradeHandler(control, { video: true });
-    server.on("upgrade", createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/') ? videoBroker!.handle(req, socket, head) : broker!.handle(req, socket, head)));
+    const sessions = createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/')
+      ? videoBroker!.handle(req, socket, head) : broker!.handle(req, socket, head));
+    server.on("upgrade", (req, socket, head) => {
+      if (browsers?.matches(req)) browsers.upgrade(req, socket, head);
+      else void sessions(req, socket, head);
+    });
     await new Promise<void>((resolve, reject) => {
       const listening = () => { server!.off("error", reject); resolve(); };
       server!.once("error", reject); server!.listen(config.listen.port, config.listen.host, listening);
     });
   } catch (error) {
+    browsers?.close();
     broker?.close();
     videoBroker?.close();
     server?.close();
@@ -124,6 +144,7 @@ export async function startController(config: ControllerConfig) {
         reloader?.close();
         broker?.close();
         videoBroker?.close();
+        browsers?.close();
         await new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });
         await Promise.all([client.close(), services.close()]);
       })();

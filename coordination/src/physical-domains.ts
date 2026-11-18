@@ -112,4 +112,24 @@ export class PhysicalDomains {
     db.prepare("INSERT INTO physical_domains VALUES (?,?) ON CONFLICT(host) DO UPDATE SET domain=excluded.domain").run(host, domain);
     return { hostId: host, domainId: domain };
   }
+
+  /** During a stopped host migration, retain existing disk charges and preserve the bound model approval. */
+  attachForMigration(db: DatabaseSync, hostId: string, domainId: string, capacity: Resources): PhysicalMapping {
+    transaction(db);
+    const host = identifier(hostId), domain = identifier(domainId);
+    const current = db.prepare("SELECT capacity FROM resource_domains WHERE id=?").get(domain);
+    if (!current) throw new ServiceError("Unknown resource domain.", 404);
+    const before = size(JSON.parse(String(current.capacity)));
+    if (physicalMapping(db, { hostId: host }) || physicalMapping(db, { domainId: domain })
+      || db.prepare("SELECT 1 FROM resource_reservations WHERE domain=? AND state='held'").get(domain)
+      || keys.some(key => capacity[key] < before[key])) throw new ServiceError("Migration requires an unmapped, idle model domain and capacity for all existing limits.", 409);
+    const reserved = hostReservations(db, host);
+    if (reserved.cpu || reserved.memoryMiB || reserved.diskGiB >= capacity.diskGiB) {
+      throw new ServiceError("Migration must retain all stopped reservations with disk headroom.", 409);
+    }
+    db.prepare("UPDATE resource_domains SET capacity=? WHERE id=?").run(JSON.stringify(capacity), domain);
+    db.prepare("INSERT INTO host_limits VALUES (?,?) ON CONFLICT(host) DO UPDATE SET limits=excluded.limits").run(host, JSON.stringify(capacity));
+    db.prepare("INSERT INTO physical_domains VALUES (?,?)").run(host, domain);
+    return { hostId: host, domainId: domain };
+  }
 }
