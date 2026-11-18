@@ -26,20 +26,14 @@ XML
 cat > "$root/src/test/canaveral/dashboardtrial/TrialActivity.java" <<'JAVA'
 package test.canaveral.dashboardtrial;
 
-import android.app.Activity;
-import android.graphics.Color;
-import android.os.Bundle;
-import android.view.Gravity;
-import android.widget.TextView;
-
-public final class TrialActivity extends Activity {
-    @Override protected void onCreate(Bundle state) {
+public final class TrialActivity extends android.app.Activity {
+    @Override protected void onCreate(android.os.Bundle state) {
         super.onCreate(state);
-        TextView label = new TextView(this);
+        android.widget.TextView label = new android.widget.TextView(this);
         label.setText("Canaveral dashboard install trial");
-        label.setGravity(Gravity.CENTER);
-        label.setTextColor(Color.BLACK);
-        label.setBackgroundColor(Color.WHITE);
+        label.setGravity(android.view.Gravity.CENTER);
+        label.setTextColor(android.graphics.Color.BLACK);
+        label.setBackgroundColor(android.graphics.Color.WHITE);
         label.setTextSize(24);
         setContentView(label);
     }
