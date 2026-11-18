@@ -106,6 +106,7 @@ import {
   InfrastructureCard,
   InfrastructureDetails,
 } from "@/components/infrastructure";
+import { WorkspaceBuilds } from "@/components/workspace-builds";
 import { WorkspacePreviews } from "@/components/workspace-previews";
 import { BaseImageRegistry } from "@/components/image-registry";
 import { MachinePowerOff } from "@/components/machine-power";
@@ -175,6 +176,7 @@ const views = {
   orchestrators: {
     filters: ["all", "online", "offline", "draining"],
   },
+  builds: { filters: [] },
   previews: { filters: [] },
   blueprints: { filters: [] },
   templates: {
@@ -855,6 +857,8 @@ export function App() {
                 );
               }}
             />
+          ) : view === "builds" ? (
+            <WorkspaceBuilds key={user.id} />
           ) : view === "previews" ? (
             <WorkspacePreviews key={user.id} />
           ) : view === "blueprints" ? (
