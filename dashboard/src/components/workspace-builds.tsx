@@ -148,54 +148,57 @@ export function WorkspaceBuilds() {
   const [pending, setPending] = useState<Launch>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [imageError, setImageError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     let live = true;
-    async function load() {
-      try {
-        const [pins, list] = await Promise.all([
-          api("builds/images", undefined, (v) => {
-            const items = record(v).images;
-            if (!Array.isArray(items)) throw Error("Invalid build images.");
-            return items.map((item) => {
-              const { id, templateId, templateRevision, arch, digest } =
-                record(item);
-              if (
-                typeof id !== "string" ||
-                !id ||
-                ![templateId, templateRevision, arch, digest].every(
-                  (x) => typeof x === "string",
-                )
-              )
-                throw Error("Invalid build image.");
-              return {
-                id,
-                label: [id, templateId, templateRevision, arch, digest].join(
-                  " · ",
-                ),
-              };
-            });
-          }),
-          api("builds", undefined, (v) => {
-            const items = record(v).builds;
-            if (!Array.isArray(items)) throw Error("Invalid build list.");
-            return items.map((item) => build(item));
-          }),
-        ]);
-        if (live) {
-          setImages(pins);
-          setImageId((prev) =>
-            pins.some((p) => p.id === prev) ? prev : (pins[0]?.id ?? ""),
-          );
-          setRows(list);
-          setLoadError("");
-        }
-      } catch (e) {
+    void api("builds/images", undefined, (v) => {
+      const items = record(v).images;
+      if (!Array.isArray(items)) throw Error("Invalid build images.");
+      return items.map((item) => {
+        const { id, templateId, templateRevision, arch, digest } = record(item);
+        if (
+          typeof id !== "string" ||
+          !id ||
+          ![templateId, templateRevision, arch, digest].every(
+            (x) => typeof x === "string",
+          )
+        )
+          throw Error("Invalid build image.");
+        return {
+          id,
+          label: [id, templateId, templateRevision, arch, digest].join(" · "),
+        };
+      });
+    })
+      .then((pins) => {
+        if (!live) return;
+        setImages(pins);
+        setImageId((prev) =>
+          pins.some((p) => p.id === prev) ? prev : (pins[0]?.id ?? ""),
+        );
+        setImageError("");
+      })
+      .catch((e) => {
+        if (!live) return;
+        setImages([]);
+        setImageId("");
+        setImageError(errorMessage(e));
+      });
+    void api("builds", undefined, (v) => {
+      const items = record(v).builds;
+      if (!Array.isArray(items)) throw Error("Invalid build list.");
+      return items.map((item) => build(item));
+    })
+      .then((list) => {
+        if (!live) return;
+        setRows(list);
+        setLoadError("");
+      })
+      .catch((e) => {
         if (live) setLoadError(errorMessage(e));
-      }
-    }
-    void load();
+      });
     return () => {
       live = false;
     };
@@ -307,6 +310,7 @@ export function WorkspaceBuilds() {
         </Button>
       </form>
       <h2 className="text-xl">Your builds</h2>
+      {imageError && <p role="alert">Build images unavailable: {imageError}</p>}
       {loadError && <p role="alert">{loadError}</p>}
       <Button
         variant="outline"

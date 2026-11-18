@@ -79,3 +79,30 @@ test("recovers the same build and exposes its verified artifact after release", 
     ).getAttribute("href"),
   ).toBe("/api/v1/builds/" + id + "/artifact");
 });
+
+test("keeps retained artifacts available when image discovery fails", async () => {
+  const row = {
+    id: "00000000-0000-4000-8000-000000000041",
+    state: "succeeded",
+    imageId: "retired-image",
+    artifact: "out/app.bin",
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.endsWith("/images")) throw Error("Catalogue offline");
+      const value = url.endsWith("/builds") ? { builds: [row] } : row;
+      return { ok: true, json: async () => value };
+    }),
+  );
+  render(<WorkspaceBuilds />);
+  const link = await screen.findByRole("link", {
+    name: "Download verified artifact",
+  });
+  expect(link.getAttribute("href")).toBe(
+    "/api/v1/builds/" + row.id + "/artifact",
+  );
+  expect((screen.getByText("Launch build") as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+});
