@@ -422,3 +422,11 @@ and requires its executable in the image. The POST body limit is 1 MiB and up
 to 128 files. The controller's existing preview HTTP response limits apply.
 Restart fences active previews and reconciles cancellation against their stored
 request IDs. Cleanup remains stopping while the controller holds the reservation.
+
+For Kubernetes, mount the application credential read-only and give the dashboard
+UID a writable persistent volume for the SQLite directory. Run one dashboard
+replica with the `Recreate` deployment strategy so two processes cannot reconcile
+the same previews during a rollout. When private host routing is enabled, set
+the HTTP `Host` header on both `/healthz` probes to the configured dashboard
+hostname. Configure wildcard DNS, TLS and private ingress as described in the
+[preview routing guide](private-preview-routing.md).
