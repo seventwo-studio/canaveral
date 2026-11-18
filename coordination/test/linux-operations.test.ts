@@ -692,6 +692,7 @@ test("preview dispatch binds the lease key, active operation, boot and one-use r
   await f.ok(f.report(runner,a.id,2,f.receipt(a,{runtimeState:"running",ready:{command:true,pty:true,files:true,preview:true}})));
   assert.equal((await get(app.credential)).status,401);
   assert.equal((await f.ok(poll())).dispatch,null);
+  assert.equal((await client.operation(command.id)).previewReady,true);
   const claimDispatch = async () => {
     let dispatch: Body | null;
     const until = performance.now() + 1500;
