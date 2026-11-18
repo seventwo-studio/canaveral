@@ -209,6 +209,21 @@ test("new operations require a connected supported runtime; durable replays surv
   assert.equal(f.post(stopped, "delete", { id: randomUUID() }).state, "queued");
 });
 
+test("stopped dashboard devices admit deletion on a matching mobile runtime", t => {
+  const f = fixture(t);
+  for (const os of ["ios", "android"]) {
+    for (const offer of [{ provider: os }, { provider: "macos", runtimes: [os] }]) {
+      const id = f.addMachine(true);
+      f.store.transaction(db => {
+        db.prepare("UPDATE hosts SET offer=? WHERE id=?").run(JSON.stringify(offer), f.host);
+        db.prepare("UPDATE machines SET template=? WHERE id=?").run(JSON.stringify({ os, mode: "device" }), id);
+      });
+      status(() => f.post(id, "power-off", { id: randomUUID() }), 409);
+      assert.equal(f.post(id, "delete", { id: randomUUID() }).state, "queued");
+    }
+  }
+});
+
 test("pending capture blocks power/deletion, while completed captures do not", t => {
   const f = fixture(t), id = f.addMachine(true), capture = randomUUID();
   for (const state of ["queued", "running", "unknown"]) {

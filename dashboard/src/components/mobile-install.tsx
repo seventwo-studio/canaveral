@@ -70,6 +70,24 @@ export function MobileInstall({ machine }: { machine: Machine }) {
       if (!stored) sessionStorage.setItem(key, JSON.stringify(intent));
       const { artifact, operation } = intent;
       const path = "app-artifacts/" + encodeURIComponent(artifact);
+      async function releaseUpload() {
+        setStatus("Installation succeeded · releasing upload storage…");
+        await api(path + "/delete", {}, (value) => {
+          const r = record(value);
+          if (
+            r.id !== artifact ||
+            r.machineId !== machine.id ||
+            r.state !== "deleted"
+          )
+            throw Error("Upload removal is unconfirmed.");
+        });
+        sessionStorage.removeItem(key);
+        if (live.current) setStatus("Installation succeeded · " + operation);
+      }
+      if (intent.releasePending) {
+        await releaseUpload();
+        return;
+      }
       function uploadReceipt(value: unknown) {
         const r = record(value);
         const offset = Number(r.received);
@@ -144,6 +162,21 @@ export function MobileInstall({ machine }: { machine: Machine }) {
             throw Error(
               result.result?.detail || "Installation " + result.state,
             );
+          const proof = result.result;
+          if (
+            proof?.installed !== true ||
+            proof.artifactCleaned !== true ||
+            proof.sha256 !== sha256 ||
+            proof.bytes !== file.size
+          )
+            throw Error(
+              "The runner did not confirm installation and cleanup of the selected file.",
+            );
+          sessionStorage.setItem(
+            key,
+            JSON.stringify({ artifact, operation, releasePending: true }),
+          );
+          await releaseUpload();
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 1500));

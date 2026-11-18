@@ -84,3 +84,55 @@ it("resumes a confirmed chunk and reuses the operation after a lost response", a
   expect(new Set(ids).size).toBe(1);
   expect(new Set(artifacts).size).toBe(1);
 });
+
+it("retries a lost upload removal receipt without repeating the successful install", async () => {
+  vi.stubGlobal("crypto", webcrypto);
+  let upload: Record<string, unknown> = {};
+  let submits = 0,
+    removals = 0;
+  vi.stubGlobal("fetch", async (path: string, options: RequestInit) => {
+    const body = JSON.parse(String(options.body));
+    if (path.endsWith("/app-artifacts")) {
+      upload = {
+        ...body,
+        machineId: machine.id,
+        chunkBytes: 524288,
+        received: body.bytes,
+        state: "ready",
+      };
+      return Response.json(upload);
+    }
+    if (path.endsWith("/operations")) {
+      submits++;
+      return Response.json({
+        id: body.id,
+        machineId: machine.id,
+        hostId: machine.hostId,
+        state: "succeeded",
+        result: {
+          installed: true,
+          artifactCleaned: true,
+          sha256: upload.sha256,
+          bytes: upload.bytes,
+        },
+      });
+    }
+    if (path === "/api/v1/app-artifacts/" + upload.id + "/delete") {
+      if (++removals === 1) throw Error("lost removal receipt");
+      return Response.json({ ...upload, state: "deleted" });
+    }
+    throw Error("Unexpected route");
+  });
+  render(<MobileInstall machine={machine} />);
+  fireEvent.change(screen.getByLabelText(/Android APK/), {
+    target: { files: [new NodeFile(["apk"], "build.apk")] },
+  });
+  const install = screen.getByRole("button", { name: "Upload and install" });
+  fireEvent.click(install);
+  await screen.findByRole("alert");
+  fireEvent.click(install);
+  await screen.findByText(/^Installation succeeded · [a-f0-9-]{36}$/);
+  expect(submits).toBe(1);
+  expect(removals).toBe(2);
+  expect(sessionStorage.length).toBe(0);
+});

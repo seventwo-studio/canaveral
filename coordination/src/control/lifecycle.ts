@@ -105,7 +105,13 @@ function requestIntent(store: SqliteStore, req: ControlRequest, action: "power-o
       throw new ServiceError(action === "delete" ? "Deletion requires confirmed shutdown on a connected host." : "Power off requires a connected host.", 409);
     }
     const offer = object(JSON.parse(host.offer)), template = object(JSON.parse(machine.template));
-    if ((offer.provider !== "apple" && offer.provider !== "macos") || (template.os !== "linux" && template.os !== "macos")) {
+    const appleVM = (offer.provider === "apple" || offer.provider === "macos") && (template.os === "linux" || template.os === "macos");
+    const mobile = template.mode === "device" && (template.os === "ios" || template.os === "android");
+    const mobileRuntime = offer.provider === template.os || (
+      (offer.provider === "macos" || (offer.provider === "linux" && template.os === "android")) &&
+      Array.isArray(offer.runtimes) && offer.runtimes.includes(template.os)
+    );
+    if (!appleVM && !(action === "delete" && mobile && mobileRuntime)) {
       throw new ServiceError("This lifecycle operation is not implemented for this runtime.", 409, { code: "capability_unsupported" });
     }
     if (pendingCapture(db, machineId)) throw new ServiceError("Resolve the image capture before changing its source.", 409);
