@@ -394,3 +394,31 @@ The page supports direct links and browser history. Details stack on narrow
 screens; the inventory keeps its compact summary. See [infrastructure setup and
 resource accounting](infrastructure.md) for enrollment scope, freshness, per-host
 limits and the distinction between KubeVirt runner and cluster metrics.
+
+## Owner workspace previews
+
+Use a dashboard account session and the usual same-origin mutation headers.
+POST `/api/v1/previews` with a client-generated lowercase UUID `id`, a
+`mode` of `static` or `command`, and `files` containing objects with
+`path` (a workspace-relative filename) and `data` (canonical base64).
+Command mode also requires `argv` (foreground executable and arguments) and
+`port` (guest loopback HTTP port). Static mode serves index.html at the root.
+Replay the same ID and body after a lost response. GET the collection for
+`{previews: Preview[]}`; GET or DELETE `/api/v1/previews/{id}` to inspect or
+stop. All item and create responses contain the Preview object directly:
+`{id, mode, state, expiresAt}`, with UTC ISO expiry and state one of
+`provisioning`, `starting`, `ready`, `stopping`, `stopped`, `failed`.
+Poll until ready or terminal. A separate private gateway handles opening the
+preview. Lease and application credentials stay on the server.
+
+Set `CANAVERAL_DASHBOARD_PREVIEW_CONFIG` to a server-local JSON file with
+`applicationKeyFile`, `database` (a dedicated SQLite file for one dashboard
+process), `templateId`, `templateRevision`, `arch`, `digest` (sha256: plus
+64 lowercase hex digits), and `ttlSeconds` (30–1800, within application limits).
+Grant that application command and file access to the pinned workspace image.
+The dashboard requires an approved workspace with Node for static serving and
+nested directory preparation. Command mode runs the supplied argv in /workspace
+and requires its executable in the image. The POST body limit is 1 MiB and up
+to 128 files. The controller's existing preview HTTP response limits apply.
+Restart fences active previews and reconciles cancellation against their stored
+request IDs. Cleanup remains stopping while the controller holds the reservation.

@@ -384,3 +384,15 @@ test("every API workspace action resolves to an allowed gateway route",async()=>
     }
   }finally{await f.close();}
 });
+
+test("preview routes require a live account and explicit application configuration", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await fetch(f.url, "/api/v1/previews")).status, 401);
+    assert.equal((await fetch(f.url, "/api/v1/previews", { token: session })).status, 503);
+    assert.equal((await fetch(f.url, "/api/v1/previews", {body:{},headers:{Cookie:"canaveral_session="+session}})).status,403);
+    f.state.revoked = true;
+    assert.equal((await fetch(f.url, "/api/v1/previews/"+randomUUID(), {method:"DELETE",token:session})).status,401);
+    assert.ok(f.calls.every(c => c.path === "/v1/auth/session"));
+  } finally { await f.close(); }
+});

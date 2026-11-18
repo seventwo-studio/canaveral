@@ -65,7 +65,7 @@ export interface LeaseCredential { id: string; credential: string }
 export interface OperationRequest { id: string; member: "primary"; action: "shell"; arguments: { argv: string[]; timeoutMs?: number } }
 export interface Operation {
   id: string; leaseId: string; member: "primary"; state: "queued" | "succeeded" | "failed" | "unknown"; updatedAt: string;
-  dispatchedAt?: string; result?: Record<string, unknown>;
+  previewReady?: boolean; dispatchedAt?: string; result?: Record<string, unknown>;
 }
 export interface CreateOperationResult { created: boolean; operation: Operation }
 function boundOperation(value: unknown, leaseId: string, id: string): Operation {

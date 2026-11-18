@@ -332,7 +332,7 @@ export class LinuxLeases {
       return { templates: rows.map(row => {
         const amount = JSON.parse(row.resources) as Resources;
         return { id: row.id, revision: row.revision, os: "linux", arch: row.arch, mode: "headless", minimum: amount, defaults: amount, memoryStepMiB: 1,
-          available: this.placements(db, row).length > 0, capabilities: this.capabilities(row.capabilities), runtime: row.backend === "kubevirt" ? "kubevirt" : "apple" };
+          digest: row.digest, workspaceIOVersion: row.workspace_version, available: this.placements(db, row).length > 0, capabilities: this.capabilities(row.capabilities), runtime: row.backend === "kubevirt" ? "kubevirt" : "apple" };
       }), limits: application.limits };
     });
   }
@@ -561,8 +561,10 @@ export class LinuxLeases {
   private operationRow(db: DatabaseSync, id: string): OperationRow | undefined {
     return db.prepare("SELECT * FROM linux_operations WHERE id=?").get(id) as unknown as OperationRow | undefined;
   }
+  private readonly previewPolls = new Map<string, number>();
   private operationView(row: OperationRow): unknown {
     return { id: row.id, leaseId: row.lease, member: "primary", state: row.state, updatedAt: utc(row.updated),
+      ...(row.state === "queued" && (this.previewPolls.get(row.id) ?? 0) > performance.now() ? {previewReady:true} : {}),
       ...(row.dispatched === null ? {} : { dispatchedAt: utc(row.dispatched) }),
       ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
   }
@@ -677,6 +679,8 @@ export class LinuxLeases {
       pending.finish(r.responseBase64);
       return {};
     }
+    for (const [id, until] of this.previewPolls) if (until <= performance.now()) this.previewPolls.delete(id);
+    this.previewPolls.set(operationId, performance.now() + 5000);
     if (!pending || remaining <= 0 || pending.claimed) return {dispatch:null};
     pending.claimed = true;
     return {controllerNow:now,dispatch:{id:pending.id,operationId,leaseId:lease.id,memberId:lease.member,assignmentId:a.id,
