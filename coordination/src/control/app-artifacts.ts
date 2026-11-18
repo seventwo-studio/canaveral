@@ -6,6 +6,7 @@ import type { SqliteStore } from '../sqlite.ts';
 import { owns, requireScope } from './contracts.ts';
 import type { ControlModule, ControlRequest, Principal } from './contracts.ts';
 import { MachineStore, registerMachineHooks } from './machines.ts';
+import { installAttemptClean, installAttempts } from './install-cleanup.ts';
 import { decodeData, uuid } from './transfers.ts';
 
 import { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from '../app-artifact-contract.ts';
@@ -34,16 +35,12 @@ function view(a: Artifact) { return { id: a.id, machineId: a.machine, format: a.
 export function validateUploadedArtifact(db: DatabaseSync, machineId: string, artifactId: unknown): void {
   const a = row(db, uuid(artifactId)); current(db, a);
   if (a.machine !== machineId || a.state !== 'ready') fail(409);
-  requireCleanAttempts(db, a);
+  // An abandoned stage may still exist; only confirmed cleanup admits another install.
+  if (installAttempts(db, a.machine, a.id).some(op => !installAttemptClean(db, op, true))) fail(409);
 }
 
 function requireCleanAttempts(db: DatabaseSync, a: Artifact): void {
-  const operations = db.prepare("SELECT o.* FROM device_operations o WHERE o.machine=? AND json_extract(o.request,'$.action')='install-uploaded' AND json_extract(o.request,'$.arguments.artifact')=?").all(a.machine, a.id);
-  for (const op of operations) {
-    const pending = db.prepare('SELECT 1 FROM control_device_pending WHERE id=?').get(op.id!);
-    const result = op.result ? object(JSON.parse(String(op.result))) : {};
-    if (op.state === 'queued' || !pending && !(op.state === 'succeeded' && result.artifactCleaned === true)) fail(409);
-  }
+  if (installAttempts(db, a.machine, a.id).some(op => !installAttemptClean(db, op))) fail(409);
 }
 
 export function createAppArtifactsModule(store: SqliteStore, machines: MachineStore): ControlModule {
@@ -120,7 +117,8 @@ export function createAppArtifactsModule(store: SqliteStore, machines: MachineSt
           if (length !== a.bytes || hash.digest('hex') !== a.sha256) return fail(409);
           db.prepare("UPDATE app_artifacts SET state='ready' WHERE id=?").run(a.id);
         } else {
-          // A dispatched failure/unknown may retain native staging; require positive cleanup.
+          // A dispatched failure/unknown may retain native staging; require positive
+          // cleanup or an explicit, audited operator resolution (devices.ts).
           requireCleanAttempts(db, a);
           db.prepare('DELETE FROM app_artifact_chunks WHERE artifact=?').run(a.id);
           db.prepare("UPDATE app_artifacts SET state='deleted',reserved_disk=0 WHERE id=?").run(a.id);

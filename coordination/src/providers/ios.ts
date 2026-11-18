@@ -164,6 +164,10 @@ export class IosProvider extends MobileProvider {
     if (!path.isAbsolute(root) || root.includes("\0")) throw new ServiceError("Simulator returned an invalid data container.");
     return root;
   }
+  /** installArtifact stages only in private `.artifact-*` directories of this assignment's storage. */
+  override async stagedArtifacts(dir: string): Promise<"absent" | "present"> {
+    return (await fsp.readdir(dir)).some(name => name.startsWith(".artifact-")) ? "present" : "absent";
+  }
   /** The caller's durable operation journal owns dispatch and never retries uncertain installs. */
   async installArtifact(machine: RecordValue, image: RecordValue, _folder: string, source: Download, sha256: string, check: Authorized = () => true): Promise<RecordValue> {
     let stage: string | undefined, identity: string | undefined;

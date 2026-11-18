@@ -45,6 +45,7 @@ store; browser storage is not used.
 | Inference models and jobs | Configuration |
 | Application artifact admission, chunks, verification and deletion | Configuration |
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
+| Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
 | Mobile video admission, inspection and closure | Configuration; playback remains a negotiated stream-client feature |
 | Managed update releases and rollouts | Configuration |
 

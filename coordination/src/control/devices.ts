@@ -3,12 +3,13 @@ import type { DatabaseSync } from "node:sqlite";
 import { ServiceError, object } from "../errors.ts";
 import { SqliteStore } from "../sqlite.ts";
 import { owns, requireScope } from "./contracts.ts";
-import type { ControlModule, ControlOptions, Principal } from "./contracts.ts";
+import type { ControlModule, ControlOptions, ControlRequest, Principal } from "./contracts.ts";
 import { registerMachineHooks } from "./machines.ts";
 import type { MachineHooks } from "./machines.ts";
 import { refreshConsumerOperations } from "./consumer-operations.ts";
 import { legacyDigest } from "./templates.ts";
 import { validateUploadedArtifact } from './app-artifacts.ts';
+import { initializeInstallResolutions, installAttemptClean } from './install-cleanup.ts';
 import { decodeData, guestPath, jsonBytes, uuid } from "./transfers.ts";
 
 export const MAX_RESULT = 6 * 1048576;
@@ -24,7 +25,7 @@ interface MachineRow { id: string; host: string; owner: string | null; template:
 const fields: Record<string, readonly string[]> = {
   screenshot: [], hierarchy: [], apps: [], logs: [], accessibility: [],
   tap: ["x", "y"], swipe: ["x", "y", "toX", "toY", "durationMs"], text: ["text"], key: ["key"],
-  install: ["artifact"], 'install-uploaded': ['artifact'], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"],
+  install: ["artifact"], 'install-uploaded': ['artifact'], 'inspect-install': ['operation', 'artifact'], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"],
   location: ["latitude", "longitude"], push: ["path", "data"], pull: ["path"], shell: ["argv"],
   permission: ["app", "permission", "state"], rotate: ["orientation"],
   "accessibility-action": ["snapshotId", "nodeId", "nativeAction"], "list-files": ["path"],
@@ -90,6 +91,7 @@ export function operationRequest(value: unknown): OperationRequest {
   if (action === "permission" && !["grant", "revoke", "reset"].includes(args.state as string)) throw new ServiceError("Invalid permission state.", 400);
   if (action === "rotate" && !["PORTRAIT", "PORTRAIT_UPSIDE_DOWN", "LANDSCAPE_LEFT", "LANDSCAPE_RIGHT"].includes(args.orientation as string)) throw new ServiceError("Invalid device orientation.", 400);
   if (action === 'install-uploaded') result.artifact = uuid(args.artifact);
+  if (action === 'inspect-install') { result.operation = uuid(args.operation); result.artifact = uuid(args.artifact); }
   return { id: uuid(input.id), action, arguments: result };
 }
 
@@ -99,6 +101,7 @@ export function initializeDevices(db: DatabaseSync, now = Date.now() / 1000): vo
     CREATE INDEX IF NOT EXISTS device_operations_host_state ON device_operations(host,state);
     CREATE TABLE IF NOT EXISTS control_device_dispatch (id TEXT PRIMARY KEY,dispatched REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS control_device_pending (id TEXT PRIMARY KEY);`);
+  initializeInstallResolutions(db);
   closeUnprovenDeviceOperations(db, now);
 }
 /** Python administrative queues have no dispatch bit. Absence of the new journal is
@@ -115,6 +118,67 @@ function receipt(row: OperationRow): OperationReceipt {
   return { id: row.id, machineId: row.machine, hostId: row.host, state: row.state, updatedAt: row.updated,
     ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) };
 }
+interface ResolutionRow { id: string; operation: string; decision: string; inspection: string | null; reason: string; decided_by: string; created: number }
+function resolutionView(row: ResolutionRow) {
+  return { id: row.id, operationId: row.operation, decision: row.decision, inspectionId: row.inspection, reason: row.reason, decidedBy: JSON.parse(row.decided_by) as unknown, decidedAt: row.created };
+}
+function withResolution(db: DatabaseSync, row: OperationRow): OperationReceipt & { resolution?: ReturnType<typeof resolutionView> } {
+  const resolution = db.prepare("SELECT * FROM device_operation_resolutions WHERE operation=?").get(row.id) as unknown as ResolutionRow | undefined;
+  return { ...receipt(row), ...(resolution ? { resolution: resolutionView(resolution) } : {}) };
+}
+const inspectionTarget = "Inspection target must be an uploaded-app install on this machine whose cleanup is not yet confirmed or resolved.";
+/** An inspection is read-only runner evidence for one terminal, uncleaned install on the same machine. */
+function validateInspectionTarget(db: DatabaseSync, machineId: string, args: Record<string, unknown>): void {
+  const target = db.prepare("SELECT * FROM device_operations WHERE id=?").get(args.operation as string) as unknown as OperationRow | undefined;
+  if (!target || target.machine !== machineId) throw new ServiceError(inspectionTarget, 409);
+  const request = object(JSON.parse(target.request));
+  if (request.action !== 'install-uploaded' || object(request.arguments).artifact !== args.artifact || !TERMINAL.includes(target.state as OperationState) || installAttemptClean(db, target))
+    throw new ServiceError(inspectionTarget, 409);
+}
+function reasonText(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 1000 || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(value)) throw new ServiceError("Resolution requires a reason of at most 1000 characters.", 400);
+  return value;
+}
+/** Explicit operator decision for an uncertain install's artifact cleanup. Never changes
+ * the install outcome itself. `cleanup-confirmed` requires a succeeded runner inspection of
+ * this exact install with positive cleanup evidence; `abandoned` requires administrator
+ * authority because it releases host scratch whose native cleanup is unproven. */
+function resolveInstall(db: DatabaseSync, req: ControlRequest, operationId: string, now: number) {
+  const principal = requireScope(req, "access");
+  const op = db.prepare("SELECT * FROM device_operations WHERE id=?").get(operationId) as unknown as OperationRow | undefined;
+  if (!op) throw new ServiceError("Unknown device operation.", 404);
+  machine(db, op.machine, principal);
+  const body = object(req.body);
+  if (Object.keys(body).length !== 4 || !["id", "decision", "inspection", "reason"].every(k => Object.hasOwn(body, k))) throw new ServiceError("Resolution requires id, decision, inspection and reason.", 400);
+  const id = uuid(body.id), decision = body.decision, inspection = body.inspection === null ? null : uuid(body.inspection), reason = reasonText(body.reason);
+  if (decision !== "cleanup-confirmed" && decision !== "abandoned") throw new ServiceError("Resolution decision must be cleanup-confirmed or abandoned.", 400);
+  if (decision === "abandoned") requireScope(req, "admin");
+  const prior = db.prepare("SELECT * FROM device_operation_resolutions WHERE id=? OR operation=?").all(id, op.id) as unknown as ResolutionRow[];
+  // Hide another account's resolution identity, as machine lookup does.
+  for (const old of prior) if (old.operation !== op.id) {
+    const other = db.prepare("SELECT machine FROM device_operations WHERE id=?").get(old.operation) as { machine: string } | undefined;
+    try { if (!other) throw new Error("hidden"); machine(db, other.machine, principal); } catch { throw new ServiceError("Unknown device operation.", 404); }
+  }
+  for (const old of prior) {
+    if (old.id !== id) throw new ServiceError("This operation already has a resolution. Reuse its request ID.", 409);
+    if (old.operation !== op.id || old.decision !== decision || old.inspection !== inspection || old.reason !== reason) throw new ServiceError("Request identity already belongs to another resolution.", 409);
+    return resolutionView(old);
+  }
+  const request = object(JSON.parse(op.request));
+  if (request.action !== "install-uploaded" || !TERMINAL.includes(op.state as OperationState)) throw new ServiceError("Only a terminal uploaded-app install can be resolved.", 409);
+  if (installAttemptClean(db, op)) throw new ServiceError("This install already has positive cleanup; no resolution is needed.", 409);
+  if (inspection !== null || decision === "cleanup-confirmed") {
+    const evidence = inspection === null ? undefined : db.prepare("SELECT * FROM device_operations WHERE id=?").get(inspection) as unknown as OperationRow | undefined;
+    const inspected = evidence ? object(JSON.parse(evidence.request)) : {};
+    if (!evidence || evidence.machine !== op.machine || inspected.action !== "inspect-install" || object(inspected.arguments).operation !== op.id) throw new ServiceError("Inspection does not belong to this install.", 409);
+    const result = evidence.result === null ? {} : object(JSON.parse(evidence.result));
+    if (decision === "cleanup-confirmed" && (evidence.state !== "succeeded" || result.operation !== op.id || result.artifact !== object(request.arguments).artifact || result.artifactCleaned !== true))
+      throw new ServiceError("Cleanup confirmation requires a succeeded inspection with positive cleanup evidence.", 409);
+  }
+  const decidedBy = JSON.stringify({ kind: principal.kind, userId: principal.user?.id ?? null, username: principal.user?.username ?? null });
+  db.prepare("INSERT INTO device_operation_resolutions VALUES (?,?,?,?,?,?,?)").run(id, op.id, decision, inspection, reason, decidedBy, now);
+  return resolutionView(db.prepare("SELECT * FROM device_operation_resolutions WHERE id=?").get(id) as unknown as ResolutionRow);
+}
 function machine(db: DatabaseSync, id: string, principal: Principal): MachineRow {
   const row = db.prepare("SELECT m.*,h.seen,h.enabled FROM machines m JOIN hosts h ON h.id=m.host WHERE m.id=?").get(id) as unknown as MachineRow | undefined;
   if (!row || !owns(principal, row.owner)) throw new ServiceError("Unknown machine.", 404);
@@ -128,7 +192,7 @@ function canonical(value: unknown): string {
 export function platformArguments(template: Record<string, unknown>, request: OperationRequest): void {
   const system = template.os, args = request.arguments;
   if (system !== "android" && system !== "ios" && template.guestAccess !== true) throw new ServiceError("This machine has no device or guest access.");
-  if (request.action === 'install-uploaded' && system !== 'android' && system !== 'ios') throw new ServiceError('Uploaded apps require a mobile simulator.', 400);
+  if ((request.action === 'install-uploaded' || request.action === 'inspect-install') && system !== 'android' && system !== 'ios') throw new ServiceError('Uploaded apps require a mobile simulator.', 400);
   if (system === "ios" && request.action.startsWith("shell")) throw new ServiceError("Guest shell is Android-only.", 400);
   if (["push", "pull", "list-files"].includes(request.action)) {
     guestPath(args.path, system === "ios" ? "container" : "absolute", request.action === "list-files");
@@ -143,15 +207,17 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
     const parts = req.parts[0] === "v1" ? req.parts.slice(1) : req.parts;
     const submit = req.method === "POST" && parts.length === 3 && parts[0] === "machines" && parts[2] === "operations";
     const read = req.method === "GET" && parts.length === 2 && parts[0] === "operations";
-    if (!submit && !read) return undefined;
+    const resolve = req.method === "POST" && parts.length === 3 && parts[0] === "operations" && parts[2] === "resolve";
+    if (!submit && !read && !resolve) return undefined;
     return store.transaction(db => {
       // Resolve inside the write transaction, including for idempotent replay.
+      if (resolve) return { body: resolveInstall(db, req, uuid(parts[1]), store.clock()) };
       const principal = requireScope(req, "access");
       if (read) {
         const row = db.prepare("SELECT * FROM device_operations WHERE id=?").get(uuid(parts[1])) as unknown as OperationRow | undefined;
         if (!row) throw new ServiceError("Unknown device operation.", 404);
         machine(db, row.machine, principal);
-        return { body: receipt(row) };
+        return { body: withResolution(db, row) };
       }
       const request = operationRequest(req.body), mid = uuid(parts[1]);
       const old = db.prepare("SELECT * FROM device_operations WHERE id=?").get(request.id) as unknown as OperationRow | undefined;
@@ -163,6 +229,7 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       const row = machine(db, mid, principal);
       platformArguments(object(JSON.parse(row.template)), request);
       if (request.action === 'install-uploaded') validateUploadedArtifact(db, mid, request.arguments.artifact);
+      if (request.action === 'inspect-install') validateInspectionTarget(db, mid, request.arguments);
       const now = store.clock();
       if (!row.enabled || row.desired !== "running" || row.observed !== "running" || now - row.seen >= 30) throw new ServiceError("Device must be running on an online host.");
       const count = db.prepare("SELECT count(*) AS n FROM device_operations WHERE host=? AND state='queued'").get(row.host)!.n as number;

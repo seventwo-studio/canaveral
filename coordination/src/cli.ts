@@ -31,7 +31,7 @@ generate --model ID --prompt-file FILE --request-id UUID [--max-tokens N]
 device ID ACTION --request-id UUID [--arguments-file FILE]
 app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
 app-artifact ID [--delete]                Inspect or delete a staged build
-operation ID [--output FILE] | template validate|prepare FILE [--cache DIR]
+operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
 image capture --request-file FILE | image-task ID
 updates [options] COMMAND                Manage signed runtime releases and rollouts
@@ -66,7 +66,7 @@ const schemas: Record<string, Schema> = {
   generate: { values: ["model", "prompt-file", "max-tokens", "digest", "host-id", "request-id"], required: ["model", "prompt-file", "request-id"] },
   create: { positional: 1, values: ["template", "cpu", "memory-mib", "disk-gib", "template-revision", "arch", "host-id", "request-id"], required: ["template", "request-id"] },
   device: { positional: 2, values: ["arguments-file", "request-id"], required: ["request-id"] },
-  operation: { positional: 1, values: ["output"] },
+  operation: { positional: 1, values: ["output", "resolve-file"] },
   'app-upload': { positional: 2, values: ['format','request-id'], required: ['format','request-id'] },
   'app-artifact': { positional: 1, flags: ['delete'] },
   template: { actions: ["validate", "prepare"], positional: 1, values: ["cache"] },
@@ -345,7 +345,7 @@ async function credentialRequest(destination: string, client: RequestClient, rou
     throw error;
   }
 }
-const deviceActions = ["screenshot", "hierarchy", "apps", "logs", "tap", "swipe", "text", "key", "install", "install-uploaded", "uninstall", "launch", "terminate", "open-url", "location", "push", "pull", "shell", "permission", "rotate", "accessibility", "accessibility-action", "list-files", "shell-open", "shell-read", "shell-write", "shell-resize", "shell-close"];
+const deviceActions = ["screenshot", "hierarchy", "apps", "logs", "tap", "swipe", "text", "key", "install", "install-uploaded", "inspect-install", "uninstall", "launch", "terminate", "open-url", "location", "push", "pull", "shell", "permission", "rotate", "accessibility", "accessibility-action", "list-files", "shell-open", "shell-read", "shell-write", "shell-resize", "shell-close"];
 async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
   const client = io.client(args.url, await credential(args), args.allowHttp);
   let result: Record<string, unknown>;
@@ -377,6 +377,9 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
     const validated = operationRequest({ id: uuid(option(args, "request-id")), action, arguments: args.options["arguments-file"] ? await jsonFile(option(args, "arguments-file")) : {} });
     const body = { id: validated.id, action: validated.action, arguments: validated.arguments };
     result = await client.request("POST", `/v1/machines/${uuid(positional(args))}/operations`, body);
+  } else if (args.command === "operation" && args.options["resolve-file"]) {
+    if (args.options.output) throw new CliError("Use --output or --resolve-file, not both.");
+    result = await client.request("POST", `/v1/operations/${uuid(positional(args))}/resolve`, await jsonFile(option(args, "resolve-file")));
   } else if (args.command === "operation") {
     result = await client.request("GET", `/v1/operations/${uuid(positional(args))}`);
     if (args.options.output) {
