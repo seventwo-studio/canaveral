@@ -130,7 +130,9 @@ exclusion, exact recovery and cleanup-report contract. Native helper retention,
 VZ/XPC and handle closure, and interrupted-deletion durability remain unaccepted.
 Legacy or revoked-binding recovery and ambiguous missing storage stay blocked.
 
-Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish Linux/macOS build acceptance, native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
+The [native dashboard Linux build trial](../coordination/native-acceptance/dashboard-builds.md) verified a Node build on ARM64, owner-only artifact download after VM cleanup and dashboard restart, failed builds, and cancellation. macOS build acceptance remains open.
+
+Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
 
 ## Acceptance before completion
 
