@@ -52,6 +52,10 @@ export function powershellScript(prepared: PreparationRecipe, machine: Preparati
   lines.push(" New-Item -ItemType File -Path ($root + '\\complete') | Out-Null", " } finally { $lock.Dispose(); Remove-Item -LiteralPath ($root + '\\lock') }", "}");
   if (notify) {
     secret(notify[1]);
+    // Windows PowerShell's Expect handshake conflicts with strict receipt framing.
+    // Set both the parent process default and any cached callback ServicePoint.
+    lines.push("[Net.ServicePointManager]::Expect100Continue = $false",
+      `([Net.ServicePointManager]::FindServicePoint([Uri]${psQuote(notify[0])})).Expect100Continue = $false`);
     lines.push(`$headers = @{ Authorization = ${psQuote("Bearer " + notify[1])} }`, "$notified = $false", "for ($i=0; $i -lt 120; $i++) {", " try {", `  $response = Invoke-WebRequest -UseBasicParsing -Uri ${psQuote(notify[0])} -Method Post -ContentType 'application/json' -Body '{"state":"ready"}' -Headers $headers -MaximumRedirection 0 -TimeoutSec 10`, "  if ($response.StatusCode -ne 200) { throw 'Invalid receipt response.' }", "  $notified = $true; break", " } catch { Start-Sleep -Seconds 5 }", "}", "if (-not $notified) { throw 'Preparation completed but its receipt could not reach the orchestrator.' }");
   }
   lines.push("} catch { [Console]::Error.WriteLine('Guest preparation failed; inspect the preparation state.'); exit 1 }", "exit 0");

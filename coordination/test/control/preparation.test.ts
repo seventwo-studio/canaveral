@@ -38,8 +38,16 @@ test("NoCloud and ConfigDrive recipes bind unique identity and bounded scoped re
   assert.equal(JSON.parse(files["openstack/latest/meta_data.json"]!).uuid, id);
   assert.ok(files["openstack/latest/user_data"]!.startsWith("#ps1_sysnative"));
   assert.ok(files["openstack/latest/user_data"]!.includes("-MaximumRedirection 0"));
+  const callback = `https://controller.example/path'quoted/v1/machines/${id}/prepared`;
+  const parent = powershellScript(recipe(windows.prepare, "windows")!, { id }, [callback, token]);
+  const framing = parent.indexOf("[Net.ServicePointManager]::Expect100Continue = $false");
+  const cached = parent.indexOf(`([Net.ServicePointManager]::FindServicePoint([Uri]'${callback.replaceAll("'", "''")}')).Expect100Continue = $false`);
+  // The callback runs in the parent, after encoded preparation children finish.
+  assert.ok(framing > parent.indexOf("-EncodedCommand"));
+  assert.ok(cached > framing && cached < parent.indexOf("Invoke-WebRequest"));
   const disabled = userData(windows, { id }, "https://controller.example", token, false, false)!;
   assert.equal(disabled.includes("Authorization"), false);
+  assert.equal(disabled.includes("Expect100Continue"), false);
   assert.equal(userData({ os: "linux" }, { id }, "https://controller.example", token), null);
 });
 test("SSH preparation preserves strict known hosts, complete assignment UUID and failure propagation", () => {

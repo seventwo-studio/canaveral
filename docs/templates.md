@@ -176,6 +176,9 @@ Omit resource flags to use the template defaults, or override individual resourc
 
 Preparation completion is durable. A stale pending heartbeat cannot undo it. Timeouts and SSH failures report failed preparation without claiming readiness; the VM remains available for inspection. Receipts can still establish success after a transient timeout. Preparation scripts keep per-instance started/completed markers. If a command was interrupted, inspect the partial state before clearing its marker; it is not silently replayed. Retain private host state, seed media and credentials across agent restarts. Scripts and preparation data can contain sensitive per-instance values; keep template secrets out of repository files and use your normal runtime secret-management channel.
 
+Windows PowerShell callbacks disable `Expect: 100-continue` in their parent process and the callback ServicePoint. The controller requires fixed-length requests without that handshake; TLS verification and redirect rejection remain enabled. Already rendered preparation media remains frozen across worker upgrades, so upgrading a renderer does not rewrite an existing guest's callback script.
+
+
 ## Source contracts
 
 The implementation uses [cloud-init NoCloud](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html), [Cloudbase-Init user data](https://cloudbase-init.readthedocs.io/en/master/userdata.html) and [KubeVirt startup data](https://kubevirt.io/user-guide/user_workloads/startup_scripts/). Apple requires preserving a macOS VM's [auxiliary storage alongside its disk](https://developer.apple.com/documentation/virtualization/vzmacauxiliarystorage). These contracts guide preparation; generated configuration and local fixture checks do not replace real guest boot, application and login acceptance.
