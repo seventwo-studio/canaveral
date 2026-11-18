@@ -828,3 +828,135 @@ fn scheduler_tick_replays_pending_then_fresh_readiness_before_poll() {
         .unwrap();
     assert!(matches!(route, LeaseRoute::OperationPoll));
 }
+
+#[test]
+fn preview_poll_and_report_follow_ready_exec_and_reject_stale_work() {
+    use canaveral_guest_protocol::data::{self as protocol, Frame};
+    let (_tmp, mut sat, lane, mut data_peer) = super::transfers::setup();
+    let binding = sat.guest_binding(1).unwrap();
+    let now = clock::now().as_secs_f64();
+    let (mut session, mut peer) =
+        guest::tests::session_pair_with_binding(binding.clone(), now + 60.0);
+    guest::tests::send_ready(&session, &mut peer);
+    session.pump(now).unwrap();
+    let mut cmd = command();
+    cmd.lease_id = binding.lease_id;
+    cmd.member_id = binding.member_id;
+    cmd.boot_attempt = binding.boot_attempt;
+    cmd.assignment_id = sat.assignment().unwrap().id;
+    cmd.arguments.argv = [
+        "/sbin/canaveral-guest-agent",
+        "--preview-service",
+        "3000",
+        "node",
+    ]
+    .map(String::from)
+    .to_vec();
+    let exec = session
+        .exec(
+            cmd.arguments.argv.clone(),
+            "/workspace".into(),
+            Default::default(),
+            30000,
+            now,
+        )
+        .unwrap();
+    sat.state
+        .operations
+        .receive(cmd.clone(), now + 30.0)
+        .unwrap();
+    sat.state.operations.current.as_mut().unwrap().guest_id = Some(exec);
+    assert!(!lane.preview_ready(&"c".repeat(64)));
+    sat.preview_ready = lane.preview_ready(&binding.bundle_digest);
+    let (send, requests) = std::sync::mpsc::sync_channel(1);
+    let (responses, recv) = std::sync::mpsc::sync_channel(1);
+    let worker = Worker { send, recv };
+    let mut dispatch = crate::preview::Loop::default();
+    let mut tick = || dispatch.tick(&sat, Some(&session), &lane, &worker).unwrap();
+    tick();
+    assert!(requests.try_recv().is_err());
+    peer.write_all(
+        &encode(&Guest::Output {
+            version: 1,
+            id: exec,
+            seq: 0,
+            stream: "stdout".into(),
+            data: STANDARD.encode("previewReady 3000\n"),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    session.pump(now).unwrap();
+    let mut tick = || dispatch.tick(&sat, Some(&session), &lane, &worker).unwrap();
+    tick();
+    let (LeaseRoute::PreviewPoll, poll) = requests.try_recv().unwrap() else {
+        panic!("expected poll")
+    };
+    assert_eq!(poll["operationId"], json!(cmd.id));
+    let id = uuid::Uuid::from_u128(100);
+    let work = json!({"controllerNow":100.0,"dispatch":{"id":id,"operationId":cmd.id,"leaseId":cmd.lease_id,"memberId":cmd.member_id,"assignmentId":cmd.assignment_id,"bootAttempt":cmd.boot_attempt,"bundleDigest":cmd.bundle_digest,"method":"HEAD","target":"/asset","expiresAt":101.0}});
+    responses
+        .send((LeaseRoute::PreviewPoll, now - 2.0, Ok(work.clone())))
+        .unwrap();
+    tick();
+    let (LeaseRoute::PreviewReport, failed) = requests.try_recv().unwrap() else {
+        panic!("expected stale report")
+    };
+    assert_eq!(failed["responseBase64"], Value::Null);
+    responses
+        .send((LeaseRoute::PreviewReport, now, Ok(json!({}))))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(110));
+    tick();
+    assert!(matches!(
+        requests.try_recv().unwrap().0,
+        LeaseRoute::PreviewPoll
+    ));
+    responses
+        .send((
+            LeaseRoute::PreviewPoll,
+            clock::now().as_secs_f64(),
+            Ok(work),
+        ))
+        .unwrap();
+    tick();
+    let Frame::PreviewRequest {
+        id: exchange,
+        exec_id,
+        method,
+        target,
+        ..
+    } = super::transfers::read_frame(&mut data_peer)
+    else {
+        panic!("expected guest request")
+    };
+    assert_eq!(
+        (exec_id, method.as_str(), target.as_str()),
+        (exec, "HEAD", "/asset")
+    );
+    let bytes = STANDARD.encode(b"HTTP/1.0 200 OK\r\n\r\n");
+    data_peer
+        .write_all(
+            &protocol::encode(
+                &Frame::PreviewResponse {
+                    version: 1,
+                    id: exchange,
+                    data: bytes.clone(),
+                },
+                protocol::Sender::Guest,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let timeout = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        tick();
+        if let Ok((LeaseRoute::PreviewReport, report)) = requests.try_recv() {
+            assert_eq!(report["dispatchId"], json!(id));
+            assert_eq!(report["responseBase64"], json!(bytes));
+            break;
+        }
+        assert!(std::time::Instant::now() < timeout);
+        std::thread::yield_now();
+    }
+}

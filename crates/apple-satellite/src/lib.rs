@@ -17,6 +17,7 @@ pub mod clock;
 pub mod data;
 pub mod guest;
 mod operations;
+mod preview;
 mod reconcile;
 pub use reconcile::reconcile;
 pub mod ownership;
@@ -493,6 +494,7 @@ pub struct Satellite {
     dir: private::Directory,
     state: Journal,
     data_authority: Option<reactor::Authority>,
+    preview_ready: bool,
     files_ready: bool,
 }
 impl Satellite {
@@ -518,6 +520,7 @@ impl Satellite {
             dir,
             state,
             data_authority: None,
+            preview_ready: false,
             files_ready: false,
         };
         if !s.state.operations.completed.is_empty() {
@@ -783,6 +786,9 @@ impl Satellite {
             "failure":failure,"executionStopped":s.stopped,"storageRemoved":s.cleaned,
             "credentialsErased":s.cleaned,"cleanup":cleanup}});
         if a.workspace_io_version == Some(1) {
+            if command && self.preview_ready {
+                report["receipt"]["ready"]["preview"] = json!(true);
+            }
             report["receipt"]["workspaceRemoved"] = json!(
                 s.stopped
                     && (s.abandoned
@@ -1926,12 +1932,17 @@ impl Satellite {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn())?;
+        let mut preview_controller = controller.data_transport();
         let mut transfer_controller = controller.data_transport();
         let mut joined_data_closed = false;
         let stopped = std::thread::scope(|scope| -> Result<bool> {
             let transfer_worker = transfer_controller
                 .as_mut()
                 .map(|c| operations::Worker::spawn(scope, c));
+            let preview_worker = preview_controller
+                .as_mut()
+                .map(|c| operations::Worker::spawn(scope, c));
+            let mut previews = preview::Loop::default();
             let mut transfer_inflight = false;
             let mut transfer_polled: Option<clock::Clock> = None;
             let worker = operations::Worker::spawn(scope, controller);
@@ -2071,6 +2082,19 @@ impl Satellite {
                             self.fence_for(self.error_cause(&mut child, session.as_ref()))?;
                             break;
                         }
+                    }
+                    let preview_ready = preview_worker.is_some()
+                        && self.assignment()?.workspace_io_version == Some(1)
+                        && self.state.direct.as_ref().is_some_and(|d| {
+                            d.ready && !d.withdrawn && data.preview_ready(&d.bundle_digest)
+                        })
+                        && !self.state.fenced;
+                    if self.preview_ready != preview_ready {
+                        self.preview_ready = preview_ready;
+                        last = None;
+                    }
+                    if let Some(w) = &preview_worker {
+                        previews.tick(self, session.as_ref(), &data, w)?;
                     }
                     if !inflight && !self.state.fenced {
                         let request = self.runtime_request_tick(
@@ -2422,6 +2446,8 @@ mod tests {
                 LeaseRoute::Claim => "claim",
                 LeaseRoute::Report => "report",
                 LeaseRoute::Assignments => "assignments",
+                LeaseRoute::PreviewPoll => "previewPoll",
+                LeaseRoute::PreviewReport => "previewReport",
                 LeaseRoute::TransferPoll => "transferPoll",
                 LeaseRoute::TransferReport => "transferReport",
                 LeaseRoute::OperationPoll => "operationPoll",

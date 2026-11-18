@@ -1,14 +1,14 @@
 use super::*;
 use canaveral_guest_protocol::data::{self as wire, Frame, Receipt};
 use std::os::unix::net::UnixStream;
-fn read_frame(peer: &mut UnixStream) -> Frame {
+pub(super) fn read_frame(peer: &mut UnixStream) -> Frame {
     let mut n = [0; 4];
     peer.read_exact(&mut n).unwrap();
     let mut bytes = vec![0; u32::from_be_bytes(n) as usize];
     peer.read_exact(&mut bytes).unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
-fn setup() -> (tempfile::TempDir, Satellite, data::Lane, UnixStream) {
+pub(super) fn setup() -> (tempfile::TempDir, Satellite, data::Lane, UnixStream) {
     let (tmp, config) = fixture();
     let mut s = seeded(&config);
     s.state.direct = Some(Direct {

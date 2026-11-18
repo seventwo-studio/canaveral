@@ -611,8 +611,6 @@ pub(crate) mod tests {
         session_pair_with_deadline(110.0)
     }
     pub(crate) fn session_pair_with_deadline(deadline: f64) -> (Session, UnixStream) {
-        let (stream, peer) = UnixStream::pair().unwrap();
-        stream.set_nonblocking(true).unwrap();
         let binding = Binding {
             lease_id: Uuid::from_u128(1),
             member_id: Uuid::from_u128(2),
@@ -620,6 +618,14 @@ pub(crate) mod tests {
             boot_attempt: Uuid::from_u128(3),
             bundle_digest: "a".repeat(64),
         };
+        session_pair_with_binding(binding, deadline)
+    }
+    pub(crate) fn session_pair_with_binding(
+        binding: Binding,
+        deadline: f64,
+    ) -> (Session, UnixStream) {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
         (
             Session {
                 stream,

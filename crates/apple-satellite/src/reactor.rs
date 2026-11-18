@@ -210,12 +210,14 @@ impl Handle {
         exec_id: Uuid,
         method: &str,
         target: &str,
+        deadline: Duration,
     ) -> crate::Result<PreviewReply> {
         let grant = PreviewGrant {
             exec: control.preview_authority(&self.binding, digest, exec_id)?,
             lease: self.authority.clone(),
             deadline: control
                 .deadline()
+                .min(deadline)
                 .min(clock::now() + Duration::from_secs(1)),
         };
         if !self.ready.load(Ordering::Acquire)
@@ -1611,7 +1613,7 @@ mod worker_tests {
         let digest = h.binding.bundle_digest.clone();
         for (seq, bytes) in ["previewRe", "ady 3000\n"].into_iter().enumerate() {
             assert!(h
-                .preview_request(&control, &digest, exec, "GET", "/")
+                .preview_request(&control, &digest, exec, "GET", "/", Duration::MAX)
                 .is_err());
             peer.write_all(
                 &canaveral_guest_protocol::encode(&canaveral_guest_protocol::Guest::Output {
@@ -1626,16 +1628,21 @@ mod worker_tests {
             .unwrap();
             control.pump(now).unwrap();
         }
-        assert!(h.preview_request(&control, "", exec, "GET", "/").is_err());
         assert!(h
-            .preview_request(&control, &digest, Uuid::nil(), "GET", "/")
+            .preview_request(&control, "", exec, "GET", "/", Duration::MAX)
             .is_err());
         assert!(h
-            .preview_request(&control, &digest, exec, "GET", "//upstream")
+            .preview_request(&control, &digest, Uuid::nil(), "GET", "/", Duration::MAX)
+            .is_err());
+        assert!(h
+            .preview_request(&control, &digest, exec, "GET", "//upstream", Duration::MAX)
+            .is_err());
+        assert!(h
+            .preview_request(&control, &digest, exec, "GET", "/", clock::now())
             .is_err());
         for cancel in [false, true] {
             let reply = h
-                .preview_request(&control, &digest, exec, "GET", "/")
+                .preview_request(&control, &digest, exec, "GET", "/", Duration::MAX)
                 .unwrap();
             let Frame::PreviewRequest { id, exec_id, .. } = receive(&mut guest) else {
                 panic!("expected preview request")
