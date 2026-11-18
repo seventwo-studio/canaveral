@@ -23,11 +23,12 @@ jobs:
       - name: Install disk construction tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils linux-image-generic
+          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-system-arm qemu-efi-aarch64 qemu-utils linux-image-generic
       - name: Build and verify ARM64 disk
         env:
           LIBGUESTFS_BACKEND: direct
         run: |
+          sudo --preserve-env=LIBGUESTFS_BACKEND libguestfs-test-tool --timeout 300
           sudo --preserve-env=LIBGUESTFS_BACKEND bash tools/browser-image/build.sh browser-worker.qcow2
           sudo chmod 0444 browser-worker.qcow2
           sha256sum browser-worker.qcow2 > browser-worker.qcow2.sha256
