@@ -97,6 +97,25 @@ boot trial also requires libguestfs and QEMU. Full acceptance requires a TLS
 connection from the controller, sandboxed launches of all three engines,
 WebSocket attachment and process cleanup after a worker crash.
 
+## Launch Chromium from the dashboard
+
+Open a ready Mac host that advertises the browser runtime and select **Launch
+Chromium**. The configured worker VM must already be running. The dashboard
+requests a five-minute session and displays its expiry, Playwright endpoint and
+scoped key. To attach with the worker's Playwright version, supply those values
+to your client:
+
+```js
+const browser = await chromium.connect(endpoint, {
+  headers: { Authorization: `Bearer ${key}` },
+});
+```
+
+If the launch response is lost, keep the host overview open and select
+**Inspect browser** or **Retry launch** to reuse the original browser ID. Select
+**Stop browser** to release the browser early. Leaving the overview clears the
+displayed credentials. A running browser still expires at its original deadline.
+
 ## HTTP lifecycle
 
 All routes reject browser Origin headers. Requests use bearer headers; secrets
@@ -256,5 +275,9 @@ On 18 November 2026, a disposable ARM64 CI guest built from `eaf5f62`
 launched Chromium, accepted an authenticated Playwright connection through its
 local TLS gateway and rendered a screenshot matching the expected pixels. The
 trial verified launcher cgroup removal after normal closure and after killing the
-worker. Firefox, WebKit and access from a deployed controller still require
+worker. The same day, the homelab Mac Studio independently built the image and
+passed the Chromium trial using the harness at `744c4cb`. The disk's SHA-256
+after the trial matched its pre-boot digest,
+`392eed5d6751d920103a8931ae62b680cf926dd507ede5eef480460d684eed07`.
+Firefox, WebKit and access from a deployed controller still require
 native verification. [CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)

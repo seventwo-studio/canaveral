@@ -1,3 +1,4 @@
+import { BrowserLaunch } from "./browser-launch";
 import type { FormEvent, ReactNode } from "react";
 import {
   allocationLimits,
@@ -528,6 +529,7 @@ export function InfrastructureDetails({
           </Button>
         </div>
       )}
+      <BrowserLaunch key={host.id} host={host} />
       <StackedResources host={host} data={data} unavailable={Boolean(error)} />
       <HostLimits
         key={host.id}

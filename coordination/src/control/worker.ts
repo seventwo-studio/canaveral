@@ -18,6 +18,7 @@ import { createModule as sessionsModule } from "./sessions.ts";
 import { AdminSystem } from "./admin-system.ts";
 import { LegacyLeases } from "./leases.ts";
 import { createModule as updatesModule } from "./updates.ts";
+import { requireAdmin } from "./contracts.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
 import { mutatesControlCommand } from "./client.ts";
 import type { ControlCommand, ControlReply } from "./client.ts";
@@ -69,6 +70,10 @@ leases.requests.wake();
 setInterval(() => { leases.requests.wake(); }, 1000).unref();
 
 async function dispatch(command: ControlCommand): Promise<unknown> {
+  if (command.type === "browsers.authorize") {
+    requireAdmin({ principal: () => principal(command.token) });
+    return true;
+  }
   if (command.type === "requests.wake") return { ok: leases.requests.wake() };
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);

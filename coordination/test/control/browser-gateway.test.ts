@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
+import { ServiceError } from "../../src/errors.ts";
 import { createBrowserGateway, parseBrowserGateway } from "../../src/control/browser-gateway.ts";
 
 test("host browser gateway routes TLS requests and attachments with separate credentials", async t => {
@@ -30,12 +31,20 @@ test("host browser gateway routes TLS requests and attachments with separate cre
     t.after(() => { server.closeAllConnections(); return new Promise<void>(resolve => server.close(() => resolve())); });
     return `https://127.0.0.1:${(server.address() as AddressInfo).port}`;
   }
-  const worker = createServer(tls, (req, res) => {
-    req.resume();
+  let firstIntent: string | undefined;
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const worker = createServer(tls, async (req, res) => {
     traffic.push({ method: req.method!, authorization: req.headers.authorization!, path: req.url! });
     if (req.method === "DELETE") { res.end(JSON.stringify({ id, state: "closed" })); return; }
-    res.writeHead(req.method === "POST" ? 201 : 200);
-    res.end(JSON.stringify({ id, engine: "chromium", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    if (req.method === "POST") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const intent = Buffer.concat(chunks).toString();
+      if (firstIntent && firstIntent !== intent) { res.writeHead(409); res.end(); return; }
+      res.writeHead(firstIntent ? 200 : 201);
+      firstIntent = intent;
+    }
+    res.end(JSON.stringify({ id, engine: "chromium", expiresAt,
       endpoint: workerOrigin.replace("https:", "wss:") + `/v1/browsers/${id}/connect`, key: session }));
   });
   worker.on("upgrade", (req, socket) => {
@@ -48,7 +57,9 @@ test("host browser gateway routes TLS requests and attachments with separate cre
   let ready = false;
   const gateway = createBrowserGateway(parseBrowserGateway({
     origin, workers: { [host]: { origin: workerOrigin, connectHost: "127.0.0.1", credentialFile } },
-  }), [operator], async () => ready);
+  }), [operator], async () => ready, async credential => {
+    if (credential !== operator) throw new ServiceError("Admin required.", 403);
+  });
   gatewayServer.on("request", gateway.handle);
   gatewayServer.on("upgrade", gateway.upgrade);
   t.after(gateway.close);
@@ -59,6 +70,12 @@ test("host browser gateway routes TLS requests and attachments with separate cre
   });
   assert.equal((await post(prefix, operator, intent)).status, 403);
   assert.equal((await post(prefix, app, intent)).status, 409);
+  assert.equal(traffic.length, 0);
+  const admin = prefix.replace("/v1/", "/v1/admin/");
+  const item = origin + admin + "/" + id;
+  const headers = { authorization: `Bearer ${operator}` };
+  assert.equal((await post(admin, app, intent)).status, 403);
+  assert.equal((await post(admin, operator, intent)).status, 409);
   assert.equal(traffic.length, 0);
   ready = true;
   const launched = await post(prefix, app, intent);
@@ -78,12 +95,25 @@ test("host browser gateway routes TLS requests and attachments with separate cre
   assert.equal(await upgrade(app), 403);
   assert.equal(await upgrade(operator), 403);
   assert.equal(await upgrade(receipt.key), 101);
+  const replay = await post(admin, operator, intent);
+  assert.equal(replay.status, 200);
+  const replayed = await replay.json();
+  assert.deepEqual(replayed, receipt);
+  assert.equal((await post(admin, operator, { ...intent, engine: "webkit" })).status, 409);
+  assert.ok(!JSON.stringify(replayed).includes(app));
   ready = false;
+  assert.equal((await (await fetch(item, { headers })).json()).key, session);
+  assert.deepEqual(await (await fetch(item, { method: "DELETE", headers })).json(), { id, state: "closed" });
+  assert.equal(await upgrade(session), 403);
   assert.equal((await post(`${prefix}/${id}/stop`, app, {})).status, 200);
   assert.equal(await upgrade(session), 403);
   assert.deepEqual(traffic, [
     { method: "POST", authorization: `Bearer ${app}`, path: "/v1/browsers" },
     { method: "GET", authorization: `Bearer ${session}`, path: `/v1/browsers/${id}/connect` },
+    { method: "POST", authorization: `Bearer ${app}`, path: "/v1/browsers" },
+    { method: "POST", authorization: `Bearer ${app}`, path: "/v1/browsers" },
+    { method: "GET", authorization: `Bearer ${app}`, path: `/v1/browsers/${id}` },
+    { method: "DELETE", authorization: `Bearer ${app}`, path: `/v1/browsers/${id}` },
     { method: "DELETE", authorization: `Bearer ${app}`, path: `/v1/browsers/${id}` },
   ]);
 });

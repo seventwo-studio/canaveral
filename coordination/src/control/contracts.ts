@@ -23,14 +23,14 @@ export interface ControlModule {
 export interface ControlOptions { adminToken: string; enrollmentToken?: string; controllerId: string; updatePublicKeys?: Record<string, string>; browserHosts?: string[] }
 export type ModuleFactory = (store: SqliteStore, options: ControlOptions) => ControlModule;
 
-export function requireScope(request: ControlRequest, action: "read" | "write" | "access" | "admin"): Principal {
+export function requireScope(request: Pick<ControlRequest, "principal">, action: "read" | "write" | "access" | "admin"): Principal {
   const principal = request.principal();
   if (principal.kind === "operator") return principal;
   if (principal.user?.role === "admin" && principal.scopes.includes("admin")) return principal;
   if (action === "admin" || !principal.scopes.includes(`machines:${action}`)) throw new ServiceError("Credential scope does not permit this action.", 403);
   return principal;
 }
-export function requireAdmin(request: ControlRequest): Principal { return requireScope(request, "admin"); }
+export function requireAdmin(request: Pick<ControlRequest, "principal">): Principal { return requireScope(request, "admin"); }
 export function owns(principal: Principal, owner: unknown): boolean {
   return principal.kind === "operator" || principal.user?.role === "admin" || (principal.user !== null && principal.user.id === owner);
 }

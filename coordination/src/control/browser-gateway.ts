@@ -10,7 +10,7 @@ import { identifier } from "../consumers.ts";
 import { secret, ServiceError } from "../errors.ts";
 import { countHeader, readBody, requestTarget, respond } from "./http.ts";
 
-const route = /^\/v1\/hosts\/([0-9a-f-]{36})\/browsers(?:\/([0-9a-f-]{36})(?:\/(stop|connect))?)?$/;
+const route = /^\/v1\/(?:(admin)\/)?hosts\/([0-9a-f-]{36})\/browsers(?:\/([0-9a-f-]{36})(?:\/(stop|connect))?)?$/;
 const browserHeaders = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions",
   "x-playwright-browser", "x-playwright-proxy"] as const;
 const upgradeHeaders = ["sec-websocket-accept", "sec-websocket-protocol", "sec-websocket-extensions"] as const;
@@ -59,7 +59,7 @@ function connection(worker: BrowserGatewayConfig["workers"][string]) {
   return { hostname: worker.connectHost, servername: origin.hostname, headers: { host: origin.host } };
 }
 
-export function createBrowserGateway(config: BrowserGatewayConfig, otherCredentials: string[], canLaunch: (hostId: string) => Promise<boolean>) {
+export function createBrowserGateway(config: BrowserGatewayConfig, otherCredentials: string[], canLaunch: (hostId: string) => Promise<boolean>, authorizeAdmin?: (token: string) => Promise<void>) {
   const sockets = new Set<Duplex>();
   const credentials = new Set(otherCredentials);
   const workers = new Map(Object.entries(config.workers).map(([id, worker]) => {
@@ -74,34 +74,37 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
     const { path, query, token } = requestTarget(req);
     const match = route.exec(path);
     if (!match || [...query].length) throw new ServiceError("Unknown browser route.", 404);
-    const [, host, browser, action] = match;
+    const [, admin, host, browser, action] = match;
     const hostId = identifier(host);
     const worker = workers.get(hostId);
     if (!worker) throw new ServiceError("No browser worker is configured for this host.", 404);
     if (browser) identifier(browser);
-    return { path, host: hostId, worker, browser, action, token: secret(token) };
+    return { admin, path, host: hostId, worker, browser, action, token: secret(token) };
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (pending >= 32) { req.resume(); respond(res, { error: "browser_gateway_busy" }, 429); return; }
     pending++;
     try {
-      const { path, host, worker, browser, action, token } = target(req);
-      if (!timingSafeEqual(worker.digest, digest(token))) throw new ServiceError("Browser application credential rejected.", 403);
+      const { admin, path, host, worker, browser, action, token } = target(req);
+      if (admin) {
+        if (!authorizeAdmin) throw new ServiceError("Administrator credential required.", 403);
+        await authorizeAdmin(token);
+      } else if (!timingSafeEqual(worker.digest, digest(token))) throw new ServiceError("Browser application credential rejected.", 403);
       if (req.headers.expect !== undefined || req.headers.upgrade !== undefined || req.headers.trailer !== undefined) {
         throw new ServiceError("Invalid browser request framing.", 400);
       }
       const create = req.method === "POST" && !browser;
-      const stop = req.method === "POST" && action === "stop";
+      const stop = admin ? req.method === "DELETE" && browser && !action : req.method === "POST" && action === "stop";
       const inspect = req.method === "GET" && browser && !action;
       if (!create && !stop && !inspect) throw new ServiceError("Unknown browser route.", 404);
-      if (inspect && (req.headers["transfer-encoding"] !== undefined || (req.headers["content-length"] ?? "0") !== "0")) {
-        throw new ServiceError("Browser inspection takes no request body.", 400);
+      if ((inspect || (admin && stop)) && (req.headers["transfer-encoding"] !== undefined || (req.headers["content-length"] ?? "0") !== "0")) {
+        throw new ServiceError("This operation takes no request body.", 400);
       }
-      const body = create || stop ? await readBody(req, path, 4096) : undefined;
+      const body = create || (stop && !admin) ? await readBody(req, path, 4096) : undefined;
       const id = create ? identifier(body?.id) : browser!;
       if (create && body?.id !== id) throw new ServiceError("Use a canonical browser UUID.", 400);
-      if (stop && Object.keys(body!).length) throw new ServiceError("Expected an empty object.", 400);
+      if (stop && !admin && Object.keys(body!).length) throw new ServiceError("Expected an empty object.", 400);
       if (create && !await canLaunch(host)) throw new ServiceError("Browser host is offline or draining.", 409);
       const endpoint = new URL(create ? "/v1/browsers" : `/v1/browsers/${id}`, worker.origin);
       const bodyBytes = create ? Buffer.from(JSON.stringify(body)) : undefined;
@@ -138,17 +141,17 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
         return;
       }
       const workerEndpoint = new URL(receipt.endpoint);
-      const browserEndpoint = new URL(`${create ? path + "/" + id : path}/connect`, config.origin);
+      const browserEndpoint = new URL(`/v1/hosts/${host}/browsers/${id}/connect`, config.origin);
       browserEndpoint.protocol = "wss:";
       const now = Date.now(), expiresAt = Date.parse(receipt.expiresAt), key = secret(receipt.key);
-      if (!["ws:", "wss:"].includes(workerEndpoint.protocol) || workerEndpoint.pathname !== `/v1/browsers/${id}/connect`
+      if (credentials.has(key) || !["ws:", "wss:"].includes(workerEndpoint.protocol) || workerEndpoint.pathname !== `/v1/browsers/${id}/connect`
         || workerEndpoint.username || workerEndpoint.password || workerEndpoint.search || workerEndpoint.hash
         || !["chromium", "firefox", "webkit"].includes(receipt.engine)
         || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt - now > 3_600_000) throw new Error("Invalid worker browser receipt.");
       for (const [id, attachment] of attachments) if (attachment.expiresAt <= now) attachments.delete(id);
       if (attachments.size >= 2048 && !attachments.has(`${host}/${id}`)) throw new Error("Browser attachment capacity reached.");
       attachments.set(`${host}/${id}`, { digest: digest(key), expiresAt });
-      respond(res, { id, engine: receipt.engine, expiresAt: receipt.expiresAt, endpoint: browserEndpoint.href, key }, status);
+      respond(res, { id, engine: receipt.engine, expiresAt: new Date(expiresAt).toISOString(), endpoint: browserEndpoint.href, key }, status);
     } catch (error) {
       req.resume();
       respond(res, { error: "browser_gateway_request_failed" }, error instanceof ServiceError ? error.status : 503);
@@ -157,8 +160,8 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
 
   function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     try {
-      const { host, worker, browser, action, token } = target(req);
-      if (action !== "connect" || !browser || sockets.size >= 128) throw new Error("Browser attachment refused.");
+      const { admin, host, worker, browser, action, token } = target(req);
+      if (admin || action !== "connect" || !browser || sockets.size >= 128) throw new Error("Browser attachment refused.");
       const attachment = attachments.get(`${host}/${browser}`);
       if (!attachment || Date.now() >= attachment.expiresAt || !timingSafeEqual(attachment.digest, digest(token))) throw new Error("Browser attachment refused.");
       if (req.method !== "GET" || req.httpVersion !== "1.1" || req.headers["content-length"] !== undefined

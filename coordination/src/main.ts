@@ -96,6 +96,8 @@ export async function startController(config: ControllerConfig) {
     const response = await control?.request({ type: "http", method: "GET", path: "/v1/hosts", query: "", token: adminToken, body: {} });
     const inventory = response?.body as { hosts: { id: string; platform: string | null; placementReady: boolean }[] } | undefined;
     return inventory?.hosts.some(host => host.id === hostId && host.platform === "macos" && host.placementReady) === true;
+  }, async token => {
+    await control!.request({ type: "browsers.authorize", token });
   }) : undefined;
   try {
     await client.ready;
