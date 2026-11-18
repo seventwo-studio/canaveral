@@ -92,8 +92,8 @@ runs the authenticated worker as browser-runtime, and starts each browser under
 the separate browser UID through a private launch socket. Launcher services
 are bound to the worker lifecycle and share its resource slice. Reconcile outstanding boots after a restart.
 
-The build requires a Linux libguestfs appliance and access to the pinned
-downloads. Native acceptance requires a separately authorized boot, a TLS
+The build provisions the disk with systemd-nspawn on ARM64 Linux. The disposable
+boot trial also requires libguestfs and QEMU. Full acceptance requires a TLS
 connection from the controller, sandboxed launches of all three engines,
 WebSocket attachment and process cleanup after a worker crash.
 
@@ -250,5 +250,11 @@ startup, expiry, uncertain cleanup, the WebSocket gateway, exact forwarding rule
 context configuration, tabs, evaluation and pointer dispatch. Package checks
 verify the new entrypoints without launching browsers. These checks do not prove
 real rendering, browser sandbox availability, cross-network forwarding, hot reload,
-frame/shadow behavior, screenshots or process supervision. Native and deployed
-acceptance remain outstanding. Track delivery in [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding).
+frame/shadow behavior, screenshots or process supervision.
+
+On 18 November 2026, a disposable ARM64 CI guest built from `eaf5f62`
+launched Chromium, accepted an authenticated Playwright connection through its
+local TLS gateway and rendered a screenshot matching the expected pixels. The
+trial verified launcher cgroup removal after normal closure and after killing the
+worker. Firefox, WebKit and access from a deployed controller still require
+native verification. [CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)
