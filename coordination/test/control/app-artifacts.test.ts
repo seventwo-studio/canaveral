@@ -67,6 +67,22 @@ test('owner scope, platform, digest and assignment changes refuse artifacts befo
   await assert.rejects(f.call('GET', `/v1/app-artifacts/${f.id}`, {}, other), status(409));
 });
 
+test('only the owner can upload, submit install-uploaded and inspect its receipt', async t => {
+  const f = fixture(t), item = `/v1/app-artifacts/${f.id}`;
+  await f.create();
+  await assert.rejects(f.call('GET', item, {}, other), status(404));
+  await assert.rejects(f.call('POST', item + '/chunks', { offset: 0, data: f.bytes.subarray(0, APP_CHUNK_BYTES).toString('base64') }, other), status(404));
+  await f.chunk(0, f.bytes.subarray(0, APP_CHUNK_BYTES));
+  await f.chunk(APP_CHUNK_BYTES, f.bytes.subarray(APP_CHUNK_BYTES));
+  await assert.rejects(f.call('POST', item + '/complete', {}, other), status(404));
+  assert.equal((await f.complete()).state, 'ready');
+  await assert.rejects(f.call('POST', `/v1/machines/${f.machine.id}/operations`, f.operation, other), status(404));
+  const submitted = await f.submit(), receipt = `/v1/operations/${f.operation.id}`;
+  assert.equal(submitted.state, 'queued');
+  assert.deepEqual(await f.call('GET', receipt), submitted);
+  await assert.rejects(f.call('GET', receipt, {}, other), status(404));
+});
+
 test('outbound host download is bound to the exact operation and source digest', async t => {
   const f = fixture(t); await f.upload(); await f.submit();
   f.store.transaction(db => assert.equal(assignedDeviceOperations(db, f.host, 1000)[0]!.expiresAt, 2800));

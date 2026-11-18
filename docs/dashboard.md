@@ -456,3 +456,25 @@ publishes the bytes and their SHA-256 digest together after the transfer SDK
 confirms the size and digest. Output and artifacts survive cleanup and
 dashboard restart in the private SQLite database. Restart fences unfinished
 execution and reconciles its original request without rerunning the command.
+
+## Owner mobile app uploads
+
+Send JSON mutations with the dashboard session cookie and matching Origin.
+The dashboard forwards the owner's credential to the controller, which checks
+machine access on each artifact and operation request.
+
+1. POST `/api/v1/machines/{machine}/app-artifacts` with a client-generated
+   UUID `id`, `format` (`apk` for Android or `ios-app-tar` for iOS),
+   byte count `bytes` and lowercase hex `sha256`.
+2. POST `/api/v1/app-artifacts/{id}/chunks` with byte `offset` and base64
+   `data`. Use the reservation's `chunkBytes` size except for the final chunk.
+   GET `/api/v1/app-artifacts/{id}` for the acknowledged offset in `received`.
+3. POST `{}` to `/api/v1/app-artifacts/{id}/complete`. The controller verifies
+   the size and digest before returning `state: "ready"`.
+4. POST `/api/v1/machines/{machine}/operations` with
+   `{"id":"OPERATION_UUID","action":"install-uploaded","arguments":{"artifact":"ARTIFACT_UUID"}}`.
+   Poll `/api/v1/operations/{OPERATION_UUID}` for the installation receipt.
+   After a lost submission response, replay the same operation UUID and intent.
+
+Another ordinary account receives 404 for the owner's artifact and operation
+receipt. Native installation and recovery follow the [mobile control contract](mobile-control.md).

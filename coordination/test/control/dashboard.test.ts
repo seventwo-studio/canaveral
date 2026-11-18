@@ -160,6 +160,33 @@ test("dashboard browser routes forward the caller and require same-origin cookie
   ]);
 });
 
+test("mobile upload and install routes forward the owner's session and JSON intent", async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const artifact = randomUUID(), operation = randomUUID();
+  const item = `/v1/app-artifacts/${artifact}`, operations = `/v1/machines/${machine}/operations`;
+  const reserve = `/v1/machines/${machine}/app-artifacts`;
+  const requests: [string, Record<string, unknown>?][] = [
+    [reserve, { id: artifact, format: "apk", bytes: 524288, sha256: "0".repeat(64) }],
+    [item + "/chunks", { offset: 0, data: Buffer.alloc(524288).toString("base64") }],
+    [item + "/complete", {}], [item],
+    [operations, { id: operation, action: "install-uploaded", arguments: { artifact } }],
+    [`/v1/operations/${operation}`],
+  ];
+  const cookie = { Cookie: `canaveral_session=${session}` };
+  for (const [path, body] of requests) {
+    if (body) {
+      for (const headers of [cookie, { ...cookie, Origin: "https://other.example" }]) {
+        assert.equal((await fetch(f.url, "/api" + path, { body, headers })).status, 403);
+      }
+    }
+    const reply = await fetch(f.url, "/api" + path, { body, headers: { ...cookie, Origin: f.url } });
+    assert.equal(reply.status, 200);
+  }
+  assert.deepEqual(f.calls.map(call => [call.method, call.path, call.token, call.body]),
+    requests.map(([path, body]) => [body ? "POST" : "GET", path, session, body ?? {}]));
+});
+
 test("malformed bodies never reach upstream; retries retain intent and unconfirmed mutations are uncertain", async () => {
   const f = await fixture();
   try {
