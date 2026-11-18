@@ -279,5 +279,12 @@ worker. The same day, the homelab Mac Studio independently built the image and
 passed the Chromium trial using the harness at `744c4cb`. The disk's SHA-256
 after the trial matched its pre-boot digest,
 `392eed5d6751d920103a8931ae62b680cf926dd507ede5eef480460d684eed07`.
-Firefox, WebKit and access from a deployed controller still require
+In a second homelab trial, the HTTPS dashboard API created, inspected and
+stopped Chromium through a disposable controller. Playwright ran outside the VM
+on the Mac and verified all 6,144 screenshot pixels. The controller rejected an
+operator credential on attachment and rejected the scoped key after stop. This
+trial used synthetic host enrollment and heartbeat, a loopback dashboard TLS
+proxy and restricted guest networking.
+
+Firefox, WebKit and access from a persistently deployed controller still require
 native verification. [CI guest trial](https://github.com/seventwo-studio/canaveral/actions/runs/44387055088/job/135094371194) · [ST-601](https://linear.app/seventwo/issue/ST-601/add-browser-emulation-api-with-agent-runtime-server-forwarding)
