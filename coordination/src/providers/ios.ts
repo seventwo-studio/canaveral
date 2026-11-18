@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { StateLock } from "../runtime-process.ts";
 import { ServiceError, object } from "../errors.ts";
 import { MobileProvider, MAX_OUTPUT, atomicUpload, authorized, confined, containerParts, decodeData, digest, encoded, locked, operationRequest, readJson, readRegular, saveJson, text, unsupported, uuid } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
@@ -49,6 +50,72 @@ export class IosProvider extends MobileProvider {
     const { runtime, device } = found[0]!, definition = object(image.device);
     if (device.name !== this.name(machine) || runtime !== definition.runtime || device.deviceTypeIdentifier !== definition.deviceType || device.isAvailable !== true) throw new ServiceError("Simulator identity/runtime differs from its assignment; refusing control.");
     return { ...device, udid: id };
+  }
+  async removeOwnedStorage(machine: RecordValue, image: RecordValue, folder: string, requestId: string): Promise<RecordValue> {
+    this.executionAllowed(machine);
+    const lock = new StateLock(path.join(folder, "simulator-removal.sqlite"));
+    try { return await this.removeSimulator(machine, image, folder, requestId); }
+    finally { lock.close(); }
+  }
+  private async removeSimulator(machine: RecordValue, image: RecordValue, folder: string, requestId: string): Promise<RecordValue> {
+    const machineId = uuid(machine.id), id = uuid(requestId), fingerprint = digest(this.binding(machine, image));
+    const root = text(this.config.storage, "storage"), storage = path.join(root, machineId);
+    if (!path.isAbsolute(root) || path.resolve(folder) === storage || path.resolve(folder).startsWith(storage + path.sep))
+      throw new ServiceError("Simulator storage overlaps host state or is not absolute.");
+    const journal = path.join(folder, "deletion.json");
+    const previous = readJson(journal);
+    let proof = previous ?? { machineId, id, fingerprint, state: "pending" };
+    if (proof.id !== id || proof.machineId !== machineId || proof.fingerprint !== fingerprint)
+      throw new ServiceError("Deletion receipt belongs to another assignment or request.");
+    const record = (state: string, fields: RecordValue = {}) => {
+      proof = { ...proof, ...fields, state };
+      saveJson(journal, proof);
+    };
+    const identity = () => {
+      const info = fs.lstatSync(storage, { bigint: true, throwIfNoEntry: false });
+      if (!info) return null;
+      if (!info.isDirectory() || fs.realpathSync(storage) !== storage) throw new ServiceError("Invalid simulator storage directory.");
+      return String(info.dev) + ":" + String(info.ino);
+    };
+    const absent = async () => {
+      const devices = await this.inventory();
+      return devices.every(({ device }) => uuid(device.udid) !== proof.udid && text(device.name, "simulator name") !== this.name(machine));
+    };
+    const original = identity();
+    if (!previous) record("pending", { directory: original });
+    if ((proof.state === "pending" || original !== null) && proof.directory !== original) throw new ServiceError("Simulator storage changed since removal began.");
+    if (!["pending", "deleting", "erasing", "complete"].includes(String(proof.state))) throw new ServiceError("Unknown simulator deletion state.");
+    if (original !== null && proof.state !== "complete") {
+      if (!readJson(path.join(storage, "canaveral-owner.json"))) throw new ServiceError("Simulator storage has no owner.");
+      this.storage(machine, image);
+      await locked(path.join(storage, "assignment.lock"), async () => {
+        const receipt = readJson(path.join(storage, "simulator.json"));
+        if (proof.state === "pending") {
+          if (receipt) {
+            const device = await this.owned(machine, image, storage);
+            if (!device) throw new ServiceError("Missing owned simulator.");
+            const udid = uuid(device.udid);
+            if (device.state === "Booted") await this.simctl(["shutdown", udid]);
+            if ((await this.owned(machine, image, storage))?.state !== "Shutdown") throw new ServiceError("Simulator shutdown is unconfirmed.");
+            record("deleting", { udid, directory: original });
+            await this.simctl(["delete", udid]);
+          } else if (readJson(path.join(storage, "create-started.json"))) throw new ServiceError("Simulator creation outcome is uncertain.");
+        }
+        if (proof.state !== "pending" && (proof.directory !== original || proof.udid !== receipt?.udid))
+          throw new ServiceError("Simulator removal identity changed.");
+        if (!await absent()) throw new ServiceError("Simulator removal is unconfirmed.");
+        record("erasing", { directory: original });
+      });
+      if (identity() !== original) throw new ServiceError("Simulator storage changed during removal.");
+      this.storage(machine, image);
+      fs.rmSync(storage, { recursive: true });
+      const parent = fs.openSync(root, "r");
+      try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
+    } else if (original !== null || !["pending", "erasing", "complete"].includes(String(proof.state)) || !await absent()) {
+      throw new ServiceError("Simulator removal evidence is inconsistent.");
+    }
+    record("complete");
+    return proof;
   }
   async reconcile(machine: RecordValue, image: RecordValue, _folder: string): Promise<RecordValue> {
     this.executionAllowed(machine);
