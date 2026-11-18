@@ -153,7 +153,7 @@ for (const width of [1440, 1133, 390, 320])
       "script-src 'self'",
     );
     await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();
-    await page.evaluate(() => document.fonts.ready);
+    await page.evaluate(() => document.fonts.load('14px "Geist Mono"'));
     expect(
       await page.evaluate(() => document.fonts.check('14px "Geist Mono"')),
     ).toBe(true);
@@ -161,8 +161,10 @@ for (const width of [1440, 1133, 390, 320])
       await page
         .locator("label, input, button")
         .evaluateAll((elements) =>
-          elements.every((element) =>
-            getComputedStyle(element).fontFamily.includes("Geist Mono"),
+          elements.every(
+            (element) =>
+              getComputedStyle(element).fontFamily ===
+              getComputedStyle(document.body).fontFamily,
           ),
         ),
     ).toBe(true);

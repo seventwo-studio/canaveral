@@ -21,19 +21,7 @@ import { record } from "@/lib/types";
 import type { AuthState } from "@/lib/types";
 import type { Host } from "@/lib/infrastructure";
 import type { RegistryEntry, Resources } from "@/lib/catalogue";
-type View =
-  | "machines"
-  | "hosts"
-  | "orchestrators"
-  | "templates"
-  | "blueprints"
-  | "account"
-  | "tokens"
-  | "users"
-  | "admin"
-  | "api-access"
-  | "system"
-  | "configuration";
+type View = keyof typeof destinations;
 import { AccountPage, TokensPage, UsersPage } from "@/components/accounts";
 import {
   AdminOverview,
@@ -76,9 +64,6 @@ const statusCode = (error: unknown) =>
 import { useEffect, useRef, useState } from "react";
 import {
   Rocket,
-  Monitor,
-  Server,
-  Layers,
   ArrowUpRight,
   Plus,
   Search,
@@ -129,7 +114,7 @@ import {
 } from "@/components/image-actions";
 import { MachineControl } from "@/components/machine-control";
 import { LoginScreen } from "@/components/login-screen";
-import { WorkspaceSidebar } from "@/components/workspace-sidebar";
+import { destinations, WorkspaceSidebar } from "@/components/workspace-sidebar";
 import {
   SidebarProvider,
   SidebarInset,
@@ -180,20 +165,16 @@ import {
 
 const views = {
   machines: {
-    icon: Monitor,
     filters: ["all", "ready", "preparing", "running", "stopped", "attention"],
   },
   hosts: {
-    icon: Server,
     filters: ["all", "online", "offline", "draining"],
   },
   orchestrators: {
-    icon: Orbit,
     filters: ["all", "online", "offline", "draining"],
   },
-  blueprints: { icon: Layers, filters: [] },
+  blueprints: { filters: [] },
   templates: {
-    icon: Layers,
     filters: ["all", "headless", "desktop", "device"],
   },
 };
@@ -480,9 +461,6 @@ export function App() {
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
-  useEffect(() => {
-    document.title = `Canaveral · ${infrastructureId ? "Overview · " : ""}${view === "admin" ? "Administration" : view === "api-access" ? "API access" : title(view)}`;
-  }, [view, infrastructureId]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (acting.current || !["setup", "login"].includes(auth)) return;
@@ -601,6 +579,12 @@ export function App() {
   const resourceHost = infrastructureHosts.find(
     (host) => host.id === infrastructureId,
   );
+  const locationLabel = resourcePage
+    ? `${resourceHost?.name || "Overview"} · ${destinations[view].label}`
+    : destinations[view].label;
+  useEffect(() => {
+    document.title = `Canaveral · ${locationLabel}`;
+  }, [locationLabel]);
   if (claim)
     return (
       <ClaimScreen
@@ -679,24 +663,15 @@ export function App() {
         Skip to content
       </a>
       <WorkspaceSidebar
-        views={
-          user.role === "admin"
-            ? views
-            : {
-                machines: views.machines,
-                templates: views.templates,
-                blueprints: views.blueprints,
-              }
-        }
         view={view}
-        counts={{
+        counts={loaded && !stale ? {
           machines: inventory.machines.length,
           hosts: inventory.hosts.filter((h) => infrastructureKind(h) === "host")
             .length,
           orchestrators: inventory.hosts.filter(
             (h) => infrastructureKind(h) === "orchestrator",
           ).length,
-        }}
+        } : {}}
         user={user}
         onSignOut={() => signOut()}
       />
@@ -712,41 +687,25 @@ export function App() {
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem className="hidden sm:block">
-                {[
-                  "admin",
-                  "users",
-                  "api-access",
-                  "system",
-                  "configuration",
-                ].includes(view) ? (
-                  <a href="#admin">Administration</a>
-                ) : isInfrastructure ? (
-                  "Infrastructure"
-                ) : (
-                  "Workspace"
-                )}
+                {destinations[view].group}
               </BreadcrumbItem>
               <BreadcrumbSeparator className="hidden sm:block" />
               <BreadcrumbItem>
                 {resourcePage ? (
-                  <BreadcrumbLink href={`#${view}`}>
-                    {title(view)}
+                  <BreadcrumbLink href={destinations[view].href}>
+                    {destinations[view].label}
                   </BreadcrumbLink>
                 ) : (
-                  <BreadcrumbPage>
-                    {view === "admin"
-                      ? "Overview"
-                      : view === "api-access"
-                        ? "API access"
-                        : title(view)}
-                  </BreadcrumbPage>
+                  <BreadcrumbPage>{destinations[view].label}</BreadcrumbPage>
                 )}
               </BreadcrumbItem>
               {resourcePage && (
                 <>
                   <BreadcrumbSeparator />
                   <BreadcrumbItem>
-                    <BreadcrumbPage>Overview</BreadcrumbPage>
+                    <BreadcrumbPage className="block max-w-[28vw] truncate">
+                      {resourceHost?.name || "Overview"}
+                    </BreadcrumbPage>
                   </BreadcrumbItem>
                 </>
               )}

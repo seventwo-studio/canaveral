@@ -11,7 +11,7 @@ import {
   FieldError,
   FieldSet,
 } from "./ui/field";
-import { Brand } from "./brand";
+import { AccountLayout } from "./account-layout";
 
 export function takeClaim(): string | null {
   if (!location.hash.startsWith("#claim=")) return null;
@@ -109,8 +109,7 @@ export function ClaimScreen({
     }
   }
   return (
-    <main className="mx-auto max-w-md space-y-6 p-8">
-      <Brand />
+    <AccountLayout>
       <h1 className="font-display text-3xl">Choose your Canaveral password</h1>
       <p>Use a new password for Canaveral only. Choose 12–1024 characters.</p>
       {info?.username && <p>Account: {info.username}</p>}
@@ -156,6 +155,6 @@ export function ClaimScreen({
       <Button variant="outline" onClick={onDone}>
         Go to sign in
       </Button>
-    </main>
+    </AccountLayout>
   );
 }

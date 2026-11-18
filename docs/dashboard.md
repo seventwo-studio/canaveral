@@ -204,8 +204,8 @@ credential boundaries and native acceptance limits.
 ## Frontend development
 
 The dashboard uses React, Tailwind CSS v4 and checked-in shadcn/ui components
-(Radix primitives) in `dashboard/`. Its custom launch theme uses neutral black and charcoal
-surfaces, off-white text, launch-orange controls and a deterministic Bayer-dithered
+(Radix primitives) in `dashboard/`. The workspace uses warm paper surfaces, a graphite navigation rail and a restrained
+launch-orange accent. Account entry screens use a deterministic Bayer-dithered
 launch photograph rendered with four-tone grayscale and warm flame palettes. The original
 Unsplash photo (`paris-bilal-X3o5blcQGXA-unsplash.jpg`, Paris Bilal / Unsplash)
 is bundled unchanged as `dashboard/public/launch.jpg` under the Unsplash License;
@@ -229,17 +229,13 @@ Keep visible copy limited to essential labels, fields, actions and operational
 state. The launch photograph carries the theme; omit decorative slogans,
 coordinates, section overlines, repeated headings and duplicate summary cards.
 Retain validation, stale-data notices and consequential-action confirmations.
-The visual reference is [Simlock](https://incubator.callstack.com/simlock/):
-near-black surfaces, vivid orange (#ff7a1a), thin rules and nearly square corners.
-Use system sans-serif display headings with self-hosted Geist Mono for interface
-labels and data. Primary actions use uppercase monospace labels. Keep the small
-Lucide outline rocket on an orange background and the lowercase wordmark in foreground text without a background. The font and icon licenses ship in `licenses.txt`.
+The [screen and navigation guide](dashboard-design.md) maps Browserbase references
+to Canaveral workflows. Use a persistent resource rail, a compact breadcrumb header,
+and contextual actions beside the resources they affect. Keep the lowercase wordmark,
+rocket mark and real launch photograph. The font and icon licenses ship in `licenses.txt`.
 
-Use the shadcn dashboard-01 block as the application layout reference: an inset
-workspace, compact breadcrumb header, page heading and action, inventory toolbar,
-and table or card grid. The sidebar has an infrastructure group and an account
-menu. Keep template and host cards directly in the grid, without a second
-bordered panel around them. Do not add fabricated charts or telemetry.
+Keep template and host cards directly in the grid, without a second bordered panel
+around them. Do not add fabricated charts or telemetry.
 
 Use shadcn compositions for the application structure as well as its controls.
 Navigation uses SidebarProvider, Sidebar, its header/content/menu/footer parts,
@@ -251,8 +247,7 @@ Do not recreate those structures with custom wrappers and global CSS overrides.
 
 Inventory filters are single-choice Toggle Group items, not tab panels. Keep
 native capacity meters: they represent reserved resources rather than task
-completion. Theme customization belongs in CSS variables; product-specific CSS
-is limited to the launch artwork, domain status badges and native meter drawing.
+completion. Keep shared colors in CSS variables and maintain distinct status labels and native meters.
 After adding registry components, verify utility imports resolve to `@/lib/utils`.
 
 With Node.js 24 installed:

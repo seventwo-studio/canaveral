@@ -9,9 +9,10 @@
 }
 @custom-variant dark (&:is(.dark *));
 @theme inline {
-  --font-sans: "Geist Mono", monospace;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: "Geist Mono", monospace;
-  --font-display: Arial, Helvetica, sans-serif;
+  --font-display: var(--font-sans);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -44,36 +45,36 @@
   --radius-xl: calc(var(--radius) + 2px);
 }
 :root {
-  color-scheme: dark;
-  --radius: 0.125rem;
-  --background: #0a0a0a;
-  --foreground: #fafafa;
-  --card: #111111;
-  --card-foreground: #fafafa;
-  --popover: #161616;
-  --popover-foreground: #fafafa;
-  --primary: #ff7a1a;
-  --primary-foreground: #171717;
-  --secondary: #262626;
-  --secondary-foreground: #e5e5e5;
-  --muted: #161616;
-  --muted-foreground: #a3a3a3;
-  --accent: #1a1a1a;
-  --accent-foreground: #fafafa;
-  --destructive: #ef9e8b;
-  --state-ready: #a7d5bc;
-  --state-pending: #e3c38c;
-  --border: #ffffff14;
-  --input: #ffffff29;
-  --ring: #ff7a1a;
-  --sidebar: #111111;
-  --sidebar-foreground: #e5e5e5;
-  --sidebar-primary: #ff7a1a;
-  --sidebar-primary-foreground: #171717;
-  --sidebar-accent: #1f1710;
-  --sidebar-accent-foreground: #ff9b52;
-  --sidebar-border: #ffffff14;
-  --sidebar-ring: #ff7a1a;
+  color-scheme: light;
+  --radius: 0.375rem;
+  --background: #f7f6f2;
+  --foreground: #222826;
+  --card: #fffefa;
+  --card-foreground: var(--foreground);
+  --popover: #fffefa;
+  --popover-foreground: var(--foreground);
+  --primary: #933e20;
+  --primary-foreground: #fffaf3;
+  --secondary: #e8e8e0;
+  --secondary-foreground: #303934;
+  --muted: #edece6;
+  --muted-foreground: #5e655f;
+  --accent: #e9e9e2;
+  --accent-foreground: #202822;
+  --destructive: #aa3530;
+  --state-ready: #2a6b4e;
+  --state-pending: #805915;
+  --border: #d7d8cf;
+  --input: #afb4aa;
+  --ring: #a14822;
+  --sidebar: #242b29;
+  --sidebar-foreground: #e6e9e0;
+  --sidebar-primary: #efab78;
+  --sidebar-primary-foreground: #2c211b;
+  --sidebar-accent: #39423c;
+  --sidebar-accent-foreground: #fffaf0;
+  --sidebar-border: #434b45;
+  --sidebar-ring: #efab78;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -83,6 +84,79 @@
   }
   body {
     @apply bg-background text-foreground font-sans;
+  }
+}
+/* Sidebar children use the same primitives as the light workspace. */
+[data-slot="sidebar-inner"],
+[data-slot="sidebar"][data-mobile="true"] {
+  --foreground: var(--sidebar-foreground);
+  --muted: #38413b;
+  --muted-foreground: #bac2b8;
+  --border: var(--sidebar-border);
+  --ring: var(--sidebar-ring);
+}
+[data-slot="sidebar-header"],
+[data-slot="sidebar-footer"] {
+  padding-block: 0.875rem;
+}
+[data-slot="sidebar-header"] {
+  border-bottom: 1px solid var(--sidebar-border);
+}
+[data-slot="sidebar-footer"] {
+  border-top: 1px solid var(--sidebar-border);
+}
+[data-slot="sidebar-group-label"],
+[data-slot="table-head"] {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.055em;
+}
+[data-slot="sidebar-menu-button"][data-active="true"] {
+  box-shadow: inset 3px 0 var(--sidebar-primary);
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+[data-slot="sidebar-inset"] > header {
+  background: var(--card);
+}
+[data-slot="table-container"] {
+  background: var(--card);
+}
+[data-slot="table-head"] {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+[data-slot="card-title"] {
+  letter-spacing: -0.018em;
+}
+[data-slot="button"][data-variant="default"] {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+@media (min-width: 64rem) {
+  #workspace-content {
+    width: 100%;
+    max-width: 100rem;
+    margin-inline: auto;
+    padding: 2rem clamp(1.5rem, 3vw, 3.5rem);
+  }
+}
+@media (max-width: 39.99rem) {
+  [data-slot="card-header"],
+  [data-slot="card-content"],
+  [data-slot="card-footer"] {
+    padding-inline: 1rem;
+  }
+  [data-slot="dialog-content"],
+  [data-slot="alert-dialog-content"] {
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
   }
 }
 /* Product artwork stays separate from the shadcn component system. */
@@ -131,22 +205,22 @@
 }
 .status-ready,
 .status-online {
-  color: #a7d5bc;
-  border-color: #345043;
-  background: #182820;
+  color: var(--state-ready);
+  border-color: #acccb7;
+  background: #edf5ed;
 }
 .status-error,
 .status-setup-failed {
-  color: #f3b39e;
-  border-color: #795246;
-  background: #3a2821;
+  color: var(--destructive);
+  border-color: #e9bbb4;
+  background: #fbeee9;
 }
 .status-preparing,
 .status-pending,
 .status-draining {
-  color: #e3c38c;
-  border-color: #645438;
-  background: #342c1c;
+  color: var(--state-pending);
+  border-color: #d9c7a0;
+  background: #f8f1de;
 }
 /* Native meter semantics describe reservations, not task completion. */
 meter {
@@ -161,10 +235,10 @@ meter::-webkit-meter-bar {
   border: 0;
 }
 meter::-webkit-meter-optimum-value {
-  background: #a3a3a3;
+  background: #606e63;
 }
 meter::-moz-meter-bar {
-  background: #a3a3a3;
+  background: #606e63;
 }
 @media (prefers-reduced-motion: reduce) {
   *,

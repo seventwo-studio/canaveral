@@ -7,8 +7,13 @@ import {
   KeyRound,
   Activity,
   Settings,
+  Library,
+  Monitor,
+  Server,
+  Orbit,
+  Layers,
+  User,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -32,23 +37,117 @@ import {
   useSidebar,
 } from "./ui/sidebar";
 
+export const destinations = {
+  admin: {
+    group: "Workspace",
+    label: "Overview",
+    href: "#admin",
+    icon: LayoutDashboard,
+    adminOnly: true,
+  },
+  machines: {
+    group: "Workspace",
+    label: "Machines",
+    href: "#machines",
+    icon: Monitor,
+    adminOnly: false,
+  },
+  templates: {
+    group: "Machine sources",
+    label: "Image library",
+    href: "#images",
+    icon: Library,
+    adminOnly: false,
+  },
+  blueprints: {
+    group: "Machine sources",
+    label: "Machine blueprints",
+    href: "#blueprints",
+    icon: Layers,
+    adminOnly: false,
+  },
+  hosts: {
+    group: "Infrastructure",
+    label: "Hosts",
+    href: "#hosts",
+    icon: Server,
+    adminOnly: true,
+  },
+  orchestrators: {
+    group: "Infrastructure",
+    label: "Orchestrators",
+    href: "#orchestrators",
+    icon: Orbit,
+    adminOnly: true,
+  },
+  system: {
+    group: "Infrastructure",
+    label: "System",
+    href: "#system",
+    icon: Activity,
+    adminOnly: true,
+  },
+  users: {
+    group: "Administration",
+    label: "Users",
+    href: "#admin/users",
+    icon: Users,
+    adminOnly: true,
+  },
+  "api-access": {
+    group: "Administration",
+    label: "API access",
+    href: "#admin/tokens",
+    icon: KeyRound,
+    adminOnly: true,
+  },
+  configuration: {
+    group: "Administration",
+    label: "Configuration",
+    href: "#configuration",
+    icon: Settings,
+    adminOnly: true,
+  },
+  account: {
+    group: "Personal",
+    label: "Account",
+    href: "#account",
+    icon: User,
+    adminOnly: false,
+  },
+  tokens: {
+    group: "Personal",
+    label: "API tokens",
+    href: "#tokens",
+    icon: KeyRound,
+    adminOnly: false,
+  },
+} as const;
+
 export function WorkspaceSidebar({
-  views,
   view,
   counts,
   user,
   onSignOut,
 }: {
-  views: Record<string, { icon: LucideIcon }>;
-  view: string;
+  view: keyof typeof destinations;
   counts: Record<string, number>;
   user: { username: string; role: "admin" | "user" };
   onSignOut: () => void;
 }) {
   const { setOpenMobile, isMobile } = useSidebar();
+  const links = Object.entries(destinations).filter(
+    ([, entry]) => !entry.adminOnly || user.role === "admin",
+  );
+  const groups = [
+    "Workspace",
+    "Machine sources",
+    "Infrastructure",
+    "Administration",
+  ];
   return (
     <Sidebar collapsible="icon" variant="inset">
-      <SidebarHeader>
+      <SidebarHeader className="border-b border-sidebar-border">
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild tooltip="Canaveral">
@@ -71,108 +170,57 @@ export function WorkspaceSidebar({
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {[
-          {
-            label: "Workspace",
-            name: "Main navigation",
-            entries: [
-              ...(user.role === "admin"
-                ? [
-                    ["admin", { icon: LayoutDashboard }] as [
-                      string,
-                      { icon: LucideIcon },
-                    ],
-                  ]
-                : []),
-              ...Object.entries(views).filter(
-                ([key]) => !["hosts", "orchestrators"].includes(key),
-              ),
-            ],
-          },
-          ...(user.role === "admin"
-            ? [
-                {
-                  label: "Infrastructure",
-                  name: "Infrastructure navigation",
-                  entries: Object.entries(views).filter(([key]) =>
-                    ["hosts", "orchestrators"].includes(key),
-                  ),
-                },
-                {
-                  label: "Administration",
-                  name: "Administration navigation",
-                  entries: [
-                    ["system", { icon: Activity }],
-                    ["configuration", { icon: Settings }],
-                    ["users", { icon: Users }],
-                    ["api-access", { icon: KeyRound }],
-                  ] as Array<[string, { icon: LucideIcon }]>,
-                },
-              ]
-            : []),
-        ].map(({ label, name, entries }) => (
-          <SidebarGroup key={label}>
-            <SidebarGroupLabel className="text-[10px] uppercase tracking-widest">
-              {label}
-            </SidebarGroupLabel>
-            <SidebarGroupContent>
-              <nav aria-label={name}>
-                <SidebarMenu>
-                  {entries.map(([key, { icon: Icon }]) => (
-                    <SidebarMenuItem key={key}>
-                      <SidebarMenuButton
-                        asChild
-                        isActive={view === key}
-                        tooltip={
-                          key === "admin"
-                            ? "Overview"
-                            : key === "api-access"
-                              ? "API access"
-                              : key === "templates"
-                                ? "Image library"
-                                : key === "blueprints"
-                                  ? "Machine blueprints"
-                                  : key.charAt(0).toUpperCase() + key.slice(1)
-                        }
-                      >
-                        <a
-                          href={
-                            key === "users"
-                              ? "#admin/users"
-                              : key === "api-access"
-                                ? "#admin/tokens"
-                                : `#${key === "templates" ? "images" : key}`
-                          }
-                          aria-current={view === key ? "page" : undefined}
-                          onClick={() => setOpenMobile(false)}
-                        >
-                          <Icon aria-hidden="true" />
-                          <span>
-                            {key === "admin"
-                              ? "Overview"
-                              : key === "api-access"
-                                ? "API access"
-                                : key === "templates"
-                                  ? "Image library"
-                                  : key === "blueprints"
-                                    ? "Machine blueprints"
-                                    : key.charAt(0).toUpperCase() +
-                                      key.slice(1)}
-                          </span>
-                        </a>
-                      </SidebarMenuButton>
-                      {counts[key] !== undefined && (
-                        <SidebarMenuBadge>{counts[key]}</SidebarMenuBadge>
-                      )}
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </nav>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        ))}
+        {groups.map((label) => {
+          const entries = links.filter(([, entry]) => entry.group === label);
+          if (!entries.length) return null;
+          return (
+            <SidebarGroup key={label}>
+              <SidebarGroupLabel className="text-[10px] uppercase tracking-widest">
+                {label}
+              </SidebarGroupLabel>
+              <SidebarGroupContent>
+                <nav
+                  aria-label={
+                    label === "Workspace"
+                      ? "Main navigation"
+                      : label + " navigation"
+                  }
+                >
+                  <SidebarMenu>
+                    {entries.map(
+                      ([key, { label: title, icon: Icon, href }]) => (
+                        <SidebarMenuItem key={key}>
+                          <SidebarMenuButton
+                            asChild
+                            isActive={view === key}
+                            tooltip={title}
+                            className="relative data-[active=true]:before:absolute data-[active=true]:before:inset-y-2 data-[active=true]:before:left-0 data-[active=true]:before:w-0.5 data-[active=true]:before:bg-sidebar-primary"
+                          >
+                            <a
+                              href={href}
+                              aria-current={view === key ? "page" : undefined}
+                              onClick={() => setOpenMobile(false)}
+                            >
+                              <Icon aria-hidden="true" />
+                              <span>{title}</span>
+                            </a>
+                          </SidebarMenuButton>
+                          {counts[key] !== undefined && (
+                            <SidebarMenuBadge className="font-mono text-[10px] tabular-nums">
+                              {counts[key]}
+                            </SidebarMenuBadge>
+                          )}
+                        </SidebarMenuItem>
+                      ),
+                    )}
+                  </SidebarMenu>
+                </nav>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          );
+        })}
       </SidebarContent>
-      <SidebarFooter>
+      <SidebarFooter className="border-t border-sidebar-border">
         <SidebarMenu>
           <SidebarMenuItem>
             <DropdownMenu>
@@ -181,6 +229,7 @@ export function WorkspaceSidebar({
                   size="lg"
                   className="data-[state=open]:bg-sidebar-accent"
                   tooltip={user.username}
+                  isActive={view === "account" || view === "tokens"}
                   aria-label="Account menu"
                 >
                   <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted text-sm font-medium">
@@ -203,14 +252,32 @@ export function WorkspaceSidebar({
                 <DropdownMenuLabel>{user.username}</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
-                  <a href="#account">Account</a>
+                  <a
+                    href="#account"
+                    aria-current={view === "account" ? "page" : undefined}
+                    onClick={() => setOpenMobile(false)}
+                  >
+                    Account
+                  </a>
                 </DropdownMenuItem>
                 <DropdownMenuItem asChild>
-                  <a href="#tokens">API tokens</a>
+                  <a
+                    href="#tokens"
+                    aria-current={view === "tokens" ? "page" : undefined}
+                    onClick={() => setOpenMobile(false)}
+                  >
+                    API tokens
+                  </a>
                 </DropdownMenuItem>
                 {user.role === "admin" && (
                   <DropdownMenuItem asChild>
-                    <a href="#users">Users</a>
+                    <a
+                      href="#users"
+                      aria-current={view === "users" ? "page" : undefined}
+                      onClick={() => setOpenMobile(false)}
+                    >
+                      Users
+                    </a>
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem onSelect={onSignOut}>
