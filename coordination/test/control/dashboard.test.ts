@@ -139,6 +139,27 @@ test("remote Host blocks local setup and marks cookies Secure; cross origins and
   } finally { await f.close(); }
 });
 
+test("dashboard browser routes forward the caller and require same-origin cookie mutations", async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const path = `/api/v1/hosts/${host}/browsers`, item = `${path}/${machine}`;
+  const cookie = { Cookie: `canaveral_session=${session}` };
+  assert.equal((await fetch(f.url, path, { body: {}, headers: cookie })).status, 403);
+  assert.equal((await fetch(f.url, item, { method: "DELETE", headers: cookie })).status, 403);
+  assert.equal((await fetch(f.url, item, { headers: { ...cookie, Origin: "https://other.example" } })).status, 403);
+  assert.equal(f.calls.length, 0);
+  const headers = { ...cookie, Origin: f.url };
+  const intent = { id: machine, engine: "chromium", ttlSeconds: 60 };
+  assert.equal((await fetch(f.url, path, { headers, body: intent })).status, 200);
+  assert.equal((await fetch(f.url, item, { headers })).status, 200);
+  assert.equal((await fetch(f.url, item, { method: "DELETE", headers })).status, 200);
+  const controller = `/v1/admin/hosts/${host}/browsers`;
+  assert.deepEqual(f.calls.map(call => [call.method, call.path, call.token, call.body]), [
+    ["POST", controller, session, intent], ["GET", controller + "/" + machine, session, {}],
+    ["DELETE", controller + "/" + machine, session, {}],
+  ]);
+});
+
 test("malformed bodies never reach upstream; retries retain intent and unconfirmed mutations are uncertain", async () => {
   const f = await fixture();
   try {

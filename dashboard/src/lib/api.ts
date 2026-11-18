@@ -15,17 +15,19 @@ export function api<T>(
   path: string,
   value: unknown,
   decode: (value: unknown) => T,
+  method?: "DELETE",
 ): Promise<T>;
 export async function api(
   path: string,
   value?: unknown,
   decode?: (value: unknown) => unknown,
+  method?: "DELETE",
 ): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
     const response = await fetch(`/api/v1/${path}`, {
-      method: value === undefined ? "GET" : "POST",
+      method: method ?? (value === undefined ? "GET" : "POST"),
       headers: {
         ...(value === undefined ? {} : { "Content-Type": "application/json" }),
       },
@@ -75,7 +77,7 @@ export async function api(
     throw new Error(
       path.startsWith("auth/")
         ? "Canaveral is unavailable. Try again."
-        : value === undefined
+        : value === undefined && !method
           ? "Could not load data. Try refreshing."
           : "Connection interrupted. The outcome may be unknown. Retry the same request to check it safely.",
     );

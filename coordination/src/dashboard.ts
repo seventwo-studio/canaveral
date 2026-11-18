@@ -191,7 +191,12 @@ const staticFiles: Record<string, [string, string]> = {
   "/launch.jpg": ["launch.jpg", "image/jpeg"], "/geist-mono.woff2": ["geist-mono.woff2", "font/woff2"],
   "/licenses.txt": ["licenses.txt", "text/plain; charset=utf-8"],
 };
+const browserCollection = new RegExp(`^/api/v1/hosts/${UUID}/browsers$`);
+const browserItem = new RegExp(`^/api/v1/hosts/${UUID}/browsers/${UUID}$`);
+
 function routeAllowed(method: string, route: string): boolean {
+  if (browserCollection.test(route)) return method === "POST";
+  if (browserItem.test(route)) return method === "GET" || method === "DELETE";
   if (method === "GET" && /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route)) return true;
   if (method === "POST" && new RegExp(`^/api/v1/admin/(?:leases/${UUID}/release|sessions/${UUID}/close|applications/${UUID}/revoke|(?:requests|jobs)/${UUID}/cancel)$`).test(route)) return true;
   if (method === "GET" && (route === "/api/v1/consumers" || new RegExp(`^/api/v1/(?:runner-enrollments|resource-domains)/${UUID}$`).test(route))) return true;
@@ -314,7 +319,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
           token = authorization.slice(7);
         } else {
           token = cookieToken;
-          if (token && method === "POST" && browserOrigin === undefined) throw new DashboardError("Same-origin Origin is required for cookie requests.", 403);
+          if (token && method !== "GET" && browserOrigin === undefined) throw new DashboardError("Same-origin Origin is required for cookie requests.", 403);
         }
         if (token || !authStatus) {
           try { secret(token); } catch { throw new DashboardError("Administrator credential rejected.", 401); }
@@ -487,7 +492,8 @@ export function createDashboardServer(config: DashboardConfig): Server {
         value = decodeJson(Buffer.concat(chunks));
       }
       if (route === "/api/v1/auth/logout") setCookie("", true);
-      const result = await upstream(method, route.slice(4), token, value);
+      const path = browserCollection.test(route) || browserItem.test(route) ? route.replace("/api/v1/", "/v1/admin/") : route.slice(4);
+      const result = await upstream(method, path, token, value);
       if (route === "/api/v1/connection-setups") result.body.controllerUrl = origin.origin;
       if (["/api/v1/auth/login", "/api/v1/auth/setup", "/api/v1/auth/claim"].includes(route)) {
         let sessionToken: string;
