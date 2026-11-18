@@ -101,6 +101,7 @@ fn direct_fixture(manifest_edit: impl Fn(&mut Manifest)) -> Direct {
         .digest()
         .map_or("sha256:invalid".into(), |d| format!("sha256:{d}"));
     c.inventory = vec![Installed {
+        preview_bundle_digest: None,
         credential_free: true,
         format: bundle::Format::BootBundle,
         image: Image {

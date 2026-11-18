@@ -60,6 +60,9 @@ pub struct Image {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Installed {
+    /// Exact guest-wire bundle digest (64 lowercase hex) attested to support preview HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_bundle_digest: Option<String>,
     /// Operator attests this exact digest contains no reusable guest credentials.
     pub credential_free: bool,
     /// Omitted for existing EFI raw inventory, so retained journals keep their fingerprint.
@@ -1936,7 +1939,10 @@ impl Satellite {
             let mut last: Option<clock::Clock> = None;
             let mut polled: Option<clock::Clock> = None;
             let mut session: Option<guest::Session> = None;
-            let mut data = data::Lane::owned(self.dir.worker_guard());
+            let mut data = data::Lane::owned(
+                self.dir.worker_guard(),
+                installed.preview_bundle_digest.clone(),
+            );
             let supervised = (|| -> Result<()> {
                 while !self.state.fenced {
                     // Observe process loss before the deadline margin can mask it.
@@ -2313,6 +2319,7 @@ mod tests {
             signing_requirement: "anchor apple generic".into(),
             ca: None,
             inventory: vec![Installed {
+                preview_bundle_digest: None,
                 credential_free: true,
                 format: bundle::Format::EfiRaw,
                 image: Image {

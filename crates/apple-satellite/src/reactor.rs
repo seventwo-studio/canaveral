@@ -159,8 +159,43 @@ impl Closed {
         self.sockets && self.workers && self.relay
     }
 }
+#[derive(Clone)]
+struct PreviewGrant {
+    exec: Authority,
+    lease: Authority,
+    deadline: Duration,
+}
+impl PreviewGrant {
+    fn permits(&self) -> bool {
+        self.exec.permits() && self.lease.permits() && clock::now() < self.deadline
+    }
+}
+struct Exchange {
+    id: Uuid,
+    grant: PreviewGrant,
+    reply: SyncSender<Vec<u8>>,
+}
+pub struct PreviewReply {
+    grant: PreviewGrant,
+    bytes: Receiver<Vec<u8>>,
+}
+impl PreviewReply {
+    /// Poll while continuing control supervision. Bytes are untrusted upstream HTTP.
+    pub fn poll(&self) -> crate::Result<Option<Vec<u8>>> {
+        if !self.grant.permits() {
+            return Err("preview expired");
+        }
+        match self.bytes.try_recv() {
+            Ok(bytes) if !bytes.is_empty() && self.grant.permits() => Ok(Some(bytes)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            _ => Err("preview unavailable"),
+        }
+    }
+}
 pub struct Handle {
     pub authority: Authority,
+    binding: canaveral_guest_protocol::Binding,
+    previews: SyncSender<(Frame, Exchange)>,
     requests: SyncSender<(Frame, Duration)>,
     cancel: SyncSender<Frame>,
     pub receipts: Receiver<Frame>,
@@ -168,6 +203,54 @@ pub struct Handle {
     worker: Option<JoinHandle<Closed>>,
 }
 impl Handle {
+    pub(crate) fn preview_request(
+        &self,
+        control: &crate::guest::Session,
+        digest: &str,
+        exec_id: Uuid,
+        method: &str,
+        target: &str,
+    ) -> crate::Result<PreviewReply> {
+        let grant = PreviewGrant {
+            exec: control.preview_authority(&self.binding, digest, exec_id)?,
+            lease: self.authority.clone(),
+            deadline: control
+                .deadline()
+                .min(clock::now() + Duration::from_secs(1)),
+        };
+        if !self.ready.load(Ordering::Acquire)
+            || !grant.permits()
+            || target.len() > 4096
+            || !matches!(method, "GET" | "HEAD")
+        {
+            return Err("preview unavailable");
+        }
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).map_err(|_| "request UUID unavailable")?;
+        let id = uuid::Builder::from_random_bytes(random).into_uuid();
+        let frame = Frame::PreviewRequest {
+            version: 1,
+            id,
+            exec_id,
+            method: method.into(),
+            target: target.into(),
+        };
+        frame
+            .validate(Sender::Host)
+            .map_err(|_| "invalid preview request")?;
+        let (reply, bytes) = mpsc::sync_channel(1);
+        self.previews
+            .try_send((
+                frame,
+                Exchange {
+                    id,
+                    grant: grant.clone(),
+                    reply,
+                },
+            ))
+            .map_err(|_| "preview busy")?;
+        Ok(PreviewReply { grant, bytes })
+    }
     /// Internal assignment routing seam; no local consumer listener is exposed.
     pub fn send_transfer(&self, mut frame: Frame) -> Result<()> {
         if let Frame::TransferRequest { remaining_ms, .. } = &mut frame {
@@ -222,6 +305,7 @@ struct Socket {
     progress: clock::Clock,
 }
 struct Output {
+    preview_request: bool,
     transfer_request: bool,
     reserved: bool,
     bytes: Vec<u8>,
@@ -240,6 +324,7 @@ pub struct Reactor<E: Egress> {
     live: Live,
     recheck: Option<Recheck>,
     next_recheck: Duration,
+    preview: Option<Exchange>,
     receipt_tx: Option<SyncSender<Frame>>,
     transfer: Option<(Uuid, u64)>,
     transfer_deadline: Option<Duration>,
@@ -275,6 +360,7 @@ impl<E: Egress> Reactor<E> {
             live: Default::default(),
             recheck: None,
             next_recheck: clock::now(),
+            preview: None,
             receipt_tx: None,
             transfer: None,
             transfer_deadline: None,
@@ -296,6 +382,7 @@ impl<E: Egress> Reactor<E> {
         }
         self.budget.reserve(decoded, bytes.len())?;
         self.output.push_back(Output {
+            preview_request: matches!(frame, Frame::PreviewRequest { .. }),
             transfer_request: matches!(frame, Frame::TransferRequest { .. }),
             reserved: false,
             bytes,
@@ -402,6 +489,17 @@ impl<E: Egress> Reactor<E> {
             }
             Frame::Close { id, .. } => {
                 self.retire(id, None)?;
+            }
+            Frame::PreviewResponse {
+                id, data: bytes, ..
+            } => {
+                let exchange = self.preview.take().ok_or("unsolicited preview response")?;
+                if exchange.id != id || self.output.iter().any(|o| o.preview_request) {
+                    return Err("unexpected preview response".into());
+                }
+                if exchange.grant.permits() {
+                    let _ = exchange.reply.try_send(data::payload(&bytes, true)?);
+                }
             }
             Frame::TransferReceipt { id, step, .. } => {
                 if self.transfer != Some((id, step)) {
@@ -642,6 +740,15 @@ impl<E: Egress> Reactor<E> {
             if remaining == 0 {
                 break;
             }
+            if o.preview_request && !self.preview.as_ref().is_some_and(|p| p.grant.permits()) {
+                if o.offset != 0 {
+                    return Err("partial preview request expired".into());
+                }
+                let removed = self.output.pop_front().unwrap();
+                self.budget.release(removed.decoded, removed.bytes.len())?;
+                self.preview = None;
+                continue;
+            }
             match self
                 .relay
                 .write(&o.bytes[o.offset..o.bytes.len().min(o.offset + remaining)])
@@ -735,6 +842,8 @@ pub fn spawn<E: Egress>(
     enabled: bool,
     authority: Authority,
 ) -> Handle {
+    let binding = session.hello.clone();
+    let (previews, px) = mpsc::sync_channel::<(Frame, Exchange)>(1);
     session.enable_handoff();
     let (requests, rx) = mpsc::sync_channel::<(Frame, Duration)>(1);
     let (cancel, cx) = mpsc::sync_channel(1);
@@ -813,6 +922,7 @@ pub fn spawn<E: Egress>(
                 reactor.output.insert(
                     pos,
                     Output {
+                        preview_request: false,
                         transfer_request: false,
                         reserved: true,
                         bytes,
@@ -820,6 +930,16 @@ pub fn spawn<E: Egress>(
                         decoded: 0,
                     },
                 );
+            }
+            // Retain a sent request's correlation slot through late replies. A silent
+            // preview peer can stall only previews; the caller's wait still expires.
+            if let Ok((frame, exchange)) = px.try_recv() {
+                if reactor.preview.is_none()
+                    && exchange.grant.permits()
+                    && reactor.queue(frame, 0).is_ok()
+                {
+                    reactor.preview = Some(exchange);
+                }
             }
             if let Ok((mut f, deadline)) = rx.try_recv() {
                 if matches!(&f, Frame::TransferRequest { id, .. } if cancelled == Some(*id)) {
@@ -855,6 +975,8 @@ pub fn spawn<E: Egress>(
         reactor.close()
     });
     Handle {
+        binding,
+        previews,
         authority,
         requests,
         cancel,
@@ -1467,6 +1589,91 @@ mod worker_tests {
         let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
         guest.read_exact(&mut body).unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+    #[test]
+    fn preview_requires_matching_ready_exec_and_discards_cancelled_reply() {
+        let (mut h, mut guest) = start(Deny);
+        let now = clock::now().as_secs_f64();
+        let (mut control, mut peer) = crate::guest::tests::session_pair_with_deadline(now + 60.0);
+        crate::guest::tests::send_ready(&control, &mut peer);
+        assert!(control.pump(now).unwrap());
+        let argv = [
+            "/sbin/canaveral-guest-agent",
+            "--preview-service",
+            "3000",
+            "node",
+        ]
+        .map(String::from)
+        .to_vec();
+        let exec = control
+            .exec(argv, "/workspace".into(), Default::default(), 30000, now)
+            .unwrap();
+        let digest = h.binding.bundle_digest.clone();
+        for (seq, bytes) in ["previewRe", "ady 3000\n"].into_iter().enumerate() {
+            assert!(h
+                .preview_request(&control, &digest, exec, "GET", "/")
+                .is_err());
+            peer.write_all(
+                &canaveral_guest_protocol::encode(&canaveral_guest_protocol::Guest::Output {
+                    version: 1,
+                    id: exec,
+                    seq: seq as u64,
+                    stream: "stdout".into(),
+                    data: STANDARD.encode(bytes),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            control.pump(now).unwrap();
+        }
+        assert!(h.preview_request(&control, "", exec, "GET", "/").is_err());
+        assert!(h
+            .preview_request(&control, &digest, Uuid::nil(), "GET", "/")
+            .is_err());
+        assert!(h
+            .preview_request(&control, &digest, exec, "GET", "//upstream")
+            .is_err());
+        for cancel in [false, true] {
+            let reply = h
+                .preview_request(&control, &digest, exec, "GET", "/")
+                .unwrap();
+            let Frame::PreviewRequest { id, exec_id, .. } = receive(&mut guest) else {
+                panic!("expected preview request")
+            };
+            assert_eq!(exec_id, exec);
+            clock::advance(Duration::from_secs(2));
+            assert!(reply.poll().is_err());
+            clock::advance(Duration::ZERO);
+            if cancel {
+                control.cancel(exec).unwrap();
+            }
+            let raw = b"HTTP/1.0 200 OK\r\n\r\nok";
+            guest
+                .write_all(
+                    &data::encode(
+                        &Frame::PreviewResponse {
+                            version: 1,
+                            id,
+                            data: STANDARD.encode(raw),
+                        },
+                        Sender::Guest,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            if cancel {
+                assert!(reply.poll().is_err());
+            } else {
+                loop {
+                    if let Some(bytes) = reply.poll().unwrap() {
+                        assert_eq!(bytes, raw);
+                        break;
+                    }
+                    thread::yield_now();
+                }
+            }
+        }
+        assert!(h.shutdown().complete());
     }
     #[test]
     fn expired_queued_transfer_closes_data_without_guest_execution() {

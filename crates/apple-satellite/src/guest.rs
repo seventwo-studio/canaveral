@@ -267,6 +267,16 @@ enum Phase {
     Ready,
     Closed,
 }
+struct Preview {
+    expected: Vec<u8>,
+    seen: usize,
+    live: crate::reactor::Authority,
+}
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.live.revoke();
+    }
+}
 pub struct Session {
     stream: UnixStream,
     out: Vec<u8>,
@@ -283,6 +293,7 @@ pub struct Session {
     event_bytes: usize,
     last_id: Uuid,
     active: Option<Uuid>,
+    preview: Option<Preview>,
     output_credit_started: bool,
     pub first_command: Option<f64>,
 }
@@ -306,6 +317,7 @@ impl Session {
             event_bytes: 0,
             last_id: Uuid::nil(),
             active: None,
+            preview: None,
             output_credit_started: false,
             first_command: None,
         };
@@ -339,6 +351,7 @@ impl Session {
     }
     fn closed<T>(&mut self, r: Result<T>) -> Result<T> {
         if r.is_err() {
+            self.preview = None;
             self.phase = Phase::Closed;
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
         }
@@ -435,11 +448,27 @@ impl Session {
                 self.phase = Phase::Ready;
                 return Ok(true);
             }
-            (Phase::Ready, Guest::Rejected { .. }) => {}
-            (Phase::Ready, Guest::Output { id, .. }) if self.active == Some(*id) => {}
+            (Phase::Ready, Guest::Rejected { .. }) => self.preview = None,
+            (
+                Phase::Ready,
+                Guest::Output {
+                    id, stream, data, ..
+                },
+            ) if self.active == Some(*id) => {
+                if let Some(preview) = self.preview.as_mut().filter(|_| stream == "stdout") {
+                    let bytes = canaveral_guest_protocol::data::payload(data, false)
+                        .map_err(|_| "invalid preview output")?;
+                    if preview.expected[preview.seen..].starts_with(&bytes) {
+                        preview.seen += bytes.len();
+                    } else {
+                        self.preview = None;
+                    }
+                }
+            }
             (Phase::Ready, Guest::Exit { id, .. } | Guest::SpawnFailed { id, .. })
                 if self.active == Some(*id) =>
             {
+                self.preview = None;
                 self.active = None;
             }
             _ => return Err("unexpected guest frame"),
@@ -466,6 +495,26 @@ impl Session {
             return Err("guest not ready for exec");
         }
         let id = next_id(self.last_id)?;
+        let preview = match argv.as_slice() {
+            [agent, flag, port, _, ..]
+                if agent == "/sbin/canaveral-guest-agent"
+                    && flag == "--preview-service"
+                    && cwd == "/workspace"
+                    && env.is_empty() =>
+            {
+                port.parse::<u16>()
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .map(|p| Preview {
+                        expected: format!("previewReady {p}\n").into_bytes(),
+                        seen: 0,
+                        live: crate::reactor::Authority::new(
+                            crate::clock::now() + Duration::from_millis(timeout_ms),
+                        ),
+                    })
+            }
+            _ => None,
+        };
         let frame = Host::Exec {
             version: 1,
             id,
@@ -479,6 +528,7 @@ impl Session {
         self.closed(r)?;
         self.last_id = id;
         self.active = Some(id);
+        self.preview = preview;
         self.first_command.get_or_insert(now);
         Ok(id)
     }
@@ -503,8 +553,32 @@ impl Session {
         if self.phase != Phase::Ready {
             return Err("guest not ready");
         }
+        if self.active == Some(id) {
+            self.preview = None;
+        }
         let r = self.queue(&Host::Cancel { version: 1, id });
         self.closed(r)
+    }
+    pub(crate) fn deadline(&self) -> Duration {
+        Duration::from_secs_f64(self.guest_deadline)
+    }
+    pub(crate) fn preview_authority(
+        &self,
+        binding: &Binding,
+        supported_digest: &str,
+        exec: Uuid,
+    ) -> Result<crate::reactor::Authority> {
+        let preview = self.preview.as_ref().ok_or("preview unavailable")?;
+        if self.hello != *binding
+            || supported_digest != binding.bundle_digest
+            || !self.ready(crate::clock::now().as_secs_f64())
+            || self.active != Some(exec)
+            || preview.seen != preview.expected.len()
+            || !preview.live.permits()
+        {
+            return Err("preview unavailable");
+        }
+        Ok(preview.live.clone())
     }
     /// Next unread guest command frame, in order.
     pub fn next_event(&mut self) -> Option<Guest> {
@@ -562,6 +636,7 @@ pub(crate) mod tests {
                 event_bytes: 0,
                 last_id: Uuid::nil(),
                 active: None,
+                preview: None,
                 output_credit_started: false,
                 first_command: None,
             },
