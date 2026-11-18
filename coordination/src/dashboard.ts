@@ -1,3 +1,5 @@
+import { DashboardPreviews, type PreviewConfig } from './dashboard-previews.ts';
+import { controllerPreviewReader, PrivatePreviewGateway } from "./private-preview.ts";
 /** Stateless browser gateway. Credentials and native transports never live in assets. */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -66,6 +68,8 @@ export interface DashboardConnectors {
   shell?: { check(machineId: string): Awaitable<boolean>; attach(request: StreamAttachment): Awaitable<void> };
 }
 export interface DashboardConfig {
+  previewDomain?: string;
+  dashboardHost?: string;
   orchestratorUrl: string;
   listen?: { host: string; port: number };
   allowHttp?: boolean;
@@ -74,6 +78,7 @@ export interface DashboardConfig {
   caFile?: string;
   assetsDirectory?: string;
   reloadAssets?: boolean;
+  previews?: PreviewConfig;
   connectors?: DashboardConnectors;
   /** At most one second; every transfer block also reauthorizes independently. */
   reauthorizeMs?: number;
@@ -195,6 +200,8 @@ const browserCollection = new RegExp(`^/api/v1/hosts/${UUID}/browsers$`);
 const browserItem = new RegExp(`^/api/v1/hosts/${UUID}/browsers/${UUID}$`);
 
 function routeAllowed(method: string, route: string): boolean {
+  if (route === "/api/v1/previews") return method === "GET" || method === "POST";
+  if (new RegExp(`^/api/v1/previews/${UUID}$`).test(route)) return method === "GET" || method === "DELETE";
   if (browserCollection.test(route)) return method === "POST";
   if (browserItem.test(route)) return method === "GET" || method === "DELETE";
   if (method === "GET" && /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route)) return true;
@@ -225,6 +232,9 @@ export function createDashboardServer(config: DashboardConfig): Server {
   const sourceAssets = fileURLToPath(new URL("../../canaveral/web/", import.meta.url));
   const assetDirectory = config.assetsDirectory ?? (existsSync(sourceAssets) ? sourceAssets : fileURLToPath(new URL("../../../canaveral/web/", import.meta.url)));
   const assets = new Map(Object.entries(staticFiles).map(([route, [name, kind]]) => [route, { name, kind, data: readFileSync(join(assetDirectory, name)) }]));
+  const previewConfig = config.previews ?? (process.env.CANAVERAL_DASHBOARD_PREVIEW_CONFIG
+    ? JSON.parse(readFileSync(process.env.CANAVERAL_DASHBOARD_PREVIEW_CONFIG, "utf8")) as PreviewConfig : undefined);
+  const previewLifecycle = previewConfig ? new DashboardPreviews(previewConfig, {baseUrl:origin.origin,allowLoopbackHttp:loopbackHost(origin.hostname),...(ca ? {ca} : {})}) : undefined;
   const connectors = config.connectors ?? {};
   const intervalMs = config.reauthorizeMs ?? 1000;
   if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 1000) throw new DashboardError("Reauthorization interval must be 1–1000 ms.", 400);
@@ -264,6 +274,21 @@ export function createDashboardServer(config: DashboardConfig): Server {
     });
   }
 
+  const previewDomain = config.previewDomain ?? process.env.CANAVERAL_PREVIEW_DOMAIN;
+  const dashboardHost = config.dashboardHost ?? process.env.CANAVERAL_DASHBOARD_HOST;
+  async function resolvePreview(session: string, previewId: string) {
+    const { body } = await upstream("GET", "/v1/auth/session", session);
+    const owner = object(body.user).id;
+    if (typeof owner !== "string") return undefined;
+    const binding = previewLifecycle?.target(owner, previewId);
+    if (!binding) return undefined;
+    const lease = (await upstream("GET", "/v1/leases/" + binding.leaseId, binding.leaseKey)).body;
+    if (lease.id !== binding.leaseId || lease.state !== "ready" || typeof lease.expiresAt !== "string" ||
+        !(Date.parse(lease.expiresAt) > Date.now())) return undefined;
+    return previewLifecycle?.target(owner, previewId);
+  }
+  const gateway = previewDomain === undefined ? undefined : new PrivatePreviewGateway(previewDomain, dashboardHost ?? "",
+    resolvePreview, controllerPreviewReader(origin, ca));
   let inFlight = 0;
   async function handle(request: IncomingMessage, response: ServerResponse, upgrade?: { socket: Duplex; head: Buffer; release(): void }): Promise<void> {
     let cookie: string | undefined;
@@ -287,14 +312,21 @@ export function createDashboardServer(config: DashboardConfig): Server {
       response.end(data);
     };
     try {
+      if (gateway && (headerValues(request, "host").length !== 1 || request.headers.host !== gateway.dashboardHost)) {
+        if (upgrade) { upgrade.socket.destroy(); return; }
+        if (headerValues(request, "host").length !== 1) { response.writeHead(400); response.end(); return; }
+        await gateway.serve(request, response);
+        return;
+      }
       const route = request.url ?? "";
+      const handoff = gateway && method === "POST" && /^\/api\/v1\/previews\/([a-zA-Z0-9_-]{1,128})\/open$/.exec(route);
       if (!route.startsWith("/") || route.startsWith("//") || /[?#\\]/.test(route)) throw new DashboardError("Use a dashboard path without a query.", 400);
       if (!upgrade && method === "GET") {
         const asset = assets.get(route);
         if (asset) { respond(config.reloadAssets ? readFileSync(join(assetDirectory, asset.name)) : asset.data, 200, asset.kind); return; }
         if (route === "/healthz") { respond({ ok: true }); return; }
       }
-      if (!routeAllowed(method, route)) throw new DashboardError("Unknown dashboard endpoint.", 404);
+      if (!handoff && !routeAllowed(method, route)) throw new DashboardError("Unknown dashboard endpoint.", 404);
       const hostHeader = oneHeader(request, "host"), browserOrigin = oneHeader(request, "origin");
       if (!hostHeader || !/^(?:\[[a-fA-F0-9:]+\]|[A-Za-z0-9.-]+)(?::\d{1,5})?$/.test(hostHeader)) throw new DashboardError("Ambiguous browser origin.", 400);
       const hostUrl = new URL(`http://${hostHeader}`); host = hostUrl.hostname;
@@ -324,6 +356,12 @@ export function createDashboardServer(config: DashboardConfig): Server {
         if (token || !authStatus) {
           try { secret(token); } catch { throw new DashboardError("Administrator credential rejected.", 401); }
         }
+      }
+      if (handoff && gateway) {
+        if (!cookieToken || browserOrigin !== "https://" + gateway.dashboardHost) throw new DashboardError("Dashboard session required.", 403);
+        if (!await resolvePreview(token, handoff[1]!).catch(() => undefined)) throw new DashboardError("Preview unavailable.", 403);
+        respond({ handoffUrl: gateway.issue(token, handoff[1]!) });
+        return;
       }
       async function authorizeMachine(machineId: string): Promise<void> {
         const { body } = await upstream("POST", `/v1/machines/${machineId}/authorize`, token, { action: "access" });
@@ -491,6 +529,12 @@ export function createDashboardServer(config: DashboardConfig): Server {
         while (source.remaining) chunks.push(await source.read(Math.min(65536, source.remaining)));
         value = decodeJson(Buffer.concat(chunks));
       }
+      if (route === "/api/v1/previews" || new RegExp(`^/api/v1/previews/${UUID}$`).test(route)) {
+        const owner = object((await upstream("GET","/v1/auth/session",token)).body.user).id;
+        if(typeof owner !== "string" || !owner) throw new DashboardError("Dashboard account required.",403);
+        if(!previewLifecycle) throw new DashboardError("Workspace previews are not configured.",503);
+        respond(previewLifecycle.handle(owner,method,route.split("/")[4],value)); return;
+      }
       if (route === "/api/v1/auth/logout") setCookie("", true);
       const path = browserCollection.test(route) || browserItem.test(route) ? route.replace("/api/v1/", "/v1/admin/") : route.slice(4);
       const result = await upstream(method, path, token, value);
@@ -524,6 +568,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
     response.once("close", release); response.once("finish", release);
     void handle(request, response);
   });
+  server.once("close",()=>previewLifecycle?.close());
   const upgrades = new Set<Duplex>();
   let pendingUpgrades = 0;
   server.on("upgrade", (request, socket, head) => {

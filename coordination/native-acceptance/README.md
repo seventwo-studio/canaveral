@@ -886,3 +886,42 @@ bundle containing the preview-capable Linux guest agent, its verified canonical
 manifest digest configured as the satellite inventory previewBundleDigest,
 and a trial over the production helper and virtio-vsock. The installed ST-535
 bundles predate the preview implementation.
+
+## Dashboard workspace preview trials
+
+The operator harness can pass its disposable dashboard server, leaf certificate
+and key, CA, and two disposable account logins to
+`dashboardSites` in `dashboard-sites.mjs`. The leaf needs DNS SANs for
+`dashboard.canaveral.test` and `*.sites.canaveral-preview.test`. Configure
+the dashboard with that dashboard host, the preview suffix, the private
+application key file, a fresh preview database and the pinned workspace image.
+Keep the controller on the trial's separately authenticated loopback TLS origin.
+
+Both trial functions call `onLaunch({id, mode})` after dashboard submission.
+The native adapter uses the private preview database to identify the admitted
+lease, starts the enrolled satellite for that lease and observes the real
+helper and guest. It must preserve the dashboard's lease credential.
+`onCleanup` must independently verify complete cleanup, process and storage
+removal and zero domain reservations. `record(mode)` runs after the old origin
+denies the previously authorized client.
+
+The direct HTTPS case checks idempotent submission, two independent account
+sessions, single-use handoff redemption, two concurrent root-relative assets
+with different expected bytes, and a guest-generated response to a fresh nonce.
+`dashboardBrowser` in `dashboard-browser.mjs` takes the same adapter and a
+private scratch directory. It drives the installed dashboard with Playwright
+Chromium, using a disposable browser profile, process-local wildcard resolution
+and a leaf public-key pin. It exercises directory selection, launch, inspect,
+open and release for both modes, including JavaScript execution from a nested
+asset. Run each trial with fresh state. Keep credentials, raw requests, URLs
+containing handoff tickets and private harness output out of shared evidence.
+
+On 2026-11-18 both trials passed with the signed helper and pinned ARM64
+[bundle used in the controller trial](pr60-native-preview.md). Chromium
+launched and opened both sites through the dashboard, executed the nested
+script, and read the fresh nonce from the dynamic service. The sample service
+returned text/plain for browser navigation. Direct HTTPS verified both
+concurrent asset bodies and denied a second account inspect, open and release.
+All four final cases reached stopped. Previously authorized origins returned
+404, owned VM processes and storage were gone, and reservations returned to
+zero. These runs used disposable loopback TLS ingress and private DNS mappings.
