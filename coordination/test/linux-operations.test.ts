@@ -692,12 +692,16 @@ test("preview dispatch binds the lease key, active operation, boot and one-use r
   await f.ok(f.report(runner,a.id,2,f.receipt(a,{runtimeState:"running",ready:{command:true,pty:true,files:true,preview:true}})));
   assert.equal((await get(app.credential)).status,401);
   assert.equal((await f.ok(poll())).dispatch,null);
-  for (const method of ["GET","HEAD"]) {
-    const waiting = get(credential,method);
-    let dispatch: Body;
+  const claimDispatch = async () => {
+    let dispatch: Body | null;
     const until = performance.now() + 1500;
     do { dispatch = (await f.ok(poll())).dispatch as Body; } while (!dispatch && performance.now() < until);
     assert.ok(dispatch);
+    return dispatch;
+  };
+  for (const method of ["GET","HEAD"]) {
+    const waiting = get(credential,method);
+    const dispatch = await claimDispatch();
     assert.equal(dispatch.operationId,command.id);
     assert.equal(dispatch.method,method);
     assert.equal(dispatch.target,"/asset?q=x");
@@ -712,4 +716,15 @@ test("preview dispatch binds the lease key, active operation, boot and one-use r
     assert.equal((await f.post(prefix+"report",report,runner.credential)).status,409);
   }
   assert.equal((await get(credential)).status,504);
+  const pending = get(credential);
+  const claimed = await claimDispatch();
+  await client.release({ id: randomUUID() });
+  const lateReport = {
+    ...tuple, dispatchId: claimed.id,
+    responseBase64: Buffer.from("HTTP/1.0 200 OK\r\n\r\nreleased").toString("base64"),
+  };
+  assert.equal((await f.post(prefix+"report", lateReport, runner.credential)).status, 409);
+  const expiredResponse = await pending;
+  assert.equal(expiredResponse.status, 504);
+  assert.doesNotMatch(await expiredResponse.text(), /released/);
 });
