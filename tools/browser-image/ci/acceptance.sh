@@ -48,11 +48,7 @@ case "$stage" in
   *) echo "Missing guest acceptance receipt" >&2; exit 1 ;;
 esac
 virt-cat -a disk /root/trial/page.png > page.png
-/usr/bin/python3 - <<'PY'
-from PIL import Image
-with Image.open("page.png") as page:
-    assert page.format == "PNG" and page.size == (96, 64)
-    rgb = page.convert("RGB")
-    assert rgb.crop((0, 0, 48, 64)).getcolors() == [(3072, (19, 83, 137))]
-    assert rgb.crop((48, 0, 96, 64)).getcolors() == [(3072, (231, 167, 41))]
-PY
+test "$(identify -format '%m %wx%h' page.png)" = 'PNG 96x64'
+convert -size 48x64 xc:'#135389' xc:'#e7a729' +append -depth 8 rgb:expected.rgb
+convert page.png -depth 8 rgb:actual.rgb
+cmp expected.rgb actual.rgb

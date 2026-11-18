@@ -47,7 +47,7 @@ jobs:
         if: ${{ inputs.verify_guest == true }}
         timeout-minutes: 40
         run: |
-          sudo apt-get install -y --no-install-recommends python3-pil
+          sudo apt-get install -y --no-install-recommends imagemagick
           sudo bash tools/browser-image/ci/acceptance.sh browser-worker.qcow2
           sha256sum -c browser-worker.qcow2.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
