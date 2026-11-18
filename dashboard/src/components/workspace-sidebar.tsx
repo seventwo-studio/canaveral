@@ -160,7 +160,7 @@ export function WorkspaceSidebar({
                   <Rocket className="size-4" />
                 </span>
                 <div className="grid flex-1 text-left leading-tight">
-                  <span className="w-fit truncate font-display text-base font-medium leading-tight text-foreground">
+                  <span className="w-fit truncate font-display text-base font-semibold leading-tight tracking-tight text-foreground">
                     canaveral
                   </span>
                 </div>
@@ -194,7 +194,7 @@ export function WorkspaceSidebar({
                             asChild
                             isActive={view === key}
                             tooltip={title}
-                            className="relative data-[active=true]:before:absolute data-[active=true]:before:inset-y-2 data-[active=true]:before:left-0 data-[active=true]:before:w-0.5 data-[active=true]:before:bg-sidebar-primary"
+                            className="h-10 md:h-8"
                           >
                             <a
                               href={href}
@@ -206,7 +206,7 @@ export function WorkspaceSidebar({
                             </a>
                           </SidebarMenuButton>
                           {counts[key] !== undefined && (
-                            <SidebarMenuBadge className="font-mono text-[10px] tabular-nums">
+                            <SidebarMenuBadge className="font-mono text-xs tabular-nums">
                               {counts[key]}
                             </SidebarMenuBadge>
                           )}

@@ -10,6 +10,13 @@ afterEach(() => {
 const response = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status });
 
+test("failed reads offer refresh without mutation recovery instructions", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError()));
+  await expect(api("machines")).rejects.toThrow(
+    /^Could not load data\. Try refreshing\.$/,
+  );
+});
+
 test("invalid mutation acknowledgements stay unknown and are not replayed", async () => {
   const fetch = vi
     .fn()

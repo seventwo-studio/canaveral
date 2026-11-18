@@ -242,7 +242,54 @@ it("shows unavailable overview counts instead of claiming zero state", async () 
   ]) {
     expect(screen.getByText(label).nextElementSibling?.textContent).toBe("—");
   }
-  expect(screen.getByText(/Load inventory to review/)).toBeTruthy();
+  expect(
+    within(screen.getByRole("region", { name: "Needs attention" })).getByText(
+      "Inventory unavailable.",
+    ),
+  ).toBeTruthy();
+});
+it("keeps the overview short and exposes remaining issues on demand", async () => {
+  render(
+    <AdminOverview
+      user={admin}
+      inventory={{
+        machines: [],
+        templates: [],
+        hosts: Array.from({ length: 6 }, (_, index) => ({
+          id: `host-${index}`,
+          name: `Host ${index + 1}`,
+          provider: "libvirt",
+          online: false,
+          enabled: true,
+          capacity: { cpu: 4, memoryMiB: 4096, diskGiB: 64 },
+        })),
+      }}
+      loaded
+      stale=""
+      directory={{
+        data: [admin],
+        error: "",
+        loading: false,
+        refresh: async () => {},
+        clear: vi.fn(),
+      }}
+      onDenied={vi.fn()}
+      onInspect={vi.fn()}
+      onRefresh={vi.fn()}
+    />,
+  );
+  const issues = within(
+    screen.getByRole("region", { name: "Needs attention" }),
+  );
+  expect(issues.getAllByRole("link")).toHaveLength(4);
+  await userEvent.click(
+    issues.getByRole("button", { name: "Show all 6 issues" }),
+  );
+  expect(issues.getByRole("link", { name: "Review Host 6" })).toBeTruthy();
+  await userEvent.click(
+    issues.getByRole("button", { name: "Show fewer issues" }),
+  );
+  expect(issues.queryByRole("link", { name: "Review Host 6" })).toBeNull();
 });
 it.each([
   [{ status: "passed", fresh: false }, "Checks stale"],

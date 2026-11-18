@@ -42,7 +42,7 @@ export function MachineInventory({
     <div className="min-w-0 overflow-hidden rounded-md border bg-card">
       <div
         aria-hidden="true"
-        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-muted/50 px-4 py-3 text-xs text-muted-foreground xl:grid"
+        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-muted/50 px-4 py-3 text-xs font-medium text-muted-foreground xl:grid"
       >
         <span>Machine</span>
         <span>State</span>
@@ -101,12 +101,12 @@ function MachineRow({
   return (
     <li
       data-machine-id={m.id}
-      className="grid min-w-0 grid-cols-2 gap-4 p-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center"
+      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center xl:hover:bg-muted/30"
     >
       <div className="flex min-w-0 items-start gap-3">
         <Monitor
           aria-hidden="true"
-          className="mt-1 hidden size-4 shrink-0 text-muted-foreground sm:block"
+          className="hidden size-8 shrink-0 rounded-md border bg-muted/50 p-1.5 text-muted-foreground sm:block"
         />
         <div className="min-w-0 space-y-1">
           <Button
@@ -141,7 +141,7 @@ function MachineRow({
       </div>
       <dl className="min-w-0 text-xs">
         <dt className="mb-1 text-muted-foreground xl:sr-only">Resources</dt>
-        <dd className="break-words tabular-nums">
+        <dd className="break-words font-mono tabular-nums">
           {m.resources.cpu} vCPU · {memory(m.resources.memoryMiB)}
           <span className="mt-1 block text-muted-foreground">
             {number(m.resources.diskGiB)} GiB disk

@@ -245,9 +245,9 @@ InputGroup; loading and missing inventory use Empty; cards use Header, Content a
 Footer sections. Retain the registry's spacing, focus and responsive behavior.
 Do not recreate those structures with custom wrappers and global CSS overrides.
 
-Inventory filters are single-choice Toggle Group items, not tab panels. Keep
-native capacity meters: they represent reserved resources rather than task
-completion. Keep shared colors in CSS variables and maintain distinct status labels and native meters.
+Inventory state filters use a single-choice Toggle Group, with a native select on
+narrow machine inventory screens. Native capacity meters show resource
+reservations. Keep shared colors in CSS variables and give each status a text label.
 After adding registry components, verify utility imports resolve to `@/lib/utils`.
 
 With Node.js 24 installed:

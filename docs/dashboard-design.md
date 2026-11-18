@@ -29,8 +29,10 @@ The image library also accepts `#templates`, user administration accepts `#users
 
 ## Design principles
 
-- Give the operator a stable location. Keep resource families in the rail, account actions at its foot and the current destination in the header. On small screens the rail becomes a drawer.
+- Give the operator a stable location. Keep resource families in the rail, account actions at its foot and the current destination in the sticky header. On small screens the rail becomes a drawer. Changing destinations scrolls to the top and moves keyboard focus to the workspace.
 - Use warm paper for the work area and graphite for navigation. Reserve burnt orange for emphasis and use monospace for identifiers and measurements. Keep the launch photograph on the account entry screens.
 - Give each machine an action appropriate to its state. Keep its name and status visible while the operator inspects details. On narrow screens, pair each value with its label.
+- Keep fleet health compact so search, filters and the first machine are visible together on a narrow phone. Use a full-width search input and a native state picker on phones. Keep host reservations expandable and label fleet counts as applying before filters.
+- Lead Overview with up to four actionable exceptions. When machines and connections both need attention, include at least one of each in the preview. Put fleet and host health before account administration, with one refresh action for the whole overview.
 - Show where a number came from. Keep reservations distinct from measured consumption, label stale snapshots and surface missing measurements where a value would appear.
-- Bind consequential actions to their subject. Name the affected machine, account or token in confirmations. An uncertain operation offers status recovery using the original request identity.
+- Bind consequential actions to their subject. Name the affected machine, account or token in confirmations. A failed read offers a refresh. An uncertain operation offers status recovery using the original request identity.

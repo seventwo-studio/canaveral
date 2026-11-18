@@ -7,7 +7,9 @@ export function AccountLayout({ children }: { children: ReactNode }) {
     <main className="grid min-h-svh lg:grid-cols-[minmax(28rem,3fr)_4fr]">
       <section className="flex flex-col gap-8 p-6 md:p-12">
         <Brand />
-        <div className="m-auto w-full max-w-sm space-y-6 py-12">{children}</div>
+        <div className="m-auto w-full max-w-sm space-y-6 py-10 [&_input]:h-11 [&_button[type=submit]]:h-11">
+          {children}
+        </div>
       </section>
       <aside
         aria-hidden="true"

@@ -95,7 +95,7 @@ it("keeps charts scoped to the full snapshot while emitting exact-state filters"
   );
   expect(onSelectState).toHaveBeenCalledWith("preparing");
   expect(screen.getByRole("img", { name: "5 machines by state" })).toBeTruthy();
-  expect(screen.getByText("All machines · before filters")).toBeTruthy();
+  expect(screen.getByText("Before filters")).toBeTruthy();
 });
 it("bounds the host summary and brings exceptions ahead of healthy connections", async () => {
   const hosts = Array.from({ length: 8 }, (_, i) => ({

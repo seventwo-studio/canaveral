@@ -1,6 +1,7 @@
 import { hostIssue } from "@/lib/fleet";
 import { FleetPulse } from "./fleet-pulse";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CircleCheck, RefreshCw } from "lucide-react";
 import type { Inventory, User } from "@/lib/inventory";
 import type { Host } from "@/lib/infrastructure";
 import { api, attention, errorMessage, machineStatus } from "@/lib/api";
@@ -170,24 +171,36 @@ export function AdminOverview({
   const users = directory.data;
   const problemMachines = inventory.machines.filter(attention);
   const problemHosts = inventory.hosts.filter((h) => hostIssue(h) !== null);
+  const [showAllIssues, setShowAllIssues] = useState(false);
+  const issueCount = problemMachines.length + problemHosts.length;
+  const issueLimit = 4;
+  const machineLimit = issueLimit - Number(problemHosts.length > 0);
+  const visibleMachines = showAllIssues
+    ? problemMachines
+    : problemMachines.slice(0, machineLimit);
+  const visibleHosts = showAllIssues
+    ? problemHosts
+    : problemHosts.slice(0, Math.max(0, issueLimit - visibleMachines.length));
   const activeTokens = tokens.data?.filter(
     (t) => tokenState(t) === "Active",
   ).length;
   return (
     <>
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="font-display text-3xl font-medium tracking-tight">
           Overview
         </h1>
         <Button
           variant="outline"
+          disabled={directory.loading || tokens.loading}
           onClick={() => {
             onRefresh();
             void directory.refresh();
             void tokens.refresh();
           }}
         >
-          Refresh administration
+          <RefreshCw />
+          Refresh overview
         </Button>
       </div>
       <ErrorNotice>{stale}</ErrorNotice>
@@ -206,136 +219,150 @@ export function AdminOverview({
           Refreshing administration…
         </p>
       )}
-      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-        <Card
-          role="region"
-          aria-label="Needs attention"
-          className="min-w-0 rounded-md shadow-none"
-        >
-          <CardHeader>
-            <div className="flex items-center justify-between gap-2">
-              <CardTitle>Needs attention</CardTitle>
-              <Badge variant="outline">
-                {loaded ? problemMachines.length + problemHosts.length : "—"}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {!loaded ? (
-              <p className="text-sm text-muted-foreground">
-                Load inventory to review machine and connection status.
-              </p>
-            ) : (
-              <>
-                {!problemMachines.length && !problemHosts.length && (
-                  <p className="text-sm text-muted-foreground">
-                    {stale
-                      ? "No alerts in the last inventory snapshot."
-                      : "No alerts in the current inventory."}
-                  </p>
-                )}
-                {problemMachines.map((m) => (
-                  <div
-                    key={m.id}
-                    className="flex items-center justify-between gap-3 border-b pb-3 last:border-0"
-                  >
-                    <div className="min-w-0">
-                      <p className="break-words text-sm font-medium">
-                        {m.name}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {machineStatus(m)} · {ownerLabel(m, users ?? [])}
-                      </p>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onInspect(m.id)}
-                    >
-                      Inspect<span className="sr-only"> {m.name}</span>
-                    </Button>
+      <Card
+        role="region"
+        aria-label="Needs attention"
+        className="min-w-0 gap-3 py-4 shadow-none"
+      >
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle>Needs attention</CardTitle>
+            <Badge variant="outline">{loaded ? issueCount : "—"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {!loaded ? (
+            <p className="text-sm text-muted-foreground">
+              Inventory unavailable.
+            </p>
+          ) : (
+            <>
+              {!issueCount && (
+                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                  {!stale && (
+                    <CircleCheck
+                      className="size-4 shrink-0 text-[color:var(--state-ready)]"
+                      aria-hidden="true"
+                    />
+                  )}
+                  {stale
+                    ? "No alerts in the last inventory snapshot."
+                    : "No alerts in the current inventory."}
+                </p>
+              )}
+              {visibleMachines.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"
+                >
+                  <div className="min-w-0">
+                    <p className="break-words text-sm font-medium">{m.name}</p>
+                    <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <Badge variant="outline" className="status status-error">
+                        <span className="status-dot" aria-hidden="true" />
+                        {machineStatus(m)}
+                      </Badge>
+                      <span className="[overflow-wrap:anywhere]">
+                        {ownerLabel(m, users ?? [])}
+                      </span>
+                    </p>
                   </div>
-                ))}
-                {problemHosts.map((h) => (
-                  <div
-                    key={h.id}
-                    className="flex items-center justify-between gap-3 border-b pb-3 last:border-0"
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onInspect(m.id)}
                   >
-                    <div className="min-w-0">
-                      <p className="break-words text-sm font-medium">
-                        {h.name}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {hostIssue(h)}
-                      </p>
-                    </div>
-                    <Button asChild variant="outline" size="sm">
-                      <a
-                        href={`#${h.kind === "orchestrator" || h.provider === "kubevirt" ? "orchestrators" : "hosts"}/${encodeURIComponent(h.id)}/resources`}
-                      >
-                        Review<span className="sr-only"> {h.name}</span>
-                      </a>
-                    </Button>
-                  </div>
-                ))}
-              </>
-            )}
-          </CardContent>
-        </Card>
-        <Card className="rounded-md shadow-none">
-          <CardHeader>
-            <CardTitle>Access management</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {(directory.error || tokens.error) && (
-              <p className="text-xs text-destructive">
-                Access counts show the last available snapshot.
-              </p>
-            )}
-            <dl className="grid grid-cols-2 gap-4 text-xs">
-              {[
-                ["Users", users?.length ?? "—"],
-                [
-                  "Active administrators",
-                  users?.filter(
-                    (u) => u.role === "admin" && u.status === "active",
-                  ).length ?? "—",
-                ],
-                ["Active API tokens", activeTokens ?? "—"],
-                [
-                  "Pending invitations",
-                  users?.filter((u) => u.status === "pending").length ?? "—",
-                ],
-                [
-                  "Disabled accounts",
-                  users?.filter((u) => u.status === "disabled").length ?? "—",
-                ],
-              ].map(([label, value]) => (
-                <div key={label}>
-                  <dt className="text-muted-foreground">{label}</dt>
-                  <dd className="mt-1 font-display text-2xl tabular-nums">
-                    {value}
-                  </dd>
+                    Inspect<span className="sr-only"> {m.name}</span>
+                  </Button>
                 </div>
               ))}
-            </dl>
-            <div className="flex flex-wrap gap-2">
-              <Button asChild>
-                <a href="#admin/users">Manage users</a>
-              </Button>
-              <Button asChild variant="outline">
-                <a href="#admin/tokens">Review API access</a>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+              {visibleHosts.map((h) => (
+                <div
+                  key={h.id}
+                  className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"
+                >
+                  <div className="min-w-0">
+                    <p className="break-words text-sm font-medium">{h.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {hostIssue(h)}
+                    </p>
+                  </div>
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href={`#${h.kind === "orchestrator" || h.provider === "kubevirt" ? "orchestrators" : "hosts"}/${encodeURIComponent(h.id)}/resources`}
+                    >
+                      Review<span className="sr-only"> {h.name}</span>
+                    </a>
+                  </Button>
+                </div>
+              ))}
+              {issueCount > issueLimit && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={showAllIssues}
+                  onClick={() => setShowAllIssues((expanded) => !expanded)}
+                >
+                  {showAllIssues
+                    ? "Show fewer issues"
+                    : `Show all ${issueCount} issues`}
+                </Button>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
       <FleetPulse
         inventory={inventory}
         loaded={loaded}
         stale={Boolean(stale)}
         showHosts
       />
+      <Card className="gap-3 py-4 shadow-none">
+        <CardHeader>
+          <CardTitle>Access management</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {(directory.error || tokens.error) && (
+            <p className="text-xs text-destructive">
+              Access counts show the last available snapshot.
+            </p>
+          )}
+          <dl className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 xl:grid-cols-5">
+            {[
+              ["Users", users?.length ?? "—"],
+              [
+                "Active administrators",
+                users?.filter(
+                  (u) => u.role === "admin" && u.status === "active",
+                ).length ?? "—",
+              ],
+              ["Active API tokens", activeTokens ?? "—"],
+              [
+                "Pending invitations",
+                users?.filter((u) => u.status === "pending").length ?? "—",
+              ],
+              [
+                "Disabled accounts",
+                users?.filter((u) => u.status === "disabled").length ?? "—",
+              ],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-muted-foreground">{label}</dt>
+                <dd className="mt-1 font-mono text-xl tabular-nums">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline">
+              <a href="#admin/users">Manage users</a>
+            </Button>
+            <Button asChild variant="ghost">
+              <a href="#admin/tokens">Review API access</a>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </>
   );
 }

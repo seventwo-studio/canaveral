@@ -7,6 +7,7 @@ import { machineStatus, memory, number } from "@/lib/api";
 import { allocationLimits } from "@/lib/infrastructure";
 import {
   Card,
+  CardAction,
   CardHeader,
   CardTitle,
   CardDescription,
@@ -77,16 +78,17 @@ export function FleetPulse({
     .map(({ host }) => host);
   const visibleHosts = expanded ? hosts : hosts.slice(0, 3);
   const problems = inventory.machines.filter(attention).length;
-  let offset = 0;
+  const attentionLabel = `${problems} ${problems === 1 ? "needs" : "need"} attention`;
+  const ready = inventory.machines.filter((machine) => machine.ready).length;
   return (
     <section
       aria-label="Fleet pulse"
-      className={`grid min-w-0 gap-4 ${showHosts ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]" : ""}`}
+      className={`grid min-w-0 items-start gap-2 md:gap-3 ${showHosts ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]" : ""}`}
     >
-      <Card className="min-w-0 shadow-none">
+      <Card className="min-w-0 gap-2 py-3 shadow-none md:gap-3 md:py-4">
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="font-display text-lg font-medium">
+            <CardTitle className="font-display text-base">
               Fleet status
             </CardTitle>
             <Badge variant="outline">
@@ -99,7 +101,7 @@ export function FleetPulse({
           </div>
           <CardDescription>
             {loaded
-              ? `${total} ${total === 1 ? "machine" : "machines"} · ${inventory.machines.filter((m) => m.ready).length} ready`
+              ? `${total} ${total === 1 ? "machine" : "machines"} · ${ready} ready`
               : "Inventory unavailable"}
           </CardDescription>
         </CardHeader>
@@ -109,163 +111,85 @@ export function FleetPulse({
               {loaded ? "No machines yet" : "Waiting for inventory…"}
             </p>
           ) : (
-            <div className="flex flex-wrap items-center gap-3 sm:gap-6">
-              <svg
-                viewBox="0 0 128 128"
+            <div className="space-y-2.5">
+              <div
                 role="img"
                 aria-label={`${total} machines by state`}
-                className="size-24 shrink-0 sm:size-32"
-              >
-                <title>
-                  {distribution
-                    .map(({ label, count }) => `${label}: ${count}`)
-                    .join("; ")}
-                </title>
-                <circle
-                  cx="64"
-                  cy="64"
-                  r="52"
-                  fill="none"
-                  stroke="var(--muted)"
-                  strokeWidth="10"
-                />
-                {distribution.map(({ label, count }) => {
-                  const start = offset;
-                  offset += (count / total) * 100;
-                  return (
-                    <circle
-                      key={label}
-                      cx="64"
-                      cy="64"
-                      r="52"
-                      pathLength="100"
-                      fill="none"
-                      stroke={stateColor(label)}
-                      strokeWidth="10"
-                      strokeDasharray={`${(count / total) * 100} ${100 - (count / total) * 100}`}
-                      strokeDashoffset={-start}
-                      transform="rotate(-90 64 64)"
-                    />
-                  );
-                })}
-                {distribution.map(({ label }, index) => {
-                  const before = distribution
-                    .slice(0, index)
-                    .reduce((sum, row) => sum + row.count, 0);
-                  const angle = (before / total) * Math.PI * 2 - Math.PI / 2;
-                  return distribution.length > 1 ? (
-                    <line
-                      key={`boundary-${label}`}
-                      x1={64 + Math.cos(angle) * 47}
-                      y1={64 + Math.sin(angle) * 47}
-                      x2={64 + Math.cos(angle) * 57}
-                      y2={64 + Math.sin(angle) * 57}
-                      stroke="var(--card)"
-                      strokeWidth="2"
-                    />
-                  ) : null;
-                })}
-                <text
-                  x="64"
-                  y="63"
-                  textAnchor="middle"
-                  fill="var(--foreground)"
-                  className="font-display text-3xl"
-                >
-                  {total}
-                </text>
-                <text
-                  x="64"
-                  y="81"
-                  textAnchor="middle"
-                  fill="var(--muted-foreground)"
-                  className="text-[10px]"
-                >
-                  machines
-                </text>
-              </svg>
-              <ul
-                className="min-w-0 flex-1 space-y-1"
-                aria-label="Machine state distribution"
+                className="flex h-1.5 gap-0.5 overflow-hidden rounded-full"
               >
                 {distribution.map(({ label, count }) => (
-                  <li key={label}>
-                    {onSelectState ? (
-                      <button
-                        type="button"
-                        aria-pressed={activeFilter === stateFilter(label)}
-                        aria-label={`Filter ${label.toLowerCase()} machines: ${count}`}
-                        onClick={() => onSelectState(stateFilter(label))}
-                        className="flex min-h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-accent"
-                      >
-                        <svg
-                          viewBox="0 0 8 8"
-                          className="size-2 shrink-0"
-                          aria-hidden="true"
-                        >
-                          <rect width="8" height="8" fill={stateColor(label)} />
-                        </svg>
-                        <span>{label}</span>
-                        <span className="ml-auto tabular-nums">{count}</span>
-                        <span className="hidden w-10 text-right tabular-nums text-muted-foreground sm:inline">
-                          {Math.round((count / total) * 100)}%
-                        </span>
-                      </button>
-                    ) : (
-                      <div className="flex min-h-8 items-center gap-2 text-xs">
-                        <svg
-                          viewBox="0 0 8 8"
-                          className="size-2 shrink-0"
-                          aria-hidden="true"
-                        >
-                          <rect width="8" height="8" fill={stateColor(label)} />
-                        </svg>
-                        <span>{label}</span>
-                        <span className="ml-auto tabular-nums">{count}</span>
-                        <span className="hidden w-10 text-right text-muted-foreground sm:inline">
-                          {Math.round((count / total) * 100)}%
-                        </span>
-                      </div>
-                    )}
-                  </li>
+                  <span
+                    key={label}
+                    className="min-w-0.5"
+                    style={{ flex: count, backgroundColor: stateColor(label) }}
+                  />
                 ))}
+              </div>
+              <ul
+                className="flex flex-wrap gap-1"
+                aria-label="Machine state distribution"
+              >
+                {distribution.map(({ label, count }) => {
+                  const contents = (
+                    <>
+                      <span
+                        className="size-1.5 shrink-0 rounded-full"
+                        style={{ backgroundColor: stateColor(label) }}
+                        aria-hidden="true"
+                      />
+                      <span>{label}</span>
+                      <span className="font-mono text-muted-foreground">
+                        {count}
+                      </span>
+                    </>
+                  );
+                  return (
+                    <li key={label}>
+                      {onSelectState ? (
+                        <button
+                          type="button"
+                          aria-pressed={activeFilter === stateFilter(label)}
+                          aria-label={`Filter ${label.toLowerCase()} machines: ${count}`}
+                          onClick={() => onSelectState(stateFilter(label))}
+                          className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-transparent px-2 text-xs hover:bg-accent aria-pressed:border-input aria-pressed:bg-accent"
+                        >
+                          {contents}
+                        </button>
+                      ) : (
+                        <span className="inline-flex min-h-8 items-center gap-1.5 px-2 text-xs">
+                          {contents}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
           {loaded && total > 0 && (
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-xs">
-              <span className="text-muted-foreground">
-                All machines · before filters
-              </span>
-              {onSelectState ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={
-                    problems ? "text-destructive" : "text-muted-foreground"
-                  }
-                  onClick={() => onSelectState("attention")}
-                >
-                  {problems} {problems === 1 ? "needs" : "need"} attention
-                </Button>
-              ) : (
-                <span
-                  className={
-                    problems ? "text-destructive" : "text-muted-foreground"
-                  }
-                >
-                  {problems} {problems === 1 ? "needs" : "need"} attention
-                </span>
-              )}
+            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 border-t pt-1.5 text-xs">
+              <span className="text-muted-foreground">Before filters</span>
+              {problems > 0 &&
+                (onSelectState ? (
+                  <button
+                    type="button"
+                    className="min-h-8 rounded-sm text-destructive underline-offset-4 hover:underline"
+                    onClick={() => onSelectState("attention")}
+                  >
+                    {attentionLabel}
+                  </button>
+                ) : (
+                  <span className="text-destructive">{attentionLabel}</span>
+                ))}
             </div>
           )}
         </CardContent>
       </Card>
       {showHosts && (
-        <Card className="min-w-0 shadow-none">
-          <CardHeader>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle className="font-display text-lg font-medium">
+        <Card className="min-w-0 gap-3 py-3 shadow-none md:py-4">
+          <CardHeader className="md:has-data-[slot=card-action]:grid-cols-1">
+            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+              <CardTitle className="font-display text-base">
                 Host reservations
               </CardTitle>
               {loaded && (
@@ -275,12 +199,15 @@ export function FleetPulse({
                 </span>
               )}
             </div>
-            <CardDescription className="flex flex-wrap items-center justify-between gap-2">
-              <span>Reserved / limit{stale ? " · last snapshot" : ""}</span>
+            <CardDescription
+              className={mobileReservations || stale ? "" : "hidden md:block"}
+            >
+              Reserved / limit{stale ? " · last snapshot" : ""}
+            </CardDescription>
+            <CardAction className="self-center md:hidden">
               <Button
                 size="sm"
                 variant="ghost"
-                className="md:hidden"
                 aria-label={`${mobileReservations ? "Hide" : "Show"} host reservations`}
                 aria-expanded={mobileReservations}
                 aria-controls={reservationId}
@@ -288,7 +215,7 @@ export function FleetPulse({
               >
                 {mobileReservations ? "Hide" : "Show"}
               </Button>
-            </CardDescription>
+            </CardAction>
           </CardHeader>
           <CardContent
             id={reservationId}
@@ -359,7 +286,7 @@ export function FleetPulse({
                                     high={limit || undefined}
                                   />
                                   <p
-                                    className={`break-words tabular-nums ${used > limit ? "text-destructive" : ""}`}
+                                    className={`break-words font-mono tabular-nums ${used > limit ? "text-destructive" : ""}`}
                                   >
                                     {format(used)} / {format(limit)}
                                     {used > limit && (
