@@ -2,6 +2,10 @@ name: Validate Canaveral
 on:
   workflow_dispatch:
     inputs:
+      build_browser_image:
+        description: Build and retain the ARM64 browser VM disk
+        type: boolean
+        default: false
       tls_controller_url:
         description: Optional existing HTTPS controller for read-only acceptance
         required: false
@@ -17,6 +21,9 @@ concurrency:
   group: validate-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  browser-vm-image:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_browser_image
+    uses: ./.github/workflows/browser-image.yaml
   typescript:
     name: TypeScript controller, SDK and guest services
     runs-on: ubuntu-24.04
