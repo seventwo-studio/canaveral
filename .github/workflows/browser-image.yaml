@@ -1,7 +1,17 @@
 name: Build browser VM image
 on:
   workflow_call:
+    inputs:
+      verify_guest:
+        description: Boot one disposable ARM64 guest for browser acceptance
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      verify_guest:
+        description: Boot one disposable ARM64 guest for browser acceptance
+        type: boolean
+        default: false
   pull_request:
     paths:
       - 'tools/browser-image/**'
@@ -33,6 +43,13 @@ jobs:
           sudo --preserve-env=LIBGUESTFS_BACKEND,LIBGUESTFS_HV bash tools/browser-image/build.sh browser-worker.qcow2
           sudo chmod 0444 browser-worker.qcow2
           sha256sum browser-worker.qcow2 > browser-worker.qcow2.sha256
+      - name: Verify disposable ARM64 browser guest
+        if: ${{ inputs.verify_guest == true }}
+        timeout-minutes: 40
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-pil
+          sudo bash tools/browser-image/ci/acceptance.sh browser-worker.qcow2
+          sha256sum -c browser-worker.qcow2.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: browser-worker-arm64

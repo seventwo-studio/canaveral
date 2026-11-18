@@ -6,6 +6,10 @@ on:
         description: Build and retain the ARM64 browser VM disk
         type: boolean
         default: false
+      verify_browser_vm:
+        description: Build the disk and test one disposable ARM64 browser VM
+        type: boolean
+        default: false
       tls_controller_url:
         description: Optional existing HTTPS controller for read-only acceptance
         required: false
@@ -22,8 +26,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   browser-vm-image:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_browser_image
+    if: github.event_name == 'workflow_dispatch' && (inputs.build_browser_image || inputs.verify_browser_vm)
     uses: ./.github/workflows/browser-image.yaml
+    with:
+      verify_guest: ${{ inputs.verify_browser_vm }}
   typescript:
     name: TypeScript controller, SDK and guest services
     runs-on: ubuntu-24.04
