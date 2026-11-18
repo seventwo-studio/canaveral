@@ -79,8 +79,7 @@ The application key is trusted with all browsers on that worker.
 
 ## Route a browser worker through the controller
 
-Isolate the browser worker in a bounded VM on the Mac. Configure the worker
-with its private HTTPS origin. Give the controller a TLS-verified network
+Isolate the browser worker in a bounded VM on the Mac. Give the controller a TLS-verified network
 route to that origin and a private copy of the worker's dedicated application
 credential. Limit the route to the controller and preserve WebSocket upgrades.
 Do not share one worker across untrusted applications.
@@ -88,6 +87,9 @@ Do not share one worker across untrusted applications.
 Supply the following `browserGateway` object in the controller configuration,
 or pass the object itself as a JSON file to `serve --browser-gateway-config`.
 Use the UUID of the existing macOS host as the key.
+If a private TCP egress proxy uses a different DNS name, add `connectHost` to
+the worker entry. The controller dials that address while verifying TLS and
+sending HTTP requests for the configured worker origin.
 
 ```json
 {
@@ -105,7 +107,9 @@ Create a `BrowserClient` with the controller origin, browser application key,
 Playwright drivers and `{ hostId }` as its fourth argument. The controller routes
 create, inspect, stop and attach through `/v1/hosts/{hostId}/browsers`. It admits
 new launches after the Mac reports ready and accepting, and verifies the scoped
-key before forwarding a browser attachment. After a controller restart, inspect
+key before forwarding a browser attachment. It returns its own attachment URL
+even when the worker generates a loopback URL for local clients.
+After a controller restart, inspect
 the browser using its original UUID and application credential to recover
 attachment authorization for a still-running worker. The worker's TTL and cleanup
 rules continue to apply. The worker's fixed VM budget is separate from machine

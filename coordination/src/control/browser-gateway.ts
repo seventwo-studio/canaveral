@@ -1,5 +1,6 @@
 import { request as httpsRequest } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isIP } from "node:net";
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -16,7 +17,7 @@ const upgradeHeaders = ["sec-websocket-accept", "sec-websocket-protocol", "sec-w
 
 export interface BrowserGatewayConfig {
   origin: string;
-  workers: Record<string, { origin: string; credentialFile: string }>;
+  workers: Record<string, { origin: string; credentialFile: string; connectHost?: string }>;
 }
 
 function tlsOrigin(value: unknown): string {
@@ -37,17 +38,26 @@ export function parseBrowserGateway(input: unknown): BrowserGatewayConfig {
   if (!workers.length || workers.length > 32) throw new Error("Configure one to 32 browser workers.");
   const targets = new Set<string>();
   return { origin, workers: Object.fromEntries(workers.map(([id, worker]) => {
-    if (!worker || Object.keys(worker).sort().join(",") !== "credentialFile,origin"
+    if (!worker || !["credentialFile,origin", "connectHost,credentialFile,origin"].includes(Object.keys(worker).sort().join(","))
       || typeof worker.credentialFile !== "string" || !isAbsolute(worker.credentialFile)) throw new Error("Browser workers require an absolute credential file path.");
     const target = tlsOrigin(worker.origin);
+    if (worker.connectHost !== undefined && (typeof worker.connectHost !== "string" || worker.connectHost.length > 253
+      || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(worker.connectHost))) throw new Error("Invalid browser worker connection DNS name.");
+    if (worker.connectHost && isIP(new URL(target).hostname.replace(/^\[|\]$/g, ""))) throw new Error("Browser worker connection override requires a DNS TLS name.");
     if (target === origin) throw new Error("Browser worker and gateway must have different origins.");
     if (targets.has(target)) throw new Error("Each browser worker belongs to one host.");
     targets.add(target);
-    return [identifier(id), { origin: target, credentialFile: worker.credentialFile }];
+    return [identifier(id), { origin: target, credentialFile: worker.credentialFile, ...(worker.connectHost ? { connectHost: worker.connectHost } : {}) }];
   })) };
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
+
+function connection(worker: BrowserGatewayConfig["workers"][string]) {
+  if (!worker.connectHost) return {};
+  const origin = new URL(worker.origin);
+  return { hostname: worker.connectHost, servername: origin.hostname, headers: { host: origin.host } };
+}
 
 export function createBrowserGateway(config: BrowserGatewayConfig, otherCredentials: string[], canLaunch: (hostId: string) => Promise<boolean>) {
   const sockets = new Set<Duplex>();
@@ -94,26 +104,30 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
       if (stop && Object.keys(body!).length) throw new ServiceError("Expected an empty object.", 400);
       if (create && !await canLaunch(host)) throw new ServiceError("Browser host is offline or draining.", 409);
       const endpoint = new URL(create ? "/v1/browsers" : `/v1/browsers/${id}`, worker.origin);
-      const result = await fetch(endpoint, {
-        method: create ? "POST" : stop ? "DELETE" : "GET", redirect: "error",
-        headers: { authorization: `Bearer ${worker.credential}`, "content-type": "application/json" },
-        ...(create ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000),
+      const bodyBytes = create ? Buffer.from(JSON.stringify(body)) : undefined;
+      const connect = connection(worker);
+      const result = await new Promise<IncomingMessage>((resolve, reject) => {
+        const request = httpsRequest(endpoint, {
+          ...connect, method: create ? "POST" : stop ? "DELETE" : "GET", signal: AbortSignal.timeout(15_000),
+          headers: { ...connect.headers, authorization: `Bearer ${worker.credential}`, "content-type": "application/json",
+            ...(bodyBytes ? { "content-length": bodyBytes.length } : {}) },
+        }, resolve);
+        request.once("error", reject);
+        request.end(bodyBytes);
       });
-      if (!result.ok) {
-        await result.body?.cancel();
-        respond(res, { error: "browser_worker_refused" }, [400, 403, 404, 409, 410, 413, 429].includes(result.status) ? result.status : 503);
+      const status = result.statusCode ?? 503;
+      if (status !== 200 && status !== 201) {
+        result.destroy();
+        respond(res, { error: "browser_worker_refused" }, [400, 403, 404, 409, 410, 413, 429].includes(status) ? status : 503);
         return;
       }
-      const reader = result.body?.getReader();
-      if (!reader) throw new Error("Empty browser response.");
-      const chunks: Uint8Array[] = [];
+      const chunks: Buffer[] = [];
       let bytes = 0;
-      for (;;) {
-        const item = await reader.read();
-        if (item.done) break;
-        bytes += item.value.length;
-        if (bytes > 8192) { await reader.cancel(); throw new Error("Browser receipt exceeds the response limit."); }
-        chunks.push(item.value);
+      for await (const chunk of result) {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+        bytes += data.length;
+        if (bytes > 8192) { result.destroy(); throw new Error("Browser receipt exceeds the response limit."); }
+        chunks.push(data);
       }
       const receipt = JSON.parse(Buffer.concat(chunks).toString());
       if (receipt.id !== id) throw new Error("Browser receipt identity mismatch.");
@@ -123,17 +137,18 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
         respond(res, { id, state: "closed" });
         return;
       }
-      const expectedWorker = new URL(`/v1/browsers/${id}/connect`, worker.origin);
-      expectedWorker.protocol = "wss:";
+      const workerEndpoint = new URL(receipt.endpoint);
       const browserEndpoint = new URL(`${create ? path + "/" + id : path}/connect`, config.origin);
       browserEndpoint.protocol = "wss:";
       const now = Date.now(), expiresAt = Date.parse(receipt.expiresAt), key = secret(receipt.key);
-      if (receipt.endpoint !== expectedWorker.href || !["chromium", "firefox", "webkit"].includes(receipt.engine)
+      if (!["ws:", "wss:"].includes(workerEndpoint.protocol) || workerEndpoint.pathname !== `/v1/browsers/${id}/connect`
+        || workerEndpoint.username || workerEndpoint.password || workerEndpoint.search || workerEndpoint.hash
+        || !["chromium", "firefox", "webkit"].includes(receipt.engine)
         || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt - now > 3_600_000) throw new Error("Invalid worker browser receipt.");
       for (const [id, attachment] of attachments) if (attachment.expiresAt <= now) attachments.delete(id);
       if (attachments.size >= 2048 && !attachments.has(`${host}/${id}`)) throw new Error("Browser attachment capacity reached.");
       attachments.set(`${host}/${id}`, { digest: digest(key), expiresAt });
-      respond(res, { id, engine: receipt.engine, expiresAt: receipt.expiresAt, endpoint: browserEndpoint.href, key }, result.status);
+      respond(res, { id, engine: receipt.engine, expiresAt: receipt.expiresAt, endpoint: browserEndpoint.href, key }, status);
     } catch (error) {
       req.resume();
       respond(res, { error: "browser_gateway_request_failed" }, error instanceof ServiceError ? error.status : 503);
@@ -154,9 +169,10 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
         || countHeader(req, "sec-websocket-key") !== 1 || !/^[A-Za-z0-9+/]{22}==$/.test(req.headers["sec-websocket-key"] ?? "")
         || browserHeaders.some(name => countHeader(req, name) > 1)) throw new Error("Invalid browser WebSocket upgrade.");
       sockets.add(socket);
-      const headers: Record<string, string> = { authorization: `Bearer ${token}`, upgrade: "websocket", connection: "Upgrade" };
+      const connect = connection(worker);
+      const headers: Record<string, string> = { ...connect.headers, authorization: `Bearer ${token}`, upgrade: "websocket", connection: "Upgrade" };
       for (const name of browserHeaders) if (typeof req.headers[name] === "string") headers[name] = req.headers[name];
-      const request = httpsRequest(new URL(`/v1/browsers/${browser}/connect`, worker.origin), { headers, timeout: 10_000 });
+      const request = httpsRequest(new URL(`/v1/browsers/${browser}/connect`, worker.origin), { ...connect, headers, timeout: 10_000 });
       const fail = () => { socket.destroy(); request.destroy(); };
       socket.on("error", fail);
       socket.once("close", () => { sockets.delete(socket); request.destroy(); });

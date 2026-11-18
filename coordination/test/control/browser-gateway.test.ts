@@ -15,7 +15,7 @@ test("host browser gateway routes TLS requests and attachments with separate cre
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cert = join(root, "test.crt"), key = join(root, "test.key");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-keyout", key,
-    "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1"], { stdio: "ignore" });
+    "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:mac-worker.test"], { stdio: "ignore" });
   const tls = { cert: readFileSync(cert), key: readFileSync(key) };
   const trust = getCACertificates("default");
   setDefaultCACertificates([...trust, tls.cert.toString()]);
@@ -42,11 +42,13 @@ test("host browser gateway routes TLS requests and attachments with separate cre
     traffic.push({ method: req.method!, authorization: req.headers.authorization!, path: req.url! });
     socket.end("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
   });
-  const workerOrigin = await listen(worker);
+  const workerOrigin = (await listen(worker)).replace("127.0.0.1", "mac-worker.test");
   const gatewayServer = createServer(tls);
   const origin = await listen(gatewayServer);
   let ready = false;
-  const gateway = createBrowserGateway(parseBrowserGateway({ origin, workers: { [host]: { origin: workerOrigin, credentialFile } } }), [operator], async () => ready);
+  const gateway = createBrowserGateway(parseBrowserGateway({
+    origin, workers: { [host]: { origin: workerOrigin, connectHost: "127.0.0.1", credentialFile } },
+  }), [operator], async () => ready);
   gatewayServer.on("request", gateway.handle);
   gatewayServer.on("upgrade", gateway.upgrade);
   t.after(gateway.close);
