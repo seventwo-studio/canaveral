@@ -32,7 +32,10 @@ and downloads happen before enrollment, rather than during device reconciliation
 The host checks that the required tools and offered system-image directories exist.
 
 For iOS, use a native Mac with full Xcode, its selected developer directory and
-installed simulator runtime/device type. Install `idb` and `idb_companion`; the
+installed simulator runtime/device type. Set `DEVELOPER_DIR` in the host service
+environment when that service uses a specific Xcode installation. This selects
+Xcode for the runner and its child tools without changing the system default.
+Install `idb` and `idb_companion`; the
 companion must be on the agent's PATH. Configure the idb executable in
 [host-ios.json](../examples/host-ios.json), or omit `idb` to resolve it on PATH.
 Run the agent as the account that owns these simulators, with access to CoreSimulator.

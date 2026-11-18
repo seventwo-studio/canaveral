@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { checkHost, HostRunner, hostOffer, hostTransport, startHost } from "../../src/host.ts";
 import type { HostConfig, HostDependencies, HostTransport } from "../../src/host.ts";
 import { normalizeTemplate } from "../../src/control/templates.ts";
+import { validateOffer } from "../../src/control/machines.ts";
 import { readRecord, saveRecord, StateLock } from "../../src/runtime-process.ts";
 import type { ExecutionClock, RecordValue } from "../../src/runtime-process.ts";
 import { ServiceError } from "../../src/errors.ts";
@@ -38,8 +39,9 @@ test("a failed runtime sweep does not stop Linux scheduling and remains a shutdo
 test('physical Linux and Mac offers include models beside VM and simulator runtimes', t => {
   const { config } = setup(t);
   const inference = { runtime: 'ollama', executable: '/private/ollama', modelsDirectory: '/private/models', models: [{ id: 'fixture:1', digest: 'sha256:' + 'a'.repeat(64), resources: { cpu: 2, memoryMiB: 2048, diskGiB: 8 } }] };
-  for (const [provider, runtimes] of [['macos', { apple: {}, ios: {} }], ['linux', { libvirt: {}, android: {} }]] as const) {
+  for (const [provider, runtimes] of [['macos', { apple: {}, android: {}, ios: {} }], ['linux', { libvirt: {}, android: {} }]] as const) {
     const offer = hostOffer({ ...config, provider, templates: [], runtimes, inference });
+    assert.deepEqual(validateOffer(offer), offer);
     assert.deepEqual((offer.inference as { models: unknown[] }).models, inference.models.map(model => ({ ...model, capability: 'generation' })));
     assert.equal(JSON.stringify(offer).includes('/private/'), false);
     assert.throws(() => hostOffer({ ...config, provider, templates: [], runtimes, inference, leaseProtocol: 1 }));

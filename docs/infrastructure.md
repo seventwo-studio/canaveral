@@ -340,6 +340,19 @@ has its local backend bindings and storage, while image definitions and the
 capacity offer and saved limits belong to the parent host. Image OS selects its
 matching runtime, or an explicit `runtime` image field selects an enabled compatible backend.
 
+Register one durable inventory host for a physical Mac. Add Android and iOS
+under that host's `runtimes` as their prerequisites are verified. Embedded
+Ollama inference can use the same host. A separately authenticated model executor
+can share the host's budget through a physical-domain binding. Keep its scoped
+credential separate from the host credential. Configure that binding before
+admitting workloads so retained reservations do not prevent it.
+
+An isolated [browser worker](browser-api.md#route-a-browser-worker-through-the-controller)
+can run alongside the macOS host. Connect it to the same inventory entry with a
+private HTTPS route and retain its sandbox, application credential, and
+per-browser session credentials. Deduct the worker's VM budget from the CPU,
+memory and storage offered by the Mac host.
+
 The local launcher consolidates historical local runtime identities while holding
 all old agent locks. It retains the canonical credential, immutable image
 definitions, machine UUIDs, runtime state directories, storage and operation
@@ -347,6 +360,41 @@ receipts; source identities are retired and cannot heartbeat. A private SQLite
 backup precedes migration. This is locally fenced maintenance, not an API that
 can reassign an unavailable remote host. The resulting configuration is
 `state/local/machine-host.json`; old configuration files remain as evidence.
+
+### Migrate a remote Android runner to a macOS host
+
+Use upgraded controller and host binaries. Back up the controller database
+with its controller identity and preserve the runner's original configuration,
+state and storage. Schedule downtime for this host. Confirm each Android
+assignment is stopped and resolve pending or uncertain work. Drain the host,
+stop its service and disable its automatic restart. The controller requires
+the old heartbeat to expire.
+
+Prepare a `provider: macos` configuration with the Android template definitions
+and matching Android SDK, storage and helper paths. Set
+`runtimes.android.stateDirectory` to the existing runner state directory.
+Additional mobile runtime bindings belong under that same host. Use a
+confirmed capacity that leaves room for macOS, the browser VM and unmanaged work.
+
+```sh
+canaveral --url https://controller.example.com --token-file /private/operator.token \
+  promote-macos --config /private/macos-host.json --state /private/android-state
+```
+
+The command holds the runner lock and saves the exact credential exchange in
+private state before dispatch. The controller keeps the UUID, machine
+assignments, disk reservations and operation receipts, and replaces the old
+credential. After an uncertain result, repeat the command with the same
+configuration, controller and state. Start the new host service using the same
+state when the exchange is confirmed. Verify its checks before accepting new work.
+
+When preserving an existing separately scoped model runner on this same Mac,
+add `--model-domain UUID`. Stop its polling service and confirm it holds no
+reservations first. The cutover attaches that unmapped domain to the host
+and expands both domain and host limits to the configured capacity in the
+same transaction. It retains the model approval and existing host disk
+charges. Confirm the domain belongs exclusively to this Mac before attaching
+it, then resume model polling after host verification.
 
 Kubernetes resource semantics follow the [ResourceQuota contract](https://kubernetes.io/docs/concepts/policy/resource-quotas/).
 

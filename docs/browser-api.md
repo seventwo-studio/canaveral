@@ -6,11 +6,10 @@ click by locator or coordinates, drag, take PNG screenshots and manage multiple
 tabs. Optional context settings emulate viewport, touch, locale and device traits;
 they do not replace the browser with a simulated renderer.
 
-This is a separate opt-in service, exported as `canaveral-machines/browser-runtime`
-and `canaveral-machines/browser-sdk`. It is not a consumer lease, runner capability,
-controller HTTP route or dashboard integration. Do not send a consumer lease key to
-this worker. The worker's application credential is provisioned separately by its
-operator. Playwright drivers are passed explicitly to keep core controller imports
+The worker is exported as `canaveral-machines/browser-runtime` and
+`canaveral-machines/browser-sdk`. It can run independently or under a macOS host
+through the controller's optional gateway. Use a dedicated browser application
+credential. Playwright drivers are passed explicitly to keep controller imports
 and offline release modules independent of browser loading.
 
 ## Start the worker
@@ -77,6 +76,44 @@ credentials: do not replay an uncertain boot across restarts without operator
 reconciliation. There is no durable cross-worker recovery or reconnect replay.
 Neither SDK actions nor JavaScript are automatically replayed after uncertainty.
 The application key is trusted with all browsers on that worker.
+
+## Route a browser worker through the controller
+
+Isolate the browser worker in a bounded VM on the Mac. Give the controller a TLS-verified network
+route to that origin and a private copy of the worker's dedicated application
+credential. Limit the route to the controller and preserve WebSocket upgrades.
+Do not share one worker across untrusted applications.
+
+Supply the following `browserGateway` object in the controller configuration,
+or pass the object itself as a JSON file to `serve --browser-gateway-config`.
+Use the UUID of the existing macOS host as the key.
+If a private TCP egress proxy uses a different DNS name, add `connectHost` to
+the worker entry. The controller dials that address while verifying TLS and
+sending HTTP requests for the configured worker origin.
+
+```json
+{
+  "origin": "https://controller.example.com",
+  "workers": {
+    "83d93157-1043-4700-91f8-158d38d1ba63": {
+      "origin": "https://browser-worker.example.internal",
+      "credentialFile": "/run/canaveral/browser-worker.token"
+    }
+  }
+}
+```
+
+Create a `BrowserClient` with the controller origin, browser application key,
+Playwright drivers and `{ hostId }` as its fourth argument. The controller routes
+create, inspect, stop and attach through `/v1/hosts/{hostId}/browsers`. It admits
+new launches after the Mac reports ready and accepting, and verifies the scoped
+key before forwarding a browser attachment. It returns its own attachment URL
+even when the worker generates a loopback URL for local clients.
+After a controller restart, inspect
+the browser using its original UUID and application credential to recover
+attachment authorization for a still-running worker. The worker's TTL and cleanup
+rules continue to apply. The worker's fixed VM budget is separate from machine
+reservations, so leave it out of the host's advertised capacity.
 
 ## Agent usage and local servers
 

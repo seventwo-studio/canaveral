@@ -10,7 +10,7 @@ import { createBrowserRuntime } from '../src/browser-runtime.ts';
 import { BrowserClient, BrowserSession } from '../src/browser-sdk.ts';
 
 const token = 'a'.repeat(32);
-async function fixture(launch?: () => Promise<BrowserServer>) {
+async function fixture(launch?: (engine: string, ports: readonly number[]) => Promise<Pick<BrowserServer, 'close' | 'wsEndpoint'>>) {
   let launches = 0, closes = 0;
   const runtime = createBrowserRuntime({ token, publicOrigin: 'http://127.0.0.1:1234', maxBrowsers: 1, launch: launch ?? (async () => { launches++; return { close: async () => { closes++; }, wsEndpoint: () => 'ws://127.0.0.1:1/native-secret' } as BrowserServer; }) });
   runtime.server.listen(0, '127.0.0.1'); await once(runtime.server, 'listening');
@@ -39,6 +39,22 @@ test('boot is authenticated, bounded, replayable and never exposes the native en
     assert.equal((await f.call('/v1/browsers', 'POST', { ...body, id: randomUUID() })).status, 201);
   } finally { await f.runtime.close(); }
 });
+test('browser setup receives immutable exact forwarding ports', async () => {
+  const launches: Array<{ engine: string; ports: readonly number[] }> = [];
+  const f = await fixture(async (engine, ports) => {
+    launches.push({ engine, ports });
+    return { wsEndpoint: () => 'ws://127.0.0.1:1/private', close: async () => {} };
+  });
+  try {
+    const request = { id: randomUUID(), engine: 'chromium', ttlSeconds: 30 };
+    const boot = (localPorts: unknown) => f.call('/v1/browsers', 'POST', { ...request, localPorts });
+    for (const ports of [null, [0], [65536], ['3000'], Array(33).fill(3000)]) assert.equal((await boot(ports)).status, 400);
+    assert.equal((await boot([8080, 3000, 8080])).status, 201);
+    assert.equal((await boot([3000, 8080])).status, 200);
+    assert.equal((await boot([3000])).status, 409);
+    assert.deepEqual(launches, [{ engine: 'chromium', ports: [3000, 8080] }]);
+  } finally { await f.runtime.close(); }
+});
 test('failed launch is retained and never silently retried', async () => {
   let launches = 0;
   const f = await fixture(async () => { launches++; throw new Error('private native path'); });
@@ -51,14 +67,21 @@ test('failed launch is retained and never silently retried', async () => {
 });
 test('WebSocket gateway requires the session key and strips credentials upstream', async () => {
   const upstream = createServer(); let authorization: string | undefined;
-  upstream.on('upgrade', (req, socket) => { authorization = req.headers.authorization; assert.equal(req.url, '/native-secret'); socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'); });
+  upstream.on('upgrade', (req, socket) => {
+    authorization = req.headers.authorization;
+    assert.equal(req.url, '/native-secret');
+    assert.equal(req.headers['x-playwright-proxy'], undefined);
+    assert.equal(req.headers['x-playwright-launch-options'], undefined);
+    assert.equal(req.headers['x-playwright-browser'], undefined);
+    socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+  });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
   const f = await fixture(async () => ({ close: async () => {}, wsEndpoint: () => `ws://127.0.0.1:${(upstream.address() as AddressInfo).port}/native-secret` }) as BrowserServer);
   try {
     const body = { id: randomUUID(), engine: 'chromium', ttlSeconds: 60 };
     const receipt = await (await f.call('/v1/browsers', 'POST', body)).json();
     const upgrade = (key: string) => new Promise<number>((resolve, reject) => {
-      const req = request(`${f.origin}/v1/browsers/${body.id}/connect`, { headers: { Connection: 'Upgrade', Upgrade: 'websocket', Authorization: `Bearer ${key}` } });
+      const req = request(`${f.origin}/v1/browsers/${body.id}/connect`, { headers: { Connection: 'Upgrade', Upgrade: 'websocket', Authorization: `Bearer ${key}`, 'x-playwright-proxy': '*', 'x-playwright-browser': 'webkit', 'x-playwright-launch-options': '{}' } });
       req.on('upgrade', (res, socket) => { socket.destroy(); resolve(res.statusCode!); }); req.on('response', res => { res.resume(); resolve(res.statusCode!); }); req.on('error', reject); req.end();
     });
     assert.equal(await upgrade(token), 403); assert.equal(await upgrade(receipt.key), 101); assert.equal(authorization, undefined);

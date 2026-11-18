@@ -20,12 +20,17 @@ export interface PageElement {
 export interface ElementSnapshot { url: string; elements: PageElement[]; truncated: boolean }
 export class BrowserClient {
   #origin: URL;
-  constructor(origin: string, private readonly token: string, private readonly engines: Record<BrowserEngine, Pick<BrowserType, 'connect'>>) {
+  #path: string;
+  constructor(origin: string, private readonly token: string, private readonly engines: Record<BrowserEngine, Pick<BrowserType, 'connect'>>, options: { hostId?: string } = {}) {
     this.#origin = new URL(origin);
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(this.#origin.hostname);
     if (!(this.#origin.protocol === 'https:' || (local && this.#origin.protocol === 'http:')) || this.#origin.username || this.#origin.password || this.#origin.pathname !== '/' || this.#origin.search || this.#origin.hash) throw new Error('Use HTTPS, or HTTP on loopback, with no path or URL credentials.');
+    if (options.hostId !== undefined && (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(options.hostId) || this.#origin.protocol !== 'https:')) {
+      throw new Error('Controller-routed browsers require an HTTPS origin and a host UUID.');
+    }
+    this.#path = options.hostId === undefined ? '/v1/browsers' : `/v1/hosts/${options.hostId}/browsers`;
   }
-  async #request(method: string, path: string, body?: BrowserIntent): Promise<BrowserReceipt> {
+  async #request(method: string, path: string, body?: BrowserIntent | Record<string, never>): Promise<BrowserReceipt> {
     const response = await fetch(new URL(path, this.#origin), { method, headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.timeout(45_000) });
     if (!response.ok) throw new Error(`Browser runtime request failed (${response.status}).`);
     return await response.json() as BrowserReceipt;
@@ -34,9 +39,9 @@ export class BrowserClient {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.id)) throw new Error('Persist a browser UUID before boot.');
     const ports = [...new Set(options.localPorts ?? [])];
     if (ports.length > 32 || ports.some(p => !Number.isInteger(p) || p < 1 || p > 65535)) throw new Error('Choose up to 32 explicit local TCP ports.');
-    const intent: BrowserIntent = { id: options.id, engine: options.engine ?? 'chromium', ttlSeconds: options.ttlSeconds ?? 300 };
-    const receipt = await this.#request('POST', '/v1/browsers', intent);
-    const expected = new URL(`/v1/browsers/${options.id}/connect`, this.#origin); expected.protocol = expected.protocol === 'https:' ? 'wss:' : 'ws:';
+    const intent: BrowserIntent = { id: options.id, engine: options.engine ?? 'chromium', ttlSeconds: options.ttlSeconds ?? 300, ...(ports.length ? { localPorts: ports } : {}) };
+    const receipt = await this.#request('POST', this.#path, intent);
+    const expected = new URL(`${this.#path}/${options.id}/connect`, this.#origin); expected.protocol = expected.protocol === 'https:' ? 'wss:' : 'ws:';
     if (receipt.id !== options.id || receipt.engine !== intent.engine || receipt.endpoint !== expected.href || typeof receipt.key !== 'string' || !receipt.key) throw new Error('Invalid browser runtime receipt.');
     let browser: Browser | undefined;
     try {
@@ -52,7 +57,9 @@ export class BrowserClient {
   }
   async stop(id: string): Promise<void> {
     if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('Invalid browser ID.');
-    await this.#request('DELETE', `/v1/browsers/${id}`);
+    const path = `${this.#path}/${id}`;
+    if (this.#path === '/v1/browsers') await this.#request('DELETE', path);
+    else await this.#request('POST', path + '/stop', {});
   }
 }
 export class BrowserSession {

@@ -19,9 +19,9 @@ async function fixture() {
   await fs.writeFile(operator, token(), { mode: 0o600 }); await fs.writeFile(password, "fixture-password-only\n", { mode: 0o600 });
   const calls: Call[] = []; let reply = async (_call: Call): Promise<Record<string, unknown>> => ({ ok: true });
   let stdout = "", stderr = "";
-  async function invoke(args: string[], credential = true, overrides: Partial<CliIO> = {}) {
+  async function invoke(args: string[], credential = true, overrides: Partial<CliIO> = {}, origin = "http://127.0.0.1:8765") {
     stdout = ""; stderr = "";
-    const status = await main(["--url", "http://127.0.0.1:8765", ...(credential ? ["--token-file", operator] : []), ...args], {
+    const status = await main(["--url", origin, ...(credential ? ["--token-file", operator] : []), ...args], {
       stdout: text => { stdout += text; }, stderr: text => { stderr += text; },
       password: async () => { throw new Error("Unexpected prompt"); },
       client: (_url, secret): RequestClient => ({ request: async (method, path, body) => { const call = { method, path, body, token: secret }; calls.push(call); return reply(call); } }), ...overrides,
@@ -52,6 +52,29 @@ test("init creates 0600 credentials and refuses overwrite or dangling symlinks",
   const dangling = join(f.root, "dangling"); await fs.mkdir(dangling); await fs.symlink(join(f.root, "missing"), join(dangling, "enrollment.token"));
   assert.equal((await f.invoke(["init", dangling], false)).status, 1);
   await assert.rejects(fs.stat(join(dangling, "admin.token")));
+}));
+test("Mac promotion journals the new credential and retries an uncertain exchange exactly", async () => withFixture(async f => {
+  const id = randomUUID(), credential = token(), origin = "https://controller.example.com";
+  const identityPath = join(f.root, "identity.json"), config = join(f.root, "host.json"), pending = join(f.root, "macos-promotion.json");
+  await fs.writeFile(identityPath, JSON.stringify({ id, credential, orchestrator: origin }), { mode: 0o600 });
+  await fs.writeFile(config, JSON.stringify({
+    name: "Mac Studio", provider: "macos", storage: f.root, capacity: { cpu: 4, memoryMiB: 4096, diskGiB: 40 },
+    runtimes: { android: { stateDirectory: f.root } }, templates: [],
+  }));
+  const promote = () => f.invoke(["promote-macos", "--state", f.root, "--config", config], true, {}, origin);
+  f.setReply(async () => { throw new CliError("Fixture response lost.", 503, id, "unknown"); });
+  assert.equal((await promote()).status, 1);
+  assert.equal((await fs.stat(pending)).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(await fs.readFile(identityPath, "utf8")).credential, credential);
+  f.setReply(async () => ({ id, provider: "macos" }));
+  const retried = await promote();
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(f.calls[0]!.path, `/v1/hosts/${id}/promote-macos`);
+  assert.deepEqual(f.calls[1], f.calls[0]);
+  const replacement = f.calls[0]!.body!.replacementCredential;
+  assert.equal(JSON.parse(await fs.readFile(identityPath, "utf8")).credential, replacement);
+  assert.ok(!retried.stdout.includes(String(replacement)));
+  await assert.rejects(fs.stat(pending), { code: "ENOENT" });
 }));
 test("login saves session privately and prints neither password nor issued token", async () => withFixture(async f => {
   const issued = token(); f.setReply(async () => ({ token: issued, user: { username: "alice" }, expiresAt: 1000 }));

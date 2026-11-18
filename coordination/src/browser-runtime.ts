@@ -1,12 +1,12 @@
 /** Dedicated real-browser processes. This service is separate from consumer leases. */
 import { createServer, request as httpRequest } from 'node:http';
-import type { Server } from 'node:http';
+import type { OutgoingHttpHeaders, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { BrowserServer } from 'playwright-core';
 
 export type BrowserEngine = 'chromium' | 'firefox' | 'webkit';
-export interface BrowserIntent { id: string; engine: BrowserEngine; ttlSeconds: number }
+export interface BrowserIntent { id: string; engine: BrowserEngine; ttlSeconds: number; localPorts?: number[] }
 export interface BrowserReceipt { id: string; engine: BrowserEngine; expiresAt: string; endpoint: string; key: string }
 export interface BrowserRuntimeOptions {
   /** Application credential for creating, inspecting and stopping browsers. */
@@ -15,9 +15,9 @@ export interface BrowserRuntimeOptions {
   publicOrigin: string;
   maxBrowsers?: number;
   /** Test/host adapter. Must return a dedicated process listening on loopback only. */
-  launch: (engine: BrowserEngine) => Promise<BrowserServer>;
+  launch: (engine: BrowserEngine, localPorts: readonly number[]) => Promise<Pick<BrowserServer, 'close' | 'wsEndpoint'>>;
 }
-interface Entry { intent: BrowserIntent; key: string; expiresAt: number; server?: BrowserServer; pending?: Promise<void>; failed?: boolean; stopping?: boolean; cleanup?: Promise<void>; sockets?: Set<Duplex> }
+interface Entry { intent: BrowserIntent; key: string; expiresAt: number; server?: Pick<BrowserServer, 'close' | 'wsEndpoint'>; pending?: Promise<void>; failed?: boolean; stopping?: boolean; cleanup?: Promise<void>; sockets?: Set<Duplex> }
 function authorized(actual: string | undefined, key: string): boolean {
   const value = Buffer.from(actual ?? ''), expected = Buffer.from(`Bearer ${key}`);
   return value.length === expected.length && timingSafeEqual(value, expected);
@@ -56,10 +56,15 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): { server: 
         for await (const chunk of req) { size += chunk.length; if (size > 4096) { send(413, { error: 'body_too_large' }); return; } chunks.push(chunk); }
         let body: BrowserIntent;
         try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { send(400, { error: 'invalid_json' }); return; }
-        if (!body || Object.keys(body).sort().join(',') !== 'engine,id,ttlSeconds' || !uuid(body.id) || !['chromium', 'firefox', 'webkit'].includes(body.engine) || !Number.isInteger(body.ttlSeconds) || body.ttlSeconds < 30 || body.ttlSeconds > 3600) { send(400, { error: 'invalid_browser_intent' }); return; }
+        const fields = body && Object.keys(body).sort().join(',');
+        if (!body || (fields !== 'engine,id,ttlSeconds' && fields !== 'engine,id,localPorts,ttlSeconds') || !uuid(body.id) || !['chromium', 'firefox', 'webkit'].includes(body.engine) || !Number.isInteger(body.ttlSeconds) || body.ttlSeconds < 30 || body.ttlSeconds > 3600) { send(400, { error: 'invalid_browser_intent' }); return; }
+        const ports = body.localPorts === undefined ? [] : body.localPorts;
+        if (!Array.isArray(ports) || ports.length > 32 || ports.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) { send(400, { error: 'invalid_browser_intent' }); return; }
+        const localPorts = [...new Set(ports)].sort((a, b) => a - b);
+        body.localPorts = localPorts;
         const previous = entries.get(body.id);
         if (previous) {
-          if (previous.intent.engine !== body.engine || previous.intent.ttlSeconds !== body.ttlSeconds) { send(409, { error: 'intent_conflict' }); return; }
+          if (previous.intent.engine !== body.engine || previous.intent.ttlSeconds !== body.ttlSeconds || previous.intent.localPorts?.join(',') !== localPorts.join(',')) { send(409, { error: 'intent_conflict' }); return; }
           await previous.pending;
           if (previous.stopping || previous.failed || !previous.server || Date.now() >= previous.expiresAt) { send(410, { error: 'browser_unavailable' }); return; }
           send(200, receipt(previous)); return;
@@ -67,7 +72,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): { server: 
         if ([...entries.values()].filter(e => e.server || e.pending || e.failed).length >= max || entries.size >= 10000) { send(429, { error: 'browser_capacity' }); return; }
         const entry: Entry = { intent: body, key: randomBytes(32).toString('base64url'), expiresAt: Date.now() + body.ttlSeconds * 1000 };
         entries.set(body.id, entry);
-        entry.pending = (async () => { try { entry.server = await launch(body.engine); } catch { entry.failed = true; } })();
+        entry.pending = (async () => { try { entry.server = await launch(body.engine, localPorts); } catch { entry.failed = true; } })();
         await entry.pending; delete entry.pending;
         if (entry.failed) { send(503, { error: 'browser_launch_failed' }); return; }
         if (closing || entry.stopping || Date.now() >= entry.expiresAt) { await stop(entry); send(410, { error: 'browser_unavailable' }); return; }
@@ -84,11 +89,17 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): { server: 
   server.on('upgrade', (req, socket, head) => {
     const match = /^\/v1\/browsers\/([0-9a-f-]+)\/connect$/.exec(req.url ?? ''), entry = match ? entries.get(match[1]!) : undefined;
     if (closing || req.headers.origin || !entry?.server || entry.stopping || Date.now() >= entry.expiresAt || !authorized(req.headers.authorization, entry.key)) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return; }
+    const forwarding = (entry.intent.localPorts?.length ?? 0) > 0;
+    if (forwarding && entry.sockets?.size) { socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n'); return; }
     (entry.sockets ??= new Set()).add(socket);
     socket.on('close', () => entry.sockets?.delete(socket));
     const target = new URL(entry.server.wsEndpoint());
     target.protocol = 'http:';
-    const headers = { ...req.headers, host: target.host }; delete headers.authorization;
+    const headers: OutgoingHttpHeaders = { ...req.headers, host: target.host };
+    delete headers.authorization;
+    delete headers['x-playwright-proxy'];
+    delete headers['x-playwright-launch-options'];
+    delete headers['x-playwright-browser'];
     const upstream = httpRequest(target, { headers });
     const fail = () => { socket.destroy(); upstream.destroy(); };
     socket.on('error', fail); socket.on('close', () => upstream.destroy());

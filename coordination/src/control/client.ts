@@ -61,6 +61,7 @@ export class ControlClient extends EventEmitter {
       path: options.path, adminToken: options.adminToken, controllerId: options.controllerId,
       ...(options.enrollmentToken === undefined ? {} : { enrollmentToken: options.enrollmentToken }),
       ...(options.updatePublicKeys === undefined ? {} : { updatePublicKeys: options.updatePublicKeys }),
+      ...(options.browserHosts === undefined ? {} : { browserHosts: options.browserHosts }),
     } });
     this.startup = setTimeout(() => { void this.close(); }, 20_000);
     this.startup.unref();

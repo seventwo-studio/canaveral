@@ -14,10 +14,10 @@ import { legacyJson, legacyDigest, normalizeTemplate } from "./templates.ts";
 import { initializeInfrastructure, claimSetup, healthReady, recordInfrastructure, recordHostImages } from "./infrastructure.ts";
 import { recordPreparation } from "./preparation.ts";
 import { reportImageTasks, assignedImageTasks, acknowledgedImages, validateCatalogueOffer } from "./images.ts";
-import { reportInferenceJobs, assignedInferenceJobs } from "./inference.ts";
+import { reportInferenceJobs, assignedInferenceJobs, INFERENCE_HOST_PROVIDERS } from "./inference.ts";
 import { blueprint, initializeBlueprints } from "./blueprints.ts";
 
-import { PhysicalDomains, physicalBudget } from "../physical-domains.ts";
+import { PhysicalDomains, physicalBudget, physicalMapping } from "../physical-domains.ts";
 
 type Json = Record<string, any>;
 export type MachineRow = Record<string, SQLOutputValue>;
@@ -110,7 +110,7 @@ export function validateOffer(value: unknown): Json {
     }).sort((a: Json, b: Json) => { for (const key of ["id", "revision", "arch", "runtime"]) { if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1; } return 0; });
   }
   if ("inference" in input) {
-    if (!["native", "apple", "libvirt"].includes(result.provider)) failure("Embedded inference currently requires a native Mac or Linux host.");
+    if (!INFERENCE_HOST_PROVIDERS.includes(result.provider)) failure("Embedded inference requires a native Mac or Linux host.");
     const inference = object(input.inference);
     if (inference.runtime !== "ollama" || !Array.isArray(inference.models) || !inference.models.length || inference.models.length > 100) failure("Offer between 1 and 100 installed ollama models.");
     const models = (inference.models as unknown[]).map(value => {
@@ -243,6 +243,47 @@ export class MachineStore implements ControlModule {
     return host;
   }
   authenticateHost(id: string, credential: string): void { this.transaction(db => { this.authenticate(db, machineIdentifier(id), credential); }); }
+  promoteHost(id: string, body: Json, operatorToken: string): Json {
+    if (!secureEqual(operatorToken, this.options.adminToken)) failure("Host migration requires the controller operator credential.", 403);
+    id = machineIdentifier(id);
+    fields(body, ["credential", "replacementCredential", "offer", "modelDomainId"]);
+    const domain = body.modelDomainId === undefined ? undefined : machineIdentifier(body.modelDomainId);
+    const previous = secret(body.credential), replacement = secret(body.replacementCredential);
+    if (secureEqual(previous, replacement) || secureEqual(replacement, operatorToken)
+      || (this.options.enrollmentToken && secureEqual(replacement, this.options.enrollmentToken))) failure("Generate a new dedicated host credential.");
+    const proposed = validateOffer(body.offer);
+    if (proposed.provider !== "macos" || !proposed.runtimes.includes("android") || proposed.leaseProtocol) failure("Migration requires a macOS host retaining its Android runtime.");
+    return this.transaction(db => {
+      const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(id);
+      if (!host || db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(id)) failure("Unknown host.", 404);
+      const original = persistedOffer(host!.offer);
+      if (secureEqual(String(host!.credential), machineDigest(replacement)) && original && equal(original, proposed)
+        && (!domain || physicalMapping(db, { hostId: id })?.domainId === domain)) return { id, provider: proposed.provider };
+      this.authenticate(db, id, previous);
+      if (original?.provider !== "android" || original.leaseProtocol || host!.enabled || this.store.clock() - Number(host!.seen) < this.leaseSeconds) {
+        failure("Drain and stop the Android runner, then wait for its heartbeat to expire before migration.", 409);
+      }
+      for (const row of db.prepare("SELECT * FROM machines WHERE host=?").all(id)) {
+        if (isDeleted(db, String(row.id))) continue;
+        if (computeReserved(db, { id: String(row.id), desired: String(row.desired), observed: String(row.observed) })) failure("Confirm all assigned machines stopped before migration.", 409);
+        if (!proposed.templates.some((template: Json) => equal(template, JSON.parse(String(row.template))))) failure("Retain all assigned template definitions before migration.", 409);
+      }
+      if (table(db, "device_operations") && db.prepare("SELECT 1 FROM device_operations WHERE host=? AND state IN ('queued','running','unknown')").get(id)) {
+        failure("Resolve pending or uncertain device operations before migration.", 409);
+      }
+      if (table(db, "image_tasks") && db.prepare("SELECT 1 FROM image_tasks WHERE host=? AND state IN ('queued','running','unknown')").get(id)) {
+        failure("Resolve pending or uncertain image operations before migration.", 409);
+      }
+      validateCatalogueOffer(db, id, proposed);
+      for (const hook of this.hooks) hook.validateOffer?.(db, id, proposed);
+      registerTemplates(db, proposed);
+      if (domain) new PhysicalDomains().attachForMigration(db, id, domain, proposed.capacity);
+      db.prepare("UPDATE hosts SET offer=?, credential=? WHERE id=?").run(JSON.stringify(proposed), machineDigest(replacement), id);
+      db.prepare("INSERT INTO host_health(host,report,received) VALUES (?,?,?) ON CONFLICT(host) DO UPDATE SET report=excluded.report,received=excluded.received")
+        .run(id, JSON.stringify({ status: "checking", checkedAt: this.store.clock(), checks: [] }), this.store.clock());
+      return { id, provider: proposed.provider };
+    });
+  }
   enroll(value: Json, token: string): Json {
     const id = machineIdentifier(value.id), credential = machineDigest(secret(value.credential)), offer = validateOffer(value.offer);
     return this.transaction(db => {
@@ -323,7 +364,12 @@ export class MachineStore implements ControlModule {
         const platforms: Record<string, string> = { Darwin: "macos", Linux: "linux", Windows: "windows", apple: "macos", ios: "macos", hyperv: "windows", libvirt: "linux", macos: "macos", linux: "linux", windows: "windows" };
         const reserved = this.used(db, String(row.id)), limits = this.limits(db, row), physical = physicalBudget(db, { hostId: String(row.id) });
         return { ...offer, id: row.id, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, ...(physical ? { physicalDomainId: physical.domainId, effectiveCapacity: physical.capacity } : {}), kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
-          platform: platforms[system] ?? platforms[offer.provider] ?? null, runtimes: offer.runtimes ?? (offer.provider === "kubevirt" ? [] : [offer.provider]), placementReady: online && Boolean(row.enabled) && this.healthReady(db, String(row.id)),
+          platform: platforms[system] ?? platforms[offer.provider] ?? null, runtimes: [
+            ...(offer.runtimes ?? (offer.provider === "kubevirt" ? [] : [offer.provider])),
+            ...(offer.inference || (physical && table(db, "model_runner_approvals")
+              && db.prepare("SELECT 1 FROM model_runner_approvals WHERE domain=? AND revoked=0").get(physical.domainId)) ? ["inference"] : []),
+            ...(offer.provider === "macos" && this.options.browserHosts?.includes(String(row.id)) ? ["browser"] : []),
+          ], placementReady: online && Boolean(row.enabled) && this.healthReady(db, String(row.id)),
           usage: sample ? { ...JSON.parse(String(sample.report)), receivedAt: sample.captured, fresh: online && this.store.clock() - Number(sample.captured) < 30 } : null,
           available: this.remainingCapacity(db, String(row.id)), limits, overcommitted: resourceKeys.some(key => reserved[key] > (physical?.capacity[key] ?? Math.min(offer.capacity[key], limits[key]))) };
       });
@@ -496,6 +542,7 @@ export class MachineStore implements ControlModule {
         return new PhysicalDomains().map(db, machineIdentifier(parts[2]!), machineIdentifier(body.domainId));
       }) };
       if (parts[3] === "heartbeat") return { body: this.heartbeat(parts[2]!, token, body) };
+      if (parts[3] === "promote-macos") return { body: this.promoteHost(parts[2]!, body, token) };
       if (parts[3] === "accepting") return { body: this.enable(parts[2]!, body.enabled, req) };
     }
     if (method === "GET" && req.path === "/v1/hosts") return { body: { hosts: this.hosts(req) } };

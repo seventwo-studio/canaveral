@@ -13,6 +13,7 @@ import { Accounts } from "../../src/accounts.ts";
 import type { ControlRequest, Principal } from "../../src/control/contracts.ts";
 import { MachineStore, initializeMachines, machineDigest, machineLeaseEligible, registerMachineHooks, validateOffer, validateTemplate } from "../../src/control/machines.ts";
 import { InfrastructureStore } from "../../src/control/infrastructure.ts";
+import { ResourceDomains } from "../../src/resource-domains.ts";
 
 type Json = Record<string, any>;
 const token = () => randomBytes(32).toString("base64url");
@@ -242,6 +243,41 @@ test("opaque legacy host rows survive startup unchanged and stay ineligible unti
   assert.throws(() => reopened.create(request({ hostId: id }), req()), error(409));
   reopened.heartbeat(id, credential, { offer: f.offer, reports: {} });
   assert.equal(reopened.create(request({ hostId: id }), req()).hostId, id);
+});
+
+test("Mac promotion fences the old credential and retains a stopped Android assignment", t => {
+  const android = image({ id: "android", os: "android", mode: "device", device: { systemImage: "system-images;android-35;google_apis;x86_64", profile: "pixel_7" } });
+  const f = fixture(t, { provider: "android", templates: [android] });
+  const machine = f.machines.create(request({ templateId: "android", hostId: f.id }), req());
+  const domainId = randomUUID();
+  const domains = new ResourceDomains();
+  f.store.transaction(db => {
+    ResourceDomains.schema(db);
+    domains.define(db, { id: domainId, name: "Mac Studio models", capacity: { cpu: 2, memoryMiB: 2048, diskGiB: 2 } }, 1000);
+  });
+  const offer: Json = { ...f.offer, name: "Mac Studio", provider: "macos", runtimes: ["android", "ios"] };
+  const body = { credential: f.credential, replacementCredential: token(), offer, modelDomainId: domainId };
+  const promote = (value = body, proof = f.options.adminToken) => f.machines.promoteHost(f.id, value, proof);
+  assert.throws(() => promote(body, token()), error(403));
+  assert.throws(() => promote(), error(409));
+  f.machines.desired(machine.id, "stopped", req());
+  f.heartbeat({ [machine.id]: { state: "stopped" } });
+  f.machines.enable(f.id, false, req());
+  assert.throws(() => promote(), error(409));
+  f.advance(31);
+  assert.throws(() => promote({ ...body, offer: { ...offer, templates: [] } }), error(409));
+  const receipt = promote();
+  assert.deepEqual(receipt, { id: f.id, provider: "macos" });
+  assert.deepEqual(promote(), receipt);
+  assert.throws(() => f.heartbeat(), error(401));
+  f.machines.heartbeat(f.id, body.replacementCredential, { offer });
+  assert.equal(f.machines.machines(req())[0]!.hostId, f.id);
+  const host = f.machines.hosts(req())[0]!;
+  assert.deepEqual(host.reserved, { cpu: 0, memoryMiB: 0, diskGiB: 10 });
+  assert.equal(host.enabled, false);
+  assert.equal(host.name, "Mac Studio");
+  assert.equal(host.physicalDomainId, domainId);
+  assert.deepEqual(f.store.transaction(db => domains.view(db, domainId)).available, { cpu: 4, memoryMiB: 4096, diskGiB: 30 });
 });
 
 test("eight-column legacy machines migrate without losing intent, owner defaults or reservations", t => {
