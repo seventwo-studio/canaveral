@@ -28,8 +28,9 @@ jobs:
         env:
           LIBGUESTFS_BACKEND: direct
         run: |
-          sudo --preserve-env=LIBGUESTFS_BACKEND libguestfs-test-tool --timeout 300
-          sudo --preserve-env=LIBGUESTFS_BACKEND bash tools/browser-image/build.sh browser-worker.qcow2
+          if [[ ! -c /dev/kvm ]]; then export LIBGUESTFS_HV="$PWD/tools/browser-image/qemu-tcg.sh"; fi
+          sudo --preserve-env=LIBGUESTFS_BACKEND,LIBGUESTFS_HV libguestfs-test-tool --timeout 300
+          sudo --preserve-env=LIBGUESTFS_BACKEND,LIBGUESTFS_HV bash tools/browser-image/build.sh browser-worker.qcow2
           sudo chmod 0444 browser-worker.qcow2
           sha256sum browser-worker.qcow2 > browser-worker.qcow2.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
