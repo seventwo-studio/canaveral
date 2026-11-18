@@ -676,3 +676,40 @@ for(const ended of ['expired','failed']) test(`box count includes ${ended} works
   await rejectsWith(app.client().acquireLease(f.acquire()),429);
   assert.equal((await f.inspectDomain(d)).reservations,1);
 });
+
+test("preview dispatch binds the lease key, active operation, boot and one-use response", async t => {
+  const { f, app, lease, client, runner, a, boot, credential } = await workspaceReady(t);
+  const command = intent();
+  command.arguments.argv = ["/sbin/canaveral-guest-agent","--preview-service","8080","node","app.js"];
+  await client.createOperation(command);
+  await f.ok(f.post("/v1/runners/linux-leases/operations/poll",{...boot,pollId:randomUUID()},runner.credential));
+  const route = `http://127.0.0.1:${f.port()}/v1/leases/${lease.id}/previews/${command.id}/asset?q=x`;
+  const get = (key:string, method="GET") => fetch(route,{method,headers:{Authorization:"Bearer "+key}});
+  const tuple = {...boot,operationId:command.id};
+  const prefix = "/v1/runners/linux-leases/previews/";
+  const poll = () => f.post(prefix+"poll",tuple,runner.credential);
+  assert.equal((await get(credential)).status,409);
+  await f.ok(f.report(runner,a.id,2,f.receipt(a,{runtimeState:"running",ready:{command:true,pty:true,files:true,preview:true}})));
+  assert.equal((await get(app.credential)).status,401);
+  assert.equal((await f.ok(poll())).dispatch,null);
+  for (const method of ["GET","HEAD"]) {
+    const waiting = get(credential,method);
+    let dispatch: Body;
+    const until = performance.now() + 1500;
+    do { dispatch = (await f.ok(poll())).dispatch as Body; } while (!dispatch && performance.now() < until);
+    assert.ok(dispatch);
+    assert.equal(dispatch.operationId,command.id);
+    assert.equal(dispatch.method,method);
+    assert.equal(dispatch.target,"/asset?q=x");
+    assert.equal((await f.ok(poll())).dispatch,null);
+    const raw = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nSet-Cookie: a=b\r\n\r\n"+(method==="GET" ? "ok" : "");
+    const report = {...tuple,dispatchId:dispatch.id,responseBase64:Buffer.from(raw).toString("base64")};
+    await f.ok(f.post(prefix+"report",report,runner.credential));
+    const response = await waiting;
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get("set-cookie"),null);
+    assert.equal(await response.text(),method==="GET" ? "ok" : "");
+    assert.equal((await f.post(prefix+"report",report,runner.credential)).status,409);
+  }
+  assert.equal((await get(credential)).status,504);
+});

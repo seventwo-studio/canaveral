@@ -113,15 +113,20 @@ export function createControllerHandler(control: Requester, identities: Identity
     response.once("close", release); response.once("finish", release);
     void (async () => {
       const target = requestTarget(request);
-      if (request.method !== "GET" && request.method !== "POST") throw new ServiceError("Unknown endpoint.", 404);
-      if (request.method === "GET") {
+      const previewRead = (request.method === "HEAD" || request.method === "GET") && /^\/v1\/leases\/[^/]+\/previews\//.test(target.path);
+      if (request.method === "GET" || previewRead) {
         if (request.headers["transfer-encoding"] !== undefined || countHeader(request, "content-length") > 1 ||
             (request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0") ||
             request.headers.upgrade !== undefined || request.headers.expect !== undefined || request.headers.trailer !== undefined) {
           throw new ServiceError("Invalid request framing.", 400);
         }
+        if (previewRead) {
+          identity(request, response);
+          return;
+        }
         if (target.path === "/healthz") { respond(response, { ok: true }); return; }
       }
+      if (request.method !== "GET" && request.method !== "POST") throw new ServiceError("Unknown endpoint.", 404);
       if (request.method === "POST" && (/^\/v1\/hosts\/[^/]+\/heartbeat$/.test(target.path) || /^\/v1\/hosts\/[^/]+\/image-tasks\/[^/]+\/resolve$/.test(target.path))) {
         // A heartbeat can carry eight MiB. Authenticate its current host before
         // reading that envelope; the module rechecks again in its transaction.

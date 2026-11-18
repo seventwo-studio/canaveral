@@ -107,6 +107,8 @@ function lease(command: Extract<IdentityCommand, { type: `leases.${string}` }>):
     case "leases.transfer": return leases.transfer(command.token,command.id,command.transferId,command.step);
     case "leases.pollTransfer": return leases.pollTransfer(command.token,command.body);
     case "leases.reportTransfer": return leases.reportTransfer(command.token,command.body);
+    case "leases.preview": return leases.preview(command.token,command.id,command.operationId,command.method,command.target);
+    case "leases.pollPreview": case "leases.reportPreview": return leases.runnerPreview(command.token,command.body,command.type === "leases.reportPreview");
     case "leases.operation": return leases.operation(command.token, command.id, command.operationId);
     case "leases.createOperation": return leases.createOperation(command.token, command.id, command.body);
     case "leases.pollOperation": return leases.pollOperation(command.token, command.body);
