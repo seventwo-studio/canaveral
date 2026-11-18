@@ -448,6 +448,63 @@ describe("dashboard contracts", () => {
     ).toBeTruthy();
     expect(screen.queryByText("Voyager")).toBeNull();
   });
+  it("selects an advertised iOS runtime and retries its pinned template", async () => {
+    const original = handler;
+    const runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0";
+    const phone = {
+      ...template,
+      id: "phone",
+      name: "iPhone",
+      arch: "arm64",
+      os: "ios",
+      mode: "device",
+      device: { runtime },
+    };
+    handler = (path, options) => {
+      if (path === "templates")
+        return json({
+          templates: [template, phone, { ...phone, revision: "r2" }],
+        });
+      if (path === "machines" && options?.method === "POST")
+        return Promise.reject(new Error("Lost response"));
+      return original(path, options);
+    };
+    const user = await login();
+    await user.click(screen.getByRole("button", { name: "Create machine" }));
+    const dialog = within(screen.getByRole("dialog"));
+    const picker = dialog.getByRole("combobox", { name: "Base image" });
+    picker.focus();
+    await user.keyboard("{Enter}");
+    expect(
+      screen.getByRole("option", { name: `iPhone · r1 · arm64 · ${runtime}` }),
+    ).toBeTruthy();
+    await user.click(
+      screen.getByRole("option", { name: `iPhone · r2 · arm64 · ${runtime}` }),
+    );
+    expect(dialog.getByLabelText("iOS simulator template")).toBe(picker);
+    expect(document.getElementById("template-summary")?.textContent).toContain(
+      runtime,
+    );
+    await user.type(dialog.getByLabelText("Machine name"), "Explorer");
+    await user.click(dialog.getByRole("button", { name: "Create machine" }));
+    await user.click(
+      await dialog.findByRole("button", { name: "Retry request" }),
+    );
+    await dialog.findByRole("button", { name: "Retry request" });
+    const requests = calls
+      .filter((c) => c.path === "machines" && c.method === "POST")
+      .map((c) => c.value);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({
+      id: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
+      templateId: "phone",
+      templateRevision: "r2",
+      arch: "arm64",
+    });
+    expect(requests[1]).toEqual(requests[0]);
+  });
   it("pins template revision and reuses a creation ID only for an unchanged retry", async () => {
     const user = await login(),
       original = handler;

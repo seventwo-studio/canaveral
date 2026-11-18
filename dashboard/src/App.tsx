@@ -237,7 +237,9 @@ function Notice({
       role={error ? "alert" : "status"}
     >
       {error && <CircleAlert aria-hidden="true" />}
-      <AlertDescription className="text-foreground">{children}</AlertDescription>
+      <AlertDescription className="text-foreground">
+        {children}
+      </AlertDescription>
     </Alert>
   ) : null;
 }
@@ -692,14 +694,19 @@ export function App() {
       </a>
       <WorkspaceSidebar
         view={view}
-        counts={loaded && !stale ? {
-          machines: inventory.machines.length,
-          hosts: inventory.hosts.filter((h) => infrastructureKind(h) === "host")
-            .length,
-          orchestrators: inventory.hosts.filter(
-            (h) => infrastructureKind(h) === "orchestrator",
-          ).length,
-        } : {}}
+        counts={
+          loaded && !stale
+            ? {
+                machines: inventory.machines.length,
+                hosts: inventory.hosts.filter(
+                  (h) => infrastructureKind(h) === "host",
+                ).length,
+                orchestrators: inventory.hosts.filter(
+                  (h) => infrastructureKind(h) === "orchestrator",
+                ).length,
+              }
+            : {}
+        }
         user={user}
         onSignOut={() => signOut()}
       />
@@ -1431,6 +1438,10 @@ export function App() {
   );
 }
 
+function iosRuntime(template: GroupedImage) {
+  return template.os === "ios" ? template.device?.runtime : undefined;
+}
+
 function CreateMachine({
   config,
   busy,
@@ -1545,7 +1556,11 @@ function CreateMachine({
               </Field>
               <Field>
                 <FieldLabel htmlFor="machine-template">
-                  {template?.blueprintId ? "Machine blueprint" : "Base image"}
+                  {template?.blueprintId
+                    ? "Machine blueprint"
+                    : template?.os === "ios"
+                      ? "iOS simulator template"
+                      : "Base image"}
                 </FieldLabel>
                 <Select
                   value={index}
@@ -1567,14 +1582,16 @@ function CreateMachine({
                     {config.templates.map((t, i) => (
                       <SelectItem key={i} value={String(i)}>
                         {t.name || t.id} · {t.revision} · {t.arch}
+                        {iosRuntime(t) && ` · ${iosRuntime(t)}`}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 {template && (
                   <FieldDescription id="template-summary">
-                    {template.os} · {title(template.mode)} · Minimum{" "}
-                    {template.minimum.cpu} vCPU,{" "}
+                    {template.os} · {title(template.mode)}
+                    {iosRuntime(template) && ` · ${iosRuntime(template)}`} ·
+                    Minimum {template.minimum.cpu} vCPU,{" "}
                     {memory(template.minimum.memoryMiB)},{" "}
                     {template.minimum.diskGiB} GiB disk
                   </FieldDescription>

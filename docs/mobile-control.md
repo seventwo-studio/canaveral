@@ -14,6 +14,12 @@ The retired mobile roadmap is historical context, not a source of active scope.
 Smooth video at roughly 30 fps and MP4 recordings are required for the finished
 API; PNG/APNG alone does not satisfy that requirement.
 
+On 18 November 2026 the requested use cases expanded to exclusive device leases
+for parallel coding agents and unattended CI and automation jobs. One intended
+workflow installs a CI build and records the app's screens for marketing. These
+use cases require access through the job's own scoped credentials. Native lease
+isolation and unattended recording remain open acceptance items.
+
 ## Current implementation
 
 The administrative API now stages builds on the controller, bound to one immutable
