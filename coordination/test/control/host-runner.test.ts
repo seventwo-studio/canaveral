@@ -142,6 +142,18 @@ test("consolidated runtime guest callback overrides host URL during preparation"
   await runner.initializeProviders(); runner.assignments = [m]; runner.lastContact = 10;
   await runner.reconcile(m); assert.ok(data.includes("cloud-config")); assert.ok(Buffer.from(data.match(/"content":"([^"]+)"/)![1]!, "base64").toString().includes("https://guests.example.test")); assert.equal(data.includes("wrong.invalid"), false); await runner.close();
 });
+test("device operations wait for an active reconciliation of the same machine", async t => {
+  const { config, image, clock } = setup(t), m = machine(image), operation = { id: randomUUID(), machineId: m.id, action: "shell", arguments: { argv: ["true"] }, expiresAt: 1100 };
+  let queued: RecordValue[] = [], reconciling = 0, overlapped = 0, operated = 0; const releases: Array<() => void> = [];
+  const runner = new HostRunner(config, { clock, transport: fakeTransport(() => ({ machines: [m], deviceOperations: queued })), providerFactory: () => ({ kind: "libvirt", check: async () => ({}),
+    reconcile: async () => { reconciling++; await new Promise<void>(r => releases.push(r)); reconciling--; return { state: "running" }; },
+    operate: async () => { if (reconciling) overlapped++; operated++; return { state: "succeeded", result: {} }; } }) });
+  await runner.initializeProviders(); await runner.connect(); await runner.checkEnvironment(); await runner.poll(); runner.reports.set(String(m.id), { state: "running" });
+  await runner.step(); await drain(); assert.equal(reconciling, 1);
+  queued = [operation]; await runner.poll(); await runner.step(); await drain(); assert.equal(operated, 0);
+  releases.forEach(r => r()); await drain(); await runner.step(); await drain();
+  assert.equal(operated, 1); assert.equal(overlapped, 0); assert.equal(runner.deviceReports.get(operation.id)?.state, "succeeded"); await runner.close();
+});
 test("round robin reconciliation and reserved operation slots avoid starvation", async t => {
   const { config, image, clock } = setup(t), machines = [machine(image), machine(image), machine(image)], operation = { id: randomUUID(), machineId: machines[0]!.id, action: "shell", arguments: { argv: ["true"] }, expiresAt: 1100 }; const reconciled = new Set<string>(); let operated = 0;
   const runner = new HostRunner({ ...config, concurrency: 1 }, { clock, transport: fakeTransport(() => ({ machines, deviceOperations: [operation] })), providerFactory: () => ({ kind: "libvirt", check: async () => ({}), reconcile: async m => { reconciled.add(String(m.id)); return { state: "running" }; }, operate: async () => { operated++; return { state: "succeeded", result: {} }; } }) });

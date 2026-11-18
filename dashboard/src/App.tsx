@@ -1,4 +1,8 @@
 import { matchesMachineState } from "./lib/fleet";
+import {
+  MobileInstall,
+  mobileInstallEligible,
+} from "./components/mobile-install";
 import { MachineInventory } from "./components/machine-inventory";
 import { FleetPulse } from "./components/fleet-pulse";
 import type { FormEvent, ReactNode } from "react";
@@ -1383,6 +1387,17 @@ export function App() {
                   {detail.ownerId === null &&
                     ". Admin-only inventory. This may be operator-created or managed by an application lease."}
                 </p>
+              )}
+              {!stale && mobileInstallEligible(detail, user.id) && (
+                <MobileInstall
+                  key={JSON.stringify([
+                    detail.id,
+                    detail.hostId,
+                    detail.ownerId,
+                    detail.template.os,
+                  ])}
+                  machine={detail}
+                />
               )}
               {detail.detail && <p className="text-sm">{detail.detail}</p>}
               <Notice error>{actionError}</Notice>

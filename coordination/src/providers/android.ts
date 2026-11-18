@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
+import { assignmentFingerprint } from "../runtime-process.ts";
 import { MobileProvider, authorized, canonical, copyUpload, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, NativeChild, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
 import { openAndroidVideo } from './android-video.ts';
@@ -179,6 +180,57 @@ export class AndroidProvider extends MobileProvider {
         return { state: "starting" };
       });
     });
+  }
+  async removeOwnedStorage(machine: RecordValue, image: RecordValue, folder: string, requestId: string): Promise<RecordValue> {
+    const id = uuid(machine.id), request = uuid(requestId), fingerprint = digest(this.binding(machine, image));
+    const assignment = readJson(path.join(folder, "assignment.json"));
+    if (machine.lease || machine.desired !== "stopped" || assignment?.fingerprint !== assignmentFingerprint(machine) || assignment.leaseId != null) {
+      throw new ServiceError("Android removal requires a matching stopped dashboard assignment.");
+    }
+    const root = text(this.config.storage, "storage"), storage = path.join(root, id);
+    const quarantine = path.join(root, `.removing-${id}-${request}`);
+    const avds = this.environment().ANDROID_AVD_HOME!, ini = path.join(avds, this.name(machine) + ".ini");
+    const receipt = path.join(folder, "deletion.json");
+    const identity = (file: string): string | null => {
+      const stat = fs.lstatSync(file, { bigint: true, throwIfNoEntry: false });
+      return stat ? stat.dev + "/" + stat.ino : null;
+    };
+    privateDirectory(root);
+    privateDirectory(avds);
+    let journal = readJson(receipt);
+    if (!journal) {
+      if (identity(quarantine)) throw new ServiceError("Android removal quarantine is already occupied.");
+      const stopped = await this.reconcile(machine, image, folder);
+      if (stopped.state !== "stopped") throw new ServiceError("Android emulator stop is unconfirmed.");
+      const name = this.name(machine), created = readJson(path.join(storage, "avd-created.json"));
+      const started = readJson(path.join(storage, "avd-create-started.json"));
+      const avd = path.join(storage, "device.avd");
+      if (created || started || identity(avd) || identity(ini)) {
+        if (created?.name !== name || created.fingerprint !== fingerprint || started?.name !== name || started.fingerprint !== fingerprint ||
+          fs.realpathSync(avd) !== avd || !fs.lstatSync(avd).isDirectory()) throw new ServiceError("Android AVD creation ownership is unconfirmed.");
+        const paths = readRegular(ini, 65536).toString("utf8").split(/\r?\n/).filter(line => line.startsWith("path="));
+        if (paths.length !== 1 || paths[0] !== "path=" + avd) throw new ServiceError("Android AVD registration points outside the assignment.");
+      }
+      journal = { id: request, machineId: id, fingerprint, storageIdentity: identity(storage), iniIdentity: identity(ini), state: "removing" };
+      saveJson(receipt, journal);
+    }
+    if (journal.id !== request || journal.machineId !== id || journal.fingerprint !== fingerprint || !["removing", "complete"].includes(String(journal.state)) ||
+      typeof journal.storageIdentity !== "string") throw new ServiceError("Android deletion receipt belongs to another assignment or request.");
+    const remaining = identity(storage), staged = identity(quarantine), registration = identity(ini);
+    if ((remaining && (remaining !== journal.storageIdentity || staged)) || (staged && staged !== journal.storageIdentity) ||
+      (registration && registration !== journal.iniIdentity) || (journal.state === "complete" && (remaining || staged || registration))) {
+      throw new ServiceError("Android storage or registration changed during removal.");
+    }
+    if (remaining) fs.renameSync(storage, quarantine);
+    if (registration) fs.unlinkSync(ini);
+    if (identity(quarantine)) fs.rmSync(quarantine, { recursive: true });
+    if (identity(storage) || identity(quarantine) || identity(ini)) throw new ServiceError("Android removal remains incomplete.");
+    for (const dir of [avds, root]) {
+      const fd = fs.openSync(dir, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    }
+    if (journal.state !== "complete") saveJson(receipt, { ...journal, state: "complete" });
+    return { id: request, machineId: id, state: "complete" };
   }
   async processStopped(machine: RecordValue, storage: string): Promise<boolean> {
     const child = this.processes.get(uuid(machine.id));

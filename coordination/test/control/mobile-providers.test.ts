@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { assignmentFingerprint } from "../../src/runtime-process.ts";
 import { AndroidProvider } from "../../src/providers/android.ts";
 import { IosProvider } from "../../src/providers/ios.ts";
 import { digest, operationRequest, readJson, saveJson } from "../../src/providers/mobile.ts";
@@ -64,6 +65,31 @@ test("Android uncertain launch and failed shutdown never relaunch or release res
   f.setDevices({}); f.setStopped(); assert.equal((await f.provider.reconcile({ ...f.machine, desired: "stopped" }, f.image, f.root)).state, "unknown"); assert.ok(fs.existsSync(path.join(storage, "launch.json")));
 });
 
+test("Android deletion requires owned registration and positive stop, preserves neighbors and replays", async t => {
+  const f = androidFixture(t);
+  await f.provider.reconcile(f.machine, f.image, f.root);
+  const machine = { ...f.machine, desired: "stopped" }, request = randomUUID();
+  saveJson(path.join(f.root, "assignment.json"), { fingerprint: assignmentFingerprint(machine) });
+  const storage = f.provider.storage(machine, f.image), registry = f.provider.environment().ANDROID_AVD_HOME!;
+  const ini = path.join(registry, f.provider.name(machine) + ".ini"), neighbor = path.join(registry, "other.ini");
+  fs.writeFileSync(neighbor, "untouched");
+  fs.writeFileSync(ini, "path=/foreign/device.avd");
+  f.setDevices({ "emulator-5554": "device" });
+  const remove = () => f.provider.removeOwnedStorage(machine, f.image, f.root, request);
+  await assert.rejects(remove(), /stop is unconfirmed/);
+  await assert.rejects(remove(), /stop is unconfirmed/);
+  f.setStopped();
+  await assert.rejects(remove(), /registration points outside/);
+  assert.ok(fs.existsSync(storage));
+  fs.writeFileSync(ini, "path=" + path.join(storage, "device.avd"));
+  const receipt = await remove();
+  assert.equal(receipt.state, "complete");
+  assert.deepEqual(await remove(), receipt);
+  assert.equal(fs.existsSync(storage), false);
+  assert.equal(fs.existsSync(ini), false);
+  assert.equal(fs.readFileSync(neighbor, "utf8"), "untouched");
+});
+
 test("Android acknowledged stop waits for child exit, preserves data and reuses its AVD", async t => {
   const f = androidFixture(t); await f.provider.reconcile(f.machine, f.image, f.root); f.setDevices({ "emulator-5554": "device" });
   const storage = f.provider.storage(f.machine, f.image); fs.writeFileSync(path.join(storage, "keep-app-data"), "keep");
@@ -91,6 +117,7 @@ function iosFixture(t: { after(fn: () => void): void }) {
     calls.push({ argv: [...argv], options }); let stdout = "fixture";
     if (argv.includes("devices")) stdout = JSON.stringify({ devices: { [(f.image.device as RecordValue).runtime as string]: inventory } });
     else if (argv.includes("create")) { inventory = [device]; if (loseCreate) throw new Error("lost create"); stdout = udid; }
+    else if (argv.includes("delete")) inventory = inventory.filter(entry => entry.udid !== argv.at(-1));
     else if (argv.includes("boot")) device.state = "Booted";
     else if (argv.includes("shutdown")) device.state = "Shutdown";
     else if (argv.includes("get_app_container")) stdout = f.root;
@@ -123,4 +150,44 @@ test("iOS never adopts foreign names, lost creates, replaced UDIDs or altered ru
 test("iOS rejects container traversal before file adapter access", async t => {
   const f = iosFixture(t); await f.provider.reconcile(f.machine, f.image, f.root);
   for (const value of ["../../secret", "/etc/passwd", "a/../secret"]) await assert.rejects(f.provider.control(f.machine, f.image, f.root, operationRequest({ id: randomUUID(), action: "pull", arguments: { app: "com.example.app", path: value } })), /relative/);
+});
+
+test("iOS removal erases only the assigned UDID and storage and replays completion", async t => {
+  const f = iosFixture(t), id = randomUUID();
+  await f.provider.reconcile(f.machine, f.image, f.root);
+  const neighbor = { ...f.device, udid: randomUUID(), name: "personal" };
+  f.setInventory([neighbor, f.device]);
+  const other = f.provider.storage({ ...f.machine, id: randomUUID() }, f.image);
+  const remove = () => f.provider.removeOwnedStorage(f.machine, f.image, f.root, id);
+  assert.equal((await remove()).state, "complete");
+  assert.equal((await remove()).state, "complete");
+  assert.deepEqual(f.calls.filter(c => c.argv.includes("delete")).map(c => c.argv.at(-1)), [f.udid]);
+  assert.equal(fs.existsSync(path.join(f.root, "storage", String(f.machine.id))), false);
+  assert.ok(fs.existsSync(path.join(other, "canaveral-owner.json")));
+  assert.deepEqual((await f.provider.inventory()).map(entry => entry.device.udid), [neighbor.udid]);
+});
+
+test("iOS removal preserves an uncertain create without deleting by name", async t => {
+  const f = iosFixture(t); f.loseCreate();
+  await assert.rejects(f.provider.reconcile(f.machine, f.image, f.root));
+  await assert.rejects(f.provider.removeOwnedStorage(f.machine, f.image, f.root, randomUUID()), /creation outcome/);
+  assert.ok(!f.calls.some(c => c.argv.includes("delete")));
+  assert.ok(fs.existsSync(path.join(f.root, "storage", String(f.machine.id), "create-started.json")));
+});
+
+test("iOS lost delete response waits for absence without repeating the command", async t => {
+  const f = iosFixture(t), id = randomUUID();
+  await f.provider.reconcile(f.machine, f.image, f.root);
+  const simctl = f.provider.simctl.bind(f.provider);
+  let attempts = 0;
+  f.provider.simctl = async (args, options) => {
+    if (args[0] === "delete") { attempts++; throw new Error("lost delete response"); }
+    return simctl(args, options);
+  };
+  const remove = () => f.provider.removeOwnedStorage(f.machine, f.image, f.root, id);
+  await assert.rejects(remove(), /lost delete/);
+  await assert.rejects(remove(), /unconfirmed/);
+  f.setInventory([]);
+  assert.equal((await remove()).state, "complete");
+  assert.equal(attempts, 1);
 });
