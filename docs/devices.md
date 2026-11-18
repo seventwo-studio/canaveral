@@ -111,6 +111,7 @@ For actions with arguments, supply a JSON object using `--arguments-file path.js
 | `apps` | none | Installed app inventory |
 | `install` | `artifact` | Host-configured artifact ID, for an APK or simulator `.app` |
 | `install-uploaded` | `artifact` UUID | Verified machine-scoped APK or simulator `.app.tar` uploaded through Canaveral |
+| `inspect-install` | `operation`, `artifact` UUIDs | Read-only runner evidence for an uncertain `install-uploaded`; see [mobile control](mobile-control.md#resolving-an-uncertain-install) |
 | `launch` | `app` | Android `package/activity`; iOS bundle ID |
 | `terminate`, `uninstall` | `app` | Package/bundle ID |
 | `open-url` | `url` | Open URL/deep link on this device |

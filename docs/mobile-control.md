@@ -44,6 +44,8 @@ their consumer execution gate pending native fencing and cleanup acceptance.
 | Install published build | `POST /v1/machines/{machine}/operations` | `{id, action:"install-uploaded", arguments:{artifact}}` |
 | Read installation receipt | `GET /v1/operations/{id}` | none |
 | Remove uploaded bytes | `POST /v1/app-artifacts/{id}/delete` | `{}` |
+| Inspect an uncertain install | `POST /v1/machines/{machine}/operations` | `{id, action:"inspect-install", arguments:{operation, artifact}}` |
+| Resolve its artifact cleanup | `POST /v1/operations/{install}/resolve` | `{id, decision, inspection, reason}` |
 
 Upload receipts contain `id`, `machineId`, `format`, `bytes`, `sha256`, `received`,
 `state` and `chunkBytes`. States are `uploading`, `ready` and `deleted`. The upload
@@ -133,17 +135,67 @@ Filesystem overhead and actual runtime storage still need native measurement.
 
 A pending or uncertain install blocks additional install attempts against the same
 artifact. The same operation UUID returns its original receipt without dispatching
-again. A fresh UUID is permitted only after positive cleanup, or proof that an
-earlier failed operation was never dispatched. This prevents one reserved stage
+again. A fresh UUID is permitted only after positive cleanup, an operator
+resolution (below), or proof that an earlier failed operation was never dispatched. This prevents one reserved stage
 from covering multiple retained attempts. Successful receipts include
 `installed:true`, `sha256`, `bytes` and `artifactCleaned:true`.
 
 `app-artifact ARTIFACT_UUID --delete` removes uploaded payloads and releases scratch
-only when prior attempts have positive cleanup or were never dispatched. An
-`unknown` install retains bytes and reservations for inspection. No automatic
-recovery endpoint clears that uncertainty; inspecting installed state and native
-staging remains an operator acceptance/recovery task. Do not retry with a new
-artifact UUID to bypass an uncertain operation.
+only when every prior attempt has positive cleanup, was never dispatched, or has an
+operator resolution. An `unknown` install retains bytes and reservations until then.
+Do not retry with a new artifact UUID to bypass an uncertain operation.
+
+### Resolving an uncertain install
+
+Recovery never changes the install's own outcome: its receipt stays `unknown` (or
+`failed`), and nothing is retried. It decides only whether the artifact's host
+scratch may be released. Two steps keep evidence and decision separate.
+
+1. **Inspect.** The machine owner submits the device action `inspect-install` with
+   `arguments:{operation, artifact}` naming a terminal install on the same machine
+   that still lacks cleanup. It uses the ordinary operation queue, UUID replay and
+   receipts, so the device must be running on a fresh host. The owning runner
+   answers under the assignment lock, read-only, from its private journal for that
+   install (`operations/{install}.json`, matched by binding fingerprint) and its
+   staging state. The succeeded result is
+   `{operation, artifact, providerReceipt, stagedArtifacts, artifactCleaned}`.
+   `providerReceipt` is `absent`, `partial` (an interrupted journal write), `started`
+   or the saved report state. `stagedArtifacts` is `absent` or `present` for iOS,
+   which stages in private `.artifact-*` directories of the assignment's storage.
+   It is `not-inspectable` for Android, whose staging lives in an emulator package
+   session. `artifactCleaned` is true only when the journal is absent, because the
+   provider never started that install; or the saved report confirmed
+   `artifactCleaned`; or the platform shows that no stage remains. A busy lock or
+   a mismatched journal makes the inspection `unknown`; submit another inspection
+   UUID later. Inspection removes nothing.
+2. **Decide.** `POST /v1/operations/{install}/resolve` with
+   `{id, decision, inspection, reason}` records one append-only decision per install.
+   `cleanup-confirmed` requires `inspection` to name a succeeded `inspect-install`
+   of this exact install with `artifactCleaned:true`. The machine owner may record
+   it. `abandoned` accepts `inspection` as optional evidence (`null` permitted) and
+   requires administrator authority, because it releases scratch whose native
+   cleanup is unproven. The operator then owns any residue, for example by deleting
+   the machine. Both decisions need a non-empty `reason` of up to 1000 characters.
+   The controller stores the deciding principal (`kind`, `userId`, `username`) and
+   time.
+
+Repeating the same request UUID and body returns the saved decision, so a lost
+response is safe to retry. A different body under that UUID, or a second UUID for
+an already resolved install, returns conflict. Other accounts receive not-found.
+`GET /v1/operations/{install}` then includes `resolution`. Deleting the artifact
+remains a separate, explicit step; only that step releases the reservation.
+CLI: `device MACHINE inspect-install --request-id UUID --arguments-file FILE`, then
+`operation INSTALL --resolve-file FILE`. The dashboard does not yet expose resolve.
+
+Machine deletion is refused while any install on that machine is queued or lacks
+positive cleanup or a resolution. Deletion removes the storage and journals that
+inspection reads. Order recovery as inspect, resolve, delete the artifact, then
+delete the machine if wanted. A stopped machine must be started to inspect it; an
+administrator may abandon without inspection instead.
+
+Native acceptance of inspection is open. iOS stage enumeration and the absent-journal
+rule are fixture-covered only. No native check yet establishes that an Android
+package session left by an uncertain commit is gone.
 
 ## Screens, input and recordings
 

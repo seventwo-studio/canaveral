@@ -114,7 +114,7 @@ export function deviceDefinition(value: unknown, system: string, arch: string): 
   return result;
 }
 const fields: Record<string, readonly string[]> = {
-  screenshot: [], hierarchy: [], apps: [], logs: [], tap: ["x", "y"], swipe: ["x", "y", "toX", "toY", "durationMs"], text: ["text"], key: ["key"], install: ["artifact"], "install-uploaded": ["artifact"], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"], location: ["latitude", "longitude"], push: ["path", "data"], pull: ["path"], shell: ["argv"], permission: ["app", "permission", "state"], rotate: ["orientation"], accessibility: [], "accessibility-action": ["snapshotId", "nodeId", "nativeAction"], "list-files": ["path"], "shell-open": ["session"], "shell-read": ["session", "offset"], "shell-write": ["session", "text"], "shell-close": ["session"], "shell-resize": ["session", "rows", "cols"],
+  screenshot: [], hierarchy: [], apps: [], logs: [], tap: ["x", "y"], swipe: ["x", "y", "toX", "toY", "durationMs"], text: ["text"], key: ["key"], install: ["artifact"], "install-uploaded": ["artifact"], "inspect-install": ["operation", "artifact"], uninstall: ["app"], launch: ["app"], terminate: ["app"], "open-url": ["url"], location: ["latitude", "longitude"], push: ["path", "data"], pull: ["path"], shell: ["argv"], permission: ["app", "permission", "state"], rotate: ["orientation"], accessibility: [], "accessibility-action": ["snapshotId", "nodeId", "nativeAction"], "list-files": ["path"], "shell-open": ["session"], "shell-read": ["session", "offset"], "shell-write": ["session", "text"], "shell-close": ["session"], "shell-resize": ["session", "rows", "cols"],
 };
 export function operationRequest(value: unknown): DeviceRequest {
   const input = object(value);
@@ -124,7 +124,7 @@ export function operationRequest(value: unknown): DeviceRequest {
   const optional = ["push", "pull", "list-files"].includes(action) ? ["app"] : [];
   if (required.some(k => !(k in args)) || Object.keys(args).some(k => !required.includes(k) && !optional.includes(k))) throw new ServiceError(`Invalid arguments for ${action}.`, 400);
   for (const [key, val] of Object.entries(args)) {
-    if (key === "session" || action === "install-uploaded" && key === "artifact") uuid(val);
+    if (key === "session" || (action === "install-uploaded" || action === "inspect-install") && key === "artifact" || action === "inspect-install" && key === "operation") uuid(val);
     else if (key === "offset") integer(val, key, 0, Number.MAX_SAFE_INTEGER);
     else if (["rows", "cols"].includes(key)) integer(val, key, 1, 500);
     else if (["x", "y", "toX", "toY"].includes(key)) integer(val, key, 0, 32768);
@@ -144,7 +144,8 @@ export function operationRequest(value: unknown): DeviceRequest {
   if (action === "rotate" && !["PORTRAIT", "PORTRAIT_UPSIDE_DOWN", "LANDSCAPE_LEFT", "LANDSCAPE_RIGHT"].includes(args.orientation as string)) throw new ServiceError("Invalid orientation.", 400);
   const normalized = structuredClone(args);
   if ("session" in normalized) normalized.session = uuid(normalized.session);
-  if (action === "install-uploaded") normalized.artifact = uuid(normalized.artifact);
+  if (action === "install-uploaded" || action === "inspect-install") normalized.artifact = uuid(normalized.artifact);
+  if (action === "inspect-install") normalized.operation = uuid(normalized.operation);
   return { id: uuid(input.id), action, arguments: normalized };
 }
 export function readRegular(file: string, limit: number): Buffer {
@@ -331,6 +332,25 @@ export class MobileProvider {
       saveJson(receipt, { fingerprint, report }); return report;
     });
   }
+  /** Read-only evidence for one earlier install, run under the assignment lock through
+   * operate(). It never removes, adopts or retries anything. Cleanup is positive only when the
+   * install provably never reached its handler, its own receipt confirms cleanup, or the
+   * platform can show that no private stage remains. */
+  async inspectInstall(machine: RecordValue, image: RecordValue, args: RecordValue): Promise<RecordValue> {
+    const dir = this.storage(machine, image), operation = uuid(args.operation), artifact = uuid(args.artifact), operations = path.join(dir, "operations");
+    const expected = digest({ binding: this.binding(machine, image), id: operation, action: "install-uploaded", arguments: { artifact } });
+    const saved = readJson(path.join(operations, operation + ".json"));
+    // saveJson publishes by rename; a leftover temporary means publication may have been interrupted.
+    const partial = fs.readdirSync(operations).some(name => name.startsWith(operation + ".json.") && name.endsWith(".tmp"));
+    if (saved && saved.fingerprint !== expected) throw new ServiceError("Install receipt belongs to another assignment or request; inspect manually.", 409);
+    const report = saved?.report === undefined ? undefined : object(saved.report);
+    const providerReceipt = saved ? report ? String(report.state) : "started" : partial ? "partial" : "absent";
+    const stagedArtifacts = await this.stagedArtifacts(dir);
+    const artifactCleaned = providerReceipt === "absent" || report?.state === "succeeded" && object(report.result ?? {}).artifactCleaned === true || stagedArtifacts === "absent";
+    return { operation, artifact, providerReceipt, stagedArtifacts, artifactCleaned };
+  }
+  /** Platforms that stage on host storage override this; others cannot prove stage absence. */
+  async stagedArtifacts(_dir: string): Promise<"absent" | "present" | "not-inspectable"> { return "not-inspectable"; }
   operationReceipt(machine: RecordValue, image: RecordValue, operationId: string): OperationReport {
     return (readJson(path.join(this.storage(machine, image), "operations", uuid(operationId) + ".json"))?.report as OperationReport | undefined) ?? { state: "unknown", result: { detail: "No completed local receipt is available. Inspect before retrying." } };
   }

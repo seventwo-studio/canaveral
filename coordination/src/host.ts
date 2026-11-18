@@ -78,6 +78,7 @@ interface Runtime extends NativeProvider {
   readonly config?: RecordValue;
   operate?(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, authorized?: () => boolean, handler?: (request: import('./providers/mobile.ts').DeviceRequest) => Promise<RecordValue>): Promise<RecordValue>;
   installArtifact?(machine: RecordValue, image: RecordValue, folder: string, source: import('./providers/mobile.ts').Download, sha256: string, authorized: () => boolean): Promise<RecordValue>;
+  inspectInstall?(machine: RecordValue, image: RecordValue, args: RecordValue): Promise<RecordValue>;
   openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
   pipe?(argv: readonly string[]): Promise<import('./providers/mobile.ts').NativePipe>;
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
@@ -646,6 +647,10 @@ export class HostRunner {
       if (!context.authorized()) return { state: "failed", result: { detail: "Operation authorization ended before execution." } };
       const operation = { ...task };
       const backend = this.accessBackend(machine);
+      if (operation.action === 'inspect-install') {
+        if (!runtime.operate || !runtime.inspectInstall || !['android','ios'].includes(String(image.os))) throw new ServiceError('Install inspection is unsupported.', 409);
+        return runtime.operate(machine, image, folder, operation, context.authorized, request => runtime.inspectInstall!(machine, image, request.arguments));
+      }
       if (operation.action === 'install-uploaded') {
         if (!runtime.operate || !runtime.installArtifact || !['android','ios'].includes(String(image.os))) throw new ServiceError('Uploaded app installation is unsupported.', 409);
         const identity = this.identity;
