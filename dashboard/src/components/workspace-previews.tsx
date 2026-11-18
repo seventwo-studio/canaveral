@@ -1,3 +1,4 @@
+import { readFile } from "@/lib/workspace-file";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { record } from "@/lib/types";
@@ -36,19 +37,6 @@ type Launch = {
   argv?: string[];
   port?: number;
 };
-
-async function readFile(file: File) {
-  const data = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-    reader.onerror = () => reject(new Error("Could not read " + file.name));
-    reader.readAsDataURL(file);
-  });
-  return {
-    path: file.webkitRelativePath?.split("/").slice(1).join("/") || file.name,
-    data,
-  };
-}
 
 export function WorkspacePreviews() {
   const [rows, setRows] = useState<Preview[]>([]);

@@ -81,10 +81,12 @@ the reservation count to zero. See the [native trial record](../coordination/nat
 The guest supports a [bounded HTTP exchange](guest-wire.md#bounded-preview-http-exchange)
 for GET and HEAD requests to a ready service. Each response, including its
 headers, must fit within 64 KiB and arrive within 500 ms. Larger assets and
-streaming responses need additional transport support. The dashboard milestone
-adds an owner session and per-site HTTPS origin to this path. Its acceptance
-requires opening a static page with its assets and a dynamic response through
-that origin, checking access from another account, and releasing both sites.
+streaming responses need additional transport support. On 2026-11-18 Chromium
+launched static and dynamic previews through the dashboard on the ARM64 homelab.
+The static site loaded its nested script and the dynamic service echoed a fresh
+nonce. A second account was denied access. Release revoked the private origins
+and returned reservations to zero. The trials used disposable TLS ingress and
+DNS mappings. See the [dashboard acceptance record](../coordination/native-acceptance/README.md#dashboard-workspace-preview-trials).
 
 - A preview is a request tied to one pull request. The controller routes a per-PR hostname to the declared port over the existing outbound host connection and posts the URL as a deployment. Previews are private-network only for now; public exposure needs separate authentication and fork rules.
 - The controller polls the GitHub API for pull-request state, without webhooks. A new push updates the preview, and closing the pull request destroys it.
@@ -128,7 +130,9 @@ exclusion, exact recovery and cleanup-report contract. Native helper retention,
 VZ/XPC and handle closure, and interrupted-deletion durability remain unaccepted.
 Legacy or revoked-binding recovery and ambiguous missing storage stay blocked.
 
-Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish Linux/macOS build acceptance, native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
+The [native dashboard Linux build trial](../coordination/native-acceptance/dashboard-builds.md) verified a Node build on ARM64, owner-only artifact download after VM cleanup and dashboard restart, failed builds, and cancellation. macOS build acceptance remains open.
+
+Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
 
 ## Acceptance before completion
 

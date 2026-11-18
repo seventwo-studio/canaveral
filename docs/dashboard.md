@@ -430,3 +430,29 @@ the same previews during a rollout. When private host routing is enabled, set
 the HTTP `Host` header on both `/healthz` probes to the configured dashboard
 hostname. Configure wildcard DNS, TLS and private ingress as described in the
 [preview routing guide](private-preview-routing.md).
+
+## Owner workspace builds
+
+Use the same dashboard session, mutation headers, source file encoding and size
+limits as previews. GET `/api/v1/builds/images` for `{images: [{id,
+templateId,templateRevision,arch,digest}]}`. The preview configuration's pin
+has ID `default`. Operators may add pins in its optional `buildImages` array
+using those same five fields. Every selected pin must match the live catalogue.
+
+POST `/api/v1/builds` with a lowercase UUID `id`, `imageId`, `files`, a
+foreground `argv` array and one workspace-relative filename `artifact`.
+Replay the same body and ID after a lost response. Changed intent returns 409.
+GET the collection for `{builds: [...]}`. POST, GET and DELETE on the
+appropriate collection or item return a build with `id`, `imageId`, `artifact`,
+`expiresAt` and `state`. Poll `/api/v1/builds/{id}`. DELETE that item to
+cancel. States are `provisioning`, `running`, `stopping`, `succeeded`,
+`failed` and `stopped`. Item responses include `result` when a validated
+command receipt is available, with stdoutBase64, stderrBase64, byte counts,
+truncation and termination fields per the Linux command contract (256 KiB
+combined capture). After success GET `/api/v1/builds/{id}/artifact` for the
+verified bytes (maximum 1 MiB) as an attachment named for the declared basename.
+Before success the owner receives 409. Other owners receive 404. The dashboard
+publishes the bytes and their SHA-256 digest together after the transfer SDK
+confirms the size and digest. Output and artifacts survive cleanup and
+dashboard restart in the private SQLite database. Restart fences unfinished
+execution and reconciles its original request without rerunning the command.

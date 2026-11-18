@@ -199,9 +199,14 @@ const staticFiles: Record<string, [string, string]> = {
 const browserCollection = new RegExp(`^/api/v1/hosts/${UUID}/browsers$`);
 const browserItem = new RegExp(`^/api/v1/hosts/${UUID}/browsers/${UUID}$`);
 
+function attachmentName(path: string): string {
+  return `attachment; filename*=UTF-8''${encodeURIComponent(posix.basename(path)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+}
+
 function routeAllowed(method: string, route: string): boolean {
-  if (route === "/api/v1/previews") return method === "GET" || method === "POST";
-  if (new RegExp(`^/api/v1/previews/${UUID}$`).test(route)) return method === "GET" || method === "DELETE";
+  if (route === "/api/v1/builds/images" || new RegExp(`^/api/v1/builds/${UUID}/artifact$`).test(route)) return method === "GET";
+  if (route === "/api/v1/previews" || route === "/api/v1/builds") return method === "GET" || method === "POST";
+  if (new RegExp(`^/api/v1/(?:previews|builds)/${UUID}$`).test(route)) return method === "GET" || method === "DELETE";
   if (browserCollection.test(route)) return method === "POST";
   if (browserItem.test(route)) return method === "GET" || method === "DELETE";
   if (method === "GET" && /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route)) return true;
@@ -470,7 +475,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
             await source.verify();
             if (!await authorized()) throw new DashboardError("Download authorization ended.", 401);
             response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": source.size,
-              "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(posix.basename(options.path as string)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+              "Content-Disposition": attachmentName(options.path as string),
               "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Connection": "close" });
             streamStarted = true;
             let remaining = source.size;
@@ -529,11 +534,18 @@ export function createDashboardServer(config: DashboardConfig): Server {
         while (source.remaining) chunks.push(await source.read(Math.min(65536, source.remaining)));
         value = decodeJson(Buffer.concat(chunks));
       }
-      if (route === "/api/v1/previews" || new RegExp(`^/api/v1/previews/${UUID}$`).test(route)) {
+      if (/^\/api\/v1\/(?:builds|previews)(?:\/|$)/.test(route)) {
         const owner = object((await upstream("GET","/v1/auth/session",token)).body.user).id;
         if(typeof owner !== "string" || !owner) throw new DashboardError("Dashboard account required.",403);
         if(!previewLifecycle) throw new DashboardError("Workspace previews are not configured.",503);
-        respond(previewLifecycle.handle(owner,method,route.split("/")[4],value)); return;
+        const [, , , collection, id, action] = route.split("/");
+        if (collection === "builds" && id === "images") { respond({images:previewLifecycle.images}); return; }
+        if (action === "artifact") {
+          const {bytes,name} = previewLifecycle.artifact(owner,id!);
+          response.setHeader("Content-Disposition", attachmentName(name));
+          respond(bytes,200,"application/octet-stream"); return;
+        }
+        respond(previewLifecycle.handle(owner,method,id,value,collection === "builds")); return;
       }
       if (route === "/api/v1/auth/logout") setCookie("", true);
       const path = browserCollection.test(route) || browserItem.test(route) ? route.replace("/api/v1/", "/v1/admin/") : route.slice(4);

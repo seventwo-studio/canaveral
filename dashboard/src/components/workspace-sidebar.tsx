@@ -52,6 +52,13 @@ export const destinations = {
     icon: Monitor,
     adminOnly: false,
   },
+  builds: {
+    group: "Workspace",
+    label: "Linux builds",
+    href: "#builds",
+    icon: Layers,
+    adminOnly: false,
+  },
   previews: {
     group: "Workspace",
     label: "Workspace previews",

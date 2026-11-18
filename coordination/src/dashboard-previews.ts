@@ -4,15 +4,25 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   ConsumerClient,
+  ConsumerError,
   ConsumerServiceError,
   LeaseClient,
   uploadWorkspaceFile,
+  downloadWorkspaceFile,
 } from "./consumer-client.ts";
 import type { ClientOptions } from "./consumer-client.ts";
 import { DashboardError } from "./dashboard.ts";
 import { transferPath, transferUUID } from "./linux-transfers.ts";
 
+import type { TransferJournal } from "./linux-transfer-sdk.ts";
+import { operationReceipt } from "./linux-operations.ts";
+
+type BuildImage = Pick<
+  PreviewConfig,
+  "templateId" | "templateRevision" | "arch" | "digest"
+> & { id: string };
 export interface PreviewConfig {
+  buildImages?: BuildImage[];
   applicationKeyFile: string;
   database: string;
   templateId: string;
@@ -23,30 +33,51 @@ export interface PreviewConfig {
 }
 interface Intent {
   id: string;
-  mode: "static" | "command";
+  mode: "static" | "command" | "build";
+  imageId?: string;
+  artifact?: string;
   files: { path: string; data: string }[];
   argv: string[];
   port: number;
 }
-const invalid = (): never => {
-  throw new DashboardError("Invalid preview specification.", 400);
-};
 export function previewIntent(body: Record<string, unknown>): Intent {
-  const { id, mode, files } = body;
+  return workspaceIntent(body, false);
+}
+function workspaceIntent(
+  body: Record<string, unknown>,
+  build: boolean,
+): Intent {
+  const invalid = (): never => {
+    throw new DashboardError(
+      build ? "Invalid build specification." : "Invalid preview specification.",
+      400,
+    );
+  };
+  const { id, files } = body;
+  const mode = build ? "build" : body.mode;
+  let artifact: string | undefined;
+  if (build) {
+    if (typeof body.imageId !== "string") return invalid();
+    try {
+      artifact = transferPath(body.artifact);
+    } catch {
+      return invalid();
+    }
+  }
   try {
     transferUUID(id);
   } catch {
     return invalid();
   }
   if (
-    (mode !== "static" && mode !== "command") ||
+    (!build && mode !== "static" && mode !== "command") ||
     !Array.isArray(files) ||
     files.length > 128 ||
     Object.keys(body).some(
       (k) =>
         ![
           "id",
-          "mode",
+          ...(build ? ["imageId", "artifact", "argv"] : ["mode"]),
           "files",
           ...(mode === "command" ? ["argv", "port"] : []),
         ].includes(k),
@@ -86,21 +117,22 @@ export function previewIntent(body: Record<string, unknown>): Intent {
     }
   }
   let argv: string[], port: number;
-  if (mode === "command") {
+  if (mode === "command" || build) {
     if (
       !Array.isArray(body.argv) ||
       !body.argv.length ||
       !body.argv[0] ||
       body.argv.some((a) => typeof a !== "string" || a.includes("\0")) ||
       Buffer.byteLength(JSON.stringify(body.argv)) > 64000 ||
-      typeof body.port !== "number" ||
-      !Number.isInteger(body.port) ||
-      body.port < 1 ||
-      body.port > 65535
+      (!build &&
+        (typeof body.port !== "number" ||
+          !Number.isInteger(body.port) ||
+          body.port < 1 ||
+          body.port > 65535))
     )
       return invalid();
     argv = body.argv;
-    port = body.port;
+    port = build ? 0 : (body.port as number);
   } else {
     if (!paths.has("index.html")) return invalid();
     port = 18760;
@@ -114,7 +146,14 @@ fs.createReadStream(p).on('error',()=>r.destroy()).pipe(r)}).listen(18760,'127.0
     argv = ["node", "-e", script, JSON.stringify([...paths])];
   }
   if (Buffer.byteLength(JSON.stringify(argv)) > 64000) return invalid();
-  return { id: id as string, mode, files: entries, argv, port };
+  return {
+    id: id as string,
+    mode: mode as Intent["mode"],
+    ...(artifact ? { artifact, imageId: body.imageId as string } : {}),
+    files: entries,
+    argv,
+    port,
+  };
 }
 function parentDirectories(files: { path: string }[]) {
   return [
@@ -141,6 +180,7 @@ function view({ id, mode, state, expiresAt }: Row) {
 }
 
 export class DashboardPreviews {
+  readonly images: BuildImage[];
   private db: DatabaseSync;
   private app: ConsumerClient;
   private config: PreviewConfig;
@@ -159,6 +199,29 @@ export class DashboardPreviews {
       !/^sha256:[a-f0-9]{64}$/.test(config.digest)
     )
       throw new Error("Invalid preview configuration");
+    const { templateId, templateRevision, arch, digest } = config;
+    this.images = [
+      { id: "default", templateId, templateRevision, arch, digest },
+      ...(config.buildImages ?? []),
+    ].map(({ id, templateId, templateRevision, arch, digest }) => ({
+      id,
+      templateId,
+      templateRevision,
+      arch,
+      digest,
+    }));
+    if (
+      new Set(this.images.map((i) => i.id)).size !== this.images.length ||
+      this.images.some(
+        (i) =>
+          !i.id ||
+          !i.templateId ||
+          !i.templateRevision ||
+          !["amd64", "arm64"].includes(i.arch) ||
+          !/^sha256:[a-f0-9]{64}$/.test(i.digest),
+      )
+    )
+      throw Error("Invalid build image configuration");
     this.config = config;
     this.options = options;
     this.app = new ConsumerClient({
@@ -170,7 +233,9 @@ export class DashboardPreviews {
     this.db
       .exec(`CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,owner TEXT,mode TEXT,hash TEXT,state TEXT,expiresAt TEXT,lease TEXT,op TEXT,failed INTEGER);
       CREATE TABLE IF NOT EXISTS preview_transfer_journal(preview TEXT,transfer TEXT,step INTEGER,payload TEXT,PRIMARY KEY(preview,transfer,step));
-      UPDATE previews SET state='stopping',failed=1 WHERE state IN ('ready','starting','provisioning')`);
+      CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY,imageId TEXT,artifact TEXT,result TEXT,bytes BLOB,sha256 TEXT,submitted INTEGER DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS build_chunks(id TEXT,seq INTEGER PRIMARY KEY,data BLOB);
+      UPDATE previews SET state='stopping',failed=1 WHERE state IN ('ready','starting','provisioning','running')`);
     this.timer = setInterval(() => this.tick(), 1000).unref();
   }
   private row(id: string) {
@@ -186,50 +251,111 @@ export class DashboardPreviews {
     method: string,
     id?: string,
     body?: Record<string, unknown>,
+    build = false,
   ) {
     if (!id && method === "GET")
       return {
-        previews: (
+        [build ? "builds" : "previews"]: (
           this.db
-            .prepare("SELECT * FROM previews WHERE owner=? ORDER BY rowid DESC")
-            .all(owner) as unknown as Row[]
-        ).map(view),
+            .prepare(
+              "SELECT * FROM previews WHERE owner=? AND (mode='build')=? ORDER BY rowid DESC",
+            )
+            .all(owner, Number(build)) as unknown as Row[]
+        ).map((r) => (build ? this.buildView(r, false) : view(r))),
       };
-    const intent = method === "POST" ? previewIntent(body!) : undefined;
+    const intent =
+      method === "POST" ? workspaceIntent(body!, build) : undefined;
     id = intent?.id ?? id!;
     const r = this.row(id);
-    if ((r && r.owner !== owner) || (!r && !intent))
-      throw new DashboardError("Unknown preview.", 404);
+    if (
+      (r && (r.owner !== owner || (r.mode === "build") !== build)) ||
+      (!r && !intent)
+    )
+      throw new DashboardError(
+        build ? "Unknown build." : "Unknown preview.",
+        404,
+      );
     if (intent) {
       const hash = createHash("sha256")
         .update(JSON.stringify(intent))
         .digest("hex");
       if (r && hash !== r.hash)
         throw new DashboardError(
-          "Preview ID already has another specification.",
+          build
+            ? "Build ID already has another specification."
+            : "Preview ID already has another specification.",
           409,
         );
       if (!r) {
         const expiresAt = new Date(
           Date.now() + this.config.ttlSeconds * 1000,
         ).toISOString();
-        this.db
-          .prepare("INSERT INTO previews VALUES(?,?,?,?,?,?,?,?,0)")
-          .run(
-            id,
-            owner,
-            intent.mode,
-            hash,
-            "provisioning",
-            expiresAt,
-            randomUUID(),
-            randomUUID(),
-          );
+        if (build && !this.images.some((i) => i.id === intent.imageId))
+          throw new DashboardError("Unknown build image.", 400);
+        this.db.exec("BEGIN");
+        try {
+          if (build)
+            this.db
+              .prepare("INSERT INTO builds(id,imageId,artifact) VALUES(?,?,?)")
+              .run(id, intent.imageId!, intent.artifact!);
+          this.db
+            .prepare("INSERT INTO previews VALUES(?,?,?,?,?,?,?,?,0)")
+            .run(
+              id,
+              owner,
+              intent.mode,
+              hash,
+              "provisioning",
+              expiresAt,
+              randomUUID(),
+              randomUUID(),
+            );
+          this.db.exec("COMMIT");
+        } catch (error) {
+          this.db.exec("ROLLBACK");
+          throw error;
+        }
         this.intents.set(id, intent);
       }
-    } else if (method === "DELETE" && !["stopped", "failed"].includes(r!.state))
+    } else if (
+      method === "DELETE" &&
+      !["stopped", "failed", "succeeded", "stopping"].includes(r!.state)
+    )
       this.state(id, "stopping");
-    return view(this.row(id)!);
+    return build ? this.buildView(this.row(id)!, true) : view(this.row(id)!);
+  }
+  private buildView({ id, state, expiresAt }: Row, detail: boolean) {
+    const meta = this.db
+      .prepare(
+        detail
+          ? "SELECT imageId,artifact,result FROM builds WHERE id=?"
+          : "SELECT imageId,artifact FROM builds WHERE id=?",
+      )
+      .get(id)!;
+    return {
+      id,
+      state,
+      expiresAt,
+      imageId: meta.imageId,
+      artifact: meta.artifact,
+      ...(detail && typeof meta.result === "string"
+        ? { result: JSON.parse(meta.result) }
+        : {}),
+    };
+  }
+  artifact(owner: string, id: string) {
+    const row = this.row(id);
+    if (!row || row.owner !== owner || row.mode !== "build")
+      throw new DashboardError("Unknown build.", 404);
+    if (row.state !== "succeeded")
+      throw new DashboardError("Artifact unavailable.", 409);
+    const meta = this.db
+      .prepare("SELECT artifact,bytes,sha256 FROM builds WHERE id=?")
+      .get(id)!;
+    const bytes = Buffer.from(meta.bytes as Uint8Array);
+    if (createHash("sha256").update(bytes).digest("hex") !== meta.sha256)
+      throw Error("Invalid retained artifact");
+    return { name: String(meta.artifact), bytes };
   }
   target(owner: string, id: string) {
     const r = this.row(id),
@@ -245,7 +371,9 @@ export class DashboardPreviews {
   }
   private tick() {
     for (const r of this.db
-      .prepare("SELECT * FROM previews WHERE state NOT IN ('failed','stopped')")
+      .prepare(
+        "SELECT * FROM previews WHERE state NOT IN ('failed','stopped','succeeded')",
+      )
       .all() as unknown as Row[]) {
       if (this.active.has(r.id)) continue;
       this.active.add(r.id);
@@ -275,6 +403,15 @@ export class DashboardPreviews {
         admitted = (await this.app.cancelRequest(lease)).state === "admitted";
       } catch (e) {
         if (!(e instanceof ConsumerServiceError && e.status === 404)) throw e;
+        // A timed-out submission may still arrive. Its deadline fences later admission.
+        if (
+          r.mode === "build" &&
+          Date.now() < Date.parse(r.expiresAt) &&
+          this.db
+            .prepare("SELECT id FROM builds WHERE id=? AND submitted=1")
+            .get(id)
+        )
+          return;
       }
       if (
         admitted &&
@@ -284,10 +421,18 @@ export class DashboardPreviews {
       this.db
         .prepare("DELETE FROM preview_transfer_journal WHERE preview=?")
         .run(id);
-      this.state(id, r.failed ? "failed" : "stopped");
+      this.db.prepare("DELETE FROM build_chunks WHERE id=?").run(id);
+      const published =
+        r.mode === "build" &&
+        this.db
+          .prepare("SELECT id FROM builds WHERE id=? AND sha256 IS NOT NULL")
+          .get(id);
+      this.state(id, published ? "succeeded" : r.failed ? "failed" : "stopped");
       return;
     }
     const check = () => {
+      if (r.mode === "build" && Date.now() >= Date.parse(r.expiresAt))
+        this.state(id, "stopping");
       if (
         this.closed ||
         this.row(id)!.state === "stopping" ||
@@ -298,14 +443,33 @@ export class DashboardPreviews {
     const scoped = (leaseKey: string) =>
       new LeaseClient({ ...this.options, leaseId: lease, leaseKey });
     if (r.state !== "provisioning") {
-      const op = await scoped(this.keys.get(id)!).operation(r.op);
+      const client = scoped(this.keys.get(id)!);
+      const op = await client.operation(r.op);
       check();
+      if (r.mode === "build") {
+        if (op.state === "queued") return;
+        const receipt = operationReceipt({
+          state: op.state,
+          ...(op.result ? { result: op.result } : {}),
+        });
+        if (receipt.result)
+          this.db
+            .prepare("UPDATE builds SET result=? WHERE id=?")
+            .run(JSON.stringify(receipt.result), id);
+        if (receipt.state !== "succeeded") throw Error("Build failed");
+        await this.collectArtifact(id, client, check);
+        return;
+      }
       if (op.state !== "queued") throw Error("Service ended");
       this.state(id, op.previewReady ? "ready" : "starting");
       return;
     }
-    const { templateId, templateRevision, arch, digest, ttlSeconds } =
-      this.config;
+    const intent = this.intents.get(id)!;
+    const { templateId, templateRevision, arch, digest } =
+      intent.mode === "build"
+        ? this.images.find((i) => i.id === intent.imageId)!
+        : this.config;
+    const { ttlSeconds } = this.config;
     const images = await this.app.catalogue();
     if (
       !images.templates.some(
@@ -319,6 +483,8 @@ export class DashboardPreviews {
     )
       throw Error("Workspace pin unavailable");
     check();
+    if (intent.mode === "build")
+      this.db.prepare("UPDATE builds SET submitted=1 WHERE id=?").run(id);
     const { request } = await this.app.submitRequest({
       id: lease,
       kind: "linux-lease",
@@ -339,8 +505,7 @@ export class DashboardPreviews {
     if (!machine.members[0]?.ready) return;
     check();
     const key = (await this.app.rotateLeaseCredential(lease)).credential;
-    const client = scoped(key),
-      intent = this.intents.get(id)!;
+    const client = scoped(key);
     const parents = parentDirectories(intent.files);
     if (parents.length) {
       check();
@@ -385,19 +550,7 @@ export class DashboardPreviews {
         (async function* () {
           yield bytes;
         })(),
-        {
-          save: async (value) => {
-            check();
-            this.db
-              .prepare("INSERT INTO preview_transfer_journal VALUES(?,?,?,?)")
-              .run(
-                id,
-                value.id,
-                "step" in value ? value.step : 0,
-                JSON.stringify(value),
-              );
-          },
-        },
+        this.journal(id, check),
         {
           wait: async () => {
             check();
@@ -407,27 +560,112 @@ export class DashboardPreviews {
       );
     }
     check();
-    await client.createOperation({
-      id: r.op,
-      member: "primary",
-      action: "shell",
-      arguments: {
-        argv: [
-          "/sbin/canaveral-guest-agent",
-          "--preview-service",
-          String(intent.port),
-          ...intent.argv,
-        ],
-        timeoutMs: ttlSeconds * 1000,
-      },
-    });
+    await client
+      .createOperation({
+        id: r.op,
+        member: "primary",
+        action: "shell",
+        arguments: {
+          argv:
+            intent.mode === "build"
+              ? intent.argv
+              : [
+                  "/sbin/canaveral-guest-agent",
+                  "--preview-service",
+                  String(intent.port),
+                  ...intent.argv,
+                ],
+          timeoutMs: ttlSeconds * 1000,
+        },
+      })
+      .catch((error) => {
+        if (
+          intent.mode !== "build" ||
+          !(error instanceof ConsumerError && error.outcome === "unknown")
+        )
+          throw error;
+        // Inspect the persisted operation ID on the next tick. Never launch a replacement.
+      });
     check();
     this.db
       .prepare("DELETE FROM preview_transfer_journal WHERE preview=?")
       .run(id);
     this.keys.set(id, key);
     this.intents.delete(id);
-    this.state(id, "starting");
+    this.state(id, intent.mode === "build" ? "running" : "starting");
+  }
+  private journal(id: string, check: () => void): TransferJournal {
+    return {
+      save: async (value) => {
+        check();
+        this.db
+          .prepare("INSERT INTO preview_transfer_journal VALUES(?,?,?,?)")
+          .run(
+            id,
+            value.id,
+            "step" in value ? value.step : 0,
+            JSON.stringify(value),
+          );
+      },
+    };
+  }
+  private async collectArtifact(
+    id: string,
+    client: LeaseClient,
+    check: () => void,
+  ) {
+    const { artifact } = this.db
+      .prepare("SELECT artifact FROM builds WHERE id=?")
+      .get(id)!;
+    let total = 0;
+    const transfer = await downloadWorkspaceFile(
+      client,
+      {
+        id: randomUUID(),
+        member: "primary",
+        direction: "download",
+        path: String(artifact),
+      },
+      async (chunk) => {
+        check();
+        total += chunk.length;
+        if (total > 1048576) throw Error("Artifact too large");
+        this.db
+          .prepare("INSERT INTO build_chunks(id,data) VALUES(?,?)")
+          .run(id, chunk);
+      },
+      this.journal(id, check),
+      {
+        wait: async () => {
+          check();
+          await delay(150);
+        },
+      },
+      1048576,
+    );
+    check();
+    const bytes = Buffer.concat(
+      this.db
+        .prepare("SELECT data FROM build_chunks WHERE id=? ORDER BY seq")
+        .all(id)
+        .map((c) => c.data as Uint8Array),
+    );
+    if (
+      bytes.length !== transfer.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !== transfer.sha256
+    )
+      throw Error("Invalid artifact");
+    this.db.exec("BEGIN");
+    try {
+      this.db
+        .prepare("UPDATE builds SET bytes=?,sha256=? WHERE id=?")
+        .run(bytes, transfer.sha256, id);
+      this.state(id, "stopping");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
   close() {
     this.closed = true;

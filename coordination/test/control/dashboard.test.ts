@@ -391,7 +391,13 @@ test("preview routes require a live account and explicit application configurati
     assert.equal((await fetch(f.url, "/api/v1/previews")).status, 401);
     assert.equal((await fetch(f.url, "/api/v1/previews", { token: session })).status, 503);
     assert.equal((await fetch(f.url, "/api/v1/previews", {body:{},headers:{Cookie:"canaveral_session="+session}})).status,403);
+    for (const path of ["/api/v1/builds","/api/v1/builds/images","/api/v1/builds/"+machine,"/api/v1/builds/"+machine+"/artifact"]) {
+      assert.equal((await fetch(f.url,path)).status,401);
+      assert.equal((await fetch(f.url,path,{token:session})).status,503);
+    }
+    assert.equal((await fetch(f.url,"/api/v1/builds",{body:{},headers:{Cookie:"canaveral_session="+session}})).status,403);
     f.state.revoked = true;
+    assert.equal((await fetch(f.url,"/api/v1/builds/"+machine+"/artifact",{token:session})).status,401);
     assert.equal((await fetch(f.url, "/api/v1/previews/"+randomUUID(), {method:"DELETE",token:session})).status,401);
     assert.ok(f.calls.every(c => c.path === "/v1/auth/session"));
   } finally { await f.close(); }
