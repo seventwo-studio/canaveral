@@ -45,7 +45,7 @@ function extensionOids(der) {
 // Ambient proxies are poisoned: every client must reach the loopback controller directly.
 const env = {...process.env, HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1', ALL_PROXY: 'http://127.0.0.1:1', NO_PROXY: ''};
 let controller, proxy;
-try {
+async function runFixture() {
   // Disposable CA and localhost leaf, generated from an explicit OpenSSL configuration. Ambient
   // configuration is not portable: OpenSSL 1.1.1w (the macos-15 runner image's openssl) merges
   // `req -x509 -addext` with the default [v3_ca] section and writes duplicate extensions, which
@@ -179,7 +179,7 @@ try {
   }
   const binding = {controllerId, runnerId: randomUUID(), generation: 1, incarnationId: randomUUID()};
   await enroll(binding, join(dir, 'identity'));
-  await ok('POST', '/v1/linux-lease-runner-approvals', {binding, domainId, backend: 'appleVirtualization', images: [{id: image.id, revision: image.revision, arch, digest}]});
+  if (process.env.CANAVERAL_PREVIEW_FIXTURE !== '1') await ok('POST', '/v1/linux-lease-runner-approvals', {binding, domainId, backend: 'appleVirtualization', images: [{id: image.id, revision: image.revision, arch, digest}]});
 
   // Fake native helper: a private, ad-hoc signed, pinned, immutable copy.
   mkdirSync(join(dir, 'helper'), {mode: 0o700});
@@ -215,6 +215,11 @@ try {
   }
   function neverReady(view) {
     assert.notEqual(view.state, 'ready'); assert.equal(view.members[0].ready, false);
+  }
+
+  if (process.env.CANAVERAL_PREVIEW_FIXTURE === "1") {
+    const {previewTrial} = await import("./preview-trial.mjs");
+    return previewTrial({dir, app, arch, VM, binding, domainId, ca, direct, ok, sdk, configure, satellite, builderBin, sha, until, inspect, reports, log, relays, orphans});
   }
 
   // A QCOW2 container renamed .raw must be rejected before native preparation can expand it.
@@ -591,6 +596,9 @@ try {
   assert.equal(calls('run'), runs); assert.equal(calls('prepare'), prepares);
   assert.equal(calls('exec'), execsBefore + completedCommands + 1, 'crash recovery repeated a guest command');
   console.log('PASS Apple satellite public API fixture (fake helper, no VM or real command execution): preflight, TLS trust, SDK lifecycle, exact claim/report replay, cleanup-gated capacity, expiry under stalled controller, crash uncertainty without relaunch; simulated direct boot: bound readiness/renewal, command output through consumer API, lost operation report replay without duplicate exec, interrupted-command uncertainty, wrong identity, handshake expiry and owned cleanup');
+}
+try {
+  await runFixture();
 } finally {
   for (const c of children) if (c.exitCode === null && c.signalCode === null) { c.kill('SIGKILL'); await once(c, 'exit'); }
   for (const pid of orphans) { try { process.kill(pid, 'SIGKILL'); } catch {} }
