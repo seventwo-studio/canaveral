@@ -292,6 +292,21 @@ pub enum Frame {
         id: Uuid,
         code: ErrorCode,
     },
+    PreviewRequest {
+        version: u32,
+        #[serde(deserialize_with = "crate::uuid")]
+        id: Uuid,
+        #[serde(rename = "execId", deserialize_with = "crate::uuid")]
+        exec_id: Uuid,
+        method: String,
+        target: String,
+    },
+    PreviewResponse {
+        version: u32,
+        #[serde(deserialize_with = "crate::uuid")]
+        id: Uuid,
+        data: String,
+    },
     TransferRequest {
         version: u32,
         #[serde(deserialize_with = "crate::uuid")]
@@ -331,6 +346,8 @@ impl Frame {
             | Self::HalfClose { id, .. }
             | Self::Close { id, .. }
             | Self::Error { id, .. }
+            | Self::PreviewRequest { id, .. }
+            | Self::PreviewResponse { id, .. }
             | Self::TransferRequest { id, .. }
             | Self::TransferCancel { id, .. }
             | Self::TransferReceipt { id, .. } => Some(id),
@@ -355,6 +372,34 @@ impl Frame {
                 if !lower_hex(nonce, 64) || host != matches!(self, Self::DataHello { .. }) {
                     return Err("invalid data handshake".into());
                 }
+                *version
+            }
+            Self::PreviewRequest {
+                version,
+                exec_id,
+                method,
+                target,
+                ..
+            } => {
+                if !host
+                    || exec_id.is_nil()
+                    || !matches!(method.as_str(), "GET" | "HEAD")
+                    || target.len() > 4096
+                    || !target.starts_with('/')
+                    || target.starts_with("//")
+                    || !target
+                        .bytes()
+                        .all(|b| b.is_ascii_graphic() && !matches!(b, b'\\' | b'#'))
+                {
+                    return Err("invalid preview request".into());
+                }
+                *version
+            }
+            Self::PreviewResponse { version, data, .. } => {
+                if host {
+                    return Err("invalid preview response direction".into());
+                }
+                payload(data, true)?;
                 *version
             }
             Self::Open { version, .. } => {
