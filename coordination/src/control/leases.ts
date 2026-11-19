@@ -206,6 +206,8 @@ export class LegacyLeases implements ControlModule {
     store.transaction(initializeLeases);
     store.addTransactionHook(refreshLegacyLeases);
     store.transaction(db => refreshLegacyLeases(db, store.clock()));
+    // Request admission skips a whole intent group after a 429 or 503 refusal, so neither acquisition path may
+    // decide those from the request UUID: UUID conflicts are 409 and capacity, quota and limits are UUID-free.
     this.requests = new Requests(store, this.applications, (kind, app, intent) => {
       if (kind === "lease") this.acquireForApplication(app, intent);
       else this.linux.acquireForApplication(app, intent);

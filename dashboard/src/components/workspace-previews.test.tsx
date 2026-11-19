@@ -94,3 +94,50 @@ test.each(["static", "command"])(
     expect(screen.queryByText("Open preview")).toBeNull();
   },
 );
+
+test("shows a waiting preview's queue state and cancels it", async () => {
+  const id = "0b6e5a4c-1d2e-4f3a-8b7c-6d5e4f3a2b1c",
+    deadline = new Date(Date.now() + 600000).toISOString();
+  let row: Record<string, unknown> = {
+    id,
+    mode: "static",
+    state: "provisioning",
+    expiresAt: deadline,
+    request: {
+      state: "waiting",
+      priority: 3,
+      deadline,
+      reason: "capacity_unavailable",
+      admittedAt: null,
+    },
+  };
+  const methods: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      const reply = (value: unknown) => ({ ok: true, json: async () => value });
+      if (url.endsWith("/previews")) return reply({ previews: [row] });
+      expect(url).toBe("/api/v1/previews/" + id);
+      methods.push(init.method ?? "GET");
+      if (init.method === "DELETE")
+        row = {
+          ...row,
+          state: "stopped",
+          request: {
+            ...(row.request as object),
+            state: "cancelled",
+            reason: "consumer_cancelled",
+          },
+        };
+      return reply(row);
+    }),
+  );
+  render(<WorkspacePreviews />);
+  await screen.findByText(/ · waiting for capacity/);
+  screen.getByText(/Queued at priority 3 · last check: capacity_unavailable/);
+  expect(screen.queryByText("Open preview")).toBeNull();
+  fireEvent.click(await screen.findByText("Cancel waiting preview"));
+  await screen.findByText(/ · stopped/);
+  screen.getByText("Request cancelled (consumer_cancelled)");
+  expect(methods).toEqual(["DELETE"]);
+});

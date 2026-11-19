@@ -28,8 +28,18 @@ export function requestSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS requests_deadline ON requests(deadline) WHERE state='waiting';
     CREATE TABLE IF NOT EXISTS request_scheduler (id INTEGER PRIMARY KEY CHECK(id=1),turn TEXT NOT NULL,sequence INTEGER NOT NULL);
     INSERT OR IGNORE INTO request_scheduler VALUES(1,'',0);
-    CREATE TABLE IF NOT EXISTS request_scan (sequence INTEGER PRIMARY KEY);`);
+    CREATE TABLE IF NOT EXISTS request_scan (sequence INTEGER PRIMARY KEY);
+    DROP TABLE IF EXISTS request_pool_turns;
+    DROP TABLE IF EXISTS request_unit_turns;
+    CREATE TABLE IF NOT EXISTS request_admissions (application TEXT PRIMARY KEY,admitted INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS request_admissions_order ON request_admissions(admitted);`);
+  // Interim builds of this change kept turns per image pin (request_pool_turns) and per capacity unit
+  // (request_unit_turns). Admission order is disposable state, so they are dropped rather than converted.
 }
+/** Requests of one application with the same normalized intent apart from UUID and name have the same fit. */
+const GROUP = "application||char(31)||kind||char(31)||json_remove(intent,'$.id','$.name')";
+/** Refused attempts one application may use in a single admission pass before its remaining candidates wait for the next cycle. */
+const REFUSALS_PER_APPLICATION_PASS = 16;
 
 /** Lease kinds are admitted only by the control worker; each acquisition is a nested savepoint in one
  * bounded write pass. Model-job requests share this table, envelope, replay, waiting cap and cancellation,
@@ -37,6 +47,8 @@ export function requestSchema(db: DatabaseSync): void {
  */
 export class Requests {
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities,
+    /** Must decide a 429 or 503 refusal from the intent apart from its UUID and name, and from application and
+     * capacity state, never from the request UUID: the pass skips a refused request's whole group on that basis. */
     readonly acquire: (kind: RequestKind, application: string, intent: Record<string, unknown>) => void,
     readonly release: (db: DatabaseSync, row: { kind: RequestKind; id: string }, token: string) => void,
     /** Pure shape check shared with direct acquisition, so malformed intent is refused before it consumes a UUID. */
@@ -135,16 +147,42 @@ export class Requests {
       db.prepare("UPDATE requests SET state='cancelled',reason='application_revoked' WHERE state='waiting' AND application NOT IN (SELECT id FROM consumers WHERE revoked=0)").run();
       db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE state='waiting' AND deadline<=?").run(this.store.clock());
       settleModelRequests(db,this.store.clock());
-      let turn = String(db.prepare("SELECT turn FROM request_scheduler WHERE id=1").get()!.turn);
+      // Groups are computed once per pass into a connection-local table of the remaining candidates. Rows leave
+      // request_pass when attempted or when their group is blocked; the transaction owns every change.
+      db.exec(`DROP TABLE IF EXISTS temp.request_pass;
+        CREATE TEMP TABLE request_pass AS SELECT application,id,sequence,priority,${GROUP} AS grp
+          FROM requests WHERE state='waiting' AND kind!='model-job' AND sequence NOT IN (SELECT sequence FROM request_scan);
+        CREATE UNIQUE INDEX temp.request_pass_id ON request_pass(application,id);
+        CREATE INDEX temp.request_pass_group ON request_pass(grp);
+        DROP TABLE IF EXISTS temp.request_deferred;
+        CREATE TEMP TABLE request_deferred AS SELECT * FROM request_pass WHERE 0;`);
 
-      // At most 256 savepoint-isolated attempts; failed fits do not occupy an application turn twice in a round.
+      // At most 256 savepoint-isolated attempts; each request is attempted at most once per scan cycle.
+      // Across the whole pass the least recently admitted application goes first (never admitted before any),
+      // then higher priority, then FIFO sequence. Only an admission moves an application to the back: a refused
+      // attempt leaves the order, so the next candidate is tried in the same pass. One order for every image pin
+      // and kind means an application that keeps being admitted cannot keep taking capacity that an application
+      // admitted less recently could use, whatever domains or hosts their pins share.
+      const candidate = db.prepare(`SELECT p.application,p.id,p.grp FROM temp.request_pass p LEFT JOIN request_admissions a ON a.application=p.application
+        ORDER BY coalesce(a.admitted,0),p.priority DESC,p.sequence LIMIT 1`);
+      // Refusals per application per pass. An application that reaches the cap has its remaining candidates set
+      // aside until no other application has one, so unservable backlogs (or cancel-and-resubmit churn) from a few
+      // applications cannot use every attempt in every pass and keep a servable application waiting. Set-aside
+      // candidates stay unscanned and return to the pass once the others are exhausted, so a lone application
+      // keeps its full throughput.
+      const refusals = new Map<string, number>();
       for (let i=0;i<256;i++) {
-        const row = db.prepare(`SELECT * FROM requests WHERE state='waiting' AND kind!='model-job' AND sequence NOT IN (SELECT sequence FROM request_scan)
-          ORDER BY application> ? DESC,application,priority DESC,sequence LIMIT 1`).get(turn) as unknown as Row | undefined;
-        if (!row) { db.exec("DELETE FROM request_scan"); break; }
+        const next = candidate.get() as { application: string; id: string; grp: string } | undefined;
+        if (!next) {
+          if (db.prepare("SELECT 1 FROM temp.request_deferred LIMIT 1").get()) {
+            db.exec("INSERT INTO temp.request_pass SELECT * FROM temp.request_deferred; DELETE FROM temp.request_deferred");
+            refusals.clear(); i--; continue;
+          }
+          db.exec("DELETE FROM request_scan; DROP TABLE temp.request_pass; DROP TABLE temp.request_deferred"); break;
+        }
+        db.prepare("DELETE FROM temp.request_pass WHERE application=? AND id=?").run(next.application,next.id);
+        const row = this.row(db,next.application,next.id);
         db.prepare("INSERT OR IGNORE INTO request_scan VALUES(?)").run(row.sequence);
-        turn = row.application;
-        db.prepare("UPDATE request_scheduler SET turn=? WHERE id=1").run(turn);
         // Earlier attempts take time: decide expiry against the clock immediately before this acquisition.
         if (row.deadline !== null && this.store.clock() >= row.deadline) {
           db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE application=? AND id=?").run(row.application,row.id);
@@ -153,11 +191,27 @@ export class Requests {
         try {
           this.store.transaction(() => this.acquire(row.kind,row.application,JSON.parse(row.intent)));
           db.prepare("UPDATE requests SET state='admitted',admitted_at=?,target=?,reason=NULL WHERE application=? AND id=?").run(this.store.clock(),row.id,row.application,row.id);
+          db.prepare(`INSERT INTO request_admissions VALUES(?,(SELECT coalesce(max(admitted),0)+1 FROM request_admissions))
+            ON CONFLICT(application) DO UPDATE SET admitted=excluded.admitted`).run(row.application);
         } catch (error) {
           // The savepoint already rolled this attempt back. An unexpected failure stays waiting with a
           // visible reason and is not retried until the next round, so it cannot stall other requests.
           const temporary = !(error instanceof ServiceError) || error.status === 429 || error.status === 503;
           db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(temporary ? "waiting" : "rejected",error instanceof ServiceError ? error.code : "admission_error",row.application,row.id);
+          // A capacity or quota refusal applies to the group's other requests for the rest of this pass, so a large
+          // unservable backlog costs one attempt per group and cannot hide servable work behind it. This relies on
+          // the acquire contract above: such a refusal never depends on the request UUID. A host drain refusal
+          // (host_draining, where the controller has one) is capacity state too.
+          // The skipped members count as scanned, so the group costs one attempt per scan cycle, not per pass.
+          if (error instanceof ServiceError && (error.status === 429 || error.status === 503 || error.code === "host_draining")) {
+            db.prepare("INSERT OR IGNORE INTO request_scan SELECT sequence FROM temp.request_pass WHERE grp=?").run(next.grp);
+            db.prepare("DELETE FROM temp.request_pass WHERE grp=?").run(next.grp);
+          }
+          const refused = (refusals.get(next.application) ?? 0) + 1; refusals.set(next.application, refused);
+          if (refused >= REFUSALS_PER_APPLICATION_PASS) {
+            db.prepare("INSERT INTO temp.request_deferred SELECT * FROM temp.request_pass WHERE application=?").run(next.application);
+            db.prepare("DELETE FROM temp.request_pass WHERE application=?").run(next.application);
+          }
         }
       }
     });

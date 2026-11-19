@@ -259,3 +259,9 @@ response carries the upstream status, content type and bounded body. The
 controller discards upstream cookies and rejects encoded or ambiguously
 framed bodies. This endpoint serves credentialed API clients. A private
 dashboard preview origin still requires its own routing and authentication.
+
+To start a preview when capacity may be full, submit a `linux-lease` request to
+`/v1/requests` for a workspace image instead of acquiring directly. Once it is
+admitted and the lease is ready, rotate the lease key and start the
+`--preview-service` operation. The request waits, is admitted and is cancelled
+like any box; see [queued previews](requests.md#queued-previews).
