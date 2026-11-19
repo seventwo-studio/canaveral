@@ -5,6 +5,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   captureFileName,
   closeVideoSession,
+  MAX_RECORDING,
+  RECORDING_BIT_RATE,
+  RECORDING_DURATIONS,
   recordVideo,
   screenshotPng,
   type VideoSessionReceipt,
@@ -45,11 +48,14 @@ function stubApi() {
   );
   return calls;
 }
-async function start(signal = new AbortController().signal) {
+async function start(
+  signal = new AbortController().signal,
+  durationSeconds = 10,
+) {
   let socket!: FakeSocket;
   const states: string[] = [];
   const result = recordVideo(machine, {
-    durationSeconds: 10,
+    durationSeconds,
     signal,
     onRequest: () => {},
     onSession: () => {},
@@ -288,5 +294,53 @@ it("rejects video data before the format message and messages during verificatio
     socket.bytes(mp4.subarray(0, 100));
     await expect(result).rejects.toThrow(/Unexpected video data/);
     expect(socket.sent).toEqual([]);
+  }
+});
+
+it("offers lengths up to the backend maximum that fit the in-memory limit", () => {
+  expect(Math.max(...RECORDING_DURATIONS)).toBe(180);
+  // Constrained encoder rate plus MP4 overhead stays well inside the page's buffer.
+  expect((180 * RECORDING_BIT_RATE) / 8).toBeLessThan(MAX_RECORDING * 0.7);
+});
+
+it("waits through a static screen longer than 30 s until the capture deadline", async () => {
+  stubApi();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const { socket, result } = await start(undefined, 60);
+    let settled = false;
+    void result.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    // Android sends no frames while nothing on screen changes.
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(settled).toBe(false);
+    stream(socket, mp4);
+    socket.control({
+      type: "finish",
+      bytes: mp4.length,
+      sha256: sha(mp4),
+      cleaned: true,
+    });
+    await vi.waitFor(() => expect(socket.sent).toEqual(['{"type":"ack"}']));
+    socket.close();
+    await expect(result).resolves.toMatchObject({ bytes: mp4.length });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("still reports a stream that stays silent past the capture deadline", async () => {
+  stubApi();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const { result } = await start(undefined, 5);
+    const failure = expect(result).rejects.toThrow(/stalled/);
+    await vi.advanceTimersByTimeAsync(34_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await failure;
+  } finally {
+    vi.useRealTimers();
   }
 });

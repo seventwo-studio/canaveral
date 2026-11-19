@@ -9,6 +9,7 @@ import { tokenHash } from '../../src/accounts.ts';
 import { CliClient } from '../../src/account-cli.ts';
 import { MachineStore, machineDigest } from '../../src/control/machines.ts';
 import { MobileVideoSessions } from '../../src/control/mobile-video-sessions.ts';
+import { createModule as lifecycleModule } from '../../src/control/lifecycle.ts';
 import { SessionConnection } from '../../src/control/sessions.ts';
 import type { ControlRequest, Principal } from '../../src/control/contracts.ts';
 import { object, ServiceError } from '../../src/errors.ts';
@@ -30,6 +31,7 @@ function fixture(t: TestContext) {
   let store = new SqliteStore(file, () => now), machines = new MachineStore(store, options);
   const principalHash = (_db: unknown, hash: string) => { if (hash !== tokenHash(token) || revoked) throw new ServiceError('Credential revoked.',401); return owner; };
   let sessions = new MobileVideoSessions(store, machines, principalHash);
+  const lifecycle = lifecycleModule(store, options);
   const offer = { name: 'portable-video-fixture', provider: 'android', capacity: { cpu: 8, memoryMiB: 8192, diskGiB: 32 }, templates: [image] };
   machines.enroll({ id: host, credential: hostToken, offer }, options.enrollmentToken);
   const req = (method: string, path: string, body = {}, principal?: Principal, auth = token): ControlRequest => ({ method, path, parts: path.split('/').filter(Boolean), body, token: auth, query: new URLSearchParams(),
@@ -48,6 +50,18 @@ function fixture(t: TestContext) {
     authorized: (session: View) => sessions.command({ type: 'video-sessions.authorized', sessionId: session.id, generation: session.generation, ready: true }),
     disconnect: (session: View) => sessions.command({ type: 'video-sessions.disconnect', sessionId: session.id, generation: session.generation }),
     restrict: () => { owner = { ...owner, scopes: ['machines:read'] }; }, revoke: () => { revoked = true; },
+    get owner() { return owner; },
+    remove: (body: { id: string }, principal?: Principal) => { const response = lifecycle.handle(req('POST', `/v1/machines/${machine.id}/delete`, body, principal)) as { body: unknown } | undefined; assert.ok(response); return object(response.body); },
+    /** Confirmed shutdown, as lifecycle requires; the heartbeat lets video admission observe it. */
+    stop: (heartbeat = true) => {
+      store.transaction(db => db.prepare("UPDATE machines SET desired='stopped',observed='stopped' WHERE id=?").run(machine.id));
+      if (heartbeat) machines.heartbeat(host, hostToken, { offer, reports: { [machine.id]: { state: 'stopped' } } });
+    },
+    start: () => {
+      store.transaction(db => db.prepare("UPDATE machines SET desired='running' WHERE id=?").run(machine.id));
+      machines.heartbeat(host, hostToken, { offer, reports: { [machine.id]: { state: 'running' } } });
+    },
+    completeDeletion: (id: string) => machines.heartbeat(host, hostToken, { offer, reports: { [machine.id]: { state: 'stopped', deletion: { id, state: 'complete' } } } }),
     advance: (seconds: number) => { now += seconds; },
     restart: () => { store = new SqliteStore(file, () => now); machines = new MachineStore(store,options); sessions = new MobileVideoSessions(store,machines,principalHash); },
   };
@@ -145,4 +159,65 @@ test('real mobile-video broker relays encoded bytes and controls, rejects consum
   const replay = await client.request('POST',path,nextBody);
   assert.equal(replay.state,'disconnected'); assert.equal(replay.generation,next.generation); assert.equal(await reserved(),initial + 1);
   await assert.rejects(SessionConnection.connect(origin,second.hostPath,hostToken));
+});
+
+const admin: Principal = { kind: 'token', user: { id: randomUUID(), username: 'admin', role: 'admin', status: 'active' }, scopes: ['admin'] };
+const refused = (pattern: RegExp) => (error: unknown) => error instanceof ServiceError && error.status === 409 && pattern.test(error.message);
+
+test('machine deletion is refused while a video session is active or lacks positive cleanup', t => {
+  const f = fixture(t), session = f.create(); f.attach(session, 'host'); f.attach(session, 'consumer');
+  const deletion = { id: randomUUID() }, finish = `/v1/hosts/${f.host}/video-sessions/${session.id}/finish`;
+  // Shutdown recorded without a heartbeat: the session row is still live when deletion is requested.
+  f.stop(false); assert.throws(() => f.remove(deletion), refused(/video session/));
+  f.stop(); const read = f.call('GET', `${f.path}/${session.id}`);
+  assert.equal(read.state, 'disconnected'); assert.equal(read.cleaned, false);
+  assert.throws(() => f.remove(deletion), refused(/video session/)); assert.throws(() => f.remove(deletion), refused(/video session/));
+  const held = f.available();
+  assert.throws(() => f.remove(deletion, f.other), status(404));
+  // Positive runner cleanup releases the reservation; the same deletion UUID then succeeds and replays.
+  assert.equal(f.call('POST', finish, { generation: session.generation, cleaned: true }, undefined, f.hostToken).cleaned, true);
+  assert.deepEqual(f.available(), { ...held, cpu: held.cpu + 1, memoryMiB: held.memoryMiB + 256 }, 'only positive cleanup released the session reservation');
+  const queued = f.remove(deletion); assert.equal(queued.state, 'queued'); assert.deepEqual(f.remove(deletion), queued);
+});
+
+test('a never-attached host session needs no cleanup before deletion', t => {
+  const f = fixture(t), session = f.create(); f.attach(session, 'consumer');
+  assert.equal(f.call('POST', `${f.path}/${session.id}/close`).cleaned, true);
+  f.stop(); assert.equal(f.remove({ id: randomUUID() }).state, 'queued');
+});
+
+test('only an administrator abandons a closed, uncleaned video session; it unblocks deletion only', t => {
+  const f = fixture(t), initial = f.available(), session = f.create(); f.attach(session, 'host'); f.attach(session, 'consumer');
+  const abandon = `${f.path}/${session.id}/abandon`, body = { reason: 'Recorder state unknown after early cancellation; deleting the device.' };
+  assert.throws(() => f.call('POST', abandon, body, admin), refused(/Close the video session/));
+  assert.equal(f.call('POST', `${f.path}/${session.id}/close`).state, 'disconnected');
+  assert.throws(() => f.call('POST', abandon, body), status(403));
+  assert.throws(() => f.call('POST', abandon, body, { ...admin, scopes: ['machines:access'] }), status(403));
+  assert.throws(() => f.call('POST', abandon, body, f.other), status(404));
+  assert.throws(() => f.call('POST', abandon, { reason: ' ' }, admin), status(400));
+  assert.throws(() => f.call('POST', abandon, { ...body, extra: true }, admin), status(400));
+  const record = f.call('POST', abandon, body, admin), resolution = object(record.resolution);
+  assert.equal(record.cleaned, false); assert.equal(resolution.decision, 'abandoned'); assert.equal(resolution.reason, body.reason);
+  assert.deepEqual(resolution.decidedBy, { kind: 'token', userId: admin.user!.id, username: 'admin' });
+  assert.deepEqual(f.call('POST', abandon, body, admin), record, 'a lost response is safe to retry');
+  assert.throws(() => f.call('POST', abandon, { reason: 'different' }, admin), status(409));
+  assert.deepEqual(f.call('GET', `${f.path}/${session.id}`), record);
+  // Abandonment proves no cleanup: the machine still cannot capture and the reservation stays.
+  assert.throws(() => f.create(), status(409)); assert.equal(f.available().cpu, initial.cpu - 1);
+  f.stop(); const deletion = f.remove({ id: randomUUID() }), held = f.available(); assert.equal(deletion.state, 'queued');
+  f.completeDeletion(String(deletion.id));
+  const released = f.available();
+  assert.deepEqual([released.cpu, released.memoryMiB], [held.cpu + 1, held.memoryMiB + 256], 'the reservation is retained until deletion completes');
+});
+
+test('positive cleanup needs no abandonment, and a later receipt still records cleanup', t => {
+  const f = fixture(t), session = f.create(); f.attach(session, 'host'); f.attach(session, 'consumer');
+  const finish = `/v1/hosts/${f.host}/video-sessions/${session.id}/finish`, abandon = `${f.path}/${session.id}/abandon`, body = { reason: 'operator decision' };
+  f.call('POST', finish, { generation: session.generation, cleaned: true }, undefined, f.hostToken);
+  assert.throws(() => f.call('POST', abandon, body, admin), refused(/positive cleanup/));
+  const other = fixture(t), second = other.create(); other.attach(second, 'host'); other.attach(second, 'consumer'); other.call('POST', `${other.path}/${second.id}/close`);
+  other.call('POST', `${other.path}/${second.id}/abandon`, body, admin);
+  const late = other.call('POST', `/v1/hosts/${other.host}/video-sessions/${second.id}/finish`, { generation: second.generation, cleaned: true }, undefined, other.hostToken);
+  assert.equal(late.cleaned, true); assert.equal(object(late.resolution).decision, 'abandoned');
+  other.start(); assert.equal(other.create().state, 'pending', 'positive cleanup admits the next capture');
 });

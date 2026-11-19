@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { serveMobileVideo, videoEncoderArguments, Mp4Envelope } from '../../src/mobile-video.ts';
+import { serveMobileVideo, videoEncoderArguments, Mp4Envelope, MAX_VIDEO_READ_MS } from '../../src/mobile-video.ts';
 import { MobileVideoClient, VideoClient } from '../../src/video-sdk.ts';
 import { createSessionUpgradeHandler, SessionConnection } from '../../src/control/sessions.ts';
 import { validateRelayMessage } from '../../src/control/session-protocol.ts';
@@ -139,4 +139,52 @@ test('real WebSocket SDK records exact MP4 and keeps its ACK attached until host
   const video = await connecting, saved: Buffer[] = [];
   const [receipt] = await Promise.all([video.record({ write(data) { saved.push(Buffer.from(data)); return data.length; } }), serving]);
   assert.deepEqual(Buffer.concat(saved), mp4); assert.deepEqual(receipt, finish); assert.equal(cleaned, true);
+});
+
+/** Liveness regression: the broker drops a peer that does not answer pings. The host only
+ * sends while it captures, so its session client must keep answering. The heartbeat here
+ * is shortened so the capture, including a silent stretch, outlasts the timeout several times. */
+test('host session keeps answering pings through a capture longer than the heartbeat timeout', { timeout: 15000 }, async t => {
+  const heartbeat = { intervalMs: 40, timeoutMs: 200 };
+  const id = randomUUID(), generation = randomUUID(), machineId = randomUUID(), hostId = randomUUID(), credential = 'a'.repeat(43), hostCredential = 'b'.repeat(43);
+  const view = { id, generation, machineId, capability: 'video', protocol: 'canaveral-session-v1', state: 'ready', ...options, attachBefore: new Date(Date.now() + 30000).toISOString(), authorizationDeadline: new Date(Date.now() + 60000).toISOString() };
+  let attached = 0, disconnected = false;
+  const broker = createSessionUpgradeHandler({ async request(command) {
+    if (command.type === 'video-sessions.attach') { attached++; return view; }
+    if (command.type === 'video-sessions.authorized') return { authorized: !disconnected && (!command.ready || attached === 2) };
+    disconnected = true; return { disconnected: true };
+  } }, { video: true, heartbeat });
+  const server = createServer((_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(view)); });
+  server.on('upgrade', (req, socket, head) => { void broker.handle(req, socket, head); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { broker.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`, api = new MobileVideoClient({ baseUrl: origin, credential, allowLoopbackHttp: true });
+  const connecting = api.connect(await api.create(machineId, { id, ...options }), { timeoutMs: 5000 });
+  const host = await SessionConnection.connect(origin, `/v1/hosts/${hostId}/video-sessions/${id}/${generation}`, hostCredential, { heartbeat }); t.after(() => host.close());
+  assert.equal((await host.receive(2) as Record<string, unknown>).type, 'ready');
+  // The encoder emits nothing for 600 ms, then the MP4 in pieces over another ~600 ms.
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const pieces = Array.from({ length: 6 }, (_, i) => mp4.subarray(Math.floor(i * mp4.length / 6), Math.floor((i + 1) * mp4.length / 6)));
+  const encoder = pipe([]); let first = true;
+  encoder.read = async () => { await sleep(first ? 600 : 100); first = false; return pieces.shift() ?? Buffer.alloc(0); };
+  const started = Date.now(); let cleaned: boolean | undefined;
+  const serving = serveMobileVideo(host, pipe([Buffer.from('h264')]), async () => encoder, '/opt/ffmpeg', options, () => true, value => { cleaned = value; }).finally(() => host.close());
+  const video = await connecting, saved: Buffer[] = [];
+  const [receipt] = await Promise.all([video.record({ write(data) { saved.push(Buffer.from(data)); return data.length; } }), serving]);
+  assert.ok(Date.now() - started > 4 * heartbeat.timeoutMs, 'the capture outlasted the heartbeat timeout several times');
+  assert.deepEqual(Buffer.concat(saved), mp4); assert.deepEqual(receipt, finish); assert.equal(cleaned, true);
+});
+
+test('session heartbeat options are bounded', async () => {
+  assert.throws(() => createSessionUpgradeHandler({ async request() { return {}; } }, { video: true, heartbeat: { intervalMs: 100, timeoutMs: 100 } }), /heartbeat/);
+  await assert.rejects(SessionConnection.connect('http://127.0.0.1:1', `/v1/hosts/${randomUUID()}/video-sessions/${randomUUID()}/${randomUUID()}`, 'b'.repeat(43), { heartbeat: { intervalMs: 1, timeoutMs: 100 } }), /heartbeat/);
+});
+
+test('a static screen may stay silent until the capture deadline, not a fixed 30 s', async () => {
+  const waits: number[] = [], long = { ...options, durationSeconds: 60 };
+  const source = pipe([Buffer.from('h264')]), encoder = pipe([mp4]);
+  const read = (target: typeof source) => { const original = target.read.bind(target); target.read = async (maximum, timeoutMs) => { waits.push(timeoutMs); return original(maximum, timeoutMs); }; };
+  read(source); read(encoder);
+  await serveMobileVideo({ async sendControl() {}, async sendBytes() {}, async receive() { return { type: 'ack' }; }, close() {} }, source, async () => encoder, '/opt/ffmpeg', long, () => true);
+  assert.ok(waits.length >= 2); for (const wait of waits) assert.ok(wait > 60000 && wait <= MAX_VIDEO_READ_MS, `read wait ${wait} ms is bounded by the 70 s capture deadline`);
 });

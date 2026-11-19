@@ -7,8 +7,12 @@ import type { SessionChannel } from './control/session-protocol.ts';
 
 export interface VideoOptions { fps: number; durationSeconds: number; bitRate: number }
 export const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
+export const MAX_VIDEO_SECONDS = 180;
+/** Longest single read: the whole capture plus its exit grace. Android emits no frames
+ * while the screen is static, so a quiet stretch can last until the time limit. */
+export const MAX_VIDEO_READ_MS = (MAX_VIDEO_SECONDS + 10) * 1000;
 export function validateVideoOptions(value: VideoOptions): VideoOptions {
-  if (value.fps !== 30 || !Number.isSafeInteger(value.durationSeconds) || value.durationSeconds < 1 || value.durationSeconds > 180 ||
+  if (value.fps !== 30 || !Number.isSafeInteger(value.durationSeconds) || value.durationSeconds < 1 || value.durationSeconds > MAX_VIDEO_SECONDS ||
       !Number.isSafeInteger(value.bitRate) || value.bitRate < 100000 || value.bitRate > 20000000) throw new ServiceError('Video requires 30 fps, 1–180 seconds and 100000–20000000 bits per second.', 400);
   return { fps: 30, durationSeconds: value.durationSeconds, bitRate: value.bitRate };
 }
@@ -67,11 +71,15 @@ export async function serveMobileVideo(channel: SessionChannel, source: NativePi
     watch = setInterval(() => { try { check(); } catch (error) { rejectFailure(error); void closeSource().catch(() => {}); void pipe.close().catch(() => {}); } }, 250);
     // Native sources own normal finite termination. Allow their trailer/exit grace;
     // forceful deadline cleanup never produces a successful recording receipt.
+    // Android emits no frames while the screen is static, so a read may wait until that
+    // deadline rather than a fixed 30 s; the deadline timer still bounds every stall.
+    const deadline = performance.now() + (options.durationSeconds + 10) * 1000;
+    const wait = () => Math.max(30000, Math.ceil(deadline - performance.now()));
     timer = setTimeout(() => { rejectFailure(new ServiceError('Native video exceeded its duration and exit grace.', 409)); void closeSource().catch(() => {}); void pipe.close().catch(() => {}); }, (options.durationSeconds + 10) * 1000);
     pumping = (async () => {
       try {
         for (;;) {
-          check(); const data = await source.read(65536, 30000);
+          check(); const data = await source.read(65536, wait());
           check(); if (!data.length) break;
           if (data.length > 65536) throw new ServiceError('Native video exceeded its chunk bound.', 409);
           for (let offset = 0; offset < data.length;) {
@@ -87,7 +95,7 @@ export async function serveMobileVideo(channel: SessionChannel, source: NativePi
     await channel.sendControl({ type: 'video', mediaType: 'video/mp4', codec: 'avc1', fps: 30 });
     const hash = createHash('sha256'), envelope = new Mp4Envelope(); let bytes = 0;
     for (;;) {
-      check(); const data = await Promise.race([pipe.read(65536, 30000), failure]); check();
+      check(); const data = await Promise.race([pipe.read(65536, wait()), failure]); check();
       if (!data.length) break;
       if (data.length > 65536 || bytes + data.length > MAX_VIDEO_BYTES) throw new ServiceError('Video exceeded its output budget.', 413);
       envelope.push(data); hash.update(data); bytes += data.length;

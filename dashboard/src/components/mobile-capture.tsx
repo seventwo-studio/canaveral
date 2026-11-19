@@ -247,7 +247,11 @@ export function MobileCapture({ machine }: { machine: Machine }) {
           >
             {RECORDING_DURATIONS.map((s) => (
               <option key={s} value={s}>
-                {s} seconds
+                {s < 60
+                  ? `${s} seconds`
+                  : s === 60
+                    ? "1 minute"
+                    : `${s / 60} minutes`}
               </option>
             ))}
           </select>

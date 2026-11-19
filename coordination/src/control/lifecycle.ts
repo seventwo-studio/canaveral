@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { identifier } from "../consumers.ts";
 import { object, ServiceError } from "../errors.ts";
 import { unresolvedInstall } from "./install-cleanup.ts";
+import { unresolvedVideoSession } from "./video-cleanup.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import { owns, requireScope } from "./contracts.ts";
 import type { ControlModule, ControlOptions, ControlRequest, Principal } from "./contracts.ts";
@@ -118,6 +119,8 @@ function requestIntent(store: SqliteStore, req: ControlRequest, action: "power-o
     if (pendingCapture(db, machineId)) throw new ServiceError("Resolve the image capture before changing its source.", 409);
     // Deletion removes the simulator storage and journals that inspection reads.
     if (action === "delete" && unresolvedInstall(db, machineId)) throw new ServiceError("Inspect and resolve the uncertain app installation before deleting this machine.", 409);
+    // The runner still owes positive cleanup of the device's capture; the reservation stays with it.
+    if (action === "delete" && unresolvedVideoSession(db, machineId)) throw new ServiceError("Close the video session and wait for its cleanup, or have an administrator abandon it, before deleting this machine.", 409);
     if (hasPendingPowerOff(db, machineId)) throw new ServiceError("Resolve the pending power-off intent. Reuse its request ID.", 409);
     const table = action === "power-off" ? "machine_power_offs" : "machine_deletions";
     db.prepare(`INSERT INTO ${table} (id,machine,state,created) VALUES (?,?,'queued',?)`).run(requestId, machineId, store.clock());
