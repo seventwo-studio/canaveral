@@ -59,6 +59,67 @@ the authenticated helper over verified SSH and observes the completed preparatio
 marker. This Linux access mode does not require exposing the local controller to
 the guest. Existing cloud-init callback behavior is retained for other images.
 
+## Linux desktop image
+
+`tools/desktop-image/` builds a credential-free ARM64 desktop base disk. It
+starts from the browser image's pinned Debian 13 genericcloud disk and Node
+24.11.0 archive and uses the same dated Debian package snapshot. It preinstalls
+every package the desktop preparation recipe lists (XFCE, xfce4-terminal,
+TigerVNC, D-Bus, AT-SPI, X11 utilities, scrot, OpenSSH and curl) with their
+recommendations, so the recipe's first-boot `apt-get install` installs nothing.
+Preparation still runs `apt-get update` against that snapshot, so the guest needs
+outbound HTTPS. The disk keeps the snapshot's package indexes for that update.
+It boots to `multi-user.target` without a display manager; the Canaveral desktop
+service starts its own Xtigervnc session on guest loopback.
+
+The image holds no account, SSH host key, machine ID, guest token or authorized
+key. The build fails if any of these remain. Each VM receives its `desktop`
+account, authorized key, pinned SSH host key and guest token from its own
+preparation seed. A portable test keeps the image's package list aligned with
+the recipe.
+
+The [desktop image workflow](../.github/workflows/desktop-image.yaml) builds two
+artifacts on a native ARM64 runner: `desktop-arm64.qcow2`, an uncompressed
+standalone QCOW2 that the Apple runner imports, and
+`desktop-guest-bundle-arm64.json`, the guest service bundle. The bundle's
+AT-SPI helper loads the guest's libatspi at run time, so both Rust helpers are
+glibc builds. Built on Ubuntu 24.04, they require glibc 2.39 or later; Debian 13
+ships 2.41. To build them yourself on ARM64 Linux, run as root
+`bash tools/desktop-image/build.sh desktop-arm64.qcow2`, then with the pinned
+Rust toolchain and Node 24 run
+`bash tools/desktop-image/build-guest-bundle.sh desktop-guest-bundle-arm64.json`.
+Verify both SHA-256 values before installing them on a host.
+
+Run the local workspace with these artifacts and a signed Apple runner:
+
+```sh
+node coordination/dist/src/cli.js local \
+  --linux-image /absolute/path/desktop-arm64.qcow2 \
+  --guest-helper-manifest /absolute/path/desktop-guest-bundle-arm64.json \
+  --apple-runner /absolute/path/CanaveralVMRunner
+```
+
+### Launch, use and delete a desktop from the dashboard
+
+On **Machines**, **Launch desktop** offers only Linux desktop images from online,
+accepting hosts. It asks for a name, the image and its CPU, memory and disk,
+prefilled from the image's defaults. The controller chooses the host. The row shows **Preparing** until the
+host confirms guest readiness, then **Ready**. **Control** opens the desktop in
+the shared viewer. **Take control** sends pointer and keyboard input.
+
+**Stop** requests a graceful shutdown. Once the host reports the machine stopped,
+**Delete machine** in the row menu asks for confirmation and sends one deletion
+request UUID. A retry or a status check reuses that UUID. The row shows
+**Deleting** until the host reports owned removal. The dashboard reports the
+deletion only when the controller stops listing the machine. If the host cannot
+confirm removal, the row shows **Deletion blocked**: storage and its reservation
+stay in place until an operator inspects the host.
+
+The live viewer needs a dashboard with an attached desktop connector. Only
+`canaveral local` provides one. A standalone dashboard, such as one deployed
+beside a remote controller, refuses the desktop WebSocket with 409 until the
+outbound display broker for machine owners exists.
+
 ## Headless Linux setup
 
 A Linux image with `guestAccess: true` and `mode: headless` receives the
