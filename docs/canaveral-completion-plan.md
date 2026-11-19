@@ -132,6 +132,8 @@ Legacy or revoked-binding recovery and ambiguous missing storage stay blocked.
 
 The [native dashboard Linux build trial](../coordination/native-acceptance/dashboard-builds.md) verified a Node build on ARM64, owner-only artifact download after VM cleanup and dashboard restart, failed builds, and cancellation. macOS build acceptance remains open.
 
+Administrators can run an installed model from the dashboard's **Models** page over the existing embedded inference API, see its output and observe cancellation and capacity release. Portable fixtures cover the flow; the [native trial](../coordination/native-acceptance/dashboard-models.md) could not run on 2026-11-19 because the designated Mac has no operator-installed model runtime.
+
 Existing portable tests cover many authority, reservation, command/session and recovery cases. They do not establish native simulator leasing, real model fit/cancellation, signing admission or GPU isolation. Preserve these distinctions in code and documentation.
 
 ## Acceptance before completion

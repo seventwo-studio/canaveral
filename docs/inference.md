@@ -36,6 +36,9 @@ can reconnect without the enrollment credential, as with VM-only hosts.
 
 ## Submit and inspect work
 
+Administrators can also run prompts from the dashboard's **Models** page; see
+[administrator model runs](dashboard.md#administrator-model-runs).
+
 Use the normal orchestrator administrator credential, or an administrator account
 session. Existing enrollment and host credentials cannot submit or inspect jobs.
 There is no new inference credential or separately exposed inference server.
