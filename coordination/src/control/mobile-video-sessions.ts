@@ -76,6 +76,9 @@ export class MobileVideoSessions implements ControlModule {
     if (old) { if (old.reason !== reason) throw new ServiceError('This video session was already abandoned with another reason.', 409); return present(db, r); }
     if (live.includes(r.state)) throw new ServiceError('Close the video session before abandoning its cleanup.', 409);
     if (r.cleaned) throw new ServiceError('This video session already has positive cleanup; no abandonment is needed.', 409);
+    // A runner may still be tearing the recorder down until the session deadline; its cleanup
+    // receipt must be able to arrive first.
+    if (this.store.clock() < r.deadline) throw new ServiceError('Wait until the video session deadline has passed before abandoning its cleanup.', 409, { retryable: true });
     const decidedBy = JSON.stringify({ kind: principal.kind, userId: principal.user?.id ?? null, username: principal.user?.username ?? null });
     db.prepare("INSERT INTO mobile_video_session_resolutions VALUES (?,'abandoned',?,?,?)").run(r.id, reason, decidedBy, this.store.clock());
     return present(db, r);

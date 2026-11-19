@@ -196,6 +196,9 @@ test('only an administrator abandons a closed, uncleaned video session; it unblo
   assert.throws(() => f.call('POST', abandon, body, f.other), status(404));
   assert.throws(() => f.call('POST', abandon, { reason: ' ' }, admin), status(400));
   assert.throws(() => f.call('POST', abandon, { ...body, extra: true }, admin), status(400));
+  // A closing runner may still report cleanup until the session deadline.
+  assert.throws(() => f.call('POST', abandon, body, admin), refused(/deadline has passed/));
+  f.advance(3600);
   const record = f.call('POST', abandon, body, admin), resolution = object(record.resolution);
   assert.equal(record.cleaned, false); assert.equal(resolution.decision, 'abandoned'); assert.equal(resolution.reason, body.reason);
   assert.deepEqual(resolution.decidedBy, { kind: 'token', userId: admin.user!.id, username: 'admin' });
@@ -216,8 +219,19 @@ test('positive cleanup needs no abandonment, and a later receipt still records c
   f.call('POST', finish, { generation: session.generation, cleaned: true }, undefined, f.hostToken);
   assert.throws(() => f.call('POST', abandon, body, admin), refused(/positive cleanup/));
   const other = fixture(t), second = other.create(); other.attach(second, 'host'); other.attach(second, 'consumer'); other.call('POST', `${other.path}/${second.id}/close`);
+  other.advance(3600);
   other.call('POST', `${other.path}/${second.id}/abandon`, body, admin);
   const late = other.call('POST', `/v1/hosts/${other.host}/video-sessions/${second.id}/finish`, { generation: second.generation, cleaned: true }, undefined, other.hostToken);
   assert.equal(late.cleaned, true); assert.equal(object(late.resolution).decision, 'abandoned');
   other.start(); assert.equal(other.create().state, 'pending', 'positive cleanup admits the next capture');
+});
+
+test('an operator may abandon after the deadline; a non-owner user with the admin scope sees not-found', t => {
+  const f = fixture(t), session = f.create(); f.attach(session, 'host'); f.attach(session, 'consumer');
+  const abandon = `${f.path}/${session.id}/abandon`, body = { reason: 'Operator recovery after an unconfirmed recorder stop.' };
+  f.call('POST', `${f.path}/${session.id}/close`); f.advance(3600);
+  const userWithAdminScope: Principal = { kind: 'token', user: { id: randomUUID(), username: 'scoped', role: 'user', status: 'active' }, scopes: ['admin', 'machines:access'] };
+  assert.throws(() => f.call('POST', abandon, body, userWithAdminScope), status(404));
+  const operator: Principal = { kind: 'operator', user: null, scopes: [] };
+  assert.deepEqual(object(f.call('POST', abandon, body, operator).resolution).decidedBy, { kind: 'operator', userId: null, username: null });
 });

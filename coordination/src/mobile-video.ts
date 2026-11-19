@@ -104,6 +104,9 @@ export async function serveMobileVideo(channel: SessionChannel, source: NativePi
     await Promise.race([pumping, failure]);
     if (await pipe.wait(5000) !== 0 || !envelope.complete()) throw new ServiceError('Video encoder did not complete an MP4 stream.', 409);
     await pipe.close(); check();
+    // The viewer may acknowledge only after finish. Do not rely on the broker alone (an older
+    // controller relays early messages): anything already buffered now is an early ack.
+    if (await channel.receive(0) !== null) throw new ServiceError('The viewer sent a message before the recording finished.', 409);
     await channel.sendControl({ type: 'finish', bytes, sha256: hash.digest('hex'), cleaned: true });
     const ack = await channel.receive(30); check();
     if (!ack || ack instanceof Uint8Array || Object.keys(ack).join(',') !== 'type' || ack.type !== 'ack') throw new ServiceError('Video completion was not acknowledged.', 409);

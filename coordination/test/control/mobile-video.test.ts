@@ -15,6 +15,12 @@ function box(type: string, data = Buffer.alloc(0)): Buffer { const b = Buffer.al
 const mp4 = Buffer.concat([box('ftyp', Buffer.from('isom0000')), box('moov'), box('moof'), box('mdat', Buffer.from('encoded-native-samples'))]);
 const metadata = { type: 'video', mediaType: 'video/mp4', codec: 'avc1', fps: 30 };
 const finish = { type: 'finish', bytes: mp4.length, sha256: createHash('sha256').update(mp4).digest('hex'), cleaned: true };
+/** A viewer that acknowledges only after the host's finish, as the protocol requires. */
+function viewer(controls: Record<string, unknown>[], output?: Buffer[]): SessionChannel {
+  let finished = false;
+  return { sessionId: randomUUID(), async sendControl(value) { controls.push(value); if (value.type === 'finish') finished = true; },
+    async sendBytes(bytes) { output?.push(Buffer.from(bytes)); }, async receive() { return finished ? { type: 'ack' } : null; }, close() {} } as SessionChannel;
+}
 class Wire implements SessionChannel {
   readonly sessionId = randomUUID();
   queue: Array<SessionMessage | null> = [metadata];
@@ -36,7 +42,7 @@ function pipe(parts: Uint8Array[], exit = 0): NativePipe & { closes: number; end
 
 test('native video pipeline pumps H264 to bounded fMP4 and finishes only after both processes complete', async () => {
   const source = pipe([Buffer.from('native-h264')]), encoder = pipe([mp4.subarray(0, 17), mp4.subarray(17)]), controls: Record<string, unknown>[] = [], output: Buffer[] = [];
-  await serveMobileVideo({ async sendControl(value) { controls.push(value); }, async sendBytes(bytes) { output.push(Buffer.from(bytes)); }, async receive() { return { type: 'ack' }; }, close() {} }, source,
+  await serveMobileVideo(viewer(controls, output), source,
     async argv => { assert.deepEqual(argv, videoEncoderArguments('/opt/ffmpeg', options)); return encoder; }, '/opt/ffmpeg', options, () => true);
   assert.deepEqual(Buffer.concat(encoder.input), Buffer.from('native-h264')); assert.equal(encoder.ends, 1);
   assert.deepEqual(Buffer.concat(output), mp4); assert.deepEqual(controls, [metadata, finish]); assert.ok(source.closes >= 1); assert.ok(encoder.closes >= 1);
@@ -45,7 +51,7 @@ test('native video pipeline pumps H264 to bounded fMP4 and finishes only after b
 test('native capture/encoder failures and revoked authorization never emit successful completion', async () => {
   for (const [sourceExit, encoderExit] of [[1,0],[0,1]]) {
     const source = pipe([Buffer.from('h264')], sourceExit), encoder = pipe([mp4], encoderExit), controls: Record<string, unknown>[] = [];
-    await assert.rejects(serveMobileVideo({ async sendControl(value) { controls.push(value); }, async sendBytes() {}, async receive() { return { type: 'ack' }; }, close() {} }, source, async () => encoder, '/opt/ffmpeg', options, () => true));
+    await assert.rejects(serveMobileVideo(viewer(controls), source, async () => encoder, '/opt/ffmpeg', options, () => true));
     assert.ok(!controls.some(value => value.type === 'finish')); assert.ok(source.closes); assert.ok(encoder.closes);
   }
   const source = pipe([]); await assert.rejects(serveMobileVideo({ async sendControl() {}, async sendBytes() {}, async receive() { return null; }, close() {} }, source, async () => { throw new Error('must not spawn'); }, '/opt/ffmpeg', options, () => false)); assert.ok(source.closes);
@@ -185,7 +191,7 @@ test('a static screen may stay silent until the capture deadline, not a fixed 30
   const source = pipe([Buffer.from('h264')]), encoder = pipe([mp4]);
   const read = (target: typeof source) => { const original = target.read.bind(target); target.read = async (maximum, timeoutMs) => { waits.push(timeoutMs); return original(maximum, timeoutMs); }; };
   read(source); read(encoder);
-  await serveMobileVideo({ async sendControl() {}, async sendBytes() {}, async receive() { return { type: 'ack' }; }, close() {} }, source, async () => encoder, '/opt/ffmpeg', long, () => true);
+  await serveMobileVideo(viewer([]), source, async () => encoder, '/opt/ffmpeg', long, () => true);
   assert.ok(waits.length >= 2); for (const wait of waits) assert.ok(wait > 60000 && wait <= MAX_VIDEO_READ_MS, `read wait ${wait} ms is bounded by the 70 s capture deadline`);
 });
 
@@ -210,4 +216,13 @@ test('broker refuses a video acknowledgement before the host finish', { timeout:
   await host.sendControl(metadata); assert.deepEqual(await consumer.receive(2), metadata);
   await consumer.sendControl({ type: 'ack' });
   await assert.rejects(host.receive(2)); assert.equal(disconnected, true);
+});
+
+test('the runner refuses an acknowledgement buffered before its finish, even if a broker relayed it', async () => {
+  const source = pipe([Buffer.from('native-h264')]), encoder = pipe([mp4]), controls: Record<string, unknown>[] = [];
+  // An older broker may relay a viewer ack during capture; it would be read after finish.
+  const early: SessionChannel = { sessionId: randomUUID(), async sendControl(value) { controls.push(value); }, async sendBytes() {},
+    async receive() { return { type: 'ack' }; }, close() {} };
+  await assert.rejects(serveMobileVideo(early, source, async () => encoder, '/opt/ffmpeg', options, () => true), /before the recording finished/);
+  assert.ok(!controls.some(value => value.type === 'finish'), 'no completion is claimed');
 });

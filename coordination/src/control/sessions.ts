@@ -308,13 +308,13 @@ class SocketPeer {
   private writer: Promise<void> = Promise.resolve();
   private queued = 0;
   private controlQueued = 0;
-  private lastPong = Date.now();
+  private lastFrame = Date.now();
   private lastPing = Date.now();
   private timer: NodeJS.Timeout;
   constructor(readonly socket: Duplex, readonly server = true, heartbeat: SessionHeartbeat = SESSION_HEARTBEAT) {
     socket.on("error", () => {});
     this.timer = setInterval(() => {
-      if (Date.now() - this.lastPong >= heartbeat.timeoutMs) { this.close(); return; }
+      if (Date.now() - this.lastFrame >= heartbeat.timeoutMs) { this.close(); return; }
       if (!this.controlQueued && Date.now() - this.lastPing >= heartbeat.intervalMs) {
         this.lastPing = Date.now(); void this.send(Buffer.from("canaveral"), 9).catch(() => this.close());
       }
@@ -391,7 +391,7 @@ class SocketPeer {
         if (size + length > (kind === 1 ? MAX_CONTROL_BYTES : MAX_BINARY_BYTES)) throw new ServiceError("Session message exceeds its budget.", 400);
       }
       const mask = this.server ? await this.read(4) : undefined, data = await this.read(length);
-      this.lastPong = Date.now();
+      this.lastFrame = Date.now();
       if (mask) for (let i = 0; i < length; i++) data[i] = data[i]! ^ mask[i % 4]!;
       if (opcode === 8) return null;
       if (opcode === 9) { await this.send(data, 10); continue; }
@@ -513,9 +513,10 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
 }
 
 /** Bounded raw-socket client, with default TLS verification and no automatic reconnect.
- * It always keeps exactly one bounded read outstanding, so peer pings are answered while the
- * caller is only sending, for example during a native capture. At most one received message
- * waits for `receive()`; TCP backpressure applies beyond it. */
+  * It keeps one bounded read outstanding, so peer pings are answered while the caller is only
+ * sending, for example during a native capture. At most one received message waits for
+ * `receive()`; once it waits, TCP backpressure applies and pings are answered again only after
+ * the caller reads it. Video channels read nothing during capture, so their slot stays empty. */
 export class SessionConnection implements SessionChannel {
   private pending: Promise<SessionMessage> | undefined;
   private failure: ServiceError | undefined;

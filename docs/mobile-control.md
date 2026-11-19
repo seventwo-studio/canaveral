@@ -310,7 +310,10 @@ Recover in this order:
    cancellation: `POST /v1/machines/{machine}/video-sessions/{id}/abandon` with
    `{reason}` (1–1000 characters). This needs administrator authority, because
    it accepts unproven native cleanup. The machine owner receives 403 and other
-   accounts 404. The session must already be closed. The decision is append-only
+   accounts 404. The session must already be closed, and its authorization
+   deadline (`authorizationDeadline`) must have passed, so a runner that is still
+   tearing the recorder down can report cleanup first. An earlier request returns
+   a retryable conflict. The decision is append-only
    and stores the reason, the deciding principal (`kind`, `userId`, `username`)
    and the time in `resolution`. Repeating the same reason returns the saved
    decision, so a lost response is safe to retry; a different reason, a live
