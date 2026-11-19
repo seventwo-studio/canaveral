@@ -23,7 +23,7 @@ for binary in /usr/bin/Xtigervnc /usr/bin/xfce4-session /usr/bin/xfce4-terminal 
 done
 ls /usr/lib/*/libatspi.so.0 >/dev/null
 # Smoke-start the same X server the guest service uses, on a private display.
-/usr/bin/Xtigervnc :9 -geometry 64x64 -depth 24 -SecurityTypes None -localhost yes -rfbport -1 &
+/usr/bin/Xtigervnc :9 -geometry 1440x900 -depth 24 -SecurityTypes None -localhost yes &
 server=$!
 ready=false
 for attempt in $(seq 1 50); do
