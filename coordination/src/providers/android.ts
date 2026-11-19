@@ -86,8 +86,8 @@ export class AndroidProvider extends MobileProvider {
     for (const line of lines.slice(1)) { const parts = line.trim().split(/\s+/); if (parts.length >= 2) result[parts[0]!] = parts[1]!; }
     return result;
   }
-  async owned(machine: RecordValue, serial: string): Promise<void> {
-    if ((await this.adb(serial, ["emu", "avd", "name"])).split(/\r?\n/)[0] !== this.name(machine)) throw new ServiceError("Android serial belongs to another AVD; refusing control.");
+  async owned(machine: RecordValue, serial: string, options: Partial<RunOptions> = {}): Promise<void> {
+    if ((await this.adb(serial, ["emu", "avd", "name"], options)).split(/\r?\n/)[0] !== this.name(machine)) throw new ServiceError("Android serial belongs to another AVD; refusing control.");
   }
   async endpoint(machine: RecordValue, storage: string, check: Authorized = () => true): Promise<string | undefined> {
     await authorized(check);
@@ -317,8 +317,9 @@ export class AndroidProvider extends MobileProvider {
     if (!launch || launch.version !== 2 || launch.fingerprint !== digest(this.binding(machine, image))) return undefined;
     return { startedAt: launch.startedAt, identity: digest(launch) };
   }
-  openVideo(machine: RecordValue, image: RecordValue, folder: string, options: AndroidVideoOptions, check: Authorized): Promise<NativePipe> {
-    return openAndroidVideo(this, machine, image, folder, options, check);
+  /** cleanupCheck is the assignment authority under which an early-cancelled recorder may be stopped. */
+  openVideo(machine: RecordValue, image: RecordValue, folder: string, options: AndroidVideoOptions, check: Authorized, cleanupCheck?: Authorized): Promise<NativePipe> {
+    return openAndroidVideo(this, machine, image, folder, options, check, cleanupCheck);
   }
   override async control(machine: RecordValue, image: RecordValue, folder: string, input: DeviceRequest): Promise<RecordValue> {
     this.executionAllowed(machine);

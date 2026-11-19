@@ -61,7 +61,7 @@ The controller confirmed deletion of each machine while its uncleaned video sess
 ## Open
 
 - iOS recording: idb's stop exits 1 under Python 3.14, so no iOS MP4 has been produced. The options are an idb runtime that exits 0 after SIGINT, an upstream fix, or a reviewed provider change to its stop proof. Each is a separate decision. This trial does not change the provider.
-- Android: positive cleanup after early cancellation (leaving the page, cancel or failure), and with it reservation release on that path.
+- ~~Android: positive cleanup after early cancellation~~: fixed for Cancel and leaving the page and natively verified on 19 November 2026 in the [recording cleanup trial](dashboard-android-recording-cleanup.md). Failure paths share the same cleanup but were not provoked natively.
 - Leaving the page natively: which of the unload keepalive close or the socket close ended the session.
 - ~~Session liveness during capture~~: fixed and natively verified on 19 November 2026 in the [video lifecycle trial](dashboard-mobile-video-lifecycle.md).
 - Recorded duration versus requested duration on Android; iOS pacing is unmeasured.

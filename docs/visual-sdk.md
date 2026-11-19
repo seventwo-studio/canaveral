@@ -96,8 +96,10 @@ is at most 64 KiB. The SDK's byte budget can be smaller; read and sink-write
 timeouts default to 30 seconds. Both sides apply backpressure. Native sources own
 finite termination; an additional ten-second exit grace ends in failure if they
 cannot stop. Positive source/encoder completion and cleanup are required before
-the host reports a complete recording. Android cancellation can leave remote
-capture termination uncertain, retaining its reservation for inspection.
+the host reports a complete recording. After an Android cancellation the runner
+stops and confirms the exact guest recorder it started; when that cannot be proven,
+for example on an unreachable device, the session keeps its reservation for
+inspection. See [Android recorder cleanup](mobile-control.md#android-recorder-cleanup-after-early-cancellation).
 
 Each session is a single capture attempt. Disconnects never reconnect or roll
 over to a new capture automatically. Persist the UUID before creation, inspect

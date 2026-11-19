@@ -82,7 +82,7 @@ interface Runtime extends NativeProvider {
   operate?(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, authorized?: () => boolean, handler?: (request: import('./providers/mobile.ts').DeviceRequest) => Promise<RecordValue>): Promise<RecordValue>;
   installArtifact?(machine: RecordValue, image: RecordValue, folder: string, source: import('./providers/mobile.ts').Download, sha256: string, authorized: () => boolean): Promise<RecordValue>;
   inspectInstall?(machine: RecordValue, image: RecordValue, args: RecordValue): Promise<RecordValue>;
-  openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
+  openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean, cleanupAuthorized?: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
   pipe?(argv: readonly string[]): Promise<import('./providers/mobile.ts').NativePipe>;
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
@@ -800,7 +800,11 @@ export class HostRunner {
       }
       const options = { fps: 30 as const, durationSeconds: Number(job.durationSeconds), bitRate: Number(job.bitRate) };
       captureStarted = true;
-      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized());
+      // Capture ends with the session; stopping an early-cancelled recorder needs only the assignment,
+      // and only the same assignment that started the capture (fingerprint and lease unchanged).
+      const capturedAssignment = assignmentFingerprint(machine), capturedLease = JSON.stringify(machine.lease ?? null);
+      const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && JSON.stringify(current.lease ?? null) === capturedLease; };
+      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
       await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), positive => { cleaned = positive; });
       cleaned = true;
     } catch {
