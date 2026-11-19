@@ -73,6 +73,31 @@ private struct BootstrapDevice: GuestDesktopDevice {
         let legacy = await bridge.handle(.init(method: "GET", target: "/v1/identity", headers: ["authorization": "Bearer " + bootstrap.credential], body: Data()))
         XCTAssertEqual(legacy.status, 401)
     }
+    func testUnleasedDesktopLaunchIsScopedToItsMachine() throws {
+        let rawRoot = FileManager.default.temporaryDirectory.appendingPathComponent("LaunchScope-\(UUID())")
+        try FileManager.default.createDirectory(at: rawRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let canonical = try XCTUnwrap(realpath(rawRoot.path, nil)); defer { free(canonical) }
+        let root = URL(fileURLWithPath: String(cString: canonical))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let boot = root.appendingPathComponent("guest-bootstrap"), bytes = Data(repeating: 0, count: 32768)
+        try FileManager.default.createDirectory(at: boot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let path = boot.appendingPathComponent("launch.iso"); try bytes.write(to: path); try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: path.path)
+        let machine = Machine(name: "fixture", os: .macOS, cpuCount: 2, memoryGiB: 4, diskGiB: 8)
+        XCTAssertNil(machine.executionLeaseID)
+        let metadata = try FileManager.default.attributesOfItem(atPath: path.path), launch = UUID().uuidString.lowercased()
+        func pin(scope: UUID) throws -> LaunchMediaPin {
+            let raw: [String: Any] = ["path": path.path, "size": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "uid": getuid(), "mode": 256, "nlink": 1, "dev": String((metadata[.systemNumber] as! NSNumber).uint64Value), "ino": String((metadata[.systemFileNumber] as! NSNumber).uint64Value), "version": 2, "machineId": machine.id.uuidString.lowercased(), "leaseId": scope.uuidString.lowercased(), "fingerprint": String(repeating: "a", count: 64), "launchId": launch]
+            return try JSONDecoder().decode(LaunchMediaPin.self, from: JSONSerialization.data(withJSONObject: raw))
+        }
+        let directory = root.appendingPathComponent(machine.id.uuidString)
+        XCTAssertNoThrow(try ValidatedLaunchMedia(pin: pin(scope: machine.id), machine: machine, directory: directory, launch: launch))
+        // Any other scope, or a headless machine, cannot adopt the media.
+        XCTAssertThrowsError(try ValidatedLaunchMedia(pin: pin(scope: UUID()), machine: machine, directory: directory, launch: launch))
+        var server = machine; server.mode = .server
+        XCTAssertThrowsError(try ValidatedLaunchMedia(pin: pin(scope: machine.id), machine: server, directory: directory, launch: launch))
+        var leased = machine; leased.executionLeaseID = UUID()
+        XCTAssertThrowsError(try ValidatedLaunchMedia(pin: pin(scope: machine.id), machine: leased, directory: directory, launch: launch))
+    }
     func testTypedNativeAttachmentRevalidatesAfterAttachment() throws {
         let rawRoot = FileManager.default.temporaryDirectory.appendingPathComponent("LaunchPin-\(UUID())")
         try FileManager.default.createDirectory(at: rawRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

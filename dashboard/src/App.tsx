@@ -46,7 +46,21 @@ interface CreateConfig {
   templates: GroupedImage[];
   selected?: GroupedImage;
   returnFocus: Element | null;
+  /** Desktop launch asks only for a name, a desktop image and its size. */
+  desktop?: boolean;
 }
+/** Images that boot an interactive desktop the viewer can open: the host must
+ * provide owned guest access, which carries the display. Linux desktops are
+ * prepared over SSH; macOS desktops run their own per-launch guest helper. */
+const desktopImage = (t: {
+  os: string;
+  mode: string;
+  arch: string;
+  guestAccess?: boolean;
+}) =>
+  t.mode === "desktop" &&
+  t.guestAccess === true &&
+  (t.os === "linux" || (t.os === "macos" && t.arch === "arm64"));
 interface CreateSpec {
   id: string;
   name: string;
@@ -75,6 +89,7 @@ import {
   RefreshCw,
   Orbit,
   CircleAlert,
+  Monitor,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -116,6 +131,7 @@ import { WorkspacePreviews } from "@/components/workspace-previews";
 import { ModelRuns } from "@/components/model-runs";
 import { BaseImageRegistry } from "@/components/image-registry";
 import { MachinePowerOff } from "@/components/machine-power";
+import { MachineDelete } from "@/components/machine-delete";
 import {
   ImageImport,
   ImageCapture,
@@ -328,6 +344,11 @@ export function App() {
       infrastructureKind(h) ===
       (view === "orchestrators" ? "orchestrator" : "host"),
   );
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const deleting = useRef(new Map<string, string>());
+  // One deletion request UUID per machine, kept across dialog reopenings so an
+  // unconfirmed request is always checked or retried under its original ID.
+  const deleteIntents = useRef(new Map<string, string>());
   const [create, setCreate] = useState<CreateConfig | null>(null),
     [detailId, setDetailId] = useState<string | null>(null),
     [stop, setStop] = useState<Machine | null>(null);
@@ -356,6 +377,9 @@ export function App() {
     setRegistryOpen(false);
     setBlueprintSource(null);
     setPowerOffId(null);
+    setDeleteId(null);
+    deleting.current.clear();
+    deleteIntents.current.clear();
     setCaptureId(null);
     setStop(null);
     setLoaded(false);
@@ -483,6 +507,17 @@ export function App() {
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
+  // A requested deletion is reported only once the controller stops listing the
+  // machine, which happens after the host's owned-removal receipt is complete.
+  useEffect(() => {
+    if (!loaded || stale) return;
+    for (const [id, name] of deleting.current)
+      if (!inventory.machines.some((m) => m.id === id)) {
+        deleting.current.delete(id);
+        deleteIntents.current.delete(id);
+        setMessage(`${name} deleted. The host confirmed removal.`);
+      }
+  }, [inventory, loaded, stale]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (acting.current || !["setup", "login"].includes(auth)) return;
@@ -586,13 +621,18 @@ export function App() {
       );
   }
   const templates = templatesFor(inventory.templates);
-  function openCreate(t?: GroupedImage) {
+  function openCreate(t?: GroupedImage, desktop = false) {
     if (!busy) {
       setActionError("");
       setCreate({
-        templates: t?.blueprintId ? [t] : templates.filter(eligible),
+        templates: t?.blueprintId
+          ? [t]
+          : templates.filter(
+              (item) => eligible(item) && (!desktop || desktopImage(item)),
+            ),
         selected: t,
         returnFocus: document.activeElement,
+        desktop,
       });
     }
   }
@@ -648,6 +688,7 @@ export function App() {
         hostName(m.hostId),
         m.template.os,
         m.template.arch,
+        m.template.mode,
         ownerLabel(m, directory.data ?? []),
       ]) &&
       (user.role !== "admin" ||
@@ -967,6 +1008,17 @@ export function App() {
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    {view === "machines" && (
+                      <Button
+                        variant="outline"
+                        className="max-sm:size-8 max-sm:px-0"
+                        onClick={() => openCreate(undefined, true)}
+                        disabled={busy}
+                      >
+                        <Monitor />
+                        <span className="max-sm:sr-only">Launch desktop</span>
+                      </Button>
+                    )}
                     {view === "templates" && user.role === "admin" && (
                       <Button
                         variant="outline"
@@ -1001,13 +1053,20 @@ export function App() {
                       disabled={busy}
                     >
                       {view === "templates" ? <ArrowUpRight /> : <Plus />}
-                      {isInfrastructure
-                        ? view === "orchestrators"
-                          ? "Add orchestrator"
-                          : "Add host"
-                        : view === "templates"
-                          ? "Machine blueprints"
-                          : "Create machine"}
+                      {isInfrastructure ? (
+                        view === "orchestrators" ? (
+                          "Add orchestrator"
+                        ) : (
+                          "Add host"
+                        )
+                      ) : view === "templates" ? (
+                        "Machine blueprints"
+                      ) : (
+                        <>
+                          Create
+                          <span className="max-sm:sr-only"> machine</span>
+                        </>
+                      )}
                     </Button>
                   </div>
                 </div>
@@ -1239,6 +1298,10 @@ export function App() {
                       operationTrigger.current = trigger;
                       setPowerOffId(id);
                     }}
+                    onDelete={(id, trigger) => {
+                      operationTrigger.current = trigger;
+                      setDeleteId(id);
+                    }}
                   />
                 ) : isInfrastructure ? (
                   <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
@@ -1293,6 +1356,28 @@ export function App() {
           onRefresh={refresh}
         />
       )}
+      {deleteId && inventory.machines.some((m) => m.id === deleteId) && (
+        <MachineDelete
+          machine={inventory.machines.find((m) => m.id === deleteId)!}
+          requestId={(() => {
+            const id = deleteId;
+            if (!deleteIntents.current.has(id))
+              deleteIntents.current.set(id, crypto.randomUUID());
+            return deleteIntents.current.get(id)!;
+          })()}
+          returnFocus={operationTrigger.current}
+          onClose={() => setDeleteId(null)}
+          onRequested={async (receipt) => {
+            const name =
+              inventory.machines.find((m) => m.id === receipt.machineId)
+                ?.name ?? "Machine";
+            if (receipt.state === "complete")
+              setMessage(`${name} deleted. The host confirmed removal.`);
+            else deleting.current.set(receipt.machineId, name);
+            await refresh();
+          }}
+        />
+      )}
       {registryOpen && (
         <BaseImageRegistry
           hosts={inventory.hosts}
@@ -1331,7 +1416,9 @@ export function App() {
               "machines",
               spec,
               (m) =>
-                `${m.name} assigned to ${hostName(m.hostId)}. Waiting for the host to report its state.`,
+                create.desktop
+                  ? `${m.name} is starting on ${hostName(m.hostId)}. Open its desktop with Control once it shows Ready.`
+                  : `${m.name} assigned to ${hostName(m.hostId)}. Waiting for the host to report its state.`,
               true,
             )
           }
@@ -1586,9 +1673,13 @@ function CreateMachine({
         }}
       >
         <DialogHeader>
-          <DialogTitle>Create a machine</DialogTitle>
+          <DialogTitle>
+            {config.desktop ? "Launch a desktop" : "Create a machine"}
+          </DialogTitle>
           <DialogDescription className="sr-only">
-            Choose a source, resources and placement.
+            {config.desktop
+              ? "Choose a desktop image and its size."
+              : "Choose a source, resources and placement."}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} onChange={changed} className="space-y-6">
@@ -1600,7 +1691,11 @@ function CreateMachine({
                   id="machine-name"
                   name="name"
                   maxLength={100}
-                  placeholder="e.g. development-workspace"
+                  placeholder={
+                    config.desktop
+                      ? "e.g. review-desktop"
+                      : "e.g. development-workspace"
+                  }
                   autoComplete="off"
                   required
                   autoFocus
@@ -1610,9 +1705,11 @@ function CreateMachine({
                 <FieldLabel htmlFor="machine-template">
                   {template?.blueprintId
                     ? "Machine blueprint"
-                    : template?.os === "ios"
-                      ? "iOS simulator template"
-                      : "Base image"}
+                    : config.desktop
+                      ? "Desktop image"
+                      : template?.os === "ios"
+                        ? "iOS simulator template"
+                        : "Base image"}
                 </FieldLabel>
                 <Select
                   value={index}
@@ -1646,6 +1743,13 @@ function CreateMachine({
                     Minimum {template.minimum.cpu} vCPU,{" "}
                     {memory(template.minimum.memoryMiB)},{" "}
                     {template.minimum.diskGiB} GiB disk
+                  </FieldDescription>
+                )}
+                {config.desktop && template?.os === "macos" && (
+                  <FieldDescription>
+                    A macOS desktop boots once with its own guest credential,
+                    valid for two days. After you stop it or the credential
+                    expires, delete it and launch a new one.
                   </FieldDescription>
                 )}
               </Field>
@@ -1688,34 +1792,41 @@ function CreateMachine({
                       </Field>
                     ))}
                   </FieldGroup>
-                  <Field>
-                    <FieldLabel htmlFor="placement">Placement</FieldLabel>
-                    <Select
-                      value={placement}
-                      onValueChange={(v) => {
-                        setPlacement(v);
-                        changed();
-                      }}
-                      disabled={busy}
-                    >
-                      <SelectTrigger id="placement" className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="automatic">
-                          Automatic · any eligible host
-                        </SelectItem>
-                        {template.hosts
-                          .filter((h) => h.online && h.accepting)
-                          .map((h) => (
-                            <SelectItem key={h.id} value={h.id}>
-                              {hostName(h.id)}
-                            </SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
+                  {!config.desktop && (
+                    <Field>
+                      <FieldLabel htmlFor="placement">Placement</FieldLabel>
+                      <Select
+                        value={placement}
+                        onValueChange={(v) => {
+                          setPlacement(v);
+                          changed();
+                        }}
+                        disabled={busy}
+                      >
+                        <SelectTrigger id="placement" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="automatic">
+                            Automatic · any eligible host
+                          </SelectItem>
+                          {template.hosts
+                            .filter((h) => h.online && h.accepting)
+                            .map((h) => (
+                              <SelectItem key={h.id} value={h.id}>
+                                {hostName(h.id)}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  )}
                 </>
+              ) : config.desktop ? (
+                <Notice>
+                  No online accepting host offers a desktop image yet. Add a
+                  Linux or macOS desktop image to a host to launch one.
+                </Notice>
               ) : (
                 <Notice>
                   No online accepting host offers an image yet. Register or
@@ -1735,7 +1846,15 @@ function CreateMachine({
               Cancel
             </Button>
             <Button type="submit" disabled={!template || busy}>
-              {busy ? "Creating…" : retry ? "Retry request" : "Create machine"}
+              {busy
+                ? config.desktop
+                  ? "Launching…"
+                  : "Creating…"
+                : retry
+                  ? "Retry request"
+                  : config.desktop
+                    ? "Launch desktop"
+                    : "Create machine"}
               <ArrowUpRight />
             </Button>
           </DialogFooter>

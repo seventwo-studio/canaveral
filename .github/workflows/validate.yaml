@@ -284,6 +284,8 @@ jobs:
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 26
           swift build --package-path VirtualMachines --jobs 2
           swift test --package-path VirtualMachines --jobs 2 --filter 'DirectBoot|SerialConsoleTests|GuestAssignmentTests|GuestBootstrapTests|GuestTLSTests'
+          # Packaging check for the macOS desktop guest bundle (ad-hoc signed; images need a stable identity).
+          CANAVERAL_SWIFT_CONFIGURATION=debug bash tools/macos-image/build-guest-app.sh --adhoc "$RUNNER_TEMP/macos-guest"
           npm ci --prefix coordination
           npm run build --prefix coordination
           node script/check_guest_bootstrap.mjs

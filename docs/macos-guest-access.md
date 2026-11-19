@@ -88,7 +88,7 @@ legacy helper input is never a fallback for missing stream ownership.
 The resolver is an internal integration seam, not a completed transport or public
 configuration option. No production provider binds it yet. `guestAccess` image
 admission remains Linux-only, and ordinary runners still refuse consumer lease
-execution. These changes do not admit macOS images or grant host enrollment.
+execution. These changes do not admit macOS images or grant host enrollment. (Superseded on 2026-11-19 for Apple-silicon macOS desktops; see [unleased dashboard desktops](#unleased-dashboard-desktops).)
 
 Fixtures exercise common upload/download, accessibility transfer, RFB/semantic
 input, distinct terminals, authorization changes, explicit cleanup, malformed
@@ -198,14 +198,14 @@ unconfirmed after revocation.
 The helper cannot independently learn host-side revocation. This protocol does
 not enforce native permissions, readiness, lease deadlines, cancellation, owned
 cleanup, disk erasure or capture/clone acceptance. Production resolver/transport, native launch delivery acceptance, tenant isolation, endpoint discovery and those native lifecycle gates remain open.
-`guestAccess` admission remains Linux-only. Portable protocol verification does
+`guestAccess` admission remains Linux-only. (Superseded on 2026-11-19 for Apple-silicon macOS desktops; see [unleased dashboard desktops](#unleased-dashboard-desktops).) Portable protocol verification does
 not establish usable or accepted macOS workspace delivery.
 
 ## Owned assignment delivery (ST-594)
 
 The Apple provider's internal leased macOS path now constructs launch media under
 its assignment/provider lock before native preparation and boot dispatch. This
-path does not enable macOS admission: `guestAccess` remains Linux-only. Production
+path does not enable macOS admission: `guestAccess` remains Linux-only. (Superseded on 2026-11-19 for Apple-silicon macOS desktops; see [unleased dashboard desktops](#unleased-dashboard-desktops).) Production
 transport and resolver selection remain separate work. AssignedGuest now has the private TLS listener described below; this does not
 resolve a guest route or connect the production host access path.
 
@@ -456,4 +456,47 @@ to the disposable localhost listener. It establishes no native NAT reachability,
 firewall/permission/Keychain/OS-profile compatibility, getifaddrs behavior,
 TCC/automount/timing/readiness, independent lifecycle/erasure, capture/clone/template
 qualification or workspace acceptance. Linux-only guestAccess and ordinary host
-execution admission remain closed.
+execution admission remain closed. (Superseded on 2026-11-19 for Apple-silicon macOS desktops; see [unleased dashboard desktops](#unleased-dashboard-desktops).)
+
+## Unleased dashboard desktops
+
+**Launch desktop** creates an ordinary machine owned by its dashboard account,
+with no execution lease. The local TypeScript host still refuses lease execution.
+A macOS image with `guestAccess: true` therefore uses the same per-launch media,
+TLS identity, v2 challenge and owned resolver as leased work, scoped to the
+machine instead of a lease. Template admission accepts `guestAccess` for
+Apple-silicon macOS desktops; Windows, headless macOS and imported macOS media
+remain refused.
+
+- The assignment tuple's `leaseId` carries the machine ID. The provider derives
+  it from the assignment, so a receipt cannot be read as another machine's or as
+  a leased assignment's. Native `machine.json` keeps `executionLeaseID` null.
+  `LaunchMediaPin.validate` accepts the machine ID as the scope only for an
+  unleased macOS desktop machine. A leased machine still requires its lease ID.
+- Without a lease there is no lease deadline guard, watch or fence. Authority is
+  the host's ordinary assignment check (`desired: running`, no deletion, fresh
+  contact). Stop and deletion use the existing positive stop proof and owned
+  removal, including the bootstrap handle checks.
+- Media is built once per machine. After a stop, the consumed launch cannot be
+  relaunched; the machine reports `unknown` with "relaunch is blocked". Delete it
+  and launch a new desktop. A fresh launch identity for a restart is not
+  implemented.
+- The host reports guest connection readiness without a preparation recipe.
+  The machine becomes **Ready** after the resolver verifies the helper's pinned
+  identity and the helper returns one well-formed display frame. That probe is a
+  read: it claims and resets no input. A verified binding is probed again after
+  30 seconds, so Ready drops within about that time once the helper stops or
+  returns no frame. Resolver failures report a generic waiting detail.
+- The per-launch certificate expires two days after the media is built. An
+  unleased desktop has no lease deadline, so this is its access lifetime: after
+  it the binding fails and the desktop must be deleted and launched again.
+- Until the helper answers, every host poll attempts a resolution, bounded by
+  the 1-second process probe and the TLS handshake timeout. A guest that drops
+  packets can therefore delay other machines' reconciliation on a host with
+  little concurrency. This is unmeasured.
+
+Portable tests cover the machine-scoped receipt, pin and native validation, the
+refusal of unleased macOS without guest access, resolution through injected TLS,
+and frame-based readiness. The guest image is operator-supplied; see
+[macOS desktop image](macos-desktop-image.md). No macOS guest has booted through
+this path yet ([trial record](../coordination/native-acceptance/dashboard-desktop-macos.md)).

@@ -1,6 +1,7 @@
 /** Administrative dashboard shapes, separate from consumer lease admission. */
 export interface MachineStatusInput {
   ready?: boolean;
+  deletion?: { id: string; state: string };
   observed: string;
   preparation: { state: string };
 }
@@ -13,6 +14,32 @@ export interface PowerOffReceipt {
   id: string;
   machineId: string;
   state: "queued" | "unknown" | "succeeded";
+}
+/** Controller deletion intent. `complete` means the host confirmed owned removal. */
+export interface DeletionReceipt {
+  id: string;
+  machineId: string;
+  state: "queued" | "running" | "blocked" | "complete";
+}
+export const deletionStates = ["queued", "running", "blocked", "complete"];
+export function deletionReceipt(
+  value: unknown,
+  expected?: Pick<DeletionReceipt, "id" | "machineId">,
+): DeletionReceipt {
+  const receipt = record(value);
+  if (
+    typeof receipt.id !== "string" ||
+    typeof receipt.machineId !== "string" ||
+    typeof receipt.state !== "string" ||
+    !deletionStates.includes(receipt.state)
+  )
+    throw new Error("Invalid deletion receipt.");
+  if (
+    expected &&
+    (receipt.id !== expected.id || receipt.machineId !== expected.machineId)
+  )
+    throw new Error("Deletion receipt ownership changed.");
+  return receipt as unknown as DeletionReceipt;
 }
 export interface HostAvailability {
   id: string;

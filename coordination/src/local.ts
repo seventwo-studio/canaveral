@@ -13,12 +13,15 @@ async function exported(name: string, fn: string): Promise<(...args: never[]) =>
 }
 function numberOption(args: CliArguments, name: string, fallback: number, min: number, max: number): number { const text = option(args, name, String(fallback)), value = Number(text); if (!/^\d+$/.test(text) || !Number.isSafeInteger(value) || value < min || value > max) throw new CliError(`Invalid --${name}.`); return value; }
 async function exists(path: string): Promise<boolean> { try { await fs.lstat(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
-async function jsonFile(path: string): Promise<Record<string, unknown>> { const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); try { const info = await file.stat(); if (!info.isFile() || info.size > 1048576) throw new CliError("Local configuration requires a bounded regular JSON file."); return record(JSON.parse(await file.readFile("utf8")) as unknown); } finally { await file.close(); } }
+/** Generated local host configs embed the private operator guest bundle (up to 128 MiB) in the
+ * preparation recipe, its runtime copy and the template recipe; other local JSON stays at 1 MiB. */
+export const LOCAL_HOST_CONFIG_BYTES = 3 * 128 * 1048576 + 1048576;
+async function jsonFile(path: string, maximum = 1048576): Promise<Record<string, unknown>> { const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); try { const info = await file.stat(); if (!info.isFile() || info.size > maximum) throw new CliError("Local configuration requires a bounded regular JSON file."); return record(JSON.parse(await file.readFile("utf8")) as unknown); } finally { await file.close(); } }
 async function stopped(signal: AbortSignal): Promise<void> { if (!signal.aborted) await new Promise<void>(done => signal.addEventListener("abort", () => done(), { once: true })); }
-async function localConfig(root: string, args: CliArguments, url: string): Promise<{ config: Record<string, unknown>; state: string } | undefined> {
+export async function localConfig(root: string, args: CliArguments, url: string): Promise<{ config: Record<string, unknown>; state: string } | undefined> {
   const physical = join(root, "machine-host.json");
   if (await exists(physical)) {
-    const config = loadHost(await jsonFile(physical), root);
+    const config = loadHost(await jsonFile(physical, LOCAL_HOST_CONFIG_BYTES), root);
     if (typeof config.agentStateDirectory !== "string") throw new CliError("Local physical host config requires agentStateDirectory.");
     return { config, state: resolve(root, config.agentStateDirectory) };
   }
@@ -47,34 +50,43 @@ async function localConfig(root: string, args: CliArguments, url: string): Promi
     }, null, 2) + "\n"));
   }
   const linuxPath = join(root, "linux-host.json");
-  if (args.options["linux-image"] && !await exists(linuxPath)) {
+  // One Apple runtime serves the Linux and macOS desktops; its file keeps the historical name.
+  if ((args.options["linux-image"] || args.options["macos-image"]) && !await exists(linuxPath)) {
     const runner = resolve(expandPath(option(args, "apple-runner")));
-    const manifestValue = args.options["guest-helper-manifest"] ?? process.env.CANAVERAL_GUEST_BUNDLE;
-    if (typeof manifestValue !== "string") throw new CliError("Supply --guest-helper-manifest (or CANAVERAL_GUEST_BUNDLE) with the installed TypeScript guest bundle; local does not synthesize guest services.");
-    const manifest = resolve(expandPath(manifestValue));
-    const { desktopRecipe, loadHelperArtifacts } = await import("./guest/access.ts");
-    const helpers = loadHelperArtifacts(manifest);
-    if (!helpers.some(file => file.path === "/opt/canaveral/server.mjs" && file.content.length)) throw new CliError("The installed guest bundle must include /opt/canaveral/server.mjs.");
-    const key = join(root, "desktop_ed25519");
-    if (!await exists(key)) {
-      if (await exists(key + ".pub")) throw new CliError("An orphaned local SSH public key exists; inspect it before generating another identity.");
-      const { execFile } = await import("node:child_process");
-      await new Promise<void>((done, reject) => execFile("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key], { timeout: 10000, maxBuffer: 4096 }, error => error ? reject(new CliError("Local SSH identity generation failed; inspect retained key files.")) : done()));
+    const templates: Record<string, unknown>[] = [];
+    let linux: Record<string, unknown> = {};
+    if (args.options["linux-image"]) {
+      const manifestValue = args.options["guest-helper-manifest"] ?? process.env.CANAVERAL_GUEST_BUNDLE;
+      if (typeof manifestValue !== "string") throw new CliError("Supply --guest-helper-manifest (or CANAVERAL_GUEST_BUNDLE) with the installed TypeScript guest bundle; local does not synthesize guest services.");
+      const manifest = resolve(expandPath(manifestValue));
+      const { desktopRecipe, loadHelperArtifacts } = await import("./guest/access.ts");
+      const helpers = loadHelperArtifacts(manifest);
+      if (!helpers.some(file => file.path === "/opt/canaveral/server.mjs" && file.content.length)) throw new CliError("The installed guest bundle must include /opt/canaveral/server.mjs.");
+      const key = join(root, "desktop_ed25519");
+      if (!await exists(key)) {
+        if (await exists(key + ".pub")) throw new CliError("An orphaned local SSH public key exists; inspect it before generating another identity.");
+        const { execFile } = await import("node:child_process");
+        await new Promise<void>((done, reject) => execFile("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key], { timeout: 10000, maxBuffer: 4096 }, error => error ? reject(new CliError("Local SSH identity generation failed; inspect retained key files.")) : done()));
+      }
+      const prepare = desktopRecipe((await fs.readFile(key + ".pub", "utf8")).trim(), helpers);
+      linux = { guestOrchestratorURL: "http://192.168.64.1:" + numberOption(args, "api-port", 8875, 1, 65535),
+        guestAccess: { identityFile: key, helperManifest: manifest }, guestHelperManifest: manifest, guestPreparation: prepare };
+      templates.push({ id: "ubuntu-desktop", revision: "1", os: "linux", mode: "desktop", arch: "arm64", image: resolve(expandPath(option(args, "linux-image"))), guestAccess: true,
+        minimum: { cpu: 2, memoryMiB: 4096, diskGiB: 32 }, memoryStepMiB: 1024, prepare });
     }
-    const prepare = desktopRecipe((await fs.readFile(key + ".pub", "utf8")).trim(), helpers);
+    if (args.options["macos-image"]) templates.push(await macOSDesktopTemplate(args));
+    const macOS = templates.some(t => t.os === "macos");
     const config = {
       name: "local-linux", provider: "apple", pollIntervalSeconds: 0.25, runner,
-      storage: join(root, "linux-disks"), guestOrchestratorURL: "http://192.168.64.1:" + numberOption(args, "api-port", 8875, 1, 65535),
-      guestAccess: { identityFile: key, helperManifest: manifest }, guestHelperManifest: manifest, guestPreparation: prepare,
-      capacity: { cpu: 4, memoryMiB: 8192, diskGiB: 128 },
-      templates: [{ id: "ubuntu-desktop", revision: "1", os: "linux", mode: "desktop", arch: "arm64", image: resolve(expandPath(option(args, "linux-image"))), guestAccess: true,
-        minimum: { cpu: 2, memoryMiB: 4096, diskGiB: 32 }, memoryStepMiB: 1024, prepare }],
+      storage: join(root, "linux-disks"), ...linux,
+      capacity: macOS ? { cpu: 8, memoryMiB: 16384, diskGiB: 256 } : { cpu: 4, memoryMiB: 8192, diskGiB: 128 },
+      templates,
     };
     await privateOutput(linuxPath, async write => write(JSON.stringify(config, null, 2) + "\n"));
   }
   const configs: Array<{ path: string; config: Record<string, unknown>; state: string }> = [];
   for (const [path, state] of [[androidPath, join(root, "agent")], [linuxPath, join(root, "linux-agent")]] as const) {
-    if (await exists(path)) configs.push({ path, config: loadHost(await jsonFile(path), root), state });
+    if (await exists(path)) configs.push({ path, config: loadHost(await jsonFile(path, LOCAL_HOST_CONFIG_BYTES), root), state });
   }
   if (!configs.length) return undefined;
   // Never re-enroll or silently discard a legacy identity during consolidation.
@@ -100,6 +112,32 @@ async function localConfig(root: string, args: CliArguments, url: string): Promi
   if (identities.length) await consolidateLocalHost(root, configs.map(entry => entry.state), identities, config);
   await privateOutput(physical, async write => write(JSON.stringify(config, null, 2) + "\n"));
   return { config, state };
+}
+/** An operator-prepared macOS desktop: a directory holding the installed system disk
+ * (`disk.raw`), its auxiliary storage (`auxiliary.bin`) and hardware model
+ * (`hardware-model.bin`), plus the IPSW restore image it was installed from. Each clone
+ * receives a new machine identifier and its own per-launch helper credential. */
+export async function macOSDesktopTemplate(args: CliArguments): Promise<Record<string, unknown>> {
+  if (process.arch !== "arm64") throw new CliError("macOS desktops require an Apple-silicon host.");
+  const directory = resolve(expandPath(option(args, "macos-image")));
+  const restore = resolve(expandPath(option(args, "macos-restore-image")));
+  if (!restore.toLowerCase().endsWith(".ipsw")) throw new CliError("--macos-restore-image must name the IPSW restore image the disk was installed from.");
+  const files = { disk: join(directory, "disk.raw"), auxiliary: join(directory, "auxiliary.bin"), hardware: join(directory, "hardware-model.bin"), restore };
+  const sizes: Record<string, number> = {};
+  for (const [name, path] of Object.entries(files)) {
+    let info; try { info = await fs.lstat(path); } catch { throw new CliError(`The macOS image is missing ${path}.`); }
+    // The provider refuses links for platform artifacts; fail here with the path.
+    if (!info.isFile() || !info.size || await fs.realpath(path) !== path) throw new CliError(`${path} must be a non-empty regular file, not a link or under one.`);
+    // Whoever can write the golden image controls every future clone.
+    const owner = process.getuid?.();
+    for (const [target, stat] of [[path, info], [dirname(path), await fs.stat(dirname(path))]] as const)
+      if ((stat.uid !== owner && stat.uid !== 0) || (stat.mode & 0o022) !== 0) throw new CliError(`${target} must be owned by this user or root and not writable by group or others.`);
+    sizes[name] = info.size;
+  }
+  const diskGiB = Math.max(64, Math.ceil(sizes.disk! / 1073741824));
+  return { id: "macos-desktop", revision: "1", os: "macos", mode: "desktop", arch: "arm64", image: files.disk,
+    macOSRestoreImage: files.restore, macOSAuxiliaryStorage: files.auxiliary, macOSHardwareModel: files.hardware, guestAccess: true,
+    minimum: { cpu: 4, memoryMiB: 8192, diskGiB }, memoryStepMiB: 1024 };
 }
 export async function runLocal(args: CliArguments, io: CliIO, signal: AbortSignal): Promise<void> {
   const apiPort = numberOption(args, "api-port", 8875, 1, 65535), dashboardPort = numberOption(args, "dashboard-port", 8876, 1, 65535);

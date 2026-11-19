@@ -22,14 +22,14 @@ function iso(payload: Buffer, primaryName = "ASSIGNMENT.JSON;1", jolietName = "a
   const end = b.subarray(18 * 2048); end[0] = 255; end.write("CD001", 1); end[6] = 1;
   payload.copy(b, 22 * 2048); return b;
 }
-function fixture(t: { after(f: () => void): void }, exchange = "") {
+function fixture(t: { after(f: () => void): void }, exchange = "", leased = true) {
   const root = exchange ? dirname(dirname(exchange)) : mkdtempSync(join(realpathSync(tmpdir()), "bootstrap-")); mkdirSync(root, { recursive: true }); if (!exchange) t.after(() => rmSync(root, { recursive: true, force: true }));
-  const machine: Data = { id: exchange ? basename(exchange) : randomUUID(), lease: { id: randomUUID() }, name: "fixture", template: { id: "mac", revision: "1" }, resources: { cpu: 2, memoryMiB: 1024, diskGiB: 8 }, desired: "running" };
-  const folder = join(root, "assignment"); mkdirSync(folder, { mode: 0o700 }); saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(machine), leaseId: (machine.lease as Data).id });
+  const machine: Data = { id: exchange ? basename(exchange) : randomUUID(), ...(leased ? { lease: { id: randomUUID() } } : {}), name: "fixture", template: { id: "mac", revision: "1" }, resources: { cpu: 2, memoryMiB: 1024, diskGiB: 8 }, desired: "running" };
+  const folder = join(root, "assignment"); mkdirSync(folder, { mode: 0o700 }); saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(machine), ...(leased ? { leaseId: (machine.lease as Data).id } : {}) });
   let builds = 0;
   const config: Data = { storage: join(root, "storage"), runner: "/fixture/runner", withFileLock: async (_: string, f: () => unknown) => f(), command: async (args: string[], opts: CommandOptions) => {
     if (args[0] === "hdiutil") { builds++; const receipt = readRecord(join(storage, "guest-launch.json")); assert.equal(receipt.state, "building"); assert.ok(!JSON.stringify(args).includes(String(receipt.credential))); const payload = readFileSync(join(args.at(-1)!, "assignment.json")); writeFileSync(args[args.indexOf("-o") + 1]!, iso(payload), { mode: 0o600 }); return ""; }
-    if (args[1] === "prepare") { const request = JSON.parse(opts.input!); assert.equal(request.seedISO, undefined); mkdirSync(native, { mode: 0o700 }); saveRecord(join(native, "machine.json"), { executionLeaseID: (machine.lease as Data).id }); writeFileSync(join(native, "native-prepared"), ""); return ""; }
+    if (args[1] === "prepare") { const request = JSON.parse(opts.input!); assert.equal(request.seedISO, undefined); mkdirSync(native, { mode: 0o700 }); assert.equal(request.leaseID, leased ? (machine.lease as Data).id : undefined); saveRecord(join(native, "machine.json"), { executionLeaseID: leased ? (machine.lease as Data).id : null }); writeFileSync(join(native, "native-prepared"), ""); return ""; }
     if (args[1] === "lease-clock") return JSON.stringify({ version: 1, continuous: 1, bootSessionID: randomUUID() });
     return '{"locked":false}';
   }, launch: async () => {} };
@@ -44,6 +44,28 @@ test("real provider builds private media then dispatches native launch exactly o
   assert.equal(JSON.stringify(readRecord(join(f.native, "guest-launch-pin.json"))).includes(String(receipt.credential)), false);
   assert.equal((await f.provider.reconcile(f.machine, image, f.folder)).state, "unknown"); assert.equal(f.builds(), 1); assert.equal(launches, 1);
 
+});
+test("an unleased guest-access macOS desktop launches once with media scoped to its own machine", async t => {
+  const f = fixture(t, "", false); let launches = 0; f.config.launch = async () => { launches++; };
+  const image = { os: "macos", mode: "desktop", guestAccess: true, image: "/fixture/base.raw" };
+  // No lease deadline guard is required or consulted for a dashboard desktop.
+  assert.equal((await f.provider.reconcile(f.machine, image, f.folder)).state, "starting");
+  const receipt = guestLaunchReceipt(f.storage, f.machine)!, assignment = receipt.assignment as Data;
+  assert.equal(receipt.state, "sealed"); assert.equal(assignment.leaseId, f.machine.id); assert.equal(assignment.machineId, f.machine.id);
+  assert.equal(readRecord(join(f.native, "guest-launch-pin.json")).leaseId, f.machine.id);
+  assert.equal(readRecord(join(f.native, "runner-launch.json")).launchId, assignment.launchId);
+  // A stopped launch is never silently relaunched with the consumed media.
+  assert.equal((await f.provider.reconcile(f.machine, image, f.folder)).state, "unknown"); assert.equal(f.builds(), 1); assert.equal(launches, 1);
+  // The same custody can never be read as another machine's or a leased assignment.
+  assert.throws(() => guestLaunchReceipt(f.storage, { ...f.machine, lease: { id: randomUUID() } }), /differs/);
+});
+test("unleased macOS without guest access gets no launch media or helper binding", async t => {
+  const f = fixture(t, "", false);
+  const image = { os: "macos", mode: "desktop", image: "/fixture/base.raw" };
+  assert.equal((await f.provider.reconcile(f.machine, image, f.folder)).state, "starting");
+  assert.equal(guestLaunchReceipt(f.storage, f.machine), null); assert.equal(f.builds(), 0);
+  const authority = { authorized: () => true, clock: { suspendAware: true, bootId: randomUUID(), now: () => 1, wall: () => 1 } };
+  assert.throws(() => f.provider.guestHelperBinding(f.machine, image, f.folder, authority), /unavailable/);
 });
 test("planned resumes without regenerating; uncertain building blocks rebuild and cleanup", async t => {
   const f = fixture(t); f.config.command = async () => { throw new Error("lost builder"); };
@@ -277,4 +299,35 @@ test('Apple access resolves no missing storage and rejects native launch, PID an
     change();const provider=new AppleProvider(f.config,f.root);await assert.rejects(provider.guestHelperBinding(f.machine,{os:'macos'},f.folder,authority));await provider.close();
   }
   const missing={...f.machine,id:randomUUID()};const provider=new AppleProvider(f.config,f.root);await assert.rejects(provider.guestHelperBinding(missing,{os:'macos'},f.folder,authority));assert.equal(readdirSync(f.config.storage as string).length,1);await provider.close();
+});
+test('an unleased desktop resolves only its own machine-scoped custody', async t => {
+  const f = fixture(t, "", false), receipt = await ensureGuestLaunch(f.config, f.machine, f.storage);
+  f.config.runner = process.execPath; f.config.processAbsent = () => false;
+  const assignment = receipt.assignment as Data, now = Math.floor(Date.now() / 1000);
+  const { guestMAC } = await import('../../src/providers/guest-tls.ts');
+  const { AppleBindings } = await import('../../src/providers/apple-binding.ts');
+  const { GuestHelperBinding } = await import('../../src/control/session-protocol.ts');
+  f.config.readNATLeases = () => `{\nhw_address=1,${guestMAC(String(f.machine.id))}\nip_address=192.168.64.2\nlease=0xfffffff0\n}\n`;
+  mkdirSync(f.native, { mode: 0o700 });
+  const definition = { id: f.machine.id, executionLeaseID: null, macAddress: guestMAC(String(f.machine.id)) };
+  const status = { phase: 'Running', pid: 1234, updatedAt: now - 978307200, runnerProtocol: 1, runtimeState: 1 };
+  const snapshot = { pid: 1234, uid: process.getuid?.(), seconds: now, micros: 0, executableHex: Buffer.from(process.execPath).toString('hex'), argvHex: [process.execPath, 'run', f.native].map(v => Buffer.from(v).toString('hex')), userNanoseconds: 0, systemNanoseconds: 0, rssBytes: 0 };
+  const authority = { authorized: () => true, clock: { suspendAware: true, bootId: randomUUID(), now: () => 10, wall: () => now } };
+  const image = { os: 'macos', mode: 'desktop', guestAccess: true };
+  const reset = () => { saveRecord(join(f.native, 'machine.json'), definition); saveRecord(join(f.native, 'runner-launch.json'), { attemptedAt: now, launchId: assignment.launchId }); saveRecord(join(f.native, 'status.json'), status); saveRecord(join(f.native, 'guest-launch-pin.json'), receipt.pin as Data); f.config.processSnapshot = () => snapshot; };
+  reset();
+  const dialed: Data[] = [];
+  const provider = new AppleProvider(f.config, f.root, new AppleBindings(async (_factory, evidence, current) => { dialed.push(evidence as unknown as Data); return new GuestHelperBinding(async () => ({}), current); }));
+  try {
+    const binding = await provider.guestHelperBinding(f.machine, image, f.folder, authority);
+    assert.equal(binding.authorized(), true);
+    assert.equal((dialed[0]!.assignment as Data).leaseId, f.machine.id);
+    assert.equal((dialed[0]!.pinned as Data).address, '192.168.64.2');
+  } finally { await provider.close(); }
+  // Native records that claim a lease, or a template without guest access, never resolve.
+  for (const [change, template] of [[() => saveRecord(join(f.native, 'machine.json'), { ...definition, executionLeaseID: randomUUID() }), image], [() => {}, { os: 'macos', mode: 'desktop' }]] as const) {
+    reset(); change();
+    const other = new AppleProvider(f.config, f.root, new AppleBindings(async (_factory, _evidence, current) => new GuestHelperBinding(async () => ({}), current)));
+    try { await assert.rejects(Promise.resolve().then(() => other.guestHelperBinding(f.machine, template, f.folder, authority))); } finally { await other.close(); }
+  }
 });

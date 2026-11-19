@@ -204,3 +204,65 @@ test("offline consolidation refuses a historical native lock before changing ide
   await assert.rejects(consolidateLocalHost(f.host.state, [state], [{ state, id: randomUUID() }], {}), /native runner locks/);
   await fs.stat(join(state, "agent.lock")); await assert.rejects(fs.stat(join(f.host.state, "before-physical-host.sqlite3")));
 }));
+
+test("local Linux desktop config accepts a real-sized guest bundle on creation and reload", async () => {
+  const { localConfig, LOCAL_HOST_CONFIG_BYTES } = await import("../../src/local.ts");
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "canaveral-local-bundle-")));
+  try {
+    const image = join(root, "desktop.qcow2"), runner = join(root, "CanaveralVMRunner"), manifest = join(root, "bundle.json");
+    await fs.writeFile(image, Buffer.alloc(4096)); await fs.writeFile(runner, "#!/bin/sh\n", { mode: 0o500 });
+    // Native helpers ship as 48 KiB base64 parts; together they exceed the 1 MiB local JSON default.
+    const parts = Array.from({ length: 48 }, (_, index) => ({ path: `/opt/canaveral/payload/canaveral-guest-agent.${String(index).padStart(4, "0")}.b64`, content: "A".repeat(49152), mode: "0644" }));
+    await fs.writeFile(manifest, JSON.stringify([{ path: "/opt/canaveral/server.mjs", content: "await 0;\n", mode: "0644" }, ...parts]), { mode: 0o600 });
+    const args = { command: "local", action: "", positionals: [], url: "http://127.0.0.1:8875", allowHttp: true,
+      options: { "linux-image": image, "apple-runner": runner, "guest-helper-manifest": manifest } };
+    const created = await localConfig(root, args, args.url);
+    const templates = created!.config.templates as Array<Record<string, unknown>>;
+    assert.ok(templates.some(t => t.os === "linux" && t.mode === "desktop" && t.guestAccess === true));
+    const physical = await fs.stat(join(root, "machine-host.json"));
+    assert.ok(physical.size > 1048576 && physical.size < LOCAL_HOST_CONFIG_BYTES);
+    if (process.platform !== "darwin") {
+      // Apple desktops need a macOS host; elsewhere the large config is still read and then
+      // refused only for runtime compatibility, never for its size.
+      await assert.rejects(localConfig(root, { ...args, options: {} }, args.url), /compatible configured runtimes/);
+      return;
+    }
+    const reloaded = await localConfig(root, { ...args, options: {} }, args.url);
+    assert.deepEqual(reloaded!.config.templates, created!.config.templates);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("local macOS desktop config uses an operator-prepared disk and offers guest access", async () => {
+  const { localConfig } = await import("../../src/local.ts");
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "canaveral-local-macos-")));
+  try {
+    const image = join(root, "macos"), restore = join(root, "UniversalMac.ipsw"), runner = join(root, "CanaveralVMRunner");
+    await fs.mkdir(image); await fs.writeFile(runner, "#!/bin/sh\n", { mode: 0o500 }); await fs.writeFile(restore, "ipsw");
+    for (const name of ["disk.raw", "auxiliary.bin", "hardware-model.bin"]) await fs.writeFile(join(image, name), "x");
+    const args = (options: Record<string, string>) => ({ command: "local", action: "", positionals: [], url: "http://127.0.0.1:8875", allowHttp: true, options: { "apple-runner": runner, ...options } });
+    if (process.arch !== "arm64") {
+      await assert.rejects(localConfig(root, args({ "macos-image": image, "macos-restore-image": restore }), "http://127.0.0.1:8875"), /Apple-silicon/);
+      return;
+    }
+    // Missing artifacts, links and a non-IPSW restore image are refused before any config is written.
+    await assert.rejects(localConfig(root, args({ "macos-image": image, "macos-restore-image": join(root, "restore.dmg") }), "x"), /IPSW/);
+    await fs.rename(join(image, "auxiliary.bin"), join(root, "aux"));
+    await assert.rejects(localConfig(root, args({ "macos-image": image, "macos-restore-image": restore }), "x"), /missing .*auxiliary\.bin/);
+    await fs.symlink(join(root, "aux"), join(image, "auxiliary.bin"));
+    await assert.rejects(localConfig(root, args({ "macos-image": image, "macos-restore-image": restore }), "x"), /not a link/);
+    await fs.rm(join(image, "auxiliary.bin")); await fs.rename(join(root, "aux"), join(image, "auxiliary.bin"));
+    // The provider refuses linked ancestors too, so local refuses them before writing a config.
+    await fs.symlink(image, join(root, "linked"));
+    await assert.rejects(localConfig(root, args({ "macos-image": join(root, "linked"), "macos-restore-image": restore }), "x"), /under one/);
+    await assert.rejects(fs.stat(join(root, "linux-host.json")));
+    // No Linux guest bundle or SSH identity is needed for a macOS-only local host.
+    const created = await localConfig(root, args({ "macos-image": image, "macos-restore-image": restore }), "http://127.0.0.1:8875");
+    const templates = created!.config.templates as Array<Record<string, unknown>>;
+    assert.equal(templates.length, 1);
+    assert.deepEqual({ ...templates[0], minimum: undefined }, { id: "macos-desktop", revision: "1", os: "macos", mode: "desktop", arch: "arm64", image: join(image, "disk.raw"),
+      macOSRestoreImage: restore, macOSAuxiliaryStorage: join(image, "auxiliary.bin"), macOSHardwareModel: join(image, "hardware-model.bin"), guestAccess: true, minimum: undefined, memoryStepMiB: 1024 });
+    assert.deepEqual(templates[0]!.minimum, { cpu: 4, memoryMiB: 8192, diskGiB: 64 });
+    await assert.rejects(fs.stat(join(root, "desktop_ed25519")));
+    assert.equal(created!.config.guestPreparation, undefined);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

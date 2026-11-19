@@ -46,6 +46,8 @@ Account create/mint commands require a stable --request-id. Passwords and issued
 credentials stay in private files. Never retry an uncertain mutation with a new ID.
 Local Linux: --linux-image FILE --apple-runner FILE --guest-helper-manifest FILE
 (or CANAVERAL_GUEST_BUNDLE) requires an installed, runnable TypeScript guest bundle.
+Local macOS: --macos-image DIR --macos-restore-image FILE.ipsw --apple-runner FILE
+uses an operator-prepared disk (disk.raw, auxiliary.bin, hardware-model.bin).
 Retained legacy identities require explicit offline consolidation; no state is adopted.
 Native host adapters and local desktop preparation require installed, explicitly
 configured runtimes. Missing support fails closed; local never downloads runtimes.
@@ -55,7 +57,7 @@ const schemas: Record<string, Schema> = {
   init: { positional: 1 },
   serve: { values: ["config", "bind", "port", "database", "admin-token-file", "enrollment-token-file", "controller-id", "tls-cert-file", "tls-key-file", "update-trust-file", "browser-gateway-config"] },
   dashboard: { values: ["bind", "port", "bootstrap-token-file"] },
-  local: { values: ["state", "api-port", "dashboard-port", "linux-image", "apple-runner", "android-sdk", "guest-helper-manifest", "controller-id"] },
+  local: { values: ["state", "api-port", "dashboard-port", "linux-image", "macos-image", "macos-restore-image", "apple-runner", "android-sdk", "guest-helper-manifest", "controller-id"] },
   host: { flags: ["check"], values: ["config", "setup-file", "state", "ca-file", "enrollment-token-file"], required: ["state"] },
   "promote-macos": { values: ["config", "state", "model-domain"], required: ["config", "state"] },
   admin: { actions: ["create", "setup-link", "recover"], values: ["username", "password-file", "user-id", "dashboard-url", "output-file"] },

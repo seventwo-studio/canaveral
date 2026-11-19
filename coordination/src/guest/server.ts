@@ -229,10 +229,15 @@ class DashboardSocket implements SessionChannel {
     if (this.dead || this.attachment.signal.aborted || !this.check() || !await this.attachment.authorized()) throw new ServiceError("Stream authorization ended.", 410);
     if (this.dead || !this.check() || this.attachment.signal.aborted) throw new ServiceError("Stream authorization ended.", 410);
   }
+  /** Frame parts are fenced locally; `message` asks for full authorization once the frame is
+   * complete and before it is returned, so no input is acted on without a fresh check. */
+  private live(): void {
+    if (this.dead || this.attachment.signal.aborted || !this.check()) throw new ServiceError("Stream authorization ended.", 410);
+  }
   private async read(n: number): Promise<Buffer> {
     const socket = this.attachment.socket, result = Buffer.alloc(n); let offset = 0;
     while (offset < n) {
-      await this.allowed();
+      this.live();
       const part = socket.read(Math.min(n - offset, socket.readableLength || n - offset)) as Buffer | null;
       if (part) { part.copy(result, offset); offset += part.length; continue; }
       if (socket.destroyed || socket.readableEnded) throw new ServiceError("Stream disconnected.", 410);
@@ -242,7 +247,7 @@ class DashboardSocket implements SessionChannel {
         socket.once("readable", done); socket.once("close", end); socket.once("end", end); socket.once("error", end);
       });
     }
-    await this.allowed(); return result;
+    this.live(); return result;
   }
   private send(data: Uint8Array, opcode: number): Promise<void> {
     const result = this.tail.then(async () => {

@@ -55,8 +55,9 @@ export interface ImageImportRequest {
   hostId: string; metadata: Record<string, unknown>; size: number;
   reader: AuthorizedReader; authorized: Authorization;
 }
-/** Native WebSocket adapters own protocol framing and must fence every read/write
- * with authorized(), including after blocking I/O. The gateway also cancels idle
+/** Native WebSocket adapters own protocol framing and must fence every received message
+ * and every write with authorized(), including after blocking I/O; a message is fenced
+ * once complete, before it is acted on. The gateway also cancels idle
  * transports on revocation. No native adapter is installed by default. */
 export interface StreamAttachment {
   machineId: string; sessionId: string | undefined; request: IncomingMessage;

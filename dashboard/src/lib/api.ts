@@ -121,6 +121,8 @@ const providers: Readonly<Record<string, string>> = {
 export const provider = (value?: string): string | undefined =>
   providers[value ?? ""] || value;
 export function machineStatus(machine: MachineStatusInput): string {
+  if (machine.deletion?.state === "blocked") return "Deletion blocked";
+  if (machine.deletion) return "Deleting";
   if (machine.ready) return "Ready";
   if (machine.observed === "running" && machine.preparation.state === "failed")
     return "Setup failed";
@@ -129,7 +131,9 @@ export function machineStatus(machine: MachineStatusInput): string {
   return title(machine.observed);
 }
 export const attention = (m: MachineStatusInput): boolean =>
-  ["error", "unknown"].includes(m.observed) || m.preparation.state === "failed";
+  ["error", "unknown"].includes(m.observed) ||
+  m.preparation.state === "failed" ||
+  m.deletion?.state === "blocked";
 export function templatesFor<T extends InstalledImagePlacement>(
   templates: T[],
 ): Array<T & { hosts: HostAvailability[] }> {

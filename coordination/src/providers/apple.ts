@@ -155,13 +155,19 @@ export function validateBootstrapISO(bytes: Buffer, payload: Buffer): void {
   if (primary !== 1 || supplementary !== 1 || !terminated) throw new ServiceError("ISO volume is incomplete.");
 }
 
+/** The launch tuple's scope: the execution lease for leased work. An unleased
+ * guest-access macOS desktop (launched from the dashboard) has no lease, so its
+ * assignment is scoped to the machine itself and the tuple carries its machine ID. */
+export function launchScope(machine: Data): string { return machine.lease ? uuid(object(machine.lease).id) : uuid(machine.id); }
+/** Assigned launch media applies to leased macOS work and to unleased macOS guest-access desktops. */
+export function assignedLaunch(machine: Data, image: Data): boolean { return image.os === "macos" && (!!machine.lease || image.guestAccess === true); }
 /** Private launch custody. Call only under the assignment provider lock. */
 export function guestLaunchReceipt(storage: string, machine: Data): Data | null {
   const file = join(storage, "guest-launch.json"); if (!present(file)) return null;
   const stat = lstatSync(safePath(file));
   if (stat.uid !== process.getuid?.() || (stat.mode & 0o7777) !== 0o600) throw new ServiceError("Private launch receipt ownership differs.");
   const receipt = readRecord(file), assignment = object(receipt.assignment);
-  if (Object.keys(assignment).sort().join() !== "fingerprint,launchId,leaseId,machineId,version" || (receipt.version !== 1 && receipt.version !== 2) || assignment.version !== 1 || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(assignment.launchId)) || !/^[A-Za-z0-9_-]{43}$/.test(String(receipt.credential)) || Buffer.from(String(receipt.credential), "base64url").toString("base64url") !== receipt.credential) throw new ServiceError("Private launch receipt differs from assignment.");
+  if (Object.keys(assignment).sort().join() !== "fingerprint,launchId,leaseId,machineId,version" || (receipt.version !== 1 && receipt.version !== 2) || assignment.version !== 1 || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== launchScope(machine) || assignment.fingerprint !== assignmentFingerprint(machine) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(assignment.launchId)) || !/^[A-Za-z0-9_-]{43}$/.test(String(receipt.credential)) || Buffer.from(String(receipt.credential), "base64url").toString("base64url") !== receipt.credential) throw new ServiceError("Private launch receipt differs from assignment.");
   if (receipt.version === 2 && (receipt.tls || receipt.state === "sealed")) validateLaunchTLS(receipt.tls, String(assignment.launchId));
   return receipt;
 }
@@ -183,7 +189,7 @@ export async function ensureGuestLaunch(config: Data, machine: Data, storage: st
   let receipt = guestLaunchReceipt(storage, machine);
   if (!receipt) {
     if (present(join(native, "runner-launch.json")) || present(join(storage, "apple-prepare.json"))) throw new ServiceError("Existing native intent has no launch custody.");
-    receipt = { version: 2, state: "planned", assignment: { version: 1, machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id), fingerprint: assignmentFingerprint(machine), launchId: randomUUID() }, credential: randomBytes(32).toString("base64url") };
+    receipt = { version: 2, state: "planned", assignment: { version: 1, machineId: uuid(machine.id), leaseId: launchScope(machine), fingerprint: assignmentFingerprint(machine), launchId: randomUUID() }, credential: randomBytes(32).toString("base64url") };
     saveRecord(file, receipt, true);
   }
   if (receipt.version !== 2) throw new ServiceError("Legacy launch custody is cleanup-only.");
@@ -281,7 +287,7 @@ export class AppleProvider {
   async sweep(active: Set<string>): Promise<void> { this.bindings.sweep(active); }
   async close(): Promise<void> { this.bindings.close(); }
   guestHelperBinding(machine: Data, image: Data, folder: string, authority: OwnedGuestAuthority) {
-    if (image.os !== "macos" || !machine.lease) throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"});
+    if (!assignedLaunch(machine, image)) throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"});
     let allowed = false; try { allowed = authority.authorized() === true; } catch { /* unavailable authority denies access */ }
     if (!allowed) throw new ServiceError("Owned macOS authority ended.",410,{retryable:false});
     // No storage creation or adoption on this path, including after disappearance.
@@ -295,7 +301,7 @@ export class AppleProvider {
       const receipt = readRecord(join(storage,"guest-launch.json")), assignment = object(receipt.assignment);
       const definition = readRecord(join(path,"machine.json")), launch = readRecord(join(path,"runner-launch.json")), pin = readRecord(join(path,"guest-launch-pin.json"));
       const status = readRecord(join(path,"status.json"));
-      if (receipt.version !== 2 || receipt.state !== "sealed" || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== uuid(object(machine.lease).id) || assignment.fingerprint !== assignmentFingerprint(machine) || launch.launchId !== assignment.launchId || uuid(definition.id) !== uuid(machine.id) || uuid(definition.executionLeaseID) !== assignment.leaseId || definition.macAddress !== guestMAC(uuid(machine.id)) || legacyDigest(pin) !== legacyDigest(receipt.pin)) throw new ServiceError("Native launch custody differs.");
+      if (receipt.version !== 2 || receipt.state !== "sealed" || assignment.machineId !== uuid(machine.id) || assignment.leaseId !== launchScope(machine) || assignment.fingerprint !== assignmentFingerprint(machine) || launch.launchId !== assignment.launchId || uuid(definition.id) !== uuid(machine.id) || (machine.lease ? uuid(definition.executionLeaseID) !== assignment.leaseId : definition.executionLeaseID != null) || definition.macAddress !== guestMAC(uuid(machine.id)) || legacyDigest(pin) !== legacyDigest(receipt.pin)) throw new ServiceError("Native launch custody differs.");
       requireRunningAppleStatus(status,authority.clock.wall());
       const media = lstatSync(safePath(String(pin.path)));
       if (media.isSymbolicLink() || !media.isFile() || String(media.dev) !== pin.dev || String(media.ino) !== pin.ino || media.size !== pin.size || (media.mode & 0o7777) !== 0o400) throw new ServiceError("Launch media changed.");
@@ -563,7 +569,7 @@ export class AppleProvider {
       return { state: "unknown", detail: "Native outcome is uncertain; capacity remains reserved." };
     }
     let guestLaunch: Data | null = null;
-    if (image.os === "macos" && machine.lease) {
+    if (assignedLaunch(machine, image)) {
       const assignedAttempted = present(launch) || present(join(folder, "apple-boot-request.json")) || present(join(folder, "provisioning.json")) && readRecord(join(folder, "provisioning.json")).phase === "bootRequested";
       if (assignedAttempted) {
         guestLaunch = guestLaunchReceipt(storage, machine);
@@ -572,9 +578,12 @@ export class AppleProvider {
         if (fresh && status?.phase === "Unavailable") return { state: "error", detail: status.detail ?? "" };
         return { state: "unknown", detail: "Assigned launch was already attempted; relaunch is blocked." };
       } else {
-        if (typeof image._leaseAuthorization !== "function") throw new ServiceError("Leased boot requires a local deadline guard.");
-        const auth = object(await image._leaseAuthorization());
-        if (auth.leaseID !== uuid(object(machine.lease).id) || !Number.isSafeInteger(auth.revision) || typeof auth.fenced !== "boolean" || auth.fenced || typeof auth.remainingSeconds !== "number" || !Number.isFinite(auth.remainingSeconds) || !(auth.remainingSeconds > 0)) throw new ServiceError("Lease authorization ended before bootstrap.");
+        // An unleased guest-access desktop has no lease deadline; leased work must still hold its guard.
+        if (machine.lease) {
+          if (typeof image._leaseAuthorization !== "function") throw new ServiceError("Leased boot requires a local deadline guard.");
+          const auth = object(await image._leaseAuthorization());
+          if (auth.leaseID !== uuid(object(machine.lease).id) || !Number.isSafeInteger(auth.revision) || typeof auth.fenced !== "boolean" || auth.fenced || typeof auth.remainingSeconds !== "number" || !Number.isFinite(auth.remainingSeconds) || !(auth.remainingSeconds > 0)) throw new ServiceError("Lease authorization ended before bootstrap.");
+        }
         guestLaunch = await ensureGuestLaunch(this.config, machine, storage);
       }
     }

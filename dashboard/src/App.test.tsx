@@ -539,6 +539,258 @@ describe("dashboard contracts", () => {
     await within(dialog).findByRole("button", { name: "Retry request" });
     expect(created()[2]!.value!.id).not.toBe(created()[0]!.value!.id);
   });
+  it("launches a Linux desktop from desktop images without placement choices", async () => {
+    const desktop = {
+      ...template,
+      id: "linux-desktop",
+      revision: "1",
+      arch: "arm64",
+      mode: "desktop",
+      guestAccess: true,
+      name: "Debian desktop",
+      minimum: { cpu: 2, memoryMiB: 4096, diskGiB: 16 },
+      defaults: { cpu: 2, memoryMiB: 4096, diskGiB: 32 },
+    };
+    const original = handler;
+    handler = (p, options) =>
+      p === "templates"
+        ? json({ templates: [template, desktop] })
+        : p === "machines" && options?.method === "POST"
+          ? json({
+              ...machine,
+              id: calls.at(-1)!.value!.id,
+              name: "Review",
+              template: desktop,
+            })
+          : original(p, options);
+    const user = await login();
+    await user.click(screen.getByRole("button", { name: "Launch desktop" }));
+    const dialog = screen.getByRole("dialog");
+    within(dialog).getByRole("heading", { name: "Launch a desktop" });
+    expect(within(dialog).getByText(/linux · Desktop/)).toBeTruthy();
+    expect(within(dialog).queryByText("Placement")).toBeNull();
+    expect(within(dialog).getByLabelText("Desktop image")).toBeTruthy();
+    await user.type(within(dialog).getByLabelText("Machine name"), "Review");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Launch desktop" }),
+    );
+    await waitFor(() =>
+      expect(
+        calls.find((c) => c.path === "machines" && c.method === "POST")?.value,
+      ).toMatchObject({
+        name: "Review",
+        templateId: "linux-desktop",
+        templateRevision: "1",
+        arch: "arm64",
+        resources: desktop.defaults,
+      }),
+    );
+    expect(
+      calls.find((c) => c.path === "machines" && c.method === "POST")?.value,
+    ).not.toHaveProperty("hostId");
+    await screen.findByText(/Review is starting on Arctic/);
+  });
+  it("launches a macOS desktop and explains it runs once", async () => {
+    const mac = {
+      ...template,
+      id: "macos-desktop",
+      revision: "1",
+      os: "macos",
+      arch: "arm64",
+      mode: "desktop",
+      guestAccess: true,
+      name: "macOS desktop",
+      minimum: { cpu: 4, memoryMiB: 8192, diskGiB: 64 },
+      defaults: { cpu: 4, memoryMiB: 8192, diskGiB: 64 },
+    };
+    const original = handler;
+    handler = (p, options) =>
+      p === "templates"
+        ? json({
+            templates: [
+              template,
+              mac,
+              // Intel macOS and macOS without a guest helper are never offered.
+              { ...mac, id: "intel", arch: "amd64" },
+              { ...mac, id: "plain", guestAccess: undefined },
+            ],
+          })
+        : p === "machines" && options?.method === "POST"
+          ? json({
+              ...machine,
+              id: calls.at(-1)!.value!.id,
+              name: "Mac review",
+              template: mac,
+            })
+          : original(p, options);
+    const user = await login();
+    await user.click(screen.getByRole("button", { name: "Launch desktop" }));
+    const dialog = screen.getByRole("dialog");
+    within(dialog).getByRole("heading", { name: "Launch a desktop" });
+    expect(within(dialog).getByText(/macos · Desktop/)).toBeTruthy();
+    expect(
+      within(dialog).getByText(/boots once with its own guest credential/),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("Placement")).toBeNull();
+    // The form's native select mirrors the offered images.
+    expect(dialog.querySelectorAll("select option")).toHaveLength(1);
+    await user.type(
+      within(dialog).getByLabelText("Machine name"),
+      "Mac review",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Launch desktop" }),
+    );
+    await waitFor(() =>
+      expect(
+        calls.find((c) => c.path === "machines" && c.method === "POST")?.value,
+      ).toMatchObject({
+        name: "Mac review",
+        templateId: "macos-desktop",
+        templateRevision: "1",
+        arch: "arm64",
+        resources: mac.defaults,
+      }),
+    );
+    await screen.findByText(/Mac review is starting on Arctic/);
+  });
+  it("offers neither headless images nor desktops without guest access", async () => {
+    const original = handler;
+    handler = (p, options) =>
+      p === "templates"
+        ? json({
+            templates: [
+              template,
+              { ...template, id: "installer", mode: "desktop" },
+            ],
+          })
+        : original(p, options);
+    const user = await login();
+    await user.click(screen.getByRole("button", { name: "Launch desktop" }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        /No online accepting host offers a desktop image/,
+      ),
+    ).toBeTruthy();
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Launch desktop",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+  it("deletes a stopped machine and confirms only after the controller stops listing it", async () => {
+    const stopped = { ...machine, desired: "stopped", observed: "stopped" };
+    let listed: unknown[] = [stopped];
+    const original = handler;
+    handler = (p, options) =>
+      p === "machines" && options?.method !== "POST"
+        ? json({ machines: listed })
+        : p === "machines/m1/delete"
+          ? json({ ...calls.at(-1)!.value, machineId: "m1", state: "queued" })
+          : original(p, options);
+    const user = await login();
+    await user.click(
+      screen.getByRole("button", { name: "More actions for Voyager" }),
+    );
+    // The receipt is queued: the host has not confirmed removal yet.
+    listed = [{ ...stopped, deletion: { id: "pending", state: "running" } }];
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Delete machine/ }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(calls.some((c) => c.path === "machines/m1/delete")).toBe(false);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete machine" }),
+    );
+    await within(dialog).findByText(/Waiting for the host to confirm removal/);
+    const request = calls.find((c) => c.path === "machines/m1/delete")!;
+    expect(request.value!.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(screen.queryByText(/Voyager deleted/)).toBeNull();
+    const list = screen.getByRole("list", {
+      name: "Machine list",
+      hidden: true,
+    });
+    await within(list).findByText("Deleting");
+    listed = [];
+    await user.click(
+      within(dialog).getAllByRole("button", { name: "Close" })[0]!,
+    );
+    await user.click(screen.getAllByRole("button", { name: /Refresh/ })[0]!);
+    await screen.findByText("Voyager deleted. The host confirmed removal.");
+  });
+  it("reuses a lost deletion request ID after the dialog is closed and reopened", async () => {
+    const stopped = { ...machine, desired: "stopped", observed: "stopped" };
+    const original = handler;
+    handler = (p, options) =>
+      p === "machines" && options?.method !== "POST"
+        ? json({ machines: [stopped] })
+        : p === "machines/m1/delete"
+          ? Promise.reject(new Error("Lost response"))
+          : original(p, options);
+    const user = await login();
+    const attempt = async () => {
+      await user.click(
+        screen.getByRole("button", { name: "More actions for Voyager" }),
+      );
+      await user.click(
+        await screen.findByRole("menuitem", { name: /Delete machine/ }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      await user.click(
+        within(dialog).getByRole("button", { name: "Delete machine" }),
+      );
+      await within(dialog).findByRole("alert");
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    };
+    await attempt();
+    await attempt();
+    const requests = calls.filter((c) => c.path === "machines/m1/delete");
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.value).toEqual(requests[0]!.value);
+  });
+  it("shows a blocked deletion as unconfirmed and retries with its request ID", async () => {
+    const blocked = {
+      ...machine,
+      desired: "stopped",
+      observed: "unknown",
+      deletion: {
+        id: "11111111-1111-4111-8111-111111111111",
+        state: "blocked",
+      },
+    };
+    const original = handler;
+    handler = (p, options) =>
+      p === "machines" && options?.method !== "POST"
+        ? json({ machines: [blocked] })
+        : p === "machines/m1/delete"
+          ? json({ id: blocked.deletion.id, machineId: "m1", state: "blocked" })
+          : original(p, options);
+    const user = await login();
+    const list = screen.getByRole("list", { name: "Machine list" });
+    expect(within(list).getByText("Deletion blocked")).toBeTruthy();
+    expect(
+      within(list).getByText("Removal unconfirmed; storage retained"),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop Voyager" })).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: "More actions for Voyager" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Check deletion status/ }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Check deletion" }),
+    );
+    await within(dialog).findByText(/could not confirm removal/);
+    expect(calls.find((c) => c.path === "machines/m1/delete")!.value).toEqual({
+      id: blocked.deletion.id,
+    });
+    expect(screen.queryByText(/Voyager deleted/)).toBeNull();
+  });
   it("requires confirmation before requesting a graceful stop", async () => {
     const user = await login();
     await user.click(screen.getByRole("button", { name: "Stop Voyager" }));

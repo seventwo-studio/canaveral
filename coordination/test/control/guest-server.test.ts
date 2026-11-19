@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { connect } from "node:net";
 import { once } from "node:events";
 import { createGuestServer, acceptDashboardSocket, attachShell, serveTerminal } from "../../src/guest/server.ts";
 import type { GuestServerServices } from "../../src/guest/server.ts";
@@ -135,4 +136,37 @@ test("host guest access shutdown permanently fences and waits for a late owned b
   const stop = access.close().then(() => { closeDone = true; }); releaseResolve(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(closeDone, false); releaseClose(); await stop; await assert.rejects(request); assert.equal(closed, true);
   await assert.rejects(access.control({ id: randomUUID() }, { mode: "headless" }, "/unused", { action: "health", arguments: {} })); assert.equal(resolutions, 1);
+});
+test("dashboard socket authorizes each complete message once, including frames that arrive in parts", async () => {
+  let allowed = true, checks = 0, channel: SessionChannel | undefined, refused: unknown;
+  const received: Array<{ value: unknown; checks: number }> = [], stop = new AbortController(), server = createServer();
+  let opened!: () => void; const ready = new Promise<void>(resolve => { opened = resolve; });
+  server.on("upgrade", (request, socket, head) => {
+    void (async () => {
+      channel = await acceptDashboardSocket({ machineId: randomUUID(), sessionId: undefined, request, socket, head, signal: stop.signal, authorized: async () => { checks++; return allowed; } }, () => true);
+      opened();
+      // One blocking receive per message keeps the fence count deterministic.
+      for (;;) { const before = checks, value = await channel.receive(10); received.push({ value, checks: checks - before }); }
+    })().catch(error => { refused = error; channel?.close(); socket.destroy(); });
+  });
+  const port = await listening(server), socket = connect(port, "127.0.0.1");
+  socket.on("error", () => {});
+  // A masked binary frame, written in three parts so the server reads it across several chunks.
+  const frame = (payload: Buffer) => { const mask = randomBytes(4); return Buffer.concat([Buffer.from([0x82, 0x80 | payload.length]), mask, Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]!))]); };
+  const pause = () => new Promise(resolve => setTimeout(resolve, 30));
+  try {
+    socket.write(`GET /desktop HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString("base64")}\r\n\r\n`);
+    await ready; await once(socket, "data");
+    const first = frame(Buffer.from([5, 1, 0, 10, 0, 20]));
+    for (const part of [first.subarray(0, 1), first.subarray(1, 4), first.subarray(4)]) { socket.write(part); await pause(); }
+    while (received.length < 1) await pause();
+    assert.deepEqual([...(received[0]!.value as Uint8Array)], [5, 1, 0, 10, 0, 20]);
+    // Before the receive, once the frame is complete, and before returning it.
+    assert.equal(received[0]!.checks, 3);
+    // Revocation while a frame is still arriving: the completed frame is never delivered.
+    const next = frame(Buffer.from([4, 1, 0, 0, 0, 0, 0, 97]));
+    socket.write(next.subarray(0, 3)); await pause(); allowed = false; socket.write(next.subarray(3));
+    await once(socket, "close");
+    assert.equal(received.length, 1); assert.ok(refused);
+  } finally { allowed = false; stop.abort(); channel?.close(); socket.destroy(); await close(server); }
 });
