@@ -262,7 +262,9 @@ test("inspection checks again after provider return; absent native transports fa
   const f = await fixture({ accessibility: () => { inspect(); return { nodes: [], source: "fixture" }; } });
   try {
     assert.equal((await fetch(f.url, `/api/v1/machines/${machine}/accessibility`, { token: operator })).status, 200);
-    for (const suffix of ["desktop", `shells/${randomUUID()}/stream`]) assert.equal((await fetch(f.url, `/api/v1/machines/${machine}/${suffix}`, { token: operator })).status, 409);
+    assert.equal((await fetch(f.url, `/api/v1/machines/${machine}/shells/${randomUUID()}/stream`, { token: operator })).status, 409);
+    // Without a local display the desktop relays through the controller, and only for a same-origin cookie WebSocket.
+    assert.equal((await fetch(f.url, `/api/v1/machines/${machine}/desktop`, { token: operator })).status, 403);
     inspect = () => { f.state.revoked = true; };
     const denied = await fetch(f.url, `/api/v1/machines/${machine}/accessibility`, { token: operator });
     assert.equal(denied.status, 401); assert.equal(denied.data.includes("nodes"), false);

@@ -61,11 +61,16 @@ assignment reports, preparation callbacks, chunk download and binary WebSocket
 framing remain machine protocols. Their effects are represented by inventory,
 readiness, operations, session state, cleanup and host diagnostics.
 
-The one gateway WebSocket for a controller session protocol is the owner's mobile
-video attachment, `/api/v1/machines/{machine}/video-sessions/{id}/{generation}`.
-It requires the session cookie and a matching Origin, rechecks machine access
-every second and relays frames unchanged under the creator's own credential; see
-[owner mobile capture](dashboard.md#owner-mobile-capture).
+Two gateway WebSockets relay a controller session protocol under the creator's
+own credential: the owner's mobile video attachment,
+`/api/v1/machines/{machine}/video-sessions/{id}/{generation}` (see
+[owner mobile capture](dashboard.md#owner-mobile-capture)), and the desktop viewer,
+`/api/v1/machines/{machine}/desktop`, on a dashboard without an attached local
+display. Both require the session cookie and a matching Origin, recheck machine
+access before the upgrade and every second after it, and relay frames unchanged.
+For the desktop, the gateway first opens an owner display session,
+`POST /v1/machines/{machine}/display-sessions` with `{id}`, and closes it when
+the viewer leaves; see [remote desktop relay](guest-access.md#remote-desktop-relay).
 
 Frontend/controller fixture checks do not establish native stream disconnection,
 provider cleanup, mobile capture, model execution or deployment acceptance. No

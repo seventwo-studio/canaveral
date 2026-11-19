@@ -68,7 +68,13 @@ export function DesktopView({
       pending.clear();
     };
     try {
-      const transport = new WebSocket(url.href, ["binary"]);
+      // An attached local display answers "binary"; a dashboard relaying through the
+      // controller answers with the session protocol and first sends its broker's
+      // "ready" control, which displayMessage ignores.
+      const transport = new WebSocket(url.href, [
+        "binary",
+        "canaveral-session-v1",
+      ]);
       socket.current = transport;
       transport.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return;

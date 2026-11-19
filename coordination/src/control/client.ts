@@ -4,6 +4,7 @@ import { ServiceError, secret } from "../errors.ts";
 import type { ControlOptions, ControlResponse } from "./contracts.ts";
 import type { SessionCommand } from "./sessions.ts";
 import type { VideoSessionCommand } from './mobile-video-sessions.ts';
+import type { DisplaySessionCommand } from './display-sessions.ts';
 
 /** Plain, cloneable requests only. Credentials never appear in events. */
 export interface HttpCommand {
@@ -16,10 +17,11 @@ export interface HttpCommand {
 }
 export interface HostAuthenticateCommand { type: "hosts.authenticate"; hostId: string; token: string }
 interface BrowserAuthorizeCommand { type: "browsers.authorize"; token: string }
-export type ControlCommand = BrowserAuthorizeCommand | HttpCommand | SessionCommand | VideoSessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
+export type ControlCommand = BrowserAuthorizeCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
-  return command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect';
+  return command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
+    command.type === 'display-sessions.attach' || command.type === 'display-sessions.disconnect';
 }
 export type ControlReply =
   | { kind: "ready" }

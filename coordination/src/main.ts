@@ -92,6 +92,7 @@ export async function startController(config: ControllerConfig) {
   let server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer> | undefined;
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  let displayBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async hostId => {
     const response = await control?.request({ type: "http", method: "GET", path: "/v1/hosts", query: "", token: adminToken, body: {} });
     const inventory = response?.body as { hosts: { id: string; platform: string | null; placementReady: boolean }[] } | undefined;
@@ -116,8 +117,9 @@ export async function startController(config: ControllerConfig) {
     server.on("checkExpectation", handler);
     broker = createSessionUpgradeHandler(control);
     videoBroker = createSessionUpgradeHandler(control, { video: true });
-    const sessions = createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/')
-      ? videoBroker!.handle(req, socket, head) : broker!.handle(req, socket, head));
+    displayBroker = createSessionUpgradeHandler(control, { display: true });
+    const sessions = createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/') ? videoBroker!.handle(req, socket, head)
+      : req.url?.includes('/display-sessions/') ? displayBroker!.handle(req, socket, head) : broker!.handle(req, socket, head));
     server.on("upgrade", (req, socket, head) => {
       if (browsers?.matches(req)) browsers.upgrade(req, socket, head);
       else void sessions(req, socket, head);
@@ -130,6 +132,7 @@ export async function startController(config: ControllerConfig) {
     browsers?.close();
     broker?.close();
     videoBroker?.close();
+    displayBroker?.close();
     server?.close();
     await Promise.allSettled([client.close(), control?.close()]);
     throw error;
@@ -146,6 +149,7 @@ export async function startController(config: ControllerConfig) {
         reloader?.close();
         broker?.close();
         videoBroker?.close();
+        displayBroker?.close();
         browsers?.close();
         await new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });
         await Promise.all([client.close(), services.close()]);

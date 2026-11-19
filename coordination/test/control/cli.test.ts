@@ -195,6 +195,14 @@ test("host setup check does not enroll or persist configuration", async () => wi
   assert.equal((await f.invoke(["host", "--setup-file", setup, "--state", state, "--check"], false, { runtime })).status, 1);
   await assert.rejects(fs.stat(state)); assert.equal(f.calls.length, 0);
 }));
+test("host accepts a configuration that embeds an operator guest bundle beyond 1 MiB", async () => withFixture(async f => {
+  const file = join(f.root, "desktop-host.json"), state = join(f.root, "desktop-state"), recipe = "A".repeat(3 * 1048576);
+  await fs.writeFile(file, JSON.stringify({ name: "desktop-host", templates: [], guestPreparation: { files: [{ content: recipe }] } }), { mode: 0o600 });
+  let seen = 0;
+  const runtime = { checkHost: async (options: Record<string, unknown>) => { seen = JSON.stringify(options.config).length; return { status: "failed" }; } } as unknown as CliRuntime;
+  assert.equal((await f.invoke(["host", "--config", file, "--state", state, "--check"], false, { runtime })).status, 1);
+  assert.ok(seen > recipe.length, "the full configuration reached the host runtime");
+}));
 test("local validates ports before state changes and cleans up services in reverse order", async () => withFixture(async f => {
   const root = join(f.root, "local"), calls: string[] = []; const controller = new AbortController(); controller.abort();
   const runtime = {
