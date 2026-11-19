@@ -408,9 +408,13 @@ POST `/api/v1/previews` with a client-generated lowercase UUID `id`, a
 `path` (a workspace-relative filename) and `data` (canonical base64).
 Command mode also requires `argv` (foreground executable and arguments) and
 `port` (guest loopback HTTP port). Static mode serves index.html at the root.
-Optional `priority` (integer from -1000000 to 1000000, default 0, bounded by
-the dashboard application's `maxRequestPriority`) and `deadline` (UTC RFC3339,
-in the future and at most 24 hours ahead) queue the preview; see below.
+Optional `priority` (integer from -1000000 to 1000000, default 0, at most the
+dashboard's `maxPreviewPriority` and the application's `maxRequestPriority`) and
+`deadline` (UTC RFC3339, in the future and at most 24 hours ahead) queue the
+preview; see below. A priority above `maxPreviewPriority` returns 400. An owner
+with `maxWaitingPreviewsPerOwner` previews still waiting gets 429
+`preview_waiting_limit` until one starts, ends or is cancelled; a replay of an
+existing preview is not counted again.
 Replay the same ID and body after a lost response; a changed body, including
 priority or deadline, returns 409. GET the collection for
 `{previews: Preview[]}`; GET or DELETE `/api/v1/previews/{id}` to inspect or
@@ -436,9 +440,17 @@ after revocation (which cancels waiting requests), a preview that was never seen
 admitted ends `failed`. A lost submission reply or a controller outage before
 admission is retried by replaying the same request on the next tick; the preview
 neither fails nor creates a second request. The controller's waiting cap
-(`request_waiting_limit`) and other submission refusals still fail the preview.
+(`request_waiting_limit`) and other definitive submission refusals (4xx) still
+fail the preview, at once: unless an earlier attempt's outcome was unknown, the
+controller holds no request that a later reply could reveal, so stopping does not
+wait out the deadline. After an unknown outcome the preview stays `stopping` until
+its waiting deadline before trusting a missing request. The submitted intent
+includes the configured pin and `ttlSeconds`, so changing either while previews
+wait makes their replay after a dashboard restart return 409, which fails them.
 All of one dashboard's previews share its application, so the controller's
-per-application fairness and waiting cap apply to the dashboard as a whole.
+per-application fairness and waiting cap apply to the dashboard as a whole. The
+dashboard bounds each owner's share with `maxWaitingPreviewsPerOwner` and
+`maxPreviewPriority`; owners are not otherwise scheduled against each other.
 The Workspace previews page shows a waiting preview's priority, last admission
 reason and waiting deadline, and offers **Cancel waiting preview**.
 
@@ -446,6 +458,10 @@ Set `CANAVERAL_DASHBOARD_PREVIEW_CONFIG` to a server-local JSON file with
 `applicationKeyFile`, `database` (a dedicated SQLite file for one dashboard
 process), `templateId`, `templateRevision`, `arch`, `digest` (sha256: plus
 64 lowercase hex digits), and `ttlSeconds` (30–1800, within application limits).
+Optional `maxPreviewPriority` (0–1000000, default 0) is the highest priority an
+owner may set; the default lets owners only lower their own previews. Optional
+`maxWaitingPreviewsPerOwner` (1–1000, default 10) bounds each owner's waiting
+previews so one owner cannot fill the application's waiting cap (default 100).
 Grant that application command and file access to the pinned workspace image.
 The dashboard requires an approved workspace with Node for static serving and
 nested directory preparation. Command mode runs the supplied argv in /workspace
@@ -456,8 +472,13 @@ against their stored request IDs. A preview whose request was never seen admitte
 holds no key, workspace or service: it keeps its stored files and resumes waiting
 after restart. Cleanup remains stopping while the controller holds the reservation.
 The database gains a `workspace_requests` table holding pending files until launch
-or stop. A dashboard from before queued previews ignores it and fences every
-provisioning preview at startup, cancelling its request; it cannot resume one.
+or stop. The dashboard keeps the database file mode 0600, narrowing an existing
+file at startup, and enables SQLite `secure_delete` so cleared files are
+overwritten. A dashboard from before queued previews ignores the table and fences
+every provisioning preview at startup, cancelling its request; it cannot resume
+one, and it never clears the files already stored there. After a downgrade, delete
+the `workspace_requests` rows (or the database once no preview is active) to
+remove them.
 
 For Kubernetes, mount the application credential read-only and give the dashboard
 UID a writable persistent volume for the SQLite directory. Run one dashboard

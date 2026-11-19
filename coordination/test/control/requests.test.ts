@@ -232,8 +232,9 @@ test("a large unservable backlog costs one attempt per group and does not hide s
   assert.deepEqual(attempts,["full-image","fixture-image"]);
 });
 
-test("each image pool keeps its own application turn, so admissions in one pool cannot starve an application in another",t=>{
+test("each capacity unit keeps its own application turn, so admissions in one unit cannot starve an application in another",t=>{
   // Three applications sorted by UUID: low and mid contend for one slot in pool P; high is admitted in pool Q every pass.
+  // Without a unit callback each pin is its own unit.
   const f=leaseFixture(t), [low,mid,high]=[f.application(),f.application(),f.application()].sort((a,b)=>a.id<b.id?-1:1) as [typeof f.app,typeof f.app,typeof f.app];
   let used=0;const owners=new Map<string,string>(), served:string[]=[];
   const queue=new Requests(f.store,f.apps,(_kind,application,intent)=>{
@@ -243,4 +244,42 @@ test("each image pool keeps its own application turn, so admissions in one pool 
   for(let i=0;i<3;i++){submit(low,"pool-p","low");submit(mid,"pool-p","mid");}
   for(let round=0;round<4;round++){ submit(high,"pool-q","high"); queue.pass(); used=0; }
   assert.deepEqual(served,["low","mid","low","mid"]);
+});
+
+test("pins on one runner domain share its application turn, so a stuck head on one pin cannot let one application starve another",t=>{
+  // C's old request on pin X never fits; B waits on pin Y; A submits a fresh request on pin X before every pass.
+  // Both pins resolve to one domain that frees one slot per pass. Turns per pin admitted A every time.
+  const f=leaseFixture(t), [a,b,c]=[f.application({maxWaitingRequests:100}),f.application(),f.application()];
+  let free=0;const owners=new Map<string,string>(), served:string[]=[], units:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,_application,intent)=>{
+    if(owners.get(String(intent.id))==="C"||free<1) throw new ServiceError("No approved runner domain serving this image has capacity.",503,{code:"capacity_unavailable"});
+    free--;served.push(owners.get(String(intent.id))!);
+  },()=>{},()=>{},(_db,_kind,pin)=>{units.push(pin.templateId);return pin.templateId==="pin-x"||pin.templateId==="pin-y"?"domain-1":undefined;});
+  const submit=(app:typeof f.app,templateId:string,name:string)=>{const req=envelope(f);req.intent={...req.intent,templateId};owners.set(req.id,name);queue.submit(app.credential,req);};
+  submit(c,"pin-x","C");
+  for(let i=0;i<5;i++) submit(b,"pin-y","B");
+  const resolved:string[][]=[];
+  for(let pass=0;pass<10;pass++){ submit(a,"pin-x","A"); free=1; units.length=0; queue.pass(); resolved.push([...units].sort()); }
+  assert.deepEqual(served,served[0]==="A"?["A","B","A","B","A","B","A","B","A","B"]:["B","A","B","A","B","A","B","A","B","A"]);
+  // Each distinct waiting pin resolves once per pass.
+  assert.deepEqual(resolved[0],["pin-x","pin-y"]);
+  assert.ok(resolved.every(pins=>new Set(pins).size===pins.length),JSON.stringify(resolved));
+});
+
+test("queued lease pins resolve to the runner domains or hosts that serve them",t=>{
+  const f=leaseFixture(t), runners=f.leases.linux.runners!, [shared,alone]=[randomUUID(),randomUUID()];
+  const enroll=()=>{const binding={controllerId:f.options.controllerId,runnerId:randomUUID(),generation:1,incarnationId:randomUUID()}, id=randomUUID();
+    const issued=runners.issue({id,...binding,ttlSeconds:60});runners.consume((issued as {enrollmentToken:string}).enrollmentToken,{id,...binding,credential:key()});return binding;};
+  const image=(id:string)=>{const value={id,revision:"1",arch:"amd64",os:"linux",mode:"headless",backend:"kubevirt",digest:"sha256:"+"ab".repeat(32),resources:{cpu:1,memoryMiB:1024,diskGiB:4},capabilities:["command"]};f.leases.linux.image(value);return {id,revision:"1",arch:"amd64",digest:value.digest};};
+  const [x,y,z,unapproved]=[image("pin-x"),image("pin-y"),image("pin-z"),image("pin-none")];
+  f.store.transaction(db=>{for(const domain of [shared,alone]) f.leases.linux.domains.define(db,{id:domain,name:"fixture",capacity:{cpu:1,memoryMiB:1024,diskGiB:4}},f.now());});
+  f.leases.linux.approve({binding:enroll(),domainId:shared,backend:"kubevirt",images:[x,y]});
+  f.leases.linux.approve({binding:enroll(),domainId:shared,backend:"kubevirt",images:[y]});
+  f.leases.linux.approve({binding:enroll(),domainId:alone,backend:"kubevirt",images:[z]});
+  const unit=(kind:"lease"|"linux-lease",templateId:string)=>f.store.transaction(db=>f.leases.requests.unit(db,kind,{templateId,templateRevision:"1",arch:"amd64"}));
+  assert.equal(unit("linux-lease","pin-x"),unit("linux-lease","pin-y"));
+  assert.notEqual(unit("linux-lease","pin-x"),unit("linux-lease","pin-z"));
+  assert.equal(unit("linux-lease",unapproved.id),undefined);
+  assert.equal(unit("lease",f.image.id),`lease-hosts\u001f${f.host}`);
+  assert.equal(unit("lease","unknown-image"),undefined);
 });

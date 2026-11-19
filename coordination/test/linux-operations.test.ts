@@ -744,8 +744,9 @@ async function previewQueue(t: { after: (fn: () => Promise<void>) => void; mock:
   let now = T0;
   t.mock.method(Date, "now", () => now * 1000);
   // A stable front port that follows controller restarts and can drop one reply after the controller commits it.
-  let drop: RegExp | undefined, dropped = 0;
+  let drop: RegExp | undefined, dropped = 0, cancels = 0;
   const proxy = http.createServer((req, res) => {
+    if (req.method === "POST" && /^\/v1\/requests\/[^/]+\/cancel$/.test(req.url ?? "")) cancels++;
     const upstream = http.request({ host: "127.0.0.1", port: f.port(), method: req.method, path: req.url, headers: req.headers, agent: false }, reply => {
       if (drop && req.method === "POST" && drop.test(req.url ?? "")) { drop = undefined; dropped++; reply.resume(); reply.on("end", () => res.socket?.destroy()); return; }
       res.writeHead(reply.statusCode!, reply.headers); reply.pipe(res);
@@ -756,7 +757,7 @@ async function previewQueue(t: { after: (fn: () => Promise<void>) => void; mock:
   await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", resolve));
   const tmp = mkdtempSync(join(tmpdir(), "queued-previews-"));
   writeFileSync(join(tmp, "key"), app.credential);
-  const config = { applicationKeyFile: join(tmp, "key"), database: join(tmp, "previews.sqlite"), templateId: IMAGE.id, templateRevision: IMAGE.revision, arch: "amd64" as const, digest: DIGEST, ttlSeconds: 60 };
+  const config = { applicationKeyFile: join(tmp, "key"), database: join(tmp, "previews.sqlite"), templateId: IMAGE.id, templateRevision: IMAGE.revision, arch: "amd64" as const, digest: DIGEST, ttlSeconds: 60, maxPreviewPriority: 10 };
   const open = () => new DashboardPreviews(config, { baseUrl: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`, allowLoopbackHttp: true });
   let dash = open();
   t.after(async () => { dash.close(); await new Promise<void>(resolve => proxy.close(() => resolve())); rmSync(tmp, { recursive: true, force: true }); });
@@ -765,6 +766,7 @@ async function previewQueue(t: { after: (fn: () => Promise<void>) => void; mock:
     f, app, filler, domain, runner,
     get dash() { return dash; },
     get dropped() { return dropped; },
+    get cancels() { return cancels; },
     dropNext(route: RegExp) { drop = route; },
     clock(seconds: number) { now = seconds; f.clock(seconds); },
     reopen() { dash.close(); dash = open(); },
@@ -877,4 +879,15 @@ test("revoking the dashboard application cancels a waiting preview, which then e
   await q.until(created.id, v => v.state === "failed");
   assert.deepEqual(q.f.rows(`SELECT state,reason FROM requests WHERE id='${q.leaseOf(created.id)}'`), [{ state: "cancelled", reason: "application_revoked" }]);
   assert.equal(q.f.rows(`SELECT * FROM linux_leases WHERE id='${q.leaseOf(created.id)}'`).length, 0);
+});
+
+test("a preview whose submission the controller refuses fails at once instead of stopping until its deadline", async t => {
+  // The dashboard allows priority 5 but the application's maximum is 0, so the controller refuses the request (400).
+  const q = await previewQueue(t, { maxRequestPriority: 0 });
+  const created = q.submit({ priority: 5 });
+  const failed = await q.until(created.id, v => v.state === "failed", 5000);
+  assert.equal(failed.request, undefined);
+  assert.deepEqual((await q.app.client().listRequests()).requests, []);
+  await delay(1500);
+  assert.equal(q.cancels, 1);
 });

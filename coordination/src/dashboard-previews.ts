@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, openSync, closeSync } from "node:fs";
+import { readFileSync, openSync, closeSync, chmodSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -31,6 +31,10 @@ export interface PreviewConfig {
   arch: "arm64" | "amd64";
   digest: string;
   ttlSeconds: number;
+  /** Highest queue priority a dashboard owner may set on a preview. Default 0: owners can only lower theirs. */
+  maxPreviewPriority?: number;
+  /** Waiting previews one owner may hold at once, so one owner cannot fill the shared application's waiting cap. */
+  maxWaitingPreviewsPerOwner?: number;
 }
 interface Intent {
   id: string;
@@ -241,7 +245,15 @@ export class DashboardPreviews {
       !Number.isInteger(config.ttlSeconds) ||
       config.ttlSeconds < 30 ||
       config.ttlSeconds > 1800 ||
-      !/^sha256:[a-f0-9]{64}$/.test(config.digest)
+      !/^sha256:[a-f0-9]{64}$/.test(config.digest) ||
+      (config.maxPreviewPriority !== undefined &&
+        (!Number.isSafeInteger(config.maxPreviewPriority) ||
+          config.maxPreviewPriority < 0 ||
+          config.maxPreviewPriority > 1000000)) ||
+      (config.maxWaitingPreviewsPerOwner !== undefined &&
+        (!Number.isSafeInteger(config.maxWaitingPreviewsPerOwner) ||
+          config.maxWaitingPreviewsPerOwner < 1 ||
+          config.maxWaitingPreviewsPerOwner > 1000))
     )
       throw new Error("Invalid preview configuration");
     const { templateId, templateRevision, arch, digest } = config;
@@ -273,10 +285,14 @@ export class DashboardPreviews {
       ...options,
       applicationKey: readFileSync(config.applicationKeyFile, "utf8").trim(),
     });
+    // The open mode applies only to a new file; an existing database (now holding pending preview files) is narrowed too.
     closeSync(openSync(config.database, "a", 0o600));
+    chmodSync(config.database, 0o600);
     this.db = new DatabaseSync(config.database);
+    // Pending preview files are cleared from workspace_requests at launch or stop; overwrite the freed content.
     this.db
-      .exec(`CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,owner TEXT,mode TEXT,hash TEXT,state TEXT,expiresAt TEXT,lease TEXT,op TEXT,failed INTEGER);
+      .exec(`PRAGMA secure_delete=ON;
+      CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,owner TEXT,mode TEXT,hash TEXT,state TEXT,expiresAt TEXT,lease TEXT,op TEXT,failed INTEGER);
       CREATE TABLE IF NOT EXISTS preview_transfer_journal(preview TEXT,transfer TEXT,step INTEGER,payload TEXT,PRIMARY KEY(preview,transfer,step));
       CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY,imageId TEXT,artifact TEXT,result TEXT,bytes BLOB,sha256 TEXT,submitted INTEGER DEFAULT 0);
       CREATE TABLE IF NOT EXISTS build_chunks(id TEXT,seq INTEGER PRIMARY KEY,data BLOB);
@@ -358,6 +374,28 @@ export class DashboardPreviews {
           );
         if (build && !this.images.some((i) => i.id === intent.imageId))
           throw new DashboardError("Unknown build image.", 400);
+        if ((intent.priority ?? 0) > (this.config.maxPreviewPriority ?? 0))
+          throw new DashboardError(
+            "Priority exceeds this dashboard's maximum.",
+            400,
+          );
+        // Every owner shares the dashboard's application and its waiting cap, so each owner's share is bounded.
+        if (
+          !build &&
+          Number(
+            this.db
+              .prepare(
+                `SELECT count(*) AS n FROM previews p JOIN workspace_requests w ON w.id=p.id WHERE p.owner=? AND p.mode!='build'
+                  AND p.state='provisioning' AND coalesce(json_extract(w.request,'$.state'),'waiting')='waiting'`,
+              )
+              .get(owner)!.n,
+          ) >= (this.config.maxWaitingPreviewsPerOwner ?? 10)
+        )
+          throw new DashboardError(
+            "Waiting preview limit reached; cancel a waiting preview or wait for one to start.",
+            429,
+            { code: "preview_waiting_limit", retryable: true },
+          );
         this.db.exec("BEGIN");
         try {
           if (build)
@@ -623,12 +661,32 @@ export class DashboardPreviews {
         }));
       }
     } catch (e) {
-      if (
+      const uncertain =
         e instanceof ConsumerTransportError ||
         (e instanceof ConsumerError && e.outcome === "unknown") ||
-        (e instanceof ConsumerServiceError && e.status >= 500)
-      )
-        return;
+        (e instanceof ConsumerServiceError && e.status >= 500);
+      if (!seen && uncertain)
+        // The controller may hold this submission; stopping must wait out the deadline before trusting a 404.
+        this.db
+          .prepare(
+            "UPDATE workspace_requests SET submitted=2 WHERE id=? AND submitted=1",
+          )
+          .run(id);
+      else if (!seen && e instanceof ConsumerServiceError) {
+        // A definitive refusal (waiting cap, priority, 409, ...). Unless an earlier attempt's outcome was unknown,
+        // the controller holds no request this cancel could miss, so the preview fails at once instead of waiting
+        // out its deadline. If it does hold one (a replay refused on a changed limit), cancel finds and closes it.
+        if (
+          this.db
+            .prepare(
+              "UPDATE workspace_requests SET submitted=0 WHERE id=? AND submitted=1",
+            )
+            .run(id).changes &&
+          intent.mode === "build"
+        )
+          this.db.prepare("UPDATE builds SET submitted=0 WHERE id=?").run(id);
+      }
+      if (uncertain) return;
       throw e;
     }
     this.observe(id, request);

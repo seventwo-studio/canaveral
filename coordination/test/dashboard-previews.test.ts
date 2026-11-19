@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, statSync, chmodSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -335,4 +336,79 @@ test("build publication waits for verified transfer and release, survives restar
   await until(expired.id, "stopped");
   assert.throws(() => manager.artifact("owner", expired.id), /unavailable/);
   assert.equal(launched.mock.callCount(), 4);
+});
+
+function queuedManager(
+  t: { after: (fn: () => void) => void; mock: { method: typeof test.mock.method } },
+  extra: Record<string, unknown> = {},
+  prepare?: (database: string) => void,
+) {
+  const tmp = mkdtempSync(join(tmpdir(), "workspace-preview-queue-")),
+    digest = "sha256:" + "a".repeat(64);
+  const config = {
+    applicationKeyFile: join(tmp, "key"),
+    database: join(tmp, "state"),
+    templateId: "test",
+    templateRevision: "1",
+    arch: "arm64" as const,
+    digest,
+    ttlSeconds: 30,
+    ...extra,
+  };
+  writeFileSync(config.applicationKeyFile, "a".repeat(43));
+  prepare?.(config.database);
+  const waiting = { state: "waiting", priority: 0, deadline: null, reason: null, admittedAt: null };
+  t.mock.method(ConsumerClient.prototype, "catalogue", async () => ({
+    templates: [{ id: "test", revision: "1", arch: "arm64", digest, workspaceIOVersion: 1 }],
+  }));
+  t.mock.method(ConsumerClient.prototype, "submitRequest", async () => ({ request: waiting }));
+  t.mock.method(ConsumerClient.prototype, "inspectRequest", async () => waiting);
+  t.mock.method(ConsumerClient.prototype, "cancelRequest", async () => ({ ...waiting, state: "cancelled", reason: "consumer_cancelled" }));
+  const manager = new DashboardPreviews(config, { baseUrl: "https://localhost" });
+  let closed = false;
+  const close = () => { if (!closed) { closed = true; manager.close(); } };
+  t.after(() => { close(); rmSync(tmp, { recursive: true, force: true }); });
+  const create = (owner: string, extraBody: Record<string, unknown> = {}, id: string = randomUUID()) =>
+    manager.handle(owner, "POST", undefined, { id, mode: "static", files: [{ path: "index.html", data: "eA==" }], ...extraBody }) as { id: string; state: string };
+  return { manager, config, create, close };
+}
+
+test("each owner holds a bounded number of waiting previews and cannot raise priority above the dashboard maximum", (t) => {
+  const { manager, create } = queuedManager(t, { maxWaitingPreviewsPerOwner: 2 });
+  const first = create("a"), second = create("a");
+  assert.throws(() => create("a"), (e: { status?: number; code?: string }) => e.status === 429 && e.code === "preview_waiting_limit");
+  // Replay of an existing preview is not a new waiting preview; another owner keeps its own share.
+  assert.equal(create("a", {}, first.id).id, first.id);
+  create("b");
+  manager.handle("a", "DELETE", second.id);
+  create("a");
+  // By default owners may only lower their own priority.
+  assert.throws(() => create("c", { priority: 1 }), (e: { status?: number }) => e.status === 400);
+  create("c", { priority: -5 });
+});
+
+test("a configured preview priority maximum bounds owner priority", (t) => {
+  const { create } = queuedManager(t, { maxPreviewPriority: 3 });
+  create("a", { priority: 3 });
+  assert.throws(() => create("a", { priority: 4 }), (e: { status?: number }) => e.status === 400);
+  assert.throws(() => queuedManager(t, { maxPreviewPriority: -1 }), /Invalid preview configuration/);
+  assert.throws(() => queuedManager(t, { maxWaitingPreviewsPerOwner: 0 }), /Invalid preview configuration/);
+});
+
+test("the preview database is owner-only even when it already existed, and stopped previews leave no file bytes behind", async (t) => {
+  const { manager, config, close } = queuedManager(t, {}, (database) => {
+    writeFileSync(database, "");
+    chmodSync(database, 0o644);
+  });
+  assert.equal(statSync(config.database).mode & 0o777, 0o600);
+  const data = randomBytes(24000).toString("base64");
+  const preview = manager.handle("owner", "POST", undefined, { id: randomUUID(), mode: "static", files: [{ path: "index.html", data }] }) as { id: string };
+  for (let i = 0; i < 50 && (manager.handle("owner", "GET", preview.id) as { request?: unknown }).request === undefined; i++) await delay(100);
+  manager.handle("owner", "DELETE", preview.id);
+  for (let i = 0; i < 50 && (manager.handle("owner", "GET", preview.id) as { state: string }).state !== "stopped"; i++) await delay(100);
+  assert.equal((manager.handle("owner", "GET", preview.id) as { state: string }).state, "stopped");
+  close();
+  await delay(100);
+  const bytes = readFileSync(config.database);
+  for (const at of [0, 8000, 16000, data.length - 64]) assert.equal(bytes.includes(Buffer.from(data.slice(at, at + 64))), false, `file bytes at ${at} remain`);
 });

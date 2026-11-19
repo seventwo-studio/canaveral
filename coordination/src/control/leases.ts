@@ -48,6 +48,16 @@ export function leaseEligible(offer: Record<string, unknown>, image: Record<stri
     return offer.leaseImages.some(item => sameJson(item, reference));
   } catch { return false; }
 }
+/** The enabled hosts that offer a legacy lease pin, so pins served by the same hosts share one application turn.
+ * Transient host state (heartbeat age, health) is left out so the unit stays stable. Read-only. */
+function legacyCapacityUnit(db: DatabaseSync, pin: { templateId: string; templateRevision: string; arch: string }): string | undefined {
+  const row = db.prepare("SELECT definition FROM templates WHERE id=? AND revision=? AND arch=?").get(pin.templateId, pin.templateRevision, pin.arch);
+  if (!row) return undefined;
+  const image = object(JSON.parse(String(row.definition)));
+  const hosts = (db.prepare("SELECT id,offer FROM hosts WHERE enabled=1 ORDER BY id").all() as Array<{ id: string; offer: string }>)
+    .filter(host => leaseEligible(object(JSON.parse(String(host.offer))), image)).map(host => String(host.id));
+  return hosts.length ? ["lease-hosts", ...hosts].join("\u001f") : undefined;
+}
 function template(row: LegacyMachineRow): Record<string, unknown> { return object(typeof row.template === "string" ? JSON.parse(row.template) : row.template); }
 function observedReady(db: DatabaseSync, row: LegacyMachineRow, now: number): boolean {
   const image = template(row), required = (image.preparationDriver ?? "none") !== "none";
@@ -206,6 +216,8 @@ export class LegacyLeases implements ControlModule {
     store.transaction(initializeLeases);
     store.addTransactionHook(refreshLegacyLeases);
     store.transaction(db => refreshLegacyLeases(db, store.clock()));
+    // Request admission skips a whole intent group after a 429 or 503 refusal, so neither acquisition path may
+    // decide those from the request UUID: UUID conflicts are 409 and capacity, quota and limits are UUID-free.
     this.requests = new Requests(store, this.applications, (kind, app, intent) => {
       if (kind === "lease") this.acquireForApplication(app, intent);
       else this.linux.acquireForApplication(app, intent);
@@ -215,7 +227,7 @@ export class LegacyLeases implements ControlModule {
     }, (kind, intent) => {
       if (kind === "linux-lease") { this.linux.validateAcquisition(intent); return; }
       validateAcquisition(intent);
-    });
+    }, (db, kind, pin) => kind === "linux-lease" ? this.linux.capacityUnit(db, pin) : legacyCapacityUnit(db, pin));
     this.operations = operationModule(store, options);
     registerMachineHooks(store, {
       reportFields: ["leaseFenced"],

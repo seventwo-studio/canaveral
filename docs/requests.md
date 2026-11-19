@@ -57,20 +57,36 @@ Grants, allowlists, application limits, health, drains and physical capacity are
 therefore checked by the existing acquisition code at admission. A failed attempt
 cannot leave a partial reservation or roll back another request's admission.
 
-Requests are grouped into pools by kind and exact image pin (`templateId`,
-`templateRevision`, `arch`), because requests in one pool compete for the same
-approved runner domains or hosts. Each pool keeps its own application turn in
-`request_pool_turns`, persisted across restart: after an admission in a pool, the
-next application in UUID order goes first there. Admissions in one pool never move
-another pool's turn, so an application admitted continually on one runner domain
-cannot starve an application waiting for another. A pass visits pools by their
-oldest waiting request. Within an application, higher priority precedes FIFO
-sequence. There is no aging.
+Application turns are kept per capacity unit, the physical capacity a request's
+image pin (kind, `templateId`, `templateRevision`, `arch`) competes for. A
+`linux-lease` pin's unit is the set of runner domains with an unrevoked approval
+for it; a `lease` pin's unit is the set of enabled hosts that offer it. Pins with
+the same set share one unit, so two pins on one runner domain share one turn. A pin
+with no approved domain or offering host is its own unit. Each pass resolves every
+distinct waiting pin once. Transient runner and host state (drain, binding
+currency, heartbeat age, health) is left out, so a unit does not change while a
+runner restarts. Changing approvals or offers can move a pin to another unit, which
+starts from its own turn.
+
+Each unit keeps its own application turn in `request_unit_turns`, persisted across
+restart. A unit's turn advances only when a request is admitted in it: the next
+application in UUID order after the last one admitted goes first there. A refused
+attempt does not move the turn, so the following application is tried next in the
+same pass. Admissions in one unit never move another unit's turn, so an application
+admitted continually on one runner domain cannot starve an application waiting for
+another. Because pins on one domain share a turn, an application that keeps
+submitting on one pin cannot starve another application on a second pin of the same
+domain, even behind an older request that never fits. Pins whose domain sets overlap
+without being equal are separate units and do not share a turn. A pass visits units
+by their oldest waiting request. Within an application, higher priority precedes
+FIFO sequence. There is no aging.
 
 A request whose attempt returns 429 or 503 is skipped for the current scan cycle.
 For the rest of that pass, so are the application's other waiting requests with the
 same normalized intent apart from UUID and name: they would meet the same limit or
-capacity. A large unservable backlog therefore costs one attempt per group, and
+capacity. This relies on acquisition never deciding a 429 or 503 from the request
+UUID; UUID conflicts are 409. A host drain refusal (`host_draining`), where the
+controller has one, skips the group the same way. A large unservable backlog therefore costs one attempt per group, and
 servable requests behind it are reached in the same pass. Requests with different
 intent, and other applications, remain eligible. An unexpected failure blocks only
 its own request. Passes attempt at most 256 requests; a persisted scan continuation
@@ -179,7 +195,7 @@ duplicated lease admission, placement, the box limit and cleanup, or moved file
 upload into the controller.
 
 A preview request therefore follows every rule above: it waits when capacity or
-the application's box limit is full, is admitted by pool turn, priority and FIFO,
+the application's box limit is full, is admitted by unit turn, priority and FIFO,
 expires at its deadline, can be cancelled while waiting, and replays by UUID.
 Waiting never preempts, shrinks or relocates a running lease. Admission reserves
 on the mapped physical ledger in the pass transaction; lease TTL starts at
@@ -188,18 +204,23 @@ admission.
 [Dashboard previews](dashboard.md#owner-workspace-previews) submit these requests
 for their owners and show the request state. All of one dashboard's previews share
 its application: the controller's per-application fairness and the waiting cap apply
-to the dashboard as a whole, not to each dashboard owner.
+to the dashboard as a whole. The dashboard bounds each owner's waiting previews and
+the priority owners may set, so one owner cannot fill the shared waiting cap or jump
+ahead of every other owner; owners are not otherwise scheduled against each other.
 
 ## Upgrade and backup boundary
 
 This feature creates only new tables (`requests`, `request_scheduler`,
-`request_scan`, `model_job_scheduler`, `request_pool_turns`) and partial indexes
-for waiting order and deadline. Each pass also builds a connection-local temporary
-table of its candidates; it is never persisted. It neither alters nor converts existing tables; queued model calls add
+`request_scan`, `model_job_scheduler`, `request_unit_turns`) and partial indexes
+for waiting order and deadline. Each pass also builds connection-local temporary
+tables of its candidates and their units, indexed by request and group; they are
+never persisted. It neither alters nor converts existing tables; queued model calls add
 rows to the existing `model_jobs` table in its current schema. Old databases and old application policy JSON
 remain usable.
 
-A controller from before per-pool turns ignores `request_pool_turns` and orders
+Interim builds of this change kept turns per image pin in `request_pool_turns`;
+this version drops that table at startup, since turns are disposable. A controller
+from before per-unit turns ignores `request_unit_turns` and orders
 leases by the global turn in `request_scheduler`, which this version no longer
 advances; waiting requests and held reservations are unaffected. Downgrading after
 the first queued model call is unsupported. An older controller
