@@ -47,7 +47,9 @@ export interface ReleaseRequest { id: string }
 export interface ModelJobIntent { adapter: "ollama" | "llama.cpp" | "vllm" | "mlx"; model: string; digest: string; prompt: string; maxTokens: number }
 export type WaitingRequestInput = { id: string; priority?: number; deadline?: string; source?: Record<string, unknown> } &
   ({ kind: "lease" | "linux-lease"; intent: Omit<AcquireRequest,"id"> } | { kind: "model-job"; intent: ModelJobIntent });
-export interface WaitingRequest { id: string; kind: "lease" | "linux-lease" | "model-job"; intent: AcquireRequest | ModelJobIntent; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
+/** Stored model-call intent as returned in request views: the prompt is replaced by `sha256:<hex>` of its UTF-8 bytes. */
+export interface ModelJobRequestIntent { adapter: ModelJobIntent["adapter"]; model: string; digest: string; promptDigest: string; maxTokens: number }
+export interface WaitingRequest { id: string; kind: "lease" | "linux-lease" | "model-job"; intent: AcquireRequest | ModelJobRequestIntent; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
 export interface WaitingRequestPage { requests: WaitingRequest[]; nextCursor: string | null }
 function waitingRequest(value: unknown, id?: string): WaitingRequest {
   if (!isRecord(value) || typeof value["id"] !== "string" || (id !== undefined && !sameId(value["id"],id)) ||

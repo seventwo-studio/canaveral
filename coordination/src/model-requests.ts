@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { object, ServiceError } from "./errors.ts";
 import { modelAdapter, parseModelJob } from "./model-job.ts";
@@ -5,7 +6,7 @@ import type { ModelJob } from "./model-job.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { Resources } from "./consumers.ts";
 
-/** Model-job tables and the model-claim turn. Every statement is idempotent so either worker may run it first. */
+/** Model-job tables and the per-runner model-claim turns. Every statement is idempotent so either worker may run it first. */
 export function modelJobSchema(db: DatabaseSync): void {
   ResourceDomains.schema(db);
   db.exec(`CREATE TABLE IF NOT EXISTS model_catalog (model TEXT NOT NULL, digest TEXT NOT NULL, adapter TEXT NOT NULL, resources TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(model,digest));
@@ -15,11 +16,10 @@ export function modelJobSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS model_jobs_open ON model_jobs(closed,state,created);
     CREATE TABLE IF NOT EXISTS model_assignments (id TEXT PRIMARY KEY, claim TEXT NOT NULL UNIQUE, application TEXT NOT NULL, job TEXT NOT NULL, controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, reservation TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL DEFAULT 0, report TEXT, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, UNIQUE(application,job));
     CREATE INDEX IF NOT EXISTS model_assignments_binding ON model_assignments(controller,runner,generation,closed);
-    CREATE TABLE IF NOT EXISTS model_job_scheduler (id INTEGER PRIMARY KEY CHECK(id=1), turn TEXT NOT NULL);
-    INSERT OR IGNORE INTO model_job_scheduler VALUES(1,'');`);
+    CREATE TABLE IF NOT EXISTS model_job_scheduler (runner TEXT PRIMARY KEY, turn TEXT NOT NULL);`);
 }
 
-export { cancelModelJob, expireModelRequest, settleModelRequests } from "./model-settlement.ts";
+export { cancelModelJob, closeRevokedModelJobs, expireModelRequest, expireModelRequests, settleModelRequests } from "./model-settlement.ts";
 const table = (db: DatabaseSync, name: string): boolean => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 const INTENT_FIELDS = ["adapter", "model", "digest", "prompt", "maxTokens"];
 
@@ -34,6 +34,14 @@ export function modelRequestIntent(value: unknown): Record<string, unknown> {
       message: { type: "submit", adapter: input.adapter, model: input.model, digest: input.digest, prompt: input.prompt, maxTokens: input.maxTokens } });
   } catch { throw new ServiceError("Invalid model-job intent.", 400); }
   return { adapter: input.adapter, model: input.model, digest: input.digest, prompt: input.prompt, maxTokens: input.maxTokens };
+}
+
+/** The stored and returned request intent: the prompt is replaced by its SHA-256 digest, so request views never
+ * echo it while exact replay still compares it. The job record keeps the prompt for the runner.
+ */
+export function modelRequestRecord(intent: Record<string, unknown>): Record<string, unknown> {
+  const promptDigest = "sha256:" + createHash("sha256").update(String(intent.prompt), "utf8").digest("hex");
+  return { adapter: intent.adapter, model: intent.model, digest: intent.digest, promptDigest, maxTokens: intent.maxTokens };
 }
 
 /** Same grant and catalog checks as direct submission. Returns the pinned catalog resources. */

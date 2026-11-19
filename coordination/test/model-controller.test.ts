@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
@@ -108,8 +108,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const post = (route: string, body: unknown, token?: string, via = port()) => call(via, "POST", route, body, token);
   const get = (route: string, token?: string) => call(port(), "GET", route, undefined, token);
 
-  async function application(limits: Body = {}): Promise<{ id: string; credential: string }> {
-    const id = randomUUID();
+  async function application(limits: Body = {}, id: string = randomUUID()): Promise<{ id: string; credential: string }> {
     const created = await post("/v1/consumers", { id, name: "fixture", templates: [], limits: { resources: { cpu: 1, memoryMiB: 1, diskGiB: 1 }, activeLeases: 1, ...limits } }, admin);
     assert.equal(created.status, 200);
     return { id, credential: created.body.credential as string };
@@ -145,9 +144,14 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
     const db = new DatabaseSync(statePath);
     try { return db.prepare(sql).all().map(row => ({ ...row })) as Body[]; } finally { db.close(); }
   }
+  /** Seeds rows directly in one transaction; used where the HTTP path would take minutes. */
+  function seed(work: (db: DatabaseSync) => void): void {
+    const db = new DatabaseSync(statePath, { timeout: 15000 });
+    try { db.exec("BEGIN IMMEDIATE"); work(db); db.exec("COMMIT"); } finally { db.close(); }
+  }
   assert.equal((await post("/v1/model-catalog", { model: MODEL, digest: DIGEST, adapter: "ollama", resources: JOB_RESOURCES }, admin)).status, 200);
   return {
-    admin, controllerId, start, port, post, get, application, enroll, domain, approve, grant, submission, receipt, success, claim, report, inspectDomain, rows,
+    admin, controllerId, start, port, post, get, application, enroll, domain, approve, grant, submission, receipt, success, claim, report, inspectDomain, rows, seed,
     async restart() { await primary.kill(); primary = await start(); },
   };
 }
@@ -491,6 +495,9 @@ test("waiting model calls expire at their deadline and cancel without execution"
   const jobCancel = await q.post(`/v1/model-jobs/${viaJob.id}/cancel`, { version: 1, applicationId: a.id, id: viaJob.id, message: { type: "cancel" } }, a.credential);
   assert.deepEqual([jobCancel.body.state, (jobCancel.body.request as Body).state], ["cancelled", "cancelled"]);
   const queue = (await q.get("/v1/admin/model-jobs", q.admin)).body.jobs as Body[];
+  // Open jobs list oldest first, so long-waiting work stays visible.
+  assert.deepEqual(queue.filter(j => !["cancelled", "failed", "succeeded"].includes(String(j.state))).map(j => j.id),
+    [blocker.id, soon.id, viaAdmin.id]);
   const listed = queue.find(j => j.id === viaAdmin.id)!;
   assert.deepEqual([listed.applicationId, listed.state, listed.assigned, (listed.request as Body).state], [a.id, "queued", false, "waiting"]);
   assert.equal(JSON.stringify(queue).includes("Summarize"), false);
@@ -523,6 +530,11 @@ test("model-call replay is exact, changed intent conflicts and lost responses re
   const reordered = { source: { run: "7", repository: "team/project" }, priority: 2, intent: { maxTokens: 64, prompt: "Summarize the fixture.", digest: DIGEST, model: MODEL, adapter: "ollama" }, kind: "model-job", id: request.id };
   const replay = await q.submit(reordered as Queued, a.credential);
   assert.deepEqual([replay.status, replay.body.state, replay.body.sequence], [200, "waiting", 1]);
+  // The request stores and returns only the prompt digest; the job keeps the prompt for the runner.
+  const promptDigest = "sha256:" + createHash("sha256").update("Summarize the fixture.").digest("hex");
+  assert.deepEqual(replay.body.intent, { adapter: "ollama", model: MODEL, digest: DIGEST, promptDigest, maxTokens: 64 });
+  for (const echoed of [replay.body, await q.request(request.id, a.credential), (await q.get("/v1/requests", a.credential)).body]) assert.equal(JSON.stringify(echoed).includes("Summarize"), false);
+  assert.deepEqual(q.rows(`SELECT count(*) AS n FROM requests WHERE intent LIKE '%Summarize%'`), [{ n: 0 }]);
   for (const changed of [{ ...request, intent: intent("Another prompt.") }, { ...request, priority: 1 }, { ...request, source: { run: "8" } },
     { ...request, deadline: new Date(Date.now() + 60_000).toISOString() }]) {
     const conflict = await q.submit(changed, a.credential);
@@ -598,4 +610,93 @@ test("the consumer SDK submits, lists, inspects and cancels queued model calls",
   assert.equal((await client.cancelRequest(id)).state, "cancelled");
   assert.equal((await client.inspectRequest(id)).reason, "consumer_cancelled");
   await assert.rejects(client.submitRequest({ ...input, id: randomUUID(), intent: { ...input.intent, extra: 1 } as typeof input.intent }));
+});
+
+// Fairness and eligibility across runners serving different models.
+
+const OTHER_MODEL = "fixture-other:1", WIDE = { cpu: 64, memoryMiB: 131072, diskGiB: 400 };
+/** Fixed application UUIDs make the round-robin order deterministic (first < second < third). */
+const ORDERED = ["10000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-000000000002", "30000000-0000-4000-8000-000000000003"];
+async function twoModels(t: { after: (fn: () => Promise<void>) => void }) {
+  const f = await fixture(t);
+  assert.equal((await f.post("/v1/model-catalog", { model: OTHER_MODEL, digest: DIGEST, adapter: "ollama", resources: JOB_RESOURCES }, f.admin)).status, 200);
+  const grantOther = async (applicationId: string) =>
+    assert.equal((await f.post("/v1/model-grants", { applicationId, model: OTHER_MODEL, digest: DIGEST, maxUnfinished: 8 }, f.admin)).status, 200);
+  const approveOther = async (runner: Runner) => assert.equal((await f.post("/v1/model-runner-approvals",
+    { binding: runner.binding, domainId: await f.domain(WIDE), models: [{ model: OTHER_MODEL, digest: DIGEST }] }, f.admin)).status, 200);
+  const other = (applicationId: string, id: string = randomUUID()) => {
+    const s = f.submission(applicationId, id); s.message.model = OTHER_MODEL; return s;
+  };
+  const claimed = async (runner: Runner) => {
+    const reply = await f.claim(runner);
+    assert.equal(reply.status, 200);
+    return (reply.body.assignment as { job: { applicationId: string; id: string } } | null)?.job ?? null;
+  };
+  return { ...f, grantOther, approveOther, other, claimed };
+}
+
+test("each runner keeps its own application turn, so admissions elsewhere cannot starve an application", async t => {
+  const f = await twoModels(t);
+  const a = await f.application({}, ORDERED[0]), b = await f.application({}, ORDERED[1]), c = await f.application({}, ORDERED[2]);
+  await f.grant(a.id); await f.grant(b.id); await f.grantOther(c.id);
+  const r1 = await f.enroll(), r2 = await f.enroll();
+  await f.approve(r1, await f.domain(WIDE)); await f.approveOther(r2);
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await f.post("/v1/model-jobs", f.submission(a.id), a.credential)).status, 201);
+    assert.equal((await f.post("/v1/model-jobs", f.other(c.id), c.credential)).status, 201);
+  }
+  assert.equal((await f.post("/v1/model-jobs", f.submission(b.id), b.credential)).status, 201);
+  // Interleaved claims: r2's admissions of c must not reset r1's rotation between a and b.
+  const first: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await f.claimed(r2))?.applicationId, c.id);
+    first.push((await f.claimed(r1))?.applicationId ?? "none");
+  }
+  assert.deepEqual(first, [a.id, b.id, a.id]);
+});
+
+test("claims consider only eligible queue heads, however many unservable jobs wait ahead", async t => {
+  const f = await twoModels(t);
+  const c = await f.application({}, ORDERED[0]), a = await f.application({}, ORDERED[1]);
+  await f.grantOther(c.id); await f.grant(a.id);
+  const runner = await f.enroll();
+  await f.approve(runner, await f.domain(WIDE));
+  // More than 4,096 open jobs for a model this runner does not serve, submitted before the servable one.
+  f.seed(db => {
+    const insert = db.prepare("INSERT INTO model_jobs VALUES (?,?,?,?,?,'queued',0,0,'pending',NULL,0,?,?)");
+    for (let i = 0; i < 4200; i++) {
+      const job = f.other(c.id);
+      insert.run(c.id, job.id, JSON.stringify(job), OTHER_MODEL, DIGEST, 1, 1);
+    }
+  });
+  const servable = f.submission(a.id);
+  assert.equal((await f.post("/v1/model-jobs", servable, a.credential)).status, 201);
+  const job = await f.claimed(runner);
+  assert.deepEqual([job?.applicationId, job?.id], [a.id, servable.id]);
+  assert.deepEqual(f.rows(`SELECT count(*) AS n FROM model_jobs WHERE application='${c.id}' AND closed=0`), [{ n: 4200 }]);
+});
+
+test("revoking an application or grant closes its unclaimed direct model jobs without execution", async t => {
+  const f = await fixture(t), a = await f.application(), b = await f.application();
+  await f.grant(a.id); await f.grant(b.id);
+  const runner = await f.enroll();
+  await f.approve(runner, await f.domain(WIDE));
+  const claimedJob = f.submission(a.id);
+  assert.equal((await f.post("/v1/model-jobs", claimedJob, a.credential)).status, 201);
+  assert.notEqual((await f.claim(runner)).body.assignment, null);
+  const waiting = f.submission(a.id), other = f.submission(b.id);
+  for (const [job, app] of [[waiting, a], [other, b]] as const) assert.equal((await f.post("/v1/model-jobs", job, app.credential)).status, 201);
+
+  assert.equal((await f.post("/v1/model-grants/revoke", { applicationId: a.id, model: MODEL, digest: DIGEST }, f.admin)).status, 200);
+  const failed = (await f.get(`/v1/model-jobs/${waiting.id}`, a.credential)).body;
+  assert.deepEqual([failed.state, failed.cancelRequested, failed.stopped, failed.cleanup, failed.assignment, failed.reservationHeld],
+    ["failed", false, true, "complete", "none", false]);
+  // Claimed work keeps its reservation and report authority.
+  const held = (await f.get(`/v1/model-jobs/${claimedJob.id}`, a.credential)).body;
+  assert.deepEqual([held.state, held.assignment, held.reservationHeld], ["queued", "current", true]);
+
+  assert.equal((await f.post(`/v1/consumers/${b.id}/revoke`, {}, f.admin)).status, 200);
+  assert.deepEqual(f.rows(`SELECT state,cancel_requested,stopped,cleanup,closed FROM model_jobs WHERE id='${other.id}'`),
+    [{ state: "cancelled", cancel_requested: 1, stopped: 1, cleanup: "complete", closed: 1 }]);
+  assert.equal((await f.claim(runner)).body.assignment, null);
 });

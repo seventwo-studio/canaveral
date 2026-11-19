@@ -157,12 +157,13 @@ export class AdminSystem implements ControlModule {
     };
     return {...configuration,page,nextPage:state.more && page<1000000 ? page+1 : null};
   }
-  /** Application model jobs for the dashboard queue: open work first, then the most recent. No prompts or results. */
+  /** Application model jobs for the dashboard queue: open work oldest first, so stuck work stays visible, then the
+   * most recently closed. No prompts or results. */
   private modelJobs(db: DatabaseSync) {
     if (!legacyTable(db,"model_jobs")) return [];
     const rows = db.prepare(`SELECT j.id,j.application AS applicationId,j.model,j.digest,j.state,j.cancel_requested,j.stopped,j.cleanup,j.closed,j.created,j.updated,
       (SELECT reservation FROM model_assignments a WHERE a.application=j.application AND a.job=j.id) AS reservation
-      FROM model_jobs j ORDER BY j.closed,j.rowid DESC LIMIT 100`).all() as Array<Record<string, unknown>>;
+      FROM model_jobs j ORDER BY j.closed,CASE WHEN j.closed=0 THEN j.rowid ELSE -j.rowid END LIMIT 100`).all() as Array<Record<string, unknown>>;
     return rows.map(j => {
       const request = modelQueueView(db,String(j.applicationId),String(j.id));
       const held = j.reservation !== null && !!db.prepare("SELECT 1 FROM resource_reservations WHERE id=? AND state='held'").get(String(j.reservation));

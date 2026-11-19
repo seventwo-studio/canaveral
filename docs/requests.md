@@ -95,9 +95,14 @@ uncertain-operation contracts. The SDK never automatically retries or polls.
 
 ## Queued model calls
 
-A `model-job` request queues one application model call. Its `intent` is exactly the
-`model-job/1` submit message without `type`: `{adapter, model, digest, prompt,
-maxTokens}`. Other or missing fields return 400 without consuming the UUID. The
+A `model-job` request queues one application model call. Its submitted `intent` is
+exactly the `model-job/1` submit message without `type`: `{adapter, model, digest,
+prompt, maxTokens}`. Other or missing fields return 400 without consuming the UUID.
+Prompts are not echoed: the request stores and returns `{adapter, model, digest,
+promptDigest, maxTokens}`, where `promptDigest` is `sha256:` and the lowercase hex
+SHA-256 of the prompt's UTF-8 bytes. Replay compares that digest, so resending the
+same prompt replays and a changed prompt is a 409 `request_conflict`. The job record
+keeps the prompt for the runner. The
 application needs an active grant for the exact model and digest (403), and the
 adapter must match the immutable catalog entry (409); both are checked at submission
 because the job record is created with the request. `resources` is the catalogued
@@ -109,12 +114,16 @@ Admission is a runner claim, because only a claim binds an approved physical dom
 The control-worker pass never acquires model calls; it expires them at their
 deadline, cancels them on application revocation and rejects them with reason
 `model_grant_revoked` when the grant is revoked. Each claim is one transaction:
-it orders every unassigned, uncancelled model job the runner can serve by the same
-rules as the lease pass, applications in a persisted round-robin turn
-(`model_job_scheduler`, separate from the lease turn), then higher priority, then
-FIFO submission order. Direct `/v1/model-jobs` submissions take part at priority 0
-without a deadline. It expires intent whose deadline has passed, skips an
-application whose admitted, unreleased jobs for that model and digest have reached
+it first expires every model call whose deadline has passed, then orders the
+unassigned, uncancelled model jobs the runner can serve by the same rules as the
+lease pass: applications in a persisted round-robin turn, then higher priority, then
+FIFO submission order. The turn is kept per runner (`model_job_scheduler`, separate
+from the lease turn), so admissions on a runner that serves other models cannot
+starve an application waiting on this one. Eligibility (served model and digest,
+catalogued adapter, unrevoked application and grant) is decided in the query, and
+only the first job of each application, model and digest is considered, because
+later ones share its limit and resources. Direct `/v1/model-jobs` submissions take
+part at priority 0 without a deadline. The claim skips an application whose admitted, unreleased jobs for that model and digest have reached
 the grant's `maxUnfinished` (reason `model_job_limit`), and skips a job whose
 catalogued resources do not fit the runner's domain (reason `capacity_unavailable`,
 job state `waitingForResources`). The first job that fits is reserved on the domain's
@@ -146,7 +155,12 @@ This feature creates only new tables (`requests`, `request_scheduler`,
 `request_scan`, `model_job_scheduler`) and partial indexes for waiting order and
 deadline. It neither alters nor converts existing tables; queued model calls add
 rows to the existing `model_jobs` table in its current schema. Old databases and old application policy JSON
-remain usable. Held reservations, application/runner identities, assignment and
+remain usable.
+
+Downgrading after the first queued model call is unsupported. An older controller
+does not know the `model-job` kind and rejects the waiting request, but its FIFO claim
+still finds the open job in `model_jobs` and runs it, outside the request's priority,
+deadline and cancellation. Held reservations, application/runner identities, assignment and
 mutation receipts remain authoritative across upgrade and restart. Queue order,
 scan position and request tombstones are durable in the same SQLite database.
 

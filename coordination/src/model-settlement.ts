@@ -27,6 +27,15 @@ export function expireModelRequest(db: DatabaseSync, application: string, id: st
   return true;
 }
 
+/** Every waiting model call at or past its deadline expires and its unassigned job closes. Runs before a claim
+ * reads the queue, so overdue intent is never admitted and never occupies a queue head.
+ */
+export function expireModelRequests(db: DatabaseSync, now: number): void {
+  if (!table(db, "requests")) return;
+  const due = db.prepare("SELECT application,id FROM requests WHERE kind='model-job' AND state='waiting' AND deadline<=?").all(now) as Array<{ application: string; id: string }>;
+  for (const row of due) expireModelRequest(db, row.application, row.id, now);
+}
+
 /** Shared consumer, request and administrator cancellation. Waiting intent closes without execution
  * (expiry wins at its deadline); claimed reservations require runner receipts.
  */
@@ -54,4 +63,20 @@ export function settleModelRequests(db: DatabaseSync, now: number): void {
   const ended = db.prepare(`SELECT r.application,r.id,r.state FROM requests r JOIN model_jobs j ON j.application=r.application AND j.id=r.id
     WHERE r.kind='model-job' AND r.state IN ('cancelled','expired','rejected') AND j.closed=0`).all() as Array<{ application: string; id: string; state: string }>;
   for (const row of ended) closeUnassigned(db, row.application, row.id, row.state === "cancelled", now);
+}
+
+/** Revocation hook for one application, run in the revoking transaction. Queued model calls settle through
+ * their requests; direct submissions have no request, so their unassigned jobs close here: as cancelled when
+ * the application is revoked, as failed when only the grant is. Assigned work keeps its reservation.
+ */
+export function closeRevokedModelJobs(db: DatabaseSync, application: string, now: number): void {
+  if (!table(db, "model_jobs") || !table(db, "requests")) return;
+  settleModelRequests(db, now);
+  const revoked = !table(db, "consumers") || !db.prepare("SELECT 1 FROM consumers WHERE id=? AND revoked=0").get(application);
+  const rows = db.prepare(`SELECT j.id FROM model_jobs j WHERE j.application=? AND j.closed=0
+    AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.application=j.application AND r.id=j.id)
+    AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id)
+    AND (? OR NOT EXISTS (SELECT 1 FROM model_grants g WHERE g.application=j.application AND g.model=j.model AND g.digest=j.digest AND g.revoked=0))`)
+    .all(application, revoked ? 1 : 0) as Array<{ id: string }>;
+  for (const row of rows) closeUnassigned(db, application, row.id, revoked, now);
 }

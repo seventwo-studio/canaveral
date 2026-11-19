@@ -105,7 +105,7 @@ key may submit or inspect, including old receipts after lease termination. Treat
 command arguments and returned output as private. These methods have controller
 and fake-peer fixture coverage, without native execution acceptance.
 
-The [waiting request contract](requests.md) is opt-in. Request methods use only the application key, preserve caller UUIDs, and never poll or retry. `submitRequest` accepts `kind: "model-job"` with a `ModelJobIntent` (`{adapter, model, digest, prompt, maxTokens}`) for [queued model calls](requests.md#queued-model-calls); request views can carry that kind. Types and methods are also exposed through `sdk.ts`.
+The [waiting request contract](requests.md) is opt-in. Request methods use only the application key, preserve caller UUIDs, and never poll or retry. `submitRequest` accepts `kind: "model-job"` with a `ModelJobIntent` (`{adapter, model, digest, prompt, maxTokens}`) for [queued model calls](requests.md#queued-model-calls); request views of that kind return a `ModelJobRequestIntent` (`{adapter, model, digest, promptDigest, maxTokens}`), never the prompt. Types and methods are also exposed through `sdk.ts`.
 
 Linux lease acquisition and renewal require integer `ttlSeconds >= 30`, bounded
 by the application's maximum. The controller returns 400

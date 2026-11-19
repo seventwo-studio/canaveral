@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { object, secret, ServiceError } from "./errors.ts";
 import type { SqliteStore } from "./sqlite.ts";
-import { settleModelRequests } from "./model-settlement.ts";
+import { closeRevokedModelJobs } from "./model-settlement.ts";
 
 export interface Resources { cpu: number; memoryMiB: number; diskGiB: number }
 export interface ImagePermission { id: string; revision: string; arch: "arm64" | "amd64" }
@@ -152,7 +152,7 @@ export class ConsumerIdentities {
       this.row(db, consumerId);
       db.prepare("UPDATE consumers SET revoked=1 WHERE id=?").run(consumerId);
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='requests'").get()) db.prepare("UPDATE requests SET state='cancelled',reason='application_revoked' WHERE application=? AND state='waiting'").run(consumerId);
-      settleModelRequests(db, this.store.clock());
+      closeRevokedModelJobs(db, consumerId, this.store.clock());
       return { id: consumerId, revoked: true };
     });
   }

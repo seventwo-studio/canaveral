@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { ConsumerIdentities, identifier } from "./consumers.ts";
 import { object, ServiceError } from "./errors.ts";
 import type { SqliteStore } from "./sqlite.ts";
-import { cancelModelJob, insertQueuedModelJob, modelGrantResources, modelJobSchema, modelRequestIntent, settleModelRequests } from "./model-requests.ts";
+import { cancelModelJob, insertQueuedModelJob, modelGrantResources, modelJobSchema, modelRequestIntent, modelRequestRecord, settleModelRequests } from "./model-requests.ts";
 
 /** `model-job` requests are admitted by a runner claim, not by the controller pass; see model-jobs.ts. */
 export type RequestKind = "lease" | "linux-lease" | "model-job";
@@ -41,7 +41,8 @@ export class Requests {
     readonly release: (db: DatabaseSync, row: { kind: RequestKind; id: string }, token: string) => void,
     /** Pure shape check shared with direct acquisition, so malformed intent is refused before it consumes a UUID. */
     readonly validate: (kind: RequestKind, intent: Record<string, unknown>) => void = () => {}) {
-    store.transaction(requestSchema);
+    // Model calls insert their job with the request, so the model tables exist before the first submission.
+    store.transaction(db => { requestSchema(db); modelJobSchema(db); });
   }
   submit(token: string, value: unknown): { created: boolean; request: RequestView } {
     const input = object(value);
@@ -55,8 +56,7 @@ export class Requests {
     // Normalize defaults without freezing capacity, credentials or a placement.
     return this.store.transaction(db => {
       const app = this.applications.verify(db,token);
-      const normalized: Record<string, unknown> = model ? intent : { ...intent, ttlSeconds: intent.ttlSeconds === undefined ? app.limits.defaultTTLSeconds : intent.ttlSeconds, requiredCapabilities: intent.requiredCapabilities === undefined ? [] : intent.requiredCapabilities, resources: intent.resources === undefined ? {} : intent.resources };
-      if (model) modelJobSchema(db);
+      const normalized: Record<string, unknown> = model ? modelRequestRecord(intent) : { ...intent, ttlSeconds: intent.ttlSeconds === undefined ? app.limits.defaultTTLSeconds : intent.ttlSeconds, requiredCapabilities: intent.requiredCapabilities === undefined ? [] : intent.requiredCapabilities, resources: intent.resources === undefined ? {} : intent.resources };
       if (kind === "lease") normalized.name = intent.name === undefined ? `lease-${id}` : intent.name;
       if (Array.isArray(normalized.requiredCapabilities)) normalized.requiredCapabilities = [...normalized.requiredCapabilities].sort();
       const priority = input.priority === undefined ? 0 : input.priority;

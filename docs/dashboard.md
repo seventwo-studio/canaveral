@@ -492,7 +492,8 @@ Portable component and browser fixtures cover this flow. Native dashboard model
 execution remains unaccepted; see the [acceptance record](../coordination/native-acceptance/dashboard-models.md).
 
 Below the administrator runs, **Application model queue** lists up to 100
-application model jobs from `GET /api/v1/admin/model-jobs`, open work first. It
+application model jobs from `GET /api/v1/admin/model-jobs`: open work first, oldest
+first so long-waiting jobs stay visible, then the most recently closed. It
 shows each job's application, model, state and reservation, and for a
 [queued model call](requests.md#queued-model-calls) its request state, waiting
 reason, priority and deadline. Direct submissions show as priority 0. Prompts and

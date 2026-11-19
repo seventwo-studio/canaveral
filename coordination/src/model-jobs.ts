@@ -9,7 +9,7 @@ import { modelAdapter, modelIdentity, modelJobCanRelease, modelReceiptMatches, p
 import type { GenerationResult, ModelJob, ModelJobState } from "./model-job.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { SqliteStore } from "./sqlite.ts";
-import { cancelModelJob, expireModelRequest, modelJobSchema, modelQueueView } from "./model-requests.ts";
+import { cancelModelJob, closeRevokedModelJobs, expireModelRequest, expireModelRequests, modelJobSchema, modelQueueView } from "./model-requests.ts";
 import { requestSchema } from "./requests.ts";
 
 export { cancelModelJob } from "./model-requests.ts";
@@ -131,6 +131,7 @@ export class ModelJobs {
     return this.store.transaction(db => {
       const changed = db.prepare("UPDATE model_grants SET revoked=1 WHERE application=? AND model=? AND digest=?").run(application, String(input.model), String(input.digest));
       if (!changed.changes) throw new ServiceError("Unknown model grant.", 404);
+      closeRevokedModelJobs(db, application, this.now());
       return { applicationId: application, model: input.model, digest: input.digest, revoked: true };
     });
   }
@@ -249,46 +250,59 @@ export class ModelJobs {
       if (updateDraining(db, b.runnerId, "runner")) return { assignment: null };
       const active = db.prepare("SELECT count(*) AS n FROM model_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(active.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };
-      const served = new Set((JSON.parse(approval.models) as Array<[string, string]>).map(m => JSON.stringify(m)));
-      const now = this.now(), turn = String(db.prepare("SELECT turn FROM model_job_scheduler WHERE id=1").get()!.turn);
-      // One request model: applications take persisted round-robin turns; within one, higher priority precedes
-      // FIFO submission order. Direct submissions are priority 0 without a deadline. Waiting intent never
-      // displaces held reservations: an unfit or quota-blocked job is skipped and later jobs stay eligible.
-      const queue = db.prepare(`SELECT j.*,r.priority AS request_priority,r.reason AS request_reason
-        FROM model_jobs j LEFT JOIN requests r ON r.application=j.application AND r.id=j.id AND r.kind='model-job'
-        WHERE j.closed=0 AND j.state IN ('queued','waitingForResources') AND j.cancel_requested=0 AND (r.id IS NULL OR r.state='waiting')
-          AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id)
-        ORDER BY j.application>? DESC,j.application,COALESCE(r.priority,0) DESC,j.rowid LIMIT 4096`).all(turn) as unknown as
-        Array<JobRow & { request_priority: number | null; request_reason: string | null }>;
-      const unfit = new Set<string>(), blocked = new Set<string>();
+      const now = this.now();
+      // Expiry is decided against the clock inside this admission transaction, before eligibility.
+      expireModelRequests(db, now);
+      // Each runner keeps its own persisted application turn, so admissions on a runner serving other
+      // models never reset this runner's rotation.
+      const turn = (db.prepare("SELECT turn FROM model_job_scheduler WHERE runner=?").get(b.runnerId) as { turn: string } | undefined)?.turn ?? "";
+      // One request model: applications take round-robin turns; within one, higher priority precedes FIFO
+      // submission order. Direct submissions are priority 0 without a deadline. Eligibility (served model,
+      // catalogued adapter, unrevoked application and grant) is decided here in SQL, and only the head job of
+      // each (application, model, digest) is read: later jobs share its quota and resources, so they could
+      // not be admitted before it. Waiting intent never displaces held reservations: an unfit or
+      // quota-blocked head is skipped and later heads stay eligible.
+      const queue = db.prepare(`WITH served(model,digest) AS (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)),
+        eligible AS (SELECT j.application,j.id,j.model,j.digest,j.rowid AS seq,COALESCE(r.priority,0) AS priority,g.max_unfinished,c.resources,
+            ROW_NUMBER() OVER (PARTITION BY j.application,j.model,j.digest ORDER BY COALESCE(r.priority,0) DESC,j.rowid) AS head
+          FROM model_jobs j
+          JOIN served s ON s.model=j.model AND s.digest=j.digest
+          JOIN model_catalog c ON c.model=j.model AND c.digest=j.digest AND c.adapter=?
+          JOIN consumers k ON k.id=j.application AND k.revoked=0
+          JOIN model_grants g ON g.application=j.application AND g.model=j.model AND g.digest=j.digest AND g.revoked=0
+          LEFT JOIN requests r ON r.application=j.application AND r.id=j.id AND r.kind='model-job'
+          WHERE j.closed=0 AND j.state IN ('queued','waitingForResources') AND j.cancel_requested=0 AND (r.id IS NULL OR r.state='waiting')
+            AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id))
+        SELECT * FROM eligible WHERE head=1 ORDER BY application>? DESC,application,priority DESC,seq`).all(approval.models, adapter, turn) as unknown as
+        Array<{ application: string; id: string; model: string; digest: string; max_unfinished: number; resources: string }>;
+      const unfit = new Set<string>();
+      /** Records the skip reason on every waiting job behind this head; writes only rows that change. */
       const wait = (job: (typeof queue)[number], reason: string) => {
-        if (reason === "capacity_unavailable" && job.state !== "waitingForResources") db.prepare("UPDATE model_jobs SET state='waitingForResources',updated=? WHERE application=? AND id=?").run(now, job.application, job.id);
-        if (job.request_priority !== null && job.request_reason !== reason) db.prepare("UPDATE requests SET reason=? WHERE application=? AND id=? AND state='waiting'").run(reason, job.application, job.id);
+        if (reason === "capacity_unavailable") {
+          db.prepare(`UPDATE model_jobs SET state='waitingForResources',updated=? WHERE application=? AND model=? AND digest=? AND closed=0 AND state='queued'
+            AND cancel_requested=0 AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=model_jobs.application AND a.job=model_jobs.id)`)
+            .run(now, job.application, job.model, job.digest);
+        }
+        db.prepare(`UPDATE requests SET reason=? WHERE application=? AND kind='model-job' AND state='waiting' AND reason IS NOT ?
+          AND id IN (SELECT id FROM model_jobs WHERE application=? AND model=? AND digest=? AND closed=0)`)
+          .run(reason, job.application, reason, job.application, job.model, job.digest);
       };
       for (const job of queue) {
-        const submission = parseModelJob(JSON.parse(job.submission) as unknown), identity = JSON.stringify([job.model, job.digest]);
-        if (submission.message.type !== "submit" || submission.message.adapter !== adapter || !served.has(identity) || !this.applications.active(db, job.application)) continue;
-        const grant = db.prepare("SELECT max_unfinished FROM model_grants WHERE application=? AND model=? AND digest=? AND revoked=0").get(job.application, job.model, job.digest) as { max_unfinished: number } | undefined;
-        if (!grant) continue;
-        // Expiry is decided against the clock inside this admission transaction.
-        if (expireModelRequest(db, job.application, job.id, now)) continue;
-        const quota = JSON.stringify([job.application, job.model, job.digest]);
-        if (blocked.has(quota) || Number((db.prepare(`SELECT count(*) AS n FROM model_assignments a JOIN model_jobs m ON m.application=a.application AND m.id=a.job
-            WHERE a.application=? AND a.closed=0 AND m.model=? AND m.digest=?`).get(job.application, job.model, job.digest) as { n: number }).n) >= grant.max_unfinished) {
-          blocked.add(quota); wait(job, "model_job_limit"); continue;
+        const identity = JSON.stringify([job.model, job.digest]);
+        if (Number((db.prepare(`SELECT count(*) AS n FROM model_assignments a JOIN model_jobs m ON m.application=a.application AND m.id=a.job
+            WHERE a.application=? AND a.closed=0 AND m.model=? AND m.digest=?`).get(job.application, job.model, job.digest) as { n: number }).n) >= job.max_unfinished) {
+          wait(job, "model_job_limit"); continue;
         }
-        const entry = db.prepare("SELECT resources FROM model_catalog WHERE model=? AND digest=?").get(job.model, job.digest) as { resources: string } | undefined;
-        if (!entry) throw new ServiceError("Model catalog state is unavailable.", 503, { retryable: false });
         const id = randomUUID(), reservation = randomUUID();
         // Admission and reservation share this transaction on the domain's physical ledger.
-        if (unfit.has(identity) || !this.domains.reserve(db, { id: reservation, domain: approval.domain, kind: "model-job", owner: id, resources: resources(JSON.parse(entry.resources) as unknown) }, now)) {
+        if (unfit.has(identity) || !this.domains.reserve(db, { id: reservation, domain: approval.domain, kind: "model-job", owner: id, resources: resources(JSON.parse(job.resources) as unknown) }, now)) {
           unfit.add(identity); wait(job, "capacity_unavailable"); continue;
         }
         db.prepare("INSERT INTO model_assignments VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,0,?)")
           .run(id, claim, job.application, job.id, b.controllerId, b.runnerId, b.generation, b.incarnationId, approval.domain, reservation, now);
         db.prepare("UPDATE model_jobs SET state='queued',updated=? WHERE application=? AND id=?").run(now, job.application, job.id);
         db.prepare("UPDATE requests SET state='admitted',admitted_at=?,target=?,reason=NULL WHERE application=? AND id=? AND kind='model-job' AND state='waiting'").run(now, job.id, job.application, job.id);
-        db.prepare("UPDATE model_job_scheduler SET turn=? WHERE id=1").run(job.application);
+        db.prepare("INSERT INTO model_job_scheduler VALUES(?,?) ON CONFLICT(runner) DO UPDATE SET turn=excluded.turn").run(b.runnerId, job.application);
         return { assignment: this.assignmentView(db, db.prepare("SELECT * FROM model_assignments WHERE id=?").get(id) as unknown as AssignmentRow) };
       }
       return { assignment: null };
