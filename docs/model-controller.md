@@ -141,7 +141,10 @@ transaction:
   [request order](requests.md#queued-model-calls): this runner's persisted
   per-application round-robin turn, then priority (direct submissions are 0), then
   FIFO submission order. Each runner keeps its own turn, so admissions on a runner
-  that serves other models do not reset it.
+  that serves other models do not reset it. There is no candidate cap: claim cost
+  grows with the number of open jobs, held under the write lock (about 230 ms at
+  100,000 open jobs in an in-memory benchmark). Skip-reason writes use the
+  `(application, model, digest, closed)` index, so they touch only that group.
 - It skips an application whose admitted, unreleased jobs for that model and digest
   have reached the grant's `maxUnfinished`.
 - It reserves the first remaining job's catalogued resources in the approval's domain
@@ -216,7 +219,9 @@ connection never changes a claimed job. The only timer is the request pass, whic
 closes unclaimed queued model calls at their deadline, on application revocation or
 on grant revocation. Revoking an application or a grant also closes that
 application's unclaimed direct jobs in the revoking transaction: `cancelled` for an
-application, `failed` for a grant, each with `stopped: true` and `cleanup: "complete"`. The following are not implemented:
+application, `failed` for a grant, each with `stopped: true` and `cleanup: "complete"`.
+Direct jobs left open by revocations made before this rule existed are closed the
+same way once, when the controller starts. The following are not implemented:
 
 - Prompt/result retention and deletion
 - Operator reconciliation of revoked runners' work

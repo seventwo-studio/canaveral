@@ -9,7 +9,7 @@ import { modelAdapter, modelIdentity, modelJobCanRelease, modelReceiptMatches, p
 import type { GenerationResult, ModelJob, ModelJobState } from "./model-job.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { SqliteStore } from "./sqlite.ts";
-import { cancelModelJob, closeRevokedModelJobs, expireModelRequest, expireModelRequests, modelJobSchema, modelQueueView } from "./model-requests.ts";
+import { cancelModelJob, closeAllRevokedModelJobs, closeRevokedModelJobs, expireModelRequest, expireModelRequests, modelJobSchema, modelQueueView } from "./model-requests.ts";
 import { requestSchema } from "./requests.ts";
 
 export { cancelModelJob } from "./model-requests.ts";
@@ -80,7 +80,8 @@ function canonicalResult(result: GenerationResult | undefined): string | null {
 export class ModelJobs {
   readonly domains = new ResourceDomains();
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities, readonly runners: RunnerEnrollment | undefined) {
-    store.transaction(db => { modelJobSchema(db); requestSchema(db); });
+    // Close direct jobs left open by revocations made before closing on revocation existed.
+    store.transaction(db => { modelJobSchema(db); requestSchema(db); closeAllRevokedModelJobs(db, store.clock()); });
   }
 
   private now(): number { return this.store.clock(); }

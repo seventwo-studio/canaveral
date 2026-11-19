@@ -74,9 +74,18 @@ export function closeRevokedModelJobs(db: DatabaseSync, application: string, now
   settleModelRequests(db, now);
   const revoked = !table(db, "consumers") || !db.prepare("SELECT 1 FROM consumers WHERE id=? AND revoked=0").get(application);
   const rows = db.prepare(`SELECT j.id FROM model_jobs j WHERE j.application=? AND j.closed=0
-    AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.application=j.application AND r.id=j.id)
+    AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.application=j.application AND r.id=j.id AND r.kind='model-job')
     AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id)
     AND (? OR NOT EXISTS (SELECT 1 FROM model_grants g WHERE g.application=j.application AND g.model=j.model AND g.digest=j.digest AND g.revoked=0))`)
     .all(application, revoked ? 1 : 0) as Array<{ id: string }>;
   for (const row of rows) closeUnassigned(db, application, row.id, revoked, now);
+}
+/** Startup catch-up for direct jobs left open by revocations made before this rule existed. */
+export function closeAllRevokedModelJobs(db: DatabaseSync, now: number): void {
+  if (!table(db, "model_jobs") || !table(db, "requests") || !table(db, "model_grants")) return;
+  const consumers = table(db, "consumers");
+  const applications = db.prepare(`SELECT DISTINCT j.application FROM model_jobs j WHERE j.closed=0
+    AND (${consumers ? "NOT EXISTS (SELECT 1 FROM consumers c WHERE c.id=j.application AND c.revoked=0) OR " : ""}
+      NOT EXISTS (SELECT 1 FROM model_grants g WHERE g.application=j.application AND g.model=j.model AND g.digest=j.digest AND g.revoked=0))`).all() as Array<{ application: string }>;
+  for (const { application } of applications) closeRevokedModelJobs(db, application, now);
 }

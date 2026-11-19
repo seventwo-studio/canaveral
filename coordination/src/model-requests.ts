@@ -9,17 +9,21 @@ import type { Resources } from "./consumers.ts";
 /** Model-job tables and the per-runner model-claim turns. Every statement is idempotent so either worker may run it first. */
 export function modelJobSchema(db: DatabaseSync): void {
   ResourceDomains.schema(db);
+  // Interim builds of this change used a single global turn. The turn is disposable state.
+  const scheduler = db.prepare("PRAGMA table_info(model_job_scheduler)").all() as Array<{ name: string }>;
+  if (scheduler.length && !scheduler.some(column => column.name === "runner")) db.exec("DROP TABLE model_job_scheduler");
   db.exec(`CREATE TABLE IF NOT EXISTS model_catalog (model TEXT NOT NULL, digest TEXT NOT NULL, adapter TEXT NOT NULL, resources TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(model,digest));
     CREATE TABLE IF NOT EXISTS model_grants (application TEXT NOT NULL, model TEXT NOT NULL, digest TEXT NOT NULL, max_unfinished INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(application,model,digest));
     CREATE TABLE IF NOT EXISTS model_runner_approvals (controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, models TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(controller,runner,generation));
     CREATE TABLE IF NOT EXISTS model_jobs (application TEXT NOT NULL, id TEXT NOT NULL, submission TEXT NOT NULL, model TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, cleanup TEXT NOT NULL DEFAULT 'pending', result TEXT, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL, PRIMARY KEY(application,id));
     CREATE INDEX IF NOT EXISTS model_jobs_open ON model_jobs(closed,state,created);
+    CREATE INDEX IF NOT EXISTS model_jobs_group ON model_jobs(application,model,digest,closed);
     CREATE TABLE IF NOT EXISTS model_assignments (id TEXT PRIMARY KEY, claim TEXT NOT NULL UNIQUE, application TEXT NOT NULL, job TEXT NOT NULL, controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, reservation TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL DEFAULT 0, report TEXT, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, UNIQUE(application,job));
     CREATE INDEX IF NOT EXISTS model_assignments_binding ON model_assignments(controller,runner,generation,closed);
     CREATE TABLE IF NOT EXISTS model_job_scheduler (runner TEXT PRIMARY KEY, turn TEXT NOT NULL);`);
 }
 
-export { cancelModelJob, closeRevokedModelJobs, expireModelRequest, expireModelRequests, settleModelRequests } from "./model-settlement.ts";
+export { cancelModelJob, closeAllRevokedModelJobs, closeRevokedModelJobs, expireModelRequest, expireModelRequests, settleModelRequests } from "./model-settlement.ts";
 const table = (db: DatabaseSync, name: string): boolean => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 const INTENT_FIELDS = ["adapter", "model", "digest", "prompt", "maxTokens"];
 

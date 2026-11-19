@@ -700,3 +700,19 @@ test("revoking an application or grant closes its unclaimed direct model jobs wi
     [{ state: "cancelled", cancel_requested: 1, stopped: 1, cleanup: "complete", closed: 1 }]);
   assert.equal((await f.claim(runner)).body.assignment, null);
 });
+
+test("revocation closes a direct job even when a lease request reuses its UUID, and startup closes jobs left by older revocations", async t => {
+  const f = await fixture(t), a = await f.application(), b = await f.application();
+  await f.grant(a.id); await f.grant(b.id);
+  const shared = f.submission(a.id), stale = f.submission(b.id);
+  for (const [job, app] of [[shared, a], [stale, b]] as const) assert.equal((await f.post("/v1/model-jobs", job, app.credential)).status, 201);
+  // A lease request with the same UUID must not make the direct job look like a queued call.
+  f.seed(db => db.prepare("INSERT INTO requests (application,id,kind,intent,resources,priority,state,sequence,created) VALUES (?,?,'lease','{}','{}',0,'admitted',0,0)").run(a.id, shared.id));
+  assert.equal((await f.post("/v1/model-grants/revoke", { applicationId: a.id, model: MODEL, digest: DIGEST }, f.admin)).status, 200);
+  assert.deepEqual(f.rows(`SELECT state,closed FROM model_jobs WHERE id='${shared.id}'`), [{ state: "failed", closed: 1 }]);
+  // A grant revoked before closing on revocation existed leaves its direct job open until the controller starts.
+  f.seed(db => db.prepare("UPDATE model_grants SET revoked=1 WHERE application=?").run(b.id));
+  assert.deepEqual(f.rows(`SELECT closed FROM model_jobs WHERE id='${stale.id}'`), [{ closed: 0 }]);
+  await f.restart();
+  assert.deepEqual(f.rows(`SELECT state,closed FROM model_jobs WHERE id='${stale.id}'`), [{ state: "failed", closed: 1 }]);
+});
