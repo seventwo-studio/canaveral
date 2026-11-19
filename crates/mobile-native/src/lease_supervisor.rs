@@ -470,7 +470,9 @@ pub fn run(prepared: Prepared, elapsed: fn() -> Result<f64>, announce: impl FnOn
     };
     // Drop the parent's pipe writers so the copier ends with the group.
     drop(command);
-    std::thread::spawn(move || copy_capped(reader, log));
+    // Thread creation can fail after the child exists; a failed copier must not skip the group stop,
+    // so it only loses the log (the reader is dropped and the child sees a closed pipe on write).
+    let _ = std::thread::Builder::new().spawn(move || copy_capped(reader, log));
     let pid = child.id();
     let mut group = Group {
         child,

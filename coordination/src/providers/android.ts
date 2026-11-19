@@ -347,6 +347,12 @@ export class AndroidProvider extends MobileProvider {
     try {
       if (await this.adb(serial, ["shell", "getprop", "sys.boot_completed"]) !== "1") return waiting("Waiting for Android to finish booting.");
       if (!(await this.adb(serial, ["shell", "pm", "path", "android"])).startsWith("package:")) return waiting("Waiting for the package manager.");
+      // A debuggable (userdebug or eng) guest can get root and act as adbd toward the shared host adb
+      // server without using the network; leased images must be user builds.
+      if (await this.adb(serial, ["shell", "getprop", "ro.debuggable"]) !== "0") {
+        this.fenceLease(storage);
+        return { state: "error", leaseFenced: true, detail: "Leased Android images must be user builds (ro.debuggable=0); the lease was fenced before use." };
+      }
     } catch { return waiting("Waiting for the booted emulator to answer readiness checks."); }
     const receipt = path.join(storage, "lease-isolation.json");
     if (readJson(receipt)?.bootId !== launch.bootId) {
@@ -396,6 +402,9 @@ export class AndroidProvider extends MobileProvider {
     this.executionAllowed(machine);
     const storage = this.leaseStorage(machine), launch = readJson(path.join(storage, "launch.json"));
     if (!launch || launch.supervised !== true) return null;
+    // A launch whose supervisor has not written its record yet is still starting (or the runner crashed
+    // around it); its recovery belongs to cleanup, never to this fence poll, which could race the launch.
+    if (!readJson(path.join(storage, "lease-supervisor.json")) && launch.supervisorExit === undefined && launch.nothingRunning !== true) return null;
     if (await this.leaseStopped(machine, storage)) return { state: "stopped", leaseFenced: true };
     const allowed = authorization(), previous = readJson(path.join(storage, "lease-authorization.json")), stopping = machine.desired === "stopped" || allowed.fenced;
     if (!previous || previous.revision !== allowed.revision || stopping && previous.fenced !== true) await this.publishLease(machine, storage, () => allowed, stopping);

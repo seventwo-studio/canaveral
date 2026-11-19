@@ -86,6 +86,7 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
       if (args.join(" ") === "emu avd name") return ok(device.name + "\nOK");
       if (args.join(" ") === "shell getprop sys.boot_completed") return ok(Date.now() >= device.bootedAt ? "1" : "");
       if (args.join(" ") === "shell pm path android") return ok("package:/system/framework/framework-res.apk");
+      if (args.join(" ") === "shell getprop ro.debuggable") return ok(fixture.guest === "debuggable" ? "1" : "0");
       if (args.join(" ") === "exec-out screencap -p") return ok(PNG);
       if (args[0] === "shell" && args[1]?.includes("canaveral-isolation")) {
         const ports = /for p in ([0-9 ]+); do/.exec(args[1])![1]!.trim().split(" ").map(Number), lines: string[] = [];
@@ -103,7 +104,7 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
     leases: fixture.leases ?? nativeLeaseSupervisor,
   };
 }
-interface HarnessOptions { guest?: "isolated" | "leaky"; leases?: LeaseSupervisorTransport }
+interface HarnessOptions { guest?: "isolated" | "leaky" | "debuggable"; leases?: LeaseSupervisorTransport }
 
 interface Harness {
   url: string; admin: string; root: string; image: RecordValue; registry: string; events: string; counters: Map<string, number>;
@@ -434,6 +435,16 @@ test("a guest that reaches the host loopback is fenced and never handed out", { 
   assert.equal((await h.api("POST", `/v1/leases/${id}/credential`, {}, app)).status >= 400, true);
   await until(() => fenced() !== undefined, "the supervisor stopped the leaky guest");
   assert.equal(existsSync(join(h.storage(machineId), "lease-isolation.json")), false);
+  await cleaned(h, app, id);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("a debuggable guest image is fenced and never handed out", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { guest: "debuggable" }), app = await h.application();
+  const { id } = await acquire(h, app, 60, false);
+  const views: string[] = [];
+  await until(async () => { const lease = (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body; views.push(lease.state); return lease.state === "failed"; }, "failed lease", 30000);
+  assert.ok(!views.includes("ready"), "the lease never became ready");
   await cleaned(h, app, id);
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
 });

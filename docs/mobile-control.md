@@ -459,9 +459,18 @@ assignment whose runtime is not Android, or whose template is not an advertised
 fails the lease. Consumer operations and sessions for such an assignment are refused.
 
 Run the host so that stopping or restarting it does not kill the detached lease
-supervisors. The example systemd unit `deploy/systemd/canaveral-host.service` uses
-`KillMode=process` for this; the default `control-group` mode would kill every
-supervisor and emulator on a service restart.
+supervisors. On Linux, add the drop-in
+`deploy/systemd/canaveral-host.service.d/android-leases.conf` (`KillMode=process`)
+to the example unit on hosts that lease Android emulators; the default
+`control-group` mode would kill every supervisor and emulator on a service restart.
+The base unit keeps `control-group`, so hosts without Android leases still clean up
+every helper when the service stops. Linux lease hosts have no native acceptance yet.
+
+Lease images must be user builds. Readiness refuses a guest whose `ro.debuggable` is
+not `0` and fences the lease: a userdebug or eng guest can get root and act as adbd
+toward the host's shared adb server without using the network, which the slirp
+restriction below does not cover. Google Play system images are user builds; plain
+Google APIs images are not.
 
 ### Guest network isolation
 
