@@ -507,3 +507,46 @@ machine access on each artifact and operation request.
 
 Another ordinary account receives 404 for the owner's artifact and operation
 receipt. Native installation and recovery follow the [mobile control contract](mobile-control.md).
+
+## Owner mobile capture
+
+The machine details of an owned, running iOS or Android device include
+**Capture**. It uses existing routes only.
+
+- **Screenshot:** submits the `screenshot` device operation and accepts only an
+  `image/png` result with a valid PNG signature and header. The operator names
+  the file, previews it and downloads it.
+- **Recording:** POST `/api/v1/machines/{machine}/video-sessions` with
+  `{id, fps:30, durationSeconds, bitRate:4000000}` for 5, 10, 15 or 20
+  seconds. Longer captures wait for the session-liveness fix described in
+  [mobile control](mobile-control.md#dashboard-capture). The page then opens a WebSocket to
+  `/api/v1/machines/{machine}/video-sessions/{id}/{generation}` with
+  subprotocol `canaveral-session-v1`.
+
+The gateway relays that WebSocket only for a same-origin request carrying the
+session cookie and a matching Origin. A bearer header, missing or foreign Origin,
+or another account is refused. The gateway checks machine access before the
+upgrade and every second while attached. It opens the controller attachment with
+that cookie's own session token as a bearer credential, the browser's WebSocket
+key and no extensions, then copies frames unchanged. The token never reaches page
+script or the upstream response. An ordinary GET to the attachment path stays 404.
+
+The page shows a recording as successful only after the host's `finish`
+message matches the received byte count and SHA-256, reports `cleaned:true`, and
+the bytes pass the dashboard's MP4 structure check. That check requires `ftyp`,
+one movie header with one H.264 video track, ordered fragments whose sample
+tables cover exactly the following media data, a key frame first, and at least
+one frame with a positive duration. Only then does the page acknowledge the
+stream, show frames, duration and size, preview the file and offer a download.
+A stream error, early close, stall, size or checksum mismatch, or failed
+structure check is shown as a failure without a file. The page holds a recording
+in memory, up to 128 MiB.
+
+Cancelling, failing, closing the details or leaving the page closes the socket
+and POSTs `{}` to `/api/v1/machines/{machine}/video-sessions/{id}/close`. Page
+unload uses a keepalive request. After success the page waits for the session's
+`finished` state, which follows the runner's positive cleanup report and releases
+the reservation. A browser that cannot decode the verified file shows an error
+beside the preview. The [native trial](../coordination/native-acceptance/dashboard-mobile-capture.md)
+passed Android screenshots and recordings and iOS screenshots; iOS recording
+failed at idb's stop and remains open.

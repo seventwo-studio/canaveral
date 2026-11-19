@@ -277,6 +277,33 @@ from an exited adb process; its bounded recorder and native cleanup recovery nee
 inspection. iOS uses idb's graceful signal/stop protocol and confirms its retained
 child exit; companion termination remains a native acceptance check.
 
+### Dashboard capture
+
+Owners capture from machine details through the existing `screenshot` operation
+and these video-session routes; see [owner mobile capture](dashboard.md#owner-mobile-capture).
+The dashboard gateway relays the consumer attachment for a same-origin cookie
+session only. The page acknowledges a recording only after the finish receipt,
+SHA-256 and its MP4 structure check pass, and closes the session on cancel,
+failure, close or unload.
+
+On 19 November 2026 the [native trial](../coordination/native-acceptance/dashboard-mobile-capture.md)
+on the Mac Studio homelab passed Android screenshots and verified 15-second
+recordings: ffprobe frame counts and durations matched the page, FFmpeg decoded
+cleanly and positive cleanup released the session reservation. iOS screenshots
+passed. iOS recording failed: idb-cli 1.7.8 exits 1 after the provider's SIGINT
+stop under Python 3.14, so the provider correctly reports unknown cleanup and
+retains the reservation. Android cancellation still lacks positive cleanup, so
+leaving the page closes the session but keeps its reservation. Android encoded
+duration follows emitted frames, not the requested length.
+
+Open session-liveness defect: the broker pings each peer every 10 seconds and
+drops a peer after 30 seconds without a pong. The runner's session client
+answers pings only while it reads a message, and native capture reads nothing
+between `ready` and the final `ack`. A capture that runs about 30 seconds past
+host attachment is therefore cut off. A portable experiment with an idle host
+ended at 30 seconds both directly and through the dashboard relay. The dashboard
+offers at most 20 seconds until the runner keeps answering pings during capture.
+
 The local attached display path and consumer lease display keep their prior
 contracts. Administrative native video does not enable consumer lease execution
 or bypass that acceptance gate.
@@ -296,8 +323,9 @@ iOS archive/filesystem fixtures, native video source fixtures, a bounded synthet
 encoder, actual WebSocket relay and SDK frame/APNG/MP4-envelope verification. They verify transfer,
 authorization, digest, ownership, deduplication, reservations and failure handling.
 They do not prove an APK or simulator build runs on an actual device, or that a
-real encoder produces playable video. FFmpeg is not installed in this checkout
-environment; its native encoding and decoding acceptance remains open.
+real encoder produces playable video. The Android dashboard trial of 19 November
+2026 produced FFmpeg-encoded MP4s that ffprobe, FFmpeg and Chromium decoded; iOS
+encoding remains unaccepted.
 
 Host choice is deferred. Before production use, verify each selected host's SDK,
 acceleration, Xcode selection, installed runtime and input/accessibility support;

@@ -3,6 +3,7 @@ import {
   MobileInstall,
   mobileInstallEligible,
 } from "./components/mobile-install";
+import { MobileCapture } from "./components/mobile-capture";
 import { MachineInventory } from "./components/machine-inventory";
 import { FleetPulse } from "./components/fleet-pulse";
 import type { FormEvent, ReactNode } from "react";
@@ -1403,6 +1404,20 @@ export function App() {
               {!stale && mobileInstallEligible(detail, user.id) && (
                 <MobileInstall
                   key={JSON.stringify([
+                    detail.id,
+                    detail.hostId,
+                    detail.ownerId,
+                    detail.template.os,
+                  ])}
+                  machine={detail}
+                />
+              )}
+              {/* A transient refresh failure must not cancel a running recording;
+                  the controller and gateway still authorize every capture. */}
+              {mobileInstallEligible(detail, user.id) && (
+                <MobileCapture
+                  key={JSON.stringify([
+                    "capture",
                     detail.id,
                     detail.hostId,
                     detail.ownerId,
