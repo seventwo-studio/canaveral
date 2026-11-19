@@ -457,6 +457,35 @@ confirms the size and digest. Output and artifacts survive cleanup and
 dashboard restart in the private SQLite database. Restart fences unfinished
 execution and reconciles its original request without rerunning the command.
 
+## Administrator model runs
+
+Administrators open **Models** (`#models`) to run a prompt against an installed
+model through the existing [embedded inference API](inference.md). The page has
+no new gateway route or credential: it uses the administrator dashboard session
+on the already allowed `/api/v1/models`, `/api/v1/jobs`, `/api/v1/jobs/{id}`
+and `/api/v1/jobs/{id}/cancel` routes. Ordinary accounts do not see the page,
+and the controller enforces administrator authority on every request.
+
+The model choice lists each exact model ID and digest once, with the number of
+online, accepting hosts offering it. Unavailable identities stay visible but
+disabled. A submission always pins the selected digest and leaves placement to
+the controller. It carries a client UUID, the prompt (64 KiB) and 1–4,096 output
+tokens (default 600). After a lost response the dashboard shows **Retry same
+request** and replays the identical body and UUID. A definite 400, 409, 413 or 422
+rejection discards that UUID. A 401 or 403 signs the session out.
+
+The page polls each new or unfinished job every two seconds. It shows the state,
+runner detail, host and request identities, then the generated text and measured
+input/output token counts after success. A terminal state alone is not shown as
+release: polling continues until the runner confirms that the owned runtime has
+stopped and cleanup is complete, then the page reports **Runtime stopped ·
+capacity released**. **Cancel job** requests cancellation once; the reservation
+stays held until that same positive stop. The job list omits result bodies.
+**Show output** inspects one finished job on request.
+
+Portable component and browser fixtures cover this flow. Native dashboard model
+execution remains unaccepted; see the [acceptance record](../coordination/native-acceptance/dashboard-models.md).
+
 ## Owner mobile app uploads
 
 Send JSON mutations with the dashboard session cookie and matching Origin.
