@@ -105,3 +105,24 @@ test('dashboard relays an owned video session to a cookie client with matching O
   await assert.rejects(secondHost.receive(5));
   assert.equal(await leaving.next(), null); assert.equal(leaving.closed, true);
 });
+
+test('a connection reset while relay authorization is pending does not crash the dashboard', { timeout: 20000 }, async t => {
+  const { createServer } = await import('node:http'), { connect } = await import('node:net');
+  // A slow controller keeps the upgrade waiting in authorization.
+  const upstream = createServer((_request, response) => { setTimeout(() => { response.writeHead(401, { 'Content-Type': 'application/json' }); response.end('{"error":"Unauthorized."}'); }, 500); });
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const dashboard = await startDashboard({ orchestratorUrl: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, listen: { host: '127.0.0.1', port: 0 } });
+  t.after(async () => { await dashboard.close(); await new Promise<void>(resolve => upstream.close(() => resolve())); });
+  const home = `http://127.0.0.1:${dashboard.address.port}`, path = `/api/v1/machines/${randomUUID()}/video-sessions/${randomUUID()}/${randomUUID()}`;
+  const socket = connect(dashboard.address.port, '127.0.0.1');
+  socket.on('error', () => {});
+  await new Promise<void>(resolve => socket.once('connect', resolve));
+  socket.write([`GET ${path} HTTP/1.1`, `Host: 127.0.0.1:${dashboard.address.port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+    `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Protocol: canaveral-session-v1',
+    `Cookie: canaveral_session=${key()}`, `Origin: ${home}`, '', ''].join('\r\n'));
+  await new Promise(resolve => setTimeout(resolve, 150));
+  socket.resetAndDestroy();
+  await new Promise(resolve => setTimeout(resolve, 800));
+  // The process is still alive and the gateway still answers.
+  assert.ok((await fetch(home + '/')).status < 500);
+});

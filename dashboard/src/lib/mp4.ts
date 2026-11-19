@@ -165,6 +165,8 @@ export function verifyMp4(data: Uint8Array): Mp4Summary {
     const runFlags = view.getUint32(need(trun, 0, 4)) & 0xffffff;
     const count = view.getUint32(need(trun, 4, 4));
     if (!count) fail("a fragment has no samples");
+    // Every sample has at least one byte, so a count beyond the file is malformed.
+    if (count > view.byteLength) fail("a sample run is malformed");
     if (!(runFlags & 0x1)) fail("a sample run has no data offset");
     const start = base + view.getInt32(need(trun, 8, 4));
     let cursor = 12,
@@ -194,6 +196,7 @@ export function verifyMp4(data: Uint8Array): Mp4Summary {
       if (first && flags & 0x10000) fail("it does not start on a key frame");
       first = false;
       bytes += size;
+      if (bytes > view.byteLength) fail("a sample run exceeds the file");
       duration += sampleDuration;
       frames++;
     }

@@ -108,14 +108,18 @@ export function MobileCapture({ machine }: { machine: Machine }) {
     setClip(undefined);
     setClipStatus("Requesting a recording session…");
     const abort = new AbortController();
-    let sessionId: string | undefined;
+    let sessionId: string | undefined, requested: string | undefined;
     try {
       const result = await recordVideo(machine.id, {
         durationSeconds: duration,
         signal: abort.signal,
+        // Registered before the create request, so cancel and unmount can close it.
+        onRequest(id) {
+          requested = id;
+          active.current = { id, abort };
+        },
         onSession(session) {
           sessionId = session.id;
-          active.current = { id: session.id, abort };
         },
         onProgress(state, bytes) {
           if (!live.current) return;
@@ -161,12 +165,13 @@ export function MobileCapture({ machine }: { machine: Machine }) {
                 " in System"),
         );
     } catch (e) {
-      const session = active.current;
       active.current = undefined;
-      if (session) {
-        session.abort.abort();
+      // Close by the requested ID even if unmount already tried: the create request
+      // may have landed after that close.
+      if (requested) {
+        abort.abort();
         try {
-          await closeVideoSession(machine.id, session.id);
+          await closeVideoSession(machine.id, requested);
         } catch {
           /* Inspect the session in System; its reservation is held until cleanup. */
         }
@@ -175,7 +180,7 @@ export function MobileCapture({ machine }: { machine: Machine }) {
         setClipStatus("");
         setClipError(
           errorMessage(e) +
-            (session ? " Session " + session.id + " was closed." : ""),
+            (requested ? " Session " + requested + " was closed." : ""),
         );
       }
     } finally {

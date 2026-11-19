@@ -654,6 +654,9 @@ export function createDashboardServer(config: DashboardConfig): Server {
   const upgrades = new Set<Duplex>();
   let pendingUpgrades = 0;
   server.on("upgrade", (request, socket, head) => {
+    // Node detaches the server error listener on upgrade. A reset while authorization or the
+    // upstream attachment is pending must not crash the process.
+    socket.on("error", () => socket.destroy());
     upgrades.add(socket); socket.once("close", () => upgrades.delete(socket));
     const response = new ServerResponse(request); response.assignSocket(socket as Socket);
     if (pendingUpgrades >= 32) { response.writeHead(503, { Connection: "close" }); response.end(); return; }

@@ -51,6 +51,7 @@ async function start(signal = new AbortController().signal) {
   const result = recordVideo(machine, {
     durationSeconds: 10,
     signal,
+    onRequest: () => {},
     onSession: () => {},
     onProgress: (state) => states.push(state),
     socket: (url) => (socket = new FakeSocket(url)) as unknown as WebSocket,
@@ -226,4 +227,66 @@ it("closes sessions through the supported route, including on unload", async () 
   ]);
   const keepalive = vi.mocked(fetch).mock.calls[1]![1]!;
   expect(keepalive).toMatchObject({ method: "POST", keepalive: true });
+});
+
+it("registers the session ID before creation so a cancelled create can still be closed", async () => {
+  const calls = stubApi();
+  const abort = new AbortController();
+  let requested = "";
+  const result = recordVideo(machine, {
+    durationSeconds: 10,
+    signal: abort.signal,
+    onRequest: (id) => {
+      requested = id;
+      abort.abort();
+    },
+    onSession: () => {},
+    onProgress: () => {},
+    socket: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+  await expect(result).rejects.toThrow(/cancelled/);
+  expect(requested).toMatch(/^[0-9a-f-]{36}$/);
+  // Cancelled before the request: nothing was created, so nothing attaches.
+  expect(calls).toHaveLength(0);
+});
+
+it("rejects video data before the format message and messages during verification", async () => {
+  stubApi();
+  // Media before the video format message.
+  {
+    let socket!: FakeSocket;
+    const result = recordVideo(machine, {
+      durationSeconds: 10,
+      signal: new AbortController().signal,
+      onRequest: () => {},
+      onSession: () => {},
+      onProgress: () => {},
+      socket: (url) => (socket = new FakeSocket(url)) as unknown as WebSocket,
+    });
+    await vi.waitFor(() => expect(socket).toBeDefined());
+    socket.open();
+    socket.control({
+      type: "ready",
+      sessionId: session.id,
+      generation,
+      capability: "video",
+    });
+    socket.bytes(mp4.subarray(0, 100));
+    await expect(result).rejects.toThrow(/Unexpected video data/);
+    expect(socket.sent).toEqual([]);
+  }
+  // Data arriving while the finished snapshot is verified.
+  {
+    const { socket, result } = await start();
+    stream(socket, mp4);
+    socket.control({
+      type: "finish",
+      bytes: mp4.length,
+      sha256: sha(mp4),
+      cleaned: true,
+    });
+    socket.bytes(mp4.subarray(0, 100));
+    await expect(result).rejects.toThrow(/Unexpected video data/);
+    expect(socket.sent).toEqual([]);
+  }
 });

@@ -58,3 +58,19 @@ it("rejects truncated, reordered or inconsistent recordings", () => {
   view.setInt32(trun + 16, view.getInt32(trun + 16) + 1);
   expect(() => verifyMp4(altered)).toThrow(/do not match their media data/);
 });
+
+it("rejects a sample count beyond the file without iterating it", () => {
+  const data = fixture.slice();
+  const at = boxStarts(data, "moof")[0]!;
+  // The first trun inside the first fragment; its sample count follows version/flags.
+  let found = -1;
+  for (let i = at; i < data.length - 4; i++)
+    if (String.fromCharCode(...data.subarray(i, i + 4)) === "trun") {
+      found = i;
+      break;
+    }
+  new DataView(data.buffer).setUint32(found + 8, 0xffffffff);
+  const started = performance.now();
+  expect(() => verifyMp4(data)).toThrow(/malformed|exceeds/);
+  expect(performance.now() - started).toBeLessThan(200);
+});

@@ -123,6 +123,9 @@ export interface Recording extends Mp4Summary {
 export interface RecordOptions {
   durationSeconds: number;
   signal: AbortSignal;
+  /** Called with the browser-chosen session ID before the create request, so the caller
+   * can close the session even when the create outcome is unknown or cancelled. */
+  onRequest(id: string): void;
   /** Called once the session exists, before attachment, so the caller can close it. */
   onSession(session: VideoSessionReceipt): void;
   onProgress(
@@ -151,6 +154,8 @@ export async function recordVideo(
   if (!RECORDING_DURATIONS.includes(options.durationSeconds as never))
     throw Error("Choose a supported recording length.");
   const id = crypto.randomUUID();
+  options.onRequest(id);
+  if (options.signal.aborted) throw Error("Recording cancelled.");
   const session = await api(
     `machines/${machineId}/video-sessions`,
     {
@@ -176,7 +181,9 @@ export async function recordVideo(
   return await new Promise<Recording>((resolve, reject) => {
     const chunks: Uint8Array[] = [];
     let bytes = 0,
-      stage: "ready" | "video" | "media" | "acknowledged" = "ready",
+      stage:
+        "ready" | "video" | "format" | "media" | "verifying" | "acknowledged" =
+        "ready",
       result: Recording | undefined,
       done = false,
       idle: ReturnType<typeof setTimeout> | undefined;
@@ -222,7 +229,8 @@ export async function recordVideo(
       arm();
       void (async () => {
         if (event.data instanceof ArrayBuffer) {
-          if (stage !== "media" && stage !== "video")
+          // Media is accepted only after the format message and before verification.
+          if (stage !== "media" && stage !== "format")
             throw Error("Unexpected video data.");
           stage = "media";
           const chunk = new Uint8Array(event.data);
@@ -263,6 +271,7 @@ export async function recordVideo(
             message.fps !== 30
           )
             throw Error("Unexpected video format.");
+          stage = "format";
           options.onProgress("recording", 0);
           return;
         }
@@ -275,6 +284,8 @@ export async function recordVideo(
           typeof message.sha256 !== "string"
         )
           throw Error("The recording size or cleanup was not confirmed.");
+        // Nothing else is accepted while the snapshot is verified.
+        stage = "verifying";
         options.onProgress("verifying", bytes);
         const data = new Uint8Array(bytes);
         let offset = 0;
