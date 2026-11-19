@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { tokenHash } from '../../src/accounts.ts';
 import { MachineStore, machineDigest } from '../../src/control/machines.ts';
 import { OwnerDisplaySessions } from '../../src/control/display-sessions.ts';
@@ -119,6 +120,22 @@ test('a lapsed per-message check records the disconnect at once', t => {
   const f = fixture(t), s = f.create(); f.attach(s, 'host'); f.attach(s, 'consumer');
   f.revoke(f.ownerToken); assert.equal(f.authorized(s), false);
   assert.equal(f.store.transaction(db => db.prepare('SELECT state FROM owner_display_sessions WHERE id=?').get(s.id))!.state, 'disconnected');
+});
+
+test('per-message re-checks of a ready session do not each commit, and continuous re-checks keep it live', t => {
+  const f = fixture(t), s = f.create(); f.attach(s, 'host'); f.attach(s, 'consumer');
+  // Another connection's data_version changes only when some connection commits a change.
+  const observer = new DatabaseSync(f.store.path, { readOnly: true }); t.after(() => observer.close());
+  const version = () => Number((observer.prepare('PRAGMA data_version').get() as { data_version: number }).data_version);
+  const before = version();
+  // A burst of relayed input within one second: every message is still checked, none writes.
+  for (let i = 0; i < 50; i++) { f.advance(0.01); assert.equal(f.authorized(s), true); }
+  assert.equal(version(), before, 'a burst of per-message checks commits no write');
+  // A broker re-checking at its 250 ms monitor cadence keeps the session past the liveness window.
+  for (let i = 0; i < 80; i++) { f.advance(0.25); assert.equal(f.authorized(s), true, 'a continuously re-checked session never lapses'); }
+  assert.notEqual(version(), before, 'continuous re-checks still refresh liveness');
+  f.heartbeat(); f.advance(10);
+  assert.equal(f.authorized(s), false, 'once re-checks stop, the session releases its slot within the liveness window');
 });
 
 test('one owner cannot hold more than eight live viewers on a shared host, across credentials', t => {

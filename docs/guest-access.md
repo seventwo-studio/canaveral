@@ -154,7 +154,10 @@ The session is bound to the credential that created it: another account cannot
 open it, and another credential of the same owner cannot read or close it. Both
 peers must attach within 30 seconds; a ready session lasts as long as the viewer
 and the checks above, and releases its slot if the broker stops re-checking it
-for 10 seconds, for example after a lost disconnect. A machine accepts at most
+for 10 seconds, for example after a lost disconnect. Every check is evaluated,
+but a successful one records liveness at most once a second, so relayed input
+does not wait on a durable controller write per message; the slot is therefore
+released 9 to 10 seconds after the last check. A machine accepts at most
 four live sessions, a host sixteen, one owner eight on the same host across all
 of their credentials, and one credential eight. At most 64 sessions per machine may be opened
 within five minutes. Closing the viewer closes the session. A controller restart
