@@ -679,6 +679,11 @@ test("a lease key installs a large APK and records verified MP4 of its own emula
   for (let i = 0; i < 3; i++) { const id = randomUUID(); extra.push(id); assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id, member: "primary", format: "apk", bytes: 4096, sha256: small.sha256 }, a.key)).status, 201); }
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id: randomUUID(), member: "primary", format: "apk", bytes: 4096, sha256: small.sha256 }, a.key)).status, 429);
   for (const id of [artifact, ...extra]) assert.equal((await lease.deleteAppArtifact(id)).state, "deleted");
+  // One application's lease uploads share at most 2 GiB of the controller-wide pool by declared size.
+  const big = randomUUID(), declared = 1536 * 1024 ** 2;
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id: big, member: "primary", format: "apk", bytes: declared, sha256: small.sha256 }, a.key)).status, 201);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id: randomUUID(), member: "primary", format: "apk", bytes: 600 * 1024 ** 2, sha256: small.sha256 }, a.key)).status, 429, "the application share is exhausted");
+  assert.equal((await lease.deleteAppArtifact(big)).state, "deleted");
   assert.deepEqual(await h.reserved(), { cpu: 4, memoryMiB: 4096, diskGiB: 16 });
   // Rotating the key revokes it for recording too.
   const rotated = (await h.api("POST", `/v1/leases/${a.id}/credential`, {}, app)).body.credential as string;

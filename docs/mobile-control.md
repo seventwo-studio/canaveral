@@ -670,8 +670,13 @@ Receipts add `leaseId`. Chunk, completion, replay and install rules are those of
 [administrative upload](#current-implementation). The install operation is authorized for
 at most 30 minutes, and never beyond the lease. An upload binds one lease member, and only
 that lease's install of that member may read it from the controller. The runner reads it
-only while the lease is ready; the provider rechecks the lease supervisor, not only the
-AVD identity, throughout the transfer. Administrative routes neither read nor install
+only while the lease is ready. The provider rechecks the lease supervisor, not only the
+AVD identity, between install stages (after the install session is created, after
+staging, and before and after commit); during streaming, the runner's lease guard and
+the controller's per-chunk lease check apply. One application's lease uploads may
+declare at most 2 GiB in total across its leases (a quarter of the controller-wide 8 GiB
+upload pool), so one lease key cannot reserve the whole pool. Rotating the lease key
+during an install marks it `unknown`; its upload stays held until lease cleanup. Administrative routes neither read nor install
 lease uploads.
 
 **Recording reuses the native video session** (#67, #68, #72): the same table, the same

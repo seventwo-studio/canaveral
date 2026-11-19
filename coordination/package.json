@@ -51,7 +51,7 @@
   "scripts": {
     "build": "tsc && node ../script/prepare_cli.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test dist/test/*.test.js dist/test/control/*.test.js"
+    "test": "node --test --test-force-exit dist/test/*.test.js dist/test/control/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

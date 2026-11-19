@@ -894,7 +894,8 @@ export class HostRunner {
       // and only the same assignment that started the capture (fingerprint and lease unchanged).
       // The lease's identity, not its whole assignment record: that carries the controller's clock and
       // revision, which change on every heartbeat and renewal without changing the owner.
-      const leaseOf = (m: RecordValue) => m.lease == null ? null : String(object(m.lease).id);
+      // A lease without a string id never matches, so a malformed record fails closed.
+      const leaseOf = (m: RecordValue) => { if (m.lease == null) return null; const id = object(m.lease).id; return typeof id === "string" && id ? id : Symbol("unidentified lease"); };
       const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
       const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
       const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());

@@ -11,12 +11,16 @@ import type { ControlModule, ControlRequest } from './contracts.ts';
 import type { SqliteStore } from '../sqlite.ts';
 import { ServiceError } from '../errors.ts';
 import type { MachineStore } from './machines.ts';
-import { artifactRow, artifactView, changeArtifact, fields, initializeAppArtifacts, insertArtifact, reserveArtifact, scratchGiB } from './app-artifacts.ts';
+import { artifactRow, artifactView, changeArtifact, fields, initializeAppArtifacts, insertArtifact, reserveArtifact, scratchGiB, STORAGE_BYTES } from './app-artifacts.ts';
 import { ACTIVE, leaseScopedMember, legacySessionLease, requireApplicationCapacity } from './leases.ts';
 import { uuid } from './transfers.ts';
 
 /** Uploads a single lease may hold at once, in any state but deleted. */
 export const LEASE_ARTIFACTS = 4;
+/** One application's share of the controller-wide upload pool across all of its leases. Declared
+ * sizes count from creation, so without a share one lease key could reserve the whole pool with no
+ * data sent and refuse every other upload on the controller. */
+export const APPLICATION_UPLOAD_SHARE = STORAGE_BYTES / 4;
 const fail = (status = 400): never => { throw new ServiceError('App artifact request rejected.', status); };
 
 export function createLeaseAppArtifactsModule(store: SqliteStore, machines: MachineStore): ControlModule {
@@ -46,6 +50,8 @@ export function createLeaseAppArtifactsModule(store: SqliteStore, machines: Mach
         }
         const scoped = leaseScopedMember(db, leaseId, req.token, member, 'files', store.clock());
         if (Number(db.prepare("SELECT COUNT(*) AS n FROM app_artifacts WHERE lease=? AND state!='deleted'").get(lease.id)!.n) >= LEASE_ARTIFACTS) return fail(429);
+        const shared = Number(db.prepare("SELECT COALESCE(SUM(a.bytes),0) AS n FROM app_artifacts a JOIN leases l ON l.id=a.lease WHERE l.consumer=? AND a.state!='deleted'").get(lease.consumer)!.n);
+        if (typeof intent.bytes === 'number' && shared + intent.bytes > APPLICATION_UPLOAD_SHARE) return fail(429);
         const reserved = reserveArtifact(db, machines, scoped.machine, intent, lease.id, () => {});
         if ('replayed' in reserved) return { body: artifactView(reserved.replayed) };
         requireApplicationCapacity(db, lease.consumer, { diskGiB: scratchGiB(reserved.size) });

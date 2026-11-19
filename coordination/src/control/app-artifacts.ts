@@ -13,7 +13,7 @@ import { decodeData, uuid } from './transfers.ts';
 
 import { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from '../app-artifact-contract.ts';
 export { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from '../app-artifact-contract.ts';
-const STORAGE_BYTES = 8 * 1024 ** 3;
+export const STORAGE_BYTES = 8 * 1024 ** 3;
 const reservationSql = 'SELECT 0 AS cpu,0 AS memoryMiB,COALESCE(SUM(reserved_disk),0) AS diskGiB FROM app_artifacts WHERE host=? AND state!=\'deleted\'';
 export type Artifact = { id: string; machine: string; host: string; binding: string; format: string; bytes: number; sha256: string; received: number; state: string; reserved_disk: number; lease: string | null };
 const fail = (status = 400): never => { throw new ServiceError('App artifact request rejected.', status); };
