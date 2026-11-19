@@ -800,8 +800,11 @@ export class HostRunner {
       }
       const options = { fps: 30 as const, durationSeconds: Number(job.durationSeconds), bitRate: Number(job.bitRate) };
       captureStarted = true;
-      // Capture ends with the session; stopping an early-cancelled recorder needs only the assignment.
-      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)));
+      // Capture ends with the session; stopping an early-cancelled recorder needs only the assignment,
+      // and only the same assignment that started the capture (fingerprint and lease unchanged).
+      const capturedAssignment = assignmentFingerprint(machine), capturedLease = JSON.stringify(machine.lease ?? null);
+      const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && JSON.stringify(current.lease ?? null) === capturedLease; };
+      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
       await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), positive => { cleaned = positive; });
       cleaned = true;
     } catch {

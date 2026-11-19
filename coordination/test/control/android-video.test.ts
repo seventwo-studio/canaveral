@@ -9,7 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 
 const BOOT = '0f1e2d3c-4b5a-4968-8776-655443322110', START = '73311';
 const HEADER = `canaveral-recorder ${BOOT} 4321 (sh) R 812 4321 812 0 -1 4194560 120 0 0 0 0 0 0 0 20 0 1 0 ${START} 10973184 512 18446744073709551615\n`;
-type Guest = 'running' | 'stubborn' | 'immortal' | 'absent' | 'replaced' | 'rebooted' | 'zombie' | 'foreign' | 'unreadable' | 'unreachable';
+type Guest = 'running' | 'stubborn' | 'laggard' | 'immortal' | 'absent' | 'replaced' | 'rebooted' | 'zombie' | 'foreign' | 'unreadable' | 'unreachable';
 
 function fixture() {
   let allowed = true, assignment = true, epoch: RecordValue | undefined = { startedAt: 100, identity: 'owned-boot' }, clock = 0, foreign = false, booted = true;
@@ -22,13 +22,14 @@ function fixture() {
   };
   // A guest shell answering recorderStopCommand: it signals only the matching boot, PID and start time.
   const recorder = (script: string): string => {
-    probes.push(script); clock += 1;
+    // A laggard device answers slowly enough to exhaust the time budget before SIGKILL.
+    probes.push(script); clock += guest === 'laggard' ? 4 : 1;
     if (guest === 'unreachable') throw new ServiceError('Device command unavailable or timed out; its effects may be uncertain.', 409, { outcome: 'unknown' });
     assert.ok(script.includes(`!= ${BOOT}`) && script.includes('/proc/4321/stat') && script.includes(`!= ${START}`), 'cleanup is bound to the reported recorder');
     assert.doesNotMatch(script, /pkill|killall|pidof|screenrecord -/, 'cleanup never matches recorders by name');
     const signal = /kill -(TERM|KILL) 4321/.exec(script)?.[1];
-    const state = guest === 'stubborn' || guest === 'immortal' ? 'running' : guest === 'zombie' ? 'exited' : guest;
-    if (state === 'running' && signal) { signals.push(signal); if (guest === 'running' || guest === 'stubborn' && signal === 'KILL') guest = 'absent'; }
+    const state = guest === 'stubborn' || guest === 'laggard' || guest === 'immortal' ? 'running' : guest === 'zombie' ? 'exited' : guest;
+    if (state === 'running' && signal) { signals.push(signal); if (guest === 'running' || (guest === 'stubborn' || guest === 'laggard') && signal === 'KILL') guest = 'absent'; }
     return 'canaveral-recorder ' + state;
   };
   const provider = {
@@ -140,6 +141,14 @@ test('Android cleanup accepts only positive exit evidence for the exact recorder
   }
   const stubborn = fixture(), slow = await stubborn.owned(); stubborn.setGuest('stubborn');
   await slow.close(); assert.deepEqual(stubborn.signals, ['TERM', 'KILL']); assert.deepEqual(slow.signalled, ['TERM', 'KILL']); assert.equal(slow.stopped, 'absent');
+  // Slow adb must not skip SIGKILL: it is always sent before giving up.
+  const laggard = fixture(), late = await laggard.owned(); laggard.setGuest('laggard');
+  await late.close(); assert.deepEqual(laggard.signals, ['TERM', 'KILL']); assert.equal(late.stopped, 'absent');
+  // After SIGKILL, at least one further probe runs before reporting unknown.
+  const immortal = fixture(), stuck = await immortal.owned(); immortal.setGuest('immortal');
+  await assert.rejects(stuck.close(), { code: 'video_stop_uncertain' });
+  const kill = immortal.probes.findIndex(p => /kill -KILL 4321/.test(p));
+  assert.ok(kill >= 0 && immortal.probes.length > kill + 1, 'a probe follows SIGKILL');
   for (const guest of ['immortal','foreign','unreadable','unreachable'] as const) {
     const f = fixture(), source = await f.owned(); f.setGuest(guest);
     await assert.rejects(source.close(), { code: 'video_stop_uncertain', outcome: 'unknown' }, guest);
@@ -186,6 +195,8 @@ test('Android capture without a valid recorder identity never claims cleanup', a
 });
 
 test('Android recorder commands are bounded, quoted by construction and shell-parsable', () => {
+  // A zombie main thread counts as exited only when no other thread remains.
+  assert.match(recorderStopCommand({ boot: BOOT, pid: 4321, start: START }), /ls \/proc\/4321\/task/);
   assert.deepEqual(parseRecorderHeader(HEADER.trim()), { boot: BOOT, pid: 4321, start: START });
   for (const bad of [{ boot: BOOT + ';reboot', pid: 1, start: '1' }, { boot: BOOT, pid: 0, start: '1' }, { boot: BOOT, pid: 1.5, start: '1' }, { boot: BOOT, pid: 1, start: '1;x' }])
     assert.throws(() => recorderStopCommand(bad), /identity/);

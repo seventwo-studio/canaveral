@@ -302,14 +302,21 @@ the capture creates no guest file, so there is no temporary file to remove.
 
 After a cancel, close, failure, authorization loss or deadline, the runner closes
 its adb client. It then stops the recorder only while it still holds the
-machine's assignment (fresh controller contact, desired `running`, no deletion),
-and after `emu avd name` confirms the serial is still the machine's AVD. One guest
-shell compares the boot id, PID and start time (`/proc/<pid>/stat` field 22) and
-signals only on an exact match, with SIGTERM and then, after 3 seconds, SIGKILL. A
-name match such as `pkill` is never used, and other screenrecord processes are
-never touched. Cleanup is positive only if, within 6 seconds, the PID is absent,
-holds a process with another start time, the boot id changed, or the process is a
-zombie. A matching process in an unexpected command, an unreadable `/proc` entry,
+machine's assignment, the same one that started the capture (fresh controller
+contact, desired `running`, no deletion, unchanged assignment fingerprint and
+lease), and after `emu avd name` confirms the serial is still the machine's AVD.
+One guest shell compares the boot id, PID and start time (`/proc/<pid>/stat`
+field 22) and signals only on an exact match, with SIGTERM and then, after 3
+seconds, SIGKILL. A name match such as `pkill` is never used, and other
+screenrecord processes are never touched. Cleanup is positive only if the PID is
+absent, holds a process with another start time, the boot id changed, or the
+process is a zombie with no remaining threads. Probes start within 6 seconds;
+SIGKILL is always sent before giving up and is always followed by at least one
+probe, so one cleanup takes at most about 6 seconds plus a few bounded adb calls
+(5 seconds for each ownership check, 10 seconds for each probe). The guest
+reports its own evidence; a compromised guest can only affect its own
+reservation. The remaining gap between reading `/proc` and `kill` is the
+narrowest a shell allows without a pidfd. A matching process in an unexpected command, an unreadable `/proc` entry,
 an unreachable or foreign device, lost assignment authority or a timeout reports
 unknown. The result is computed once per capture, so a repeated close returns the
 same outcome. A capture that already ended with EOF and a zero remote exit needs no

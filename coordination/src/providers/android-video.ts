@@ -26,7 +26,7 @@ const MARK = 'canaveral-recorder';
 const HEADER_BYTES = 1024, HEADER_MS = 10000;
 /** Grace for screenrecord's own SIGTERM teardown, then SIGKILL, then a last bounded wait. */
 export const RECORDER_TERM_SECONDS = 3, RECORDER_KILL_SECONDS = 3;
-const PROBE_MS = 200, PROBE_TIMEOUT_MS = 10000;
+const PROBE_MS = 200, PROBE_TIMEOUT_MS = 10000, OWNED_TIMEOUT_MS = 5000;
 const POSITIVE = new Set<string>(['absent', 'replaced', 'rebooted', 'exited']);
 
 function stopUncertain(): ServiceError {
@@ -59,7 +59,8 @@ export function recorderStopCommand(recorder: AndroidRecorder, signal?: 'TERM' |
     'set -- $s; ' +
     `if [ "\${22}" != ${start} ]; then echo ${MARK} replaced; exit 0; fi; ` +
     `case "$2" in "(sh)"|"(screenrecord)") ;; *) echo ${MARK} foreign; exit 0;; esac; ` +
-    `case "$3" in Z|X|x) echo ${MARK} exited; exit 0;; esac; ` +
+    // A zombie main thread is exited only when no other thread of the process remains.
+    `case "$3" in Z|X|x) if [ "$(ls /proc/${pid}/task 2>/dev/null)" = ${pid} ]; then echo ${MARK} exited; else echo ${MARK} running; fi; exit 0;; esac; ` +
     (signal ? `kill -${signal} ${pid} 2>/dev/null; ` : '') + `echo ${MARK} running`;
 }
 
@@ -69,7 +70,7 @@ export async function stopAndroidRecorder(provider: AndroidProvider, machine: Re
   allowed: Authorized, elapsed: () => number, signalled: ('TERM' | 'KILL')[] = []): Promise<AndroidRecorderStop> {
   const step = async (signal?: 'TERM' | 'KILL'): Promise<string> => {
     await authorized(allowed);
-    if (signal) { await provider.owned(machine, serial); await authorized(allowed); }
+    if (signal) { await provider.owned(machine, serial, { timeoutMs: OWNED_TIMEOUT_MS }); await authorized(allowed); }
     const output = await provider.adb(serial, ['shell', recorderStopCommand(recorder, signal)], { timeoutMs: PROBE_TIMEOUT_MS });
     const state = /^canaveral-recorder (absent|replaced|rebooted|exited|running|foreign|unreadable)$/.exec(output)?.[1];
     if (!state || state === 'foreign' || state === 'unreadable') throw new ServiceError('Android recorder state is uncertain.', 409, { outcome: 'unknown' });
@@ -78,15 +79,16 @@ export async function stopAndroidRecorder(provider: AndroidProvider, machine: Re
   };
   const begun = elapsed();
   if (!Number.isFinite(begun)) throw new ServiceError('Android cleanup clock is unavailable.', 409, { outcome: 'unknown' });
-  let state = await step('TERM'), killed = false;
+  let state = await step('TERM'), killed = false, probedAfterKill = false;
   for (;;) {
     if (POSITIVE.has(state)) return state as AndroidRecorderStop;
     const spent = elapsed() - begun;
     if (!Number.isFinite(spent) || spent < 0) throw new ServiceError('Android cleanup clock identity changed.', 409, { outcome: 'unknown' });
-    if (spent >= RECORDER_TERM_SECONDS + RECORDER_KILL_SECONDS) throw new ServiceError('Android recorder did not exit.', 409, { outcome: 'unknown' });
+    // Give up only after SIGKILL was sent and at least one later probe still saw the recorder.
+    if (spent >= RECORDER_TERM_SECONDS + RECORDER_KILL_SECONDS && killed && probedAfterKill) throw new ServiceError('Android recorder did not exit.', 409, { outcome: 'unknown' });
     await sleep(PROBE_MS);
     if (!killed && spent >= RECORDER_TERM_SECONDS) { killed = true; state = await step('KILL'); }
-    else state = await step();
+    else { state = await step(); if (killed) probedAfterKill = true; }
   }
 }
 

@@ -86,8 +86,8 @@ export class AndroidProvider extends MobileProvider {
     for (const line of lines.slice(1)) { const parts = line.trim().split(/\s+/); if (parts.length >= 2) result[parts[0]!] = parts[1]!; }
     return result;
   }
-  async owned(machine: RecordValue, serial: string): Promise<void> {
-    if ((await this.adb(serial, ["emu", "avd", "name"])).split(/\r?\n/)[0] !== this.name(machine)) throw new ServiceError("Android serial belongs to another AVD; refusing control.");
+  async owned(machine: RecordValue, serial: string, options: Partial<RunOptions> = {}): Promise<void> {
+    if ((await this.adb(serial, ["emu", "avd", "name"], options)).split(/\r?\n/)[0] !== this.name(machine)) throw new ServiceError("Android serial belongs to another AVD; refusing control.");
   }
   async endpoint(machine: RecordValue, storage: string, check: Authorized = () => true): Promise<string | undefined> {
     await authorized(check);
