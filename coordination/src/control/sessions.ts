@@ -649,6 +649,19 @@ export class GuestHelperAccess {
     if (value.source !== "macos-accessibility" || value.coordinateSpace !== "screen-points") throw new ServiceError("Native accessibility source or coordinates differ.", 409);
     return value;
   }
+  private readonly displayed = new WeakSet<GuestHelperBinding>();
+  /** Desktop readiness: a verified binding to this launch's helper that has captured one
+   * well-formed display frame. The probe is a read; it claims and resets no input. */
+  async ready(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string): Promise<boolean> {
+    const b = await this.binding(machine, image, folder);
+    if (!this.displayed.has(b)) {
+      const value = await b.call("/v1/display/frame", null), frame = value.frame && typeof value.frame === "object" ? value.frame as Record<string, unknown> : {};
+      const size = (n: unknown) => Number.isSafeInteger(n) && (n as number) > 0 && (n as number) <= 4096;
+      if (typeof frame.pngBase64 !== "string" || !frame.pngBase64.startsWith("iVBORw0KGgo") || !size(frame.width) || !size(frame.height)) return false;
+      this.displayed.add(b);
+    }
+    return b.authorized();
+  }
   async desktop(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string): Promise<DisplayConnection> { return this.desktopSession(machine, image, folder, () => true); }
   async desktopSession(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, authorized: () => boolean): Promise<DisplayConnection> {
     const b = await this.binding(machine, image, folder);

@@ -62,6 +62,8 @@ export interface GuestAccess {
   streamUpload?(machine: RecordValue, image: RecordValue, folder: string, path: string, app: string | undefined, reader: ByteReader, size: number, authorized: () => boolean): Promise<RecordValue>;
   streamDownload?(machine: RecordValue, image: RecordValue, folder: string, path: string, app?: string, authorized?: () => boolean): Promise<VerifiedDownload>;
   desktop?(machine: RecordValue, image: RecordValue, folder: string): Promise<DisplayConnection>;
+  /** Readiness of a guest connection that needs no preparation recipe (macOS desktops). */
+  ready?(machine: RecordValue, image: RecordValue, folder: string): Promise<boolean>;
 }
 export interface HostDependencies {
   transport?: HostTransport; clock?: ExecutionClock;
@@ -593,6 +595,15 @@ export class HostRunner {
         }
       }
       const result = await runtime.reconcile(current, image, folder);
+      // A macOS desktop has no preparation recipe: its access is ready once the
+      // launch's own helper answers the pinned identity challenge and shows a frame.
+      if (!prepared && image.os === "macos" && image.guestAccess && result.state === "running") {
+        result.accessReady = false;
+        const ready = "ready" in backend ? backend.ready : undefined;
+        if (!ready) result.detail = "This host has no verified macOS guest connection.";
+        else try { if (await ready.call(backend, current, image, folder)) result.accessReady = true; else result.detail = "Waiting for the guest helper to show the desktop."; }
+        catch { result.detail = "Waiting for the verified macOS guest helper."; }
+      }
       if (prepared && preparation) {
         if (result.state === "running" && image.guestAccess && backend.control) {
           result.accessReady = false;

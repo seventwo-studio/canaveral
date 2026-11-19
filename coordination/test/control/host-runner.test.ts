@@ -170,6 +170,30 @@ test("guest preparation receives cloneable data and verified health determines a
   const report = await runner.reconcile(m); assert.equal(prepared, 1); assert.equal(report.accessReady, true); assert.equal((report.preparation as RecordValue).state, "ready"); await runner.close();
 });
 
+test("a macOS desktop is ready only after its verified helper shows a display frame", async t => {
+  const { config, clock, image: base } = setup(t);
+  const mac = { ...base, id: "mac", os: "macos", mode: "desktop", arch: "arm64", guestAccess: true }, m = machine(mac);
+  const { GuestHelperBinding } = await import("../../src/control/session-protocol.ts");
+  let frame: RecordValue = {}, reads = 0, resolves = 0, fail = false, cached: InstanceType<typeof GuestHelperBinding> | undefined;
+  // Like AppleBindings, the fake keeps one verified binding per live launch.
+  const runtime = { kind: "apple", check: async () => ({}), reconcile: async () => ({ state: "running" }),
+    guestHelperBinding: async (_m: RecordValue, _i: RecordValue, _f: string, a: import("../../src/providers/apple-binding.ts").OwnedGuestAuthority) => {
+      resolves++; if (fail) throw new Error("private resolver detail");
+      return cached ??= new GuestHelperBinding(async (path, body) => { assert.equal(path, "/v1/display/frame"); assert.equal(body, null); reads++; return { frame }; }, a.authorized);
+    } };
+  const runner = new HostRunner({ ...config, provider: "macos", runtimes: { apple: {} }, templates: [mac] }, { clock, transport: fakeTransport(() => ({ machines: [m] })), providerFactory: () => runtime });
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  // No preparation recipe, no lease: readiness is the helper's own verified frame.
+  let report = await runner.reconcile(m); assert.equal(report.accessReady, false); assert.match(String(report.detail), /show the desktop/);
+  frame = { pngBase64: "iVBORw0KGgoAAAANSUhEUg", width: 1440, height: 900 };
+  report = await runner.reconcile(m); assert.equal(report.accessReady, true);
+  report = await runner.reconcile(m); assert.equal(report.accessReady, true);
+  assert.equal(reads, 2, "a confirmed binding is not re-probed for frames");
+  fail = true; const other = machine(mac);
+  report = await runner.reconcile(other); assert.equal(report.accessReady, false); assert.doesNotMatch(String(report.detail), /private/);
+  assert.ok(resolves >= 3); await runner.close();
+});
+
 test('mixed runtime selection captures macOS authority and retains old backends for shutdown', async t => {
   const {config,clock,image:linux} = setup(t);
   const mac = {...linux,id:'mac',os:'macos',mode:'desktop',arch:'arm64'};
