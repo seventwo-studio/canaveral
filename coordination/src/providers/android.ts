@@ -121,6 +121,13 @@ export class AndroidProvider extends MobileProvider {
     }
     return undefined;
   }
+  /** Ownership recheck for long-running device work. A leased emulator additionally needs its live
+   * supervisor and current, unfenced authorization (endpoint), so a fence, expiry or supervisor
+   * loss ends the work within one recheck rather than at the next reconcile. */
+  async ownedLive(machine: RecordValue, image: RecordValue, serial: string, check: Authorized = () => true): Promise<void> {
+    if (machine.lease == null) { await this.owned(machine, serial); return; }
+    if (await this.endpoint(machine, this.storage(machine, image), check) !== serial) throw new ServiceError("Leased Android device access ended.", 410);
+  }
   launchArguments(machine: RecordValue, port: number): string[] {
     const resources = object(machine.resources);
     return [this.tool("emulator"), "-avd", this.name(machine), "-port", String(port), "-cores", String(integer(resources.cpu, "cpu", 1, 1024)), "-memory", String(integer(resources.memoryMiB, "memory", 1, 2 ** 30)), "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim",
@@ -491,7 +498,7 @@ export class AndroidProvider extends MobileProvider {
     let session: string | undefined, serial: string | undefined, pipe: NativePipe | undefined, commitAttempted = false, createAttempted = false;
     const recheck = async () => {
       await authorized(check);
-      if (serial) { await this.owned(machine, serial); await authorized(check); }
+      if (serial) { await this.ownedLive(machine, image, serial, check); await authorized(check); }
     };
     try {
       this.executionAllowed(machine);

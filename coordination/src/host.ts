@@ -808,18 +808,28 @@ export class HostRunner {
       const path = join(this.state, 'work', 'video', `${id}.json`);
       if (present(path)) {
         const saved = readRecord(path);
-        if (saved.generation === generation && saved.machineId === machineId && saved.cleaned === true && this.identity) {
+        // A lease session may repeat its host-only receipt: the encoder exited, and the lease's own
+        // proven emulator removal settles the guest recorder on the controller.
+        const receipt = saved.cleaned === true ? { generation, cleaned: true } : saved.hostCleaned === true ? { generation, hostCleaned: true } : undefined;
+        if (saved.generation === generation && saved.machineId === machineId && receipt && this.identity) {
           const identity = this.identity;
           this.launch(key, () => this.fresh(), async () => {
-            await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, cleaned: true }, identity.credential, this.stopController.signal);
+            await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, receipt, identity.credential, this.stopController.signal);
           });
         }
         continue; // Only positive cleanup reports repeat; native capture never does.
       }
       if (!['pending','attaching','ready'].includes(String(job.state))) continue;
-      const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
+      const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.leasedCaptureAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
       this.launch(key, allowed, context => this.runVideo(job, path, context));
     }
+  }
+  /** A leased emulator records only while its lease is ready on this runner and the host offers
+   * leased execution for it; the lease guard (machineAuthorized) fences it at the deadline. */
+  private leasedCaptureAuthorized(machineId: string): boolean {
+    const machine = this.assignments.find(m => m.id === machineId);
+    if (!machine?.lease) return true;
+    return machine.ready === true && object(machine.lease).state === "ready" && this.offer.leaseProtocol === 1 && this.leaseEligible(machine);
   }
   /** Owner desktop viewers relayed by a standalone dashboard through the controller. Only
    * unleased desktop assignments qualify; leased machines use their lease's sessions. */
@@ -864,7 +874,10 @@ export class HostRunner {
     const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);
     if (!identity || !machine || !context.authorized()) return;
     const { runtime, image, folder } = this.context(machine);
-    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false;
+    // hostCleaned: this runner's own encoder is confirmed exited (or never started). For a leased
+    // emulator that alone may be reported when the guest recorder's stop is unproven.
+    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true;
+    const leased = machine.lease != null;
     saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
     try {
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/${identifier(job.generation)}`, identity.credential,
@@ -879,19 +892,24 @@ export class HostRunner {
       captureStarted = true;
       // Capture ends with the session; stopping an early-cancelled recorder needs only the assignment,
       // and only the same assignment that started the capture (fingerprint and lease unchanged).
-      const capturedAssignment = assignmentFingerprint(machine), capturedLease = JSON.stringify(machine.lease ?? null);
-      const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && JSON.stringify(current.lease ?? null) === capturedLease; };
+      // The lease's identity, not its whole assignment record: that carries the controller's clock and
+      // revision, which change on every heartbeat and renewal without changing the owner.
+      // A lease without a string id never matches, so a malformed record fails closed.
+      const leaseOf = (m: RecordValue) => { if (m.lease == null) return null; const id = object(m.lease).id; return typeof id === "string" && id ? id : Symbol("unidentified lease"); };
+      const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
+      const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
       const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
-      await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), positive => { cleaned = positive; });
+      await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
       cleaned = true;
     } catch {
       if (!captureStarted) cleaned = true;
       try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
     } finally {
       channel?.close();
-      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned });
-      if (cleaned) {
-        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, { generation: job.generation, cleaned: true }, identity.credential, this.stopController.signal); }
+      const hostOnly = !cleaned && leased && hostCleaned;
+      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}) });
+      if (cleaned || hostOnly) {
+        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, cleaned ? { generation: job.generation, cleaned: true } : { generation: job.generation, hostCleaned: true }, identity.credential, this.stopController.signal); }
         catch { this.log('Video cleanup receipt was not acknowledged; its reservation is retained.'); }
       }
     }

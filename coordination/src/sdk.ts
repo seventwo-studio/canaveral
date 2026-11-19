@@ -15,6 +15,10 @@ import { TerminalClient } from './terminal-sdk.ts';
 import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
 import { receiveSnapshot, MAX_SNAPSHOT_BYTES } from './accessibility-sdk.ts';
+import { LeaseVideoClient } from './video-sdk.ts';
+import { uploadAppArtifactFile } from './app-artifact-client.ts';
+import { appArtifactMetadata } from './app-artifact-contract.ts';
+import type { AppArtifactMetadata } from './app-artifact-contract.ts';
 import { FilePublicationError, scopedDownloadFiles } from './sdk-files.ts';
 import type { DownloadDirectory, DownloadFiles } from './sdk-files.ts';
 export { containerDownloadFiles, linuxDownloadFiles, scopedDownloadFiles, windowsDownloadFiles } from './sdk-files.ts';
@@ -299,7 +303,7 @@ export interface CreateOperationResult { created: boolean; operation: DurableOpe
 export function operationRequest(request: DurableOperationRequest): DurableOperationRequest {
   const fields: Record<string, string[]> = {
     screenshot: [], hierarchy: [], apps: [], logs: [], accessibility: [], tap: ['x', 'y'], swipe: ['x', 'y', 'toX', 'toY', 'durationMs'],
-    text: ['text'], key: ['key'], install: ['artifact'], uninstall: ['app'], launch: ['app'], terminate: ['app'], 'open-url': ['url'],
+    text: ['text'], key: ['key'], install: ['artifact'], 'install-uploaded': ['artifact'], uninstall: ['app'], launch: ['app'], terminate: ['app'], 'open-url': ['url'],
     location: ['latitude', 'longitude'], push: ['path', 'data'], pull: ['path'], shell: ['argv'], permission: ['app', 'permission', 'state'],
     rotate: ['orientation'], 'accessibility-action': ['snapshotId', 'nodeId', 'nativeAction'], 'list-files': ['path'],
     'shell-open': ['session'], 'shell-read': ['session', 'offset'], 'shell-write': ['session', 'text'], 'shell-close': ['session'], 'shell-resize': ['session', 'rows', 'cols'],
@@ -312,7 +316,7 @@ export function operationRequest(request: DurableOperationRequest): DurableOpera
   const invalid = () => { throw new ConsumerConfigurationError('Invalid operation argument.'); };
   for (const [key, value] of Object.entries(args)) {
     if (key === 'timeoutMs') { if (!Number.isSafeInteger(value) || Number(value)<1 || Number(value)>1800000) invalid(); }
-    else if (key === 'session') identifier(value);
+    else if (key === 'session' || key === 'artifact' && request.action === 'install-uploaded') identifier(value);
     else if (key === 'offset') { if (!Number.isSafeInteger(value) || Number(value) < 0) invalid(); }
     else if (['rows', 'cols', 'durationMs', 'x', 'y', 'toX', 'toY'].includes(key)) {
       const dimensions = ['rows', 'cols'].includes(key), duration = key === 'durationMs';
@@ -346,7 +350,35 @@ export class LeaseClient {
   static fromCredentialFile(options: ClientOptions & { leaseId: string; credentialFile: string }): LeaseClient {
     return new LeaseClient({ ...options, leaseKey: credentialFile(options.credentialFile) });
   }
-  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); }
+  #video: LeaseVideoClient;
+  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); }
+  /** MP4 recording of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `record`. */
+  get video(): LeaseVideoClient { return this.#video; }
+  async #artifactCall(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string): Promise<AppArtifactMetadata> {
+    const { status, json } = await this.transport.call(method, path, body, [200, 201], method === 'POST', method === 'POST' ? id : undefined);
+    try { const value = appArtifactMetadata(json); if (value.id !== id || value.leaseId !== this.id) throw new Error('identity'); return value; }
+    catch { throw new ConsumerProtocolError('Invalid app upload receipt.', 'response_invalid', status, { requestId: id, ...(method === 'POST' ? { outcome: 'unknown' as const } : {}) }); }
+  }
+  /** Uploads one APK for `member` in verified 512 KiB chunks, resuming confirmed chunks of the
+   * same caller UUID. It does not install; follow with `installApp`. Any app size up to 2 GiB. */
+  uploadApp(request: { id: string; member: string; file: string; format?: 'apk' }): Promise<AppArtifactMetadata> {
+    const id = identifier(request.id);
+    if (Object.keys(request).some(k => !['id','member','file','format'].includes(k)) || (request.format ?? 'apk') !== 'apk' || typeof request.file !== 'string') throw new ConsumerConfigurationError('Invalid lease app upload.');
+    return uploadAppArtifactFile({ request: async (method, path, body) => {
+      const { json } = await this.transport.call(method as 'GET' | 'POST', path, body, [200, 201], method === 'POST', id);
+      if (!record(json)) throw new ConsumerProtocolError('Invalid app upload receipt.', 'response_invalid', 200, { requestId: id, outcome: 'unknown' });
+      return json;
+    } }, { lease: { leaseId: this.id, member: request.member }, id, format: 'apk', file: request.file });
+  }
+  appArtifact(artifactId: string): Promise<AppArtifactMetadata> { const id = identifier(artifactId); return this.#artifactCall('GET', `/v1/leases/${this.id}/app-artifacts/${id}`, undefined, id); }
+  /** Releases the upload's bytes and host scratch once every install attempt of it is clean. */
+  deleteAppArtifact(artifactId: string): Promise<AppArtifactMetadata> { const id = identifier(artifactId); return this.#artifactCall('POST', `/v1/leases/${this.id}/app-artifacts/${id}/delete`, {}, id); }
+  /** Installs a published upload of this lease as the durable operation `install-uploaded`. Poll
+   * `operation(id)`; an `unknown` receipt is never replayed and its upload stays held until cleanup. */
+  installApp(request: { id: string; member: string; artifact: string }): Promise<{ created: boolean; operation: DurableOperation }> {
+    if (Object.keys(request).some(k => !['id','member','artifact'].includes(k))) throw new ConsumerConfigurationError('Invalid lease app installation.');
+    return this.createOperation({ id: request.id, member: request.member, action: 'install-uploaded', arguments: { artifact: identifier(request.artifact) } });
+  }
   createTransfer(intent:TransferIntent) { return this.#http.createTransfer(intent); }
   transfer(id:string) { return this.#http.transfer(id); }
   createTransferStep(id:string,step:number,request:FileRequest) { return this.#http.createTransferStep(id,step,request); }

@@ -232,7 +232,7 @@ export class Transport {
   }
 
   async openSession(path: string): Promise<{ socket: Duplex; head: Buffer }> {
-    if (!/^\/v1\/(?:leases\/[0-9a-f-]+\/sessions|machines\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/i.test(path)) {
+    if (!/^\/v1\/(?:leases\/[0-9a-f-]+\/(?:video-)?sessions|machines\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/i.test(path)) {
       throw new ConsumerConfigurationError("Invalid session attachment path.");
     }
     const key = randomBytes(16).toString("base64");

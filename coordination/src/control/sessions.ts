@@ -409,7 +409,8 @@ class SocketPeer {
 type AttachCommand = Extract<SessionCommand | VideoSessionCommand | DisplaySessionCommand, { type: 'sessions.attach' | 'video-sessions.attach' | 'display-sessions.attach' }>;
 function upgradeRequest(req: IncomingMessage, family?: SessionFamily): { key: string; token: string; command: AttachCommand } {
   const path = req.url ?? "", p = path.split("/");
-  const route = family ? new RegExp(`^/v1/(hosts|machines)/[0-9a-f-]+/${family}-sessions/[0-9a-f-]+/[0-9a-f-]+$`) : /^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/;
+  // Video consumers also attach through their lease; display relays remain owner-only.
+  const route = family ? new RegExp(`^/v1/(hosts|machines${family === 'video' ? '|leases' : ''})/[0-9a-f-]+/${family}-sessions/[0-9a-f-]+/[0-9a-f-]+$`) : /^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/;
   if (req.method !== "GET" || !route.test(path)) throw new ServiceError("Invalid session attachment path.", 400);
   const counts = new Map<string, number>();
   for (let i = 0; i < req.rawHeaders.length; i += 2) { const k = req.rawHeaders[i]!.toLowerCase(); counts.set(k, (counts.get(k) ?? 0) + 1); }
@@ -567,7 +568,7 @@ export class SessionConnection implements SessionChannel {
   private check(): void { if (this.failure) throw this.failure; if (!this.allowed()) throw new ServiceError("Session authorization or connection ended.", 410, { code: "session_disconnected", retryable: false }); }
   static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"]; heartbeat?: SessionHeartbeat } = {}): Promise<SessionConnection> {
     let url: URL; try { url = new URL(origin); } catch { throw new ServiceError("Invalid session origin.", 400); }
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/sessions|(hosts|machines)\/[0-9a-f-]+\/(?:video|display)-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/sessions|(hosts|machines)\/[0-9a-f-]+\/(?:video|display)-sessions|leases\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
     secret(token);
     const allowed = options.authorized ?? (() => true), heartbeat = heartbeatOption(options.heartbeat);
     if (!allowed()) throw new ServiceError("Session authorization ended.", 410);

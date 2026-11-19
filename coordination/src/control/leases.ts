@@ -11,6 +11,8 @@ import type { ControlModule, ControlOptions, ControlRequest, ControlResponse } f
 import { MachineStore, machineDigest, machineIdentifier, machineImageRuntime, registerMachineHooks, validateMachineRequest } from "./machines.ts";
 import { cleanupView, computeReserved, ensureLeaseCleanup, initializeLifecycle, isDeleted, leaseCleanup, refreshLeaseCleanup } from "./lifecycle.ts";
 import { createModule as operationModule, initializeConsumerOperations, refreshConsumerOperations } from "./consumer-operations.ts";
+import { applicationArtifactDisk, releaseLeaseArtifacts } from "./install-cleanup.ts";
+import { applicationVideoUsage, settleLeaseVideoSessions } from "./video-cleanup.ts";
 
 export const ACTIVE = ["provisioning", "ready"];
 export interface LegacyLeaseRow {
@@ -119,6 +121,9 @@ export function refreshLegacyLeases(db: DatabaseSync, now: number): void {
   }
   refreshLeaseCleanup(db, now);
   refreshConsumerOperations(db, now);
+  // Recordings and uploads of ended leases release only on their own or the lease's cleanup proof.
+  settleLeaseVideoSessions(db);
+  releaseLeaseArtifacts(db);
 }
 /** Add to the host assignment, retaining the independent lifecycle cleanup fields. */
 export function legacyLeaseAssignment<T extends { id: string }>(db: DatabaseSync, machine: T, now: number): T & { lease?: Record<string, unknown> } {
@@ -159,7 +164,30 @@ export function applicationLeaseUsage(db: DatabaseSync, applicationId: string): 
       for (const k of resourceKeys) resources[k] += Number(size[k]);
     }
   }
+  // Lease recordings and uploads hold host capacity until their cleanup is proven; they count too.
+  const video = applicationVideoUsage(db, applicationId);
+  resources.cpu += video.cpu; resources.memoryMiB += video.memoryMiB;
+  resources.diskGiB += applicationArtifactDisk(db, applicationId);
   return { active, resources };
+}
+/** Refuses an additional lease-held reservation that would exceed the application's resource limits. */
+export function requireApplicationCapacity(db: DatabaseSync, applicationId: string, extra: Partial<Record<typeof resourceKeys[number], number>>): void {
+  const spec = JSON.parse(String(db.prepare("SELECT specification FROM consumers WHERE id=?").get(applicationId)!.specification)) as ApplicationSpec;
+  const used = applicationLeaseUsage(db, applicationId).resources;
+  if (resourceKeys.some(k => used[k] + (extra[k] ?? 0) > spec.limits.resources[k])) throw new ServiceError("Application resource limit exceeded.", 429);
+}
+/** The lease-key view of one member: the current key of an active application, a ready lease and
+ * a checked, ready member machine with the required capability. Lease-scoped recording and
+ * uploads use it; administrative and application credentials never satisfy it. */
+export function leaseScopedMember(db: DatabaseSync, leaseId: string, token: string, member: unknown, capability: Capability, now: number): { lease: LegacyLeaseRow; machine: LegacyMachineRow } {
+  const lease = legacySessionLease(db, leaseId, token);
+  if (typeof member !== "string" || !member.trim() || [...member].length > 100) throw new ServiceError("An explicit member is required.", 400);
+  if (!ACTIVE.includes(lease.state)) throw new ServiceError("Lease has ended.", 410, { code: "lease_ended" });
+  const machine = db.prepare("SELECT m.*,h.seen,h.enabled,h.offer AS host_offer FROM machines m JOIN hosts h ON h.id=m.host JOIN lease_members lm ON lm.machine=m.id WHERE lm.lease=? AND lm.name=?").get(lease.id, member);
+  if (!machine) throw new ServiceError("Unknown environment member.", 404);
+  if (!capabilities(template(machine))[capability]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
+  if (lease.state !== "ready" || now >= lease.expires || !legacyMachineReady(db, machine, now)) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });
+  return { lease, machine };
 }
 
 /** One UUID-ordered page across both ledgers. Filtering happens before ordering and limiting. */
