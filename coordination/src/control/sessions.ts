@@ -286,23 +286,39 @@ export function createModule(store: SqliteStore, options: ControlOptions): Sessi
 export interface SessionCommandClient { request(command: SessionCommand | VideoSessionCommand): Promise<unknown> }
 interface Pair {
   view: { id: string; generation: string; capability: RelayCapability }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
+  /** Video: the host's finish was relayed, so the consumer may acknowledge it. */
+  finished?: boolean;
 }
-/** One assembled input message and one pending socket write per direction. No retry/reconnect. */
+/** Peer liveness: ping every `intervalMs`; drop a peer from which no frame arrived for
+ * `timeoutMs`. Any received frame counts, so a pong queued behind media still in socket
+ * buffers does not drop a peer whose stream is merely slow to drain. Only tests shorten
+ * it. A peer answers pings only while a read is outstanding. */
+export interface SessionHeartbeat { intervalMs: number; timeoutMs: number }
+export const SESSION_HEARTBEAT: Readonly<SessionHeartbeat> = Object.freeze({ intervalMs: 10_000, timeoutMs: 30_000 });
+function heartbeatOption(value: SessionHeartbeat | undefined): SessionHeartbeat {
+  if (value === undefined) return SESSION_HEARTBEAT;
+  if (!Number.isSafeInteger(value.intervalMs) || !Number.isSafeInteger(value.timeoutMs) || value.intervalMs < 10 || value.timeoutMs <= value.intervalMs) throw new ServiceError("Invalid session heartbeat.", 400);
+  return { intervalMs: value.intervalMs, timeoutMs: value.timeoutMs };
+}
+/** One assembled input message and one pending socket write per direction. No retry/reconnect.
+ * Ping and pong frames have their own small queue, so they never fail on, or wait for
+ * queue space behind, a continuous media stream; all frames still serialize through one
+ * writer, so bytes already written are sent first. */
 class SocketPeer {
-  private busy = false;
   private writer: Promise<void> = Promise.resolve();
   private queued = 0;
-  private lastPong = Date.now();
+  private controlQueued = 0;
+  private lastFrame = Date.now();
   private lastPing = Date.now();
   private timer: NodeJS.Timeout;
-  constructor(readonly socket: Duplex, readonly server = true) {
+  constructor(readonly socket: Duplex, readonly server = true, heartbeat: SessionHeartbeat = SESSION_HEARTBEAT) {
     socket.on("error", () => {});
     this.timer = setInterval(() => {
-      if (Date.now() - this.lastPong >= 30_000) { this.close(); return; }
-      if (!this.busy && Date.now() - this.lastPing >= 10_000) {
+      if (Date.now() - this.lastFrame >= heartbeat.timeoutMs) { this.close(); return; }
+      if (!this.controlQueued && Date.now() - this.lastPing >= heartbeat.intervalMs) {
         this.lastPing = Date.now(); void this.send(Buffer.from("canaveral"), 9).catch(() => this.close());
       }
-    }, 500);
+    }, Math.min(500, Math.max(5, Math.floor(heartbeat.intervalMs / 4))));
     this.timer.unref();
     socket.once("close", () => clearInterval(this.timer));
   }
@@ -323,13 +339,13 @@ class SocketPeer {
     return result;
   }
   async send(data: Uint8Array, opcode = 1): Promise<void> {
-    if (this.socket.destroyed || this.queued >= 2) throw new ServiceError("Session output is blocked or disconnected.", 410);
-    this.queued++;
+    const control = opcode >= 8;
+    if (this.socket.destroyed || (control ? this.controlQueued : this.queued) >= 2) throw new ServiceError("Session output is blocked or disconnected.", 410);
+    if (control) this.controlQueued++; else this.queued++;
     const previous = this.writer;
     let release!: () => void;
     this.writer = new Promise<void>(resolve => { release = resolve; });
     await previous;
-    this.busy = true;
     try {
       const length = data.byteLength;
       const header = Buffer.alloc(length < 126 ? 2 : length <= 65535 ? 4 : 10);
@@ -344,7 +360,7 @@ class SocketPeer {
         for (let i = 0; i < payload.length; i++) payload[i] = payload[i]! ^ mask[i % 4]!;
         await this.write(Buffer.concat([header, mask, payload]));
       }
-    } finally { this.busy = false; this.queued--; release(); }
+    } finally { if (control) this.controlQueued--; else this.queued--; release(); }
   }
   async write(data: Uint8Array): Promise<void> {
     await new Promise<void>((resolve, reject) => {
@@ -375,10 +391,11 @@ class SocketPeer {
         if (size + length > (kind === 1 ? MAX_CONTROL_BYTES : MAX_BINARY_BYTES)) throw new ServiceError("Session message exceeds its budget.", 400);
       }
       const mask = this.server ? await this.read(4) : undefined, data = await this.read(length);
+      this.lastFrame = Date.now();
       if (mask) for (let i = 0; i < length; i++) data[i] = data[i]! ^ mask[i % 4]!;
       if (opcode === 8) return null;
       if (opcode === 9) { await this.send(data, 10); continue; }
-      if (opcode === 10) { this.lastPong = Date.now(); continue; }
+      if (opcode === 10) continue;
       data.copy(assembled, size); size += length;
       if (final) return { binary: kind === 2, data: assembled.subarray(0, size) };
     }
@@ -409,8 +426,8 @@ function upgradeRequest(req: IncomingMessage, video = false): { key: string; tok
   }
   return { key, token: command.token, command };
 }
-export function createSessionUpgradeHandler(client: SessionCommandClient, options: { video?: boolean } = {}): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
-  const pairs = new Map<string, Pair>(); let stopped = false, monitoring = false;
+export function createSessionUpgradeHandler(client: SessionCommandClient, options: { video?: boolean; heartbeat?: SessionHeartbeat } = {}): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
+  const pairs = new Map<string, Pair>(), heartbeat = heartbeatOption(options.heartbeat); let stopped = false, monitoring = false;
   const disconnect = (pair: Pair): void => {
     if (pair.closed) return;
     pair.closed = true; pair.start();
@@ -449,7 +466,7 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
           pair = { view, peers: {}, started, start, closed: false }; pairs.set(identity, pair);
         }
         if (pair.closed || pair.peers[command.side]) throw new ServiceError("Session peer cannot be replaced.", 409);
-        peer = new SocketPeer(socket); pair.peers[command.side] = peer;
+        peer = new SocketPeer(socket, true, heartbeat); pair.peers[command.side] = peer;
         const currentPair = pair;
         socket.once("close", () => disconnect(currentPair));
         const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
@@ -467,10 +484,15 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
         await pair.started;
         while (!pair.closed) {
           const message = await peer.message(); if (!message) break;
-          validateRelayMessage(view.capability, command.side, message.data, message.binary);
+          const relayed = validateRelayMessage(view.capability, command.side, message.data, message.binary);
+          // The video consumer may only acknowledge a relayed finish. An early message would sit
+          // unread in the capturing runner and is never a valid completion proof.
+          if (view.capability === "video" && command.side === "consumer" && !pair.finished) throw new ServiceError("Video acknowledgement preceded completion.", 409);
           if (!await authorized(pair, true) || pair.closed) throw new ServiceError("Session authorization ended.", 410);
           const other = pair.peers[command.side === "host" ? "consumer" : "host"];
           if (!other) throw new ServiceError("Session peer ended.", 410);
+          // Set before relaying, so an acknowledgement can never race the flag.
+          if (view.capability === "video" && command.side === "host" && !(relayed instanceof Uint8Array) && relayed.type === "finish") pair.finished = true;
           await other.send(message.data, message.binary ? 2 : 1);
         }
       } catch (error) {
@@ -490,7 +512,11 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
   };
 }
 
-/** Bounded raw-socket client, with default TLS verification and no automatic reconnect. */
+/** Bounded raw-socket client, with default TLS verification and no automatic reconnect.
+  * It keeps one bounded read outstanding, so peer pings are answered while the caller is only
+ * sending, for example during a native capture. At most one received message waits for
+ * `receive()`; once it waits, TCP backpressure applies and pings are answered again only after
+ * the caller reads it. Video channels read nothing during capture, so their slot stays empty. */
 export class SessionConnection implements SessionChannel {
   private pending: Promise<SessionMessage> | undefined;
   private failure: ServiceError | undefined;
@@ -498,14 +524,27 @@ export class SessionConnection implements SessionChannel {
   private reading = false;
   private constructor(private readonly peer: SocketPeer, readonly authorized: () => boolean, readonly sessionId: string) {
     this.timer = setInterval(() => { if (!this.allowed()) this.close(); }, 250); this.timer.unref();
+    this.readAhead();
+  }
+  private readAhead(): Promise<SessionMessage> {
+    this.pending ??= this.peer.message().then(message => {
+      if (!message) throw new ServiceError("Session disconnected; open a new identity without replaying input.", 410, { code: "session_disconnected" });
+      if (message.binary) return message.data;
+      let value: Record<string, unknown>;
+      try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(message.data)) as Record<string, unknown>; encodeControl(value); }
+      catch { throw new ServiceError("Invalid session control.", 400); }
+      return value;
+    }).catch(error => { this.failure ??= error instanceof ServiceError ? error : new ServiceError("Session protocol failed; input is not replayed.", 503, { retryable: false }); this.close(); throw this.failure; });
+    void this.pending.catch(() => {});
+    return this.pending;
   }
   private allowed(): boolean { try { return this.authorized() === true && !this.peer.socket.destroyed; } catch { return false; } }
   private check(): void { if (this.failure) throw this.failure; if (!this.allowed()) throw new ServiceError("Session authorization or connection ended.", 410, { code: "session_disconnected", retryable: false }); }
-  static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"] } = {}): Promise<SessionConnection> {
+  static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"]; heartbeat?: SessionHeartbeat } = {}): Promise<SessionConnection> {
     let url: URL; try { url = new URL(origin); } catch { throw new ServiceError("Invalid session origin.", 400); }
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/sessions|(hosts|machines)\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
     secret(token);
-    const allowed = options.authorized ?? (() => true);
+    const allowed = options.authorized ?? (() => true), heartbeat = heartbeatOption(options.heartbeat);
     if (!allowed()) throw new ServiceError("Session authorization ended.", 410);
     const key = randomBytes(16).toString("base64"), expected = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
     const socket = await new Promise<Duplex>((resolve, reject) => {
@@ -525,7 +564,7 @@ export class SessionConnection implements SessionChannel {
       req.once("error", () => { clearTimeout(timer); reject(new ServiceError("Session connection failed; no input is automatically replayed.", 503, { retryable: false })); });
       req.end();
     });
-    return new SessionConnection(new SocketPeer(socket, false), allowed, path.split("/")[5]!);
+    return new SessionConnection(new SocketPeer(socket, false, heartbeat), allowed, path.split("/")[5]!);
   }
   async sendControl(value: Record<string, unknown>): Promise<void> { this.check(); await this.peer.send(Buffer.from(encodeControl(value))); this.check(); }
   async sendBytes(value: Uint8Array): Promise<void> {
@@ -539,17 +578,12 @@ export class SessionConnection implements SessionChannel {
     this.reading = true;
     let timer: NodeJS.Timeout | undefined;
     try {
-      this.pending ??= this.peer.message().then(message => {
-        if (!message) throw new ServiceError("Session disconnected; open a new identity without replaying input.", 410, { code: "session_disconnected" });
-        if (message.binary) return message.data;
-        let value: Record<string, unknown>;
-        try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(message.data)) as Record<string, unknown>; encodeControl(value); }
-        catch { throw new ServiceError("Invalid session control.", 400); }
-        return value;
-      }).catch(error => { this.failure = error instanceof ServiceError ? error : new ServiceError("Session protocol failed; input is not replayed.", 503, { retryable: false }); this.close(); throw this.failure; });
-      void this.pending.catch(() => {});
-      const value = await Promise.race([this.pending, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutSeconds * 1000); })]);
-      if (value !== null) { this.pending = undefined; this.check(); if (!(value instanceof Uint8Array)) this.failure = workerError(value, this.sessionId); }
+      const value = await Promise.race([this.readAhead(), new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutSeconds * 1000); })]);
+      if (value !== null) {
+        this.pending = undefined; this.check();
+        if (!(value instanceof Uint8Array)) this.failure = workerError(value, this.sessionId);
+        if (!this.failure) this.readAhead();
+      }
       return value;
     } finally { if (timer) clearTimeout(timer); this.reading = false; }
   }

@@ -48,9 +48,13 @@ Two earlier iOS runs (c2vPTO at 01:53–01:57 and mPyB0T at 01:57–02:01 CET) g
 
 ### Session liveness, found during the trial
 
+Fixed after this trial; see the [video lifecycle trial](dashboard-mobile-video-lifecycle.md), which recorded 60- and 180-second clips. The observation below is kept as found.
+
 The offered lengths were reduced from 5–60 to 5–20 seconds. The controller broker pings each session peer every 10 seconds and closes a peer after 30 seconds without a pong. The runner's session client answers pings only while it reads a message. Native capture reads `ready` first and the consumer's `ack` last, and nothing between them. A portable experiment on the built tree attached an idle host client with heartbeats. Its session ended 30 seconds after attachment, whether the consumer attached through the dashboard relay or directly to the controller. The gateway is therefore not the cause. Longer captures need the runner to keep answering pings during capture.
 
 ### Controller observation
+
+Fixed after this trial: deletion is now refused until positive cleanup or an administrator abandonment; see the [video lifecycle trial](dashboard-mobile-video-lifecycle.md). The observation below is kept as found.
 
 The controller confirmed deletion of each machine while its uncleaned video session remained. Those sessions keep 1 CPU and 256 MiB reserved on the disposable host. This follows the existing rule that unknown native cleanup retains its reservation. Machine deletion does not wait for video cleanup.
 
@@ -59,7 +63,7 @@ The controller confirmed deletion of each machine while its uncleaned video sess
 - iOS recording: idb's stop exits 1 under Python 3.14, so no iOS MP4 has been produced. The options are an idb runtime that exits 0 after SIGINT, an upstream fix, or a reviewed provider change to its stop proof. Each is a separate decision. This trial does not change the provider.
 - Android: positive cleanup after early cancellation (leaving the page, cancel or failure), and with it reservation release on that path.
 - Leaving the page natively: which of the unload keepalive close or the socket close ended the session.
-- Session liveness during capture: recordings that reach about 30 seconds after host attachment are cut off, so the dashboard offers at most 20 seconds.
+- ~~Session liveness during capture~~: fixed and natively verified on 19 November 2026 in the [video lifecycle trial](dashboard-mobile-video-lifecycle.md).
 - Recorded duration versus requested duration on Android; iOS pacing is unmeasured.
 - Screenshots of larger displays may exceed the 4 MiB device-output limit.
 - Remote hosts, consumer leases, unattended recording, and decoding outside Chromium and FFmpeg.

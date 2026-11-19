@@ -233,7 +233,8 @@ close with `POST /v1/machines/{machine}/video-sessions/{id}/close` and `{}`.
 A disconnected capture cannot reattach or silently roll over to another clip.
 
 The response contains the machine, session and generation identities, options,
-`attachBefore` and `authorizationDeadline`. The creator attaches within 30 seconds
+`attachBefore`, `authorizationDeadline`, `cleaned` (positive native cleanup was
+reported) and, once decided, `resolution` (below). The creator attaches within 30 seconds
 at `/v1/machines/{machine}/video-sessions/{id}/{generation}`; the assigned runner
 attaches outbound at `/v1/hosts/{host}/video-sessions/{id}/{generation}`. Both use
 header credentials and the existing `canaveral-session-v1` WebSocket protocol.
@@ -244,7 +245,21 @@ changes terminate authorization. Consumer lease keys do not authorize these rout
 After broker readiness, the host sends `{type:"video",mediaType:"video/mp4",
 codec:"avc1",fps:30}`, then binary MP4 bytes in messages no larger than 64 KiB.
 Message boundaries are not MP4 box or frame boundaries. Binary input from the
-consumer is forbidden. The host finishes with `{type:"finish",bytes,sha256,
+consumer is forbidden.
+
+Each broker peer is pinged every 10 seconds and dropped after 30 seconds without
+receiving any frame from it. Counting every frame, not only pongs, keeps a peer
+whose pong waits behind media still in socket buffers on a slow link. Ping and pong
+frames have their own small output queue, so they never fail for lack of queue
+space behind media. The broker refuses a consumer message before the host's
+`finish` has been relayed; an early `ack` ends the session and is never a
+completion proof. The runner's session client keeps
+one bounded read outstanding at all times, so it answers pings while it only
+sends media; at most one received message waits for the caller. A capture may
+therefore run to the 180-second maximum. Android emits no frames while the screen
+is static, so native and encoder reads wait until the capture deadline (duration
+plus 10 seconds) rather than a fixed 30 seconds; the deadline still bounds every
+stall. The host finishes with `{type:"finish",bytes,sha256,
 cleaned:true}`; the consumer verifies the complete content and replies
 `{type:"ack"}`. An interrupted or unverified file remains incomplete. The
 [video SDK](visual-sdk.md#native-mp4-video) exposes both byte iteration for live
@@ -277,6 +292,42 @@ from an exited adb process; its bounded recorder and native cleanup recovery nee
 inspection. iOS uses idb's graceful signal/stop protocol and confirms its retained
 child exit; companion termination remains a native acceptance check.
 
+### Deleting a machine with a video session
+
+Machine deletion is refused (409) while any video session on that machine is
+live, or ended without positive cleanup and without an abandonment. Deletion would
+remove the device whose recorder the runner still has to stop and prove clean.
+A session whose host never attached needs no cleanup. Retrying the refused
+deletion with the same request UUID is safe once the session is cleaned.
+
+Recover in this order:
+
+1. **Close** the session (`POST .../video-sessions/{id}/close`), or stop the
+   machine. Either ends capture authorization.
+2. **Wait** for the runner's positive cleanup receipt. `cleaned` becomes true, the
+   reservation is released and deletion is allowed.
+3. **Abandon** only when cleanup stays unknown, for example after Android early
+   cancellation: `POST /v1/machines/{machine}/video-sessions/{id}/abandon` with
+   `{reason}` (1–1000 characters). This needs administrator authority, because
+   it accepts unproven native cleanup. The machine owner receives 403 and other
+   accounts 404. The session must already be closed, and its authorization
+   deadline (`authorizationDeadline`) must have passed, so a runner that is still
+   tearing the recorder down can report cleanup first. An earlier request returns
+   a retryable conflict. The decision is append-only
+   and stores the reason, the deciding principal (`kind`, `userId`, `username`)
+   and the time in `resolution`. Repeating the same reason returns the saved
+   decision, so a lost response is safe to retry; a different reason, a live
+   session or a session with positive cleanup returns conflict.
+4. **Delete** the machine. Abandonment unblocks only this deletion. It still
+   blocks another capture on that machine, and the session keeps its 1 CPU and
+   256 MiB reservation, and its host slot, until the deletion completes. The
+   operator owns any residue, which the device's deletion removes.
+
+A positive cleanup receipt that arrives after abandonment is still recorded and
+releases the reservation as usual. Sessions left uncleaned on machines deleted
+before this rule existed can be abandoned in the same way; because their deletion
+is already complete, abandonment releases their reservation immediately.
+
 ### Dashboard capture
 
 Owners capture from machine details through the existing `screenshot` operation
@@ -286,7 +337,7 @@ session only. The page acknowledges a recording only after the finish receipt,
 SHA-256 and its MP4 structure check pass, and closes the session on cancel,
 failure, close or unload.
 
-On 19 November 2026 the [native trial](../coordination/native-acceptance/dashboard-mobile-capture.md)
+On 19 November 2026 the [first native trial](../coordination/native-acceptance/dashboard-mobile-capture.md)
 on the Mac Studio homelab passed Android screenshots and verified 15-second
 recordings: ffprobe frame counts and durations matched the page, FFmpeg decoded
 cleanly and positive cleanup released the session reservation. iOS screenshots
@@ -296,13 +347,21 @@ retains the reservation. Android cancellation still lacks positive cleanup, so
 leaving the page closes the session but keeps its reservation. Android encoded
 duration follows emitted frames, not the requested length.
 
-Open session-liveness defect: the broker pings each peer every 10 seconds and
-drops a peer after 30 seconds without a pong. The runner's session client
-answers pings only while it reads a message, and native capture reads nothing
-between `ready` and the final `ack`. A capture that runs about 30 seconds past
-host attachment is therefore cut off. A portable experiment with an idle host
-ended at 30 seconds both directly and through the dashboard relay. The dashboard
-offers at most 20 seconds until the runner keeps answering pings during capture.
+That trial found two lifecycle defects, both now fixed (see
+[native video sessions](#native-video-sessions) and
+[deleting a machine with a video session](#deleting-a-machine-with-a-video-session)).
+The runner answered broker pings only while reading, so captures were cut off
+about 30 seconds after host attachment and the dashboard offered at most 20
+seconds. It now offers 5, 10, 15, 30, 60, 120 and 180 seconds. The upper bound is
+the backend's own maximum and Android screenrecord's time limit; at the
+dashboard's 4 Mbit/s a 180-second file is about 86 MiB, within its 128 MiB
+in-memory limit. Machine deletion also no longer proceeds while a session lacks
+positive cleanup. The same day's [follow-up trial](../coordination/native-acceptance/dashboard-mobile-video-lifecycle.md)
+verified 60- and 180-second Android recordings through the dashboard, each with
+static stretches longer than 30 seconds, by ffprobe and a clean FFmpeg decode. It
+also confirmed that deletion was refused (409) while a left-page session was
+uncleaned, that the owner could not abandon it (403), and that after an
+administrator's abandonment the deletion completed and released the reservation.
 
 The local attached display path and consumer lease display keep their prior
 contracts. Administrative native video does not enable consumer lease execution

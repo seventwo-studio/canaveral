@@ -8,10 +8,13 @@ const MAX_SCREENSHOT = 4 * 1048576;
 /** The dashboard holds a recording in memory; keep it well below the 512 MiB stream budget. */
 export const MAX_RECORDING = 128 * 1048576;
 export const RECORDING_BIT_RATE = 4_000_000;
-/** The runner answers broker pings only between messages, and the broker drops a
- * peer after 30 s without a pong; keep each capture inside that window. */
-export const RECORDING_DURATIONS = [5, 10, 15, 20] as const;
-const IDLE_MS = 30_000;
+/** Up to the backend's 180-second session maximum, which is also Android
+ * screenrecord's time limit. At RECORDING_BIT_RATE a 180 s file is about 86 MiB,
+ * inside MAX_RECORDING. */
+export const RECORDING_DURATIONS = [5, 10, 15, 30, 60, 120, 180] as const;
+/** Android emits no frames while the screen is static, so silence can last until the
+ * runner's own deadline (duration + 10 s). A lost host closes the socket instead. */
+const idleMs = (durationSeconds: number) => (durationSeconds + 30) * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Keeps a readable, portable base name and appends the extension. */
@@ -195,7 +198,7 @@ export async function recordVideo(
       clearTimeout(idle);
       idle = setTimeout(
         () => finish(Error("The recording stream stalled.")),
-        IDLE_MS,
+        idleMs(options.durationSeconds),
       );
     };
     function finish(error?: Error) {

@@ -124,6 +124,8 @@ try {
   assert.equal(machine.ownerId, user.id);
   const observed = async state => (await owner.request('GET', path)).observed === state;
   const reserved = async () => (await manager.request('GET', '/v1/hosts')).hosts.find(h => h.id === runner.identity.id).reserved;
+  const db = () => new DatabaseSync(join(root, 'db'), { readOnly: true });
+  const sessions = () => { const d = db(); try { return d.prepare('SELECT id,state,cleaned FROM mobile_video_sessions WHERE machine=? ORDER BY created').all(machineId).map(r => ({ ...r })); } finally { d.close(); } };
   try {
     await until(() => observed('running'), 'running machine', 600000);
     const assignment = runner.assignments.find(item => item.id === machineId);
@@ -138,8 +140,6 @@ try {
     console.log('Disposable device running:', device, runtime.name?.(assignment) ?? '');
     await waitForFile('ready-to-record', 'Open this device with device_open and bring an app to the foreground');
 
-    const db = () => new DatabaseSync(join(root, 'db'), { readOnly: true });
-    const sessions = () => { const d = db(); try { return d.prepare('SELECT id,state,cleaned FROM mobile_video_sessions WHERE machine=? ORDER BY created').all(machineId).map(r => ({ ...r })); } finally { d.close(); } };
     const open = async () => {
       await page.goto(home + '/#machines');
       await page.reload();
@@ -232,6 +232,23 @@ try {
     await owner.request('POST', path + '/desired', { state: 'stopped' });
     await until(() => observed('stopped'), 'confirmed shutdown');
     const remove = () => owner.request('POST', path + '/delete', { id: deletionId });
+    // A session without positive cleanup must block deletion until an administrator abandons it.
+    const uncleaned = sessions().filter(session => session.cleaned === 0);
+    if (uncleaned.length) {
+      const outcome = promise => promise.then(body => ({ accepted: body }), error => ({ refused: String(error?.message ?? error) }));
+      const refused = await outcome(remove()), reservedBefore = await reserved();
+      const reason = 'Native trial: Android cleanup after early cancellation is unproven; deleting the disposable device.';
+      const abandon = (client, id) => outcome(client.request('POST', `${path}/video-sessions/${id}/abandon`, { reason }));
+      const ownerAbandon = await abandon(owner, uncleaned[0].id), adminAbandon = [];
+      for (const session of uncleaned) adminAbandon.push(await abandon(manager, session.id));
+      evidence.deletionWhileUncleaned = { sessions: uncleaned, deletion: refused, reservedBefore, ownerAbandon, adminAbandon,
+        afterAbandon: await owner.request('GET', `${path}/video-sessions/${uncleaned[0].id}`), reservedAfterAbandon: await reserved() };
+      await save();
+      console.log('Deletion while uncleaned', JSON.stringify(evidence.deletionWhileUncleaned));
+      assert.match(refused.refused ?? '', /HTTP 409/);
+      assert.match(ownerAbandon.refused ?? '', /HTTP 403/);
+      assert.ok(adminAbandon.every(result => result.accepted?.resolution?.decision === 'abandoned'));
+    }
     await remove();
     await until(async () => {
       const proof = await remove();
@@ -240,6 +257,8 @@ try {
     }, 'confirmed deletion');
     const after = await inventory();
     evidence.after = after;
+    evidence.reservedAfterDeletion = await reserved();
+    evidence.sessionsAfterDeletion = sessions();
     evidence.inventoryRestored = JSON.stringify(after) === JSON.stringify(before);
     evidence.finished = new Date().toISOString();
     await save();

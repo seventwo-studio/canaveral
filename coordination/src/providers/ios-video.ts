@@ -1,6 +1,7 @@
 /** Continuous native H.264 capture; frame acquisition never uses screenshots or input locks. */
 import { ServiceError } from "../errors.ts";
 import { authorized, unsupported } from "./mobile.ts";
+import { MAX_VIDEO_READ_MS } from "../mobile-video.ts";
 import type { Authorized, NativePipe, RecordValue } from "./mobile.ts";
 import type { IosProvider } from "./ios.ts";
 
@@ -72,7 +73,7 @@ export async function openIosVideo(provider: IosProvider, machine: RecordValue, 
   timer.unref();
   return {
     async read(maximum, timeoutMs) {
-      if (!Number.isInteger(maximum) || maximum < 1 || maximum > 65536 || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new ServiceError("Invalid native iOS video read envelope.", 400);
+      if (!Number.isInteger(maximum) || maximum < 1 || maximum > 65536 || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_VIDEO_READ_MS) throw new ServiceError("Invalid native iOS video read envelope.", 400);
       if (reading) throw new ServiceError("Concurrent native iOS video reads are unsupported.", 409);
       reading = true;
       try {

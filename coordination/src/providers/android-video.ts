@@ -3,6 +3,7 @@
  */
 import { ServiceError } from '../errors.ts';
 import { authorized, canonical, integer, unsupported } from './mobile.ts';
+import { MAX_VIDEO_READ_MS } from '../mobile-video.ts';
 import type { Authorized, NativePipe, RecordValue } from './mobile.ts';
 import type { AndroidProvider } from './android.ts';
 
@@ -11,7 +12,7 @@ function stopUncertain(): ServiceError {
   return new ServiceError('Android capture connection closed without positive guest completion; inspect the bounded recorder before reopening.', 409,
     { code: 'video_stop_uncertain', outcome: 'unknown', retryable: false });
 }
-function timeout(value: number): number { return integer(value, 'video pipe timeout', 1, 30000); }
+function timeout(value: number): number { return integer(value, 'video pipe timeout', 1, MAX_VIDEO_READ_MS); }
 
 export async function openAndroidVideo(provider: AndroidProvider, machine: RecordValue, image: RecordValue, _folder: string,
   options: AndroidVideoOptions, check: Authorized): Promise<NativePipe> {
