@@ -191,6 +191,29 @@ class RequestReader {
   }
 }
 
+/** Error replies discard at most the JSON cap of unread body; larger or chunked bodies close at once. */
+const DRAIN_LIMIT = 1048576, DRAIN_MS = 5_000;
+/**
+ * Responses carry Connection: close, so Node closes the socket once the reply is flushed. Closing with
+ * request bytes still in flight makes the kernel send RST, and the client loses the error reply in a
+ * reset. Reading the rest of a bounded body first lets the close end with FIN.
+ */
+async function discardBody(request: IncomingMessage, reader: RequestReader | undefined): Promise<void> {
+  if (request.complete || request.destroyed) return;
+  let source = reader;
+  if (!source) {
+    const declared = headerValues(request, "content-length");
+    if (request.headers["transfer-encoding"] !== undefined || declared.length !== 1 || !/^\d+$/.test(declared[0]!)) return;
+    source = new RequestReader(request, Number(declared[0]));
+  }
+  if (source.remaining > DRAIN_LIMIT) return;
+  const body = source;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, DRAIN_MS); });
+  const drained = (async () => { while (body.remaining) await body.read(Math.min(65536, body.remaining)); })().catch(() => {});
+  try { await Promise.race([drained, deadline]); } finally { clearTimeout(timer); }
+}
+
 const staticFiles: Record<string, [string, string]> = {
   "/": ["index.html", "text/html; charset=utf-8"], "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/style.css": ["style.css", "text/css; charset=utf-8"], "/favicon.svg": ["favicon.svg", "image/svg+xml"],
@@ -333,6 +356,8 @@ export function createDashboardServer(config: DashboardConfig): Server {
     let cookie: string | undefined;
     let host = "";
     let streamStarted = false;
+    // A connector-owned stream is never shared with the error-path drain.
+    let body: RequestReader | undefined, streamed = false;
     const method = request.method ?? "";
     const setCookie = (token: string, clear = false) => {
       cookie = `canaveral_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : SESSION_SECONDS}${loopbackHost(host) ? "" : "; Secure"}`;
@@ -542,7 +567,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
           const app = oneHeader(request, "x-canaveral-app");
           const authorized = authorizationCheck(machineId, () => connector.check(machineId));
           if (!await authorized()) throw new DashboardError("Transfer authorization ended.", 401);
-          const source = new RequestReader(request, size);
+          const source = new RequestReader(request, size); streamed = true;
           let value: unknown;
           try {
             value = await guarded(authorized, async () => connector.write({ machineId, path: target, app, size, reader: new AuthorizedReader(source, authorized), authorized }));
@@ -614,7 +639,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
           } catch { return false; }
         };
         if (!await authorized()) throw new DashboardError("Image import authorization ended.", 401);
-        const source = new RequestReader(request, size);
+        const source = new RequestReader(request, size); streamed = true;
         let value: unknown;
         try { value = await guarded(authorized, async () => connector.write({ hostId, metadata, size, reader: new AuthorizedReader(source, authorized), authorized })); }
         catch (error) { if (error instanceof DashboardError && error.status === 401) throw unknownOutcome("Image import authorization ended. Inspect the original import before another mutation."); throw error; }
@@ -625,7 +650,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
       let value: Record<string, unknown> | undefined;
       if (method === "POST") {
         if (request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json") throw new DashboardError("Expected application/json.", 415);
-        const size = contentLength(request, 1, 1048576), source = new RequestReader(request, size), chunks: Uint8Array[] = [];
+        const size = contentLength(request, 1, 1048576), source = body = new RequestReader(request, size), chunks: Uint8Array[] = [];
         while (source.remaining) chunks.push(await source.read(Math.min(65536, source.remaining)));
         value = decodeJson(Buffer.concat(chunks));
       }
@@ -664,6 +689,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
       if (streamStarted || response.headersSent) { if (upgrade) upgrade.socket.destroy(); else response.destroy(); return; }
       const failure = error instanceof DashboardError ? error : new DashboardError("Dashboard service or attached provider unavailable.", 503, { retryable: false, ...(method === "POST" ? { outcome: "unknown" } : {}) });
       if (failure.status === 401) setCookie("", true);
+      if (!upgrade && !streamed) await discardBody(request, body);
       respond({ error: failure.message, code: failure.code, retryable: failure.retryable, ...(failure.outcome ? { outcome: failure.outcome } : {}) }, failure.status);
     } finally { if (!upgrade) request.resume(); else upgrade.release(); }
   }

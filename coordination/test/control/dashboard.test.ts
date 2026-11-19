@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
+import { connect } from "node:net";
 import type { AddressInfo } from "node:net";
 import { randomBytes, randomUUID } from "node:crypto";
 import { AuthorizedChannel, AuthorizedReader, AuthorizedRemote, createDashboardServer, startDashboard } from "../../src/dashboard.ts";
@@ -186,6 +187,33 @@ test("mobile upload and install routes forward the owner's session and JSON inte
   }
   assert.deepEqual(f.calls.map(call => [call.method, call.path, call.token, call.body]),
     requests.map(([path, body]) => [body ? "POST" : "GET", path, session, body ?? {}]));
+});
+
+test("early rejections read a bounded body first, so the client receives the error instead of a reset", async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const port = new URL(f.url).port, body = Buffer.alloc(524288, "x");
+  const head = (length: number) => Buffer.from([`POST /api/v1/machines/${machine}/app-artifacts HTTP/1.1`, `Host: 127.0.0.1:${port}`,
+    `Cookie: canaveral_session=${session}`, "Origin: https://other.example", "Content-Type: application/json", `Content-Length: ${length}`, "", ""].join("\r\n"));
+  async function exchange(length: number, first: Buffer, rest?: Buffer) {
+    const socket = connect(Number(port), "127.0.0.1");
+    const chunks: Buffer[] = [];
+    socket.on("data", chunk => chunks.push(chunk));
+    const ended = new Promise<string>((resolve, reject) => { socket.once("end", () => resolve(Buffer.concat(chunks).toString())); socket.once("error", reject); });
+    socket.write(Buffer.concat([head(length), first]));
+    // A reply before the declared body is complete is the premature close that made clients see ECONNRESET.
+    const early = await Promise.race([ended.then(() => true), new Promise<boolean>(resolve => setTimeout(resolve, 250, false))]);
+    if (rest) socket.end(rest);
+    try { return { early, reply: await ended }; } finally { socket.destroy(); }
+  }
+  const half = body.length / 2, bounded = await exchange(body.length, body.subarray(0, half), body.subarray(half));
+  assert.equal(bounded.early, false);
+  assert.match(bounded.reply, /^HTTP\/1\.1 403 /);
+  // Bodies over the JSON cap are never drained; the rejection still arrives without waiting for them.
+  const unbounded = await exchange(1048577, body.subarray(0, 1));
+  assert.equal(unbounded.early, true);
+  assert.match(unbounded.reply, /^HTTP\/1\.1 403 /);
+  assert.equal(f.calls.length, 0);
 });
 
 test("malformed bodies never reach upstream; retries retain intent and unconfirmed mutations are uncertain", async () => {

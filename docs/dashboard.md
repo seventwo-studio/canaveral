@@ -362,6 +362,11 @@ clears the cookie and revokes the controller session. An unreachable controller
 may delay revocation until expiry. Account/session state survives controller and
 gateway restarts through the existing database. Cookie mutations require a
 same-origin Origin header; cross-origin browser requests remain rejected.
+Before an error reply, the gateway reads and discards an unread body of up to
+1 MiB, waiting at most five seconds, without forwarding it. This lets clients
+receive the HTTP error instead of a connection reset. Larger, chunked or stalled
+bodies, and streaming uploads already handed to a connector, still close the
+connection immediately.
 The operator, personal API token and enrollment credentials remain separate;
 account sessions and personal tokens cannot enroll hosts. The gateway rejects a
 request that supplies both a bearer credential and a session cookie.
