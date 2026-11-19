@@ -7,9 +7,11 @@ a paired WebSocket relay. Terminal cleanup coordination, the owned Apple cleanup
 worker and provider-independent unstarted-assignment cleanup have fixture coverage.
 Full provider deadline enforcement, paired environments and live consumer acceptance
 remain open. [Durable consumer operations](consumer-operations.md) have controller/runner
-fixture coverage. Current administrative runners do not advertise lease execution
-protocol 1, so they cannot accidentally accept consumer leases before those paths
-are implemented. Fixture hosts explicitly opt into that protocol for lifecycle tests.
+fixture coverage. Ordinary runners do not advertise lease execution protocol 1. The only
+exception is a supervised Android emulator host with the native lease clock and lease
+supervisor ([Android emulator leases](mobile-control.md#android-emulator-leases)); every
+other runtime still refuses the declaration. Fixture hosts explicitly opt into that
+protocol for lifecycle tests.
 
 ## Ownership and compatibility
 
@@ -238,15 +240,16 @@ This remains partial runner enforcement, not full disconnected-session/command c
 acceptance. Other provider stop paths and access locks still need bounded
 cancellation/priority, and native running-VM expiry requires live acceptance.
 Automatic Apple cleanup now uses the owned deletion and credential-erasure path
-below; other provider cleanup remains unimplemented. The
+below. Android emulator leases use the native lease supervisor's group-exit proof
+before the same owned removal and erasure; other provider cleanup remains unimplemented. The
 runner explicitly rejects configuration that attempts to advertise protocol 1
-until those gates are complete. It must not be enabled just to make admission pass.
+for any other runtime until those gates are complete. It must not be enabled just to make admission pass.
 
 Controller eligibility now also requires explicit image revision, architecture
 and runtime selectors; a host-wide protocol flag alone grants no execution.
 Withdrawal closes affected sessions without claiming cleanup or freeing their
 reservations. Ordinary runners also reject selector configuration until native
-acceptance is complete. See the [eligibility contract](lease-eligibility.md).
+acceptance is complete; supervised Android hosts accept only Android selectors. See the [eligibility contract](lease-eligibility.md).
 
 ### Owned lease cleanup
 

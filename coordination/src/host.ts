@@ -87,6 +87,7 @@ interface Runtime extends NativeProvider {
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
+  ownsStorage?(machine: RecordValue, image: RecordValue, storage: string): boolean;
   sweep?(active: Set<string>): Promise<unknown>;
   close?(): Promise<unknown>;
   resourceProcesses?(machine: RecordValue, image: RecordValue, folder: string): Promise<unknown[]>;
@@ -144,11 +145,26 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-function rejectUnsupportedLeases(config: RecordValue): void {
-  if ("leaseProtocol" in config || "leaseImages" in config) throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400);
+/** Only supervised Android emulators have independent native deadline enforcement and owned
+ * cleanup. Every other runtime keeps refusing lease declarations, whatever the configuration. */
+export function leaseOffer(config: RecordValue): RecordValue {
+  if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
+  const refuse = (): never => { throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400); };
+  if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
+  const provider = String(config.provider);
+  let android: unknown;
+  try { android = provider === "android" ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config).android : undefined; } catch { refuse(); }
+  const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
+  if (!android || !absolute(config.leaseClockHelper) || !absolute(object(android).leaseSupervisor) || !["darwin", "linux"].includes(process.platform)) refuse();
+  const leaseImages = (config.leaseImages as unknown[]).map(value => {
+    const entry = object(value);
+    if (Object.keys(entry).sort().join() !== "arch,id,revision,runtime" || entry.runtime !== "android") refuse();
+    return { id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch"), runtime: "android" };
+  });
+  return { leaseProtocol: 1, leaseImages };
 }
 export function hostOffer(config: RecordValue): RecordValue {
-  rejectUnsupportedLeases(config);
+  const leases = leaseOffer(config);
   const provider = text(config.provider, "provider");
   if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
@@ -163,6 +179,8 @@ export function hostOffer(config: RecordValue): RecordValue {
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === "android")) throw new ServiceError("Lease images must name offered Android templates.", 400);
+  Object.assign(offer, leases);
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
   if (config.inference !== undefined) {
@@ -271,7 +289,7 @@ export class HostRunner {
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config);
-    rejectUnsupportedLeases(config);
+    leaseOffer(config);
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir); privateDirectory(this.state);
@@ -539,7 +557,7 @@ export class HostRunner {
     if (this.updateAdmissionBlocked && machine.desired !== "stopped") throw new ServiceError("Host update admission is fenced.", 409);
     const { runtime, image: originalImage, folder } = this.context(machine), id = identifier(machine.id);
     if (machine.leaseCleanup) {
-      const nativeCleanup = runtime.kind === "apple" || runtime.kind === "libvirt" && !!runtime.stopForCleanup;
+      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
           this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
@@ -549,6 +567,7 @@ export class HostRunner {
           stop: () => runtime.stopForCleanup ? runtime.stopForCleanup(machine, originalImage, folder) : runtime.reconcile(machine, { ...originalImage, _leaseAuthorization: () => this.guard.authorization(id, String(object(machine.lease).id)) }, folder),
           remove: (requestId: string, preboot?: boolean) => runtime.removeOwnedStorage!(machine, originalImage, folder, requestId, preboot), preboot: runtime.kind === "apple",
         } : {}),
+        ...(runtime.ownsStorage ? { storageOwned: (storage: string) => runtime.ownsStorage!(machine, originalImage, storage) } : {}),
       });
     }
     return assignmentAccess(machine, folder, async () => {

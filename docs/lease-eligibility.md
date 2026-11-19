@@ -3,7 +3,9 @@
 Controller and worker contract, 2026-11-03. Fixture coverage establishes scoped
 eligibility and withdrawal behavior. Native deadline/cancellation/cleanup
 acceptance remains open; ordinary `Agent` configuration still rejects both
-`leaseProtocol` and `leaseImages` before creating runner state.
+`leaseProtocol` and `leaseImages` before creating runner state. Since 2026-11-19 the
+only exception is a supervised Android host with Android-only selectors; see
+[Android emulator leases](mobile-control.md#android-emulator-leases).
 
 An installed image is not automatically eligible for consumer execution. A host
 offering `leaseProtocol: 1` must explicitly identify each eligible image revision,

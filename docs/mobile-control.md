@@ -17,8 +17,9 @@ API; PNG/APNG alone does not satisfy that requirement.
 On 18 November 2026 the requested use cases expanded to exclusive device leases
 for parallel coding agents and unattended CI and automation jobs. One intended
 workflow installs a CI build and records the app's screens for marketing. These
-use cases require access through the job's own scoped credentials. Native lease
-isolation and unattended recording remain open acceptance items.
+use cases require access through the job's own scoped credentials. Android emulator
+leases are now enabled; see [Android emulator leases](#android-emulator-leases). iOS
+simulator leases and unattended recording through lease credentials remain open.
 
 ## Current implementation
 
@@ -32,8 +33,8 @@ for builds already present on the host.
 Use a private personal API token with `machines:access` for owned machines, or the
 existing operator credential. Other users, enrollment credentials, guest credentials
 and unrelated hosts cannot read these artifacts. Application/lease credentials are
-not supported by this administrative artifact API. Ordinary native runners retain
-their consumer execution gate pending native fencing and cleanup acceptance.
+not supported by this administrative artifact API. Leased Android emulators install
+builds through lease operations instead; see [Android emulator leases](#android-emulator-leases).
 
 | Operation | Endpoint | Body |
 | --- | --- | --- |
@@ -418,6 +419,178 @@ general guest shell; exposing the Mac host shell would violate simulator scope.
 Network-condition control, reset/delete/snapshot capabilities and broader native
 inputs require explicit platform adapters and acceptance rather than claims of
 platform parity.
+
+## Android emulator leases
+
+Enabled 19 November 2026 for Android emulators only. An agent or CI job submits a
+`kind: "lease"` [request](requests.md) (or a direct `/v1/leases` acquisition) for an
+Android template. The request waits while the host is full, is admitted in the shared
+fair order and then gets a booted, checked emulator to itself. The lease follows the
+generic [lease contract](leases.md). iOS simulators and physical devices still refuse
+leased execution.
+
+### Host configuration
+
+A host advertises lease execution only when all of these hold. Every other runtime,
+and any partial configuration, keeps refusing `leaseProtocol` and `leaseImages`.
+
+- The provider is `android`, or a `macos`/`linux` host with the `android` runtime enabled.
+- `leaseClockHelper` is an absolute path to an installed `canaveral-mobile-native`. This
+  is the suspend-aware native lease clock described in [leases](leases.md).
+- The Android runtime sets `leaseSupervisor` to an absolute path to the same helper.
+- `leaseProtocol: 1`, and every `leaseImages` entry is
+  `{id, revision, arch, runtime: "android"}` naming an offered Android template.
+
+```json
+{ "provider": "android", "androidSDK": "/ABS/sdk", "storage": "/ABS/devices",
+  "leaseClockHelper": "/ABS/canaveral-mobile-native", "leaseSupervisor": "/ABS/canaveral-mobile-native",
+  "leaseProtocol": 1, "leaseImages": [{ "id": "phone", "revision": "1", "arch": "arm64", "runtime": "android" }] }
+```
+
+Size the host's `capacity` to the number of emulators it may run. Requests beyond that wait.
+
+### Independent deadline and stop proof
+
+The runner never spawns a leased emulator itself. It writes a version 2 `launch.json`
+with `supervised: true`, then starts `canaveral-mobile-native lease-supervise <storage>`
+detached in its own session. The launch request (emulator argv and environment)
+travels on stdin. The supervisor:
+
+- starts the emulator in a dedicated process group and records
+  `lease-supervisor.json` (machine, lease, launch boot, boot session, supervisor and
+  emulator PIDs);
+- every 100 ms reads the private `lease-authorization.json` the runner publishes.
+  That file binds machine, lease, launch boot, OS boot session, lease revision, an
+  absolute deadline on the continuous clock (Mach continuous time or
+  `CLOCK_BOOTTIME`) and a fence flag. Same or older revisions never extend the
+  deadline, and a renewal first seen after expiry is ignored;
+- stops the emulator when the deadline passes, the file is fenced, missing, malformed
+  or bound to another assignment or boot, the clock fails, or the supervisor receives
+  SIGTERM. It writes a sticky `lease-fenced.json`, sends SIGTERM to the group, waits
+  5 s, then sends SIGKILL. The leader stays an unreaped child until every signal is
+  sent, so its process group ID cannot be reused;
+- writes `lease-stopped.json` (`groupAbsent: true`) only after the leader is reaped
+  and the whole group is gone, then exits. It never exits while a group member may
+  survive. It refuses a second launch in the same storage.
+
+Because the supervisor is detached, deadline enforcement continues when the runner
+process or the controller is lost. The runner's own lease guard also fences locally at
+the deadline without the controller and publishes the fence immediately. A fenced
+or stopped supervisor makes every device command for that assignment fail with 410,
+whatever the runner still believes.
+
+Stop proof for cleanup is positive only:
+
+- a matching `lease-stopped.json` with the supervisor exited; or
+- a launch that never spawned (no launch, or an observed ordinary supervisor exit
+  before its launch record); or
+- a recorded supervisor and emulator PID that are both absent, with the emulator's
+  process group absent too.
+
+Anything else stays unknown. PIDs are only observed, never signalled after recovery.
+Processes that deliberately leave the emulator's process group, for example a newly
+started adb server, are not covered. The runner starts the adb server during its
+environment check, before any lease.
+
+### Readiness
+
+A leased emulator reports `running` with `accessReady: true` only after it has
+finished booting (`sys.boot_completed=1`), its package manager answers
+`pm path android`, and `emu avd name` proves the serial is the lease's own AVD.
+Until then it reports `starting` with a detail. The controller now requires that
+positive access check for mobile lease members. The lease becomes `ready`, and its
+member shows `ready: true`, only after a checked device, never from inventory or a
+bare emulator process.
+
+### Scoped control
+
+The application exchanges its key for a lease-scoped credential
+(`POST /v1/leases/{id}/credential`). Only that credential authorizes
+`POST /v1/leases/{id}/operations` and `GET /v1/leases/{id}/operations/{op}`. Operations target
+member `primary` and resolve to that lease's own machine, host and AVD:
+
+| Need | Action | Capability |
+| --- | --- | --- |
+| Install a build | `push` the APK to `/data/local/tmp` (up to 512 KiB per operation), then `shell` `["pm","install","-r",path]` | files, command |
+| Launch, stop, list or remove apps | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | command |
+| Screens | `screenshot` (PNG), `hierarchy` | screenshot, hierarchy |
+| Input | `tap`, `swipe`, `text`, `key` | input |
+| Logs | `logs` (last 200 logcat lines) | command |
+
+App lifecycle and logs need `command` because the Android shell already grants
+them. They remain unavailable to iOS, which has no shell capability. Operations keep
+the durable receipt semantics: the same UUID replays its receipt without running
+again; a changed body is 409; an operation in flight when authorization ends is
+`unknown` and is never replayed. Rotating the credential revokes the previous one.
+
+The administrative app-artifact API, MP4 video sessions and dashboard capture do not
+accept lease credentials. APKs larger than 512 KiB need a lease file session, which
+has not been accepted natively for Android leases. Recording through lease
+credentials (MP4 or the display stream) is not available yet: the host has no
+leased Android display transport.
+
+### Expiry, release and loss
+
+At expiry or release the controller refuses the old credential at once (410
+`lease_ended` for operations, 401 after rotation), fails queued operations and
+issues the cleanup intent. The runner fences the supervisor. Cleanup then requires
+the stop proof above before it removes the AVD storage and its `ANDROID_AVD_HOME`
+registration through the recoverable quarantine path. It then erases the
+assignment's credential directory, and only then reports completion. The controller
+releases the host and application reservations only on that report. The runner's fence is conservative: it can fall a fraction of a second before the controller's expiry. If its fence report arrives first, the lease ends `failed` instead of `expired`, and the device answers 409 `member_not_ready` in between. Both outcomes revoke access. A lease is never
+relaunched: an emulator that stops while its lease is active reports `error`, which
+fails the lease.
+
+- **Controller loss:** the runner keeps its persisted deadline, fences locally and the
+  supervisor stops the emulator. Cleanup completes when the controller returns.
+- **Runner loss:** the supervisor alone stops the emulator at its deadline. The
+  reservation stays held until a runner restarts, recovers the lease guard and proves
+  cleanup. A restarted runner recovers a running supervised emulator without
+  relaunching it, using its conservative recovered deadline.
+
+### Unprovable cleanup and recovery
+
+If the supervisor is lost while its emulator group survives (for example, killed
+with SIGKILL), cleanup reports `blocked` with reason `execution_pending`. The host,
+application and lease reservations stay held and the runner retries with backoff.
+There is no administrator override that releases them without proof.
+
+Recovery:
+
+1. Inspect `<storage>/<machine>/lease-supervisor.json`. It names the emulator
+   `childPid`, which is also its process group ID.
+2. Confirm the process is the lease's emulator (its argv contains
+   `-avd cvm-<machine>`), then stop that process group.
+3. On its next retry the runner observes the supervisor, emulator and group absent,
+   removes storage, erases credentials and reports completion.
+
+A reused PID that still shows as present keeps cleanup blocked. Wait for it to
+disappear; never signal an unidentified process to unblock cleanup.
+
+### Verification
+
+[android-leases.test.ts](../coordination/test/control/android-leases.test.ts) runs a
+real loopback controller and `HostRunner` with the native lease clock and the real
+`lease-supervise` helper. It drives stand-in emulator processes (each with a
+grandchild in its group) through fake adb and avdmanager. It covers:
+
+- acquisition through queued requests and checked readiness;
+- scoped control, a second lease waiting on a full host, and expiry while in use
+  with the old key refused;
+- proven cleanup and a clean hand-over;
+- controller loss and runner loss with independent deadline enforcement;
+- renewal, lost replies and UUID replay, and runner and controller restart without
+  relaunch;
+- cross-lease denial and a foreign serial refused by the provider;
+- unprovable cleanup with the operator recovery, and supervisor refusal of ended
+  authorization and relaunch.
+
+The native trial of 19 November 2026 ([record](../coordination/native-acceptance/android-lease-agents.md))
+ran the two-agent, one-emulator case on the Mac Studio with a real API 36 emulator
+and APK. Host and controller loss, renewal, restart and unprovable cleanup are
+fixture-covered only. The supervised emulator's resource usage is not attributed by
+the [runtime ownership](android-runtime-ownership.md) sampler, because its launch has
+no recorded process birth time.
 
 ## Acceptance boundaries
 

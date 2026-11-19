@@ -25,6 +25,20 @@ export interface NativePipe {
   resize?(rows: number, cols: number): Promise<void>;
 }
 export interface NativeChild { pid: number; processStartedAt?: number; stopped(): Promise<boolean> }
+/** A leased emulator owned by the independent native lease supervisor. */
+export interface SupervisedChild { pid: number; supervisorPid: number; supervisorExited(): Promise<boolean> }
+/** A failed supervised launch; supervisorExit is set only for an observed ordinary exit. */
+export class SupervisorLaunchError extends ServiceError {
+  constructor(readonly supervisorExit?: number) { super("Leased emulator launch is unconfirmed; inspect its supervisor records before recovery.", 409, { outcome: "unknown" }); }
+}
+export interface LeaseClockSample { version: number; bootSessionID: string; continuous: number }
+export interface LeaseSupervisorTransport {
+  /** Starts `lease-supervise` detached; resolves after its launch record names the emulator. */
+  supervise(helper: string, storage: string, request: RecordValue): Promise<SupervisedChild>;
+  clock(helper: string): Promise<LeaseClockSample>;
+  /** Positively absent process group only; never signals it. */
+  groupAbsent(pgid: number): Promise<boolean>;
+}
 export interface MobileTransport {
   run(argv: readonly string[], options: RunOptions): Promise<CommandResult>;
   spawn?(argv: readonly string[], options: RunOptions & { log: string }): Promise<NativeChild>;
@@ -36,6 +50,7 @@ export interface MobileTransport {
   shells?: ShellAdapter;
   files?: ContainerFiles;
   elapsed?(): number;
+  leases?: LeaseSupervisorTransport;
 }
 export interface ByteReader { read(count: number): Promise<Uint8Array> }
 export interface Download extends ByteReader { size: number; verify(): Promise<boolean>; close(): Promise<void> }

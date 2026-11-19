@@ -1,5 +1,7 @@
 //! Descriptor-confined file and owned PTY adapter. Private bounded JSON-lines stdio only.
 #[cfg(unix)]
+mod lease_supervisor;
+#[cfg(unix)]
 mod owned_process;
 #[cfg(unix)]
 mod unix {
@@ -690,6 +692,17 @@ mod unix {
         if mode == "clock" && args.len() == 1 {
             println!("{}", elapsed()?);
             return Ok(());
+        }
+        if mode == "lease-clock" && args.len() == 1 {
+            let session = crate::lease_supervisor::boot_session()?;
+            println!(
+                "{}",
+                json!({"version": 1, "bootSessionID": session, "continuous": elapsed()?})
+            );
+            return Ok(());
+        }
+        if mode == "lease-supervise" && args.len() == 2 {
+            return crate::lease_supervisor::supervise(&args[1], elapsed);
         }
         let mut server = Server::default();
         if mode == "files" && args.len() == 2 {
