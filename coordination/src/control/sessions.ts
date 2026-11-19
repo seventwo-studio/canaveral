@@ -430,6 +430,8 @@ function upgradeRequest(req: IncomingMessage, family?: SessionFamily): { key: st
   }
   return { key, token: command.token, command };
 }
+/** Concurrent monitor checks, and consecutive transient failures (at 250 ms) before a pair ends. */
+const MONITOR_CONCURRENCY = 8, MONITOR_TRANSIENT_LIMIT = 40;
 export function createSessionUpgradeHandler(client: SessionCommandClient, options: { video?: boolean; display?: boolean; heartbeat?: SessionHeartbeat } = {}): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
   if (options.video && options.display) throw new ServiceError("Choose one owner session family.", 400);
   const family: SessionFamily | undefined = options.video ? 'video' : options.display ? 'display' : undefined;
@@ -446,11 +448,25 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
     const result = await client.request({ type: `${prefix}.authorized`, sessionId: pair.view.id, generation: pair.view.generation, ready }) as { authorized?: boolean };
     return result?.authorized === true;
   };
+  // The monitor shares the controller client's pending-request budget with HTTP traffic.
+  // It runs a bounded number of checks at once, and a busy or briefly unavailable
+  // controller is not lost access: only a definite refusal, or about 10 s of consecutive
+  // transient failures, ends a pair.
+  const failures = new WeakMap<Pair, number>();
+  const transient = (error: unknown) => !(error instanceof ServiceError) || error.status === 429 || error.status >= 500;
   const timer = setInterval(() => {
     if (monitoring) return; monitoring = true;
-    void Promise.all([...pairs.values()].map(async pair => {
-      try { if (!await authorized(pair)) disconnect(pair); } catch { disconnect(pair); }
-    })).finally(() => { monitoring = false; });
+    const queue = [...pairs.values()];
+    const work = async () => {
+      for (let pair = queue.shift(); pair; pair = queue.shift()) {
+        try { if (await authorized(pair)) failures.delete(pair); else disconnect(pair); }
+        catch (error) {
+          const count = (failures.get(pair) ?? 0) + 1;
+          if (!transient(error) || count >= MONITOR_TRANSIENT_LIMIT) disconnect(pair); else failures.set(pair, count);
+        }
+      }
+    };
+    void Promise.all(Array.from({ length: MONITOR_CONCURRENCY }, work)).finally(() => { monitoring = false; });
   }, 250); timer.unref();
   return {
     close(): void { stopped = true; clearInterval(timer); for (const pair of [...pairs.values()]) disconnect(pair); },

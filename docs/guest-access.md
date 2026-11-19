@@ -144,14 +144,19 @@ controller to the machine's host:
 4. The controller relays each message only after checking, in process, that the
    creating credential still has `machines:access` to that exact running,
    unleased assignment on a fresh host whose credential has not rotated. A
-   250 ms monitor repeats the check. The gateway also rechecks machine access
-   every second. A lost check closes both sockets.
+   250 ms monitor repeats the check, at most eight checks at a time. A busy or
+   briefly unavailable controller is not lost access: only a definite refusal,
+   or about 10 seconds of consecutive transient failures, ends the pair. The
+   gateway also rechecks machine access every second. A lost check closes both
+   sockets.
 
 The session is bound to the credential that created it: another account cannot
 open it, and another credential of the same owner cannot read or close it. Both
 peers must attach within 30 seconds; a ready session lasts as long as the viewer
-and the checks above. A machine accepts at most four live sessions, a host
-sixteen and one credential eight. At most 64 sessions per machine may be opened
+and the checks above, and releases its slot if the broker stops re-checking it
+for 10 seconds, for example after a lost disconnect. A machine accepts at most
+four live sessions, a host sixteen, one owner eight on the same host across all
+of their credentials, and one credential eight. At most 64 sessions per machine may be opened
 within five minutes. Closing the viewer closes the session. A controller restart
 disconnects every live session; the viewer reconnects with a new one.
 

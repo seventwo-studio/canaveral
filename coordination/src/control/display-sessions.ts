@@ -17,13 +17,18 @@ export type DisplaySessionCommand =
   | { type: 'display-sessions.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
   | { type: 'display-sessions.authorized'; sessionId: string; generation: string; ready?: boolean }
   | { type: 'display-sessions.disconnect'; sessionId: string; generation: string };
-type Row = { id: string; machine: string; host: string; binding: string; generation: string; credential: string; host_credential: string | null; state: string; created: number; host_attached: number; consumer_attached: number };
+type Row = { id: string; machine: string; host: string; binding: string; generation: string; credential: string; host_credential: string | null; state: string; created: number; host_attached: number; consumer_attached: number; seen: number | null };
 const LIVE = ['pending', 'attaching', 'ready'];
 /** Both peers must attach within this window; a ready session has no fixed lifetime. */
 export const DISPLAY_ATTACH_SECONDS = 30;
 /** Live sessions per machine, host and creating credential; rows per machine in any state
  * within the retention window, so a create/close loop cannot grow the table. */
 const PER_MACHINE = 4, PER_HOST = 16, PER_CREDENTIAL = 8, ROWS_PER_MACHINE = 64, RETAIN_SECONDS = 300;
+/** One owner's live sessions on a shared host, across all of their credentials. */
+const PER_OWNER_HOST = 8;
+/** A ready session whose broker has not re-checked it for this long has lost its relay
+ * (for example a crashed broker or a lost disconnect) and releases its slot. */
+const READY_LIVENESS_SECONDS = 10;
 const fail = (status = 409): never => { throw new ServiceError('Desktop display session rejected.', status); };
 function binding(m: Record<string, unknown>): string { return machineDigest([m.id, m.host, m.owner, m.template, m.request]); }
 function row(db: DatabaseSync, id: string): Row { return db.prepare('SELECT * FROM owner_display_sessions WHERE id=?').get(uuid(id)) as unknown as Row ?? fail(404); }
@@ -34,14 +39,17 @@ function view(r: Row) {
 
 export class OwnerDisplaySessions implements ControlModule {
   constructor(readonly store: SqliteStore, readonly machines: MachineStore, readonly principalHash: (db: DatabaseSync, hash: string) => Principal) {
-    store.transaction(db => db.exec(`CREATE TABLE IF NOT EXISTS owner_display_sessions (
+    store.transaction(db => { db.exec(`CREATE TABLE IF NOT EXISTS owner_display_sessions (
       id TEXT PRIMARY KEY,machine TEXT NOT NULL,host TEXT NOT NULL,binding TEXT NOT NULL,generation TEXT NOT NULL,
       credential TEXT NOT NULL,host_credential TEXT,state TEXT NOT NULL,created REAL NOT NULL,
-      host_attached INTEGER NOT NULL,consumer_attached INTEGER NOT NULL);
+      host_attached INTEGER NOT NULL,consumer_attached INTEGER NOT NULL,seen REAL);
       CREATE INDEX IF NOT EXISTS owner_display_sessions_host ON owner_display_sessions(host,state);
       CREATE INDEX IF NOT EXISTS owner_display_sessions_state ON owner_display_sessions(state,created);
       CREATE INDEX IF NOT EXISTS owner_display_sessions_machine ON owner_display_sessions(machine,created);
-      UPDATE owner_display_sessions SET state='disconnected' WHERE state IN ('pending','attaching','ready');`));
+      UPDATE owner_display_sessions SET state='disconnected' WHERE state IN ('pending','attaching','ready');`);
+      // Additive column for databases created before the liveness timestamp.
+      if (!(db.prepare("PRAGMA table_info(owner_display_sessions)").all() as Array<{ name: string }>).some(c => c.name === 'seen'))
+        db.exec('ALTER TABLE owner_display_sessions ADD COLUMN seen REAL'); });
     registerMachineHooks(store, {
       heartbeatResponse: (db, host) => {
         this.refresh(db); this.prune(db);
@@ -65,7 +73,7 @@ export class OwnerDisplaySessions implements ControlModule {
       if (!(principal.kind === 'operator' || principal.user?.role === 'admin' && principal.scopes.includes('admin') || principal.scopes.includes('machines:access'))) return false;
       const now = this.store.clock();
       return binding(m) === r.binding && m.host === r.host && m.enabled === 1 && m.desired === 'running' && m.observed === 'running' && now - Number(m.seen) < 30 &&
-        !this.leased(db, r.machine) && (r.state === 'ready' || now < r.created + DISPLAY_ATTACH_SECONDS) && (!r.host_credential || r.host_credential === m.hostCredential);
+        !this.leased(db, r.machine) && (r.state === 'ready' ? now - Number(r.seen ?? r.created) < READY_LIVENESS_SECONDS : now < r.created + DISPLAY_ATTACH_SECONDS) && (!r.host_credential || r.host_credential === m.hostCredential);
     } catch { return false; }
   }
   private refresh(db: DatabaseSync): void {
@@ -84,6 +92,8 @@ export class OwnerDisplaySessions implements ControlModule {
       if (command.type === 'display-sessions.authorized') {
         const authorized = LIVE.includes(r.state) && this.current(db, r);
         if (LIVE.includes(r.state) && !authorized) this.disconnect(db, r);
+        // Each successful broker re-check keeps a ready session alive.
+        if (authorized) db.prepare('UPDATE owner_display_sessions SET seen=? WHERE id=?').run(this.store.clock(), r.id);
         return { authorized: authorized && (!command.ready || r.state === 'ready') };
       }
       if (!LIVE.includes(r.state) || !this.current(db, r)) return fail(410);
@@ -91,10 +101,10 @@ export class OwnerDisplaySessions implements ControlModule {
         if (uuid(command.ownerId) !== r.host) return fail(403);
         this.machines.authenticateHost(r.host, command.token);
         if (r.host_attached) return fail(409);
-        db.prepare('UPDATE owner_display_sessions SET host_attached=1,host_credential=?,state=? WHERE id=?').run(machineDigest(command.token), r.consumer_attached ? 'ready' : 'attaching', r.id);
+        db.prepare('UPDATE owner_display_sessions SET host_attached=1,host_credential=?,state=?,seen=? WHERE id=?').run(machineDigest(command.token), r.consumer_attached ? 'ready' : 'attaching', this.store.clock(), r.id);
       } else {
         if (uuid(command.ownerId) !== r.machine || tokenHash(command.token) !== r.credential || r.consumer_attached) return fail(403);
-        db.prepare('UPDATE owner_display_sessions SET consumer_attached=1,state=? WHERE id=?').run(r.host_attached ? 'ready' : 'attaching', r.id);
+        db.prepare('UPDATE owner_display_sessions SET consumer_attached=1,state=?,seen=? WHERE id=?').run(r.host_attached ? 'ready' : 'attaching', this.store.clock(), r.id);
       }
       return view(row(db, r.id));
     });
@@ -121,8 +131,9 @@ export class OwnerDisplaySessions implements ControlModule {
       if (template.mode !== 'desktop' || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30 || this.leased(db, String(m.id))) return fail(409);
       const live = (column: string, value: unknown) => Number(db.prepare(`SELECT COUNT(*) AS n FROM owner_display_sessions WHERE ${column}=? AND state IN ('pending','attaching','ready')`).get(value as string)!.n);
       const recent = Number(db.prepare('SELECT COUNT(*) AS n FROM owner_display_sessions WHERE machine=? AND created>=?').get(String(m.id), this.store.clock() - RETAIN_SECONDS)!.n);
-      if (live('machine', m.id) >= PER_MACHINE || live('host', m.host) >= PER_HOST || live('credential', hash) >= PER_CREDENTIAL || recent >= ROWS_PER_MACHINE) return fail(429);
-      db.prepare("INSERT INTO owner_display_sessions VALUES (?,?,?,?,?,?,NULL,'pending',?,0,0)").run(id, String(m.id), String(m.host), binding(m), randomUUID(), hash, this.store.clock());
+      const ownerOnHost = Number(db.prepare("SELECT COUNT(*) AS n FROM owner_display_sessions s JOIN machines o ON o.id=s.machine WHERE s.host=? AND o.owner IS ? AND s.state IN ('pending','attaching','ready')").get(String(m.host), m.owner as string)!.n);
+      if (live('machine', m.id) >= PER_MACHINE || live('host', m.host) >= PER_HOST || live('credential', hash) >= PER_CREDENTIAL || ownerOnHost >= PER_OWNER_HOST || recent >= ROWS_PER_MACHINE) return fail(429);
+      db.prepare("INSERT INTO owner_display_sessions (id,machine,host,binding,generation,credential,host_credential,state,created,host_attached,consumer_attached,seen) VALUES (?,?,?,?,?,?,NULL,'pending',?,0,0,NULL)").run(id, String(m.id), String(m.host), binding(m), randomUUID(), hash, this.store.clock());
       return { status: 201, body: view(row(db, id)) };
     });
   }

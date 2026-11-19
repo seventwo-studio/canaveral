@@ -150,10 +150,13 @@ async function readBounded(path: string, maximum: number): Promise<Buffer> {
   }
   const file = await fs.open(expandPath(path), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
-    if (!(await file.stat()).isFile()) throw new CliError("Input must be a regular file.");
-    const data = Buffer.alloc(maximum + 1); let size = 0;
+    const info = await file.stat();
+    if (!info.isFile()) throw new CliError("Input must be a regular file.");
+    // Size the buffer from the file, not the limit; one byte more detects growth past the limit.
+    const data = Buffer.alloc(Math.min(info.size, maximum) + 1); let size = 0;
     while (size < data.length) { const read = await file.read(data, size, data.length - size, null); if (!read.bytesRead) break; size += read.bytesRead; }
-    if (size > maximum) throw new CliError("Input file exceeds the command's size limit."); return data.subarray(0, size);
+    if (size > maximum) throw new CliError("Input file exceeds the command's size limit.");
+    if (size > info.size) throw new CliError("Input file changed while it was being read."); return data.subarray(0, size);
   } finally { await file.close(); }
 }
 async function jsonFile(path: string, maximum = 1_048_576): Promise<Record<string, unknown>> {

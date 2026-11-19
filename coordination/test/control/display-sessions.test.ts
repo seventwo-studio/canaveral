@@ -92,8 +92,11 @@ test('display authority ends with logout, scope, machine stop, host credential r
   const late = fixture(t), e = late.create(); late.attach(e, 'consumer'); late.advance(31);
   assert.throws(() => late.attach(e, 'host'), status(410), 'both peers attach within the window');
   late.heartbeat(); const ready = late.create(); late.attach(ready, 'host'); late.attach(ready, 'consumer');
-  late.advance(29); late.heartbeat(); late.advance(29); late.heartbeat();
-  assert.equal(late.authorized(ready), true, 'a ready session has no fixed lifetime while its host stays fresh');
+  // A live broker re-checks continuously; that, not a fixed lifetime, keeps a ready session.
+  for (let i = 0; i < 12; i++) { late.advance(5); late.heartbeat(); assert.equal(late.authorized(ready), true, 'a re-checked ready session has no fixed lifetime'); }
+  const lapsed = late.create(); late.attach(lapsed, 'host'); late.attach(lapsed, 'consumer');
+  late.advance(5); late.heartbeat(); late.authorized(ready); late.advance(6); late.heartbeat();
+  assert.equal(late.authorized(lapsed), false, 'a ready session whose broker stopped re-checking releases its slot');
   late.advance(31); assert.equal(late.authorized(ready), false, 'a stale host ends it');
 
   const restarted = fixture(t), g = restarted.create(); restarted.attach(g, 'host'); restarted.attach(g, 'consumer'); restarted.restart();
@@ -116,4 +119,17 @@ test('a lapsed per-message check records the disconnect at once', t => {
   const f = fixture(t), s = f.create(); f.attach(s, 'host'); f.attach(s, 'consumer');
   f.revoke(f.ownerToken); assert.equal(f.authorized(s), false);
   assert.equal(f.store.transaction(db => db.prepare('SELECT state FROM owner_display_sessions WHERE id=?').get(s.id))!.state, 'disconnected');
+});
+
+test('one owner cannot hold more than eight live viewers on a shared host, across credentials', t => {
+  const f = fixture(t);
+  // Eight live viewers held under the owner's second credential on their other machine.
+  f.store.transaction(db => {
+    const m = db.prepare('SELECT * FROM machines WHERE id=?').get(f.plain.id) as Record<string, unknown>;
+    const bound = machineDigest([m.id, m.host, m.owner, m.template, m.request]);
+    for (let i = 0; i < 8; i++)
+      db.prepare("INSERT INTO owner_display_sessions (id,machine,host,binding,generation,credential,host_credential,state,created,host_attached,consumer_attached,seen) VALUES (?,?,?,?,?,?,NULL,'ready',?,1,1,?)")
+        .run(randomUUID(), String(m.id), String(m.host), bound, randomUUID(), tokenHash(f.secondToken), 1000, 1000);
+  });
+  assert.throws(() => f.create(), status(429), 'the per-owner host limit applies before the shared host limit');
 });
