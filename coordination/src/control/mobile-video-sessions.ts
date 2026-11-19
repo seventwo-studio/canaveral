@@ -70,8 +70,8 @@ export class MobileVideoSessions implements ControlModule {
    * only; the reservation is released when that deletion completes. The same reason
    * repeats safely; a different reason, a live session or positive cleanup conflicts. */
   private abandon(db: DatabaseSync, req: import('./contracts.ts').ControlRequest, principal: Principal, r: Row) {
-    exact(req.body, ['reason']); const reason = reasonText(req.body.reason);
     requireScope(req, 'admin');
+    exact(req.body, ['reason']); const reason = reasonText(req.body.reason);
     const old = resolution(db, r.id);
     if (old) { if (old.reason !== reason) throw new ServiceError('This video session was already abandoned with another reason.', 409); return present(db, r); }
     if (live.includes(r.state)) throw new ServiceError('Close the video session before abandoning its cleanup.', 409);

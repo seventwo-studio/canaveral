@@ -188,3 +188,26 @@ test('a static screen may stay silent until the capture deadline, not a fixed 30
   await serveMobileVideo({ async sendControl() {}, async sendBytes() {}, async receive() { return { type: 'ack' }; }, close() {} }, source, async () => encoder, '/opt/ffmpeg', long, () => true);
   assert.ok(waits.length >= 2); for (const wait of waits) assert.ok(wait > 60000 && wait <= MAX_VIDEO_READ_MS, `read wait ${wait} ms is bounded by the 70 s capture deadline`);
 });
+
+test('broker refuses a video acknowledgement before the host finish', { timeout: 10000 }, async t => {
+  const id = randomUUID(), generation = randomUUID(), machineId = randomUUID(), hostId = randomUUID();
+  const view = { id, generation, machineId, capability: 'video', protocol: 'canaveral-session-v1', state: 'ready', ...options, attachBefore: new Date(Date.now() + 30000).toISOString(), authorizationDeadline: new Date(Date.now() + 60000).toISOString() };
+  let attached = 0, disconnected = false;
+  const broker = createSessionUpgradeHandler({ async request(command) {
+    if (command.type === 'video-sessions.attach') { attached++; return view; }
+    if (command.type === 'video-sessions.authorized') return { authorized: !disconnected && (!command.ready || attached === 2) };
+    disconnected = true; return { disconnected: true };
+  } }, { video: true });
+  const server = createServer((_req, res) => { res.writeHead(404); res.end(); });
+  server.on('upgrade', (req, socket, head) => { void broker.handle(req, socket, head); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { broker.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const consumer = await SessionConnection.connect(origin, `/v1/machines/${machineId}/video-sessions/${id}/${generation}`, 'a'.repeat(43));
+  const host = await SessionConnection.connect(origin, `/v1/hosts/${hostId}/video-sessions/${id}/${generation}`, 'b'.repeat(43));
+  t.after(() => { consumer.close(); host.close(); });
+  for (const peer of [consumer, host]) assert.equal((await peer.receive(2) as Record<string, unknown>).type, 'ready');
+  await host.sendControl(metadata); assert.deepEqual(await consumer.receive(2), metadata);
+  await consumer.sendControl({ type: 'ack' });
+  await assert.rejects(host.receive(2)); assert.equal(disconnected, true);
+});

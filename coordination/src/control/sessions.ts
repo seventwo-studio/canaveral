@@ -286,9 +286,13 @@ export function createModule(store: SqliteStore, options: ControlOptions): Sessi
 export interface SessionCommandClient { request(command: SessionCommand | VideoSessionCommand): Promise<unknown> }
 interface Pair {
   view: { id: string; generation: string; capability: RelayCapability }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
+  /** Video: the host's finish was relayed, so the consumer may acknowledge it. */
+  finished?: boolean;
 }
-/** Peer liveness: ping every `intervalMs`; drop a peer that sends no pong for `timeoutMs`.
- * Only tests shorten it. A peer answers pings only while a read is outstanding. */
+/** Peer liveness: ping every `intervalMs`; drop a peer from which no frame arrived for
+ * `timeoutMs`. Any received frame counts, so a pong queued behind media still in socket
+ * buffers does not drop a peer whose stream is merely slow to drain. Only tests shorten
+ * it. A peer answers pings only while a read is outstanding. */
 export interface SessionHeartbeat { intervalMs: number; timeoutMs: number }
 export const SESSION_HEARTBEAT: Readonly<SessionHeartbeat> = Object.freeze({ intervalMs: 10_000, timeoutMs: 30_000 });
 function heartbeatOption(value: SessionHeartbeat | undefined): SessionHeartbeat {
@@ -297,8 +301,9 @@ function heartbeatOption(value: SessionHeartbeat | undefined): SessionHeartbeat 
   return { intervalMs: value.intervalMs, timeoutMs: value.timeoutMs };
 }
 /** One assembled input message and one pending socket write per direction. No retry/reconnect.
- * Ping and pong frames have their own small queue, so liveness never competes with, or is
- * starved by, a continuous media stream; all frames still serialize through one writer. */
+ * Ping and pong frames have their own small queue, so they never fail on, or wait for
+ * queue space behind, a continuous media stream; all frames still serialize through one
+ * writer, so bytes already written are sent first. */
 class SocketPeer {
   private writer: Promise<void> = Promise.resolve();
   private queued = 0;
@@ -386,10 +391,11 @@ class SocketPeer {
         if (size + length > (kind === 1 ? MAX_CONTROL_BYTES : MAX_BINARY_BYTES)) throw new ServiceError("Session message exceeds its budget.", 400);
       }
       const mask = this.server ? await this.read(4) : undefined, data = await this.read(length);
+      this.lastPong = Date.now();
       if (mask) for (let i = 0; i < length; i++) data[i] = data[i]! ^ mask[i % 4]!;
       if (opcode === 8) return null;
       if (opcode === 9) { await this.send(data, 10); continue; }
-      if (opcode === 10) { this.lastPong = Date.now(); continue; }
+      if (opcode === 10) continue;
       data.copy(assembled, size); size += length;
       if (final) return { binary: kind === 2, data: assembled.subarray(0, size) };
     }
@@ -478,10 +484,15 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
         await pair.started;
         while (!pair.closed) {
           const message = await peer.message(); if (!message) break;
-          validateRelayMessage(view.capability, command.side, message.data, message.binary);
+          const relayed = validateRelayMessage(view.capability, command.side, message.data, message.binary);
+          // The video consumer may only acknowledge a relayed finish. An early message would sit
+          // unread in the capturing runner and is never a valid completion proof.
+          if (view.capability === "video" && command.side === "consumer" && !pair.finished) throw new ServiceError("Video acknowledgement preceded completion.", 409);
           if (!await authorized(pair, true) || pair.closed) throw new ServiceError("Session authorization ended.", 410);
           const other = pair.peers[command.side === "host" ? "consumer" : "host"];
           if (!other) throw new ServiceError("Session peer ended.", 410);
+          // Set before relaying, so an acknowledgement can never race the flag.
+          if (view.capability === "video" && command.side === "host" && !(relayed instanceof Uint8Array) && relayed.type === "finish") pair.finished = true;
           await other.send(message.data, message.binary ? 2 : 1);
         }
       } catch (error) {

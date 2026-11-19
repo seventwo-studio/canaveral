@@ -74,7 +74,7 @@ export async function serveMobileVideo(channel: SessionChannel, source: NativePi
     // Android emits no frames while the screen is static, so a read may wait until that
     // deadline rather than a fixed 30 s; the deadline timer still bounds every stall.
     const deadline = performance.now() + (options.durationSeconds + 10) * 1000;
-    const wait = () => Math.max(30000, Math.ceil(deadline - performance.now()));
+    const wait = () => Math.min(MAX_VIDEO_READ_MS, Math.max(30000, Math.ceil(deadline - performance.now())));
     timer = setTimeout(() => { rejectFailure(new ServiceError('Native video exceeded its duration and exit grace.', 409)); void closeSource().catch(() => {}); void pipe.close().catch(() => {}); }, (options.durationSeconds + 10) * 1000);
     pumping = (async () => {
       try {

@@ -248,8 +248,12 @@ Message boundaries are not MP4 box or frame boundaries. Binary input from the
 consumer is forbidden.
 
 Each broker peer is pinged every 10 seconds and dropped after 30 seconds without
-a pong. Ping and pong frames have their own small output queue, so a continuous
-media stream neither delays nor starves them. The runner's session client keeps
+receiving any frame from it. Counting every frame, not only pongs, keeps a peer
+whose pong waits behind media still in socket buffers on a slow link. Ping and pong
+frames have their own small output queue, so they never fail for lack of queue
+space behind media. The broker refuses a consumer message before the host's
+`finish` has been relayed; an early `ack` ends the session and is never a
+completion proof. The runner's session client keeps
 one bounded read outstanding at all times, so it answers pings while it only
 sends media; at most one received message waits for the caller. A capture may
 therefore run to the 180-second maximum. Android emits no frames while the screen
