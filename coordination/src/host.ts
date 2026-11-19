@@ -462,10 +462,18 @@ export class HostRunner {
     }
     if (!this.guest && installed.some(t => t.guestAccess)) this.guest = createGuestAccess(this.config, this.state);
   }
+  /** Configured definitions are immutable once loaded, but an operator recipe can embed a
+   * multi-MiB guest bundle; validating it on every access fence would saturate the host. */
+  private readonly configuredDigests = new WeakMap<RecordValue, string>();
+  private configuredDigest(image: RecordValue): string {
+    let digest = this.configuredDigests.get(image);
+    if (digest === undefined) { digest = legacyDigest(normalizeTemplate(image)); this.configuredDigests.set(image, digest); }
+    return digest;
+  }
   context(machine: RecordValue): { runtime: Runtime; image: RecordValue; folder: string } {
     const id = identifier(machine.id), template = object(machine.template);
     const image = (this.config.templates as RecordValue[]).find(t => t.id === machine.templateId && t.revision === template.revision && t.arch === template.arch);
-    if (!image || legacyDigest(normalizeTemplate(image)) !== legacyDigest(normalizeTemplate(template))) throw new ServiceError("Assigned immutable template no longer matches this host.", 409);
+    if (!image || this.configuredDigest(image) !== legacyDigest(normalizeTemplate(template))) throw new ServiceError("Assigned immutable template no longer matches this host.", 409);
     const name = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? runtimeFor(this.config, image) : String(this.config.provider);
     const runtime = this.runtimes.get(name);
     if (!runtime) throw new ServiceError("Assignment runtime is unavailable.", 409, { code: "capability_unsupported" });
