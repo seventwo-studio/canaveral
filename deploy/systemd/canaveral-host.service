@@ -12,6 +12,8 @@ ExecStart=/usr/bin/node /opt/canaveral/coordination/dist/src/cli.js host --confi
 Restart=on-failure
 RestartSec=10
 UMask=0077
+# Hosts that lease Android emulators add the android-leases.conf drop-in (see
+# canaveral-host.service.d/), so lease supervisors outlive host restarts.
 
 [Install]
 WantedBy=multi-user.target

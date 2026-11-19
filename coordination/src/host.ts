@@ -87,6 +87,7 @@ interface Runtime extends NativeProvider {
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
+  ownsStorage?(machine: RecordValue, image: RecordValue, storage: string): boolean;
   sweep?(active: Set<string>): Promise<unknown>;
   close?(): Promise<unknown>;
   resourceProcesses?(machine: RecordValue, image: RecordValue, folder: string): Promise<unknown[]>;
@@ -144,11 +145,26 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-function rejectUnsupportedLeases(config: RecordValue): void {
-  if ("leaseProtocol" in config || "leaseImages" in config) throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400);
+/** Only supervised Android emulators have independent native deadline enforcement and owned
+ * cleanup. Every other runtime keeps refusing lease declarations, whatever the configuration. */
+export function leaseOffer(config: RecordValue): RecordValue {
+  if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
+  const refuse = (): never => { throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400); };
+  if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
+  const provider = String(config.provider);
+  let android: unknown;
+  try { android = provider === "android" ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config).android : undefined; } catch { refuse(); }
+  const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
+  if (!android || !absolute(config.leaseClockHelper) || !absolute(object(android).leaseSupervisor) || !["darwin", "linux"].includes(process.platform)) refuse();
+  const leaseImages = (config.leaseImages as unknown[]).map(value => {
+    const entry = object(value);
+    if (Object.keys(entry).sort().join() !== "arch,id,revision,runtime" || entry.runtime !== "android") refuse();
+    return { id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch"), runtime: "android" };
+  });
+  return { leaseProtocol: 1, leaseImages };
 }
 export function hostOffer(config: RecordValue): RecordValue {
-  rejectUnsupportedLeases(config);
+  const leases = leaseOffer(config);
   const provider = text(config.provider, "provider");
   if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
@@ -163,6 +179,8 @@ export function hostOffer(config: RecordValue): RecordValue {
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === "android")) throw new ServiceError("Lease images must name offered Android templates.", 400);
+  Object.assign(offer, leases);
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
   if (config.inference !== undefined) {
@@ -271,7 +289,7 @@ export class HostRunner {
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config);
-    rejectUnsupportedLeases(config);
+    leaseOffer(config);
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir); privateDirectory(this.state);
@@ -319,6 +337,8 @@ export class HostRunner {
   async initializeProviders(): Promise<void> {
     const factory = this.dependencies.providerFactory ?? createProvider, provider = String(this.config.provider);
     const clean = Object.fromEntries(Object.entries(this.config).filter(([key]) => !PRIVATE_CONFIG.has(key)));
+    // Leased Android guests must not reach the controller's port on this host; the probe needs only the number.
+    try { const controller = new URL(String(this.config.url)); clean.leaseControllerPort = Number(controller.port || (controller.protocol === "https:" ? 443 : 80)); } catch { /* no controller URL */ }
     if (Object.hasOwn(HOST_RUNTIMES, provider)) {
       for (const [kind, options] of Object.entries(enabledRuntimes(this.config))) this.runtimes.set(kind, await factory({ ...clean, ...options, provider: kind,
         storage: options.storage ?? join(String(clean.storage), kind), templates: (clean.templates as RecordValue[]).filter(i => runtimeFor(this.config, i) === kind) }, String(options.stateDirectory ?? this.state)));
@@ -357,7 +377,7 @@ export class HostRunner {
   }
   private sessionAuthorized(job: RunnerSessionJob): boolean {
     const machine = this.assignments.find(m => m.id === job.machineId);
-    return this.fresh() && this.queues.sessions!.some(s => s.id === job.id && s.generation === job.generation && s.leaseId === job.leaseId && s.machineId === job.machineId && s.capability === job.capability) && !!machine && machine.ready === true && machine.desired === "running" && !!machine.lease && object(machine.lease).id === job.leaseId && object(machine.lease).state === "ready" && this.offer.leaseProtocol === 1 && this.guard.allowed(job.machineId);
+    return this.fresh() && this.queues.sessions!.some(s => s.id === job.id && s.generation === job.generation && s.leaseId === job.leaseId && s.machineId === job.machineId && s.capability === job.capability) && !!machine && machine.ready === true && machine.desired === "running" && !!machine.lease && object(machine.lease).id === job.leaseId && object(machine.lease).state === "ready" && this.offer.leaseProtocol === 1 && this.leaseEligible(machine) && this.guard.allowed(job.machineId);
   }
   private sessionBackend(job: RunnerSessionJob): RunnerSessionBackend {
     const machine = this.assignments.find(m => m.id === job.machineId);
@@ -539,7 +559,7 @@ export class HostRunner {
     if (this.updateAdmissionBlocked && machine.desired !== "stopped") throw new ServiceError("Host update admission is fenced.", 409);
     const { runtime, image: originalImage, folder } = this.context(machine), id = identifier(machine.id);
     if (machine.leaseCleanup) {
-      const nativeCleanup = runtime.kind === "apple" || runtime.kind === "libvirt" && !!runtime.stopForCleanup;
+      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
           this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
@@ -549,6 +569,7 @@ export class HostRunner {
           stop: () => runtime.stopForCleanup ? runtime.stopForCleanup(machine, originalImage, folder) : runtime.reconcile(machine, { ...originalImage, _leaseAuthorization: () => this.guard.authorization(id, String(object(machine.lease).id)) }, folder),
           remove: (requestId: string, preboot?: boolean) => runtime.removeOwnedStorage!(machine, originalImage, folder, requestId, preboot), preboot: runtime.kind === "apple",
         } : {}),
+        ...(runtime.ownsStorage ? { storageOwned: (storage: string) => runtime.ownsStorage!(machine, originalImage, storage) } : {}),
       });
     }
     return assignmentAccess(machine, folder, async () => {
@@ -567,11 +588,14 @@ export class HostRunner {
       }
       if (present(join(folder, "deletion.json"))) throw new ServiceError("Durable deletion intent prevents reconciliation.", 409);
       let current = machine, image = originalImage;
-      let leaseAuthorization: (() => LeaseAuthorization) | undefined;
+      let leaseAuthorization: (() => LeaseAuthorization) | undefined, refused = false;
       if (machine.lease) {
         // Default portable clock never authorizes leased starts; preserve and stop
         // pre-existing assignments while their independent native fence runs.
-        if (!this.guard.allowed(id)) current = { ...machine, desired: "stopped", leaseFenced: true };
+        // The host enforces its own lease gate rather than trusting the controller: an assignment
+        // outside its advertised Android lease images is never started, and is stopped if running.
+        refused = machine.desired === "running" && !this.leaseEligible(machine);
+        if (!this.guard.allowed(id) || refused) current = { ...machine, desired: "stopped", leaseFenced: true };
         if (current.desired === "running") {
           if (!runtime.refreshExecution) throw new ServiceError("Native independent lease fence is unavailable.", 409);
           const leaseId = String(object(machine.lease).id);
@@ -581,7 +605,10 @@ export class HostRunner {
         leaseAuthorization = () => this.guard.authorization(id, String(object(machine.lease).id));
       }
       // Stopping bypasses credentials, source preparation and guest connectivity.
-      if (current.desired === "stopped") return runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
+      if (current.desired === "stopped") {
+        const stopped = await runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
+        return refused ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail: "This host does not offer leased execution for this runtime and template." } : stopped;
+      }
       if (context && !context.authorized()) throw new ServiceError("Assignment authorization ended.", 410);
       if (image.source && !image.image && !image.catalogueImageId) throw new ServiceError("Prepare and verify the configured base image before runtime creation.", 409);
       if (image.catalogueImageId) this.library.verifyDefinition(image);
@@ -642,6 +669,14 @@ export class HostRunner {
       return result;
     });
   }
+  /** Leased execution runs only on the Android runtime, for a template this host advertised in leaseImages. */
+  leaseEligible(machine: RecordValue): boolean {
+    if (this.offer.leaseProtocol !== 1 || !Array.isArray(this.offer.leaseImages)) return false;
+    let context: { runtime: Runtime; image: RecordValue };
+    try { context = this.context(machine); } catch { return false; }
+    const { runtime, image } = context;
+    return runtime.kind === "android" && image.os === "android" && (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === "android" && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch);
+  }
   private machineAuthorized(id: string): boolean {
     const current = this.assignments.find(m => m.id === id);
     return this.fresh() && !!current && current.desired === "running" && !current.deletion && !current.leaseCleanup && this.guard.allowed(id);
@@ -651,7 +686,7 @@ export class HostRunner {
     const machine = this.assignments.find(m => m.id === operation.machineId);
     if (!machine || machine.ready !== true || machine.desired !== "running" || !machine.lease || object(machine.lease).id !== operation.leaseId || object(machine.lease).state !== "ready") return false;
     // This runner advertises no accepted consumer execution selector.
-    return this.offer.leaseProtocol === 1 && this.guard.allowed(String(machine.id));
+    return this.offer.leaseProtocol === 1 && this.leaseEligible(machine) && this.guard.allowed(String(machine.id));
   }
   private async durableWork(kind: string, task: RecordValue, target: Map<string, RecordValue>, work: (context: HostWorkContext) => Promise<RecordValue>, context: HostWorkContext): Promise<void> {
     const id = identifier(task.id), path = join(this.state, "work", kind, `${id}.json`);

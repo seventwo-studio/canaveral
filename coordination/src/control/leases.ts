@@ -49,10 +49,11 @@ export function leaseEligible(offer: Record<string, unknown>, image: Record<stri
   } catch { return false; }
 }
 function template(row: LegacyMachineRow): Record<string, unknown> { return object(typeof row.template === "string" ? JSON.parse(row.template) : row.template); }
+/** Inventory is not readiness: guests and leased devices need the runner's positive access check. */
 function observedReady(db: DatabaseSync, row: LegacyMachineRow, now: number): boolean {
-  const image = template(row), required = (image.preparationDriver ?? "none") !== "none";
+  const image = template(row), required = (image.preparationDriver ?? "none") !== "none", checked = Boolean(image.guestAccess) || image.os === "android" || image.os === "ios";
   return now - Number(row.seen) < 30 && row.observed === "running" && (!required || Boolean(row.prepared_at)) &&
-    (!image.guestAccess || Boolean(row.access_ready)) && !isDeleted(db, String(row.id)) &&
+    (!checked || Boolean(row.access_ready)) && !isDeleted(db, String(row.id)) &&
     !db.prepare("SELECT 1 FROM machine_deletions WHERE machine=?").get(String(row.id)) && !leaseCleanup(db, String(row.id));
 }
 /** SQL input: m.*, h.seen, h.enabled, h.offer AS host_offer. */

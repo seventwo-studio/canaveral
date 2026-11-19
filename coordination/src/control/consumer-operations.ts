@@ -13,6 +13,8 @@ interface Row {
 const actionCapabilities: Record<string, string> = {
   screenshot: "screenshot", hierarchy: "hierarchy", accessibility: "hierarchy", "accessibility-action": "hierarchy",
   tap: "input", swipe: "input", text: "input", key: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
+  // App lifecycle and logs are subsets of the device shell, so they need the same capability.
+  apps: "command", launch: "command", terminate: "command", uninstall: "command", "open-url": "command", logs: "command",
   "shell-open": "pty", "shell-read": "pty", "shell-write": "pty", "shell-close": "pty", "shell-resize": "pty",
 };
 export function initializeConsumerOperations(db: DatabaseSync): void {

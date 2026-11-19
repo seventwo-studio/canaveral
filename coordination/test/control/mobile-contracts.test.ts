@@ -102,6 +102,7 @@ test("native defaults run a harmless fixture and mobile consumer leases fail clo
   const root = fixture(t), img = image(), m = machine(img), android = new AndroidProvider({ storage: path.join(root, "storage"), androidSDK: "/sdk" }, root);
   assert.equal((await android.run([process.execPath, "-e", "process.stdout.write('fixture')"])).toString(), "fixture");
   await assert.rejects(android.run([path.join(root, "missing-fixture-executable")]), /unavailable/);
-  await assert.rejects(android.reconcile({ ...m, lease: { id: randomUUID() } }, img, root), /fencing/);
+  // Leased execution needs the native lease supervisor; without it the provider fails closed.
+  await assert.rejects(android.reconcile({ ...m, lease: { id: randomUUID() } }, img, root), /native lease supervisor/);
   assert.equal(digest({ a: 1, b: { d: 2, c: true } }), digest({ b: { c: true, d: 2 }, a: 1 }));
 });

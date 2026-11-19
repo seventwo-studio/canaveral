@@ -7,7 +7,8 @@ import * as path from "node:path";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { ServiceError, object } from "../errors.ts";
-import type { CommandResult, ContainerDirectory, ContainerFiles, Download, MobileTransport, NativePipe, RecordValue, RunOptions, ShellAdapter } from "./mobile.ts";
+import { SupervisorLaunchError } from "./mobile.ts";
+import type { CommandResult, ContainerDirectory, ContainerFiles, Download, LeaseSupervisorTransport, MobileTransport, NativePipe, RecordValue, RunOptions, ShellAdapter } from "./mobile.ts";
 
 function command(argv: readonly string[]): [string, string[]] {
   if (!argv.length || argv.some(a => typeof a !== "string" || a.includes("\0")) || !argv[0]) throw new ServiceError("Invalid native command.", 400);
@@ -139,10 +140,67 @@ export function createNodeMobileTransport(config: RecordValue, selection?: NodeN
       if (!Number.isSafeInteger(pid) || pid <= 0) return false;
       try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
     },
-    portPairAvailable, executableAvailable,
+    portPairAvailable, executableAvailable, leases: nativeLeaseSupervisor,
     ...nativeAdapters(config, selection),
   };
 }
+/** The supervisor is spawned detached in its own session, so it outlives the host runner.
+ * Its launch request travels on stdin, never argv; it answers with one bounded line. */
+export const nativeLeaseSupervisor: LeaseSupervisorTransport = {
+  async supervise(helper, storage, request) {
+    if (!path.isAbsolute(helper) || !path.isAbsolute(storage)) throw new ServiceError("Lease supervisor paths must be absolute.", 400);
+    const child = nodeSpawn(helper, ["lease-supervise", storage], { env: {}, stdio: ["pipe", "pipe", "ignore"], detached: true, shell: false, windowsHide: true });
+    try {
+      await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+      child.stdin.end(JSON.stringify(request) + "\n");
+      const line = await timeout(new Promise<string>((resolve, reject) => {
+        let data = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => { data += chunk; if (data.length > 4096) reject(new Error("envelope")); else if (data.includes("\n")) resolve(data.slice(0, data.indexOf("\n"))); });
+        child.stdout.once("end", () => reject(new Error("closed")));
+      }), 30000);
+      const value = object(JSON.parse(line));
+      if (value.supervisorPid !== child.pid || !Number.isSafeInteger(value.childPid) || (value.childPid as number) <= 1) throw new Error("identity");
+      child.stdout.destroy(); child.unref();
+      return { pid: value.childPid as number, supervisorPid: child.pid!, supervisorExited: async () => child.exitCode !== null || child.signalCode !== null };
+    } catch {
+      child.stdout.destroy();
+      // Report an exit only when the retained child ended by status, never by signal.
+      await new Promise<void>(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else { const timer = setTimeout(resolve, 2000); child.once("exit", () => { clearTimeout(timer); resolve(); }); } });
+      throw new SupervisorLaunchError(child.exitCode !== null && child.signalCode === null ? child.exitCode : undefined);
+    }
+  },
+  async clock(helper) {
+    if (!path.isAbsolute(helper)) throw new ServiceError("Lease supervisor path must be absolute.", 400);
+    const result = spawnSync(helper, ["lease-clock"], { env: {}, shell: false, encoding: "utf8", timeout: 1000, maxBuffer: 1024, windowsHide: true });
+    try {
+      if (result.error || result.status !== 0) throw new Error();
+      const value = object(JSON.parse(result.stdout));
+      if (value.version !== 1 || typeof value.bootSessionID !== "string" || typeof value.continuous !== "number" || !Number.isFinite(value.continuous) || value.continuous < 0) throw new Error();
+      return { version: 1, bootSessionID: value.bootSessionID, continuous: value.continuous };
+    } catch { throw new ServiceError("Native lease clock is unavailable.", 409, { outcome: "unknown" }); }
+  },
+  async groupAbsent(pgid) {
+    if (!Number.isSafeInteger(pgid) || pgid <= 1) return false;
+    try { process.kill(-pgid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  },
+  async status(helper, storage) {
+    if (!path.isAbsolute(helper) || !path.isAbsolute(storage)) throw new ServiceError("Lease supervisor paths must be absolute.", 400);
+    const result = spawnSync(helper, ["lease-status", storage], { env: {}, shell: false, encoding: "utf8", timeout: 2000, maxBuffer: 1024, windowsHide: true });
+    try {
+      if (result.error || result.status !== 0) throw new Error();
+      const value = object(JSON.parse(result.stdout));
+      if (value.version !== 1 || typeof value.bootSessionID !== "string" || typeof value.continuous !== "number" || !Number.isFinite(value.continuous) || value.continuous < 0 || !["held", "free", "absent"].includes(String(value.supervisor))) throw new Error();
+      return { version: 1, bootSessionID: value.bootSessionID, continuous: value.continuous, supervisor: value.supervisor as "held" | "free" | "absent" };
+    } catch { throw new ServiceError("Native lease supervisor status is unavailable.", 409, { outcome: "unknown" }); }
+  },
+  async commandLines() {
+    // Full-width argv for every process this account can see; truncation would hide a match.
+    const result = spawnSync("/bin/ps", ["-axww", "-o", "command="], { env: {}, shell: false, encoding: "utf8", timeout: 5000, maxBuffer: 64 * 1048576, windowsHide: true });
+    if (result.error || result.status !== 0) throw new ServiceError("Process inventory is unavailable.", 409, { outcome: "unknown" });
+    return result.stdout.split("\n").filter(Boolean);
+  },
+};
 /** Freshness uses a suspend-aware native clock, never civil time or awake-only hrtime. */
 export function nativeElapsedClock(config: RecordValue): () => number {
   return () => {
