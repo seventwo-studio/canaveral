@@ -412,9 +412,9 @@ Optional `priority` (integer from -1000000 to 1000000, default 0, at most the
 dashboard's `maxPreviewPriority` and the application's `maxRequestPriority`) and
 `deadline` (UTC RFC3339, in the future and at most 24 hours ahead) queue the
 preview; see below. A priority above `maxPreviewPriority` returns 400. An owner
-with `maxWaitingPreviewsPerOwner` previews still waiting gets 429
-`preview_waiting_limit` until one starts, ends or is cancelled; a replay of an
-existing preview is not counted again.
+with `maxWaitingPreviewsPerOwner` previews and builds still waiting, counted
+together, gets 429 `preview_waiting_limit` until one starts, ends or is
+cancelled; a replay of an existing preview or build is not counted again.
 Replay the same ID and body after a lost response; a changed body, including
 priority or deadline, returns 409. GET the collection for
 `{previews: Preview[]}`; GET or DELETE `/api/v1/previews/{id}` to inspect or
@@ -444,7 +444,9 @@ neither fails nor creates a second request. The controller's waiting cap
 fail the preview, at once: unless an earlier attempt's outcome was unknown, the
 controller holds no request that a later reply could reveal, so stopping does not
 wait out the deadline. After an unknown outcome the preview stays `stopping` until
-its waiting deadline before trusting a missing request. The submitted intent
+its waiting deadline before trusting a missing request. A submission the dashboard
+had sent but not seen answered when it stopped is an unknown outcome too: startup
+marks it so, and a refused replay after the restart waits out the deadline. The submitted intent
 includes the configured pin and `ttlSeconds`, so changing either while previews
 wait makes their replay after a dashboard restart return 409, which fails them.
 All of one dashboard's previews share its application, so the controller's
@@ -461,7 +463,8 @@ process), `templateId`, `templateRevision`, `arch`, `digest` (sha256: plus
 Optional `maxPreviewPriority` (0–1000000, default 0) is the highest priority an
 owner may set; the default lets owners only lower their own previews. Optional
 `maxWaitingPreviewsPerOwner` (1–1000, default 10) bounds each owner's waiting
-previews so one owner cannot fill the application's waiting cap (default 100).
+previews and builds together, so one owner cannot fill the application's waiting
+cap (default 100): builds wait as `linux-lease` requests on the same cap.
 Grant that application command and file access to the pinned workspace image.
 The dashboard requires an approved workspace with Node for static serving and
 nested directory preparation. Command mode runs the supplied argv in /workspace
@@ -474,7 +477,10 @@ after restart. Cleanup remains stopping while the controller holds the reservati
 The database gains a `workspace_requests` table holding pending files until launch
 or stop. The dashboard keeps the database file mode 0600, narrowing an existing
 file at startup, and enables SQLite `secure_delete` so cleared files are
-overwritten. A dashboard from before queued previews ignores the table and fences
+overwritten. `secure_delete` does not reach pages freed before it was set: only
+interim builds of queued previews stored files without it, so on first start the
+dashboard rebuilds (`VACUUM`) a database that already has `workspace_requests`,
+once, and records that in `user_version`. A dashboard from before queued previews ignores the table and fences
 every provisioning preview at startup, cancelling its request; it cannot resume
 one, and it never clears the files already stored there. After a downgrade, delete
 the `workspace_requests` rows (or the database once no preview is active) to
@@ -499,6 +505,9 @@ using those same five fields. Every selected pin must match the live catalogue.
 POST `/api/v1/builds` with a lowercase UUID `id`, `imageId`, `files`, a
 foreground `argv` array and one workspace-relative filename `artifact`.
 Replay the same body and ID after a lost response. Changed intent returns 409.
+A build waits as a `linux-lease` request like a preview and counts toward the
+owner's `maxWaitingPreviewsPerOwner` together with previews; over it, POST
+returns 429 `preview_waiting_limit`.
 GET the collection for `{builds: [...]}`. POST, GET and DELETE on the
 appropriate collection or item return a build with `id`, `imageId`, `artifact`,
 `expiresAt` and `state`. Poll `/api/v1/builds/{id}`. DELETE that item to

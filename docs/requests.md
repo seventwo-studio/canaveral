@@ -57,29 +57,38 @@ Grants, allowlists, application limits, health, drains and physical capacity are
 therefore checked by the existing acquisition code at admission. A failed attempt
 cannot leave a partial reservation or roll back another request's admission.
 
-Application turns are kept per capacity unit, the physical capacity a request's
-image pin (kind, `templateId`, `templateRevision`, `arch`) competes for. A
-`linux-lease` pin's unit is the set of runner domains with an unrevoked approval
-for it; a `lease` pin's unit is the set of enabled hosts that offer it. Pins with
-the same set share one unit, so two pins on one runner domain share one turn. A pin
-with no approved domain or offering host is its own unit. Each pass resolves every
-distinct waiting pin once. Transient runner and host state (drain, binding
-currency, heartbeat age, health) is left out, so a unit does not change while a
-runner restarts. Changing approvals or offers can move a pin to another unit, which
-starts from its own turn.
+One admission order covers every waiting `lease` and `linux-lease` request,
+whatever image pin, runner domain or host it needs. Each application has one
+persisted admission record (`request_admissions`) holding when it was last
+admitted by a pass, as a counter. A pass tries candidates by least recently
+admitted application first (one never admitted goes before any that was), then
+higher priority, then FIFO sequence. Only an admission moves its application to
+the back; a refused attempt leaves the order unchanged, so the next candidate is
+tried in the same pass. The order is recomputed before every attempt, so an
+application admitted earlier in a pass falls behind the others for the rest of it.
 
-Each unit keeps its own application turn in `request_unit_turns`, persisted across
-restart. A unit's turn advances only when a request is admitted in it: the next
-application in UUID order after the last one admitted goes first there. A refused
-attempt does not move the turn, so the following application is tried next in the
-same pass. Admissions in one unit never move another unit's turn, so an application
-admitted continually on one runner domain cannot starve an application waiting for
-another. Because pins on one domain share a turn, an application that keeps
-submitting on one pin cannot starve another application on a second pin of the same
-domain, even behind an older request that never fits. Pins whose domain sets overlap
-without being equal are separate units and do not share a turn. A pass visits units
-by their oldest waiting request. Within an application, higher priority precedes
-FIFO sequence. There is no aging.
+What this guarantees: no application waits forever while another keeps being
+admitted on capacity it could use. If application B has a request that fits a
+free slot when the pass reaches it, and application A was admitted more recently
+than B, B's request is tried before any of A's. A therefore cannot keep taking
+slots B could use, whether their pins are identical, share one runner domain, or
+are approved on overlapping but different domain sets. Admissions of an
+application on capacity B cannot use (another pin or domain that B's requests do
+not fit) move A to the back as well, which only helps B. With several applications
+contending for one slot, they are admitted in turn.
+
+Limits: the order is per application, not per owner, request size or resource.
+There is no aging. A request that needs more than any single release frees (a
+larger box behind a stream of smaller ones) can wait indefinitely while smaller
+requests from other applications fit; the guarantee covers only capacity the
+waiting request could use when tried. Within one application, a higher-priority
+request that never fits does not block lower-priority ones behind it, and
+priority does not reorder applications that have been admitted at different
+times. Admissions outside the pass (direct `/v1/leases` acquisition and runner
+claims of model calls) do not update the record. When more than 256 candidates
+wait, a scan cycle spans several passes and a request refused earlier in the cycle
+is next tried in the following cycle, so the guarantee holds per cycle, not per
+pass; see the scan continuation below.
 
 A request whose attempt returns 429 or 503 is skipped for the current scan cycle.
 For the rest of that pass, so are the application's other waiting requests with the
@@ -146,11 +155,19 @@ The control-worker pass never acquires model calls; it expires them at their
 deadline, cancels them on application revocation and rejects them with reason
 `model_grant_revoked` when the grant is revoked. Each claim is one transaction:
 it first expires every model call whose deadline has passed, then orders the
-unassigned, uncancelled model jobs the runner can serve by the same rules as the
-lease pass: applications in a persisted round-robin turn, then higher priority, then
-FIFO submission order. The turn is kept per runner (`model_job_scheduler`, separate
-from the lease turn), so admissions on a runner that serves other models cannot
-starve an application waiting on this one. Eligibility (served model and digest,
+unassigned, uncancelled model jobs the runner can serve: applications in a
+persisted round-robin turn (the next application in UUID order after the last one
+admitted on this runner), then higher priority, then FIFO submission order. The turn is kept per runner (`model_job_scheduler`, separate
+from the lease admission record), so admissions on a runner that serves other models
+cannot starve an application waiting on this one. Each claim considers only the jobs
+one runner can serve, so a per-runner turn already ranks only applications competing
+for that runner's capacity; the lease pass instead orders every pin together, which
+is why it ranks by least recent admission rather than keeping a turn per runner or
+domain. The two paths are independent: a model-call admission does not move an
+application in the lease order, and a lease admission does not advance a runner's
+model turn. Both reserve on the same physical ledger, so on a domain that serves
+both, whichever admits first takes the free capacity; neither path orders against
+the other. Eligibility (served model and digest,
 catalogued adapter, unrevoked application and grant) is decided in the query, and
 only the first job of each application, model and digest is considered, because
 later ones share its limit and resources. Direct `/v1/model-jobs` submissions take
@@ -195,7 +212,8 @@ duplicated lease admission, placement, the box limit and cleanup, or moved file
 upload into the controller.
 
 A preview request therefore follows every rule above: it waits when capacity or
-the application's box limit is full, is admitted by unit turn, priority and FIFO,
+the application's box limit is full, is admitted by least recent application
+admission, priority and FIFO,
 expires at its deadline, can be cancelled while waiting, and replays by UUID.
 Waiting never preempts, shrinks or relocates a running lease. Admission reserves
 on the mapped physical ledger in the pass transaction; lease TTL starts at
@@ -211,18 +229,19 @@ ahead of every other owner; owners are not otherwise scheduled against each othe
 ## Upgrade and backup boundary
 
 This feature creates only new tables (`requests`, `request_scheduler`,
-`request_scan`, `model_job_scheduler`, `request_unit_turns`) and partial indexes
-for waiting order and deadline. Each pass also builds connection-local temporary
-tables of its candidates and their units, indexed by request and group; they are
+`request_scan`, `model_job_scheduler`, `request_admissions`) and partial indexes
+for waiting order and deadline. Each pass also builds a connection-local temporary
+table of its candidates and their groups, indexed by request and group; it is
 never persisted. It neither alters nor converts existing tables; queued model calls add
 rows to the existing `model_jobs` table in its current schema. Old databases and old application policy JSON
 remain usable.
 
-Interim builds of this change kept turns per image pin in `request_pool_turns`;
-this version drops that table at startup, since turns are disposable. A controller
-from before per-unit turns ignores `request_unit_turns` and orders
-leases by the global turn in `request_scheduler`, which this version no longer
-advances; waiting requests and held reservations are unaffected. Downgrading after
+Interim builds of this change kept turns per image pin (`request_pool_turns`) and
+per capacity unit (`request_unit_turns`); this version drops both tables at
+startup, since admission order is disposable. A controller from before
+`request_admissions` ignores it and orders leases by the global turn in
+`request_scheduler`, which this version no longer advances; waiting requests and
+held reservations are unaffected. Downgrading after
 the first queued model call is unsupported. An older controller
 does not know the `model-job` kind and rejects the waiting request, but its FIFO claim
 still finds the open job in `model_jobs` and runs it, outside the request's priority,

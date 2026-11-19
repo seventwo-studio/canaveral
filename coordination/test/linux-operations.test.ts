@@ -836,8 +836,9 @@ test("queued dashboard previews follow priority then FIFO, and applications take
     held = String(admitted[0]!.id); holder = admitted[0]!.application === other.id ? other.credential : q.app.credential;
     order.push(names.get(held)!);
   }
-  // No request was admitted in this pool before, so applications start in UUID order and then alternate.
-  assert.deepEqual(order, other.id < q.app.id ? ["other", "high", "next", "low"] : ["high", "other", "next", "low"]);
+  // Neither application was admitted before, so the higher priority goes first; then the least recently
+  // admitted application goes next, so the applications alternate.
+  assert.deepEqual(order, ["high", "other", "next", "low"]);
 });
 
 test("a waiting dashboard preview can be cancelled, expires at its deadline and replays only its exact specification", async t => {

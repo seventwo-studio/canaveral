@@ -5,10 +5,12 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync, statSync, chmodSync }
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { DashboardPreviews, previewIntent } from "../src/dashboard-previews.ts";
 import {
   ConsumerClient,
+  ConsumerServiceError,
   ConsumerTransportError,
   LeaseClient,
 } from "../src/consumer-client.ts";
@@ -411,4 +413,62 @@ test("the preview database is owner-only even when it already existed, and stopp
   await delay(100);
   const bytes = readFileSync(config.database);
   for (const at of [0, 8000, 16000, data.length - 64]) assert.equal(bytes.includes(Buffer.from(data.slice(at, at + 64))), false, `file bytes at ${at} remain`);
+});
+
+test("builds count toward the owner's waiting limit with previews", (t) => {
+  const { manager, create } = queuedManager(t, { maxWaitingPreviewsPerOwner: 2 });
+  const build = (owner: string) =>
+    manager.handle(owner, "POST", undefined, { id: randomUUID(), imageId: "default", artifact: "out.txt", argv: ["true"], files: [] }, true);
+  build("a");
+  create("a");
+  // Both wait as linux-lease requests on the shared application cap, so neither kind may exceed the owner's share.
+  assert.throws(() => build("a"), (e: { status?: number; code?: string }) => e.status === 429 && e.code === "preview_waiting_limit");
+  assert.throws(() => create("a"), (e: { status?: number; code?: string }) => e.status === 429 && e.code === "preview_waiting_limit");
+  build("b");
+  build("b");
+});
+
+test("a submission sent but unanswered before a restart keeps the deadline guard after a refused replay", async (t) => {
+  // The dashboard marked the request sent (submitted=1) and stopped before the reply. The controller may hold it.
+  const id = randomUUID(), lease = randomUUID(), deadline = new Date(Date.now() + 20000).toISOString();
+  const { manager, config } = queuedManager(t, {}, (database) => {
+    const db = new DatabaseSync(database);
+    db.exec(`CREATE TABLE previews(id TEXT PRIMARY KEY,owner TEXT,mode TEXT,hash TEXT,state TEXT,expiresAt TEXT,lease TEXT,op TEXT,failed INTEGER);
+      CREATE TABLE workspace_requests(id TEXT PRIMARY KEY,intent TEXT,deadline TEXT NOT NULL,submitted INTEGER NOT NULL DEFAULT 0,request TEXT);`);
+    db.prepare("INSERT INTO previews VALUES(?,?,?,?,?,?,?,?,0)").run(id, "owner", "static", "h", "provisioning", deadline, lease, randomUUID());
+    db.prepare("INSERT INTO workspace_requests VALUES(?,?,?,1,NULL)").run(id, JSON.stringify({ id, mode: "static", files: [{ path: "index.html", data: "eA==" }], argv: ["node"], port: 18760 }), deadline);
+    db.close();
+  });
+  // The replay is refused definitively (for example after a configuration change) and cancel finds nothing yet.
+  const submit = t.mock.method(ConsumerClient.prototype, "submitRequest", async () => { throw new ConsumerServiceError("conflict", "request_conflict", 409, {}); });
+  const cancel = t.mock.method(ConsumerClient.prototype, "cancelRequest", async () => { throw new ConsumerServiceError("Unknown request.", "not_found", 404, {}); });
+  for (let i = 0; i < 50 && !cancel.mock.callCount(); i++) await delay(100);
+  assert.ok(submit.mock.callCount() >= 1);
+  assert.ok(cancel.mock.callCount() >= 1);
+  await delay(1500);
+  // A late arrival of the original submission would still be fenced by its deadline, so the preview waits it out.
+  assert.equal((manager.handle("owner", "GET", id) as { state: string }).state, "stopping");
+  const db = new DatabaseSync(config.database, { readOnly: true });
+  t.after(() => db.close());
+  assert.equal(db.prepare("SELECT submitted FROM workspace_requests WHERE id=?").get(id)!.submitted, 2);
+});
+
+test("a database written before secure_delete is rebuilt once so files it freed are gone", async (t) => {
+  // An interim build stored pending files in workspace_requests and cleared them without secure_delete.
+  const data = randomBytes(24000).toString("base64");
+  const { config, close } = queuedManager(t, {}, (database) => {
+    const db = new DatabaseSync(database);
+    db.exec("CREATE TABLE workspace_requests(id TEXT PRIMARY KEY,intent TEXT,deadline TEXT NOT NULL,submitted INTEGER NOT NULL DEFAULT 0,request TEXT)");
+    db.prepare("INSERT INTO workspace_requests VALUES(?,?,?,0,NULL)").run(randomUUID(), JSON.stringify({ files: [{ path: "index.html", data }] }), new Date().toISOString());
+    db.exec("UPDATE workspace_requests SET intent=NULL");
+    db.close();
+    assert.ok(readFileSync(database).includes(Buffer.from(data.slice(8000, 8064))), "fixture must leave freed bytes");
+  });
+  close();
+  await delay(100);
+  const bytes = readFileSync(config.database);
+  for (const at of [0, 8000, 16000, data.length - 64]) assert.equal(bytes.includes(Buffer.from(data.slice(at, at + 64))), false, `file bytes at ${at} remain`);
+  const db = new DatabaseSync(config.database, { readOnly: true });
+  t.after(() => db.close());
+  assert.equal(db.prepare("PRAGMA user_version").get()!.user_version, 1);
 });

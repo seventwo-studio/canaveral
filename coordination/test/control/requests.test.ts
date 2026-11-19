@@ -232,9 +232,8 @@ test("a large unservable backlog costs one attempt per group and does not hide s
   assert.deepEqual(attempts,["full-image","fixture-image"]);
 });
 
-test("each capacity unit keeps its own application turn, so admissions in one unit cannot starve an application in another",t=>{
+test("an application admitted on another image pin every pass cannot starve two applications contending for one slot",t=>{
   // Three applications sorted by UUID: low and mid contend for one slot in pool P; high is admitted in pool Q every pass.
-  // Without a unit callback each pin is its own unit.
   const f=leaseFixture(t), [low,mid,high]=[f.application(),f.application(),f.application()].sort((a,b)=>a.id<b.id?-1:1) as [typeof f.app,typeof f.app,typeof f.app];
   let used=0;const owners=new Map<string,string>(), served:string[]=[];
   const queue=new Requests(f.store,f.apps,(_kind,application,intent)=>{
@@ -246,40 +245,85 @@ test("each capacity unit keeps its own application turn, so admissions in one un
   assert.deepEqual(served,["low","mid","low","mid"]);
 });
 
-test("pins on one runner domain share its application turn, so a stuck head on one pin cannot let one application starve another",t=>{
-  // C's old request on pin X never fits; B waits on pin Y; A submits a fresh request on pin X before every pass.
-  // Both pins resolve to one domain that frees one slot per pass. Turns per pin admitted A every time.
+/** Pin X fits domain D1 or D2 and pin Y only D2; D1 stays full and D2 frees one slot before each pass. A submits a
+ * fresh pin-X request before every pass. B, with five pin-Y requests, must keep being admitted in turn with A. */
+function overlap(t: Parameters<typeof leaseFixture>[0], kind: "lease"|"linux-lease", anchor: "other"|"self"|"none") {
   const f=leaseFixture(t), [a,b,c]=[f.application({maxWaitingRequests:100}),f.application(),f.application()];
-  let free=0;const owners=new Map<string,string>(), served:string[]=[], units:string[]=[];
+  let free=0;const owners=new Map<string,string>(), served:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,_application,intent)=>{
+    const who=owners.get(String(intent.id))!;
+    if(who.endsWith("-anchor")||free<1) throw new ServiceError("No approved runner domain serving this image has capacity.",503,{code:"capacity_unavailable"});
+    free--;served.push(who);
+  },()=>{});
+  const submit=(app:typeof f.app,templateId:string,name:string,extra:Record<string,unknown>={})=>{
+    const req=envelope(f);req.kind=kind;req.intent={...req.intent,templateId,...extra};owners.set(req.id,name);queue.submit(app.credential,req);};
+  // An older pin-X request that never fits: another application's, or A's own in a different intent group.
+  if(anchor==="other") submit(c,"pin-x","C-anchor");
+  if(anchor==="self") submit(a,"pin-x","A-anchor",{ttlSeconds:121});
+  for(let i=0;i<5;i++) submit(b,"pin-y","B");
+  for(let pass=0;pass<10;pass++){ submit(a,"pin-x","A"); free=1; queue.pass(); }
+  return served.join("");
+}
+for (const kind of ["lease","linux-lease"] as const) for (const anchor of ["other","self","none"] as const)
+  test(`overlapping domain sets alternate admission between applications (${kind}, ${anchor} anchor)`,t=>{
+    // Per-unit turns admitted AAAAAAAAAA here; one shared turn over merged sets starved too.
+    const served=overlap(t,kind,anchor);
+    assert.match(served,/^(AB|BA){5}$/,served);
+  });
+
+test("an uncontested admission elsewhere does not let one of two contending applications take every slot",t=>{
+  // A is alone on pin-a; B and C contend for one pin-c slot per pass. A merged turn over both pins admitted BCBBBBBB.
+  const f=leaseFixture(t), [a,b,c]=[f.application(),f.application(),f.application()].sort((x,y)=>x.id<y.id?-1:1) as [typeof f.app,typeof f.app,typeof f.app];
+  const free:Record<string,number>={"pin-a":0,"pin-c":0};const owners=new Map<string,string>(), served:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,_application,intent)=>{
+    const pin=String(intent.templateId);
+    if(free[pin]!<1) throw new ServiceError("capacity",503,{code:"capacity_unavailable"});
+    free[pin]!--;served.push(owners.get(String(intent.id))!);
+  },()=>{});
+  const submit=(app:typeof f.app,templateId:string,name:string)=>{const req=envelope(f);req.intent={...req.intent,templateId};owners.set(req.id,name);queue.submit(app.credential,req);};
+  for(let i=0;i<8;i++){ submit(b,"pin-c","B"); submit(c,"pin-c","C"); }
+  for(let pass=0;pass<8;pass++){ submit(a,"pin-a","A"); free["pin-a"]=1; free["pin-c"]=1; queue.pass(); }
+  assert.equal(served.filter(x=>x!=="A").join(""),"BCBCBCBC");
+  assert.equal(served.filter(x=>x==="A").length,8);
+});
+
+test("pins on one runner domain alternate applications behind a stuck head",t=>{
+  // C's old request on pin X never fits; B waits on pin Y; A submits a fresh request on pin X before every pass.
+  // Both pins share one domain that frees one slot per pass. Turns per pin admitted A every time.
+  const f=leaseFixture(t), [a,b,c]=[f.application({maxWaitingRequests:100}),f.application(),f.application()];
+  let free=0;const owners=new Map<string,string>(), served:string[]=[];
   const queue=new Requests(f.store,f.apps,(_kind,_application,intent)=>{
     if(owners.get(String(intent.id))==="C"||free<1) throw new ServiceError("No approved runner domain serving this image has capacity.",503,{code:"capacity_unavailable"});
     free--;served.push(owners.get(String(intent.id))!);
-  },()=>{},()=>{},(_db,_kind,pin)=>{units.push(pin.templateId);return pin.templateId==="pin-x"||pin.templateId==="pin-y"?"domain-1":undefined;});
+  },()=>{});
   const submit=(app:typeof f.app,templateId:string,name:string)=>{const req=envelope(f);req.intent={...req.intent,templateId};owners.set(req.id,name);queue.submit(app.credential,req);};
   submit(c,"pin-x","C");
   for(let i=0;i<5;i++) submit(b,"pin-y","B");
-  const resolved:string[][]=[];
-  for(let pass=0;pass<10;pass++){ submit(a,"pin-x","A"); free=1; units.length=0; queue.pass(); resolved.push([...units].sort()); }
-  assert.deepEqual(served,served[0]==="A"?["A","B","A","B","A","B","A","B","A","B"]:["B","A","B","A","B","A","B","A","B","A"]);
-  // Each distinct waiting pin resolves once per pass.
-  assert.deepEqual(resolved[0],["pin-x","pin-y"]);
-  assert.ok(resolved.every(pins=>new Set(pins).size===pins.length),JSON.stringify(resolved));
+  for(let pass=0;pass<10;pass++){ submit(a,"pin-x","A"); free=1; queue.pass(); }
+  assert.match(served.join(""),/^(AB|BA){5}$/);
 });
 
-test("queued lease pins resolve to the runner domains or hosts that serve them",t=>{
-  const f=leaseFixture(t), runners=f.leases.linux.runners!, [shared,alone]=[randomUUID(),randomUUID()];
-  const enroll=()=>{const binding={controllerId:f.options.controllerId,runnerId:randomUUID(),generation:1,incarnationId:randomUUID()}, id=randomUUID();
-    const issued=runners.issue({id,...binding,ttlSeconds:60});runners.consume((issued as {enrollmentToken:string}).enrollmentToken,{id,...binding,credential:key()});return binding;};
-  const image=(id:string)=>{const value={id,revision:"1",arch:"amd64",os:"linux",mode:"headless",backend:"kubevirt",digest:"sha256:"+"ab".repeat(32),resources:{cpu:1,memoryMiB:1024,diskGiB:4},capabilities:["command"]};f.leases.linux.image(value);return {id,revision:"1",arch:"amd64",digest:value.digest};};
-  const [x,y,z,unapproved]=[image("pin-x"),image("pin-y"),image("pin-z"),image("pin-none")];
-  f.store.transaction(db=>{for(const domain of [shared,alone]) f.leases.linux.domains.define(db,{id:domain,name:"fixture",capacity:{cpu:1,memoryMiB:1024,diskGiB:4}},f.now());});
-  f.leases.linux.approve({binding:enroll(),domainId:shared,backend:"kubevirt",images:[x,y]});
-  f.leases.linux.approve({binding:enroll(),domainId:shared,backend:"kubevirt",images:[y]});
-  f.leases.linux.approve({binding:enroll(),domainId:alone,backend:"kubevirt",images:[z]});
-  const unit=(kind:"lease"|"linux-lease",templateId:string)=>f.store.transaction(db=>f.leases.requests.unit(db,kind,{templateId,templateRevision:"1",arch:"amd64"}));
-  assert.equal(unit("linux-lease","pin-x"),unit("linux-lease","pin-y"));
-  assert.notEqual(unit("linux-lease","pin-x"),unit("linux-lease","pin-z"));
-  assert.equal(unit("linux-lease",unapproved.id),undefined);
-  assert.equal(unit("lease",f.image.id),`lease-hosts\u001f${f.host}`);
-  assert.equal(unit("lease","unknown-image"),undefined);
+test("the least recently admitted application goes first after restart and across request kinds",t=>{
+  // A is admitted once on a legacy lease. Afterwards B (never admitted) goes before A on a Linux lease, even though
+  // A's request is older and has higher priority, and the order survives reopening the database.
+  const f=leaseFixture(t), a=f.application({maxRequestPriority:10}), b=f.application();
+  const served:string[]=[], owners=new Map<string,string>();let free=1;
+  const acquire=(_kind:string,_application:string,intent:Record<string,unknown>)=>{if(free<1) throw new ServiceError("capacity",503,{code:"capacity_unavailable"});free--;served.push(owners.get(String(intent.id))!);};
+  const queue=new Requests(f.store,f.apps,acquire,()=>{});
+  const submit=(app:typeof f.app,kind:"lease"|"linux-lease",name:string,priority=0)=>{const req={...envelope(f,{priority}),kind};owners.set(req.id,name);queue.submit(app.credential,req);};
+  submit(a,"lease","A1");queue.pass();
+  submit(a,"linux-lease","A2",10);submit(b,"linux-lease","B1");
+  free=1;new Requests(new SqliteStore(f.store.path,f.now),f.apps,acquire,()=>{}).pass();
+  assert.deepEqual(served,["A1","B1"]);
+  f.store.transaction(db=>{
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('request_unit_turns','request_pool_turns')").get(),undefined);
+    assert.deepEqual(db.prepare("SELECT application FROM request_admissions ORDER BY admitted").all().map(r=>r.application),[a.id,b.id]);
+  });
+});
+
+test("interim turn tables are dropped on upgrade",t=>{
+  const f=leaseFixture(t);
+  f.store.transaction(db=>db.exec("CREATE TABLE request_unit_turns (unit TEXT PRIMARY KEY,turn TEXT NOT NULL); CREATE TABLE request_pool_turns (pool TEXT PRIMARY KEY,turn TEXT NOT NULL)"));
+  new Requests(new SqliteStore(f.store.path,f.now),f.apps,()=>{},()=>{});
+  f.store.transaction(db=>assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('request_unit_turns','request_pool_turns')").all(),[]));
 });

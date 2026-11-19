@@ -849,17 +849,6 @@ export class LinuxLeases {
     return [...domains];
   }
 
-  /** The physical capacity a queued pin competes for: the sorted set of domains with an unrevoked approval for it.
-   * Transient runner state (drain, binding currency) is left out so the unit, and its turn, stay stable. Read-only. */
-  capacityUnit(db: DatabaseSync, pin: { templateId: string; templateRevision: string; arch: string }): string | undefined {
-    const image = this.imageRow(db, pin.templateId, pin.templateRevision, pin.arch);
-    if (!image) return undefined;
-    const wanted = imageKey(image), domains = new Set<string>();
-    for (const row of db.prepare("SELECT domain,images,workspace_version FROM linux_lease_runner_approvals WHERE revoked=0 AND backend=?").all(image.backend) as unknown as ApprovalRow[])
-      if ((image.workspace_version === null || row.workspace_version === 1) && (JSON.parse(row.images) as string[]).includes(wanted)) domains.add(row.domain);
-    return domains.size ? ["linux-domains", ...[...domains].sort()].join("\u001f") : undefined;
-  }
-
   private approval(db: DatabaseSync, b: Binding): ApprovalRow | undefined {
     return db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND revoked=0")
       .get(b.controllerId, b.runnerId, b.generation, b.incarnationId) as unknown as ApprovalRow | undefined;

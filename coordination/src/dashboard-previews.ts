@@ -33,7 +33,8 @@ export interface PreviewConfig {
   ttlSeconds: number;
   /** Highest queue priority a dashboard owner may set on a preview. Default 0: owners can only lower theirs. */
   maxPreviewPriority?: number;
-  /** Waiting previews one owner may hold at once, so one owner cannot fill the shared application's waiting cap. */
+  /** Waiting previews and builds one owner may hold at once, together, so one owner cannot fill the shared
+   * application's waiting cap: both submit linux-lease requests against it. */
   maxWaitingPreviewsPerOwner?: number;
 }
 interface Intent {
@@ -289,6 +290,15 @@ export class DashboardPreviews {
     closeSync(openSync(config.database, "a", 0o600));
     chmodSync(config.database, 0o600);
     this.db = new DatabaseSync(config.database);
+    // Only interim builds of queued previews stored files in workspace_requests before secure_delete was set; pages
+    // they freed still hold file bytes. Rebuild such a database once (user_version marks it) to drop those pages.
+    const scrub =
+      this.db.prepare("PRAGMA user_version").get()!.user_version === 0 &&
+      !!this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_requests'",
+        )
+        .get();
     // Pending preview files are cleared from workspace_requests at launch or stop; overwrite the freed content.
     this.db
       .exec(`PRAGMA secure_delete=ON;
@@ -297,10 +307,16 @@ export class DashboardPreviews {
       CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY,imageId TEXT,artifact TEXT,result TEXT,bytes BLOB,sha256 TEXT,submitted INTEGER DEFAULT 0);
       CREATE TABLE IF NOT EXISTS build_chunks(id TEXT,seq INTEGER PRIMARY KEY,data BLOB);
       CREATE TABLE IF NOT EXISTS workspace_requests(id TEXT PRIMARY KEY,intent TEXT,deadline TEXT NOT NULL,submitted INTEGER NOT NULL DEFAULT 0,request TEXT);
+      UPDATE workspace_requests SET submitted=2 WHERE submitted=1 AND request IS NULL;
       UPDATE previews SET state='stopping',failed=1 WHERE state IN ('ready','starting','provisioning','running')
         AND NOT (state='provisioning' AND mode!='build' AND id IN (SELECT id FROM workspace_requests WHERE intent IS NOT NULL
           AND coalesce(json_extract(request,'$.state'),'waiting')='waiting'))`);
+    if (scrub) this.db.exec("VACUUM");
+    this.db.exec("PRAGMA user_version=1");
     // A preview whose request was never seen admitted holds no lease key, workspace or service, so it resumes waiting.
+    // A submission marked sent (1) but never answered may have reached the controller before a crash: its outcome
+    // is unknown (2), so a later refused replay or 404 cancel keeps the deadline guard. Build rows are covered too;
+    // they are fenced above and their builds.submitted flag is cleared only together with a 1 here.
     this.timer = setInterval(() => this.tick(), 1000).unref();
   }
   private row(id: string) {
@@ -380,19 +396,19 @@ export class DashboardPreviews {
             400,
           );
         // Every owner shares the dashboard's application and its waiting cap, so each owner's share is bounded.
+        // Previews and builds both wait as linux-lease requests on that cap, so they count together.
         if (
-          !build &&
           Number(
             this.db
               .prepare(
-                `SELECT count(*) AS n FROM previews p JOIN workspace_requests w ON w.id=p.id WHERE p.owner=? AND p.mode!='build'
+                `SELECT count(*) AS n FROM previews p JOIN workspace_requests w ON w.id=p.id WHERE p.owner=?
                   AND p.state='provisioning' AND coalesce(json_extract(w.request,'$.state'),'waiting')='waiting'`,
               )
               .get(owner)!.n,
           ) >= (this.config.maxWaitingPreviewsPerOwner ?? 10)
         )
           throw new DashboardError(
-            "Waiting preview limit reached; cancel a waiting preview or wait for one to start.",
+            "Waiting limit reached; cancel a waiting preview or build, or wait for one to start.",
             429,
             { code: "preview_waiting_limit", retryable: true },
           );
