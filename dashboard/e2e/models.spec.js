@@ -119,7 +119,7 @@ test("ordinary users are returned to machines from the models route", async ({
     await route.fulfill({ json: result });
   });
   await page.goto("/#models");
-  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Machines", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Models" })).toHaveCount(0);
   expect(requested).not.toContain("models");
   expect(requested).not.toContain("jobs");
