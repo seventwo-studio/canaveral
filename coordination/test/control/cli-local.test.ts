@@ -216,18 +216,17 @@ test("local Linux desktop config accepts a real-sized guest bundle on creation a
     await fs.writeFile(manifest, JSON.stringify([{ path: "/opt/canaveral/server.mjs", content: "await 0;\n", mode: "0644" }, ...parts]), { mode: 0o600 });
     const args = { command: "local", action: "", positionals: [], url: "http://127.0.0.1:8875", allowHttp: true,
       options: { "linux-image": image, "apple-runner": runner, "guest-helper-manifest": manifest } };
-    if (process.platform !== "darwin") {
-      // Apple desktops need a macOS host; elsewhere the large config must still be read and
-      // then refused only for runtime compatibility, never for its size.
-      await assert.rejects(localConfig(root, args, args.url), /compatible configured runtimes/);
-      assert.ok((await fs.stat(join(root, "linux-host.json"))).size > 1048576);
-      return;
-    }
     const created = await localConfig(root, args, args.url);
     const templates = created!.config.templates as Array<Record<string, unknown>>;
     assert.ok(templates.some(t => t.os === "linux" && t.mode === "desktop" && t.guestAccess === true));
     const physical = await fs.stat(join(root, "machine-host.json"));
     assert.ok(physical.size > 1048576 && physical.size < LOCAL_HOST_CONFIG_BYTES);
+    if (process.platform !== "darwin") {
+      // Apple desktops need a macOS host; elsewhere the large config is still read and then
+      // refused only for runtime compatibility, never for its size.
+      await assert.rejects(localConfig(root, { ...args, options: {} }, args.url), /compatible configured runtimes/);
+      return;
+    }
     const reloaded = await localConfig(root, { ...args, options: {} }, args.url);
     assert.deepEqual(reloaded!.config.templates, created!.config.templates);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
