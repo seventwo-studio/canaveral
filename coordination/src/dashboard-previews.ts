@@ -311,8 +311,14 @@ export class DashboardPreviews {
       UPDATE previews SET state='stopping',failed=1 WHERE state IN ('ready','starting','provisioning','running')
         AND NOT (state='provisioning' AND mode!='build' AND id IN (SELECT id FROM workspace_requests WHERE intent IS NOT NULL
           AND coalesce(json_extract(request,'$.state'),'waiting')='waiting'))`);
-    if (scrub) this.db.exec("VACUUM");
-    this.db.exec("PRAGMA user_version=1");
+    // VACUUM needs about twice the database size in free disk space. If it fails, keep running and retry at the
+    // next start (user_version stays 0); only the database file is rewritten, not deleted journals.
+    let scrubbed = true;
+    if (scrub) {
+      try { this.db.exec("VACUUM"); }
+      catch (error) { scrubbed = false; console.error("Dashboard could not scrub freed preview pages; retrying at the next start.", error instanceof Error ? error.message : error); }
+    }
+    if (scrubbed) this.db.exec("PRAGMA user_version=1");
     // A preview whose request was never seen admitted holds no lease key, workspace or service, so it resumes waiting.
     // A submission marked sent (1) but never answered may have reached the controller before a crash: its outcome
     // is unknown (2), so a later refused replay or 404 cancel keeps the deadline guard. Build rows are covered too;

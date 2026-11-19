@@ -67,15 +67,20 @@ the back; a refused attempt leaves the order unchanged, so the next candidate is
 tried in the same pass. The order is recomputed before every attempt, so an
 application admitted earlier in a pass falls behind the others for the rest of it.
 
-What this guarantees: no application waits forever while another keeps being
-admitted on capacity it could use. If application B has a request that fits a
-free slot when the pass reaches it, and application A was admitted more recently
-than B, B's request is tried before any of A's. A therefore cannot keep taking
-slots B could use, whether their pins are identical, share one runner domain, or
-are approved on overlapping but different domain sets. Admissions of an
-application on capacity B cannot use (another pin or domain that B's requests do
-not fit) move A to the back as well, which only helps B. With several applications
-contending for one slot, they are admitted in turn.
+What this guarantees: no application waits forever for queued admissions while
+another keeps being admitted by the queue on capacity it could use. If application
+B has a request that fits a free slot when the pass reaches it, and application A
+was admitted by the queue more recently than B, B's request is tried before any of
+A's, whether their pins are identical, share one runner domain, or are approved on
+overlapping but different domain sets. With several applications contending for
+one slot, they are admitted in turn.
+
+The order is per application, not per request or resource. An application that
+keeps being admitted on capacity nobody else contends for also moves behind others
+for contested capacity: if B is admitted on an uncontested pin every pass and C
+waits on a pin B also wants, C wins that contested slot each time. Per-application
+fairness across all capacity is a deliberate choice; per-capacity turns were tried
+and allowed starvation when pins shared or overlapped domains.
 
 Limits: the order is per application, not per owner, request size or resource.
 There is no aging. A request that needs more than any single release frees (a
@@ -90,10 +95,16 @@ wait, a scan cycle spans several passes and a request refused earlier in the cyc
 is next tried in the following cycle, so the guarantee holds per cycle, not per
 pass; see the scan continuation below.
 
-A request whose attempt returns 429 or 503 is skipped for the current scan cycle.
-For the rest of that pass, so are the application's other waiting requests with the
-same normalized intent apart from UUID and name: they would meet the same limit or
-capacity. This relies on acquisition never deciding a 429 or 503 from the request
+A request whose attempt returns 429 or 503 is skipped for the current scan cycle,
+and so are the application's other waiting requests with the same normalized intent
+apart from UUID and name: they would meet the same limit or capacity, so they count
+as scanned. An application may use at most 16 refused attempts per pass while
+another application still has a candidate; its remaining candidates are set aside,
+unscanned, and return to the pass once the others are exhausted. Unservable
+backlogs, or cancel-and-resubmit churn, from a few applications therefore cannot
+use every attempt in every pass and keep a servable application waiting. The bound
+is per application: sixteen or more applications that each keep 16 unservable
+groups waiting can still fill a pass. This relies on acquisition never deciding a 429 or 503 from the request
 UUID; UUID conflicts are 409. A host drain refusal (`host_draining`), where the
 controller has one, skips the group the same way. A large unservable backlog therefore costs one attempt per group, and
 servable requests behind it are reached in the same pass. Requests with different

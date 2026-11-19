@@ -480,7 +480,10 @@ file at startup, and enables SQLite `secure_delete` so cleared files are
 overwritten. `secure_delete` does not reach pages freed before it was set: only
 interim builds of queued previews stored files without it, so on first start the
 dashboard rebuilds (`VACUUM`) a database that already has `workspace_requests`,
-once, and records that in `user_version`. A dashboard from before queued previews ignores the table and fences
+once, and records that in `user_version`. The rebuild needs about twice the
+database size in free disk space; if it fails, the dashboard logs it, keeps
+running and retries at the next start. Only the database file is rewritten: the
+temporary rollback journal is deleted, not overwritten. A dashboard from before queued previews ignores the table and fences
 every provisioning preview at startup, cancelling its request; it cannot resume
 one, and it never clears the files already stored there. After a downgrade, delete
 the `workspace_requests` rows (or the database once no preview is active) to
