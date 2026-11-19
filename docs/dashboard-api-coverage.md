@@ -42,7 +42,7 @@ store; browser storage is not used.
 | Model catalog, resource domains, grants and runner approvals | Configuration |
 | Linux lease images, grants and runner approvals | Configuration |
 | Runner enrollment and revocation | Configuration |
-| Inference models and jobs | Configuration |
+| Inference models and jobs | Configuration; Models (administrator prompt, output, cancellation) |
 | Application artifact admission, chunks, verification and deletion | Configuration |
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |

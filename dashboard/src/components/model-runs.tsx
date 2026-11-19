@@ -63,6 +63,7 @@ export function modelJob(value: unknown, expected?: string) {
     typeof hostId !== "string" ||
     typeof model !== "string" ||
     typeof digest !== "string" ||
+    !DIGEST.test(digest) ||
     typeof state !== "string" ||
     !states.includes(state) ||
     !["running", "cancelled"].includes(String(desired)) ||
@@ -117,6 +118,45 @@ const denied = (e: unknown) =>
 const short = (digest: string) => digest.slice(0, 19);
 const key = (o: { id: string; digest: string }) =>
   JSON.stringify([o.id, o.digest]);
+/** Settled means the runner positively confirmed stop and cleanup. */
+const released = (j: Job) =>
+  terminal.includes(j.state) &&
+  j.stopped &&
+  j.cleanup === "complete" &&
+  !j.reservationHeld;
+const settled = (j: Job) => terminal.includes(j.state) && !j.reservationHeld;
+/** Transient: no HTTP status (network, timeout, invalid body), throttling or a server error. */
+const transient = (e: unknown) =>
+  !(e instanceof Error && "status" in e) ||
+  Number(e.status) === 429 ||
+  Number(e.status) >= 500;
+const pendingKey = "canaveral.modelRuns.pending";
+function storedPending(): Submission | undefined {
+  try {
+    const v = record(JSON.parse(sessionStorage.getItem(pendingKey) ?? "null"));
+    if (
+      typeof v.id === "string" &&
+      UUID.test(v.id) &&
+      typeof v.model === "string" &&
+      typeof v.digest === "string" &&
+      DIGEST.test(v.digest) &&
+      typeof v.prompt === "string" &&
+      Number.isInteger(v.maxTokens)
+    )
+      return v as Submission;
+  } catch {
+    /* Storage may be unavailable; the request then lives in memory only. */
+  }
+  return undefined;
+}
+function storePending(value: Submission | undefined) {
+  try {
+    if (value) sessionStorage.setItem(pendingKey, JSON.stringify(value));
+    else sessionStorage.removeItem(pendingKey);
+  } catch {
+    /* Storage may be unavailable. */
+  }
+}
 
 function JobRow({
   initial,
@@ -130,9 +170,7 @@ function JobRow({
   const [row, setRow] = useState(initial);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [inspect, setInspect] = useState(
-    follow || !terminal.includes(initial.state) || initial.reservationHeld,
-  );
+  const [inspect, setInspect] = useState(follow);
   const [refresh, setRefresh] = useState(0);
   const deniedCallback = useRef(onDenied);
   deniedCallback.current = onDenied;
@@ -141,25 +179,34 @@ function JobRow({
     () => setRow((prev) => ({ ...initial, output: prev.output })),
     [initial],
   );
+  const id = initial.id;
   useEffect(() => {
     if (!inspect || busy) return;
     let live = true;
+    let failures = 0;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
+      // A hidden tab defers polling instead of loading the controller.
+      if (document.hidden) {
+        timer = setTimeout(poll, 2000);
+        return;
+      }
       try {
-        const next = await api("jobs/" + initial.id, undefined, (v) =>
-          modelJob(v, initial.id),
-        );
+        const next = await api("jobs/" + id, undefined, (v) => modelJob(v, id));
         if (!live) return;
         setRow(next);
         setError("");
+        failures = 0;
         // A terminal state is not a release until the runner confirms stop.
-        if (!terminal.includes(next.state) || next.reservationHeld)
-          timer = setTimeout(poll, 2000);
+        // Unknown outcomes wait for operator reconciliation, so they poll slowly.
+        if (!settled(next))
+          timer = setTimeout(poll, next.state === "unknown" ? 15000 : 2000);
       } catch (e) {
         if (!live) return;
         setError(errorMessage(e));
         if (denied(e)) deniedCallback.current();
+        else if (transient(e))
+          timer = setTimeout(poll, Math.min(30000, 2000 * 2 ** ++failures));
       }
     }
     void poll();
@@ -167,7 +214,7 @@ function JobRow({
       live = false;
       clearTimeout(timer);
     };
-  }, [initial, inspect, refresh, busy]);
+  }, [id, inspect, refresh, busy]);
   async function cancel() {
     setBusy(true);
     try {
@@ -175,6 +222,8 @@ function JobRow({
         await api("jobs/" + row.id + "/cancel", {}, (v) => modelJob(v, row.id)),
       );
       setError("");
+      // The operator acted on this job, so follow it until the runner confirms stop.
+      setInspect(true);
     } catch (e) {
       setError(errorMessage(e));
       if (denied(e)) deniedCallback.current();
@@ -191,7 +240,7 @@ function JobRow({
       <p className="break-all text-sm text-muted-foreground">
         {short(row.digest)} · host {row.hostId} · {row.id}
       </p>
-      <p role="status">
+      <p role={follow ? "status" : undefined}>
         {stateLabels[row.state]}
         {row.cancelRequested && !terminal.includes(row.state)
           ? " · Cancellation requested"
@@ -199,9 +248,9 @@ function JobRow({
       </p>
       {row.detail && <p className="break-words">{row.detail}</p>}
       <p>
-        {row.reservationHeld
-          ? "Capacity reserved"
-          : "Runtime stopped · capacity released"}
+        {released(row)
+          ? "Runtime stopped · capacity released"
+          : "Capacity reserved"}
       </p>
       {row.output && (
         <>
@@ -244,7 +293,14 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
   const [maxTokens, setMaxTokens] = useState("600");
   const [rows, setRows] = useState<Job[]>();
   const [followed, setFollowed] = useState<string[]>([]);
-  const [pending, setPending] = useState<Submission>();
+  const [pending, setPendingState] = useState<Submission | undefined>(
+    storedPending,
+  );
+  // A lost response must survive reload, so its request ID is never silently replaced.
+  const setPending = (value: Submission | undefined) => {
+    storePending(value);
+    setPendingState(value);
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [offerError, setOfferError] = useState("");
@@ -298,6 +354,29 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
       live = false;
     };
   }, [refresh]);
+  const unsettled = rows?.some((r) => !settled(r)) ?? false;
+  useEffect(() => {
+    if (!unsettled) return;
+    let live = true;
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      void api("jobs", undefined, (v) => {
+        const items = record(v).jobs;
+        if (!Array.isArray(items)) throw Error("Invalid model job list.");
+        return items.map((item) => modelJob(item));
+      })
+        .then((list) => {
+          if (live) setRows(list);
+        })
+        .catch((e) => {
+          if (live && denied(e)) deniedCallback.current();
+        });
+    }, 5000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [unsettled]);
   // One entry per exact model identity; hosts are placement, not choice.
   const choices = [
     ...new Map(
@@ -409,7 +488,16 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
         {error && <p role="alert">{error}</p>}
         {pending && (
           <p>
-            Request <code>{pending.id}</code>
+            Request <code>{pending.id}</code> may already have started. Retry
+            it, or check Recent model jobs before discarding it.{" "}
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setPending(undefined)}
+            >
+              Discard request
+            </Button>
           </p>
         )}
         <Button disabled={busy || (!pending && !choice)}>

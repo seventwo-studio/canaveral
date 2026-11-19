@@ -5,6 +5,7 @@ import { ModelRuns, modelJob } from "./model-runs";
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  sessionStorage.clear();
 });
 const digest = "sha256:" + "a".repeat(64);
 const other = "sha256:" + "b".repeat(64);
@@ -245,3 +246,82 @@ test("rejects malformed or mismatched job responses", () => {
     ),
   ).toThrow();
 });
+
+test("claims released capacity only after a terminal, stopped and cleaned job", async () => {
+  const id = "00000000-0000-4000-8000-000000000061";
+  // An inconsistent response must not be shown as released.
+  const inconsistent = job(id, { state: "running", reservationHeld: false });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) =>
+      url === "/api/v1/models"
+        ? reply({ models: [offer()] })
+        : reply({ jobs: [inconsistent] }),
+    ),
+  );
+  render(<ModelRuns onDenied={vi.fn()} />);
+  await screen.findByText("Capacity reserved");
+  expect(screen.queryByText("Runtime stopped · capacity released")).toBeNull();
+});
+
+test("keeps an uncertain request identity across reloads until it is retried or discarded", async () => {
+  sessionStorage.clear();
+  const posts: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      if (url === "/api/v1/models") return reply({ models: [offer()] });
+      if (url === "/api/v1/jobs" && init.method === "POST") {
+        posts.push(String(init.body));
+        return reply({ error: "Controller unavailable." }, 503);
+      }
+      return reply({ jobs: [] });
+    }),
+  );
+  const first = render(<ModelRuns onDenied={vi.fn()} />);
+  await screen.findByText(/fixture:latest/);
+  fireEvent.change(screen.getByLabelText("Prompt"), {
+    target: { value: "Hello" },
+  });
+  fireEvent.click(screen.getByText("Run model"));
+  await screen.findByText("Retry same request");
+  first.unmount();
+  render(<ModelRuns onDenied={vi.fn()} />);
+  fireEvent.click(await screen.findByText("Retry same request"));
+  await vi.waitFor(() => expect(posts).toHaveLength(2));
+  expect(JSON.parse(posts[1]!).id).toBe(JSON.parse(posts[0]!).id);
+  fireEvent.click(await screen.findByText("Discard request"));
+  expect(await screen.findByText("Run model")).toBeTruthy();
+  expect(sessionStorage.getItem("canaveral.modelRuns.pending")).toBeNull();
+});
+
+test("a followed job resumes polling after a transient error", async () => {
+  const id = "00000000-0000-4000-8000-000000000062";
+  let calls = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      if (url === "/api/v1/models") return reply({ models: [offer()] });
+      if (url === "/api/v1/jobs" && init.method !== "POST")
+        return reply({ jobs: [job(id, { state: "running" })] });
+      if (url.endsWith("/cancel"))
+        return reply(job(id, { state: "running", desired: "cancelled" }));
+      calls++;
+      if (calls === 1) throw new TypeError("network");
+      return reply(
+        job(id, {
+          state: "cancelled",
+          desired: "cancelled",
+          stopped: true,
+          cleanup: "complete",
+          reservationHeld: false,
+        }),
+      );
+    }),
+  );
+  render(<ModelRuns onDenied={vi.fn()} />);
+  fireEvent.click(await screen.findByText("Cancel job"));
+  await screen.findByText("Runtime stopped · capacity released", undefined, {
+    timeout: 6000,
+  });
+}, 10000);
