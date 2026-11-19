@@ -82,6 +82,7 @@ test("exact static assets use fresh CSP nonces and never contain bootstrap crede
       assert.ok(nonce); assert.notEqual(nonce, "CANAVERAL_CSP_NONCE"); nonces.push(nonce);
       assert.ok(reply.headers["content-security-policy"]?.includes(`'nonce-${nonce}'`));
       assert.ok(reply.headers["content-security-policy"]?.includes("script-src 'self';"));
+      assert.ok(reply.headers["content-security-policy"]?.includes("media-src 'self' blob:;"), "verified recordings play from local blob URLs only");
     }
     assert.notEqual(nonces[0], nonces[1]);
     for (const path of ["/", "/app.js", "/style.css", "/favicon.svg", "/launch.jpg", "/geist-mono.woff2", "/licenses.txt"]) {

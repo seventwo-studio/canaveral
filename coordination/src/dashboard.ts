@@ -1,7 +1,7 @@
 import { DashboardPreviews, type PreviewConfig } from './dashboard-previews.ts';
 import { controllerPreviewReader, PrivatePreviewGateway } from "./private-preview.ts";
 /** Stateless browser gateway. Credentials and native transports never live in assets. */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, request as httpRequest, ServerResponse } from "node:http";
 import type { IncomingMessage, Server } from "node:http";
@@ -198,6 +198,9 @@ const staticFiles: Record<string, [string, string]> = {
 };
 const browserCollection = new RegExp(`^/api/v1/hosts/${UUID}/browsers$`);
 const browserItem = new RegExp(`^/api/v1/hosts/${UUID}/browsers/${UUID}$`);
+/** Consumer attachment of an existing administrative video session; WebSocket upgrades only. */
+const videoAttachment = new RegExp(`^/api/v1/machines/(${UUID})/video-sessions/(${UUID})/(${UUID})$`);
+const SESSION_PROTOCOL = "canaveral-session-v1";
 
 function attachmentName(path: string): string {
   return `attachment; filename*=UTF-8''${encodeURIComponent(posix.basename(path)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`;
@@ -279,6 +282,36 @@ export function createDashboardServer(config: DashboardConfig): Server {
     });
   }
 
+  /** Opens the controller's session WebSocket with the browser's key, so the
+   * browser can verify the accept value. Extensions and cookies are never forwarded. */
+  function relayUpgrade(path: string, token: string, key: string): Promise<{ socket: Duplex; head: Buffer; accept: string }> {
+    const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const request = (origin.protocol === "https:" ? httpsRequest : httpRequest)(new URL(path, origin), {
+        method: "GET", agent: false, ...(ca === undefined ? {} : { ca }),
+        headers: { Authorization: `Bearer ${token}`, Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Key": key, "Sec-WebSocket-Version": "13", "Sec-WebSocket-Protocol": SESSION_PROTOCOL },
+      });
+      const fail = (error: DashboardError) => { if (!settled) { settled = true; request.destroy(); reject(error); } };
+      request.setTimeout(20_000, () => fail(new DashboardError("Video session attachment timed out.", 503)));
+      request.on("error", () => fail(new DashboardError("Video session attachment failed.", 503)));
+      request.on("response", response => {
+        response.resume();
+        const status = response.statusCode ?? 502;
+        fail(new DashboardError("Video session attachment was refused.", [401, 403, 404, 409, 410, 429].includes(status) ? status : 502));
+      });
+      request.on("upgrade", (response, socket, head) => {
+        if (settled) { socket.destroy(); return; }
+        if (response.statusCode !== 101 || response.headers["sec-websocket-accept"] !== accept ||
+            response.headers["sec-websocket-protocol"] !== SESSION_PROTOCOL || response.headers["sec-websocket-extensions"] !== undefined) {
+          socket.destroy(); fail(new DashboardError("Invalid video session upgrade response.", 502)); return;
+        }
+        settled = true; request.setTimeout(0); socket.setTimeout(0); socket.pause(); resolve({ socket, head, accept });
+      });
+      request.end();
+    });
+  }
+
   const previewDomain = config.previewDomain ?? process.env.CANAVERAL_PREVIEW_DOMAIN;
   const dashboardHost = config.dashboardHost ?? process.env.CANAVERAL_DASHBOARD_HOST;
   async function resolvePreview(session: string, previewId: string) {
@@ -311,7 +344,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
       response.writeHead(status, {
         "Content-Type": kind, "Content-Length": data.length, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Connection": "close",
-        "Content-Security-Policy": `default-src 'none'; script-src 'self'; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`,
+        "Content-Security-Policy": `default-src 'none'; script-src 'self'; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`,
         ...(cookie === undefined ? {} : { "Set-Cookie": cookie }), ...(status === 429 ? { "Retry-After": "60" } : {}),
       });
       response.end(data);
@@ -331,7 +364,8 @@ export function createDashboardServer(config: DashboardConfig): Server {
         if (asset) { respond(config.reloadAssets ? readFileSync(join(assetDirectory, asset.name)) : asset.data, 200, asset.kind); return; }
         if (route === "/healthz") { respond({ ok: true }); return; }
       }
-      if (!handoff && !routeAllowed(method, route)) throw new DashboardError("Unknown dashboard endpoint.", 404);
+      const videoRoute = upgrade && method === "GET" ? videoAttachment.exec(route) : null;
+      if (!handoff && !videoRoute && !routeAllowed(method, route)) throw new DashboardError("Unknown dashboard endpoint.", 404);
       const hostHeader = oneHeader(request, "host"), browserOrigin = oneHeader(request, "origin");
       if (!hostHeader || !/^(?:\[[a-fA-F0-9:]+\]|[A-Za-z0-9.-]+)(?::\d{1,5})?$/.test(hostHeader)) throw new DashboardError("Ambiguous browser origin.", 400);
       const hostUrl = new URL(`http://${hostHeader}`); host = hostUrl.hostname;
@@ -402,6 +436,42 @@ export function createDashboardServer(config: DashboardConfig): Server {
         timer.unref();
         try { return await Promise.race([work(abort.signal), lost]); }
         finally { clearInterval(timer); abort.abort(); }
+      }
+      if (videoRoute && upgrade) {
+        // Browsers cannot send the bearer header the controller requires. The relay
+        // accepts only the same-origin session cookie, forwards it as that same
+        // creator credential and never exposes it. The controller remains the
+        // authority for session ownership, generation, direction and cleanup.
+        if (!cookieToken || authorization !== undefined || !browserOrigin) throw new DashboardError("A same-origin dashboard WebSocket is required.", 403);
+        const key = oneHeader(request, "sec-websocket-key");
+        if (request.httpVersion !== "1.1" || oneHeader(request, "upgrade")?.toLowerCase() !== "websocket" || oneHeader(request, "sec-websocket-version") !== "13" ||
+            !key || !/^[A-Za-z0-9+/]{22}==$/.test(key) || Buffer.from(key, "base64").length !== 16 ||
+            !oneHeader(request, "connection")?.split(",").some(value => value.trim().toLowerCase() === "upgrade") ||
+            !oneHeader(request, "sec-websocket-protocol")?.split(",").some(value => value.trim() === SESSION_PROTOCOL) ||
+            request.headers["content-length"] !== undefined || request.headers["transfer-encoding"] !== undefined || request.headers.expect !== undefined) {
+          throw new DashboardError("Invalid WebSocket upgrade.", 400);
+        }
+        const machineId = videoRoute[1]!;
+        await authorizeMachine(machineId);
+        const peer = await relayUpgrade(route.slice(4), token, key);
+        streamStarted = true;
+        upgrade.release();
+        const socket = upgrade.socket as Socket;
+        socket.setTimeout(0);
+        const authorized: Authorization = async () => { try { await authorizeMachine(machineId); return true; } catch { return false; } };
+        await guarded(authorized, async () => {
+          // Either side may already have closed while the upstream attachment was pending.
+          const ended = new Promise<void>(resolve => { socket.once("close", resolve); peer.socket.once("close", resolve); if (socket.destroyed || peer.socket.destroyed) resolve(); });
+          const stop = () => { socket.destroy(); peer.socket.destroy(); };
+          socket.on("error", stop); peer.socket.on("error", stop);
+          socket.once("close", stop); peer.socket.once("close", stop);
+          socket.write(["HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "Connection: Upgrade", `Sec-WebSocket-Accept: ${peer.accept}`, `Sec-WebSocket-Protocol: ${SESSION_PROTOCOL}`, "", ""].join("\r\n"));
+          if (upgrade.head.length) peer.socket.write(upgrade.head);
+          if (peer.head.length) socket.write(peer.head);
+          socket.pipe(peer.socket).pipe(socket);
+          await ended;
+        }, () => { socket.destroy(); peer.socket.destroy(); });
+        socket.destroy(); peer.socket.destroy(); return;
       }
       const machineRoute = new RegExp(`^/api/v1/machines/(${UUID})/(accessibility|desktop|files/upload|files/download/([A-Za-z0-9_-]+)|shells/(${UUID})/stream)$`).exec(route);
       if (machineRoute) {
@@ -584,6 +654,9 @@ export function createDashboardServer(config: DashboardConfig): Server {
   const upgrades = new Set<Duplex>();
   let pendingUpgrades = 0;
   server.on("upgrade", (request, socket, head) => {
+    // Node detaches the server error listener on upgrade. A reset while authorization or the
+    // upstream attachment is pending must not crash the process.
+    socket.on("error", () => socket.destroy());
     upgrades.add(socket); socket.once("close", () => upgrades.delete(socket));
     const response = new ServerResponse(request); response.assignSocket(socket as Socket);
     if (pendingUpgrades >= 32) { response.writeHead(503, { Connection: "close" }); response.end(); return; }

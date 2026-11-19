@@ -46,7 +46,7 @@ store; browser storage is not used.
 | Application artifact admission, chunks, verification and deletion | Configuration |
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
-| Mobile video admission, inspection and closure | Configuration; playback remains a negotiated stream-client feature |
+| Mobile video admission, inspection and closure | Configuration; owner capture in machine details (PNG screenshot, verified MP4 recording) |
 | Managed update releases and rollouts | Configuration |
 
 ## Credential-specific protocols
@@ -60,6 +60,12 @@ for visibility and intervention. Runner enrollment consumption, claims, heartbea
 assignment reports, preparation callbacks, chunk download and binary WebSocket
 framing remain machine protocols. Their effects are represented by inventory,
 readiness, operations, session state, cleanup and host diagnostics.
+
+The one gateway WebSocket for a controller session protocol is the owner's mobile
+video attachment, `/api/v1/machines/{machine}/video-sessions/{id}/{generation}`.
+It requires the session cookie and a matching Origin, rechecks machine access
+every second and relays frames unchanged under the creator's own credential; see
+[owner mobile capture](dashboard.md#owner-mobile-capture).
 
 Frontend/controller fixture checks do not establish native stream disconnection,
 provider cleanup, mobile capture, model execution or deployment acceptance. No
