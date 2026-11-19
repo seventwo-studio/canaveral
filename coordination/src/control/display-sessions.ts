@@ -29,6 +29,9 @@ const PER_OWNER_HOST = 8;
 /** A ready session whose broker has not re-checked it for this long has lost its relay
  * (for example a crashed broker or a lost disconnect) and releases its slot. */
 const READY_LIVENESS_SECONDS = 10;
+/** A successful re-check refreshes the liveness timestamp at most this often, so a session
+ * that is still being re-checked never comes within READY_LIVENESS_SECONDS of lapsing. */
+const LIVENESS_WRITE_SECONDS = 1;
 const fail = (status = 409): never => { throw new ServiceError('Desktop display session rejected.', status); };
 function binding(m: Record<string, unknown>): string { return machineDigest([m.id, m.host, m.owner, m.template, m.request]); }
 function row(db: DatabaseSync, id: string): Row { return db.prepare('SELECT * FROM owner_display_sessions WHERE id=?').get(uuid(id)) as unknown as Row ?? fail(404); }
@@ -92,8 +95,12 @@ export class OwnerDisplaySessions implements ControlModule {
       if (command.type === 'display-sessions.authorized') {
         const authorized = LIVE.includes(r.state) && this.current(db, r);
         if (LIVE.includes(r.state) && !authorized) this.disconnect(db, r);
-        // Each successful broker re-check keeps a ready session alive.
-        if (authorized) db.prepare('UPDATE owner_display_sessions SET seen=? WHERE id=?').run(this.store.clock(), r.id);
+        // Each successful broker re-check keeps a ready session alive, but the timestamp is
+        // written at most once per LIVENESS_WRITE_SECONDS: the broker asks once per relayed
+        // input message, and a durable commit for each one bounded input throughput by disk
+        // latency. Authority is still evaluated on every check.
+        const now = this.store.clock(), age = now - Number(r.seen);
+        if (authorized && (r.seen === null || !(age >= 0 && age < LIVENESS_WRITE_SECONDS))) db.prepare('UPDATE owner_display_sessions SET seen=? WHERE id=?').run(now, r.id);
         return { authorized: authorized && (!command.ready || r.state === 'ready') };
       }
       if (!LIVE.includes(r.state) || !this.current(db, r)) return fail(410);
