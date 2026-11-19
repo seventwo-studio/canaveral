@@ -236,7 +236,7 @@ function routeAllowed(method: string, route: string): boolean {
   if (new RegExp(`^/api/v1/(?:previews|builds)/${UUID}$`).test(route)) return method === "GET" || method === "DELETE";
   if (browserCollection.test(route)) return method === "POST";
   if (browserItem.test(route)) return method === "GET" || method === "DELETE";
-  if (method === "GET" && /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route)) return true;
+  if (method === "GET" && (route === "/api/v1/admin/model-jobs" || /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route))) return true;
   if (method === "POST" && new RegExp(`^/api/v1/admin/(?:leases/${UUID}/release|sessions/${UUID}/close|applications/${UUID}/revoke|(?:requests|jobs)/${UUID}/cancel)$`).test(route)) return true;
   if (method === "GET" && (route === "/api/v1/consumers" || new RegExp(`^/api/v1/(?:runner-enrollments|resource-domains)/${UUID}$`).test(route))) return true;
   if (method === "POST" && (["runners/credential", "runners/revoke", "consumers", "runner-enrollments", "model-catalog", "resource-domains", "model-grants", "model-grants/revoke", "model-runner-approvals", "model-runner-approvals/revoke", "linux-lease-images", "linux-lease-grants", "linux-lease-grants/revoke", "linux-lease-runner-approvals", "linux-lease-runner-approvals/revoke"].some(path => route === `/api/v1/${path}`) || new RegExp(`^/api/v1/(?:consumers/${UUID}/(?:credential|revoke)|runner-enrollments/${UUID}/revoke|updates/artifacts/[a-f0-9]{64})$`).test(route))) return true;

@@ -40,6 +40,15 @@ const reply = (value: unknown, status = 200) => ({
   status,
   json: async () => value,
 });
+/** The Models page also loads the application queue; these flows leave it empty. */
+const queueAware = <A extends [string, ...unknown[]]>(
+  handler: (...args: A) => Promise<unknown>,
+) =>
+  vi.fn(async (...args: A) =>
+    args[0] === "/api/v1/admin/model-jobs"
+      ? reply({ jobs: [] })
+      : handler(...args),
+  );
 
 test("retries the same request, follows it to output and shows released capacity", async () => {
   const bodies: string[] = [];
@@ -47,7 +56,7 @@ test("retries the same request, follows it to output and shows released capacity
   let current: Record<string, unknown> = {};
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string, init: RequestInit) => {
+    queueAware(async (url: string, init: RequestInit) => {
       if (url === "/api/v1/models")
         return reply({
           models: [
@@ -122,7 +131,7 @@ test("cancels a running job and keeps polling until the runner confirms stop", a
   const cancels: string[] = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string, init: RequestInit) => {
+    queueAware(async (url: string, init: RequestInit) => {
       if (url === "/api/v1/models") return reply({ models: [offer()] });
       if (url === "/api/v1/jobs") return reply({ jobs: [current] });
       if (url.endsWith("/cancel")) {
@@ -159,7 +168,7 @@ test("loads output for finished jobs only on request", async () => {
     cleanup: "complete",
     reservationHeld: false,
   };
-  const fetch = vi.fn(async (url: string) => {
+  const fetch = queueAware(async (url: string) => {
     if (url === "/api/v1/models") return reply({ models: [] });
     if (url === "/api/v1/jobs") return reply({ jobs: [job(id, done)] });
     return reply(
@@ -190,7 +199,7 @@ test("a definite rejection discards the request identity and denial ends admin a
   let status = 409;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string, init: RequestInit) => {
+    queueAware(async (url: string, init: RequestInit) => {
       if (url === "/api/v1/models") return reply({ models: [offer()] });
       if (url === "/api/v1/jobs" && init.method === "POST") {
         posts.push(JSON.parse(String(init.body)).id);
@@ -253,7 +262,7 @@ test("claims released capacity only after a terminal, stopped and cleaned job", 
   const inconsistent = job(id, { state: "running", reservationHeld: false });
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) =>
+    queueAware(async (url: string) =>
       url === "/api/v1/models"
         ? reply({ models: [offer()] })
         : reply({ jobs: [inconsistent] }),
@@ -269,7 +278,7 @@ test("keeps an uncertain request identity across reloads until it is retried or 
   const posts: string[] = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string, init: RequestInit) => {
+    queueAware(async (url: string, init: RequestInit) => {
       if (url === "/api/v1/models") return reply({ models: [offer()] });
       if (url === "/api/v1/jobs" && init.method === "POST") {
         posts.push(String(init.body));
@@ -300,7 +309,7 @@ test("a followed job resumes polling after a transient error", async () => {
   let calls = 0;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string, init: RequestInit) => {
+    queueAware(async (url: string, init: RequestInit) => {
       if (url === "/api/v1/models") return reply({ models: [offer()] });
       if (url === "/api/v1/jobs" && init.method !== "POST")
         return reply({ jobs: [job(id, { state: "running" })] });

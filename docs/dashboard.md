@@ -491,6 +491,20 @@ stays held until that same positive stop. The job list omits result bodies.
 Portable component and browser fixtures cover this flow. Native dashboard model
 execution remains unaccepted; see the [acceptance record](../coordination/native-acceptance/dashboard-models.md).
 
+Below the administrator runs, **Application model queue** lists up to 100
+application model jobs from `GET /api/v1/admin/model-jobs`: open work first, oldest
+first so long-waiting jobs stay visible, then the most recently closed. It
+shows each job's application, model, state and reservation, and for a
+[queued model call](requests.md#queued-model-calls) its request state, waiting
+reason, priority and deadline. Direct submissions show as priority 0. Prompts and
+results are not listed. **Cancel waiting job** (or **Cancel job** once admitted)
+sends `POST /api/v1/admin/jobs/{id}/cancel` with a new mutation UUID and the
+application ID; after a lost response the button becomes **Retry same
+cancellation** and reuses that UUID. Waiting jobs close without execution;
+admitted jobs keep their reservation until the runner confirms stop and cleanup.
+The list refreshes every five seconds while any job is unfinished and the tab is
+visible.
+
 ## Owner mobile app uploads
 
 Send JSON mutations with the dashboard session cookie and matching Origin.

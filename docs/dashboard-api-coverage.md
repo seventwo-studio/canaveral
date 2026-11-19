@@ -43,6 +43,7 @@ store; browser storage is not used.
 | Linux lease images, grants and runner approvals | Configuration |
 | Runner enrollment and revocation | Configuration |
 | Inference models and jobs | Configuration; Models (administrator prompt, output, cancellation) |
+| Application model jobs and queued model calls | Models (application queue state, administrator cancellation) |
 | Application artifact admission, chunks, verification and deletion | Configuration |
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
@@ -86,7 +87,8 @@ building or testing these screens.
 | `POST /v1/admin/leases/{id}/release` | `{id: mutationUUID}` | Terminalize the lease using its owning backend's cleanup rules |
 | `POST /v1/admin/sessions/{id}/close` | `{id: mutationUUID}` | Revoke a single access/video session without ending its lease |
 | `POST /v1/admin/applications/{id}/revoke` | `{id: mutationUUID}` | Revoke application authority and refresh subordinate lifecycle state |
-| `POST /v1/admin/requests/{id}/cancel` | `{id: mutationUUID}` | Cancel waiting intent or release its admitted lease |
+| `GET /v1/admin/model-jobs` | none | Up to 100 application model jobs, open first (oldest first), then recently closed, with queue state and no prompts or results |
+| `POST /v1/admin/requests/{id}/cancel` | `{id: mutationUUID}` | Cancel waiting intent, release its admitted lease or request its admitted model job's stop |
 | `POST /v1/admin/jobs/{id}/cancel` | `{id: mutationUUID}` | Request model/inference cancellation without releasing claimed reservations early |
 
 These endpoints require existing administrator authority: an operator credential

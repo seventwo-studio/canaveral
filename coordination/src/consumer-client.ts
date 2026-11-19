@@ -43,12 +43,17 @@ export interface AcquireResult { /** True for 201 (new intent); false for an ide
 export interface RenewRequest { id: string; expectedRevision: number; ttlSeconds: number }
 export interface ReleaseRequest { id: string }
 /** Opt-in durable lease intent. Persist the envelope before dispatch. */
-export interface WaitingRequestInput { id: string; kind: "lease" | "linux-lease"; intent: Omit<AcquireRequest,"id">; priority?: number; deadline?: string; source?: Record<string, unknown> }
-export interface WaitingRequest extends Omit<WaitingRequestInput,"deadline" | "source" | "intent"> { intent: AcquireRequest; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
+/** Queued model-call intent: the model-job/1 submit message without `type`. Admission happens at a runner claim. */
+export interface ModelJobIntent { adapter: "ollama" | "llama.cpp" | "vllm" | "mlx"; model: string; digest: string; prompt: string; maxTokens: number }
+export type WaitingRequestInput = { id: string; priority?: number; deadline?: string; source?: Record<string, unknown> } &
+  ({ kind: "lease" | "linux-lease"; intent: Omit<AcquireRequest,"id"> } | { kind: "model-job"; intent: ModelJobIntent });
+/** Stored model-call intent as returned in request views: the prompt is replaced by `sha256:<hex>` of its UTF-8 bytes. */
+export interface ModelJobRequestIntent { adapter: ModelJobIntent["adapter"]; model: string; digest: string; promptDigest: string; maxTokens: number }
+export interface WaitingRequest { id: string; kind: "lease" | "linux-lease" | "model-job"; intent: AcquireRequest | ModelJobRequestIntent; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
 export interface WaitingRequestPage { requests: WaitingRequest[]; nextCursor: string | null }
 function waitingRequest(value: unknown, id?: string): WaitingRequest {
   if (!isRecord(value) || typeof value["id"] !== "string" || (id !== undefined && !sameId(value["id"],id)) ||
-      !["lease","linux-lease"].includes(value["kind"] as string) || !["waiting","admitted","cancelled","expired","rejected"].includes(value["state"] as string) ||
+      !["lease","linux-lease","model-job"].includes(value["kind"] as string) || !["waiting","admitted","cancelled","expired","rejected"].includes(value["state"] as string) ||
       !Number.isSafeInteger(value["sequence"]) || !isRecord(value["intent"]) || typeof value["createdAt"] !== "string" ||
       !Number.isSafeInteger(value["priority"]) || !isRecord(value["resources"]) ||
       !(value["deadline"] === null || (typeof value["deadline"] === "string" && Number.isFinite(Date.parse(value["deadline"])))) ||
@@ -488,10 +493,11 @@ export class ConsumerClient extends LeaseOperations {
   async submitRequest(request: WaitingRequestInput): Promise<{ created: boolean; request: WaitingRequest }> {
     const r = exact(request, ["id","kind","intent","priority","deadline","source"], "Waiting request");
     const id = uuid(r["id"], "id");
-    if (r["kind"] !== "lease" && r["kind"] !== "linux-lease") throw new ConsumerConfigurationError("Use lease or linux-lease.", "invalid_request");
+    if (r["kind"] !== "lease" && r["kind"] !== "linux-lease" && r["kind"] !== "model-job") throw new ConsumerConfigurationError("Use lease, linux-lease or model-job.", "invalid_request");
     if (!isRecord(r["intent"]) || Object.hasOwn(r["intent"],"id")) throw new ConsumerConfigurationError("intent excludes the envelope UUID.", "invalid_request");
-    const intent = acquireBody({ ...r["intent"] as Omit<AcquireRequest,"id">, id });
-    delete intent["id"];
+    let intent: Record<string, unknown>;
+    if (r["kind"] === "model-job") intent = exact(r["intent"], ["adapter","model","digest","prompt","maxTokens"], "Model-job intent");
+    else { intent = acquireBody({ ...r["intent"] as Omit<AcquireRequest,"id">, id }); delete intent["id"]; }
     const body = { ...r, id, intent };
     if (r["priority"] !== undefined && (typeof r["priority"] !== "number" || !Number.isSafeInteger(r["priority"]) || Math.abs(r["priority"]) > 1000000)) throw new ConsumerConfigurationError("Invalid priority.", "invalid_request");
     if (r["deadline"] !== undefined && (typeof r["deadline"] !== "string" || !r["deadline"].endsWith("Z") || !Number.isFinite(Date.parse(r["deadline"])))) throw new ConsumerConfigurationError("Invalid deadline.", "invalid_request");

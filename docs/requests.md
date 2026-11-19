@@ -2,8 +2,12 @@
 
 Applications opt into `/v1/requests` when capacity may be full. Direct lease
 acquisition is unchanged: it still returns 503 `capacity_unavailable`. LeaseState
-has no waiting value. Model jobs retain their separate queue and do not participate
-in this fairness policy.
+has no waiting value. Application model calls join the same request model as
+[queued model calls](#queued-model-calls): `kind: "model-job"` requests share this
+envelope, replay, waiting cap, priority, deadline and cancellation, and every
+unassigned model job (including direct `/v1/model-jobs` submissions) is admitted in
+request order. Embedded administrator inference (`/v1/jobs`) has no application
+identity and does not join this queue; it still fails when no host has capacity.
 
 | Method and route | Result |
 | --- | --- |
@@ -16,13 +20,13 @@ Every route requires the application credential. Another application's UUID is
 404, including submission; scoped lease, host and administrator keys cannot act
 as application keys. Persist the UUID and complete envelope before sending it.
 
-The envelope has `id`, `kind` (`lease` for the generic host path or `linux-lease`
-for approved runner domains), `intent` (the existing acquisition body without
-`id`), integer `priority` (default 0), optional UTC RFC3339 `deadline` and optional
+The envelope has `id`, `kind` (`lease` for the generic host path, `linux-lease`
+for approved runner domains or `model-job` for a model call), `intent` (the existing
+acquisition body without `id`, or the model-call intent below), integer `priority` (default 0), optional UTC RFC3339 `deadline` and optional
 opaque `source` object, limited to 4096 UTF-8 bytes. Source can carry repository,
 pull request, commit and run context; it drives no behavior. Unknown fields or
-kinds return 400; `request_kind_unsupported` names the supported paths. The request
-UUID becomes the lease UUID. Do not use it for another direct acquisition.
+kinds return 400; `request_kind_unsupported` names the supported kinds. The request
+UUID becomes the lease or model-job UUID. Do not use it for another direct acquisition.
 
 ## States and clocks
 
@@ -43,7 +47,8 @@ waiting requests and retains the existing lease revocation/cleanup behavior.
 
 ## Admission and fairness
 
-The control worker is the single queue owner. It already instantiates both generic
+The control worker is the single queue owner for lease kinds; runner claims admit
+[queued model calls](#queued-model-calls). It already instantiates both generic
 and Linux lease implementations. Admission calls those implementations with a live
 application lookup, under one BEGIN IMMEDIATE pass; each attempt uses a savepoint.
 Grants, allowlists, application limits, health, drains and physical capacity are
@@ -88,12 +93,74 @@ not consume the UUID; checks that depend on current limits or grants run at
 admission and reject with a reason. Ordinary structured errors retain the consumer error and
 uncertain-operation contracts. The SDK never automatically retries or polls.
 
+## Queued model calls
+
+A `model-job` request queues one application model call. Its submitted `intent` is
+exactly the `model-job/1` submit message without `type`: `{adapter, model, digest,
+prompt, maxTokens}`. Other or missing fields return 400 without consuming the UUID.
+Prompts are not echoed: the request stores and returns `{adapter, model, digest,
+promptDigest, maxTokens}`, where `promptDigest` is `sha256:` and the lowercase hex
+SHA-256 of the prompt's UTF-8 bytes. Replay compares that digest, so resending the
+same prompt replays and a changed prompt is a 409 `request_conflict`. The job record
+keeps the prompt for the runner. The
+application needs an active grant for the exact model and digest (403), and the
+adapter must match the immutable catalog entry (409); both are checked at submission
+because the job record is created with the request. `resources` is the catalogued
+per-job reservation. The request UUID is the model-job UUID, so
+`GET /v1/model-jobs/{id}` works from submission; its view adds a `request` object
+`{state, priority, deadline, reason, admittedAt}`. Nothing is reserved while waiting.
+
+Admission is a runner claim, because only a claim binds an approved physical domain.
+The control-worker pass never acquires model calls; it expires them at their
+deadline, cancels them on application revocation and rejects them with reason
+`model_grant_revoked` when the grant is revoked. Each claim is one transaction:
+it first expires every model call whose deadline has passed, then orders the
+unassigned, uncancelled model jobs the runner can serve by the same rules as the
+lease pass: applications in a persisted round-robin turn, then higher priority, then
+FIFO submission order. The turn is kept per runner (`model_job_scheduler`, separate
+from the lease turn), so admissions on a runner that serves other models cannot
+starve an application waiting on this one. Eligibility (served model and digest,
+catalogued adapter, unrevoked application and grant) is decided in the query, and
+only the first job of each application, model and digest is considered, because
+later ones share its limit and resources. Direct `/v1/model-jobs` submissions take
+part at priority 0 without a deadline. The claim skips an application whose admitted, unreleased jobs for that model and digest have reached
+the grant's `maxUnfinished` (reason `model_job_limit`), and skips a job whose
+catalogued resources do not fit the runner's domain (reason `capacity_unavailable`,
+job state `waitingForResources`). The first job that fits is reserved on the domain's
+physical ledger, assigned, and marked `admitted` with `target` equal to its UUID, all
+in the same transaction. Skipped jobs stay eligible; there is no aging. Waiting never
+preempts, shrinks or relocates a held reservation: priority only orders admission.
+
+`waiting` ends as `admitted`, `cancelled`, `expired` or `rejected`. A model call that
+ends without admission closes its job without execution: cancellation closes it as
+`cancelled`, expiry and rejection as `failed`, each with `stopped: true`,
+`cleanup: "complete"` and no assignment. Cancel waiting intent through
+`/v1/requests/{id}/cancel`, `/v1/model-jobs/{id}/cancel` or the administrator
+request or job cancellation; all use one transition, and expiry still wins at
+`now >= deadline`. Cancelling an admitted model call keeps the request `admitted`
+and sets the job's `cancelRequested`; its reservation stays held until the bound
+runner reports stop and cleanup.
+
+The waiting cap counts model calls with leases. A queued model call is limited at
+admission by `maxUnfinished`, not refused at submission. Direct submission keeps its
+existing 429 when the application's unfinished jobs (waiting or admitted) for that
+grant reach `maxUnfinished`, and creates no request record, so direct jobs are not
+listed under `/v1/requests`. A request UUID already used by a direct job, or a direct
+submission reusing queued intent with a different submission, returns 409. An
+identical direct submission of queued intent replays the job.
+
 ## Upgrade and backup boundary
 
 This feature creates only new tables (`requests`, `request_scheduler`,
-`request_scan`) and partial indexes for waiting order and deadline. It neither
-alters nor converts existing tables. Old databases and old application policy JSON
-remain usable. Held reservations, application/runner identities, assignment and
+`request_scan`, `model_job_scheduler`) and partial indexes for waiting order and
+deadline. It neither alters nor converts existing tables; queued model calls add
+rows to the existing `model_jobs` table in its current schema. Old databases and old application policy JSON
+remain usable.
+
+Downgrading after the first queued model call is unsupported. An older controller
+does not know the `model-job` kind and rejects the waiting request, but its FIFO claim
+still finds the open job in `model_jobs` and runs it, outside the request's priority,
+deadline and cancellation. Held reservations, application/runner identities, assignment and
 mutation receipts remain authoritative across upgrade and restart. Queue order,
 scan position and request tombstones are durable in the same SQLite database.
 
@@ -114,6 +181,21 @@ const { request } = await client.submitRequest({
 // Later, explicitly inspect; the SDK does not poll.
 const current = await client.inspectRequest(request.id);
 ```
+
+### Queued model-call example
+
+```ts
+const { request } = await client.submitRequest({
+  id: persistedUuid, kind: "model-job", priority: 0,
+  intent: { adapter: "ollama", model: "your-model:latest", digest: "sha256:…", prompt, maxTokens: 600 },
+  deadline: "2026-12-01T12:00:00Z",
+});
+```
+
+Applications need `limits.maxRequestPriority` above 0 to submit positive priority.
+Portable fixtures cover waiting, admission, priority, fairness, limits, deadline,
+cancellation, replay, lost responses, restart and non-displacement; they do not
+establish native model execution or measured resource fit.
 
 ### Linux workspace box concurrency
 

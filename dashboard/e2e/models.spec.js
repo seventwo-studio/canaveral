@@ -31,6 +31,7 @@ for (const width of [320, 1440]) {
       else if (path === "templates") result = { templates: [] };
       else if (path === "users") result = { users: [adminUser] };
       else if (path === "models") result = { models: [offer] };
+      else if (path === "admin/model-jobs") result = { jobs: [] };
       else if (path === "jobs" && route.request().method() === "POST") {
         const body = route.request().postDataJSON();
         submissions.push(body);
@@ -123,4 +124,79 @@ test("ordinary users are returned to machines from the models route", async ({
   await expect(page.getByRole("link", { name: "Models" })).toHaveCount(0);
   expect(requested).not.toContain("models");
   expect(requested).not.toContain("jobs");
+  expect(requested).not.toContain("admin/model-jobs");
 });
+
+for (const width of [320, 1440]) {
+  test(`models show a waiting application job and cancel it at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const applicationId = "6a0b6f61-8c1e-4c9e-9a3e-3f1f0b2d7c11";
+    const id = "0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a00";
+    const cancels = [];
+    let cancelled = false;
+    const waiting = () => ({
+      id,
+      applicationId,
+      model: "fixture:latest",
+      digest,
+      state: cancelled ? "cancelled" : "waitingForResources",
+      cancelRequested: cancelled,
+      stopped: cancelled,
+      cleanup: cancelled ? "complete" : "pending",
+      assigned: false,
+      reservationHeld: false,
+      createdAt: 1,
+      updatedAt: 1,
+      request: {
+        state: cancelled ? "cancelled" : "waiting",
+        priority: 3,
+        deadline: null,
+        reason: cancelled ? "administrator_cancelled" : "capacity_unavailable",
+        admittedAt: null,
+      },
+    });
+    await page.route("**/api/v1/**", async (route) => {
+      const path = new URL(route.request().url()).pathname.split("/api/v1/")[1];
+      let result = {};
+      if (["auth/status", "auth/session"].includes(path))
+        result = { setupRequired: false, user: adminUser };
+      else if (path === "machines") result = { machines: [] };
+      else if (path === "hosts") result = { hosts: [] };
+      else if (path === "templates") result = { templates: [] };
+      else if (path === "users") result = { users: [adminUser] };
+      else if (path === "models") result = { models: [offer] };
+      else if (path === "jobs") result = { jobs: [] };
+      else if (path === "admin/model-jobs") result = { jobs: [waiting()] };
+      else if (path === `admin/jobs/${id}/cancel`) {
+        const body = route.request().postDataJSON();
+        cancels.push(body);
+        cancelled = true;
+        result = { id, requestId: body.id, action: "cancel", state: "cancelled", applicationId };
+      }
+      await route.fulfill({ json: result });
+    });
+    await page.goto("/#models");
+    await expect(
+      page.getByRole("heading", { name: "Application model queue" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Waiting for admission \(no approved runner has free capacity\) · priority 3/),
+    ).toBeVisible();
+    await expect(page.getByText("No capacity reserved")).toBeVisible();
+    await page.getByRole("button", { name: "Cancel waiting job" }).click();
+    await expect(page.getByText("Cancellation recorded: Cancelled.")).toBeVisible();
+    await expect(
+      page.getByText(/Cancelled before admission \(cancelled by an administrator\)/),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Cancel waiting job" })).toHaveCount(0);
+    expect(cancels).toHaveLength(1);
+    expect(cancels[0].applicationId).toBe(applicationId);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}

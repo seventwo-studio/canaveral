@@ -52,7 +52,7 @@ The embedded host ledger shares VM/image/inference reservations. The Rust runner
 
 ## Requests and waiting
 
-Durable `lease` and `linux-lease` requests wait when capacity or application limits are full. Linux workspace boxes share bounded admission with direct acquisition. Previews and queued model calls remain open.
+Durable `lease` and `linux-lease` requests wait when capacity or application limits are full. Linux workspace boxes share bounded admission with direct acquisition. Application model calls joined the same request model on 19 November 2026 ([queued model calls](requests.md#queued-model-calls)): a runner claim admits them by request order and reserves on the mapped physical ledger in one transaction. This is portable fixture evidence only; no native model runtime has run it. Previews and embedded administrator inference (`/v1/jobs`, which has no application identity) remain outside the queue.
 
 The target is one request model across consumers. Under that model, a request is a box, a preview or a model call. It carries a caller UUID, pinned template or model, resources, priority, deadline and optional source context. Requests beyond current capacity are accepted and wait instead of failing. Admission is fair per application, bounded by its limits, and a waiting request can be cancelled or expire at its deadline. Replaying the same UUID and specification returns the same request. Admission and reservation happen in one transaction against the single per-machine ledger, so the two existing ledgers must be bound first.
 
