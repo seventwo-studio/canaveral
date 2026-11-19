@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { parseControllerConfig } from "../src/main.ts";
+import { ConsumerClient } from "../src/consumer-client.ts";
 
 type Body = Record<string, unknown>;
 type Reply = { status: number; body: Body };
@@ -107,9 +108,9 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const post = (route: string, body: unknown, token?: string, via = port()) => call(via, "POST", route, body, token);
   const get = (route: string, token?: string) => call(port(), "GET", route, undefined, token);
 
-  async function application(): Promise<{ id: string; credential: string }> {
+  async function application(limits: Body = {}): Promise<{ id: string; credential: string }> {
     const id = randomUUID();
-    const created = await post("/v1/consumers", { id, name: "fixture", templates: [], limits: { resources: { cpu: 1, memoryMiB: 1, diskGiB: 1 }, activeLeases: 1 } }, admin);
+    const created = await post("/v1/consumers", { id, name: "fixture", templates: [], limits: { resources: { cpu: 1, memoryMiB: 1, diskGiB: 1 }, activeLeases: 1, ...limits } }, admin);
     assert.equal(created.status, 200);
     return { id, credential: created.body.credential as string };
   }
@@ -131,7 +132,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   async function grant(applicationId: string, maxUnfinished = 8): Promise<void> {
     assert.equal((await post("/v1/model-grants", { applicationId, model: MODEL, digest: DIGEST, maxUnfinished }, admin)).status, 200);
   }
-  const submission = (applicationId: string, id = randomUUID(), prompt = "Summarize the fixture.") =>
+  const submission = (applicationId: string, id: string = randomUUID(), prompt = "Summarize the fixture.") =>
     ({ version: 1, applicationId, id, message: { type: "submit", adapter: "ollama", model: MODEL, digest: DIGEST, prompt, maxTokens: 64 } });
   const receipt = (job: { applicationId: string; id: string }, state: string, extra: Body = {}) => ({ version: 1, applicationId: job.applicationId, id: job.id,
     message: { type: "receipt", state, cancelRequested: false, stopped: false, cleanup: "pending", ...extra } });
@@ -369,4 +370,232 @@ test("cross-application, cross-runner, role and stale-generation authority are d
   assert.equal((await f.post("/v1/model-grants/revoke", { applicationId: a.id, model: MODEL, digest: DIGEST }, f.admin)).status, 200);
   await f.post(`/v1/model-jobs/${job.id}/cancel`, { version: 1, applicationId: a.id, id: job.id, message: { type: "cancel" } }, a.credential);
   assert.equal((await f.post("/v1/model-jobs", f.submission(a.id), a.credential)).status, 403);
+});
+
+// Queued model calls: /v1/requests kind "model-job", admitted by a runner claim on the shared ledger.
+
+type Queued = { id: string; kind: "model-job"; intent: Body; priority?: number; deadline?: string; source?: Body };
+const intent = (prompt = "Summarize the fixture.") => ({ adapter: "ollama", model: MODEL, digest: DIGEST, prompt, maxTokens: 64 });
+const queued = (extra: Partial<Queued> = {}): Queued => ({ id: randomUUID(), kind: "model-job", intent: intent(), ...extra });
+async function modelQueue(t: { after: (fn: () => Promise<void>) => void }, capacity = JOB_RESOURCES) {
+  const f = await fixture(t), domain = await f.domain(capacity), runner = await f.enroll();
+  await f.approve(runner, domain);
+  const app = async (limits: Body = {}, maxUnfinished = 8) => { const a = await f.application(limits); await f.grant(a.id, maxUnfinished); return a; };
+  const submit = (request: Queued, credential: string, via?: number) => f.post("/v1/requests", request, credential, via);
+  const request = async (id: string, credential: string) => (await f.get(`/v1/requests/${id}`, credential)).body;
+  const job = async (id: string, credential: string) => (await f.get(`/v1/model-jobs/${id}`, credential)).body;
+  /** Claims once and returns the admitted job UUID, or null. */
+  const admit = async () => {
+    const reply = await f.claim(runner);
+    assert.equal(reply.status, 200);
+    const assignment = reply.body.assignment as { id: string; job: { id: string; applicationId: string } } | null;
+    return assignment ? { assignment: assignment.id, id: assignment.job.id, applicationId: assignment.job.applicationId } : null;
+  };
+  const finish = async (admitted: { assignment: string; id: string; applicationId: string }, sequence = 1) => {
+    const done = await f.report(runner, admitted.assignment, sequence, f.receipt(admitted, "failed", { stopped: true, cleanup: "complete" }));
+    assert.equal(done.body.released, true);
+  };
+  return { ...f, domain, runner, app, submit, request, job, admit, finish };
+}
+
+test("model calls wait when full, are admitted when capacity frees and never displace running work", async t => {
+  const q = await modelQueue(t), a = await q.app({ maxRequestPriority: 10 });
+  const first = queued(), second = queued(), urgent = queued({ priority: 10 });
+  const created = await q.submit(first, a.credential);
+  assert.deepEqual([created.status, created.body.state, created.body.kind, created.body.target], [201, "waiting", "model-job", null]);
+  assert.deepEqual(created.body.resources, JOB_RESOURCES);
+  // The job exists at submission without a reservation.
+  const before = await q.job(first.id, a.credential);
+  assert.deepEqual([before.state, before.assignment, before.reservationHeld, (before.request as Body).state], ["queued", "none", false, "waiting"]);
+  assert.equal((await q.submit(second, a.credential)).status, 201);
+  const running = (await q.admit())!;
+  assert.equal(running.id, first.id);
+  const admitted = await q.request(first.id, a.credential);
+  assert.deepEqual([admitted.state, admitted.target, typeof admitted.admittedAt], ["admitted", first.id, "string"]);
+  assert.equal((await q.report(q.runner, running.assignment, 1, q.receipt(running, "running"))).status, 200);
+
+  // Higher priority only orders admission: it neither preempts nor shrinks the running job's reservation.
+  assert.equal((await q.submit(urgent, a.credential)).status, 201);
+  assert.equal(await q.admit(), null);
+  const domain = await q.inspectDomain(q.domain);
+  assert.deepEqual([domain.reservations, domain.reserved.cpu], [1, JOB_RESOURCES.cpu]);
+  const still = await q.job(first.id, a.credential);
+  assert.deepEqual([still.state, still.reservationHeld, still.cancelRequested], ["running", true, false]);
+  const blocked = await q.job(urgent.id, a.credential);
+  assert.deepEqual([blocked.state, (blocked.request as Body).reason], ["waitingForResources", "capacity_unavailable"]);
+  assert.deepEqual(q.rows("SELECT count(*) AS n FROM model_assignments"), [{ n: 1 }]);
+
+  await q.finish(running, 2);
+  const next = (await q.admit())!;
+  assert.equal(next.id, urgent.id);
+  assert.equal((await q.request(urgent.id, a.credential)).state, "admitted");
+  assert.equal((await q.request(second.id, a.credential)).state, "waiting");
+});
+
+test("model calls follow request priority, FIFO and include direct submissions at priority 0", async t => {
+  const q = await modelQueue(t, { cpu: 64, memoryMiB: 131072, diskGiB: 400 }), a = await q.app({ maxRequestPriority: 10 });
+  const direct = q.submission(a.id);
+  assert.equal((await q.post("/v1/model-jobs", direct, a.credential)).status, 201);
+  const low = queued({ priority: -5 }), plain = queued(), high = queued({ priority: 5 }), highLater = queued({ priority: 5 });
+  for (const r of [low, plain, high, highLater]) assert.equal((await q.submit(r, a.credential)).status, 201);
+  assert.equal((await q.submit(queued({ priority: 11 }), a.credential)).status, 400);
+  const order: string[] = [];
+  for (let i = 0; i < 5; i++) order.push((await q.admit())!.id);
+  assert.deepEqual(order, [high.id, highLater.id, direct.id, plain.id, low.id]);
+  // Direct submissions keep their API: no request record is listed for them.
+  const listed = (await q.get("/v1/requests", a.credential)).body.requests as Body[];
+  assert.deepEqual(listed.map(r => r.id).sort(), [low.id, plain.id, high.id, highLater.id].sort());
+  assert.equal((await q.job(direct.id, a.credential)).request, undefined);
+});
+
+test("model calls are fair per application and bounded by grant, waiting and priority limits", async t => {
+  const q = await modelQueue(t, { cpu: 64, memoryMiB: 131072, diskGiB: 400 });
+  const busy = await q.app(), quiet = await q.app(), limited = await q.app({ maxWaitingRequests: 2 }, 1);
+  const busyIds: string[] = [];
+  for (let i = 0; i < 3; i++) { const r = queued(); busyIds.push(r.id); await q.submit(r, busy.credential); }
+  const quietRequest = queued(); await q.submit(quietRequest, quiet.credential);
+  const first = await q.admit(), second = await q.admit();
+  // A busy application cannot monopolize admission: the other application takes the next turn.
+  assert.deepEqual(new Set([first!.applicationId, second!.applicationId]), new Set([busy.id, quiet.id]));
+  assert.equal([first, second].find(x => x!.applicationId === busy.id)!.id, busyIds[0]);
+
+  // Grant maxUnfinished bounds admitted work; excess waits instead of failing, and does not block others.
+  const held = queued(), over = queued();
+  assert.equal((await q.submit(held, limited.credential)).status, 201);
+  assert.equal((await q.submit(over, limited.credential)).status, 201);
+  const waitingCap = await q.submit(queued(), limited.credential);
+  assert.deepEqual([waitingCap.status, waitingCap.body.code], [429, "request_waiting_limit"]);
+  const admitted: string[] = [];
+  for (let i = 0; i < 4; i++) admitted.push((await q.admit())?.id ?? "none");
+  assert.ok(admitted.includes(held.id));
+  assert.ok(!admitted.includes(over.id));
+  assert.ok(busyIds.slice(1).every(id => admitted.includes(id)));
+  const limitedView = await q.request(over.id, limited.credential);
+  assert.deepEqual([limitedView.state, limitedView.reason], ["waiting", "model_job_limit"]);
+  // Direct submission keeps its unfinished-job 429 contract.
+  assert.equal((await q.post("/v1/model-jobs", q.submission(limited.id), limited.credential)).status, 429);
+});
+
+test("waiting model calls expire at their deadline and cancel without execution", async t => {
+  const q = await modelQueue(t), a = await q.app();
+  const blocker = queued(); await q.submit(blocker, a.credential);
+  const running = (await q.admit())!;
+  const soon = queued({ deadline: new Date(Date.now() + 1500).toISOString() });
+  const viaRequest = queued(), viaJob = queued(), viaAdmin = queued();
+  for (const r of [soon, viaRequest, viaJob, viaAdmin]) assert.equal((await q.submit(r, a.credential)).status, 201);
+
+  const cancelled = await q.post(`/v1/requests/${viaRequest.id}/cancel`, {}, a.credential);
+  assert.deepEqual([cancelled.body.state, cancelled.body.reason], ["cancelled", "consumer_cancelled"]);
+  const closed = await q.job(viaRequest.id, a.credential);
+  assert.deepEqual([closed.state, closed.cancelRequested, closed.stopped, closed.cleanup, closed.assignment, closed.reservationHeld], ["cancelled", true, true, "complete", "none", false]);
+  const jobCancel = await q.post(`/v1/model-jobs/${viaJob.id}/cancel`, { version: 1, applicationId: a.id, id: viaJob.id, message: { type: "cancel" } }, a.credential);
+  assert.deepEqual([jobCancel.body.state, (jobCancel.body.request as Body).state], ["cancelled", "cancelled"]);
+  const queue = (await q.get("/v1/admin/model-jobs", q.admin)).body.jobs as Body[];
+  const listed = queue.find(j => j.id === viaAdmin.id)!;
+  assert.deepEqual([listed.applicationId, listed.state, listed.assigned, (listed.request as Body).state], [a.id, "queued", false, "waiting"]);
+  assert.equal(JSON.stringify(queue).includes("Summarize"), false);
+  const adminCancel = await q.post(`/v1/admin/jobs/${viaAdmin.id}/cancel`, { id: randomUUID(), applicationId: a.id }, q.admin);
+  assert.deepEqual([adminCancel.status, adminCancel.body.state], [200, "cancelled"]);
+  assert.equal((await q.request(viaAdmin.id, a.credential)).reason, "administrator_cancelled");
+
+  await new Promise(resolve => setTimeout(resolve, 1700));
+  const expired = await q.request(soon.id, a.credential);
+  assert.deepEqual([expired.state, expired.reason, expired.target], ["expired", "deadline", null]);
+  const expiredJob = await q.job(soon.id, a.credential);
+  assert.deepEqual([expiredJob.state, expiredJob.cancelRequested, expiredJob.reservationHeld, expiredJob.assignment], ["failed", false, false, "none"]);
+  // Cancelling admitted work keeps the request admitted and the reservation held until the runner confirms.
+  const admittedCancel = await q.post(`/v1/requests/${blocker.id}/cancel`, {}, a.credential);
+  assert.equal(admittedCancel.body.state, "admitted");
+  const requested = await q.job(blocker.id, a.credential);
+  assert.deepEqual([requested.cancelRequested, requested.reservationHeld], [true, true]);
+  assert.equal((await q.post(`/v1/requests/${blocker.id}/cancel`, {}, a.credential)).body.state, "admitted");
+  await q.report(q.runner, running.assignment, 1, q.receipt(running, "cancelled", { cancelRequested: true, stopped: true, cleanup: "complete" }));
+  assert.equal(await q.admit(), null);
+  assert.deepEqual(q.rows("SELECT count(*) AS n FROM model_assignments"), [{ n: 1 }]);
+});
+
+test("model-call replay is exact, changed intent conflicts and lost responses recover", async t => {
+  const q = await modelQueue(t), proxy = await lossyProxy(q.port), a = await q.app({ maxRequestPriority: 3 });
+  t.after(proxy.close);
+  const request = queued({ priority: 2, source: { repository: "team/project", run: "7" } });
+  await assert.rejects(q.submit(request, a.credential, proxy.port));
+  assert.equal(proxy.forwarded, 1);
+  const reordered = { source: { run: "7", repository: "team/project" }, priority: 2, intent: { maxTokens: 64, prompt: "Summarize the fixture.", digest: DIGEST, model: MODEL, adapter: "ollama" }, kind: "model-job", id: request.id };
+  const replay = await q.submit(reordered as Queued, a.credential);
+  assert.deepEqual([replay.status, replay.body.state, replay.body.sequence], [200, "waiting", 1]);
+  for (const changed of [{ ...request, intent: intent("Another prompt.") }, { ...request, priority: 1 }, { ...request, source: { run: "8" } },
+    { ...request, deadline: new Date(Date.now() + 60_000).toISOString() }]) {
+    const conflict = await q.submit(changed, a.credential);
+    assert.deepEqual([conflict.status, conflict.body.code], [409, "request_conflict"]);
+  }
+  // The queued intent owns its UUID on the direct path too: an identical submission replays, a change conflicts.
+  const asJob = q.submission(a.id, request.id);
+  assert.deepEqual([(await q.post("/v1/model-jobs", asJob, a.credential)).status], [200]);
+  assert.equal((await q.post("/v1/model-jobs", q.submission(a.id, request.id, "Different."), a.credential)).status, 409);
+  const direct = q.submission(a.id);
+  await q.post("/v1/model-jobs", direct, a.credential);
+  assert.equal((await q.submit(queued({ id: direct.id }), a.credential)).body.code, "request_conflict");
+  // Malformed intent and a missing grant are refused without consuming the UUID.
+  const malformed = queued(); (malformed.intent as Body).extra = 1;
+  assert.equal((await q.submit(malformed, a.credential)).status, 400);
+  const ungranted = await q.app(); await q.post("/v1/model-grants/revoke", { applicationId: ungranted.id, model: MODEL, digest: DIGEST }, q.admin);
+  assert.equal((await q.submit(queued({ id: malformed.id }), ungranted.credential)).status, 403);
+  assert.equal((await q.submit(queued({ id: malformed.id }), a.credential)).status, 201);
+  assert.deepEqual(q.rows(`SELECT count(*) AS n FROM requests WHERE id='${request.id}'`), [{ n: 1 }]);
+  assert.deepEqual(q.rows(`SELECT count(*) AS n FROM model_jobs WHERE id='${request.id}'`), [{ n: 1 }]);
+  // Another application cannot see or claim the UUID.
+  const other = await q.app();
+  assert.equal((await q.submit({ ...request, priority: 0 }, other.credential)).status, 404);
+  assert.equal((await q.get(`/v1/requests/${request.id}`, other.credential)).status, 404);
+});
+
+test("waiting model calls, their order and deadlines survive a controller restart", async t => {
+  const q = await modelQueue(t), a = await q.app({ maxRequestPriority: 5 });
+  const blocker = queued(); await q.submit(blocker, a.credential);
+  const running = (await q.admit())!;
+  const low = queued(), high = queued({ priority: 5 }), bounded = queued({ deadline: new Date(Date.now() + 60_000).toISOString() });
+  for (const r of [low, high, bounded]) await q.submit(r, a.credential);
+  assert.equal(await q.admit(), null);
+  await q.restart();
+  for (const r of [low, high, bounded]) assert.equal((await q.request(r.id, a.credential)).state, "waiting");
+  assert.equal((await q.request(bounded.id, a.credential)).deadline, bounded.deadline);
+  assert.equal((await q.job(running.id, a.credential)).reservationHeld, true);
+  await q.finish(running);
+  const next = (await q.admit())!;
+  assert.equal(next.id, high.id);
+  await q.restart();
+  await q.finish(next);
+  assert.equal((await q.admit())!.id, low.id);
+});
+
+test("revoked grants reject waiting model calls and revoked applications cancel them", async t => {
+  const q = await modelQueue(t), a = await q.app(), b = await q.app();
+  const blocker = queued(); await q.submit(blocker, a.credential);
+  await q.admit();
+  const ungranted = queued(), revoked = queued();
+  await q.submit(ungranted, a.credential); await q.submit(revoked, b.credential);
+  assert.equal((await q.post("/v1/model-grants/revoke", { applicationId: a.id, model: MODEL, digest: DIGEST }, q.admin)).status, 200);
+  const rejected = await q.request(ungranted.id, a.credential);
+  assert.deepEqual([rejected.state, rejected.reason], ["rejected", "model_grant_revoked"]);
+  const failed = await q.job(ungranted.id, a.credential);
+  assert.deepEqual([failed.state, failed.reservationHeld, failed.assignment], ["failed", false, "none"]);
+  // Admitted work keeps its reservation and report authority after the grant is revoked.
+  assert.deepEqual([(await q.request(blocker.id, a.credential)).state, (await q.job(blocker.id, a.credential)).reservationHeld], ["admitted", true]);
+  assert.equal((await q.post(`/v1/consumers/${b.id}/revoke`, {}, q.admin)).status, 200);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.deepEqual(q.rows(`SELECT state,reason FROM requests WHERE id='${revoked.id}'`), [{ state: "cancelled", reason: "application_revoked" }]);
+  assert.deepEqual(q.rows(`SELECT state,closed FROM model_jobs WHERE id='${revoked.id}'`), [{ state: "cancelled", closed: 1 }]);
+});
+
+test("the consumer SDK submits, lists, inspects and cancels queued model calls", async t => {
+  const q = await modelQueue(t), a = await q.app();
+  const client = new ConsumerClient({ baseUrl: `http://127.0.0.1:${q.port()}`, applicationKey: a.credential, allowLoopbackHttp: true });
+  const id = randomUUID(), input = { id, kind: "model-job" as const, intent: { adapter: "ollama" as const, model: MODEL, digest: DIGEST, prompt: "SDK prompt.", maxTokens: 32 } };
+  const first = await client.submitRequest(input);
+  assert.deepEqual([first.created, first.request.kind, first.request.state], [true, "model-job", "waiting"]);
+  assert.equal((await client.submitRequest(input)).created, false);
+  assert.deepEqual((await client.listRequests()).requests.map(r => r.id), [id]);
+  assert.equal((await client.cancelRequest(id)).state, "cancelled");
+  assert.equal((await client.inspectRequest(id)).reason, "consumer_cancelled");
+  await assert.rejects(client.submitRequest({ ...input, id: randomUUID(), intent: { ...input.intent, extra: 1 } as typeof input.intent }));
 });

@@ -9,6 +9,10 @@ import { modelAdapter, modelIdentity, modelJobCanRelease, modelReceiptMatches, p
 import type { GenerationResult, ModelJob, ModelJobState } from "./model-job.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { SqliteStore } from "./sqlite.ts";
+import { cancelModelJob, expireModelRequest, modelJobSchema, modelQueueView } from "./model-requests.ts";
+import { requestSchema } from "./requests.ts";
+
+export { cancelModelJob } from "./model-requests.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TERMINAL = ["succeeded", "failed", "cancelled"];
@@ -67,15 +71,6 @@ function canonicalResult(result: GenerationResult | undefined): string | null {
   return result ? JSON.stringify({ model: result.model, text: result.text, usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens } }) : null;
 }
 
-/** Shared consumer/operator cancellation transition; claimed reservations require runner receipts. */
-export function cancelModelJob(db: DatabaseSync, application: string, id: string, now: number): void {
-  const job = db.prepare("SELECT state,cancel_requested FROM model_jobs WHERE application=? AND id=?").get(application,id);
-  if (!job) throw new ServiceError("Unknown model job.",404);
-  if (terminal(String(job.state)) || job.cancel_requested) return;
-  if (db.prepare("SELECT 1 FROM model_assignments WHERE application=? AND job=?").get(application,id)) db.prepare("UPDATE model_jobs SET cancel_requested=1,updated=? WHERE application=? AND id=?").run(now,application,id);
-  else db.prepare("UPDATE model_jobs SET cancel_requested=1,state='cancelled',stopped=1,cleanup='complete',closed=1,updated=? WHERE application=? AND id=?").run(now,application,id);
-}
-
 /** Application-owned model-job ledger with claim-time admission against operator-approved
  * runner bindings and their shared physical resource domains. Every effect runs inside one
  * BEGIN IMMEDIATE transaction that also re-verifies the caller's credential. It never retries,
@@ -85,16 +80,7 @@ export function cancelModelJob(db: DatabaseSync, application: string, id: string
 export class ModelJobs {
   readonly domains = new ResourceDomains();
   constructor(readonly store: SqliteStore, readonly applications: ConsumerIdentities, readonly runners: RunnerEnrollment | undefined) {
-    store.transaction(db => {
-      ResourceDomains.schema(db);
-      db.exec(`CREATE TABLE IF NOT EXISTS model_catalog (model TEXT NOT NULL, digest TEXT NOT NULL, adapter TEXT NOT NULL, resources TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(model,digest));
-        CREATE TABLE IF NOT EXISTS model_grants (application TEXT NOT NULL, model TEXT NOT NULL, digest TEXT NOT NULL, max_unfinished INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(application,model,digest));
-        CREATE TABLE IF NOT EXISTS model_runner_approvals (controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, models TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, PRIMARY KEY(controller,runner,generation));
-        CREATE TABLE IF NOT EXISTS model_jobs (application TEXT NOT NULL, id TEXT NOT NULL, submission TEXT NOT NULL, model TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, cleanup TEXT NOT NULL DEFAULT 'pending', result TEXT, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL, PRIMARY KEY(application,id));
-        CREATE INDEX IF NOT EXISTS model_jobs_open ON model_jobs(closed,state,created);
-        CREATE TABLE IF NOT EXISTS model_assignments (id TEXT PRIMARY KEY, claim TEXT NOT NULL UNIQUE, application TEXT NOT NULL, job TEXT NOT NULL, controller TEXT NOT NULL, runner TEXT NOT NULL, generation INTEGER NOT NULL, incarnation TEXT NOT NULL, domain TEXT NOT NULL, reservation TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL DEFAULT 0, report TEXT, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, UNIQUE(application,job));
-        CREATE INDEX IF NOT EXISTS model_assignments_binding ON model_assignments(controller,runner,generation,closed);`);
-    });
+    store.transaction(db => { modelJobSchema(db); requestSchema(db); });
   }
 
   private now(): number { return this.store.clock(); }
@@ -221,6 +207,8 @@ export class ModelJobs {
   inspect(token: string, id: string): unknown {
     return this.store.transaction(db => {
       const application = this.applications.verify(db, token);
+      const job = this.owned(db, application.id, id);
+      expireModelRequest(db, job.application, job.id, this.now());
       return this.view(db, this.owned(db, application.id, id));
     });
   }
@@ -239,7 +227,7 @@ export class ModelJobs {
 
   // Runner routes. Every request carries `{binding, ...}` and the runner credential.
 
-  /** Claim the oldest eligible job that fits the runner's approved domain, or replay `claimId`. */
+  /** Admit the next eligible job by request order that fits the runner's approved domain, or replay `claimId`. */
   claim(token: string, value: unknown): unknown {
     const runners = this.requireRunners();
     const raw = object(value);
@@ -262,28 +250,48 @@ export class ModelJobs {
       const active = db.prepare("SELECT count(*) AS n FROM model_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(active.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };
       const served = new Set((JSON.parse(approval.models) as Array<[string, string]>).map(m => JSON.stringify(m)));
-      const queue = db.prepare(`SELECT j.* FROM model_jobs j WHERE j.closed=0 AND j.state IN ('queued','waitingForResources') AND j.cancel_requested=0
-        AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id) ORDER BY j.created, j.rowid`).all() as unknown as JobRow[];
-      const next = queue.find(job => {
-        const submission = parseModelJob(JSON.parse(job.submission) as unknown);
-        return submission.message.type === "submit" && submission.message.adapter === adapter &&
-          served.has(JSON.stringify([job.model, job.digest])) && this.applications.active(db, job.application) &&
-          !!db.prepare("SELECT 1 FROM model_grants WHERE application=? AND model=? AND digest=? AND revoked=0").get(job.application, job.model, job.digest);
-      });
-      if (!next) return { assignment: null };
-      const entry = db.prepare("SELECT resources FROM model_catalog WHERE model=? AND digest=?").get(next.model, next.digest) as { resources: string } | undefined;
-      if (!entry) throw new ServiceError("Model catalog state is unavailable.", 503, { retryable: false });
-      const id = randomUUID(), reservation = randomUUID(), now = this.now();
-      const fits = this.domains.reserve(db, { id: reservation, domain: approval.domain, kind: "model-job", owner: id, resources: resources(JSON.parse(entry.resources) as unknown) }, now);
-      if (!fits) {
-        // Strict per-runner FIFO: the oldest eligible job waits rather than being overtaken.
-        if (next.state !== "waitingForResources") db.prepare("UPDATE model_jobs SET state='waitingForResources',updated=? WHERE application=? AND id=?").run(now, next.application, next.id);
-        return { assignment: null };
+      const now = this.now(), turn = String(db.prepare("SELECT turn FROM model_job_scheduler WHERE id=1").get()!.turn);
+      // One request model: applications take persisted round-robin turns; within one, higher priority precedes
+      // FIFO submission order. Direct submissions are priority 0 without a deadline. Waiting intent never
+      // displaces held reservations: an unfit or quota-blocked job is skipped and later jobs stay eligible.
+      const queue = db.prepare(`SELECT j.*,r.priority AS request_priority,r.reason AS request_reason
+        FROM model_jobs j LEFT JOIN requests r ON r.application=j.application AND r.id=j.id AND r.kind='model-job'
+        WHERE j.closed=0 AND j.state IN ('queued','waitingForResources') AND j.cancel_requested=0 AND (r.id IS NULL OR r.state='waiting')
+          AND NOT EXISTS (SELECT 1 FROM model_assignments a WHERE a.application=j.application AND a.job=j.id)
+        ORDER BY j.application>? DESC,j.application,COALESCE(r.priority,0) DESC,j.rowid LIMIT 4096`).all(turn) as unknown as
+        Array<JobRow & { request_priority: number | null; request_reason: string | null }>;
+      const unfit = new Set<string>(), blocked = new Set<string>();
+      const wait = (job: (typeof queue)[number], reason: string) => {
+        if (reason === "capacity_unavailable" && job.state !== "waitingForResources") db.prepare("UPDATE model_jobs SET state='waitingForResources',updated=? WHERE application=? AND id=?").run(now, job.application, job.id);
+        if (job.request_priority !== null && job.request_reason !== reason) db.prepare("UPDATE requests SET reason=? WHERE application=? AND id=? AND state='waiting'").run(reason, job.application, job.id);
+      };
+      for (const job of queue) {
+        const submission = parseModelJob(JSON.parse(job.submission) as unknown), identity = JSON.stringify([job.model, job.digest]);
+        if (submission.message.type !== "submit" || submission.message.adapter !== adapter || !served.has(identity) || !this.applications.active(db, job.application)) continue;
+        const grant = db.prepare("SELECT max_unfinished FROM model_grants WHERE application=? AND model=? AND digest=? AND revoked=0").get(job.application, job.model, job.digest) as { max_unfinished: number } | undefined;
+        if (!grant) continue;
+        // Expiry is decided against the clock inside this admission transaction.
+        if (expireModelRequest(db, job.application, job.id, now)) continue;
+        const quota = JSON.stringify([job.application, job.model, job.digest]);
+        if (blocked.has(quota) || Number((db.prepare(`SELECT count(*) AS n FROM model_assignments a JOIN model_jobs m ON m.application=a.application AND m.id=a.job
+            WHERE a.application=? AND a.closed=0 AND m.model=? AND m.digest=?`).get(job.application, job.model, job.digest) as { n: number }).n) >= grant.max_unfinished) {
+          blocked.add(quota); wait(job, "model_job_limit"); continue;
+        }
+        const entry = db.prepare("SELECT resources FROM model_catalog WHERE model=? AND digest=?").get(job.model, job.digest) as { resources: string } | undefined;
+        if (!entry) throw new ServiceError("Model catalog state is unavailable.", 503, { retryable: false });
+        const id = randomUUID(), reservation = randomUUID();
+        // Admission and reservation share this transaction on the domain's physical ledger.
+        if (unfit.has(identity) || !this.domains.reserve(db, { id: reservation, domain: approval.domain, kind: "model-job", owner: id, resources: resources(JSON.parse(entry.resources) as unknown) }, now)) {
+          unfit.add(identity); wait(job, "capacity_unavailable"); continue;
+        }
+        db.prepare("INSERT INTO model_assignments VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,0,?)")
+          .run(id, claim, job.application, job.id, b.controllerId, b.runnerId, b.generation, b.incarnationId, approval.domain, reservation, now);
+        db.prepare("UPDATE model_jobs SET state='queued',updated=? WHERE application=? AND id=?").run(now, job.application, job.id);
+        db.prepare("UPDATE requests SET state='admitted',admitted_at=?,target=?,reason=NULL WHERE application=? AND id=? AND kind='model-job' AND state='waiting'").run(now, job.id, job.application, job.id);
+        db.prepare("UPDATE model_job_scheduler SET turn=? WHERE id=1").run(job.application);
+        return { assignment: this.assignmentView(db, db.prepare("SELECT * FROM model_assignments WHERE id=?").get(id) as unknown as AssignmentRow) };
       }
-      db.prepare("INSERT INTO model_assignments VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,0,?)")
-        .run(id, claim, next.application, next.id, b.controllerId, b.runnerId, b.generation, b.incarnationId, approval.domain, reservation, now);
-      db.prepare("UPDATE model_jobs SET state='queued',updated=? WHERE application=? AND id=?").run(now, next.application, next.id);
-      return { assignment: this.assignmentView(db, db.prepare("SELECT * FROM model_assignments WHERE id=?").get(id) as unknown as AssignmentRow) };
+      return { assignment: null };
     });
   }
 
@@ -355,13 +363,14 @@ export class ModelJobs {
     const authority = !assignment ? "none" : assignment.closed ? "released" : this.runners?.current(db, bindingOf(assignment)) ? "current" : "revoked";
     // A revoked or superseded runner cannot report; its unfinished work is uncertain, not failed.
     const state = authority === "revoked" && !terminal(job.state) ? "unknown" : job.state;
-    const submission = parseModelJob(JSON.parse(job.submission) as unknown);
+    const submission = parseModelJob(JSON.parse(job.submission) as unknown), queue = modelQueueView(db, job.application, job.id);
     return {
       version: 1, applicationId: job.application, id: job.id, model: job.model, digest: job.digest,
       maxTokens: submission.message.type === "submit" ? submission.message.maxTokens : undefined,
       state, cancelRequested: Boolean(job.cancel_requested), stopped: Boolean(job.stopped), cleanup: job.cleanup,
       assignment: authority, reservationHeld: !!assignment && this.domains.held(db, assignment.reservation),
       ...(job.state === "succeeded" && job.result ? { result: JSON.parse(job.result) as unknown } : {}),
+      ...(queue ? { request: queue } : {}),
       createdAt: job.created, updatedAt: job.updated,
     };
   }

@@ -117,7 +117,7 @@ port.on("message", (message: { id: number; command: ControlCommand }) => {
     });
     // Provider text and interpolated request values cannot enter errors or logs.
     reply({ kind: "error", id: message.id, error: {
-      message: ({ request_kind_unsupported: "Use kind lease or linux-lease; model jobs use /v1/model-jobs.",
+      message: ({ request_kind_unsupported: "Use kind lease, linux-lease or model-job.",
         request_waiting_limit: "Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",
         request_priority_invalid: "Priority must be an integer within the application maximum.",
         request_conflict: "Request UUID already has a different intent." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,

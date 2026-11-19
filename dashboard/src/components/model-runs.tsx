@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
+import { ModelQueue } from "./model-queue";
 import { record } from "@/lib/types";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -528,6 +529,7 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
       {!rows?.length && !loadError && (
         <p role="status">{rows ? "No model jobs yet." : "Loading jobs…"}</p>
       )}
+      <ModelQueue onDenied={onDenied} />
     </section>
   );
 }
