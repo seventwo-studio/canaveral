@@ -554,4 +554,5 @@ passed Android screenshots and recordings and iOS screenshots; iOS recording
 failed at idb's stop and remains open. The [video lifecycle trial](../coordination/native-acceptance/dashboard-mobile-video-lifecycle.md)
 then verified 60- and 180-second Android recordings with static stretches longer
 than 30 seconds, and machine deletion refused until an uncleaned session was
-abandoned by an administrator.
+abandoned by an administrator. Android Cancel and leaving the page now reach
+positive cleanup without abandonment; see the [recording cleanup trial](../coordination/native-acceptance/dashboard-android-recording-cleanup.md).

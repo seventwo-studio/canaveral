@@ -106,8 +106,8 @@ inside the recording are present in the timeline.
 
 ## Open
 
-- Android positive cleanup after early cancellation is still unproven, so leaving
-  the page still needs administrator abandonment before the machine can be deleted.
+- ~~Android positive cleanup after early cancellation~~: fixed and natively verified
+  on 19 November 2026 in the [recording cleanup trial](dashboard-android-recording-cleanup.md).
 - iOS recording: unchanged, see the capture trial.
 - Whether the page's unload close or the socket close ended the left-page session is
   still not distinguished; the Playwright context again observed no close request.

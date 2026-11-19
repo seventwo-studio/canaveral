@@ -287,10 +287,38 @@ separately from successful recording delivery, so a failed recording can release
 capacity when cleanup is proven. Unknown native cleanup retains the reservation
 and blocks another capture for that machine. The runner may repeat a saved positive
 cleanup receipt without reopening capture. A controller restart disconnects old
-generations. Android early cancellation cannot infer guest recorder termination
-from an exited adb process; its bounded recorder and native cleanup recovery need
-inspection. iOS uses idb's graceful signal/stop protocol and confirms its retained
+generations. iOS uses idb's graceful signal/stop protocol and confirms its retained
 child exit; companion termination remains a native acceptance check.
+
+#### Android recorder cleanup after early cancellation
+
+An exited host `adb` client does not prove that the guest recorder stopped:
+screenrecord can keep running on the device until its time limit. The Android
+capture shell therefore first prints one identity line on stdout, the guest kernel
+`boot_id` and its own `/proc/<pid>/stat`, then `exec`s screenrecord, which keeps
+that PID and start time. The provider strips the line before encoding. A capture
+without a valid identity line never reports cleanup. Output goes to stdout only;
+the capture creates no guest file, so there is no temporary file to remove.
+
+After a cancel, close, failure, authorization loss or deadline, the runner closes
+its adb client. It then stops the recorder only while it still holds the
+machine's assignment (fresh controller contact, desired `running`, no deletion),
+and after `emu avd name` confirms the serial is still the machine's AVD. One guest
+shell compares the boot id, PID and start time (`/proc/<pid>/stat` field 22) and
+signals only on an exact match, with SIGTERM and then, after 3 seconds, SIGKILL. A
+name match such as `pkill` is never used, and other screenrecord processes are
+never touched. Cleanup is positive only if, within 6 seconds, the PID is absent,
+holds a process with another start time, the boot id changed, or the process is a
+zombie. A matching process in an unexpected command, an unreadable `/proc` entry,
+an unreachable or foreign device, lost assignment authority or a timeout reports
+unknown. The result is computed once per capture, so a repeated close returns the
+same outcome. A capture that already ended with EOF and a zero remote exit needs no
+guest step.
+
+Unknown cleanup is not retried later: the journal stays `unknown` and the session
+keeps its reservation until an administrator abandons it (below). Stopping the
+machine ends assignment authority, so a capture cancelled by a stop is also left
+unknown unless its cleanup completed first.
 
 ### Deleting a machine with a video session
 
@@ -306,8 +334,9 @@ Recover in this order:
    machine. Either ends capture authorization.
 2. **Wait** for the runner's positive cleanup receipt. `cleaned` becomes true, the
    reservation is released and deletion is allowed.
-3. **Abandon** only when cleanup stays unknown, for example after Android early
-   cancellation: `POST /v1/machines/{machine}/video-sessions/{id}/abandon` with
+3. **Abandon** only when cleanup stays unknown, for example when the device was
+   unreachable during cleanup, when the machine was stopped before cleanup ran, or
+   for an iOS capture whose idb stop was unconfirmed: `POST /v1/machines/{machine}/video-sessions/{id}/abandon` with
    `{reason}` (1–1000 characters). This needs administrator authority, because
    it accepts unproven native cleanup. The machine owner receives 403 and other
    accounts 404. The session must already be closed, and its authorization
@@ -363,6 +392,15 @@ also confirmed that deletion was refused (409) while a left-page session was
 uncleaned, that the owner could not abandon it (403), and that after an
 administrator's abandonment the deletion completed and released the reservation.
 
+The runner now stops and confirms the exact Android recorder after early
+cancellation (see [Android recorder cleanup](#android-recorder-cleanup-after-early-cancellation)).
+The [recording cleanup trial](../coordination/native-acceptance/dashboard-android-recording-cleanup.md)
+of the same day confirmed it natively. Cancel and leaving the page each reached
+`cleaned=1` within about 5 seconds and released the reservation, with no recorder
+left on the guest. A new recording on the same machine then verified, and the
+machine was deleted without abandonment. It also showed that the guest recorder
+keeps running after the host adb client closes, so the runner's SIGTERM is needed.
+
 The local attached display path and consumer lease display keep their prior
 contracts. Administrative native video does not enable consumer lease execution
 or bypass that acceptance gate.
@@ -384,7 +422,9 @@ authorization, digest, ownership, deduplication, reservations and failure handli
 They do not prove an APK or simulator build runs on an actual device, or that a
 real encoder produces playable video. The Android dashboard trial of 19 November
 2026 produced FFmpeg-encoded MP4s that ffprobe, FFmpeg and Chromium decoded; iOS
-encoding remains unaccepted.
+encoding remains unaccepted. Android recorder cleanup with an unreachable device,
+foreign AVD, lost assignment or SIGKILL escalation is fixture-covered only; the
+native trial exercised SIGTERM cleanup after Cancel and leaving the page.
 
 Host choice is deferred. Before production use, verify each selected host's SDK,
 acceleration, Xcode selection, installed runtime and input/accessibility support;

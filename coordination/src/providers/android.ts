@@ -317,8 +317,9 @@ export class AndroidProvider extends MobileProvider {
     if (!launch || launch.version !== 2 || launch.fingerprint !== digest(this.binding(machine, image))) return undefined;
     return { startedAt: launch.startedAt, identity: digest(launch) };
   }
-  openVideo(machine: RecordValue, image: RecordValue, folder: string, options: AndroidVideoOptions, check: Authorized): Promise<NativePipe> {
-    return openAndroidVideo(this, machine, image, folder, options, check);
+  /** cleanupCheck is the assignment authority under which an early-cancelled recorder may be stopped. */
+  openVideo(machine: RecordValue, image: RecordValue, folder: string, options: AndroidVideoOptions, check: Authorized, cleanupCheck?: Authorized): Promise<NativePipe> {
+    return openAndroidVideo(this, machine, image, folder, options, check, cleanupCheck);
   }
   override async control(machine: RecordValue, image: RecordValue, folder: string, input: DeviceRequest): Promise<RecordValue> {
     this.executionAllowed(machine);

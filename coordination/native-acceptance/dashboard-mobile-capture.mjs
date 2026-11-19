@@ -1,5 +1,8 @@
 // Run after building coordination and the dashboard assets:
 //   node dashboard-mobile-capture.mjs ios|android
+// CANAVERAL_TRIAL_EARLY_CANCEL=1 (Android) cancels one recording and leaves the page
+// during another, requires positive cleanup for both, records again, then deletes
+// the machine without any abandonment.
 // iOS needs DEVELOPER_DIR for the selected Xcode; Android needs ANDROID_HOME.
 // The trial creates one disposable device through a loopback controller and a
 // native HostRunner, captures through the real dashboard, then removes it.
@@ -24,6 +27,8 @@ assert.ok(['ios', 'android'].includes(platform), 'Choose ios or android');
 const ffmpeg = process.env.CANAVERAL_TRIAL_FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
 const ffprobe = process.env.CANAVERAL_TRIAL_FFPROBE ?? '/opt/homebrew/bin/ffprobe';
 const seconds = Number(process.env.CANAVERAL_TRIAL_SECONDS ?? 15);
+const earlyCancel = process.env.CANAVERAL_TRIAL_EARLY_CANCEL === '1';
+assert.ok(!earlyCancel || platform === 'android', 'Early-cancellation cleanup is an Android trial');
 const root = await mkdtemp(join(await realpath(tmpdir()), `dashboard-${platform}-capture-`));
 console.log('Private trial state:', root);
 let controller, runner, dashboard, browser;
@@ -82,12 +87,13 @@ try {
       catch (error) { console.log('Native', label, String(key), 'failed:', error?.message ?? error); throw error; }
     };
   } });
+  const sources = [];
   for (const [owner, name] of [[runtime, 'pipe'], [runtime.transport, 'pipe'], [runtime, 'openVideo']]) {
     const original = owner?.[name]?.bind(owner);
     if (!original) continue;
     owner[name] = async (...args) => {
       const label = name === 'openVideo' ? 'source' : String(args[0]?.[0]).split('/').at(-1) + ' ' + String(args[0]?.[1] ?? '');
-      try { return traced(label, await original(...args)); }
+      try { const pipe = await original(...args); if (name === 'openVideo') sources.push(pipe); return traced(label, pipe); }
       catch (error) { console.log('Native', label, 'open failed:', error?.message ?? error); throw error; }
     };
   }
@@ -124,7 +130,7 @@ try {
   assert.equal(machine.ownerId, user.id);
   const observed = async state => (await owner.request('GET', path)).observed === state;
   const reserved = async () => (await manager.request('GET', '/v1/hosts')).hosts.find(h => h.id === runner.identity.id).reserved;
-  const db = () => new DatabaseSync(join(root, 'db'), { readOnly: true });
+  const db = () => new DatabaseSync(join(root, 'db'), { readOnly: true, timeout: 5000 });
   const sessions = () => { const d = db(); try { return d.prepare('SELECT id,state,cleaned FROM mobile_video_sessions WHERE machine=? ORDER BY created').all(machineId).map(r => ({ ...r })); } finally { d.close(); } };
   try {
     await until(() => observed('running'), 'running machine', 600000);
@@ -146,6 +152,9 @@ try {
       await page.getByRole('button', { name, exact: true }).click();
     };
     await open();
+    // Read-only guest process listing on the disposable device: screenrecord PIDs only.
+    const recorders = async () => (await run(runtime.tool('adb'), ['-s', device, 'shell', 'ps', '-A', '-o', 'PID,NAME'], { env: runtime.environment() })).stdout
+      .split('\n').map(line => line.trim().split(/\s+/)).filter(([, process]) => process === 'screenrecord').map(([pid]) => Number(pid));
 
     // Screenshot through the dashboard and its download link.
     const shotName = `${platform}-trial-screenshot`;
@@ -165,6 +174,40 @@ try {
       status: await page.getByRole('status').first().textContent() };
     await save();
     console.log('Screenshot', evidence.screenshot);
+
+    // Early cancellation: Cancel, then leaving the page, each partway through a recording.
+    // Each needs the runner's positive cleanup and reservation release without abandonment.
+    if (earlyCancel) {
+      evidence.earlyCancel = [];
+      for (const how of ['cancel', 'leave']) {
+        assert.deepEqual(await recorders(), [], 'no recorder runs before ' + how);
+        const index = sessions().length;
+        await page.getByLabel('Recording name').fill(`${platform}-trial-${how}`);
+        await page.getByLabel('Recording length').selectOption(String(seconds));
+        await page.getByRole('button', { name: 'Record MP4' }).click();
+        await page.getByText(/^Recording \d+ s ·/).waitFor({ timeout: 60000 });
+        console.log(`RECORDING ${seconds} s on ${device}, ${how} after 10 s: interact with the device now.`);
+        await delay(10000);
+        const during = await recorders(), source = sources.at(-1), cancelled = new Date().toISOString(), began = Date.now();
+        assert.equal(during.length, 1, 'exactly one recorder runs during capture');
+        assert.equal(source?.recorder?.pid, during[0], 'the runner identified the running recorder');
+        if (how === 'cancel') await page.getByRole('button', { name: 'Cancel recording' }).click();
+        else { await page.close({ runBeforeUnload: true }); page = undefined; }
+        await until(() => ['disconnected', 'finished'].includes(sessions()[index]?.state), 'closed session', 30000);
+        await until(() => sessions()[index]?.cleaned === 1, how + ' cleanup', 60000);
+        const cleanedAfter = (Date.now() - began) / 1000;
+        await until(async () => JSON.stringify(await reserved()) === JSON.stringify(baseline), how + ' reservation release', 30000);
+        const record = { how, cancelled, recordersDuring: during, recorder: source.recorder, stopped: source.stopped, signalled: source.signalled, cleanedAfterSeconds: cleanedAfter,
+          session: sessions()[index], recordersAfter: await recorders(), reservedWithMachine: baseline, reserved: await reserved(),
+          ...(how === 'cancel' ? { page: await page.getByLabel('Capture').textContent() } : {}) };
+        evidence.earlyCancel.push(record); await save();
+        console.log('Early', how, JSON.stringify(record));
+        assert.equal(record.session.cleaned, 1); assert.ok(['absent', 'replaced', 'exited'].includes(record.stopped), record.stopped);
+        assert.deepEqual(record.recordersAfter, []);
+        if (!page) { page = await context.newPage(); page.on('pageerror', error => console.log('Page error:', error.message)); }
+        await open();
+      }
+    }
 
     // Recording through the dashboard relay, verified in the page, then by FFmpeg.
     const clipName = `${platform}-trial-walkthrough`;
@@ -205,13 +248,14 @@ try {
     assert.equal(stream.codec_name, 'h264');
     assert.ok(Number(stream.nb_read_frames) > 0 && Number(probe.format.duration) > 0);
     assert.equal(decode.code, 0); assert.equal(decode.stderr, '');
-    const first = sessions()[0];
+    const first = sessions().at(-1);
     evidence.recording = { file: clipFile, bytes: mp4.length, sha256: sha(mp4), status: clipStatus, playback, probe, decode, session: first };
     await save();
     console.log('Recording', JSON.stringify(evidence.recording));
     assert.deepEqual({ state: first.state, cleaned: first.cleaned }, { state: 'finished', cleaned: 1 });
     await until(async () => JSON.stringify(await reserved()) === JSON.stringify(baseline), 'recording reservation release', 60000);
 
+    if (!earlyCancel) {
     // Leaving the page mid-recording closes the session through the supported route.
     await page.getByRole('button', { name: 'Record MP4' }).click();
     await page.getByText(/^Recording \d+ s ·/).waitFor({ timeout: 60000 });
@@ -227,6 +271,7 @@ try {
     console.log('Left page mid-recording', JSON.stringify(evidence.leftPage));
     page = undefined;
     }
+    }
     await waitForFile('release', 'Close the device panel with device_close');
   } finally {
     await owner.request('POST', path + '/desired', { state: 'stopped' });
@@ -234,6 +279,8 @@ try {
     const remove = () => owner.request('POST', path + '/delete', { id: deletionId });
     // A session without positive cleanup must block deletion until an administrator abandons it.
     const uncleaned = sessions().filter(session => session.cleaned === 0);
+    evidence.uncleanedBeforeDeletion = uncleaned;
+    if (earlyCancel) assert.deepEqual(uncleaned, [], 'early cancellation must not need abandonment');
     if (uncleaned.length) {
       const outcome = promise => promise.then(body => ({ accepted: body }), error => ({ refused: String(error?.message ?? error) }));
       const refused = await outcome(remove()), reservedBefore = await reserved();
