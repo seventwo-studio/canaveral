@@ -13,12 +13,15 @@ async function exported(name: string, fn: string): Promise<(...args: never[]) =>
 }
 function numberOption(args: CliArguments, name: string, fallback: number, min: number, max: number): number { const text = option(args, name, String(fallback)), value = Number(text); if (!/^\d+$/.test(text) || !Number.isSafeInteger(value) || value < min || value > max) throw new CliError(`Invalid --${name}.`); return value; }
 async function exists(path: string): Promise<boolean> { try { await fs.lstat(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
-async function jsonFile(path: string): Promise<Record<string, unknown>> { const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); try { const info = await file.stat(); if (!info.isFile() || info.size > 1048576) throw new CliError("Local configuration requires a bounded regular JSON file."); return record(JSON.parse(await file.readFile("utf8")) as unknown); } finally { await file.close(); } }
+/** Generated local host configs embed the private operator guest bundle (up to 128 MiB) in the
+ * preparation recipe, its runtime copy and the template recipe; other local JSON stays at 1 MiB. */
+export const LOCAL_HOST_CONFIG_BYTES = 3 * 128 * 1048576 + 1048576;
+async function jsonFile(path: string, maximum = 1048576): Promise<Record<string, unknown>> { const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); try { const info = await file.stat(); if (!info.isFile() || info.size > maximum) throw new CliError("Local configuration requires a bounded regular JSON file."); return record(JSON.parse(await file.readFile("utf8")) as unknown); } finally { await file.close(); } }
 async function stopped(signal: AbortSignal): Promise<void> { if (!signal.aborted) await new Promise<void>(done => signal.addEventListener("abort", () => done(), { once: true })); }
-async function localConfig(root: string, args: CliArguments, url: string): Promise<{ config: Record<string, unknown>; state: string } | undefined> {
+export async function localConfig(root: string, args: CliArguments, url: string): Promise<{ config: Record<string, unknown>; state: string } | undefined> {
   const physical = join(root, "machine-host.json");
   if (await exists(physical)) {
-    const config = loadHost(await jsonFile(physical), root);
+    const config = loadHost(await jsonFile(physical, LOCAL_HOST_CONFIG_BYTES), root);
     if (typeof config.agentStateDirectory !== "string") throw new CliError("Local physical host config requires agentStateDirectory.");
     return { config, state: resolve(root, config.agentStateDirectory) };
   }
@@ -74,7 +77,7 @@ async function localConfig(root: string, args: CliArguments, url: string): Promi
   }
   const configs: Array<{ path: string; config: Record<string, unknown>; state: string }> = [];
   for (const [path, state] of [[androidPath, join(root, "agent")], [linuxPath, join(root, "linux-agent")]] as const) {
-    if (await exists(path)) configs.push({ path, config: loadHost(await jsonFile(path), root), state });
+    if (await exists(path)) configs.push({ path, config: loadHost(await jsonFile(path, LOCAL_HOST_CONFIG_BYTES), root), state });
   }
   if (!configs.length) return undefined;
   // Never re-enroll or silently discard a legacy identity during consolidation.

@@ -204,3 +204,24 @@ test("offline consolidation refuses a historical native lock before changing ide
   await assert.rejects(consolidateLocalHost(f.host.state, [state], [{ state, id: randomUUID() }], {}), /native runner locks/);
   await fs.stat(join(state, "agent.lock")); await assert.rejects(fs.stat(join(f.host.state, "before-physical-host.sqlite3")));
 }));
+
+test("local Linux desktop config accepts a real-sized guest bundle on creation and reload", async () => {
+  const { localConfig, LOCAL_HOST_CONFIG_BYTES } = await import("../../src/local.ts");
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "canaveral-local-bundle-")));
+  try {
+    const image = join(root, "desktop.qcow2"), runner = join(root, "CanaveralVMRunner"), manifest = join(root, "bundle.json");
+    await fs.writeFile(image, Buffer.alloc(4096)); await fs.writeFile(runner, "#!/bin/sh\n", { mode: 0o500 });
+    // Native helpers ship as 48 KiB base64 parts; together they exceed the 1 MiB local JSON default.
+    const parts = Array.from({ length: 48 }, (_, index) => ({ path: `/opt/canaveral/payload/canaveral-guest-agent.${String(index).padStart(4, "0")}.b64`, content: "A".repeat(49152), mode: "0644" }));
+    await fs.writeFile(manifest, JSON.stringify([{ path: "/opt/canaveral/server.mjs", content: "await 0;\n", mode: "0644" }, ...parts]), { mode: 0o600 });
+    const args = { command: "local", action: "", positionals: [], url: "http://127.0.0.1:8875", allowHttp: true,
+      options: { "linux-image": image, "apple-runner": runner, "guest-helper-manifest": manifest } };
+    const created = await localConfig(root, args, args.url);
+    const templates = created!.config.templates as Array<Record<string, unknown>>;
+    assert.ok(templates.some(t => t.os === "linux" && t.mode === "desktop" && t.guestAccess === true));
+    const physical = await fs.stat(join(root, "machine-host.json"));
+    assert.ok(physical.size > 1048576 && physical.size < LOCAL_HOST_CONFIG_BYTES);
+    const reloaded = await localConfig(root, { ...args, options: {} }, args.url);
+    assert.deepEqual(reloaded!.config.templates, created!.config.templates);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
