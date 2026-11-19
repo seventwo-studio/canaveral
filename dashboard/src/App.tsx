@@ -49,10 +49,18 @@ interface CreateConfig {
   /** Desktop launch asks only for a name, a desktop image and its size. */
   desktop?: boolean;
 }
-/** Images that boot an interactive Linux desktop the viewer can open: the host must
- * prepare owned guest access, which carries the display. */
-const desktopImage = (t: { os: string; mode: string; guestAccess?: boolean }) =>
-  t.os === "linux" && t.mode === "desktop" && t.guestAccess === true;
+/** Images that boot an interactive desktop the viewer can open: the host must
+ * provide owned guest access, which carries the display. Linux desktops are
+ * prepared over SSH; macOS desktops run their own per-launch guest helper. */
+const desktopImage = (t: {
+  os: string;
+  mode: string;
+  arch: string;
+  guestAccess?: boolean;
+}) =>
+  t.mode === "desktop" &&
+  t.guestAccess === true &&
+  (t.os === "linux" || (t.os === "macos" && t.arch === "arm64"));
 interface CreateSpec {
   id: string;
   name: string;
@@ -1664,7 +1672,7 @@ function CreateMachine({
       >
         <DialogHeader>
           <DialogTitle>
-            {config.desktop ? "Launch a Linux desktop" : "Create a machine"}
+            {config.desktop ? "Launch a desktop" : "Create a machine"}
           </DialogTitle>
           <DialogDescription className="sr-only">
             {config.desktop
@@ -1733,6 +1741,12 @@ function CreateMachine({
                     Minimum {template.minimum.cpu} vCPU,{" "}
                     {memory(template.minimum.memoryMiB)},{" "}
                     {template.minimum.diskGiB} GiB disk
+                  </FieldDescription>
+                )}
+                {config.desktop && template?.os === "macos" && (
+                  <FieldDescription>
+                    A macOS desktop boots once with its own guest credential.
+                    After you stop it, delete it and launch a new one.
                   </FieldDescription>
                 )}
               </Field>
@@ -1807,8 +1821,8 @@ function CreateMachine({
                 </>
               ) : config.desktop ? (
                 <Notice>
-                  No online accepting host offers a Linux desktop image yet. Add
-                  a desktop image to a host to launch one.
+                  No online accepting host offers a desktop image yet. Add a
+                  Linux or macOS desktop image to a host to launch one.
                 </Notice>
               ) : (
                 <Notice>

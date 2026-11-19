@@ -566,7 +566,7 @@ describe("dashboard contracts", () => {
     const user = await login();
     await user.click(screen.getByRole("button", { name: "Launch desktop" }));
     const dialog = screen.getByRole("dialog");
-    within(dialog).getByRole("heading", { name: "Launch a Linux desktop" });
+    within(dialog).getByRole("heading", { name: "Launch a desktop" });
     expect(within(dialog).getByText(/linux · Desktop/)).toBeTruthy();
     expect(within(dialog).queryByText("Placement")).toBeNull();
     expect(within(dialog).getByLabelText("Desktop image")).toBeTruthy();
@@ -590,6 +590,70 @@ describe("dashboard contracts", () => {
     ).not.toHaveProperty("hostId");
     await screen.findByText(/Review is starting on Arctic/);
   });
+  it("launches a macOS desktop and explains it runs once", async () => {
+    const mac = {
+      ...template,
+      id: "macos-desktop",
+      revision: "1",
+      os: "macos",
+      arch: "arm64",
+      mode: "desktop",
+      guestAccess: true,
+      name: "macOS desktop",
+      minimum: { cpu: 4, memoryMiB: 8192, diskGiB: 64 },
+      defaults: { cpu: 4, memoryMiB: 8192, diskGiB: 64 },
+    };
+    const original = handler;
+    handler = (p, options) =>
+      p === "templates"
+        ? json({
+            templates: [
+              template,
+              mac,
+              // Intel macOS and macOS without a guest helper are never offered.
+              { ...mac, id: "intel", arch: "amd64" },
+              { ...mac, id: "plain", guestAccess: undefined },
+            ],
+          })
+        : p === "machines" && options?.method === "POST"
+          ? json({
+              ...machine,
+              id: calls.at(-1)!.value!.id,
+              name: "Mac review",
+              template: mac,
+            })
+          : original(p, options);
+    const user = await login();
+    await user.click(screen.getByRole("button", { name: "Launch desktop" }));
+    const dialog = screen.getByRole("dialog");
+    within(dialog).getByRole("heading", { name: "Launch a desktop" });
+    expect(within(dialog).getByText(/macos · Desktop/)).toBeTruthy();
+    expect(
+      within(dialog).getByText(/boots once with its own guest credential/),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("Placement")).toBeNull();
+    // The form's native select mirrors the offered images.
+    expect(dialog.querySelectorAll("select option")).toHaveLength(1);
+    await user.type(
+      within(dialog).getByLabelText("Machine name"),
+      "Mac review",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Launch desktop" }),
+    );
+    await waitFor(() =>
+      expect(
+        calls.find((c) => c.path === "machines" && c.method === "POST")?.value,
+      ).toMatchObject({
+        name: "Mac review",
+        templateId: "macos-desktop",
+        templateRevision: "1",
+        arch: "arm64",
+        resources: mac.defaults,
+      }),
+    );
+    await screen.findByText(/Mac review is starting on Arctic/);
+  });
   it("offers neither headless images nor desktops without guest access", async () => {
     const original = handler;
     handler = (p, options) =>
@@ -606,7 +670,7 @@ describe("dashboard contracts", () => {
     const dialog = screen.getByRole("dialog");
     expect(
       within(dialog).getByText(
-        /No online accepting host offers a Linux desktop image/,
+        /No online accepting host offers a desktop image/,
       ),
     ).toBeTruthy();
     expect(
