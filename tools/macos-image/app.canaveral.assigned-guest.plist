@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Starts the assigned guest helper in the automatically logged-in desktop session.
+     It is not kept alive: each launch's media can start the helper only once. -->
+<plist version="1.0"><dict>
+<key>Label</key><string>app.canaveral.assigned-guest</string>
+<key>ProgramArguments</key><array><string>/Applications/Canaveral Assigned Guest.app/Contents/MacOS/CanaveralAssignedGuest</string></array>
+<key>LimitLoadToSessionType</key><string>Aqua</string>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><false/>
+<key>ProcessType</key><string>Interactive</string>
+</dict></plist>

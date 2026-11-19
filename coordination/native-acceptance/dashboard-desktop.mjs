@@ -8,6 +8,11 @@
 //   CANAVERAL_TRIAL_BUNDLE=/abs/desktop-guest-bundle-arm64.json \
 //   CANAVERAL_TRIAL_RUNNER=/abs/CanaveralVMRunner \
 //   node coordination/native-acceptance/dashboard-desktop.mjs
+// For a macOS desktop, set CANAVERAL_TRIAL_OS=macos and supply the operator-prepared
+// image directory (docs/macos-desktop-image.md) and its restore image instead:
+//   CANAVERAL_TRIAL_OS=macos CANAVERAL_TRIAL_MACOS_IMAGE=/abs/dir \
+//   CANAVERAL_TRIAL_RESTORE_IMAGE=/abs/UniversalMac.ipsw CANAVERAL_TRIAL_RUNNER=/abs/CanaveralVMRunner \
+//   node coordination/native-acceptance/dashboard-desktop.mjs
 // It runs the real `canaveral local` controller, Apple host and dashboard on
 // loopback with fresh private state, launches one disposable desktop through
 // the dashboard, types into it through the viewer, then stops and deletes it.
@@ -27,7 +32,15 @@ import { CliClient } from '../dist/src/account-cli.js';
 
 const run = promisify(execFile);
 const input = name => { const value = process.env[name]; assert.ok(value?.startsWith('/'), `Set ${name} to an absolute path`); return value; };
-const disk = input('CANAVERAL_TRIAL_DISK'), bundle = input('CANAVERAL_TRIAL_BUNDLE'), runner = input('CANAVERAL_TRIAL_RUNNER');
+const os = process.env.CANAVERAL_TRIAL_OS ?? 'linux', mac = os === 'macos';
+assert.ok(['linux', 'macos'].includes(os), 'CANAVERAL_TRIAL_OS is linux or macos');
+const runner = input('CANAVERAL_TRIAL_RUNNER');
+const macImage = mac ? input('CANAVERAL_TRIAL_MACOS_IMAGE') : undefined, restore = mac ? input('CANAVERAL_TRIAL_RESTORE_IMAGE') : undefined;
+const disk = mac ? join(macImage, 'disk.raw') : input('CANAVERAL_TRIAL_DISK'), bundle = mac ? undefined : input('CANAVERAL_TRIAL_BUNDLE');
+const inputs = mac ? [['disk', disk], ['auxiliary', join(macImage, 'auxiliary.bin')], ['hardwareModel', join(macImage, 'hardware-model.bin')], ['restoreImage', restore], ['runner', runner]]
+  : [['disk', disk], ['bundle', bundle], ['runner', runner]];
+// The guest file the typed command creates; /tmp is a link on macOS.
+const typedDirectory = mac ? '/private/tmp' : '/tmp';
 const cli = fileURLToPath(new URL('../dist/src/cli.js', import.meta.url));
 const removalHelper = fileURLToPath(new URL('../dist/src/providers/apple-native-helper', import.meta.url));
 await readFile(removalHelper).catch(() => { throw Error('Install apple-native-helper with script/prepare_native.mjs before launching a VM'); });
@@ -55,7 +68,8 @@ async function vmProcesses() {
 
 let local, browser, failure, owner, machineId;
 try {
-  for (const [name, path] of [['disk', disk], ['bundle', bundle], ['runner', runner]]) evidence[`${name}Sha256`] = await fileSha(path);
+  evidence.os = os;
+  for (const [name, path] of inputs) evidence[`${name}Sha256`] = await fileSha(path);
   evidence.runnerSignature = (await run('/usr/bin/codesign', ['-dv', runner]).catch(error => error)).stderr?.split('\n').filter(line => /^(Identifier|TeamIdentifier|Signed Time)=/.test(line));
   evidence.baselineVmProcesses = await vmProcesses();
   await save();
@@ -64,7 +78,7 @@ try {
   // The host identity is bound to this controller URL; recovery must reuse it.
   evidence.apiPort = apiPort;
   local = spawn(process.execPath, [cli, 'local', '--state', state, '--api-port', String(apiPort), '--dashboard-port', String(dashboardPort),
-    '--linux-image', disk, '--apple-runner', runner, '--guest-helper-manifest', bundle], { stdio: ['ignore', 'pipe', 'pipe'] });
+    '--apple-runner', runner, ...(mac ? ['--macos-image', macImage, '--macos-restore-image', restore] : ['--linux-image', disk, '--guest-helper-manifest', bundle])], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   local.stdout.on('data', chunk => { output += chunk; });
   local.stderr.on('data', chunk => process.stderr.write('local: ' + chunk));
@@ -76,7 +90,7 @@ try {
   const password = randomBytes(24).toString('hex');
   // The dashboard account that launches the desktop; its session owns the machine.
   owner = new CliClient(api, (await admin.request('POST', '/v1/auth/setup', { username: 'trial', password })).token, true);
-  await until(async () => (await admin.request('GET', '/v1/templates')).templates.some(t => t.mode === 'desktop' && t.online && t.accepting), 'desktop image offer', 120000);
+  await until(async () => (await admin.request('GET', '/v1/templates')).templates.some(t => t.os === os && t.mode === 'desktop' && t.guestAccess && t.online && t.accepting), 'desktop image offer', 120000);
   const hostView = async () => (await admin.request('GET', '/v1/hosts')).hosts[0];
   evidence.hostReservedBefore = (await hostView()).reserved;
 
@@ -107,7 +121,7 @@ try {
   await page.getByRole('button', { name: 'Launch desktop' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Machine name').fill(name);
-  evidence.launchForm = await dialog.getByText(/linux · Desktop/).textContent();
+  evidence.launchForm = await dialog.getByText(new RegExp(`${os} · Desktop`)).textContent();
   await dialog.getByRole('button', { name: 'Launch desktop' }).click();
   await page.getByText(new RegExp(`${name} is starting on`)).waitFor({ timeout: 60000 });
   const machine = (await owner.request('GET', '/v1/machines')).machines.find(m => m.name === name);
@@ -140,8 +154,16 @@ try {
   await take.click();
   await page.getByText('Mouse and keyboard connected', { exact: true }).waitFor({ timeout: 30000 });
   const canvas = page.locator('canvas').first(), box = await canvas.boundingBox();
-  const scale = box.width / 1440;
-  await canvas.click({ position: { x: 647 * scale, y: 875 * scale } });
+  if (mac) {
+    // Open Terminal with Spotlight, then click inside its window to focus it.
+    await page.keyboard.press('Meta+Space'); await delay(1500);
+    await page.keyboard.type('Terminal', { delay: 60 }); await delay(1500);
+    await page.keyboard.press('Enter'); await delay(6000);
+    await canvas.click({ position: { x: box.width / 2, y: box.height / 2 } });
+  } else {
+    const scale = box.width / 1440;
+    await canvas.click({ position: { x: 647 * scale, y: 875 * scale } });
+  }
   await delay(4000);
   await canvas.screenshot({ path: join(root, 'viewer-terminal.png') });
   const operation = async (action, args = {}) => {
@@ -153,18 +175,27 @@ try {
   };
   const nonce = randomUUID();
   const typingStarted = Date.now();
-  await page.keyboard.type(`echo typed-${nonce} > /tmp/canaveral-trial.txt\n`, { delay: 30 });
+  await page.keyboard.type(`echo typed-${nonce} > ${typedDirectory}/canaveral-trial.txt\n`, { delay: 30 });
   evidence.typingMs = Date.now() - typingStarted;
   // The file appears only after the final Enter reached the guest through the viewer.
   // Listing is a read that succeeds whether or not the file exists yet.
-  await until(async () => (await operation('list-files', { path: '/tmp' })).entries?.some(entry => entry.name === 'canaveral-trial.txt' && entry.size > 0), 'typed file', 60000, 1000);
+  await until(async () => (await operation('list-files', { path: typedDirectory })).entries?.some(entry => entry.name === 'canaveral-trial.txt' && entry.size > 0), 'typed file', 60000, 1000);
   evidence.typedFileVisibleMs = Date.now() - typingStarted;
   await canvas.screenshot({ path: join(root, 'viewer-after.png') });
   await page.getByRole('button', { name: 'Release control', exact: true }).click();
-  const typed = Buffer.from((await operation('pull', { path: '/tmp/canaveral-trial.txt' })).data, 'base64').toString('utf8');
-  assert.equal(typed, `typed-${nonce}\n`);
-  const screenshot = await operation('screenshot');
-  const png = Buffer.from(screenshot.data ?? screenshot.png ?? '', 'base64');
+  let typed, png = Buffer.alloc(0);
+  if (mac) {
+    // The macOS helper offers listing and streamed files, not the discrete pull/screenshot
+    // operations: the exact size of the typed line identifies the nonce-bearing file.
+    const entry = (await operation('list-files', { path: typedDirectory })).entries.find(e => e.name === 'canaveral-trial.txt');
+    assert.equal(entry.size, Buffer.byteLength(`typed-${nonce}\n`));
+    typed = `typed-${nonce} (size ${entry.size})\n`;
+  } else {
+    typed = Buffer.from((await operation('pull', { path: '/tmp/canaveral-trial.txt' })).data, 'base64').toString('utf8');
+    assert.equal(typed, `typed-${nonce}\n`);
+    const screenshot = await operation('screenshot');
+    png = Buffer.from(screenshot.data ?? screenshot.png ?? '', 'base64');
+  }
   if (png.length) await writeFile(join(root, 'guest-after.png'), png, { mode: 0o600 });
   Object.assign(evidence, { typedFile: typed.trim(), viewerBefore: sha(await readFile(join(root, 'viewer-before.png'))), viewerAfter: sha(await readFile(join(root, 'viewer-after.png'))), guestScreenshotBytes: png.length });
   await save();

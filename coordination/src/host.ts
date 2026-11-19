@@ -62,6 +62,8 @@ export interface GuestAccess {
   streamUpload?(machine: RecordValue, image: RecordValue, folder: string, path: string, app: string | undefined, reader: ByteReader, size: number, authorized: () => boolean): Promise<RecordValue>;
   streamDownload?(machine: RecordValue, image: RecordValue, folder: string, path: string, app?: string, authorized?: () => boolean): Promise<VerifiedDownload>;
   desktop?(machine: RecordValue, image: RecordValue, folder: string): Promise<DisplayConnection>;
+  /** Readiness of a guest connection that needs no preparation recipe (macOS desktops). */
+  ready?(machine: RecordValue, image: RecordValue, folder: string): Promise<boolean>;
 }
 export interface HostDependencies {
   transport?: HostTransport; clock?: ExecutionClock;
@@ -209,6 +211,8 @@ export class HostRunner {
   private guest: GuestAccess | undefined;
   private readonly retainedAccess = new Set<Runtime | GuestAccess>();
   private readonly appleAccess = new Map<Runtime, GuestAccess>();
+  /** Per-machine backoff for macOS desktop helper probes that are not yet answering. */
+  private readonly macOSProbeBackoff = new Map<string, { failures: number; next: number }>();
   private readonly accessMachines = new Map<Runtime, Map<string, RecordValue>>();
   private readonly unsupportedAccess: GuestAccess = {control: async () => { throw new ServiceError("Owned macOS access is unavailable.",409,{code:"capability_unsupported"}); }};
   private accessAuthority(machine: RecordValue): () => boolean {
@@ -593,6 +597,22 @@ export class HostRunner {
         }
       }
       const result = await runtime.reconcile(current, image, folder);
+      // A macOS desktop has no preparation recipe: its access is ready once the
+      // launch's own helper answers the pinned identity challenge and shows a frame.
+      if (!prepared && image.os === "macos" && image.guestAccess && result.state === "running") {
+        result.accessReady = false;
+        const ready = "ready" in backend ? backend.ready : undefined, key = String(current.id), backoff = this.macOSProbeBackoff.get(key);
+        const waiting = "Waiting for the verified macOS guest helper. A desktop whose helper stopped or whose launch certificate expired needs a new launch.";
+        // A helper that is not answering is retried with backoff (5 s doubling to 30 s), so one
+        // stuck desktop does not dial and run process checks on every poll.
+        const unready = (detail: string) => { const failures = (backoff?.failures ?? 0) + 1; this.macOSProbeBackoff.set(key, { failures, next: this.clock.now() + Math.min(30, 5 * 2 ** (failures - 1)) }); result.detail = detail; };
+        if (!ready) result.detail = "This host has no verified macOS guest connection.";
+        else if (backoff && this.clock.now() < backoff.next) result.detail = waiting;
+        else try {
+          if (await ready.call(backend, current, image, folder)) { result.accessReady = true; this.macOSProbeBackoff.delete(key); }
+          else unready("Waiting for the guest helper to show the desktop.");
+        } catch { unready(waiting); }
+      } else this.macOSProbeBackoff.delete(String(current.id));
       if (prepared && preparation) {
         if (result.state === "running" && image.guestAccess && backend.control) {
           result.accessReady = false;

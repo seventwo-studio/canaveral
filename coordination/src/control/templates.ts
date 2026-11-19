@@ -123,7 +123,8 @@ function normalizeDefinition(value: unknown, operatorBundle: boolean): Template 
     if (key in v) { if (!allowed.some(x => x === v[key])) throw new ServiceError(`Invalid ${key}.`, 400); result[key] = v[key]; }
   }
   if ("cloneIdentity" in v) { if (v.cloneIdentity !== "linux-cloud-init" || os !== "linux") throw new ServiceError("Unsupported clone identity provisioning.", 400); result.cloneIdentity = v.cloneIdentity; }
-  if ("guestAccess" in v) { if (v.guestAccess !== true || os !== "linux") throw new ServiceError("Guest access is currently supported for Linux only.", 400); result.guestAccess = true; }
+  // macOS guest access is an Apple-silicon desktop reached through per-launch assigned media.
+  if ("guestAccess" in v) { if (v.guestAccess !== true || !(os === "linux" || os === "macos" && mode === "desktop" && arch === "arm64")) throw new ServiceError("Guest access is supported for Linux and Apple-silicon macOS desktops only.", 400); result.guestAccess = true; }
   if (mode === "device") {
     const d = object(v.device), keys = os === "android" ? ["systemImage", "profile"] : ["runtime", "deviceType"];
     only(d, keys); if (Object.keys(d).length !== 2) throw new ServiceError("Invalid device definition.", 400);

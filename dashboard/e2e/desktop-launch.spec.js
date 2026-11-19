@@ -191,7 +191,7 @@ test("launches a Linux desktop, controls it, then stops and deletes it with host
   await page.getByRole("button", { name: "Launch desktop" }).click();
   const dialog = page.getByRole("dialog");
   await expect(
-    dialog.getByRole("heading", { name: "Launch a Linux desktop" }),
+    dialog.getByRole("heading", { name: "Launch a desktop" }),
   ).toBeVisible();
   await expect(dialog.getByText("Placement")).toHaveCount(0);
   await expect(dialog.getByText(/linux · Desktop/)).toBeVisible();

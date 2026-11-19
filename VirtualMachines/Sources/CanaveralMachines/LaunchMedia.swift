@@ -38,7 +38,10 @@ public struct LaunchMediaPin: Codable, Sendable, Equatable {
         return try JSONDecoder().decode(LaunchMediaPin.self, from: bytes)
     }
     public func validate(machine: Machine, directory: URL, launch: String) throws {
-        guard machine.os == .macOS, machine.executionLeaseID?.uuidString.lowercased() == leaseId,
+        // Leased work is scoped to its lease. An unleased guest-access desktop has no
+        // lease, so the provider scopes its launch to the machine itself.
+        let scope = machine.executionLeaseID ?? (machine.mode == .desktop ? machine.id : nil)
+        guard machine.os == .macOS, scope?.uuidString.lowercased() == leaseId,
               machine.id.uuidString.lowercased() == machineId, launch == launchId, version == 2,
               GuestAssignmentContext.canonicalUUID(launchId), mode == 256, nlink == 1,
               path == directory.deletingLastPathComponent().appendingPathComponent("guest-bootstrap/launch.iso").path else {
