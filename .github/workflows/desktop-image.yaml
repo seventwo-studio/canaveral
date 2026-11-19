@@ -1,0 +1,54 @@
+name: Build desktop VM image
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tools/desktop-image/**'
+      - '.github/workflows/desktop-image.yaml'
+      - 'coordination/src/guest/**'
+      - 'script/build_guest_bundle.mjs'
+      - 'crates/guest-agent/**'
+      - 'crates/guest-protocol/**'
+      - 'crates/mobile-native/**'
+      - 'Cargo.lock'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      - name: Install disk construction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils cloud-guest-utils fdisk e2fsprogs util-linux mount udev systemd-container curl ca-certificates coreutils bash
+      - name: Build ARM64 guest service bundle
+        run: |
+          rustup show
+          npm --prefix coordination ci --ignore-scripts
+          bash tools/desktop-image/build-guest-bundle.sh "$PWD/desktop-guest-bundle-arm64.json"
+          sha256sum desktop-guest-bundle-arm64.json > desktop-guest-bundle-arm64.json.sha256
+      - name: Build and verify ARM64 desktop disk
+        run: |
+          sudo bash tools/desktop-image/build.sh desktop-arm64.qcow2
+          sudo chmod 0444 desktop-arm64.qcow2
+          sha256sum desktop-arm64.qcow2 > desktop-arm64.qcow2.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-arm64
+          path: |
+            desktop-arm64.qcow2
+            desktop-arm64.qcow2.sha256
+            desktop-guest-bundle-arm64.json
+            desktop-guest-bundle-arm64.json.sha256
+          if-no-files-found: error
+          retention-days: 3
