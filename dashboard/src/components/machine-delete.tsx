@@ -21,16 +21,21 @@ export interface MachineDeleteTarget {
  * every retry, and success is reported only once the controller confirms it. */
 export function MachineDelete({
   machine,
+  requestId,
   onClose,
   onRequested,
   returnFocus,
 }: {
   machine: MachineDeleteTarget;
+  /** Caller-owned UUID for a new request; an existing deletion keeps its own. */
+  requestId?: string;
   onClose: () => void;
   onRequested: (receipt: DeletionReceipt) => void | Promise<void>;
   returnFocus?: Element | null;
 }) {
-  const intent = useRef(machine.deletion?.id || crypto.randomUUID());
+  const intent = useRef(
+    machine.deletion?.id || requestId || crypto.randomUUID(),
+  );
   const [busy, setBusy] = useState(false),
     [result, setResult] = useState<DeletionReceipt | null>(null),
     [error, setError] = useState("");

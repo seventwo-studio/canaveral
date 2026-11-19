@@ -39,6 +39,8 @@ export interface ImageOffer {
   defaults?: Resources;
   memoryStepMiB?: number;
   preparationDriver?: string;
+  /** Public flag: the host prepares owned guest access (display, files, shells). */
+  guestAccess?: boolean;
   imageKind?: string;
   mediaType?: string;
   device?: { systemImage?: string; runtime?: string };
@@ -291,6 +293,7 @@ export function imagesResponse(value: unknown): ImageOffer[] {
     const t = record(value);
     requiredStrings(t, ["id", "revision", "os", "arch", "mode", "hostId"]);
     booleans(t, ["online", "accepting"]);
+    booleans(t, ["guestAccess"], true);
     optionalStrings(t, ["name", "preparationDriver", "imageKind", "mediaType"]);
     if (
       t.memoryStepMiB !== undefined &&

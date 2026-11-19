@@ -101,8 +101,8 @@ node coordination/dist/src/cli.js local \
 
 ### Launch, use and delete a desktop from the dashboard
 
-On **Machines**, **Launch desktop** offers only Linux desktop images from online,
-accepting hosts. It asks for a name, the image and its CPU, memory and disk,
+On **Machines**, **Launch desktop** offers only Linux desktop images with guest
+access from online, accepting hosts. It asks for a name, the image and its CPU, memory and disk,
 prefilled from the image's defaults. The controller chooses the host. The row shows **Preparing** until the
 host confirms guest readiness, then **Ready**. **Control** opens the desktop in
 the shared viewer. **Take control** sends pointer and keyboard input.

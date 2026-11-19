@@ -49,9 +49,10 @@ interface CreateConfig {
   /** Desktop launch asks only for a name, a desktop image and its size. */
   desktop?: boolean;
 }
-/** Images that boot an interactive Linux desktop (XFCE over the shared display). */
-const desktopImage = (t: { os: string; mode: string }) =>
-  t.os === "linux" && t.mode === "desktop";
+/** Images that boot an interactive Linux desktop the viewer can open: the host must
+ * prepare owned guest access, which carries the display. */
+const desktopImage = (t: { os: string; mode: string; guestAccess?: boolean }) =>
+  t.os === "linux" && t.mode === "desktop" && t.guestAccess === true;
 interface CreateSpec {
   id: string;
   name: string;
@@ -337,6 +338,9 @@ export function App() {
   );
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const deleting = useRef(new Map<string, string>());
+  // One deletion request UUID per machine, kept across dialog reopenings so an
+  // unconfirmed request is always checked or retried under its original ID.
+  const deleteIntents = useRef(new Map<string, string>());
   const [create, setCreate] = useState<CreateConfig | null>(null),
     [detailId, setDetailId] = useState<string | null>(null),
     [stop, setStop] = useState<Machine | null>(null);
@@ -367,6 +371,7 @@ export function App() {
     setPowerOffId(null);
     setDeleteId(null);
     deleting.current.clear();
+    deleteIntents.current.clear();
     setCaptureId(null);
     setStop(null);
     setLoaded(false);
@@ -501,6 +506,7 @@ export function App() {
     for (const [id, name] of deleting.current)
       if (!inventory.machines.some((m) => m.id === id)) {
         deleting.current.delete(id);
+        deleteIntents.current.delete(id);
         setMessage(`${name} deleted. The host confirmed removal.`);
       }
   }, [inventory, loaded, stale]);
@@ -1343,6 +1349,12 @@ export function App() {
       {deleteId && inventory.machines.some((m) => m.id === deleteId) && (
         <MachineDelete
           machine={inventory.machines.find((m) => m.id === deleteId)!}
+          requestId={(() => {
+            const id = deleteId;
+            if (!deleteIntents.current.has(id))
+              deleteIntents.current.set(id, crypto.randomUUID());
+            return deleteIntents.current.get(id)!;
+          })()}
           returnFocus={operationTrigger.current}
           onClose={() => setDeleteId(null)}
           onRequested={async (receipt) => {

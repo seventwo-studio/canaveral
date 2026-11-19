@@ -546,6 +546,7 @@ describe("dashboard contracts", () => {
       revision: "1",
       arch: "arm64",
       mode: "desktop",
+      guestAccess: true,
       name: "Debian desktop",
       minimum: { cpu: 2, memoryMiB: 4096, diskGiB: 16 },
       defaults: { cpu: 2, memoryMiB: 4096, diskGiB: 32 },
@@ -589,7 +590,17 @@ describe("dashboard contracts", () => {
     ).not.toHaveProperty("hostId");
     await screen.findByText(/Review is starting on Arctic/);
   });
-  it("offers no headless image as a desktop", async () => {
+  it("offers neither headless images nor desktops without guest access", async () => {
+    const original = handler;
+    handler = (p, options) =>
+      p === "templates"
+        ? json({
+            templates: [
+              template,
+              { ...template, id: "installer", mode: "desktop" },
+            ],
+          })
+        : original(p, options);
     const user = await login();
     await user.click(screen.getByRole("button", { name: "Launch desktop" }));
     const dialog = screen.getByRole("dialog");
@@ -645,6 +656,36 @@ describe("dashboard contracts", () => {
     );
     await user.click(screen.getAllByRole("button", { name: /Refresh/ })[0]!);
     await screen.findByText("Voyager deleted. The host confirmed removal.");
+  });
+  it("reuses a lost deletion request ID after the dialog is closed and reopened", async () => {
+    const stopped = { ...machine, desired: "stopped", observed: "stopped" };
+    const original = handler;
+    handler = (p, options) =>
+      p === "machines" && options?.method !== "POST"
+        ? json({ machines: [stopped] })
+        : p === "machines/m1/delete"
+          ? Promise.reject(new Error("Lost response"))
+          : original(p, options);
+    const user = await login();
+    const attempt = async () => {
+      await user.click(
+        screen.getByRole("button", { name: "More actions for Voyager" }),
+      );
+      await user.click(
+        await screen.findByRole("menuitem", { name: /Delete machine/ }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      await user.click(
+        within(dialog).getByRole("button", { name: "Delete machine" }),
+      );
+      await within(dialog).findByRole("alert");
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    };
+    await attempt();
+    await attempt();
+    const requests = calls.filter((c) => c.path === "machines/m1/delete");
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.value).toEqual(requests[0]!.value);
   });
   it("shows a blocked deletion as unconfirmed and retries with its request ID", async () => {
     const blocked = {
