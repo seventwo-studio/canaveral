@@ -31,7 +31,7 @@ test("desktop image carries no shared identity or credential", () => {
   assert.match(provision, /rm -f \/etc\/ssh\/ssh_host_\*/);
   assert.match(provision, /: > \/etc\/machine-id/);
   // provision-disk.sh refuses to finish if any shared identity survived.
-  for (const check of ["ssh_host_", "machine-id", "/home/desktop"]) assert.ok(disk.includes(check), `build refuses ${check}`);
+  for (const check of ["ssh_host_", "machine-id", "/home/desktop", "^desktop:", "etc/shadow", "root/.ssh", "var/lib/cloud/instance"]) assert.ok(disk.includes(check), `build refuses ${check}`);
   assert.doesNotMatch(provision + disk, /useradd|authorized_keys|\/opt\/canaveral\/token|chpasswd/);
 });
 

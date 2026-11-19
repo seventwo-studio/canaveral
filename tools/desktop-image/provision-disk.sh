@@ -44,3 +44,8 @@ if compgen -G "$root/etc/ssh/ssh_host_*" >/dev/null; then echo 'Shared SSH host 
 [[ ! -s $root/etc/machine-id ]] || { echo 'A machine ID remains in the image' >&2; exit 1; }
 [[ ! -e $root/var/lib/dbus/machine-id || -L $root/var/lib/dbus/machine-id ]] || { echo 'A D-Bus machine ID remains in the image' >&2; exit 1; }
 [[ ! -e $root/home/desktop ]] || { echo 'The desktop account must be created per instance' >&2; exit 1; }
+! grep -q '^desktop:' "$root/etc/passwd" || { echo 'The desktop account must be created per instance' >&2; exit 1; }
+# No account may ship with a usable password: every hash must be locked (! or *).
+if awk -F: '$2 !~ /^[!*]/ { found = 1 } END { exit !found }' "$root/etc/shadow"; then echo 'An account with a usable password remains in the image' >&2; exit 1; fi
+if compgen -G "$root/root/.ssh/*" >/dev/null; then echo 'Root SSH credentials remain in the image' >&2; exit 1; fi
+[[ ! -e $root/var/lib/cloud/instance ]] || { echo 'cloud-init instance state remains in the image' >&2; exit 1; }
