@@ -1,6 +1,9 @@
 // Operator-only native trial for the dashboard Linux desktop flow.
-// Build coordination (npm --prefix coordination run build) and the dashboard
-// assets first, then run on an Apple-silicon Mac:
+// Build coordination (npm --prefix coordination run build), the dashboard assets
+// and the native helpers (cargo build -p canaveral-mobile-native -p
+// canaveral-apple-native, then node script/prepare_native.mjs debug) first; the
+// Apple provider needs apple-native-helper to prove and erase owned storage.
+// Then run on an Apple-silicon Mac:
 //   CANAVERAL_TRIAL_DISK=/abs/desktop-arm64.qcow2 \
 //   CANAVERAL_TRIAL_BUNDLE=/abs/desktop-guest-bundle-arm64.json \
 //   CANAVERAL_TRIAL_RUNNER=/abs/CanaveralVMRunner \
@@ -12,6 +15,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -25,12 +29,15 @@ const run = promisify(execFile);
 const input = name => { const value = process.env[name]; assert.ok(value?.startsWith('/'), `Set ${name} to an absolute path`); return value; };
 const disk = input('CANAVERAL_TRIAL_DISK'), bundle = input('CANAVERAL_TRIAL_BUNDLE'), runner = input('CANAVERAL_TRIAL_RUNNER');
 const cli = fileURLToPath(new URL('../dist/src/cli.js', import.meta.url));
+const removalHelper = fileURLToPath(new URL('../dist/src/providers/apple-native-helper', import.meta.url));
+await readFile(removalHelper).catch(() => { throw Error('Install apple-native-helper with script/prepare_native.mjs before launching a VM'); });
 const root = await mkdtemp(join(await realpath(tmpdir()), 'dashboard-desktop-'));
 const state = join(root, 'state');
 console.log('Private trial state:', root);
 const evidence = { started: new Date().toISOString() };
 const save = () => writeFile(join(root, 'trial.json'), JSON.stringify(evidence, null, 2), { mode: 0o600 });
 const sha = data => createHash('sha256').update(data).digest('hex');
+async function fileSha(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }
 async function until(check, description, milliseconds = 180000, interval = 1000) {
   const deadline = Date.now() + milliseconds;
   let last;
@@ -46,14 +53,16 @@ async function vmProcesses() {
   return stdout.split('\n').filter(line => line.includes('com.apple.Virtualization.VirtualMachine')).map(line => Number(line.trim().split(/\s+/)[0])).sort((a, b) => a - b);
 }
 
-let local, browser, failure;
+let local, browser, failure, owner, machineId;
 try {
-  for (const [name, path] of [['disk', disk], ['bundle', bundle], ['runner', runner]]) evidence[`${name}Sha256`] = sha(await readFile(path));
+  for (const [name, path] of [['disk', disk], ['bundle', bundle], ['runner', runner]]) evidence[`${name}Sha256`] = await fileSha(path);
   evidence.runnerSignature = (await run('/usr/bin/codesign', ['-dv', runner]).catch(error => error)).stderr?.split('\n').filter(line => /^(Identifier|TeamIdentifier|Signed Time)=/.test(line));
   evidence.baselineVmProcesses = await vmProcesses();
   await save();
 
   const apiPort = 20000 + Math.floor(Math.random() * 20000), dashboardPort = apiPort + 1;
+  // The host identity is bound to this controller URL; recovery must reuse it.
+  evidence.apiPort = apiPort;
   local = spawn(process.execPath, [cli, 'local', '--state', state, '--api-port', String(apiPort), '--dashboard-port', String(dashboardPort),
     '--linux-image', disk, '--apple-runner', runner, '--guest-helper-manifest', bundle], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
@@ -66,7 +75,7 @@ try {
   const admin = new CliClient(api, (await readFile(join(state, 'admin.token'), 'utf8')).trim(), true);
   const password = randomBytes(24).toString('hex');
   // The dashboard account that launches the desktop; its session owns the machine.
-  const owner = new CliClient(api, (await admin.request('POST', '/v1/auth/setup', { username: 'trial', password })).token, true);
+  owner = new CliClient(api, (await admin.request('POST', '/v1/auth/setup', { username: 'trial', password })).token, true);
   await until(async () => (await admin.request('GET', '/v1/templates')).templates.some(t => t.mode === 'desktop' && t.online && t.accepting), 'desktop image offer', 120000);
   const hostView = async () => (await admin.request('GET', '/v1/hosts')).hosts[0];
   evidence.hostReservedBefore = (await hostView()).reserved;
@@ -75,6 +84,18 @@ try {
   browser = await require('playwright').chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.on('pageerror', error => console.log('Page error:', error.message));
+  // Viewer transport evidence: control messages received and RFB input sent.
+  const wire = { control: [], sent: { key: 0, pointer: 0, other: 0 } };
+  page.on('websocket', socket => {
+    if (!socket.url().endsWith('/desktop')) return;
+    socket.on('framereceived', ({ payload }) => { if (typeof payload === 'string') wire.control.push(payload.slice(0, 200)); });
+    socket.on('framesent', ({ payload }) => {
+      if (typeof payload === 'string') { wire.control.push('sent ' + payload.slice(0, 200)); return; }
+      const kind = payload[0];
+      if (kind === 4) wire.sent.key++; else if (kind === 5) wire.sent.pointer++; else wire.sent.other++;
+    });
+  });
+  evidence.viewerWire = wire;
   await page.goto(home);
   await page.getByLabel('Username').fill('trial');
   await page.getByLabel('Password', { exact: true }).fill(password);
@@ -91,6 +112,7 @@ try {
   await page.getByText(new RegExp(`${name} is starting on`)).waitFor({ timeout: 60000 });
   const machine = (await owner.request('GET', '/v1/machines')).machines.find(m => m.name === name);
   assert.ok(machine, 'launched machine is listed for its owner');
+  machineId = machine.id;
   Object.assign(evidence, { machineId: machine.id, launchedAt: new Date().toISOString() });
   await save();
   console.log('Launched', machine.id);
@@ -108,15 +130,9 @@ try {
   Object.assign(evidence, { dashboardStates: [...states], readyAt: new Date().toISOString(), hostReservedReady: (await hostView()).reserved });
   await save();
 
-  // 3. Open the viewer and interact. A terminal window is opened at a known
-  // position from the dashboard's own terminal so the click target is fixed.
+  // 3. Open the viewer and interact only through it: click the XFCE panel's
+  // terminal launcher (1440x900 guest pixels), then type into the new window.
   await row.getByRole('button', { name: 'Control', exact: true }).click();
-  await page.getByRole('button', { name: 'Terminals', exact: true }).click();
-  await page.getByRole('button', { name: 'New shell', exact: true }).first().click();
-  await page.locator('.xterm-screen').first().click();
-  await page.keyboard.type("DISPLAY=:1 setsid xfce4-terminal --disable-server --title=canaveral-trial --geometry=60x8+40+40 >/dev/null 2>&1 &\n");
-  await delay(5000);
-  await page.getByRole('button', { name: 'Desktop', exact: true }).click();
   const take = page.getByRole('button', { name: 'Take control', exact: true });
   await take.waitFor({ timeout: 60000 });
   await until(() => take.isEnabled(), 'viewer connection', 60000, 500);
@@ -125,12 +141,9 @@ try {
   await page.getByText('Mouse and keyboard connected', { exact: true }).waitFor({ timeout: 30000 });
   const canvas = page.locator('canvas').first(), box = await canvas.boundingBox();
   const scale = box.width / 1440;
-  await page.mouse.click(box.x + 200 * scale, box.y + 90 * scale);
-  const nonce = randomUUID();
-  await page.keyboard.type(`echo typed-${nonce} > /tmp/canaveral-trial.txt\n`, { delay: 30 });
-  await delay(3000);
-  await canvas.screenshot({ path: join(root, 'viewer-after.png') });
-  await page.getByRole('button', { name: 'Release control', exact: true }).click();
+  await canvas.click({ position: { x: 647 * scale, y: 875 * scale } });
+  await delay(4000);
+  await canvas.screenshot({ path: join(root, 'viewer-terminal.png') });
   const operation = async (action, args = {}) => {
     const id = randomUUID();
     let receipt = await owner.request('POST', `/v1/machines/${machine.id}/operations`, { id, action, arguments: args });
@@ -138,6 +151,16 @@ try {
     assert.equal(receipt.state, 'succeeded', `${action}: ${JSON.stringify(receipt.result)}`);
     return receipt.result;
   };
+  const nonce = randomUUID();
+  const typingStarted = Date.now();
+  await page.keyboard.type(`echo typed-${nonce} > /tmp/canaveral-trial.txt\n`, { delay: 30 });
+  evidence.typingMs = Date.now() - typingStarted;
+  // The file appears only after the final Enter reached the guest through the viewer.
+  // Listing is a read that succeeds whether or not the file exists yet.
+  await until(async () => (await operation('list-files', { path: '/tmp' })).entries?.some(entry => entry.name === 'canaveral-trial.txt' && entry.size > 0), 'typed file', 60000, 1000);
+  evidence.typedFileVisibleMs = Date.now() - typingStarted;
+  await canvas.screenshot({ path: join(root, 'viewer-after.png') });
+  await page.getByRole('button', { name: 'Release control', exact: true }).click();
   const typed = Buffer.from((await operation('pull', { path: '/tmp/canaveral-trial.txt' })).data, 'base64').toString('utf8');
   assert.equal(typed, `typed-${nonce}\n`);
   const screenshot = await operation('screenshot');
@@ -188,6 +211,17 @@ try {
   console.error('Trial failed:', error.message);
 } finally {
   await browser?.close().catch(() => {});
+  // A failed run still removes the VM it created, through its own controller.
+  if (failure && owner && machineId && local?.exitCode === null) {
+    try {
+      const view = async () => (await owner.request('GET', '/v1/machines')).machines.find(m => m.id === machineId);
+      if ((await view())?.desired !== 'stopped') await owner.request('POST', `/v1/machines/${machineId}/desired`, { state: 'stopped' });
+      await until(async () => (await view())?.observed === 'stopped', 'recovery stop', 300000, 2000);
+      await owner.request('POST', `/v1/machines/${machineId}/delete`, { id: (await view()).deletion?.id ?? randomUUID() });
+      await until(async () => !(await view()), 'recovery deletion', 300000, 2000);
+      evidence.recovery = 'stopped and deleted after failure';
+    } catch (error) { evidence.recovery = 'unconfirmed: ' + error.message; }
+  }
   if (local && local.exitCode === null) {
     local.kill('SIGINT');
     await Promise.race([new Promise(resolve => local.once('exit', resolve)), delay(30000)]);

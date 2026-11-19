@@ -115,6 +115,8 @@ deletion only when the controller stops listing the machine. If the host cannot
 confirm removal, the row shows **Deletion blocked**: storage and its reservation
 stay in place until an operator inspects the host.
 
+The [native trial record](../coordination/native-acceptance/dashboard-desktop.md) covers this flow on Apple silicon. The local desktop socket authorizes each complete browser message with the gateway before and after reading it, so every input event costs three controller round trips. In that trial the guest applied about 12 input events per second.
+
 The live viewer needs a dashboard with an attached desktop connector. Only
 `canaveral local` provides one. A standalone dashboard, such as one deployed
 beside a remote controller, refuses the desktop WebSocket with 409 until the
