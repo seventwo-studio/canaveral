@@ -112,6 +112,7 @@ import {
 } from "@/components/infrastructure";
 import { WorkspaceBuilds } from "@/components/workspace-builds";
 import { WorkspacePreviews } from "@/components/workspace-previews";
+import { ModelRuns } from "@/components/model-runs";
 import { BaseImageRegistry } from "@/components/image-registry";
 import { MachinePowerOff } from "@/components/machine-power";
 import {
@@ -182,6 +183,7 @@ const views = {
   },
   builds: { filters: [] },
   previews: { filters: [] },
+  models: { filters: [] },
   blueprints: { filters: [] },
   templates: {
     filters: ["all", "headless", "desktop", "device"],
@@ -313,6 +315,7 @@ export function App() {
       "api-access",
       "system",
       "configuration",
+      "models",
     ].includes(requestedView)
       ? "machines"
       : requestedView;
@@ -865,6 +868,15 @@ export function App() {
             <WorkspaceBuilds key={user.id} />
           ) : view === "previews" ? (
             <WorkspacePreviews key={user.id} />
+          ) : view === "models" && user.role === "admin" ? (
+            <ModelRuns
+              key={user.id}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
           ) : view === "blueprints" ? (
             <>
               <Notice error>{stale}</Notice>

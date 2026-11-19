@@ -13,6 +13,7 @@ import {
   Orbit,
   Layers,
   User,
+  Sparkles,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -65,6 +66,13 @@ export const destinations = {
     href: "#previews",
     icon: Rocket,
     adminOnly: false,
+  },
+  models: {
+    group: "Workspace",
+    label: "Models",
+    href: "#models",
+    icon: Sparkles,
+    adminOnly: true,
   },
   templates: {
     group: "Machine sources",
