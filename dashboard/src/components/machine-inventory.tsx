@@ -26,6 +26,7 @@ export function MachineInventory({
   onLifecycle,
   onPowerOff,
   onCapture,
+  onDelete,
 }: {
   machines: Machine[];
   hosts: Host[];
@@ -37,6 +38,7 @@ export function MachineInventory({
   onLifecycle: (machine: Machine) => void;
   onPowerOff: (id: string, trigger: Element | null) => void;
   onCapture: (id: string, trigger: Element | null) => void;
+  onDelete: (id: string, trigger: Element | null) => void;
 }) {
   return (
     <div className="min-w-0 overflow-hidden rounded-md border bg-card">
@@ -64,6 +66,7 @@ export function MachineInventory({
             onLifecycle={onLifecycle}
             onPowerOff={onPowerOff}
             onCapture={onCapture}
+            onDelete={onDelete}
           />
         ))}
       </ul>
@@ -81,6 +84,7 @@ function MachineRow({
   onLifecycle,
   onPowerOff,
   onCapture,
+  onDelete,
 }: Omit<Parameters<typeof MachineInventory>[0], "machines" | "hosts"> & {
   machine: Machine;
   host?: Host;
@@ -92,12 +96,19 @@ function MachineRow({
     m.ready &&
     m.observed === "running" &&
     (m.template.mode === "device" || m.template.guestAccess);
+  const deletable =
+    !!m.deletion ||
+    (m.desired === "stopped" &&
+      m.observed === "stopped" &&
+      !m.powerOffRequest &&
+      host?.online !== false);
   const powerOff =
-    !!m.powerOffRequest ||
-    (m.template.mode !== "device" &&
-      m.observed !== "stopped" &&
-      host?.online &&
-      ["macos", "apple"].includes(host.provider));
+    !m.deletion &&
+    (!!m.powerOffRequest ||
+      (m.template.mode !== "device" &&
+        m.observed !== "stopped" &&
+        host?.online &&
+        ["macos", "apple"].includes(host.provider)));
   return (
     <li
       data-machine-id={m.id}
@@ -138,6 +149,13 @@ function MachineRow({
         {m.powerOffRequest && (
           <p className="text-xs text-muted-foreground">Power-off pending</p>
         )}
+        {m.deletion && (
+          <p className="text-xs text-muted-foreground">
+            {m.deletion.state === "blocked"
+              ? "Removal unconfirmed; storage retained"
+              : "Waiting for host to confirm removal"}
+          </p>
+        )}
       </div>
       <dl className="min-w-0 text-xs">
         <dt className="mb-1 text-muted-foreground xl:sr-only">Resources</dt>
@@ -163,7 +181,7 @@ function MachineRow({
         )}
       </dl>
       <div className="col-span-2 flex flex-wrap items-center gap-2 xl:col-span-1 xl:flex-nowrap xl:justify-end">
-        {controllable ? (
+        {m.deletion ? null : controllable ? (
           <Button size="sm" onClick={() => onControl(m.id)}>
             Control
           </Button>
@@ -185,17 +203,18 @@ function MachineRow({
             Details<span className="sr-only"> {m.name}</span>
           </Button>
         )}
-        {!(m.observed === "stopped" && m.desired !== "running") && (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy || !!m.powerOffRequest}
-            aria-label={`${m.desired === "running" ? "Stop" : "Start"} ${m.name}`}
-            onClick={() => onLifecycle(m)}
-          >
-            {m.desired === "running" ? "Stop" : "Start"}
-          </Button>
-        )}
+        {!m.deletion &&
+          !(m.observed === "stopped" && m.desired !== "running") && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || !!m.powerOffRequest}
+              aria-label={`${m.desired === "running" ? "Stop" : "Start"} ${m.name}`}
+              onClick={() => onLifecycle(m)}
+            >
+              {m.desired === "running" ? "Stop" : "Start"}
+            </Button>
+          )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -240,6 +259,21 @@ function MachineRow({
               >
                 Capture snapshot
               </DropdownMenuItem>
+            )}
+            {deletable && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  disabled={busy}
+                  onSelect={() => {
+                    pending.current = () => onDelete(m.id, trigger.current);
+                  }}
+                >
+                  {m.deletion ? "Check deletion status" : "Delete machine"}
+                  <span className="sr-only"> {m.name}</span>
+                </DropdownMenuItem>
+              </>
             )}
             {powerOff && (
               <>

@@ -1,4 +1,4 @@
-import { record } from "./types";
+import { deletionStates, record } from "./types";
 import { resources } from "./catalogue";
 import type { Resources } from "./catalogue";
 import type {
@@ -20,6 +20,7 @@ export interface Machine extends WorkspaceMachine {
   updatedAt?: number;
   detail?: string;
   powerOffRequest?: string;
+  deletion?: { id: string; state: string };
   template: WorkspaceMachine["template"] & { name?: string; revision?: string };
 }
 export interface ImageOffer {
@@ -38,6 +39,8 @@ export interface ImageOffer {
   defaults?: Resources;
   memoryStepMiB?: number;
   preparationDriver?: string;
+  /** Public flag: the host prepares owned guest access (display, files, shells). */
+  guestAccess?: boolean;
   imageKind?: string;
   mediaType?: string;
   device?: { systemImage?: string; runtime?: string };
@@ -267,11 +270,21 @@ export function machinesResponse(value: unknown): Machine[] {
       Object.values(record(m.capabilities)).some((v) => typeof v !== "boolean")
     )
       throw new Error("Invalid guest capabilities.");
+    if (m.deletion != null) {
+      const d = record(m.deletion);
+      if (
+        !string(d.id) ||
+        !string(d.state) ||
+        !deletionStates.includes(d.state)
+      )
+        throw new Error("Invalid machine deletion state.");
+    }
     return {
       ...m,
       updatedAt: m.updatedAt ?? undefined,
       resources: resources(m.resources),
       powerOffRequest: m.powerOffRequest ?? undefined,
+      deletion: m.deletion ?? undefined,
     } as unknown as Machine;
   });
 }
@@ -280,6 +293,7 @@ export function imagesResponse(value: unknown): ImageOffer[] {
     const t = record(value);
     requiredStrings(t, ["id", "revision", "os", "arch", "mode", "hostId"]);
     booleans(t, ["online", "accepting"]);
+    booleans(t, ["guestAccess"], true);
     optionalStrings(t, ["name", "preparationDriver", "imageKind", "mediaType"]);
     if (
       t.memoryStepMiB !== undefined &&

@@ -204,3 +204,18 @@ test('mixed runtime selection captures macOS authority and retains old backends 
   assert.equal(authorities[0]!.authorized(),false,'current fingerprint is authoritative');
   runner.runtimes.clear();runner.assignments=[];await runner.close();assert.equal(closed,1);assert.ok(swept>0);
 });
+
+test("assignment context validates a configured operator recipe once, not on every access", async t => {
+  const { config, image } = setup(t);
+  let reads = 0;
+  const recipe = { driver: "cloud-init", packages: ["curl"], commands: ["true"] };
+  // Operator recipes can embed a multi-MiB guest bundle; count how often it is examined.
+  Object.defineProperty(image, "prepare", { enumerable: true, get() { reads++; return recipe; } });
+  const runner = new HostRunner(config, { transport: fakeTransport(), providerFactory });
+  await runner.initializeProviders();
+  const m = machine(image), start = reads;
+  for (let i = 0; i < 5; i++) assert.equal(runner.context(m).image.id, image.id);
+  // One full validation, then only the per-call defensive copy reads the recipe.
+  assert.ok(reads - start <= 5 + 2, `recipe reads ${reads - start}`);
+  assert.throws(() => runner.context({ ...m, template: normalizeTemplate({ ...image, prepare: { driver: "cloud-init", packages: ["other"] } }) }), /no longer matches/);
+});

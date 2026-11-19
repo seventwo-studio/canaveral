@@ -210,3 +210,34 @@ test("creation confirmation cannot substitute another machine for the original r
     createdMachine({ id: "other", name: "Guest", hostId: "host" }, "request"),
   ).toThrow("Inspect the original request");
 });
+test("machine deletion state is validated and surfaced as unconfirmed until removal", async () => {
+  const { machineStatus, attention } = await import("./api");
+  const { deletionReceipt } = await import("./types");
+  const deleting = machinesResponse({
+    machines: [{ ...machine, deletion: { id: "d1", state: "running" } }],
+  })[0]!;
+  expect(deleting.deletion).toEqual({ id: "d1", state: "running" });
+  expect(machineStatus(deleting)).toBe("Deleting");
+  const blocked = { ...deleting, deletion: { id: "d1", state: "blocked" } };
+  expect(machineStatus(blocked)).toBe("Deletion blocked");
+  expect(attention(blocked)).toBe(true);
+  for (const deletion of [{ id: "d1" }, { id: "d1", state: "done" }])
+    expect(() =>
+      machinesResponse({ machines: [{ ...machine, deletion }] }),
+    ).toThrow("Invalid machine deletion state");
+  expect(
+    deletionReceipt(
+      { id: "d1", machineId: "machine", state: "queued" },
+      { id: "d1", machineId: "machine" },
+    ).state,
+  ).toBe("queued");
+  expect(() =>
+    deletionReceipt(
+      { id: "d2", machineId: "machine", state: "queued" },
+      { id: "d1", machineId: "machine" },
+    ),
+  ).toThrow("ownership changed");
+  expect(() =>
+    deletionReceipt({ id: "d1", machineId: "machine", state: "deleted" }),
+  ).toThrow("Invalid deletion receipt");
+});
