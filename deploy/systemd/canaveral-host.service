@@ -12,6 +12,11 @@ ExecStart=/usr/bin/node /opt/canaveral/coordination/dist/src/cli.js host --confi
 Restart=on-failure
 RestartSec=10
 UMask=0077
+# Leased Android emulators run under detached lease supervisors that must outlive the
+# host process: they keep enforcing each lease deadline while the host restarts. The
+# default control-group mode would kill every supervisor and emulator on stop or restart.
+# Stop signals the host process only; supervisors and native runners keep running.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

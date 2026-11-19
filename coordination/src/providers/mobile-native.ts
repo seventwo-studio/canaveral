@@ -184,6 +184,22 @@ export const nativeLeaseSupervisor: LeaseSupervisorTransport = {
     if (!Number.isSafeInteger(pgid) || pgid <= 1) return false;
     try { process.kill(-pgid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
   },
+  async status(helper, storage) {
+    if (!path.isAbsolute(helper) || !path.isAbsolute(storage)) throw new ServiceError("Lease supervisor paths must be absolute.", 400);
+    const result = spawnSync(helper, ["lease-status", storage], { env: {}, shell: false, encoding: "utf8", timeout: 2000, maxBuffer: 1024, windowsHide: true });
+    try {
+      if (result.error || result.status !== 0) throw new Error();
+      const value = object(JSON.parse(result.stdout));
+      if (value.version !== 1 || typeof value.bootSessionID !== "string" || typeof value.continuous !== "number" || !Number.isFinite(value.continuous) || value.continuous < 0 || !["held", "free", "absent"].includes(String(value.supervisor))) throw new Error();
+      return { version: 1, bootSessionID: value.bootSessionID, continuous: value.continuous, supervisor: value.supervisor as "held" | "free" | "absent" };
+    } catch { throw new ServiceError("Native lease supervisor status is unavailable.", 409, { outcome: "unknown" }); }
+  },
+  async commandLines() {
+    // Full-width argv for every process this account can see; truncation would hide a match.
+    const result = spawnSync("/bin/ps", ["-axww", "-o", "command="], { env: {}, shell: false, encoding: "utf8", timeout: 5000, maxBuffer: 64 * 1048576, windowsHide: true });
+    if (result.error || result.status !== 0) throw new ServiceError("Process inventory is unavailable.", 409, { outcome: "unknown" });
+    return result.stdout.split("\n").filter(Boolean);
+  },
 };
 /** Freshness uses a suspend-aware native clock, never civil time or awake-only hrtime. */
 export function nativeElapsedClock(config: RecordValue): () => number {

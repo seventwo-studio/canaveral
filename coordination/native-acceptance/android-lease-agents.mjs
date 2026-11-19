@@ -40,7 +40,8 @@ async function pause(name, data) {
   note("observe", { name, continueFile: file, ...data }); await save();
   await until(() => existsSync(file), "operator observation " + name, 3600000);
 }
-const pgrep = pattern => { try { return execFileSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" }).trim().split("\n").filter(Boolean); } catch { return []; } };
+const helpers = () => Object.fromEntries(["netsimd", "crashpad_handler", "qemu-system"].map(name => [name, pgrep(name)]));
+const pgrep = pattern => { try { return execFileSync("/usr/bin/pgrep", ["-f", "--", pattern], { encoding: "utf8" }).trim().split("\n").filter(Boolean); } catch { return []; } };
 const inventory = async () => [
   (await readdir(stock)).sort(),
   await readFile(join(stock, "Pixel_API_36.ini"), "utf8"),
@@ -49,7 +50,8 @@ const inventory = async () => [
 ];
 
 let controller, runner;
-const before = await inventory();
+const before = await inventory(), helpersBefore = helpers();
+note("baseline-helpers", helpersBefore);
 try {
   const admin = randomBytes(32).toString("hex"), enrollment = randomBytes(32).toString("hex");
   await writeFile(join(root, "admin"), admin, { mode: 0o600 }); await writeFile(join(root, "enroll"), enrollment, { mode: 0o600 });
@@ -106,6 +108,14 @@ try {
   if (screenshot.body.state === "succeeded") await writeFile(join(root, "agent-a.png"), Buffer.from(screenshot.body.result.data, "base64"));
   const tap = await operate(a.id, a.key, "tap", { x: 540, y: 1200 });
   const logs = await operate(a.id, a.key, "logs");
+  // Negative guest-to-host probe from A's own lease shell: adb, the controller and the emulator's own ports.
+  const consolePort = JSON.parse(await readFile(join(storageA, "endpoint.json"), "utf8")).port;
+  const probePorts = [5037, controller.address.port, consolePort, consolePort + 1];
+  const probe = await operate(a.id, a.key, "shell", { argv: ["sh", "-c", `for p in ${probePorts.join(" ")}; do r=$( (echo | timeout 3 nc 10.0.2.2 $p >/dev/null) 2>&1 ); echo "port $p rc=$? $r"; done`] });
+  const probeOutput = String(probe.body.result?.output ?? "");
+  note("agent-a-guest-to-host", { state: probe.body.state, output: probeOutput, readinessReceipt: JSON.parse(await readFile(join(storageA, "lease-isolation.json"), "utf8")),
+    emulatorArgv: (() => { try { return execFileSync("/bin/ps", ["-o", "command=", "-p", String(recordA.childPid)], { encoding: "utf8" }).trim(); } catch { return ""; } })(), helpersDuringLease: helpers() });
+  for (const port of probePorts) assert.match(probeOutput, new RegExp(`port ${port} rc=1 nc: connect: Connection refused`), "guest reached host port " + port);
   note("agent-a-drove", { apkBytes: bytes.length, apkSha256: createHash("sha256").update(bytes).digest("hex"), push: push.body.state, install: [install.body.state, install.body.result?.output],
     launch: launch.body.state, labelVisible: String(hierarchy.body.result?.output ?? "").includes(label), screenshot: screenshot.body.state, tap: tap.body.state, logs: logs.body.state });
 
@@ -136,9 +146,27 @@ try {
   note("agent-b-clean", { machineId: b.machineId, distinct: b.machineId !== a.machineId, trialPackagePresent: String(packages.body.result?.output ?? "").includes(bundle), apps: packages.body.state, screenshot: shotB.body.state, tap: tapB.body.state, agentAKeyOnB: crossA.status });
   await pause("b", { serial: "emulator-" + JSON.parse(await readFile(join(root, "devices", b.machineId, "endpoint.json"), "utf8")).port, avd: "cvm-" + b.machineId });
 
-  assert.equal((await api("POST", `/v1/leases/${b.id}/release`, { id: randomUUID() }, b.key)).status, 200);
-  const cleanupB = await until(async () => { const view = (await api("GET", "/v1/leases/" + b.id, undefined, appB)).body; return view.cleanup.state === "complete" && view; }, "B cleanup", 300000);
-  note("agent-b-cleaned", { cleanup: cleanupB.members[0].cleanup, reserved: (await api("GET", "/v1/hosts")).body.hosts[0].reserved, processes: pgrep("cvm-" + b.machineId) });
+  // B's supervisor is killed mid-lease: access must end at once and the reservation stay held.
+  const storageB = join(root, "devices", b.machineId), recordB = JSON.parse(await readFile(join(storageB, "lease-supervisor.json"), "utf8"));
+  process.kill(recordB.supervisorPid, "SIGKILL");
+  await until(() => { try { process.kill(recordB.supervisorPid, 0); return false; } catch { return true; } }, "supervisor loss");
+  const killedAt = Date.now();
+  const tapAfterKill = await operate(b.id, b.key, "tap", { x: 540, y: 1200 });
+  await until(async () => (await api("GET", "/v1/leases/" + b.id, undefined, appB)).body.state === "failed", "B's lease fails after supervisor loss", 60000);
+  const failedAfterMs = Date.now() - killedAt;
+  const refusedB = await api("POST", `/v1/leases/${b.id}/operations`, { id: randomUUID(), member: "primary", action: "screenshot", arguments: {} }, b.key);
+  const blockedB = await until(async () => { const view = (await api("GET", "/v1/leases/" + b.id, undefined, appB)).body; return view.cleanup.state === "blocked" && view; }, "B cleanup blocked", 120000);
+  await delay(5000);
+  const emulatorAlive = (() => { try { process.kill(recordB.childPid, 0); return true; } catch { return false; } })();
+  note("agent-b-supervisor-killed", { tapAfterKill: [tapAfterKill.status, tapAfterKill.body.state ?? tapAfterKill.body.code], failedAfterMs, screenshotAfterFailure: [refusedB.status, refusedB.body.code],
+    cleanup: blockedB.cleanup, memberCleanup: blockedB.members[0].cleanup, reserved: (await api("GET", "/v1/hosts")).body.hosts[0].reserved, emulatorAlive,
+    authorizationFenced: JSON.parse(await readFile(join(storageB, "lease-authorization.json"), "utf8")).fenced });
+  // Documented operator recovery: confirm the orphan is B's emulator, then stop its process group.
+  const argvB = execFileSync("/bin/ps", ["-o", "command=", "-p", String(recordB.childPid)], { encoding: "utf8" });
+  assert.ok(argvB.includes("-avd cvm-" + b.machineId), "orphan is B's emulator");
+  process.kill(-recordB.childPid, "SIGKILL");
+  const cleanupB = await until(async () => { const view = (await api("GET", "/v1/leases/" + b.id, undefined, appB)).body; return view.cleanup.state === "complete" && view; }, "B cleanup after recovery", 300000);
+  note("agent-b-cleaned", { cleanup: cleanupB.members[0].cleanup, reserved: (await api("GET", "/v1/hosts")).body.hosts[0].reserved, processes: pgrep("cvm-" + b.machineId), storageRemoved: !existsSync(storageB) });
 } catch (error) {
   note("failed", { error: String(error?.stack ?? error) });
   process.exitCode = 1;
@@ -146,10 +174,11 @@ try {
   await save().catch(() => {});
   await runner?.close().catch(() => {}); await controller?.close().catch(() => {});
   // Supervisors carry their private storage path; emulators carry their owned AVD name.
-  const leftovers = [...pgrep(join(root, "devices")), ...pgrep("-avd cvm-")];
-  note("closed", { leftoverProcesses: leftovers });
-  const after = await inventory();
-  note("baseline", { stockInventoryUnchanged: JSON.stringify(after) === JSON.stringify(before) });
+  const after = helpers(), newHelpers = Object.fromEntries(Object.entries(after).map(([name, pids]) => [name, pids.filter(pid => !helpersBefore[name].includes(pid))]));
+  const leftovers = [...pgrep(join(root, "devices")), ...pgrep("-avd cvm-"), ...Object.values(newHelpers).flat()];
+  note("closed", { leftoverProcesses: leftovers, newHelperProcesses: newHelpers });
+  const stock = await inventory();
+  note("baseline", { stockInventoryUnchanged: JSON.stringify(stock) === JSON.stringify(before) });
   await writeFile(join(tmpdir(), "android-lease-agents-" + Date.now() + ".json"), JSON.stringify(log, null, 2), { mode: 0o600 });
   if (!leftovers.length) await rm(root, { recursive: true, force: true });
   note("removed", { root, absent: !existsSync(root) });

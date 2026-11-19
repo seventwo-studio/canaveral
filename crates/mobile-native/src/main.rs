@@ -702,7 +702,16 @@ mod unix {
             return Ok(());
         }
         if mode == "lease-supervise" && args.len() == 2 {
-            return crate::lease_supervisor::supervise(&args[1], elapsed);
+            std::process::exit(crate::lease_supervisor::supervise(&args[1], elapsed));
+        }
+        if mode == "lease-status" && args.len() == 2 {
+            let supervisor = crate::lease_supervisor::status(&args[1])?;
+            let session = crate::lease_supervisor::boot_session()?;
+            println!(
+                "{}",
+                json!({"version": 1, "bootSessionID": session, "continuous": elapsed()?, "supervisor": supervisor})
+            );
+            return Ok(());
         }
         let mut server = Server::default();
         if mode == "files" && args.len() == 2 {

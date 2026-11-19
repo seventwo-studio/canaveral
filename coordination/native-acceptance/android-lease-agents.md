@@ -1,4 +1,4 @@
-# Android emulator lease trial: two agents, one emulator, 2026-11-19
+# Android emulator lease trials: two agents, one emulator, 2026-11-19
 
 The project's original acceptance case: two agents, one Mac host with capacity for exactly one emulator. Agent A leases the emulator, installs a real APK and drives it. Agent B's request waits. A disconnects and its lease expires. A's credential stops working, cleanup is proven and B receives a clean, usable emulator.
 
@@ -41,10 +41,45 @@ The driver's leftover-process check matched one PID: the operator's monitoring s
 
 No pre-existing device was started, stopped or inspected beyond the T3 device list. Both leased emulators were driven only through Canaveral lease operations. T3's `device_open` was used only to take screenshots.
 
-## Not verified by this trial
+## Run 2: review fixes (isolation, supervisor loss, leftover helpers)
+
+The second run used the review-fix working tree on top of `4f32311`, with the rebuilt debug `canaveral-mobile-native` installed by `script/prepare_native.mjs debug`. It ran 13:41–13:47 UTC on the same Mac Studio, with the same setup, template, capacity and applications. The APK was rebuilt by [dashboard-android-app.sh](dashboard-android-app.sh): 8,589 bytes, SHA-256 `b68d9b6f…b39d`, with a fresh single-use key. The driver added three checks:
+
+- a negative guest-to-host probe from agent A's own lease shell;
+- killing agent B's supervisor mid-lease, in place of B's release;
+- leftover-helper checks for `netsimd`, `crashpad_handler` and `qemu-system` before, during and after the trial.
+
+Before the trial, a separate check on a disposable AVD (`canaveral-isoprobe`, private `ANDROID_AVD_HOME` and adb server port, deleted afterwards) showed the vulnerability with stock flags. From inside the guest, `nc 10.0.2.2` connected to the operator's adb server on 5037, the T3 server, the emulator's own console and adb ports and a host canary listener. The internet was also reachable. `crashpad_handler` ran with parent PID 1 in its own process group, outside the emulator's group. `netsimd` ran as a child of the emulator. See [Guest network isolation](../../docs/mobile-control.md#guest-network-isolation) for the flag-by-flag results.
+
+| Step | Time (UTC) | Outcome |
+| --- | --- | --- |
+| Baseline helpers | 13:41:22.4 | No `netsimd`, `crashpad_handler` or `qemu-system` process |
+| A admitted | 13:41:23.6 | Lease `775be664…`, machine `343e3902…`, TTL 240 s |
+| A ready | 13:41:55.1 | Ready only after boot, package manager, AVD ownership and the readiness isolation probe. `lease-isolation.json` recorded `isolated: true` for ports 5037, 5554, 5555, the controller's 53442 and the canary. Emulator PID 52022, supervisor PID 52021. |
+| Guest-to-host probe from A's lease shell | 13:42:18.8 | `shell` `sh -c 'nc 10.0.2.2 <port>'` for 5037, the controller port 53442, console 5554 and adb 5555: every port answered `rc=1 nc: connect: Connection refused`. The emulator argv carried `-feature -WiFiPacketStream -feature -BluetoothEmulation -feature -Uwb -network-user-mode-options restrict=on,ipv6=off -wifi-user-mode-options restrict=on,ipv6=off -crash-report-mode disabled -no-metrics`. During the lease, the only helper process was `qemu-system` PID 52022: no `netsimd` and no `crashpad_handler`. |
+| A drives the device | 13:42:18.8 | `push`, `pm install -r` (`Success`), `launch`, `hierarchy` with the trial label, `screenshot`, `tap` and `logs` all succeeded without guest networking |
+| B waits | 13:42:23.8 | B's request `waiting`; 2 CPUs, 4096 MiB and 12 GiB reserved |
+| Observation | 13:42 | T3 `device_list` showed `emulator-5554` named `cvm-343e3902…`. `device_screenshot` showed the trial app with its label. The panel was closed without shutdown. |
+| Native stop at expiry | ≤ 13:45:25.5 | `lease-stopped.json` reason `expired`, `groupAbsent: true`, exit status 0; emulator gone |
+| A's key refused | 13:45:25.5 | `tap` and `screenshot` 410 `lease_ended` |
+| A cleanup proven | 13:45:27.7 | Cleanup `complete` (attempt 2); storage and AVD registration removed |
+| B ready | 13:45:59.1 | Lease `e01e3ff1…` on machine `6fbceec9…`; trial package absent; A's key 401 on B |
+| Observation | 13:46 | T3 `device_screenshot` of `cvm-6fbceec9…` showed a fresh home screen. The panel was closed without shutdown. |
+| B's supervisor killed (SIGKILL) | ≤ 13:46:25.4 (after the B observation) | A `tap` sent right after the kill was accepted by the controller but `failed` on the host: the provider refused the device with 410. The lease was `failed` 261 ms after the kill was observed, well before its 240 s TTL. A later `screenshot` returned 410 `lease_ended`. |
+| B held | 13:46:30.4 | Five seconds after the failure: cleanup `blocked` with reason `execution_pending`, host reservation still 2 CPUs, 4096 MiB and 12 GiB, the orphaned emulator still alive and `lease-authorization.json` fenced |
+| Operator recovery | 13:46:30.4 | The driver confirmed the orphan's argv contained `-avd cvm-6fbceec9…`, then stopped its process group |
+| B cleanup proven | 13:46:31.7 | Cleanup `complete` (attempt 3); storage removed; reservation 0 CPU, 0 MiB, 0 GiB |
+| Leftover helpers | 13:46:31.8 | No new `netsimd`, `crashpad_handler` or `qemu-system` process; no supervisor or `cvm-` emulator |
+
+Baseline restored: `~/.android/avd`, `Pixel_API_36.ini`, the `Pixel_API_36.avd` inode and its `config.ini` SHA-256 matched the baseline. T3 `device_list` again showed only `Pixel_API_36` (shut down) for Android. The private trial directory, the APK build directory and the copied trial log were deleted.
+
+The run exposed a bug in the driver's leftover check that predates the review fixes: `pgrep -f "-avd cvm-"` parsed the pattern as options, printed its usage and matched nothing. The new `qemu-system` check covered the emulators in this run, and the driver now passes `--` before the pattern. The first run's leftover result for `-avd cvm-` emulators therefore rested only on its supervisor-path check and its manual inspection.
+
+## Not verified by these trials
 
 - Host loss and controller loss on real hardware. The portable suite covers both with the real supervisor binary and stand-in emulator processes; natively, only the deadline expiry path ran.
-- Unprovable cleanup on a real emulator (supervisor killed with its emulator still alive) and the operator recovery. Fixture only.
 - Renewal, runner restart mid-lease and lost-reply recovery against a real emulator. Fixture only.
 - Lease file sessions, PTY and live display sessions, and MP4 recording with lease credentials. Not exercised; see [mobile control](../../docs/mobile-control.md#android-emulator-leases).
+- A supervisor that fails during launch, and a runner crash between the launch intent and the supervisor record (automatic recovery). Fixture only.
+- Guest isolation on Linux hosts and on emulator versions other than 37.2.13. The readiness probe fails closed there, but no native run exists.
 - iOS simulators, physical devices, remote hosts, concurrent emulators on one host, and the release build of the helper.

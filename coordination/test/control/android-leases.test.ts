@@ -3,14 +3,18 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startController } from "../../src/main.ts";
 import { HostRunner, hostOffer } from "../../src/host.ts";
 import type { HostConfig } from "../../src/host.ts";
-import { AndroidProvider } from "../../src/providers/android.ts";
+import { AndroidProvider, LEASE_ISOLATION_ARGUMENTS } from "../../src/providers/android.ts";
 import { mobileNativeHelper, nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
-import type { CommandResult, MobileTransport, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
+import { SUPERVISOR_REFUSED, SupervisorLaunchError } from "../../src/providers/mobile.ts";
+import type { CommandResult, LeaseSupervisorTransport, MobileTransport, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
+import { normalizeOperatorTemplate } from "../../src/control/templates.ts";
 
 /** Disposable Android lease fixtures. A real loopback controller, a real HostRunner with the
  * native continuous lease clock and the real `lease-supervise` helper own stand-in emulator
@@ -51,8 +55,17 @@ setInterval(() => {}, 1000);\n`);
 function emulators(registry: string): Emulator[] {
   return readdirSync(registry).filter(name => name.endsWith(".json")).map(name => JSON.parse(readFileSync(join(registry, name), "utf8")) as Emulator).filter(e => alive(e.pid));
 }
+/** A guest's view of 10.0.2.2: an isolated guest is refused everywhere; a leaky one really
+ * connects to the host loopback port, as an unrestricted emulator would. */
+function reach(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = connect({ host: "127.0.0.1", port }, () => { socket.destroy(); resolve(true); });
+    socket.setTimeout(1000, () => { socket.destroy(); resolve(false); });
+    socket.once("error", () => resolve(false));
+  });
+}
 /** Fake adb/avdmanager. Every device answer comes from the live stand-in process registry. */
-function transport(paths: { sdk: string; registry: string; events: string }, counters: Map<string, number>): MobileTransport {
+function transport(paths: { sdk: string; registry: string; events: string }, counters: Map<string, number>, fixture: HarnessOptions = {}): MobileTransport {
   const ok = (stdout: string | Buffer): CommandResult => ({ stdout, exitCode: 0 });
   return {
     async run(argv: readonly string[], options: RunOptions): Promise<CommandResult> {
@@ -74,14 +87,23 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
       if (args.join(" ") === "shell getprop sys.boot_completed") return ok(Date.now() >= device.bootedAt ? "1" : "");
       if (args.join(" ") === "shell pm path android") return ok("package:/system/framework/framework-res.apk");
       if (args.join(" ") === "exec-out screencap -p") return ok(PNG);
+      if (args[0] === "shell" && args[1]?.includes("canaveral-isolation")) {
+        const ports = /for p in ([0-9 ]+); do/.exec(args[1])![1]!.trim().split(" ").map(Number), lines: string[] = [];
+        for (const port of ports) {
+          const reached = fixture.guest === "leaky" && await reach(port);
+          lines.push(reached ? `canaveral-isolation ${port} 0 ` : `canaveral-isolation ${port} 1 nc: connect: Connection refused`);
+        }
+        return ok(lines.join("\n") + "\ncanaveral-isolation-done\n");
+      }
       if (args[0] === "shell" || args[0] === "logcat") return ok("ok");
       return { stdout: "", exitCode: 1 };
     },
     async processAbsent(pid) { return !alive(pid); },
     async portPairAvailable(port) { return !emulators(paths.registry).some(e => e.port === port); },
-    leases: nativeLeaseSupervisor,
+    leases: fixture.leases ?? nativeLeaseSupervisor,
   };
 }
+interface HarnessOptions { guest?: "isolated" | "leaky"; leases?: LeaseSupervisorTransport }
 
 interface Harness {
   url: string; admin: string; root: string; image: RecordValue; registry: string; events: string; counters: Map<string, number>;
@@ -91,7 +113,7 @@ interface Harness {
   storage(machineId: string): string;
   reserved(): Promise<RecordValue>;
 }
-async function harness(t: TestContext, capacity = 1): Promise<Harness> {
+async function harness(t: TestContext, capacity = 1, options: HarnessOptions = {}): Promise<Harness> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "android-leases-")));
   const admin = randomBytes(32).toString("base64url"), enrollment = randomBytes(32).toString("base64url");
   writeFileSync(join(root, "admin"), admin, { mode: 0o600 }); writeFileSync(join(root, "enroll"), enrollment, { mode: 0o600 });
@@ -108,7 +130,7 @@ async function harness(t: TestContext, capacity = 1): Promise<Harness> {
     androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity, memoryMiB: 2048 * capacity, diskGiB: 8 * capacity }, pollIntervalSeconds: .25, concurrency: 4,
     leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }] };
   const launch = async () => {
-    runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters) }, state) });
+    runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options) }, state) });
     await runner.start();
   };
   await launch();
@@ -196,6 +218,12 @@ test("two agents share a one-emulator host: ready only when checked, scoped cont
   const a = await acquire(h, app, 15);
   assert.ok(h.counters.get(`cvm-${a.machineId}:shell pm path android`), "readiness checked the package manager");
   assert.ok(h.counters.get(`cvm-${a.machineId}:shell getprop sys.boot_completed`), "readiness checked boot completion");
+  // Readiness also proved the guest cannot reach the host: adb, its own ports and the controller.
+  const isolation = JSON.parse(readFileSync(join(h.storage(a.machineId), "lease-isolation.json"), "utf8")), launched = JSON.parse(readFileSync(join(h.storage(a.machineId), "launch.json"), "utf8"));
+  assert.equal(isolation.isolated, true); assert.equal(isolation.target, "10.0.2.2"); assert.equal(isolation.bootId, launched.bootId);
+  for (const port of [5037, Number(new URL(h.url).port)]) assert.ok(isolation.ports.includes(port), `probe covered ${port}`);
+  assert.deepEqual(launched.argv.slice(-LEASE_ISOLATION_ARGUMENTS.length), LEASE_ISOLATION_ARGUMENTS);
+  assert.ok(LEASE_ISOLATION_ARGUMENTS.join(" ").includes("-network-user-mode-options restrict=on,ipv6=off -wifi-user-mode-options restrict=on,ipv6=off"));
   const first = supervised(h, a.machineId), receipt = watchReceipt(t, join(h.storage(a.machineId), "lease-stopped.json"));
   assert.ok(alive(first.childPid) && groupAlive(first.childPid));
   // Scoped control: screenshot, input, launch and logs through A's lease key only.
@@ -328,23 +356,120 @@ test("a lease key reaches only its own emulator, and the provider refuses a fore
   await cleaned(h, app, a.id); await cleaned(h, app, b.id);
 });
 
-test("unprovable cleanup keeps the reservation until the documented operator recovery", { skip, timeout: 120000 }, async t => {
+test("supervisor loss mid-lease ends device access at once, fails the lease and holds the reservation until operator recovery", { skip, timeout: 120000 }, async t => {
   const h = await harness(t), app = await h.application();
-  const a = await acquire(h, app, 60), group = supervised(h, a.machineId);
-  // The supervisor is lost abruptly, leaving its emulator group orphaned.
+  const a = await acquire(h, app, 120), group = supervised(h, a.machineId);
+  assert.equal((await operate(h, a.id, a.key, "tap", { x: 4, y: 4 })).body.state, "succeeded");
+  const taps = h.counters.get(`cvm-${a.machineId}:shell 'input' 'tap' '4' '4'`);
+  // The supervisor is lost abruptly, leaving its emulator group orphaned and unsupervised.
   process.kill(group.supervisorPid, "SIGKILL");
   await until(() => !alive(group.supervisorPid), "supervisor loss");
   assert.ok(alive(group.childPid));
-  assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, a.key)).status, 200);
+  // Its lifetime lock is free, so the provider refuses device access immediately, whatever the runner believes.
+  const provider = h.runner().runtimes.get("android") as unknown as AndroidProvider;
+  await assert.rejects(provider.endpoint({ id: a.machineId, lease: { id: a.id } }, h.storage(a.machineId)), (error: any) => error.status === 410);
+  // The runner reports the loss and the lease fails long before its 120-second TTL.
+  await until(async () => (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state === "failed", "failed lease", 15000);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/operations`, { id: randomUUID(), member: "primary", action: "tap", arguments: { x: 4, y: 4 } }, a.key)).status, 410);
+  assert.equal(h.counters.get(`cvm-${a.machineId}:shell 'input' 'tap' '4' '4'`), taps);
+  assert.equal(JSON.parse(readFileSync(join(h.storage(a.machineId), "lease-authorization.json"), "utf8")).fenced, true);
   await until(async () => { const lease = (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body; return lease.cleanup.state === "blocked" && lease.members[0].cleanup.reason === "execution_pending"; }, "blocked cleanup");
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.cleanup.state, "blocked");
   assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 8 });
-  assert.ok(existsSync(h.storage(a.machineId)));
+  assert.ok(existsSync(h.storage(a.machineId)) && alive(group.childPid));
   // Documented recovery: the operator stops the process group named in lease-supervisor.json.
   process.kill(-group.childPid, "SIGKILL");
   await cleaned(h, app, a.id);
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+/** A supervisor stand-in that fails its launch, optionally after starting the emulator itself. */
+function failingSupervisor(spawned: boolean): LeaseSupervisorTransport {
+  return { ...nativeLeaseSupervisor, async supervise(_helper, _storage, request) {
+    if (spawned) {
+      const child = spawn(String(request.executable), request.args as string[], { cwd: String(request.cwd), env: {}, detached: true, stdio: "ignore" });
+      child.unref();
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    // An ordinary non-zero exit (or none observed) is never the dedicated refusal status.
+    throw new SupervisorLaunchError(spawned ? 1 : undefined);
+  } };
+}
+
+test("an ordinary supervisor failure is not proof that nothing spawned: a surviving emulator holds the reservation", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { leases: failingSupervisor(true) }), app = await h.application();
+  const { id } = await acquire(h, app, 60, false);
+  await until(() => emulators(h.registry).length === 1, "the unrecorded emulator");
+  const orphan = emulators(h.registry)[0]!;
+  await until(async () => (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body.state === "failed", "failed lease", 30000);
+  await until(async () => { const lease = (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body; return lease.cleanup.state === "blocked" && lease.members[0].cleanup.reason === "execution_pending"; }, "blocked cleanup");
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 8 });
+  assert.ok(alive(orphan.pid));
+  // Once the emulator is gone, the process inventory proves it and cleanup completes on its own.
+  process.kill(-orphan.pid, "SIGKILL");
+  await cleaned(h, app, id);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("a launch that left only its intent is recovered automatically from the supervisor lock and process inventory", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { leases: failingSupervisor(false) }), app = await h.application();
+  const { id } = await acquire(h, app, 60, false);
+  await until(async () => (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body.state === "failed", "failed lease", 30000);
+  await cleaned(h, app, id);
+  assert.equal(emulators(h.registry).length, 0);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("a guest that reaches the host loopback is fenced and never handed out", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { guest: "leaky" }), app = await h.application();
+  const { id } = await acquire(h, app, 60, false);
+  let machineId = "";
+  await until(async () => { const lease = (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body; machineId = lease.members?.[0]?.machineId ?? ""; return !!machineId; }, "admitted member");
+  const fenced = watchReceipt(t, join(h.storage(machineId), "lease-fenced.json"));
+  const views: string[] = [];
+  await until(async () => { const lease = (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body; views.push(lease.state); return lease.state === "failed"; }, "failed lease", 30000);
+  assert.ok(!views.includes("ready"), "the lease never became ready");
+  assert.equal((await h.api("POST", `/v1/leases/${id}/credential`, {}, app)).status >= 400, true);
+  await until(() => fenced() !== undefined, "the supervisor stopped the leaky guest");
+  assert.equal(existsSync(join(h.storage(machineId), "lease-isolation.json")), false);
+  await cleaned(h, app, id);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("the host refuses leased execution outside its advertised Android lease images", { skip, timeout: 30000 }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "android-lease-gate-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const leased = { id: "lease-phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, device: { systemImage, profile: "pixel_8" } };
+  const other = { ...leased, id: "plain-phone" };
+  const calls: RecordValue[] = [];
+  let kind = "android";
+  const runtime = { get kind() { return kind; }, reconcile: async (machine: RecordValue) => { calls.push(machine); return { state: machine.desired === "running" ? "starting" : "stopped" }; },
+    refreshExecution: async () => null, check: async () => ({ ready: true }) };
+  const runner = new HostRunner({ url: "http://127.0.0.1:9", stateDir: join(root, "runner"), name: "gate", provider: "android", storage: join(root, "devices"), androidSDK: "/nonexistent",
+    templates: [leased, other], capacity: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1,
+    leaseImages: [{ id: leased.id, revision: "1", arch, runtime: "android" }] }, { providerFactory: () => runtime as any });
+  await runner.initializeProviders();
+  const now = (runner as any).clock.wall() as number;
+  const machine = (image: RecordValue): RecordValue => ({ id: randomUUID(), templateId: image.id, template: normalizeOperatorTemplate(image), desired: "running",
+    resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, lease: { id: randomUUID(), state: "ready", revision: 1, authorizationDeadline: now + 600, controllerNow: now } });
+  const eligible = machine(leased), unlisted = machine(other);
+  runner.guard.observe([eligible, unlisted], 0);
+  assert.equal(runner.leaseEligible(eligible), true);
+  assert.equal((await runner.reconcile(eligible)).state, "starting");
+  assert.equal(calls.at(-1)!.desired, "running");
+  // A template outside leaseImages is never started, even though the controller asked and the guard allows it.
+  assert.equal(runner.leaseEligible(unlisted), false);
+  const refused = await runner.reconcile(unlisted);
+  assert.equal(refused.state, "error"); assert.match(String(refused.detail), /does not offer leased execution/);
+  assert.equal(calls.at(-1)!.desired, "stopped"); assert.equal(calls.at(-1)!.id, unlisted.id);
+  // Nor is an advertised template on a runtime that is not Android.
+  kind = "ios";
+  assert.equal(runner.leaseEligible(eligible), false);
+  assert.equal((await runner.reconcile(eligible)).state, "error");
+  assert.equal(calls.at(-1)!.desired, "stopped");
+  await runner.close();
 });
 
 test("the native supervisor refuses ended authorization and never relaunches an assignment", { skip, timeout: 30000 }, async t => {
@@ -355,7 +480,7 @@ test("the native supervisor refuses ended authorization and never relaunches an 
   const authorize = (deadline: number, fenced = false, revision = 1) => writeFileSync(join(root, "lease-authorization.json"), JSON.stringify({ version: 1, ...identity, bootSessionID: clock.bootSessionID, revision, deadline, fenced }));
   const request = { version: 1, ...identity, executable: "/bin/sh", args: ["-c", "sleep 30 & sleep 30"], env: {}, cwd: root };
   authorize(clock.continuous - 1);
-  await assert.rejects(nativeLeaseSupervisor.supervise(helper, root, request), (error: any) => error.supervisorExit === 1);
+  await assert.rejects(nativeLeaseSupervisor.supervise(helper, root, request), (error: any) => error.supervisorExit === SUPERVISOR_REFUSED);
   assert.equal(existsSync(join(root, "lease-supervisor.json")), false);
   authorize(clock.continuous + 120);
   const child = await nativeLeaseSupervisor.supervise(helper, root, request);

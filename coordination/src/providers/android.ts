@@ -1,15 +1,27 @@
 /** Android AVDs and transfers, scoped to immutable local assignment receipts. */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createServer } from "node:net";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
 import { assignmentFingerprint, StateLock } from "../runtime-process.ts";
 import type { LeaseAuthorization } from "../runtime-process.ts";
-import { MobileProvider, SupervisorLaunchError, authorized, canonical, copyUpload, markNotStaged, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
-import type { Authorized, ByteReader, DeviceRequest, Download, NativeChild, NativePipe, RecordValue, RunOptions, SupervisedChild } from "./mobile.ts";
+import { MobileProvider, SUPERVISOR_REFUSED, SupervisorLaunchError, authorized, canonical, copyUpload, markNotStaged, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
+import type { Authorized, ByteReader, DeviceRequest, Download, LeaseSupervisorStatus, NativeChild, NativePipe, RecordValue, RunOptions, SupervisedChild } from "./mobile.ts";
 import { openAndroidVideo } from './android-video.ts';
 import type { AndroidVideoOptions } from './android-video.ts';
 
+/** Leased guests get no network path to the host. User-mode networking (slirp) maps
+ * 10.0.2.2 to the host's loopback, so an unrestricted guest can reach the adb server,
+ * other emulators' adb ports and every loopback service. `restrict=on` drops all guest
+ * traffic leaving the virtual network, for the radio and the Wi-Fi interface; netsim
+ * Wi-Fi, Bluetooth and UWB are disabled so no host-wide netsimd (a radio medium shared
+ * between emulators) starts; crash reporting is disabled so no crashpad_handler escapes
+ * the supervised process group. Verified against emulator 37.2.13 on 19 November 2026. */
+export const LEASE_ISOLATION_ARGUMENTS: readonly string[] = ["-feature", "-WiFiPacketStream", "-feature", "-BluetoothEmulation", "-feature", "-Uwb",
+  "-network-user-mode-options", "restrict=on,ipv6=off", "-wifi-user-mode-options", "restrict=on,ipv6=off", "-crash-report-mode", "disabled", "-no-metrics"];
+/** The guest's alias for the host loopback under user-mode networking. */
+export const GUEST_HOST_ALIAS = "10.0.2.2";
 export function quote(value: string): string { return "'" + value.replaceAll("'", "'\"'\"'") + "'"; }
 export interface TransferHelper { data: Buffer; sha256: string }
 export function loadHelper(config: RecordValue, image: RecordValue): TransferHelper {
@@ -97,8 +109,8 @@ export class AndroidProvider extends MobileProvider {
     const port = integer(endpoint.port, "emulator console port", 5554, 5680);
     if (port % 2) throw new ServiceError("Invalid reserved Android console port.");
     const launch = readJson(path.join(storage, "launch.json")), owner = readJson(path.join(storage, "canaveral-owner.json"));
-    // A fenced or stopped lease supervisor ends device access, whatever the host still believes.
-    if (machine.lease != null && (launch?.supervised !== true || ["lease-fenced.json", "lease-stopped.json"].some(name => fs.existsSync(path.join(storage, name))))) throw new ServiceError("Leased Android execution is fenced.", 410);
+    // A fenced, stopped, lost or expired lease supervisor ends device access, whatever the host still believes.
+    if (machine.lease != null) await this.leaseAccess(launch, storage);
     if (!launch || launch.version !== 2 || launch.machineId !== uuid(machine.id) || launch.fingerprint !== owner?.fingerprint || launch.leaseId !== (machine.lease ? object(machine.lease).id ?? null : null) || canonical(launch.argv) !== canonical(this.launchArguments(machine, port))) throw new ServiceError("Android launch binding is incomplete or contradictory; refusing device adoption.");
     const serial = "emulator-" + port;
     await authorized(check); const devices = await this.devices(); await authorized(check);
@@ -111,7 +123,8 @@ export class AndroidProvider extends MobileProvider {
   }
   launchArguments(machine: RecordValue, port: number): string[] {
     const resources = object(machine.resources);
-    return [this.tool("emulator"), "-avd", this.name(machine), "-port", String(port), "-cores", String(integer(resources.cpu, "cpu", 1, 1024)), "-memory", String(integer(resources.memoryMiB, "memory", 1, 2 ** 30)), "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim"];
+    return [this.tool("emulator"), "-avd", this.name(machine), "-port", String(port), "-cores", String(integer(resources.cpu, "cpu", 1, 1024)), "-memory", String(integer(resources.memoryMiB, "memory", 1, 2 ** 30)), "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim",
+      ...(machine.lease != null ? LEASE_ISOLATION_ARGUMENTS : [])];
   }
   async provision(machine: RecordValue, image: RecordValue, storage: string): Promise<string> {
     const avds = this.environment().ANDROID_AVD_HOME!, avd = path.join(storage, "device.avd"), receipt = path.join(storage, "avd-created.json");
@@ -197,6 +210,7 @@ export class AndroidProvider extends MobileProvider {
   // Leased emulators. The native lease supervisor owns the emulator's process group and
   // enforces the published boot-bound deadline even when this runner or the controller
   // is lost. Its stopped receipt, or positively absent processes, is the only stop proof.
+  // Supervisor liveness is the kernel-held lifetime lock on its storage, never a PID.
   readonly supervisors = new Map<string, SupervisedChild>();
   private leaseHelper(): string {
     const helper = this.config.leaseSupervisor;
@@ -208,20 +222,39 @@ export class AndroidProvider extends MobileProvider {
   private leaseIdentity(machine: RecordValue): { machineId: string; leaseId: string } {
     return { machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id) };
   }
-  /** Positive stop proof only: a matching stopped receipt, a launch never spawned, or
-   * positively absent supervisor, emulator and process group. Anything else stays unknown. */
+  private supervisorStatus(storage: string): Promise<LeaseSupervisorStatus> { return this.transport!.leases!.status(this.leaseHelper(), storage); }
+  /** Device access needs a live supervisor and a current, unfenced authorization on this boot's clock. */
+  private async leaseAccess(launch: RecordValue | undefined, storage: string): Promise<void> {
+    const fenced = (): never => { throw new ServiceError("Leased Android execution is fenced.", 410); };
+    if (launch?.supervised !== true || ["lease-fenced.json", "lease-stopped.json"].some(name => fs.existsSync(path.join(storage, name)))) fenced();
+    const status = await this.supervisorStatus(storage), allowed = readJson(path.join(storage, "lease-authorization.json"));
+    // A supervisor that is gone, however it ended, no longer enforces the deadline.
+    if (status.supervisor !== "held" || !allowed || allowed.fenced !== false || allowed.bootSessionID !== status.bootSessionID ||
+      typeof allowed.deadline !== "number" || !(status.continuous < allowed.deadline)) fenced();
+  }
+  /** Positive stop proof only: a matching stopped receipt, a launch proven never to have
+   * spawned, or a gone supervisor with its emulator and process group positively absent.
+   * Anything else stays unknown. */
   async leaseStopped(machine: RecordValue, storage: string): Promise<boolean> {
     const { machineId, leaseId } = this.leaseIdentity(machine), leases = this.transport?.leases;
-    const launch = readJson(path.join(storage, "launch.json")), record = readJson(path.join(storage, "lease-supervisor.json"));
+    const launchPath = path.join(storage, "launch.json"), launch = readJson(launchPath), record = readJson(path.join(storage, "lease-supervisor.json"));
     if (!launch) return !record;
     if (launch.supervised !== true || launch.machineId !== machineId || launch.leaseId !== leaseId) throw new ServiceError("Leased launch identity is contradictory; inspect it.", 409);
-    if (!record) return Number.isSafeInteger(launch.supervisorExit);
+    if (!leases) return false;
+    if (!record && (launch.supervisorExit === SUPERVISOR_REFUSED || launch.nothingRunning === true)) return true;
+    if ((await this.supervisorStatus(storage)).supervisor === "held") return false;
+    if (!record) {
+      // Launch intent without a supervisor record: the runner crashed around the launch, or the
+      // supervisor failed without its refusal status. Only a process inventory with neither this
+      // storage's supervisor nor this AVD's emulator proves that nothing of the launch runs.
+      const avd = `-avd ${this.name(machine)}`, supervisor = `lease-supervise ${storage}`;
+      if ((await leases.commandLines()).some(line => line.includes(avd) || line.includes(supervisor))) return false;
+      saveJson(launchPath, { ...launch, nothingRunning: true });
+      return true;
+    }
     const pid = record.childPid, supervisor = record.supervisorPid;
     if (record.machineId !== machineId || record.leaseId !== leaseId || record.bootId !== launch.bootId || !Number.isSafeInteger(pid) || !Number.isSafeInteger(supervisor) ||
       launch.supervisorPid !== undefined && launch.supervisorPid !== supervisor) throw new ServiceError("Lease supervisor record belongs to another launch.", 409);
-    const retained = this.supervisors.get(machineId);
-    const gone = retained && retained.supervisorPid === supervisor ? await retained.supervisorExited() : await this.transport?.processAbsent?.(supervisor as number) === true;
-    if (!gone || !leases) return false;
     const stopped = readJson(path.join(storage, "lease-stopped.json"));
     if (stopped && stopped.machineId === machineId && stopped.leaseId === leaseId && stopped.bootId === launch.bootId && stopped.childPid === pid && stopped.supervisorPid === supervisor && stopped.groupAbsent === true) return true;
     return await this.transport?.processAbsent?.(pid as number) === true && await leases.groupAbsent(pid as number);
@@ -273,9 +306,10 @@ export class AndroidProvider extends MobileProvider {
         let child: SupervisedChild;
         try { child = await this.transport!.leases!.supervise(helper, storage, { version: 1, machineId, leaseId, bootId: identity.bootId, executable: argv[0], args: argv.slice(1), env: this.environment(), cwd: storage }); }
         catch (error) {
+          // Only the supervisor's dedicated refusal status proves nothing was spawned. Any other
+          // failure is recovered later from the lifetime lock and a process inventory.
           const exit = error instanceof SupervisorLaunchError ? error.supervisorExit : undefined;
-          // Only an observed ordinary supervisor exit without a launch record proves nothing was spawned.
-          if (Number.isSafeInteger(exit) && !readJson(path.join(storage, "lease-supervisor.json"))) saveJson(launchPath, { ...identity, supervisorExit: exit });
+          if (exit === SUPERVISOR_REFUSED && !readJson(path.join(storage, "lease-supervisor.json"))) saveJson(launchPath, { ...identity, supervisorExit: exit });
           throw error;
         }
         this.supervisors.set(machineId, child);
@@ -287,6 +321,13 @@ export class AndroidProvider extends MobileProvider {
       this.supervisors.delete(uuid(machine.id));
       return stopping ? { state: "stopped", leaseFenced: true } : { state: "error", detail: "The leased emulator stopped; a lease is never relaunched." };
     }
+    if ((await this.supervisorStatus(storage)).supervisor !== "held") {
+      // Gone without a stop receipt (killed, crashed or never recorded): nothing enforces the
+      // deadline any more. Fence access now and fail the lease; cleanup waits for stop proof.
+      this.fenceLease(storage);
+      const detail = "The lease supervisor is gone without a stop receipt. Device access is fenced; cleanup waits until the emulator's process group is proven absent.";
+      return stopping ? { state: "stopping", leaseFenced: true, detail } : { state: "error", leaseFenced: true, detail };
+    }
     if (stopping) {
       if (authorization) await this.publishLease(machine, storage, authorization, true); else this.fenceLease(storage);
       return { state: "stopping", leaseFenced: true, detail: "Lease fenced; the native supervisor's process-group exit proof is pending." };
@@ -295,10 +336,10 @@ export class AndroidProvider extends MobileProvider {
     // The fence worker republishes on every revision change; reconciliation only fills a gap.
     const allowed = authorization(), previous = readJson(path.join(storage, "lease-authorization.json"));
     if (!previous || previous.revision !== allowed.revision || allowed.fenced && previous.fenced !== true) await this.publishLease(machine, storage, () => allowed, false);
-    return this.leasedReadiness(machine, storage);
+    return this.leasedReadiness(machine, storage, launch);
   }
-  /** Ready means booted, owned and serving package management, not merely present in inventory. */
-  private async leasedReadiness(machine: RecordValue, storage: string): Promise<RecordValue> {
+  /** Ready means booted, owned, serving package management and network-isolated from the host. */
+  private async leasedReadiness(machine: RecordValue, storage: string, launch: RecordValue): Promise<RecordValue> {
     const waiting = (detail: string): RecordValue => ({ state: "starting", accessReady: false, detail });
     let serial: string | undefined;
     try { serial = await this.endpoint(machine, storage); } catch (error) { if (error instanceof ServiceError && error.status === 410) throw error; return waiting("Waiting for the owned emulator serial."); }
@@ -307,7 +348,48 @@ export class AndroidProvider extends MobileProvider {
       if (await this.adb(serial, ["shell", "getprop", "sys.boot_completed"]) !== "1") return waiting("Waiting for Android to finish booting.");
       if (!(await this.adb(serial, ["shell", "pm", "path", "android"])).startsWith("package:")) return waiting("Waiting for the package manager.");
     } catch { return waiting("Waiting for the booted emulator to answer readiness checks."); }
+    const receipt = path.join(storage, "lease-isolation.json");
+    if (readJson(receipt)?.bootId !== launch.bootId) {
+      const port = integer(readJson(path.join(storage, "endpoint.json"))?.port, "emulator console port", 5554, 5680);
+      let probe: { outcome: "isolated" | "reachable" | "inconclusive"; ports: number[] };
+      try { probe = await this.isolationProbe(serial, port); } catch { return waiting("Waiting for the guest network isolation check."); }
+      if (probe.outcome === "reachable") {
+        // Fail closed: a guest that reaches the host is never handed to a lease holder.
+        this.fenceLease(storage);
+        return { state: "error", leaseFenced: true, detail: "The leased guest reached a host loopback service; the lease was fenced before use." };
+      }
+      if (probe.outcome !== "isolated") return waiting("Waiting for a conclusive guest network isolation check.");
+      saveJson(receipt, { version: 1, bootId: launch.bootId, target: GUEST_HOST_ALIAS, ports: probe.ports, isolated: true });
+    }
     return { state: "running", accessReady: true };
+  }
+  /** Ports the guest must not reach on the host: the default adb server, this emulator's
+   * console and adb ports, the controller, operator-declared services and a fresh canary. */
+  isolationPorts(consolePort: number): number[] {
+    const configured = Array.isArray(this.config.leaseIsolationPorts) ? this.config.leaseIsolationPorts : [];
+    const ports = [5037, consolePort, consolePort + 1, ...(this.config.leaseControllerPort === undefined ? [] : [this.config.leaseControllerPort]), ...configured];
+    return [...new Set(ports.map(port => integer(port, "isolation probe port", 1, 65535)))];
+  }
+  /** Negative guest-to-host probe from the lease's own shell. Isolated only when every port is
+   * refused with a recognized error and the host-side canary saw no connection. */
+  private async isolationProbe(serial: string, consolePort: number): Promise<{ outcome: "isolated" | "reachable" | "inconclusive"; ports: number[] }> {
+    let connections = 0;
+    const canary = createServer(socket => { connections++; socket.destroy(); });
+    await new Promise<void>((resolve, reject) => { canary.once("error", reject); canary.listen(0, "127.0.0.1", () => resolve()); });
+    try {
+      const address = canary.address();
+      if (!address || typeof address === "string") throw new ServiceError("Isolation canary has no port.");
+      const ports = [...this.isolationPorts(consolePort), address.port];
+      const script = `command -v nc >/dev/null 2>&1 || { echo canaveral-isolation-unavailable; exit 0; }; for p in ${ports.join(" ")}; do r=$( (echo | timeout 3 nc ${GUEST_HOST_ALIAS} $p >/dev/null) 2>&1 ); echo "canaveral-isolation $p $? $r"; done; echo canaveral-isolation-done`;
+      const output = await this.adb(serial, ["shell", script], { timeoutMs: 10000 + 4000 * ports.length });
+      await new Promise(resolve => setImmediate(resolve));
+      const lines = output.split(/\r?\n/), results = new Map<number, string>();
+      for (const line of lines) { const match = /^canaveral-isolation (\d+) (\d+) ?(.*)$/.exec(line.trim()); if (match) results.set(Number(match[1]), match[2] + " " + match[3]); }
+      const reached = [...results.values()].some(result => result.startsWith("0 "));
+      if (connections || reached) return { outcome: "reachable", ports };
+      const refused = (result: string | undefined) => !!result && /^1 .*(refused|unreachable|no route|timed out)/i.test(result);
+      return { outcome: lines.some(line => line.trim() === "canaveral-isolation-done") && ports.every(port => refused(results.get(port))) ? "isolated" : "inconclusive", ports };
+    } finally { await new Promise<void>(resolve => canary.close(() => resolve())); }
   }
   /** Independent deadline publication, called by the host's fence worker. Never launches. */
   async refreshExecution(machine: RecordValue, _image: RecordValue, _folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | null> {
