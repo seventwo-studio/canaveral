@@ -59,7 +59,7 @@ replay. A changed definition is a 409; entries are immutable in this slice.
 | `/v1/resource-domains` | `{id, name, capacity: {cpu, memoryMiB, diskGiB}}` | Defines one physical capacity budget. This activates nothing on its own |
 | `GET /v1/resource-domains/{id}` | — | `{id, name, capacity, reserved, available, reservations}` |
 | `/v1/model-grants` | `{applicationId, model, digest, maxUnfinished}` | Lets one unrevoked application submit one catalogued model. `maxUnfinished` is 1–1024 |
-| `/v1/model-grants/revoke` | `{applicationId, model, digest}` | Blocks new submissions and claims of that application's unclaimed jobs for that model |
+| `/v1/model-grants/revoke` | `{applicationId, model, digest}` | Blocks new submissions and claims of that application's unclaimed jobs for that model; rejects its waiting queued model calls |
 | `/v1/model-runner-approvals` | `{binding, domainId, models: [{model, digest}]}` | Maps one current binding to one domain and its catalogued models |
 | `/v1/model-runner-approvals/revoke` | `{binding}` | Blocks new claims. Existing assignments keep their reservations and report authority |
 
@@ -76,23 +76,30 @@ discovered or approved automatically.
 | `GET /v1/model-jobs/{id}` | — | `job` view |
 | `POST /v1/model-jobs/{id}/cancel` | `{version: 1, applicationId, id, message: {type: "cancel"}}` | `job` view |
 
+To queue a model call with priority, a deadline and source context, submit a
+`model-job` request to `/v1/requests` instead; see
+[queued model calls](requests.md#queued-model-calls). It creates the same job record.
+
 `applicationId` must be the authenticated application (otherwise 403). The submission
 needs an active grant for its exact model and digest (403), and its adapter must
 match the immutable catalog entry (409). Unfinished jobs per grant
-are bounded (429). The idempotency key is `(applicationId, id)`. A changed submission
+are bounded (429), counting waiting and admitted jobs. The idempotency key is `(applicationId, id)`. A changed submission
 under an existing key is a 409 and never runs again. After a lost reply, resend the
 identical submission.
 
 A job view has `version, applicationId, id, model, digest, maxTokens, state,
 cancelRequested, stopped, cleanup, assignment, reservationHeld, createdAt, updatedAt`.
-It includes `result` only on success. Prompts are not echoed. `assignment` is one of
+It includes `result` only on success, and `request: {state, priority, deadline,
+reason, admittedAt}` only for a queued model call. Prompts are not echoed. `assignment` is one of
 `none`, `current`, `released` or `revoked`. With `revoked`, the bound runner binding
 was revoked or superseded. Its unfinished work is then reported as `unknown` and keeps
 its reservation.
 
 Cancellation is an intent. An unclaimed job is cancelled in the same transaction that
 excludes every claim, so the cancellation itself is the positive evidence that nothing
-ran: `cancelled`, `stopped: true`, `cleanup: "complete"`. For a claimed job, the
+ran: `cancelled`, `stopped: true`, `cleanup: "complete"`. A queued model call's
+request becomes `cancelled` in the same transaction, unless its deadline has passed,
+in which case it expires and the job closes as `failed`. For a claimed job, the
 controller records the request and delivers it to the runner. Its reservation is kept
 until the runner reports a stop and completed cleanup.
 
@@ -124,15 +131,23 @@ transaction:
 - `adapter` defaults to `ollama` for compatibility. Explicit values use the same
   four identifiers as the catalog. The runner persists its adapter with its claim
   intent and cannot change it when resolving an uncertain claim.
-- It selects the oldest unclaimed, uncancelled job with the requested adapter whose model and digest the approval
-  serves, whose application is unrevoked and whose grant is active.
-- It reserves that job's catalogued resources in the approval's domain only if they fit
-  beside every reservation held there, including other runners' reservations in the
-  same domain.
+- It considers unclaimed, uncancelled jobs with the requested adapter whose model and
+  digest the approval serves, whose application is unrevoked and whose grant is
+  active, in [request order](requests.md#queued-model-calls): a persisted
+  per-application round-robin turn, then priority (direct submissions are 0), then
+  FIFO submission order. At most 4,096 candidates are read per claim.
+- It expires queued intent whose deadline has passed and skips an application whose
+  admitted, unreleased jobs for that model and digest have reached the grant's
+  `maxUnfinished`.
+- It reserves the first remaining job's catalogued resources in the approval's domain
+  only if they fit beside every reservation held there, including other runners'
+  reservations and, for a mapped host, the host's own charges. A job that does not
+  fit becomes `waitingForResources` and is skipped; a later job that fits may be
+  admitted. Nothing held is preempted, shrunk or moved.
 
-If the oldest eligible job does not fit, it becomes `waitingForResources`, nothing
-overtakes it on this runner, and the result is `null`. A `null` result records nothing,
-so replaying that `claimId` may claim later. After an uncertain claim, list the
+The result is `null` when nothing fits. A `null` result records no assignment, so
+replaying that `claimId` may claim later. Skip reasons are recorded on queued
+requests only. After an uncertain claim, list the
 assignments or replay the same `claimId`. Do not send a fresh `claimId` to make up for
 an uncertain one.
 
@@ -186,16 +201,20 @@ These domains are separate from the legacy `hosts`/`host_limits`/`inference_jobs
 ledger. Do not offer the same physical capacity to both.
 
 Only additive tables are created: `resource_domains`, `resource_reservations`,
-`model_catalog`, `model_grants`, `model_runner_approvals`, `model_jobs` and
-`model_assignments`. Legacy rows are not read, converted or adopted.
+`model_catalog`, `model_grants`, `model_runner_approvals`, `model_jobs`,
+`model_assignments` and `model_job_scheduler`, plus the shared `requests` tables.
+Legacy rows are not read, converted or adopted.
 
-The controller has no background timer, retry, relocation or reassignment. Elapsed time
-or a lost connection never changes a job. The following are not implemented:
+The controller has no retry, relocation or reassignment. Elapsed time or a lost
+connection never changes a claimed job. The only timer is the request pass, which
+closes unclaimed queued model calls at their deadline, on application revocation or
+on grant revocation. The following are not implemented:
 
 - Prompt/result retention and deletion
 - Operator reconciliation of revoked runners' work
 - Mutable domains and catalog entries
-- Fairness beyond strict per-runner FIFO
+- Aging or reservation for large jobs skipped in favour of smaller ones that fit
+- Queueing for embedded administrator inference (`/v1/jobs`)
 - Streaming
 
 ## Verification
@@ -217,6 +236,11 @@ on a disposable SQLite file over loopback HTTP. It covers:
 - Release only after bound stop and cleanup.
 - Cross-application, cross-runner, role, revoked-binding and newer-generation denial.
 - Preservation of retained legacy rows.
+- Queued model calls: waiting when full and admission when capacity frees, priority
+  and FIFO with direct submissions, per-application turns and limits, the waiting
+  cap, deadline expiry, cancellation from each route, exact replay and 409 on
+  change, a dropped submission reply, waiting across restart, grant and application
+  revocation, and no displacement of a running job.
 
 These fixtures are source evidence only. They do not show runner execution, native
 model inference, measured resource fit, TLS deployment or release acceptance.
