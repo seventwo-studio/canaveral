@@ -995,12 +995,12 @@ export function App() {
                     {view === "machines" && (
                       <Button
                         variant="outline"
-                        className="max-sm:px-2.5 max-sm:text-xs"
+                        className="max-sm:size-8 max-sm:px-0"
                         onClick={() => openCreate(undefined, true)}
                         disabled={busy}
                       >
                         <Monitor />
-                        Launch desktop
+                        <span className="max-sm:sr-only">Launch desktop</span>
                       </Button>
                     )}
                     {view === "templates" && user.role === "admin" && (
@@ -1037,13 +1037,20 @@ export function App() {
                       disabled={busy}
                     >
                       {view === "templates" ? <ArrowUpRight /> : <Plus />}
-                      {isInfrastructure
-                        ? view === "orchestrators"
-                          ? "Add orchestrator"
-                          : "Add host"
-                        : view === "templates"
-                          ? "Machine blueprints"
-                          : "Create machine"}
+                      {isInfrastructure ? (
+                        view === "orchestrators" ? (
+                          "Add orchestrator"
+                        ) : (
+                          "Add host"
+                        )
+                      ) : view === "templates" ? (
+                        "Machine blueprints"
+                      ) : (
+                        <>
+                          Create
+                          <span className="max-sm:sr-only"> machine</span>
+                        </>
+                      )}
                     </Button>
                   </div>
                 </div>
