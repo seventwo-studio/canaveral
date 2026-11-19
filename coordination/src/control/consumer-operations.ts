@@ -4,6 +4,7 @@ import { object, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import type { ControlModule, ControlOptions } from "./contracts.ts";
 import { initializeDevices, operationRequest } from "./devices.ts";
+import { validateUploadedArtifact } from "./app-artifacts.ts";
 import { machineIdentifier } from "./machines.ts";
 import { ACTIVE, capabilities, legacyMachineReady, legacySessionLease, legacyTable, refreshLegacyLeases, sameJson, utc } from "./leases.ts";
 
@@ -14,6 +15,10 @@ interface Row {
 const actionCapabilities: Record<string, string> = {
   screenshot: "screenshot", hierarchy: "hierarchy", accessibility: "hierarchy", "accessibility-action": "hierarchy",
   tap: "input", swipe: "input", text: "input", key: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
+  // App lifecycle and logs are subsets of the device shell, so they need the same capability.
+  apps: "command", launch: "command", terminate: "command", uninstall: "command", "open-url": "command", logs: "command",
+  // A lease-key upload of this lease's own member (lease-app-artifacts.ts); see install-cleanup.ts.
+  "install-uploaded": "files",
   "shell-open": "pty", "shell-read": "pty", "shell-write": "pty", "shell-close": "pty", "shell-resize": "pty",
 };
 export function initializeConsumerOperations(db: DatabaseSync): void {
@@ -36,7 +41,7 @@ export function refreshConsumerOperations(db: DatabaseSync, now: number, leaseId
     const lease = db.prepare("SELECT * FROM leases WHERE id=?").get(op.lease);
     const machine = db.prepare("SELECT m.*,h.seen,h.enabled,h.offer AS host_offer FROM machines m JOIN hosts h ON h.id=m.host WHERE m.id=?").get(op.machine);
     const valid = leaseId === undefined && lease && lease.state === "ready" && lease.credential === op.credential &&
-      now < Number(lease.expires) && now < op.created + 120 && machine && machine.host === op.host && legacyMachineReady(db, machine, now) &&
+      now < Number(lease.expires) && now < op.created + (JSON.parse(op.request).action === "install-uploaded" ? 1800 : 120) && machine && machine.host === op.host && legacyMachineReady(db, machine, now) &&
       db.prepare("SELECT 1 FROM consumers WHERE id=? AND revoked=0").get(lease.consumer!);
     if (!valid) {
       db.prepare("UPDATE device_operations SET state=?,result=?,updated=? WHERE id=? AND state='queued'")
@@ -80,6 +85,8 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       const image = object(JSON.parse(String(machine.template))), cap = actionCapabilities[request.action];
       if (!cap || !capabilities(image)[cap as keyof ReturnType<typeof capabilities>]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
       if (lease.state !== "ready" || !legacyMachineReady(db, machine, store.clock())) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });
+      // Only an upload made through this lease's key, for this member, can be installed.
+      if (request.action === "install-uploaded") validateUploadedArtifact(db, String(machine.id), request.arguments.artifact, lease.id);
       if (Number(db.prepare("SELECT count(*) AS n FROM device_operations WHERE host=? AND state='queued'").get(machine.host!)!.n) >= 32) throw new ServiceError("Host device operation queue is full.", 429);
       const now = store.clock();
       db.prepare("INSERT INTO device_operations VALUES (?,?,?,?,'queued',NULL,?,?)").run(request.id, machine.id!, machine.host!, JSON.stringify(request), now, now);

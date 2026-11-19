@@ -925,3 +925,11 @@ concurrent asset bodies and denied a second account inspect, open and release.
 All four final cases reached stopped. Previously authorized origins returned
 404, owned VM processes and storage were gone, and reservations returned to
 zero. These runs used disposable loopback TLS ingress and private DNS mappings.
+
+`dashboardQueuedPreviews` in `dashboard-queued-previews.mjs` takes the same
+adapter plus callbacks to fill and free a one-box domain and to restart the
+dashboard. It checks that a preview waits without a lease, that a waiting
+preview can be cancelled, that waiting survives a dashboard restart, and that
+the preview is admitted and serves its page once capacity is free. On
+2026-11-19 it passed on the ARM64 homelab with the same bundle and helper; see
+the [queued preview record](dashboard-queued-previews.md).

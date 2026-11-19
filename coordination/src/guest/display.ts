@@ -14,6 +14,10 @@ export class InputDenied extends ServiceError {}
 export type BootEpoch = { startedAt: number; identity: string } | null;
 export type InputState = "owned" | "busy" | "stale" | "reset-uncertain";
 interface InputRecord { phase: "idle" | "active" | "blocked"; owner: string | null; epoch: BootEpoch }
+/** RFB client messages one WebSocket message may carry. Viewers send one input event per
+ * message; a larger batch could keep applying buffered input after access is lost, so it
+ * ends the connection before any of its events is applied. */
+export const MAX_RFB_MESSAGES_PER_FRAME = 64;
 export const INPUT_ACTIONS = new Set(["tap", "swipe", "text", "key", "accessibility-action", "launch", "terminate", "open-url", "rotate", "location", "permission", "install", "uninstall"]);
 function epoch(value: BootEpoch): BootEpoch {
   if (value !== null && (typeof value !== "object" || Object.keys(value).sort().join() !== "identity,startedAt" || typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt) || typeof value.identity !== "string" || !value.identity)) throw new ServiceError("Invalid display boot identity.", 409);
@@ -478,8 +482,9 @@ export class DisplayEndpoint {
       while (this.authorized() && this.current()) {
         const value = pending.length ? pending : await channel.receive(0.1); pending = Buffer.alloc(0);
         if (value instanceof Uint8Array) {
-          let denied = false;
-          for (const [kind, frame] of parser.feed(value)) denied = !(await this.input(kind, frame)) || denied;
+          let denied = false; const frames = parser.feed(value);
+          if (frames.length > MAX_RFB_MESSAGES_PER_FRAME) throw new ServiceError("Display input message carries too many RFB messages.", 400);
+          for (const [kind, frame] of frames) denied = !(await this.input(kind, frame)) || denied;
           if (denied) await channel.sendControl({ type: "control", state: "view-only" });
         } else if (value !== null) await this.command(value);
       }

@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ConsumerClient, ConsumerServiceError, LeaseClient } from "../src/consumer-client.ts";
+import { DashboardPreviews } from "../src/dashboard-previews.ts";
+import { setTimeout as delay } from "node:timers/promises";
 import type { AcquireRequest, Lease } from "../src/consumer-client.ts";
 
 type Body = Record<string, unknown>;
@@ -728,4 +730,165 @@ test("preview dispatch binds the lease key, active operation, boot and one-use r
   const expiredResponse = await pending;
   assert.equal(expiredResponse.status, 504);
   assert.doesNotMatch(await expiredResponse.text(), /released/);
+});
+
+// Queued dashboard previews: the real DashboardPreviews manager submits linux-lease requests to a real controller.
+// No runner claims the admitted lease, so these tests end at admission; the post-admission service path is covered
+// by dashboard-previews.test.ts and the native trials.
+type PreviewView = { id: string; state: string; expiresAt: string; request?: { state: string; priority: number; deadline: string | null; reason: string | null; admittedAt: string | null } };
+const iso = (seconds: number) => new Date(seconds * 1000).toISOString();
+async function previewQueue(t: { after: (fn: () => Promise<void>) => void; mock: { method: typeof test.mock.method } }, limits: Body = {}) {
+  const f = await fixture(t, true), app = await f.application({ maxRequestPriority: 10, ...limits }), filler = await f.application();
+  await f.grant(app.id); await f.grant(filler.id);
+  const domain = await f.domain(VM), runner = await f.enroll(); await f.ok(f.approve(runner, domain));
+  let now = T0;
+  t.mock.method(Date, "now", () => now * 1000);
+  // A stable front port that follows controller restarts and can drop one reply after the controller commits it.
+  let drop: RegExp | undefined, dropped = 0, cancels = 0;
+  const proxy = http.createServer((req, res) => {
+    if (req.method === "POST" && /^\/v1\/requests\/[^/]+\/cancel$/.test(req.url ?? "")) cancels++;
+    const upstream = http.request({ host: "127.0.0.1", port: f.port(), method: req.method, path: req.url, headers: req.headers, agent: false }, reply => {
+      if (drop && req.method === "POST" && drop.test(req.url ?? "")) { drop = undefined; dropped++; reply.resume(); reply.on("end", () => res.socket?.destroy()); return; }
+      res.writeHead(reply.statusCode!, reply.headers); reply.pipe(res);
+    });
+    upstream.on("error", () => res.socket?.destroy());
+    req.pipe(upstream);
+  });
+  await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", resolve));
+  const tmp = mkdtempSync(join(tmpdir(), "queued-previews-"));
+  writeFileSync(join(tmp, "key"), app.credential);
+  const config = { applicationKeyFile: join(tmp, "key"), database: join(tmp, "previews.sqlite"), templateId: IMAGE.id, templateRevision: IMAGE.revision, arch: "amd64" as const, digest: DIGEST, ttlSeconds: 60, maxPreviewPriority: 10 };
+  const open = () => new DashboardPreviews(config, { baseUrl: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`, allowLoopbackHttp: true });
+  let dash = open();
+  t.after(async () => { dash.close(); await new Promise<void>(resolve => proxy.close(() => resolve())); rmSync(tmp, { recursive: true, force: true }); });
+  const view = (id: string) => dash.handle("owner", "GET", id) as PreviewView;
+  return {
+    f, app, filler, domain, runner,
+    get dash() { return dash; },
+    get dropped() { return dropped; },
+    get cancels() { return cancels; },
+    dropNext(route: RegExp) { drop = route; },
+    clock(seconds: number) { now = seconds; f.clock(seconds); },
+    reopen() { dash.close(); dash = open(); },
+    view,
+    submit: (extra: Body = {}, id: string = randomUUID()) => dash.handle("owner", "POST", undefined, { id, mode: "static", files: [{ path: "index.html", data: "eA==" }], ...extra }) as PreviewView,
+    async until(id: string, wanted: (v: PreviewView) => boolean, ms = 15000) {
+      const end = performance.now() + ms;
+      while (!wanted(view(id)) && performance.now() < end) await delay(100);
+      assert.ok(wanted(view(id)), JSON.stringify(view(id)));
+      return view(id);
+    },
+    leaseOf(id: string) {
+      const db = new DatabaseSync(config.database, { readOnly: true });
+      try { return String(db.prepare("SELECT lease FROM previews WHERE id=?").get(id)!.lease); } finally { db.close(); }
+    },
+    fill: async () => (await filler.client().acquireLease(f.acquire({ requiredCapabilities: ["command"] }))).lease.id,
+    release: (leaseId: string) => f.ok(f.post(`/v1/leases/${leaseId}/release`, { id: randomUUID() }, filler.credential)),
+  };
+}
+
+test("a dashboard preview waits while capacity is full, survives both restarts and starts its lifetime at admission without displacing running work", async t => {
+  const q = await previewQueue(t), filler = await q.fill();
+  const created = q.submit({ priority: 10 });
+  assert.equal(created.state, "provisioning");
+  assert.equal(created.expiresAt, iso(T0 + 60));
+  const waiting = await q.until(created.id, v => v.request?.state === "waiting");
+  assert.deepEqual({ ...waiting.request, reason: undefined }, { state: "waiting", priority: 10, deadline: iso(T0 + 60), reason: undefined, admittedAt: null });
+  assert.equal(waiting.state, "provisioning");
+  // Waiting at a higher priority neither releases nor shrinks the running lease.
+  assert.equal((await q.filler.client().inspectLease(filler)).state, "provisioning");
+  assert.deepEqual([(await q.f.inspectDomain(q.domain)).reservations, (await q.f.inspectDomain(q.domain)).reserved.cpu], [1, VM.cpu]);
+  assert.equal(q.f.rows(`SELECT * FROM linux_leases WHERE id='${q.leaseOf(created.id)}'`).length, 0);
+  q.reopen();
+  await delay(1500);
+  assert.equal(q.view(created.id).state, "provisioning");
+  await q.f.restart();
+  await delay(1500);
+  assert.equal((await q.until(created.id, v => v.request?.state === "waiting")).state, "provisioning");
+  q.clock(T0 + 10);
+  await q.release(filler);
+  const admitted = await q.until(created.id, v => v.request?.state === "admitted");
+  assert.equal(admitted.request!.admittedAt, iso(T0 + 10));
+  assert.equal((await q.until(created.id, v => v.expiresAt === iso(T0 + 70))).state, "provisioning");
+  assert.equal(q.f.rows(`SELECT domain FROM linux_leases WHERE id='${q.leaseOf(created.id)}'`)[0]!.domain, q.domain);
+});
+
+test("queued dashboard previews follow priority then FIFO, and applications take turns", async t => {
+  const q = await previewQueue(t), filler = await q.fill();
+  // A second dashboard process with its own application shares the pool.
+  const other = await q.f.application(); await q.f.grant(other.id);
+  // Submit one at a time so the controller's FIFO sequence is the submission order.
+  const queued = async (priority: number) => { const p = q.submit({ priority }); await q.until(p.id, v => v.request?.state === "waiting"); return p; };
+  const low = await queued(0), high = await queued(5), next = await queued(5);
+  const otherLease = randomUUID();
+  assert.equal((await q.f.post("/v1/requests", { id: otherLease, kind: "linux-lease", intent: boxIntent() }, other.credential)).status, 201);
+  const order: string[] = [];
+  const names = new Map([[q.leaseOf(low.id), "low"], [q.leaseOf(high.id), "high"], [q.leaseOf(next.id), "next"], [otherLease, "other"]]);
+  let held = filler, holder = q.filler.credential;
+  for (let i = 0; i < 4; i++) {
+    await q.f.ok(q.f.post(`/v1/leases/${held}/release`, { id: randomUUID() }, holder));
+    let admitted: Body[] = [];
+    for (let tries = 0; tries < 50 && admitted.length !== 1; tries++) {
+      admitted = q.f.rows(`SELECT id,application FROM linux_leases WHERE state='provisioning' AND id!='${held}'`);
+      if (admitted.length !== 1) await delay(100);
+    }
+    assert.equal(admitted.length, 1);
+    held = String(admitted[0]!.id); holder = admitted[0]!.application === other.id ? other.credential : q.app.credential;
+    order.push(names.get(held)!);
+  }
+  // Neither application was admitted before, so the higher priority goes first; then the least recently
+  // admitted application goes next, so the applications alternate.
+  assert.deepEqual(order, ["high", "other", "next", "low"]);
+});
+
+test("a waiting dashboard preview can be cancelled, expires at its deadline and replays only its exact specification", async t => {
+  const q = await previewQueue(t); await q.fill();
+  const body = { priority: 1, deadline: iso(T0 + 20) }, id = randomUUID();
+  const created = q.submit(body, id);
+  assert.deepEqual(q.submit(body, id), created);
+  assert.throws(() => q.submit({ ...body, priority: 2 }, id), /another specification/);
+  assert.throws(() => q.submit({ deadline: iso(T0 - 1) }), /waiting deadline/);
+  assert.equal(created.expiresAt, iso(T0 + 20));
+  const cancelled = q.submit();
+  await q.until(cancelled.id, v => v.request?.state === "waiting");
+  q.dash.handle("owner", "DELETE", cancelled.id);
+  const stopped = await q.until(cancelled.id, v => v.state === "stopped");
+  assert.deepEqual([stopped.request!.state, stopped.request!.reason], ["cancelled", "consumer_cancelled"]);
+  await q.until(id, v => v.request?.state === "waiting");
+  q.clock(T0 + 20);
+  const expired = await q.until(id, v => v.state === "failed");
+  assert.deepEqual([expired.request!.state, expired.request!.reason], ["expired", "deadline"]);
+  assert.equal(q.f.rows("SELECT * FROM linux_leases WHERE state='provisioning'").length, 1);
+});
+
+test("a lost submission reply is resolved by replaying the same request, never by failing or duplicating it", async t => {
+  const q = await previewQueue(t); await q.fill();
+  q.dropNext(/^\/v1\/requests$/);
+  const created = q.submit();
+  const waiting = await q.until(created.id, v => v.request?.state === "waiting");
+  assert.equal(q.dropped, 1);
+  assert.equal(waiting.state, "provisioning");
+  const requests = await q.app.client().listRequests();
+  assert.deepEqual(requests.requests.map(r => r.id), [q.leaseOf(created.id)]);
+});
+
+test("revoking the dashboard application cancels a waiting preview, which then ends without a lease", async t => {
+  const q = await previewQueue(t); await q.fill();
+  const created = q.submit();
+  await q.until(created.id, v => v.request?.state === "waiting");
+  await q.f.ok(q.f.post(`/v1/consumers/${q.app.id}/revoke`, {}, q.f.admin));
+  await q.until(created.id, v => v.state === "failed");
+  assert.deepEqual(q.f.rows(`SELECT state,reason FROM requests WHERE id='${q.leaseOf(created.id)}'`), [{ state: "cancelled", reason: "application_revoked" }]);
+  assert.equal(q.f.rows(`SELECT * FROM linux_leases WHERE id='${q.leaseOf(created.id)}'`).length, 0);
+});
+
+test("a preview whose submission the controller refuses fails at once instead of stopping until its deadline", async t => {
+  // The dashboard allows priority 5 but the application's maximum is 0, so the controller refuses the request (400).
+  const q = await previewQueue(t, { maxRequestPriority: 0 });
+  const created = q.submit({ priority: 5 });
+  const failed = await q.until(created.id, v => v.state === "failed", 5000);
+  assert.equal(failed.request, undefined);
+  assert.deepEqual((await q.app.client().listRequests()).requests, []);
+  await delay(1500);
+  assert.equal(q.cancels, 1);
 });

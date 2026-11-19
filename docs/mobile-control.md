@@ -17,8 +17,11 @@ API; PNG/APNG alone does not satisfy that requirement.
 On 18 November 2026 the requested use cases expanded to exclusive device leases
 for parallel coding agents and unattended CI and automation jobs. One intended
 workflow installs a CI build and records the app's screens for marketing. These
-use cases require access through the job's own scoped credentials. Native lease
-isolation and unattended recording remain open acceptance items.
+use cases require access through the job's own scoped credentials. Android emulator
+leases are now enabled; see [Android emulator leases](#android-emulator-leases). Since
+19 November 2026 a lease key can also install large builds and record MP4 of its own
+emulator ([lease recording and large installs](#lease-recording-and-large-installs)).
+iOS simulator leases remain open.
 
 ## Current implementation
 
@@ -32,8 +35,9 @@ for builds already present on the host.
 Use a private personal API token with `machines:access` for owned machines, or the
 existing operator credential. Other users, enrollment credentials, guest credentials
 and unrelated hosts cannot read these artifacts. Application/lease credentials are
-not supported by this administrative artifact API. Ordinary native runners retain
-their consumer execution gate pending native fencing and cleanup acceptance.
+not supported by these administrative routes, and they refuse uploads for leased machines.
+A leased Android emulator takes uploads through its lease key on the same contract; see
+[lease recording and large installs](#lease-recording-and-large-installs).
 
 | Operation | Endpoint | Body |
 | --- | --- | --- |
@@ -240,7 +244,9 @@ attaches outbound at `/v1/hosts/{host}/video-sessions/{id}/{generation}`. Both u
 header credentials and the existing `canaveral-session-v1` WebSocket protocol.
 The consumer must use the same currently authorized credential that created the
 session; account revocation, scope changes, host loss, stop, expiry and assignment
-changes terminate authorization. Consumer lease keys do not authorize these routes.
+changes terminate authorization. Consumer lease keys do not authorize these machine
+routes; a lease key records its own emulator through the lease routes in
+[lease recording and large installs](#lease-recording-and-large-installs).
 
 After broker readiness, the host sends `{type:"video",mediaType:"video/mp4",
 codec:"avc1",fps:30}`, then binary MP4 bytes in messages no larger than 64 KiB.
@@ -287,10 +293,45 @@ separately from successful recording delivery, so a failed recording can release
 capacity when cleanup is proven. Unknown native cleanup retains the reservation
 and blocks another capture for that machine. The runner may repeat a saved positive
 cleanup receipt without reopening capture. A controller restart disconnects old
-generations. Android early cancellation cannot infer guest recorder termination
-from an exited adb process; its bounded recorder and native cleanup recovery need
-inspection. iOS uses idb's graceful signal/stop protocol and confirms its retained
+generations. iOS uses idb's graceful signal/stop protocol and confirms its retained
 child exit; companion termination remains a native acceptance check.
+
+#### Android recorder cleanup after early cancellation
+
+An exited host `adb` client does not prove that the guest recorder stopped:
+screenrecord can keep running on the device until its time limit. The Android
+capture shell therefore first prints one identity line on stdout, the guest kernel
+`boot_id` and its own `/proc/<pid>/stat`, then `exec`s screenrecord, which keeps
+that PID and start time. The provider strips the line before encoding. A capture
+without a valid identity line never reports cleanup. Output goes to stdout only;
+the capture creates no guest file, so there is no temporary file to remove.
+
+After a cancel, close, failure, authorization loss or deadline, the runner closes
+its adb client. It then stops the recorder only while it still holds the
+machine's assignment, the same one that started the capture (fresh controller
+contact, desired `running`, no deletion, unchanged assignment fingerprint and
+lease), and after `emu avd name` confirms the serial is still the machine's AVD.
+One guest shell compares the boot id, PID and start time (`/proc/<pid>/stat`
+field 22) and signals only on an exact match, with SIGTERM and then, after 3
+seconds, SIGKILL. A name match such as `pkill` is never used, and other
+screenrecord processes are never touched. Cleanup is positive only if the PID is
+absent, holds a process with another start time, the boot id changed, or the
+process is a zombie with no remaining threads. Probes start within 6 seconds;
+SIGKILL is always sent before giving up and is always followed by at least one
+probe, so one cleanup takes at most about 6 seconds plus a few bounded adb calls
+(5 seconds for each ownership check, 10 seconds for each probe). The guest
+reports its own evidence; a compromised guest can only affect its own
+reservation. The remaining gap between reading `/proc` and `kill` is the
+narrowest a shell allows without a pidfd. A matching process in an unexpected command, an unreadable `/proc` entry,
+an unreachable or foreign device, lost assignment authority or a timeout reports
+unknown. The result is computed once per capture, so a repeated close returns the
+same outcome. A capture that already ended with EOF and a zero remote exit needs no
+guest step.
+
+Unknown cleanup is not retried later: the journal stays `unknown` and the session
+keeps its reservation until an administrator abandons it (below). Stopping the
+machine ends assignment authority, so a capture cancelled by a stop is also left
+unknown unless its cleanup completed first.
 
 ### Deleting a machine with a video session
 
@@ -306,8 +347,9 @@ Recover in this order:
    machine. Either ends capture authorization.
 2. **Wait** for the runner's positive cleanup receipt. `cleaned` becomes true, the
    reservation is released and deletion is allowed.
-3. **Abandon** only when cleanup stays unknown, for example after Android early
-   cancellation: `POST /v1/machines/{machine}/video-sessions/{id}/abandon` with
+3. **Abandon** only when cleanup stays unknown, for example when the device was
+   unreachable during cleanup, when the machine was stopped before cleanup ran, or
+   for an iOS capture whose idb stop was unconfirmed: `POST /v1/machines/{machine}/video-sessions/{id}/abandon` with
    `{reason}` (1–1000 characters). This needs administrator authority, because
    it accepts unproven native cleanup. The machine owner receives 403 and other
    accounts 404. The session must already be closed, and its authorization
@@ -363,9 +405,18 @@ also confirmed that deletion was refused (409) while a left-page session was
 uncleaned, that the owner could not abandon it (403), and that after an
 administrator's abandonment the deletion completed and released the reservation.
 
+The runner now stops and confirms the exact Android recorder after early
+cancellation (see [Android recorder cleanup](#android-recorder-cleanup-after-early-cancellation)).
+The [recording cleanup trial](../coordination/native-acceptance/dashboard-android-recording-cleanup.md)
+of the same day confirmed it natively. Cancel and leaving the page each reached
+`cleaned=1` within about 5 seconds and released the reservation, with no recorder
+left on the guest. A new recording on the same machine then verified, and the
+machine was deleted without abandonment. It also showed that the guest recorder
+keeps running after the host adb client closes, so the runner's SIGTERM is needed.
+
 The local attached display path and consumer lease display keep their prior
 contracts. Administrative native video does not enable consumer lease execution
-or bypass that acceptance gate.
+or bypass that acceptance gate. Lease recording has its own routes and rules below.
 
 Existing [device controls](devices.md) cover gestures, text, app lifecycle, logs,
 accessibility, permissions, location, small files and Android shells. iOS has no
@@ -373,6 +424,451 @@ general guest shell; exposing the Mac host shell would violate simulator scope.
 Network-condition control, reset/delete/snapshot capabilities and broader native
 inputs require explicit platform adapters and acceptance rather than claims of
 platform parity.
+
+## Android emulator leases
+
+Enabled 19 November 2026 for Android emulators only. An agent or CI job submits a
+`kind: "lease"` [request](requests.md) (or a direct `/v1/leases` acquisition) for an
+Android template. The request waits while the host is full, is admitted in the shared
+fair order and then gets a booted, checked, network-isolated emulator to itself. The
+lease follows the generic [lease contract](leases.md). iOS simulators and physical
+devices still refuse leased execution.
+
+### Host configuration
+
+A host advertises lease execution only when all of these hold. Every other runtime,
+and any partial configuration, keeps refusing `leaseProtocol` and `leaseImages`.
+
+- The provider is `android`, or a `macos`/`linux` host with the `android` runtime enabled.
+- `leaseClockHelper` is an absolute path to an installed `canaveral-mobile-native`. This
+  is the suspend-aware native lease clock described in [leases](leases.md).
+- The Android runtime sets `leaseSupervisor` to an absolute path to the same helper.
+- `leaseProtocol: 1`, and every `leaseImages` entry is
+  `{id, revision, arch, runtime: "android"}` naming an offered Android template.
+
+```json
+{ "provider": "android", "androidSDK": "/ABS/sdk", "storage": "/ABS/devices",
+  "leaseClockHelper": "/ABS/canaveral-mobile-native", "leaseSupervisor": "/ABS/canaveral-mobile-native",
+  "leaseProtocol": 1, "leaseImages": [{ "id": "phone", "revision": "1", "arch": "arm64", "runtime": "android" }],
+  "leaseIsolationPorts": [8443] }
+```
+
+Size the host's `capacity` to the number of emulators it may run. Requests beyond that wait.
+`leaseIsolationPorts` is optional. It lists more host loopback ports, such as a
+separately served dashboard, that the readiness probe must find unreachable from the
+guest; see [Guest network isolation](#guest-network-isolation).
+
+The host enforces this gate itself and does not rely on the controller. A leased
+assignment whose runtime is not Android, or whose template is not an advertised
+`leaseImages` entry, is never started: the host stops it and reports `error`, which
+fails the lease. Consumer operations and sessions for such an assignment are refused.
+
+Run the host so that stopping or restarting it does not kill the detached lease
+supervisors. On Linux, add the drop-in
+`deploy/systemd/canaveral-host.service.d/android-leases.conf` (`KillMode=process`)
+to the example unit on hosts that lease Android emulators; the default
+`control-group` mode would kill every supervisor and emulator on a service restart.
+The base unit keeps `control-group`, so hosts without Android leases still clean up
+every helper when the service stops. Linux lease hosts have no native acceptance yet.
+
+Lease images must be user builds. Readiness refuses a guest whose `ro.debuggable` is
+not `0` and fences the lease: a userdebug or eng guest can get root and act as adbd
+toward the host's shared adb server without using the network, which the slirp
+restriction below does not cover. Google Play system images are user builds; plain
+Google APIs images are not.
+
+### Guest network isolation
+
+The emulator's default user-mode networking (slirp) maps the guest address `10.0.2.2`
+to the host's `127.0.0.1`. An unrestricted guest can therefore reach the host's adb
+server on 5037 and use adb smart sockets (`host:transport:<serial>` and `shell:`) to
+get a shell on any other emulator or USB device the server knows. It can also reach
+other emulators' console and adb ports, the controller, the dashboard and every other
+loopback service, as well as the LAN. The native check on 19 November 2026 confirmed
+this on the Mac Studio with emulator 37.2.13: a stock guest connected to the host's adb
+server, the T3 server and a canary listener.
+
+Leased emulators therefore run with **no guest network at all**. Every leased launch
+appends these emulator flags (`LEASE_ISOLATION_ARGUMENTS` in the Android provider),
+and they are part of the launch binding:
+
+| Flags | Effect |
+| --- | --- |
+| `-network-user-mode-options restrict=on,ipv6=off`, `-wifi-user-mode-options restrict=on,ipv6=off` | Slirp drops every guest packet that leaves the virtual network, on both the radio (`eth0`) and Wi-Fi (`wlan0`) interfaces. That covers the host alias, the internet, DNS and IPv6. |
+| `-feature -WiFiPacketStream` | Wi-Fi uses the emulator's own restricted slirp instead of `netsimd`. With netsim, `netsimd` runs its own unrestricted slirp, so the restrict options did not apply: on the native check the guest still reached the host. |
+| `-feature -BluetoothEmulation`, `-feature -Uwb` | With netsim Wi-Fi, Bluetooth and UWB off, no `netsimd` starts. `netsimd` is a host-wide daemon whose virtual radio medium is shared between emulators, so it would be a cross-lease channel. |
+| `-crash-report-mode disabled`, `-no-metrics` | No `crashpad_handler` starts. It runs outside the emulator's process group (parent PID 1, its own group), so the supervisor could not stop it. |
+
+With these flags the native check found only the `qemu-system-aarch64` process for
+the emulator: no `netsimd` and no `crashpad_handler`. Inside the guest, every TCP
+connection to `10.0.2.2` was refused (5037, the emulator's own console and adb ports,
+the T3 server and a canary). UDP to a host canary, IPv6 and the internet were also
+unreachable. Without `restrict=on` but with the other flags, every one of those ports
+was reachable again, so `restrict=on` is the operative control. adb, `pm install`,
+screenshots and input work without guest networking, because adb uses the emulator's
+own pipe.
+
+Consequence: apps under test on a leased emulator have no internet access and cannot
+reach any service on the host or the LAN. Tests that need a backend cannot use Android
+leases yet. Providing controlled egress (for example through a filtering proxy) is
+future work and needs its own isolation review.
+
+A future emulator could ignore or rename these flags. The readiness probe below
+therefore checks isolation on every leased boot and fails closed.
+
+### Independent deadline and stop proof
+
+The runner never spawns a leased emulator itself. It writes a version 2 `launch.json`
+with `supervised: true`, then starts `canaveral-mobile-native lease-supervise <storage>`
+detached in its own session. The launch request (emulator argv and environment)
+travels on stdin. The supervisor:
+
+- takes an exclusive `flock` on `<storage>/lease-supervisor.lock` before anything else
+  and holds it for its whole life. The descriptor is close-on-exec, so the emulator
+  never inherits it. The kernel releases the lock however the supervisor ends,
+  including SIGKILL. The runner tests it with a non-blocking try-lock
+  (`canaveral-mobile-native lease-status <storage>`), so supervisor liveness never
+  depends on a PID that could be reused;
+- validates the request, reads the authorization and samples the clock, all before
+  spawning. If anything fails before spawn it exits with the dedicated status 75 and
+  has spawned nothing. That status is the only exit status that proves nothing was
+  spawned;
+- starts the emulator in a dedicated process group and records
+  `lease-supervisor.json` (machine, lease, launch boot, boot session, supervisor and
+  emulator PIDs). The emulator's output goes through a pipe into `emulator.log`, which
+  keeps at most 16 MiB per launch and then drops further output;
+- every 100 ms reads the private `lease-authorization.json` the runner publishes.
+  That file binds machine, lease, launch boot, OS boot session, lease revision, an
+  absolute deadline on the continuous clock (Mach continuous time or
+  `CLOCK_BOOTTIME`) and a fence flag. Same or older revisions never extend the
+  deadline, and a renewal first seen after expiry is ignored;
+- stops the emulator when the deadline passes, the file is fenced, missing, malformed
+  or bound to another assignment or boot, the clock fails, or the supervisor receives
+  SIGTERM. It writes a sticky `lease-fenced.json`, sends SIGTERM to the group, waits
+  5 s, then sends SIGKILL. The leader stays an unreaped child until every signal is
+  sent, so its process group ID cannot be reused. Every path after spawn ends in this
+  stop, which cannot return early: an error while waiting counts as "not yet exited"
+  and the SIGKILL loop continues;
+- writes `lease-stopped.json` (`groupAbsent: true`) only after the leader is reaped
+  and the whole group is gone, then releases the lock by exiting. It never exits while
+  a group member may survive. It refuses a second launch in the same storage, and a
+  second supervisor while the first holds the lock.
+
+Because the supervisor is detached, deadline enforcement continues when the runner
+process or the controller is lost. The runner's own lease guard also fences locally at
+the deadline without the controller and publishes the fence immediately.
+
+Device commands for a leased assignment are refused with 410 unless the supervisor
+holds its lock, no `lease-fenced.json` or `lease-stopped.json` exists, and
+`lease-authorization.json` is unfenced, on the current boot session and before its
+deadline on the native clock. This holds whatever the runner still believes.
+
+Stop proof for cleanup is positive only:
+
+- a matching `lease-stopped.json`, with the supervisor's lock free; or
+- a launch that never spawned: no launch at all, a supervisor exit with status 75
+  before any launch record, or the automatic recovery below; or
+- a free supervisor lock and a recorded emulator PID that is absent, with the
+  emulator's process group absent too.
+
+Anything else stays unknown. PIDs are only observed, never signalled after recovery.
+
+The runner starts the adb server during its environment check, before any lease. With
+netsim and crash reporting disabled, the emulator starts no helper outside its process
+group. The native trial checks for leftover `netsimd`, `crashpad_handler` and
+`qemu-system` processes. A future emulator that adds a helper which leaves the group
+would not be covered by the group stop proof; the trial's leftover check is the guard
+against that.
+
+### Readiness
+
+A leased emulator reports `running` with `accessReady: true` only after all of these:
+
+1. It has finished booting (`sys.boot_completed=1`).
+2. Its package manager answers `pm path android`.
+3. `emu avd name` proves the serial is the lease's own AVD.
+4. A negative guest-to-host probe passes. The runner opens a fresh canary listener on
+   the host's `127.0.0.1`. From the lease's own `adb shell` it then tries
+   `nc 10.0.2.2 <port>` for each of these ports:
+   - 5037 (the adb server);
+   - the emulator's own console and adb ports;
+   - the controller's port, taken from the host's controller URL;
+   - every `leaseIsolationPorts` entry;
+   - the canary.
+
+   Isolation is proven only when every attempt fails with exit status 1 and a
+   recognized connection error, and the canary saw no connection. The result is
+   recorded in `lease-isolation.json` for that launch.
+
+Until then the emulator reports `starting` with a detail; an inconclusive probe (for
+example, `nc` missing) keeps it starting until the provisioning timeout fails the
+lease. If any port is reachable, or the canary sees a connection, the runner fences
+the supervisor at once and reports `error`. The lease fails without ever becoming
+ready, and no credential exchange can reach that guest.
+
+The controller requires that positive access check for mobile lease members. The lease
+becomes `ready`, and its member shows `ready: true`, only after a checked device,
+never from inventory or a bare emulator process.
+
+### Scoped control
+
+The application exchanges its key for a lease-scoped credential
+(`POST /v1/leases/{id}/credential`). Only that credential authorizes
+`POST /v1/leases/{id}/operations` and `GET /v1/leases/{id}/operations/{op}`. Operations target
+member `primary` and resolve to that lease's own machine, host and AVD:
+
+| Need | Action | Capability |
+| --- | --- | --- |
+| Install a build | Upload it through the lease key, then `install-uploaded` (any size up to 2 GiB; see below). Small APKs may still use `push` (up to 512 KiB) and `shell` `["pm","install","-r",path]`. | files (`push`/`shell` also command) |
+| Launch, stop, list or remove apps | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | command |
+| Screens | `screenshot` (PNG), `hierarchy` | screenshot, hierarchy |
+| Input | `tap`, `swipe`, `text`, `key` | input |
+| Logs | `logs` (last 200 logcat lines) | command |
+| Record | MP4 video session (see below) | displayStream |
+
+App lifecycle and logs need `command` because the Android shell already grants
+them. They remain unavailable to iOS, which has no shell capability. Operations keep
+the durable receipt semantics: the same UUID replays its receipt without running
+again; a changed body is 409; an operation in flight when authorization ends is
+`unknown` and is never replayed. Rotating the credential revokes the previous one.
+
+The lease shell runs inside the guest. Because the guest has no network path, a shell
+command or an installed APK cannot reach the host's adb server or any other host
+service.
+
+The administrative app-artifact and video routes and dashboard capture do not accept
+lease credentials. Lease file sessions and the live display stream are still not
+accepted natively for Android leases.
+
+### Lease recording and large installs
+
+Enabled 19 November 2026 for the CI and marketing-capture workflow: a job leases an
+emulator, installs its real build, drives named screens, takes PNGs (`screenshot`) and
+records a playable MP4, all with its lease key. Both paths extend existing mechanisms
+rather than adding parallel ones.
+
+**Large installs reuse the uploaded-app path**, not the lease file session. The upload
+path already provides what a build install needs: caller-UUID intents, sequential
+512 KiB chunks, digest-checked publication, host scratch reservations, streaming into one
+owned PackageManager session with a verified size and digest before commit, the
+never-replayed `unknown` receipt of an uncertain commit, and positive artifact cleanup.
+A file session only delivers bytes into the guest; installing them would then be an
+unjournaled `pm install` shell command with no digest check against the upload and no
+cleanup evidence. The lease file session also needs the separate native transfer
+helper, which has no Android lease acceptance.
+
+| Operation | Endpoint | Body |
+| --- | --- | --- |
+| Reserve upload | `POST /v1/leases/{lease}/app-artifacts` | `{id, member, format:"apk", bytes, sha256}` |
+| Read receipt | `GET /v1/leases/{lease}/app-artifacts/{id}` | none |
+| Append or repeat a chunk | `POST /v1/leases/{lease}/app-artifacts/{id}/chunks` | `{offset, data}` |
+| Verify and publish | `POST /v1/leases/{lease}/app-artifacts/{id}/complete` | `{}` |
+| Install | `POST /v1/leases/{lease}/operations` | `{id, member, action:"install-uploaded", arguments:{artifact}}` |
+| Release the upload | `POST /v1/leases/{lease}/app-artifacts/{id}/delete` | `{}` |
+
+Receipts add `leaseId`. Chunk, completion, replay and install rules are those of the
+[administrative upload](#current-implementation). The install operation is authorized for
+at most 30 minutes, and never beyond the lease. An upload binds one lease member, and only
+that lease's install of that member may read it from the controller. The runner reads it
+only while the lease is ready. The provider rechecks the lease supervisor, not only the
+AVD identity, between install stages (after the install session is created, after
+staging, and before and after commit); during streaming, the runner's lease guard and
+the controller's per-chunk lease check apply. One application's lease uploads may
+declare at most 2 GiB in total across its leases (a quarter of the controller-wide 8 GiB
+upload pool), so one lease key cannot reserve the whole pool. Rotating the lease key
+during an install marks it `unknown`; its upload stays held until lease cleanup. Administrative routes neither read nor install
+lease uploads.
+
+**Recording reuses the native video session** (#67, #68, #72): the same table, the same
+`canaveral-session-v1` broker and MP4 verification, the same host reservation (one CPU
+and 256 MiB), the same one-session-per-machine and four-per-host slots and the same
+exact-recorder cleanup.
+
+| Operation | Endpoint | Body |
+| --- | --- | --- |
+| Create or replay | `POST /v1/leases/{lease}/video-sessions` | `{id, member, fps:30, durationSeconds, bitRate}` |
+| Read | `GET /v1/leases/{lease}/video-sessions/{id}` | none |
+| Close | `POST /v1/leases/{lease}/video-sessions/{id}/close` | `{}` |
+| Attach (WebSocket) | `/v1/leases/{lease}/video-sessions/{id}/{generation}` | lease key header |
+
+Receipts add `leaseId`, `member` and `hostCleaned` (below). The SDK exposes both paths
+on `LeaseClient`: `uploadApp`, `appArtifact`, `deleteAppArtifact`, `installApp` and
+`video` (`create`, `connect`, `inspect`, `close`, `record`); see the
+[video SDK](visual-sdk.md#recording-a-leased-emulator-with-its-lease-key).
+
+#### Scope
+
+Only the lease's current key reaches these routes; the application key, operator and
+account credentials and another lease's key get 401. Another lease's upload or session
+is not found (404), and an install naming an upload of another lease or member is refused
+(409). New uploads, chunks, publication and recordings need a ready, unexpired lease with
+a checked member (410 `lease_ended` after it ends, 409 `member_not_ready` before
+readiness). A recording stays authorized only while the lease is ready, its key unrotated,
+its application active and its device checked; the runner additionally requires its own
+lease guard and, about once a second, a held supervisor lock and an unfenced, unexpired
+native authorization. Expiry, release, a fence, supervisor loss or a key rotation
+therefore ends a recording within about a second: the stream stops without a finish
+receipt, and the SDK reports `session_disconnected` or `video_incomplete`. Reading receipts and deleting
+clean uploads remain available to the current key after the lease ends.
+
+#### Reservations and cleanup proof
+
+A recording or upload keeps its reservation until cleanup is proven, after the lease ends
+too:
+
+- **Recording.** As for administrative sessions, positive cleanup is the runner's proof
+  that the native recorder and the encoder stopped. When the lease ends first, the guest
+  recorder's stop cannot be proven by adb: the supervisor fences and stops the emulator.
+  The runner then reports `hostCleaned`: its own encoder exited. The session becomes
+  `cleaned` only when both that receipt exists and the lease's own cleanup has proven
+  the emulator's whole process group gone and its storage removed. If the encoder exit
+  is unconfirmed, the session stays held after lease cleanup. An administrator may then
+  abandon it through the machine route
+  (`POST /v1/machines/{machine}/video-sessions/{id}/abandon`, after its deadline), which
+  releases it once the lease's cleanup is complete, as deletion does for owned machines.
+- **Upload.** An upload that was never installed has no native stage and is released as
+  soon as the lease ends. An install attempt is clean when it succeeded with
+  `artifactCleaned`, was never handed to the runner, or its emulator was proven stopped
+  and removed by lease cleanup. An interrupted or `unknown` install therefore holds its
+  upload until the lease's cleanup completes. It is never replayed. Within a live lease,
+  `delete` releases an upload whose attempts are all clean; an unclean attempt blocks
+  both deletion and a repeat install of the same upload.
+- **Unprovable cleanup.** When the lease's own cleanup is blocked (for example after
+  supervisor loss with a surviving emulator), its recordings and uploads stay held with
+  it. Follow [unprovable cleanup and recovery](#unprovable-cleanup-and-recovery); the
+  reservations are released with the lease's cleanup proof.
+
+Accounting: each held recording counts one CPU and 256 MiB, and each held upload its host
+scratch (`1 + ceil(2 × bytes / GiB)` GiB), against the application's resource limits,
+alongside its leases. A request that would exceed them is refused with 429 before any
+reservation, and so are new leases while held recordings or uploads use the budget. A
+lease holds at most four uploads at once. The host-wide limits still apply: four held
+recordings per host, one per machine, and 8 GiB and 128 uploads per controller. Size the
+host's capacity for the recording (one CPU and 256 MiB) and upload scratch beside its
+emulators; otherwise those requests get 409.
+
+The [native capture trial](../coordination/native-acceptance/android-lease-capture.md) of
+19 November 2026 ran this workflow on the Mac Studio with a Google Play API 36 emulator.
+Through the lease key it installed a real 1,511,885-byte APK in three chunks, took two named
+1080×2400 PNGs and recorded a 30-second MP4 that ffprobe read as 820 H.264 frames over
+27.3 s and FFmpeg decoded without errors. A second recording started 45 s before expiry
+ended with the lease. The session held its reservation (`hostCleaned`, not `cleaned`)
+until the lease's cleanup proved the emulator's group gone about 3 s later; the host
+reservation then returned to zero. Release, key rotation and supervisor loss during a
+recording, interrupted installs and uploads, and limit refusals are fixture-covered only.
+Runner or controller loss during a lease recording is not covered.
+
+### Expiry, release and loss
+
+At expiry or release the controller refuses the old credential at once (410
+`lease_ended` for operations, 401 after rotation), fails queued operations, ends
+recordings and further uploads, and issues the cleanup intent. The runner fences the supervisor. Cleanup then requires
+the stop proof above before it removes the AVD storage and its `ANDROID_AVD_HOME`
+registration through the recoverable quarantine path. It then erases the
+assignment's credential directory, and only then reports completion. The controller
+releases the host and application reservations only on that report.
+
+The runner's fence is conservative: it can fall a fraction of a second before the
+controller's expiry. If its fence report arrives first, the lease ends `failed`
+instead of `expired`, and the device answers 409 `member_not_ready` in between. Both
+outcomes revoke access. A lease is never relaunched: an emulator that stops while its
+lease is active reports `error`, which fails the lease.
+
+**Renew early.** The supervisor accepts a renewal only if it sees the newer revision
+before its current deadline. A renewal that reaches the host after that deadline
+(for example, sent in the last second, or delayed by a slow heartbeat) cannot revive
+the emulator: the supervisor has already stopped it and the lease ends `failed`.
+Renew well before expiry, for example when a third of the TTL remains, and allow at
+least a few heartbeat intervals.
+
+- **Controller loss:** the runner keeps its persisted deadline, fences locally and the
+  supervisor stops the emulator. Cleanup completes when the controller returns.
+- **Runner loss:** the supervisor alone stops the emulator at its deadline. The
+  reservation stays held until a runner restarts, recovers the lease guard and proves
+  cleanup. A restarted runner recovers a running supervised emulator without
+  relaunching it, using its conservative recovered deadline.
+- **Supervisor loss** (killed or crashed without a stop receipt): nothing enforces the
+  deadline any more, so the lease ends at once. Device commands get 410 as soon as
+  the lock is free. On its next reconcile the runner fences the authorization and
+  reports `error`, which fails the lease. Cleanup then waits for stop proof (below).
+
+### Unprovable cleanup and recovery
+
+If the supervisor is gone while its emulator group survives, cleanup reports
+`blocked` with reason `execution_pending`. The host, application and lease
+reservations stay held and the runner retries with backoff. There is no administrator
+override that releases them without proof.
+
+Recovery:
+
+1. Confirm that `canaveral-mobile-native lease-status <storage>/<machine>` reports
+   `"supervisor": "free"`, so no supervisor is running.
+2. Inspect `<storage>/<machine>/lease-supervisor.json`. It names the emulator
+   `childPid`, which is also its process group ID.
+3. Confirm the process is the lease's emulator (its argv contains
+   `-avd cvm-<machine>`), then stop that process group.
+4. On its next retry the runner observes the emulator and its group absent, removes
+   storage, erases credentials and reports completion.
+
+A reused PID that still shows as present keeps cleanup blocked. Wait for it to
+disappear; never signal an unidentified process to unblock cleanup.
+
+**Launch intent without a supervisor record.** The runner can crash between writing
+`launch.json` and the supervisor's record, or the supervisor can fail without status 75.
+In those cases `lease-supervisor.json` does not exist and the runner recovers
+automatically:
+
+- If the lock is held, a supervisor is still starting and the runner waits.
+- If the lock is free or absent, the runner lists every process command line (`ps -axww`).
+- If no process contains `lease-supervise <storage>` or `-avd cvm-<machine>`, it records
+  `nothingRunning: true` in `launch.json` as positive proof. Cleanup then proceeds and
+  the lease fails, because a lease is never relaunched.
+- If such a process exists, cleanup stays blocked. Identify it, as in step 3 above,
+  and stop it; the next retry completes.
+
+### Verification
+
+[android-leases.test.ts](../coordination/test/control/android-leases.test.ts) runs a
+real loopback controller and `HostRunner` with the native lease clock and the real
+`lease-supervise` helper. It drives stand-in emulator processes (each with a
+grandchild in its group) through fake adb and avdmanager. It covers:
+
+- acquisition through queued requests and checked readiness, including the isolation
+  probe and the launch flags;
+- scoped control, a second lease waiting on a full host, and expiry while in use
+  with the old key refused;
+- proven cleanup and a clean hand-over;
+- controller loss and runner loss with independent deadline enforcement;
+- renewal, lost replies and UUID replay, and runner and controller restart without
+  relaunch;
+- cross-lease denial and a foreign serial refused by the provider;
+- supervisor loss mid-lease: immediate 410, a failed lease, a reservation held until
+  the operator recovery;
+- a supervisor that fails with an ordinary status after spawning (cleanup blocked
+  while the emulator survives) and a launch that left only its intent (automatic
+  recovery);
+- a guest that reaches host loopback (a real canary connection): fenced, never ready;
+- the host's own lease gate for non-Android runtimes and unadvertised templates;
+- supervisor refusal of ended authorization and relaunch;
+- lease-key install of a 1.3 MB APK in three chunks and MP4 recording, with replayed
+  lost replies, refused keys of another lease, the application and the operator, the
+  per-lease upload cap and key rotation;
+- expiry mid-recording (released only after lease cleanup), key rotation (the runner's
+  exact-recorder proof) and release mid-recording, supervisor loss mid-recording, an unconfirmed encoder exit held until administrator abandonment,
+  expiry mid-upload and mid-install (the never-installed upload released at once, the
+  interrupted install's upload only after lease cleanup), and application limits.
+
+`lease_supervisor.rs` unit tests cover the lifetime lock, the refusal before spawn, a
+clock failure after spawn that still stops the whole group, and the log cap.
+
+The native trials of 19 November 2026 ([record](../coordination/native-acceptance/android-lease-agents.md))
+ran the two-agent, one-emulator case on the Mac Studio with a real API 36 emulator
+and APK. The second run added the guest-to-host probe from a lease shell, supervisor
+loss mid-lease and the leftover-helper check. Host and controller loss, renewal,
+restart and supervisor failures during launch are fixture-covered only. The
+supervised emulator's resource usage is not attributed by the
+[runtime ownership](android-runtime-ownership.md) sampler, because its launch has
+no recorded process birth time.
 
 ## Acceptance boundaries
 
@@ -384,7 +880,9 @@ authorization, digest, ownership, deduplication, reservations and failure handli
 They do not prove an APK or simulator build runs on an actual device, or that a
 real encoder produces playable video. The Android dashboard trial of 19 November
 2026 produced FFmpeg-encoded MP4s that ffprobe, FFmpeg and Chromium decoded; iOS
-encoding remains unaccepted.
+encoding remains unaccepted. Android recorder cleanup with an unreachable device,
+foreign AVD, lost assignment or SIGKILL escalation is fixture-covered only; the
+native trial exercised SIGTERM cleanup after Cancel and leaving the page.
 
 Host choice is deferred. Before production use, verify each selected host's SDK,
 acceleration, Xcode selection, installed runtime and input/accessibility support;

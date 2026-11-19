@@ -9,7 +9,9 @@ import { MachineStore } from "./machines.ts";
 import { createModule as lifecycleModule } from "./lifecycle.ts";
 import { createModule as devicesModule } from "./devices.ts";
 import { createAppArtifactsModule } from './app-artifacts.ts';
+import { createLeaseAppArtifactsModule } from './lease-app-artifacts.ts';
 import { MobileVideoSessions } from './mobile-video-sessions.ts';
+import { OwnerDisplaySessions } from './display-sessions.ts';
 import { createModule as imagesModule } from "./images.ts";
 import { createModule as blueprintsModule } from "./blueprints.ts";
 import { createModule as infrastructureModule } from "./infrastructure.ts";
@@ -43,12 +45,14 @@ const machines = new MachineStore(store, options);
 const authenticateHost = machines.authenticateHost.bind(machines);
 const modules = [accountRoutes, machines, blueprintsModule(store), ...[lifecycleModule, devicesModule, imagesModule,
   infrastructureModule, inferenceModule].map(create => create(store, options))];
-modules.push(createAppArtifactsModule(store, machines));
-const videoSessions = new MobileVideoSessions(store, machines, (db, hash) => {
+modules.push(createAppArtifactsModule(store, machines), createLeaseAppArtifactsModule(store, machines));
+const principalHash = (db: Parameters<typeof accounts.principalHashDb>[0], hash: string): Principal => {
   if (hash === operatorHash.toString('hex')) return { kind: 'operator', user: null, scopes: ['admin'] };
   return accounts.principalHashDb(db, hash);
-});
-modules.push(videoSessions);
+};
+const videoSessions = new MobileVideoSessions(store, machines, principalHash);
+const displaySessions = new OwnerDisplaySessions(store, machines, principalHash);
+modules.push(videoSessions, displaySessions);
 modules.push(sessions);
 const leases = new LegacyLeases(store, options);
 modules.push(leases);
@@ -113,6 +117,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
     return { authenticated: true };
   }
   if (command.type === 'video-sessions.attach' || command.type === 'video-sessions.authorized' || command.type === 'video-sessions.disconnect') return videoSessions.command(command);
+  if (command.type === 'display-sessions.attach' || command.type === 'display-sessions.authorized' || command.type === 'display-sessions.disconnect') return displaySessions.command(command);
   if (command.type !== "http") return sessions.sessionCommand(command);
   const request: ControlRequest = {
     method: command.method, path: command.path, parts: command.path.split("/").filter(Boolean),
@@ -146,7 +151,7 @@ port.on("message", (message: { id: number; command: ControlCommand }) => {
     });
     // Provider text and interpolated request values cannot enter errors or logs.
     reply({ kind: "error", id: message.id, error: {
-      message: ({ request_kind_unsupported: "Use kind lease or linux-lease; model jobs use /v1/model-jobs.",
+      message: ({ request_kind_unsupported: "Use kind lease, linux-lease or model-job.",
         request_waiting_limit: "Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",
         request_priority_invalid: "Priority must be an integer within the application maximum.",
         request_conflict: "Request UUID already has a different intent." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,

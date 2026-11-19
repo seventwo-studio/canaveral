@@ -43,6 +43,7 @@ store; browser storage is not used.
 | Linux lease images, grants and runner approvals | Configuration |
 | Runner enrollment and revocation | Configuration |
 | Inference models and jobs | Configuration; Models (administrator prompt, output, cancellation) |
+| Application model jobs and queued model calls | Models (application queue state, administrator cancellation) |
 | Application artifact admission, chunks, verification and deletion | Configuration |
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
@@ -61,11 +62,16 @@ assignment reports, preparation callbacks, chunk download and binary WebSocket
 framing remain machine protocols. Their effects are represented by inventory,
 readiness, operations, session state, cleanup and host diagnostics.
 
-The one gateway WebSocket for a controller session protocol is the owner's mobile
-video attachment, `/api/v1/machines/{machine}/video-sessions/{id}/{generation}`.
-It requires the session cookie and a matching Origin, rechecks machine access
-every second and relays frames unchanged under the creator's own credential; see
-[owner mobile capture](dashboard.md#owner-mobile-capture).
+Two gateway WebSockets relay a controller session protocol under the creator's
+own credential: the owner's mobile video attachment,
+`/api/v1/machines/{machine}/video-sessions/{id}/{generation}` (see
+[owner mobile capture](dashboard.md#owner-mobile-capture)), and the desktop viewer,
+`/api/v1/machines/{machine}/desktop`, on a dashboard without an attached local
+display. Both require the session cookie and a matching Origin, recheck machine
+access before the upgrade and every second after it, and relay frames unchanged.
+For the desktop, the gateway first opens an owner display session,
+`POST /v1/machines/{machine}/display-sessions` with `{id}`, and closes it when
+the viewer leaves; see [remote desktop relay](guest-access.md#remote-desktop-relay).
 
 Frontend/controller fixture checks do not establish native stream disconnection,
 provider cleanup, mobile capture, model execution or deployment acceptance. No
@@ -81,7 +87,8 @@ building or testing these screens.
 | `POST /v1/admin/leases/{id}/release` | `{id: mutationUUID}` | Terminalize the lease using its owning backend's cleanup rules |
 | `POST /v1/admin/sessions/{id}/close` | `{id: mutationUUID}` | Revoke a single access/video session without ending its lease |
 | `POST /v1/admin/applications/{id}/revoke` | `{id: mutationUUID}` | Revoke application authority and refresh subordinate lifecycle state |
-| `POST /v1/admin/requests/{id}/cancel` | `{id: mutationUUID}` | Cancel waiting intent or release its admitted lease |
+| `GET /v1/admin/model-jobs` | none | Up to 100 application model jobs, open first (oldest first), then recently closed, with queue state and no prompts or results |
+| `POST /v1/admin/requests/{id}/cancel` | `{id: mutationUUID}` | Cancel waiting intent, release its admitted lease or request its admitted model job's stop |
 | `POST /v1/admin/jobs/{id}/cancel` | `{id: mutationUUID}` | Request model/inference cancellation without releasing claimed reservations early |
 
 These endpoints require existing administrator authority: an operator credential

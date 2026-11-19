@@ -85,7 +85,11 @@ after adding the job, relative to the smaller of advertised capacity and configu
 limits. Total fractions and then host ID break ties. This is reservation balancing,
 not GPU placement or cross-application fair queueing. Up to 32 unfinished jobs can be assigned to a host. Queued jobs reserve
 their full budgets; submission fails when capacity is unavailable instead of
-creating an unbounded backlog. Draining blocks new assignments; existing jobs
+creating an unbounded backlog. These administrator jobs have no application identity,
+so they do not join the request queue. Application model calls that should wait for
+capacity use [queued model calls](requests.md#queued-model-calls) on the
+[model-job controller](model-controller.md); the dashboard Models page shows that
+queue separately. Draining blocks new assignments; existing jobs
 continue. This remains the single-controller SQLite deployment contract.
 
 The host's existing outbound heartbeat carries `inferenceReports` and receives

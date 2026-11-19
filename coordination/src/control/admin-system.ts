@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { cancelModelJob } from "../model-jobs.ts";
+import { modelQueueView } from "../model-requests.ts";
 import { identifier } from "../consumers.ts";
 import { ServiceError } from "../errors.ts";
 import type { ControlModule, ControlRequest } from "./contracts.ts";
@@ -23,6 +24,11 @@ export class AdminSystem implements ControlModule {
     if (!req.path.startsWith("/v1/admin/")) return undefined;
     const match = /^\/v1\/admin\/(leases|sessions|applications|requests|jobs)\/([^/]+)\/(release|close|revoke|cancel)$/.exec(req.path);
     const inspect = /^\/v1\/admin\/(system|configuration)(?:\/pages\/(0|[1-9][0-9]{0,6}))?$/.exec(req.path);
+    if (req.method === "GET" && req.path === "/v1/admin/model-jobs") return this.leases.store.transaction(db => {
+      requireAdmin(req);
+      if ([...req.query.keys()].length) throw new ServiceError("Queries are not supported.", 400);
+      return { body: { jobs: this.modelJobs(db) } };
+    });
     if (!(req.method === "GET" && inspect) && !(req.method === "POST" && match)) return undefined;
     return this.leases.store.transaction(db => {
       const principal = requireAdmin(req);
@@ -99,6 +105,11 @@ export class AdminSystem implements ControlModule {
       const rows = db.prepare("SELECT application,state,kind,target,deadline FROM requests WHERE id=?"+(applicationId === undefined ? "" : " AND application=?")).all(id,...(applicationId === undefined ? [] : [applicationId]));
       if (rows.length !== 1) throw new ServiceError("Unknown or ambiguous request.", rows.length ? 409 : 404);
       const row = rows[0]!;
+      if (row.kind === "model-job" && (row.state === "waiting" || row.state === "admitted")) {
+        // Waiting intent closes unexecuted; admitted work keeps its reservation until the runner confirms stop.
+        cancelModelJob(db,String(row.application),id,this.leases.store.clock(),"administrator_cancelled");
+        return String(db.prepare("SELECT state FROM requests WHERE application=? AND id=?").get(row.application!,id)!.state);
+      }
       if (row.state === "waiting") {
         const expired = row.deadline !== null && Number(row.deadline) <= this.leases.store.clock();
         db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(expired ? "expired" : "cancelled", expired ? "deadline" : "administrator_cancelled", row.application!,id);
@@ -111,7 +122,7 @@ export class AdminSystem implements ControlModule {
     const inference = applicationId === undefined && legacyTable(db,"inference_jobs") && db.prepare("SELECT state FROM inference_jobs WHERE id=?").get(id);
     if (models.length + (inference ? 1 : 0) !== 1) throw new ServiceError("Unknown or ambiguous job.", models.length || inference ? 409 : 404);
     if (models.length) {
-      cancelModelJob(db,String(models[0]!.application),id,this.leases.store.clock());
+      cancelModelJob(db,String(models[0]!.application),id,this.leases.store.clock(),"administrator_cancelled");
       const state = String(db.prepare("SELECT state FROM model_jobs WHERE application=? AND id=?").get(models[0]!.application!,id)!.state);
       return ["succeeded","failed","cancelled"].includes(state) ? state : "cancel_requested";
     }
@@ -145,6 +156,20 @@ export class AdminSystem implements ControlModule {
       runnerBindings: read("runner_bindings","SELECT controller,runner,generation,incarnation,revision,revoked FROM runner_bindings"),
     };
     return {...configuration,page,nextPage:state.more && page<1000000 ? page+1 : null};
+  }
+  /** Application model jobs for the dashboard queue: open work oldest first, so stuck work stays visible, then the
+   * most recently closed. No prompts or results. */
+  private modelJobs(db: DatabaseSync) {
+    if (!legacyTable(db,"model_jobs")) return [];
+    const rows = db.prepare(`SELECT j.id,j.application AS applicationId,j.model,j.digest,j.state,j.cancel_requested,j.stopped,j.cleanup,j.closed,j.created,j.updated,
+      (SELECT reservation FROM model_assignments a WHERE a.application=j.application AND a.job=j.id) AS reservation
+      FROM model_jobs j ORDER BY j.closed,CASE WHEN j.closed=0 THEN j.rowid ELSE -j.rowid END LIMIT 100`).all() as Array<Record<string, unknown>>;
+    return rows.map(j => {
+      const request = modelQueueView(db,String(j.applicationId),String(j.id));
+      const held = j.reservation !== null && !!db.prepare("SELECT 1 FROM resource_reservations WHERE id=? AND state='held'").get(String(j.reservation));
+      return { id:j.id,applicationId:j.applicationId,model:j.model,digest:j.digest,state:this.modelState(db,j),cancelRequested:Boolean(j.cancel_requested),
+        stopped:Boolean(j.stopped),cleanup:j.cleanup,assigned:j.reservation !== null,reservationHeld:held,createdAt:j.created,updatedAt:j.updated,...(request ? {request} : {}) };
+    });
   }
   private modelState(db:DatabaseSync, job:Record<string,unknown>): string {
     const a = db.prepare("SELECT * FROM model_assignments WHERE application=? AND job=?").get(String(job.applicationId),String(job.id));

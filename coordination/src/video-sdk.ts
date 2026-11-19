@@ -1,7 +1,9 @@
-/** Administrative native-video client. MP4 bytes are streamed unchanged to consumers. */
+/** Native-video clients. MP4 bytes are streamed unchanged to consumers. MobileVideoClient records
+ * an owned machine with an account or operator credential; LeaseVideoClient records a leased
+ * emulator with that lease's current key. Both share one session protocol and verification. */
 import { createHash } from 'node:crypto';
 import { ConsumerConfigurationError, Transport } from './consumer-client.ts';
-import type { ClientOptions } from './consumer-client.ts';
+import type { ClientOptions, LeaseClientOptions } from './consumer-client.ts';
 import { checked, identifier, interrupted, record, SessionConnection, SessionError, timeout } from './sdk.ts';
 import type { SessionChannel, Writer } from './sdk.ts';
 import { MAX_VIDEO_BYTES, Mp4Envelope, validateVideoOptions } from './mobile-video.ts';
@@ -10,6 +12,10 @@ export type { VideoOptions } from './mobile-video.ts';
 export interface VideoSession extends VideoOptions {
   id: string; machineId: string; generation: string; capability: 'video'; protocol: 'canaveral-session-v1'; state: string;
   attachBefore: string; authorizationDeadline: string;
+  /** Positive native cleanup was recorded; the session no longer holds its reservation. */
+  cleaned?: boolean;
+  /** Lease sessions only. */
+  leaseId?: string; member?: string; hostCleaned?: boolean;
 }
 export interface VideoReceiveOptions { timeoutMs?: number; maxBytes?: number; signal?: AbortSignal }
 export interface VideoFinish { type: 'finish'; bytes: number; sha256: string; cleaned: true }
@@ -93,29 +99,67 @@ export class VideoClient {
     } catch (error) { this.close(); throw interrupted(error, this.connection.sessionId); }
   }
 }
-export class MobileVideoClient {
+function options(request: VideoOptions): VideoOptions { try { return validateVideoOptions(request); } catch { throw new ConsumerConfigurationError('Invalid video options.'); } }
+function sameRequest(result: VideoSession, id: string, value: VideoOptions): void {
+  if (result.id !== id || result.fps !== value.fps || result.durationSeconds !== value.durationSeconds || result.bitRate !== value.bitRate) throw new SessionError('Video session differs from its persisted request.', 'video_incomplete', id);
+}
+/** Session attachment and MP4 verification shared by both credentials. */
+abstract class VideoSessions {
   readonly transport: Transport;
-  constructor(options: ClientOptions & { credential: string }) { this.transport = new Transport(options, options.credential); }
-  async create(machineId: string, request: VideoOptions & { id: string }): Promise<VideoSession> {
-    const machine = identifier(machineId), id = identifier(request.id);
-    let options: VideoOptions; try { options = validateVideoOptions(request); } catch { throw new ConsumerConfigurationError('Invalid video options.'); }
-    const result = session((await this.transport.call('POST', `/v1/machines/${machine}/video-sessions`, { id, ...options }, [200,201], true, id)).json);
-    if (result.id !== id || result.machineId !== machine || result.fps !== options.fps || result.durationSeconds !== options.durationSeconds || result.bitRate !== options.bitRate) throw new SessionError('Video session differs from its persisted request.', 'video_incomplete', id); return result;
-  }
-  async inspect(machineId: string, sessionId: string): Promise<VideoSession> { return this.read('GET', machineId, sessionId); }
-  async close(machineId: string, sessionId: string): Promise<VideoSession> { return this.read('POST', machineId, sessionId, '/close'); }
-  private async read(method: 'GET' | 'POST', machineId: string, sessionId: string, suffix = ''): Promise<VideoSession> {
-    const machine = identifier(machineId), id = identifier(sessionId), result = session((await this.transport.call(method, `/v1/machines/${machine}/video-sessions/${id}${suffix}`, method === 'POST' ? {} : undefined, [200], method === 'POST', id)).json);
-    if (result.machineId !== machine || result.id !== id) throw new SessionError('Video receipt belongs to another session.', 'video_incomplete', id); return result;
+  constructor(transport: Transport) { this.transport = transport; }
+  protected abstract attachPath(session: VideoSession): string;
+  protected async call(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string, accepted = [200]): Promise<VideoSession> {
+    return session((await this.transport.call(method, path, body, accepted, method === 'POST', id)).json);
   }
   async connect(value: VideoSession, options: VideoReceiveOptions = {}): Promise<VideoClient> {
     receiveOptions(options);
     if (options.signal?.aborted) throw new SessionError('Video was cancelled before attachment.', 'video_incomplete');
-    const current = session(value), connection = await SessionConnection.connect(this.transport, `/v1/machines/${current.machineId}/video-sessions/${current.id}/${current.generation}`, current.id);
+    const current = session(value), connection = await SessionConnection.connect(this.transport, this.attachPath(current), current.id);
     try {
       const ready = checked(await bounded(() => connection.receive(options.timeoutMs ?? 30000), options, () => connection.close()), current.id);
       if (!record(ready) || ready.type !== 'ready' || ready.sessionId !== current.id || ready.generation !== current.generation || ready.capability !== 'video') throw new SessionError('Native video peers did not become ready.', 'video_incomplete', current.id);
       return await VideoClient.connect(connection, options);
     } catch (error) { connection.close(); throw interrupted(error, current.id); }
+  }
+}
+export class MobileVideoClient extends VideoSessions {
+  constructor(options: ClientOptions & { credential: string }) { super(new Transport(options, options.credential)); }
+  protected attachPath(s: VideoSession): string { return `/v1/machines/${s.machineId}/video-sessions/${s.id}/${s.generation}`; }
+  async create(machineId: string, request: VideoOptions & { id: string }): Promise<VideoSession> {
+    const machine = identifier(machineId), id = identifier(request.id), value = options(request);
+    const result = await this.call('POST', `/v1/machines/${machine}/video-sessions`, { id, ...value }, id, [200,201]);
+    sameRequest(result, id, value); if (result.machineId !== machine) throw new SessionError('Video session differs from its persisted request.', 'video_incomplete', id); return result;
+  }
+  async inspect(machineId: string, sessionId: string): Promise<VideoSession> { return this.read('GET', machineId, sessionId); }
+  async close(machineId: string, sessionId: string): Promise<VideoSession> { return this.read('POST', machineId, sessionId, '/close'); }
+  private async read(method: 'GET' | 'POST', machineId: string, sessionId: string, suffix = ''): Promise<VideoSession> {
+    const machine = identifier(machineId), id = identifier(sessionId), result = await this.call(method, `/v1/machines/${machine}/video-sessions/${id}${suffix}`, method === 'POST' ? {} : undefined, id);
+    if (result.machineId !== machine || result.id !== id) throw new SessionError('Video receipt belongs to another session.', 'video_incomplete', id); return result;
+  }
+}
+/** Lease-key recording of the lease's own member. The key cannot record another lease, and a
+ * recording ends with the lease: expiry, release, a fence, supervisor loss or key rotation. */
+export class LeaseVideoClient extends VideoSessions {
+  readonly leaseId: string;
+  constructor(options: LeaseClientOptions) { super(new Transport(options, options.leaseKey)); this.leaseId = identifier(options.leaseId); }
+  protected attachPath(s: VideoSession): string { return `/v1/leases/${this.leaseId}/video-sessions/${s.id}/${s.generation}`; }
+  private bound(result: VideoSession, id: string): VideoSession {
+    if (result.id !== id || result.leaseId !== this.leaseId || typeof result.member !== 'string') throw new SessionError('Video receipt belongs to another session.', 'video_incomplete', id); return result;
+  }
+  /** Persist `id` and the request first; replaying the same body returns the same session. */
+  async create(request: VideoOptions & { id: string; member: string }): Promise<VideoSession> {
+    const id = identifier(request.id), value = options({ fps: request.fps, durationSeconds: request.durationSeconds, bitRate: request.bitRate });
+    if (Object.keys(request).some(k => !['id','member','fps','durationSeconds','bitRate'].includes(k)) || typeof request.member !== 'string' || !request.member.trim() || [...request.member].length > 100) throw new ConsumerConfigurationError('Invalid lease video request.');
+    const result = this.bound(await this.call('POST', `/v1/leases/${this.leaseId}/video-sessions`, { id, member: request.member, ...value }, id, [200,201]), id);
+    sameRequest(result, id, value); if (result.member !== request.member) throw new SessionError('Video session differs from its persisted request.', 'video_incomplete', id); return result;
+  }
+  async inspect(sessionId: string): Promise<VideoSession> { const id = identifier(sessionId); return this.bound(await this.call('GET', `/v1/leases/${this.leaseId}/video-sessions/${id}`, undefined, id), id); }
+  async close(sessionId: string): Promise<VideoSession> { const id = identifier(sessionId); return this.bound(await this.call('POST', `/v1/leases/${this.leaseId}/video-sessions/${id}/close`, {}, id), id); }
+  /** Creates (or replays) the session, attaches and writes the verified MP4 to `writer`. The
+   * returned finish is the host's positive receipt: byte count, SHA-256 and cleanup. */
+  async record(request: VideoOptions & { id: string; member: string }, writer: Writer, receive: VideoReceiveOptions = {}): Promise<VideoFinish> {
+    receiveOptions(receive);
+    const created = await this.create(request);
+    return (await this.connect(created, receive)).record(writer);
   }
 }

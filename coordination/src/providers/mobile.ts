@@ -26,6 +26,28 @@ export interface NativePipe {
   resize?(rows: number, cols: number): Promise<void>;
 }
 export interface NativeChild { pid: number; processStartedAt?: number; stopped(): Promise<boolean> }
+/** A leased emulator owned by the independent native lease supervisor. */
+export interface SupervisedChild { pid: number; supervisorPid: number; supervisorExited(): Promise<boolean> }
+/** `lease-supervise` exit status that proves it spawned nothing. Any other status is not that proof. */
+export const SUPERVISOR_REFUSED = 75;
+/** A failed supervised launch; supervisorExit is set only for an observed ordinary exit. */
+export class SupervisorLaunchError extends ServiceError {
+  constructor(readonly supervisorExit?: number) { super("Leased emulator launch is unconfirmed; inspect its supervisor records before recovery.", 409, { outcome: "unknown" }); }
+}
+export interface LeaseClockSample { version: number; bootSessionID: string; continuous: number }
+/** One native sample: the clock, plus whether a live supervisor holds the storage's lifetime lock. */
+export interface LeaseSupervisorStatus extends LeaseClockSample { supervisor: "held" | "free" | "absent" }
+export interface LeaseSupervisorTransport {
+  /** Starts `lease-supervise` detached; resolves after its launch record names the emulator. */
+  supervise(helper: string, storage: string, request: RecordValue): Promise<SupervisedChild>;
+  clock(helper: string): Promise<LeaseClockSample>;
+  /** Positively absent process group only; never signals it. */
+  groupAbsent(pgid: number): Promise<boolean>;
+  /** Kernel-held supervisor lock state for one storage directory; never consults a PID. */
+  status(helper: string, storage: string): Promise<LeaseSupervisorStatus>;
+  /** Every visible process command line, for proving that a launch left nothing running. */
+  commandLines(): Promise<string[]>;
+}
 export interface MobileTransport {
   run(argv: readonly string[], options: RunOptions): Promise<CommandResult>;
   spawn?(argv: readonly string[], options: RunOptions & { log: string }): Promise<NativeChild>;
@@ -37,6 +59,7 @@ export interface MobileTransport {
   shells?: ShellAdapter;
   files?: ContainerFiles;
   elapsed?(): number;
+  leases?: LeaseSupervisorTransport;
 }
 export interface ByteReader { read(count: number): Promise<Uint8Array> }
 export interface Download extends ByteReader { size: number; verify(): Promise<boolean>; close(): Promise<void> }

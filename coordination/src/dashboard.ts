@@ -1,7 +1,7 @@
 import { DashboardPreviews, type PreviewConfig } from './dashboard-previews.ts';
 import { controllerPreviewReader, PrivatePreviewGateway } from "./private-preview.ts";
 /** Stateless browser gateway. Credentials and native transports never live in assets. */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, request as httpRequest, ServerResponse } from "node:http";
 import type { IncomingMessage, Server } from "node:http";
@@ -199,6 +199,29 @@ class RequestReader {
   }
 }
 
+/** Error replies discard at most the JSON cap of unread body; larger or chunked bodies close at once. */
+const DRAIN_LIMIT = 1048576, DRAIN_MS = 5_000;
+/**
+ * Responses carry Connection: close, so Node closes the socket once the reply is flushed. Closing with
+ * request bytes still in flight makes the kernel send RST, and the client loses the error reply in a
+ * reset. Reading the rest of a bounded body first lets the close end with FIN.
+ */
+async function discardBody(request: IncomingMessage, reader: RequestReader | undefined): Promise<void> {
+  if (request.complete || request.destroyed) return;
+  let source = reader;
+  if (!source) {
+    const declared = headerValues(request, "content-length");
+    if (request.headers["transfer-encoding"] !== undefined || declared.length !== 1 || !/^\d+$/.test(declared[0]!)) return;
+    source = new RequestReader(request, Number(declared[0]));
+  }
+  if (source.remaining > DRAIN_LIMIT) return;
+  const body = source;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, DRAIN_MS); });
+  const drained = (async () => { while (body.remaining) await body.read(Math.min(65536, body.remaining)); })().catch(() => {});
+  try { await Promise.race([drained, deadline]); } finally { clearTimeout(timer); }
+}
+
 const staticFiles: Record<string, [string, string]> = {
   "/": ["index.html", "text/html; charset=utf-8"], "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/style.css": ["style.css", "text/css; charset=utf-8"], "/favicon.svg": ["favicon.svg", "image/svg+xml"],
@@ -221,7 +244,7 @@ function routeAllowed(method: string, route: string): boolean {
   if (new RegExp(`^/api/v1/(?:previews|builds)/${UUID}$`).test(route)) return method === "GET" || method === "DELETE";
   if (browserCollection.test(route)) return method === "POST";
   if (browserItem.test(route)) return method === "GET" || method === "DELETE";
-  if (method === "GET" && /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route)) return true;
+  if (method === "GET" && (route === "/api/v1/admin/model-jobs" || /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route))) return true;
   if (method === "POST" && new RegExp(`^/api/v1/admin/(?:leases/${UUID}/release|sessions/${UUID}/close|applications/${UUID}/revoke|(?:requests|jobs)/${UUID}/cancel)$`).test(route)) return true;
   if (method === "GET" && (route === "/api/v1/consumers" || new RegExp(`^/api/v1/(?:runner-enrollments|resource-domains)/${UUID}$`).test(route))) return true;
   if (method === "POST" && (["runners/credential", "runners/revoke", "consumers", "runner-enrollments", "model-catalog", "resource-domains", "model-grants", "model-grants/revoke", "model-runner-approvals", "model-runner-approvals/revoke", "linux-lease-images", "linux-lease-grants", "linux-lease-grants/revoke", "linux-lease-runner-approvals", "linux-lease-runner-approvals/revoke"].some(path => route === `/api/v1/${path}`) || new RegExp(`^/api/v1/(?:consumers/${UUID}/(?:credential|revoke)|runner-enrollments/${UUID}/revoke|updates/artifacts/[a-f0-9]{64})$`).test(route))) return true;
@@ -307,18 +330,18 @@ export function createDashboardServer(config: DashboardConfig): Server {
         headers: { Authorization: `Bearer ${token}`, Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Key": key, "Sec-WebSocket-Version": "13", "Sec-WebSocket-Protocol": SESSION_PROTOCOL },
       });
       const fail = (error: DashboardError) => { if (!settled) { settled = true; request.destroy(); reject(error); } };
-      request.setTimeout(20_000, () => fail(new DashboardError("Video session attachment timed out.", 503)));
-      request.on("error", () => fail(new DashboardError("Video session attachment failed.", 503)));
+      request.setTimeout(20_000, () => fail(new DashboardError("Session attachment timed out.", 503)));
+      request.on("error", () => fail(new DashboardError("Session attachment failed.", 503)));
       request.on("response", response => {
         response.resume();
         const status = response.statusCode ?? 502;
-        fail(new DashboardError("Video session attachment was refused.", [401, 403, 404, 409, 410, 429].includes(status) ? status : 502));
+        fail(new DashboardError("Session attachment was refused.", [401, 403, 404, 409, 410, 429].includes(status) ? status : 502));
       });
       request.on("upgrade", (response, socket, head) => {
         if (settled) { socket.destroy(); return; }
         if (response.statusCode !== 101 || response.headers["sec-websocket-accept"] !== accept ||
             response.headers["sec-websocket-protocol"] !== SESSION_PROTOCOL || response.headers["sec-websocket-extensions"] !== undefined) {
-          socket.destroy(); fail(new DashboardError("Invalid video session upgrade response.", 502)); return;
+          socket.destroy(); fail(new DashboardError("Invalid session upgrade response.", 502)); return;
         }
         settled = true; request.setTimeout(0); socket.setTimeout(0); socket.pause(); resolve({ socket, head, accept });
       });
@@ -346,6 +369,8 @@ export function createDashboardServer(config: DashboardConfig): Server {
     let cookie: string | undefined;
     let host = "";
     let streamStarted = false;
+    // A connector-owned stream is never shared with the error-path drain.
+    let body: RequestReader | undefined, streamed = false;
     const method = request.method ?? "";
     const setCookie = (token: string, clear = false) => {
       cookie = `canaveral_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : SESSION_SECONDS}${loopbackHost(host) ? "" : "; Secure"}`;
@@ -451,11 +476,15 @@ export function createDashboardServer(config: DashboardConfig): Server {
         try { return await Promise.race([work(abort.signal), lost]); }
         finally { clearInterval(timer); abort.abort(); }
       }
-      if (videoRoute && upgrade) {
-        // Browsers cannot send the bearer header the controller requires. The relay
-        // accepts only the same-origin session cookie, forwards it as that same
-        // creator credential and never exposes it. The controller remains the
-        // authority for session ownership, generation, direction and cleanup.
+      /** Relays one controller owner session (canaveral-session-v1) unchanged. Browsers cannot
+       * send the bearer header the controller requires. The relay accepts only the same-origin
+       * session cookie, forwards it as that same creator credential and never exposes it. The
+       * controller remains the authority for session ownership, generation, direction and
+       * cleanup; this gateway also rechecks machine access before the upgrade and every
+       * interval after it, and a lost check tears down both sockets. `open` names the controller
+       * attachment path once the browser upgrade is validated and access is confirmed. */
+      async function relaySession(machineId: string, open: () => Promise<string>): Promise<void> {
+        if (!upgrade) throw new DashboardError("A same-origin dashboard WebSocket is required.", 403);
         if (!cookieToken || authorization !== undefined || !browserOrigin) throw new DashboardError("A same-origin dashboard WebSocket is required.", 403);
         const key = oneHeader(request, "sec-websocket-key");
         if (request.httpVersion !== "1.1" || oneHeader(request, "upgrade")?.toLowerCase() !== "websocket" || oneHeader(request, "sec-websocket-version") !== "13" ||
@@ -465,9 +494,8 @@ export function createDashboardServer(config: DashboardConfig): Server {
             request.headers["content-length"] !== undefined || request.headers["transfer-encoding"] !== undefined || request.headers.expect !== undefined) {
           throw new DashboardError("Invalid WebSocket upgrade.", 400);
         }
-        const machineId = videoRoute[1]!;
         await authorizeMachine(machineId);
-        const peer = await relayUpgrade(route.slice(4), token, key);
+        const peer = await relayUpgrade(await open(), token, key);
         streamStarted = true;
         upgrade.release();
         const socket = upgrade.socket as Socket;
@@ -485,8 +513,9 @@ export function createDashboardServer(config: DashboardConfig): Server {
           socket.pipe(peer.socket).pipe(socket);
           await ended;
         }, () => { socket.destroy(); peer.socket.destroy(); });
-        socket.destroy(); peer.socket.destroy(); return;
+        socket.destroy(); peer.socket.destroy();
       }
+      if (videoRoute && upgrade) { await relaySession(videoRoute[1]!, async () => route.slice(4)); return; }
       const machineRoute = new RegExp(`^/api/v1/machines/(${UUID})/(accessibility|desktop|files/upload|files/download/([A-Za-z0-9_-]+)|shells/(${UUID})/stream)$`).exec(route);
       if (machineRoute) {
         const machineId = machineRoute[1]!, action = machineRoute[2]!;
@@ -495,6 +524,26 @@ export function createDashboardServer(config: DashboardConfig): Server {
         if (action === "accessibility") {
           if (!connectors.accessibility) throw new DashboardError("Live inspection is not attached to this dashboard.", 409);
           const value = await connectors.accessibility(machineId); await authorizeMachine(machineId); respond(value); return;
+        }
+        if (action === "desktop" && !connectors.desktop) {
+          // A dashboard without an attached local display relays through the controller: it
+          // opens an owner display session under the browser's own credential, and the
+          // machine's host attaches outbound. The session ends with this connection.
+          let session: string | undefined;
+          try {
+            await relaySession(machineId, async () => {
+              const id = randomUUID();
+              session = id; // Closed afterwards even if the response below is refused.
+              const { body } = await upstream("POST", `/v1/machines/${machineId}/display-sessions`, token, { id });
+              if (body.id !== id || body.machineId !== machineId || body.capability !== "display" || typeof body.generation !== "string" || !new RegExp(`^${UUID}$`).test(body.generation)) {
+                throw new DashboardError("Display session response did not match the request.", 502);
+              }
+              return `/v1/machines/${machineId}/display-sessions/${id}/${body.generation}`;
+            });
+          } finally {
+            if (session) void upstream("POST", `/v1/machines/${machineId}/display-sessions/${session}/close`, token, {}).catch(() => {});
+          }
+          return;
         }
         if (action === "desktop" || action.startsWith("shells/")) {
           const connector = action === "desktop" ? connectors.desktop : connectors.shell;
@@ -531,7 +580,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
           const app = oneHeader(request, "x-canaveral-app");
           const authorized = authorizationCheck(machineId, () => connector.check(machineId));
           if (!await authorized()) throw new DashboardError("Transfer authorization ended.", 401);
-          const source = new RequestReader(request, size);
+          const source = new RequestReader(request, size); streamed = true;
           let value: unknown;
           try {
             value = await guarded(authorized, async () => connector.write({ machineId, path: target, app, size, reader: new AuthorizedReader(source, authorized), authorized }));
@@ -603,7 +652,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
           } catch { return false; }
         };
         if (!await authorized()) throw new DashboardError("Image import authorization ended.", 401);
-        const source = new RequestReader(request, size);
+        const source = new RequestReader(request, size); streamed = true;
         let value: unknown;
         try { value = await guarded(authorized, async () => connector.write({ hostId, metadata, size, reader: new AuthorizedReader(source, authorized), authorized })); }
         catch (error) { if (error instanceof DashboardError && error.status === 401) throw unknownOutcome("Image import authorization ended. Inspect the original import before another mutation."); throw error; }
@@ -614,7 +663,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
       let value: Record<string, unknown> | undefined;
       if (method === "POST") {
         if (request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json") throw new DashboardError("Expected application/json.", 415);
-        const size = contentLength(request, 1, 1048576), source = new RequestReader(request, size), chunks: Uint8Array[] = [];
+        const size = contentLength(request, 1, 1048576), source = body = new RequestReader(request, size), chunks: Uint8Array[] = [];
         while (source.remaining) chunks.push(await source.read(Math.min(65536, source.remaining)));
         value = decodeJson(Buffer.concat(chunks));
       }
@@ -657,6 +706,7 @@ export function createDashboardServer(config: DashboardConfig): Server {
       if (streamStarted || response.headersSent) { if (upgrade) upgrade.socket.destroy(); else response.destroy(); return; }
       const failure = error instanceof DashboardError ? error : new DashboardError("Dashboard service or attached provider unavailable.", 503, { retryable: false, ...(method === "POST" ? { outcome: "unknown" } : {}) });
       if (failure.status === 401) setCookie("", true);
+      if (!upgrade && !streamed) await discardBody(request, body);
       respond({ error: failure.message, code: failure.code, retryable: failure.retryable, ...(failure.outcome ? { outcome: failure.outcome } : {}),
         ...(failure.blockedStatus ? { status: failure.blockedStatus } : {}) }, failure.status);
     } finally { if (!upgrade) request.resume(); else upgrade.release(); }

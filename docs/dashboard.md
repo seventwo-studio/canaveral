@@ -362,6 +362,11 @@ clears the cookie and revokes the controller session. An unreachable controller
 may delay revocation until expiry. Account/session state survives controller and
 gateway restarts through the existing database. Cookie mutations require a
 same-origin Origin header; cross-origin browser requests remain rejected.
+Before an error reply, the gateway reads and discards an unread body of up to
+1 MiB, waiting at most five seconds, without forwarding it. This lets clients
+receive the HTTP error instead of a connection reset. Larger, chunked or stalled
+bodies, and streaming uploads already handed to a connector, still close the
+connection immediately.
 The operator, personal API token and enrollment credentials remain separate;
 account sessions and personal tokens cannot enroll hosts. The gateway rejects a
 request that supplies both a bearer credential and a session cookie.
@@ -403,25 +408,86 @@ POST `/api/v1/previews` with a client-generated lowercase UUID `id`, a
 `path` (a workspace-relative filename) and `data` (canonical base64).
 Command mode also requires `argv` (foreground executable and arguments) and
 `port` (guest loopback HTTP port). Static mode serves index.html at the root.
-Replay the same ID and body after a lost response. GET the collection for
+Optional `priority` (integer from -1000000 to 1000000, default 0, at most the
+dashboard's `maxPreviewPriority` and the application's `maxRequestPriority`) and
+`deadline` (UTC RFC3339, in the future and at most 24 hours ahead) queue the
+preview; see below. A priority above `maxPreviewPriority` returns 400. An owner
+with `maxWaitingPreviewsPerOwner` previews and builds still waiting, counted
+together, gets 429 `preview_waiting_limit` until one starts, ends or is
+cancelled; a replay of an existing preview or build is not counted again.
+Replay the same ID and body after a lost response; a changed body, including
+priority or deadline, returns 409. GET the collection for
 `{previews: Preview[]}`; GET or DELETE `/api/v1/previews/{id}` to inspect or
 stop. All item and create responses contain the Preview object directly:
-`{id, mode, state, expiresAt}`, with UTC ISO expiry and state one of
+`{id, mode, state, expiresAt, request?}`, with UTC ISO expiry and state one of
 `provisioning`, `starting`, `ready`, `stopping`, `stopped`, `failed`.
 Poll until ready or terminal. A separate private gateway handles opening the
 preview. Lease and application credentials stay on the server.
+
+Each preview is a [queued `linux-lease` request](requests.md#queued-previews)
+for the configured pin. When capacity or the application's box limit is full,
+the preview waits in `provisioning` instead of failing. `request` appears once
+the controller has answered and is `{state, priority, deadline, reason,
+admittedAt}`: `waiting` while queued (with the reason of the last admission
+attempt), then `admitted`, `cancelled`, `expired` or `rejected`. It never
+contains files or the command. While waiting, `expiresAt` is the waiting
+deadline (default: creation plus `ttlSeconds`, as before). At admission it moves
+to the lease expiry, so `ttlSeconds` of preview lifetime starts at admission.
+DELETE cancels a waiting preview, which ends `stopped` with request reason
+`consumer_cancelled`. One that reaches its deadline or is rejected ends `failed`.
+If the controller rejects the dashboard's application credential, for example
+after revocation (which cancels waiting requests), a preview that was never seen
+admitted ends `failed`. A lost submission reply or a controller outage before
+admission is retried by replaying the same request on the next tick; the preview
+neither fails nor creates a second request. The controller's waiting cap
+(`request_waiting_limit`) and other definitive submission refusals (4xx) still
+fail the preview, at once: unless an earlier attempt's outcome was unknown, the
+controller holds no request that a later reply could reveal, so stopping does not
+wait out the deadline. After an unknown outcome the preview stays `stopping` until
+its waiting deadline before trusting a missing request. A submission the dashboard
+had sent but not seen answered when it stopped is an unknown outcome too: startup
+marks it so, and a refused replay after the restart waits out the deadline. The submitted intent
+includes the configured pin and `ttlSeconds`, so changing either while previews
+wait makes their replay after a dashboard restart return 409, which fails them.
+All of one dashboard's previews share its application, so the controller's
+per-application fairness and waiting cap apply to the dashboard as a whole. The
+dashboard bounds each owner's share with `maxWaitingPreviewsPerOwner` and
+`maxPreviewPriority`; owners are not otherwise scheduled against each other.
+The Workspace previews page shows a waiting preview's priority, last admission
+reason and waiting deadline, and offers **Cancel waiting preview**.
 
 Set `CANAVERAL_DASHBOARD_PREVIEW_CONFIG` to a server-local JSON file with
 `applicationKeyFile`, `database` (a dedicated SQLite file for one dashboard
 process), `templateId`, `templateRevision`, `arch`, `digest` (sha256: plus
 64 lowercase hex digits), and `ttlSeconds` (30–1800, within application limits).
+Optional `maxPreviewPriority` (0–1000000, default 0) is the highest priority an
+owner may set; the default lets owners only lower their own previews. Optional
+`maxWaitingPreviewsPerOwner` (1–1000, default 10) bounds each owner's waiting
+previews and builds together, so one owner cannot fill the application's waiting
+cap (default 100): builds wait as `linux-lease` requests on the same cap.
 Grant that application command and file access to the pinned workspace image.
 The dashboard requires an approved workspace with Node for static serving and
 nested directory preparation. Command mode runs the supplied argv in /workspace
 and requires its executable in the image. The POST body limit is 1 MiB and up
 to 128 files. The controller's existing preview HTTP response limits apply.
-Restart fences active previews and reconciles cancellation against their stored
-request IDs. Cleanup remains stopping while the controller holds the reservation.
+Restart fences previews that were seen admitted and reconciles cancellation
+against their stored request IDs. A preview whose request was never seen admitted
+holds no key, workspace or service: it keeps its stored files and resumes waiting
+after restart. Cleanup remains stopping while the controller holds the reservation.
+The database gains a `workspace_requests` table holding pending files until launch
+or stop. The dashboard keeps the database file mode 0600, narrowing an existing
+file at startup, and enables SQLite `secure_delete` so cleared files are
+overwritten. `secure_delete` does not reach pages freed before it was set: only
+interim builds of queued previews stored files without it, so on first start the
+dashboard rebuilds (`VACUUM`) a database that already has `workspace_requests`,
+once, and records that in `user_version`. The rebuild needs about twice the
+database size in free disk space; if it fails, the dashboard logs it, keeps
+running and retries at the next start. Only the database file is rewritten: the
+temporary rollback journal is deleted, not overwritten. A dashboard from before queued previews ignores the table and fences
+every provisioning preview at startup, cancelling its request; it cannot resume
+one, and it never clears the files already stored there. After a downgrade, delete
+the `workspace_requests` rows (or the database once no preview is active) to
+remove them.
 
 For Kubernetes, mount the application credential read-only and give the dashboard
 UID a writable persistent volume for the SQLite directory. Run one dashboard
@@ -442,6 +508,9 @@ using those same five fields. Every selected pin must match the live catalogue.
 POST `/api/v1/builds` with a lowercase UUID `id`, `imageId`, `files`, a
 foreground `argv` array and one workspace-relative filename `artifact`.
 Replay the same body and ID after a lost response. Changed intent returns 409.
+A build waits as a `linux-lease` request like a preview and counts toward the
+owner's `maxWaitingPreviewsPerOwner` together with previews; over it, POST
+returns 429 `preview_waiting_limit`.
 GET the collection for `{builds: [...]}`. POST, GET and DELETE on the
 appropriate collection or item return a build with `id`, `imageId`, `artifact`,
 `expiresAt` and `state`. Poll `/api/v1/builds/{id}`. DELETE that item to
@@ -491,6 +560,20 @@ stays held until that same positive stop. The job list omits result bodies.
 
 Portable component and browser fixtures cover this flow. Native dashboard model
 execution remains unaccepted; see the [acceptance record](../coordination/native-acceptance/dashboard-models.md).
+
+Below the administrator runs, **Application model queue** lists up to 100
+application model jobs from `GET /api/v1/admin/model-jobs`: open work first, oldest
+first so long-waiting jobs stay visible, then the most recently closed. It
+shows each job's application, model, state and reservation, and for a
+[queued model call](requests.md#queued-model-calls) its request state, waiting
+reason, priority and deadline. Direct submissions show as priority 0. Prompts and
+results are not listed. **Cancel waiting job** (or **Cancel job** once admitted)
+sends `POST /api/v1/admin/jobs/{id}/cancel` with a new mutation UUID and the
+application ID; after a lost response the button becomes **Retry same
+cancellation** and reuses that UUID. Waiting jobs close without execution;
+admitted jobs keep their reservation until the runner confirms stop and cleanup.
+The list refreshes every five seconds while any job is unfinished and the tab is
+visible.
 
 ## Owner mobile app uploads
 
@@ -560,4 +643,5 @@ passed Android screenshots and recordings and iOS screenshots; iOS recording
 failed at idb's stop and remains open. The [video lifecycle trial](../coordination/native-acceptance/dashboard-mobile-video-lifecycle.md)
 then verified 60- and 180-second Android recordings with static stretches longer
 than 30 seconds, and machine deletion refused until an uncleaned session was
-abandoned by an administrator.
+abandoned by an administrator. Android Cancel and leaving the page now reach
+positive cleanup without abandonment; see the [recording cleanup trial](../coordination/native-acceptance/dashboard-android-recording-cleanup.md).

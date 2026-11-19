@@ -554,3 +554,22 @@ test("assignment context validates a configured operator recipe once, not on eve
   assert.ok(reads - start <= 5 + 2, `recipe reads ${reads - start}`);
   assert.throws(() => runner.context({ ...m, template: normalizeTemplate({ ...image, prepare: { driver: "cloud-init", packages: ["other"] } }) }), /no longer matches/);
 });
+
+test("owner display sessions attach once, only for unleased desktop assignments", async t => {
+  const { config, image, clock } = setup(t);
+  const desktop = { ...image, id: "desktop", mode: "desktop" };
+  const unleased = machine(desktop), leased = { ...machine(desktop), lease: { id: randomUUID(), revision: 1, state: "ready", controllerNow: 1000, authorizationDeadline: 1060 } };
+  const job = (m: RecordValue) => ({ id: randomUUID(), machineId: m.id, generation: randomUUID(), capability: "display", state: "pending" });
+  let sessions = [job(leased), job(unleased)];
+  const runner = new HostRunner({ ...config, templates: [desktop] }, { clock, transport: fakeTransport(() => ({ machines: [unleased, leased], displaySessions: sessions })),
+    providerFactory: () => ({ kind: "libvirt", check: async () => ({}), reconcile: async (m: RecordValue) => ({ state: m.desired }), desktop: async () => { throw Error("fixture display is never opened"); } }) });
+  t.after(() => runner.close().catch(() => {}));
+  await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step(); await drain();
+  const attempts = (runner as unknown as { displayAttempts: Set<string> }).displayAttempts;
+  assert.deepEqual([...attempts], [`${sessions[1]!.id}:${sessions[1]!.generation}`], "only the unleased desktop is attempted");
+  await runner.poll(); await runner.step(); await drain();
+  assert.equal(attempts.size, 1, "a refused attach is not retried");
+  assert.equal([...(runner as unknown as { active: Map<string, unknown> }).active.keys()].some(key => key.startsWith("display:")), false);
+  sessions = []; await runner.poll(); await runner.step();
+  assert.equal(attempts.size, 0, "attempts are forgotten once the controller drops the session");
+});

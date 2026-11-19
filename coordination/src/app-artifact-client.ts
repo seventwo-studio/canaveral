@@ -8,11 +8,16 @@ import { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from './app-artifact-contract.ts'
 import { uuid } from './control/transfers.ts';
 
 export interface AppArtifactClient { request(method: string, path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> }
-/** Reusing the UUID resumes confirmed chunks of the same immutable file, never installation. */
+/** Reusing the UUID resumes confirmed chunks of the same immutable file, never installation.
+ * With `lease`, the upload goes through that lease's key routes for one of its members; the
+ * receipt's machine is then the controller's, and `machineId` is not supplied. */
 export async function uploadAppArtifactFile(client: AppArtifactClient, options: {
-  machineId: string; id: string; format: 'apk' | 'ios-app-tar'; file: string;
+  machineId?: string; lease?: { leaseId: string; member: string }; id: string; format: 'apk' | 'ios-app-tar'; file: string;
 }): Promise<AppArtifactMetadata> {
-  const machine = uuid(options.machineId), id = uuid(options.id);
+  const id = uuid(options.id), lease = options.lease ? { leaseId: uuid(options.lease.leaseId), member: options.lease.member } : undefined;
+  if (!lease === (options.machineId === undefined) || lease && (typeof lease.member !== 'string' || !lease.member.trim() || [...lease.member].length > 100)) throw new ServiceError('Choose one machine or one lease member.', 400);
+  const machine = lease ? undefined : uuid(options.machineId);
+  const base = lease ? `/v1/leases/${lease.leaseId}/app-artifacts` : '/v1/app-artifacts';
   if (!['apk','ios-app-tar'].includes(options.format)) throw new ServiceError('Invalid app artifact format.', 400);
   const file = await fs.open(options.file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -30,9 +35,10 @@ export async function uploadAppArtifactFile(client: AppArtifactClient, options: 
     }
     await unchanged(); const sha256 = hash.digest('hex');
     const metadata = { id, format: options.format, bytes: size, sha256 };
-    let current = appArtifactMetadata(await client.request('POST', `/v1/machines/${machine}/app-artifacts`, metadata));
+    let current = appArtifactMetadata(await client.request('POST', lease ? base : `/v1/machines/${machine}/app-artifacts`, lease ? { ...metadata, member: lease.member } : metadata));
+    const bound = current.machineId;
     const validate = () => {
-      if (current.id !== id || current.machineId !== machine || current.bytes !== size || current.sha256 !== sha256 || current.format !== options.format || current.state === 'deleted') throw new ServiceError('App artifact upload identity differs.', 409);
+      if (current.id !== id || current.machineId !== (machine ?? bound) || (lease && (current as AppArtifactMetadata & { leaseId?: string }).leaseId !== lease.leaseId) || current.bytes !== size || current.sha256 !== sha256 || current.format !== options.format || current.state === 'deleted') throw new ServiceError('App artifact upload identity differs.', 409);
     };
     validate();
     if (current.state === 'ready') return current;
@@ -43,12 +49,12 @@ export async function uploadAppArtifactFile(client: AppArtifactClient, options: 
         if (!bytesRead) throw new ServiceError('App artifact ended during upload.', 409); length += bytesRead;
       }
       await unchanged();
-      current = appArtifactMetadata(await client.request('POST', `/v1/app-artifacts/${id}/chunks`, { offset, data: buffer.subarray(0, length).toString('base64') }));
+      current = appArtifactMetadata(await client.request('POST', `${base}/${id}/chunks`, { offset, data: buffer.subarray(0, length).toString('base64') }));
       validate(); offset += length;
       if (current.received !== offset || current.state !== 'uploading') throw new ServiceError('App artifact cursor differs.', 409);
     }
     await unchanged();
-    current = appArtifactMetadata(await client.request('POST', `/v1/app-artifacts/${id}/complete`, {})); validate();
+    current = appArtifactMetadata(await client.request('POST', `${base}/${id}/complete`, {})); validate();
     if (current.state !== 'ready') throw new ServiceError('App artifact publication was not confirmed.', 409);
     return current;
   } finally { await file.close(); }

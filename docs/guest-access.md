@@ -122,12 +122,57 @@ deletion only when the controller stops listing the machine. If the host cannot
 confirm removal, the row shows **Deletion blocked**: storage and its reservation
 stay in place until an operator inspects the host.
 
-The [native trial record](../coordination/native-acceptance/dashboard-desktop.md) covers the Linux flow on Apple silicon. The macOS flow has not run natively; see its [trial record](../coordination/native-acceptance/dashboard-desktop-macos.md). The local desktop socket authorizes each complete browser message with the gateway before and after reading it, so every input event costs three controller round trips. In that trial the guest applied about 12 input events per second.
+The [native trial record](../coordination/native-acceptance/dashboard-desktop.md) covers the Linux flow on Apple silicon. The macOS flow has not run natively; see its [trial record](../coordination/native-acceptance/dashboard-desktop-macos.md). The local desktop socket authorizes each complete browser message with the gateway before and after reading it, so every input event costs three controller round trips. In that trial the guest applied about 12 input events per second. The [relay trial](../coordination/native-acceptance/dashboard-desktop-relay.md) ran the Linux flow with the controller, host and a standalone dashboard as separate processes. The relayed viewer applied input at 51.5 events per second by the same metric, limited by the trial's typing speed, and logging out stopped input.
 
-The live viewer needs a dashboard with an attached desktop connector. Only
-`canaveral local` provides one. A standalone dashboard, such as one deployed
-beside a remote controller, refuses the desktop WebSocket with 409 until the
-outbound display broker for machine owners exists.
+### Remote desktop relay
+
+`canaveral local` attaches the desktop in process. A standalone dashboard, such as
+one deployed beside a remote controller, relays the same viewer through the
+controller to the machine's host:
+
+1. The browser opens `/api/v1/machines/{id}/desktop` as a same-origin WebSocket
+   with the session cookie, offering the `canaveral-session-v1` protocol. The
+   gateway refuses a missing or foreign Origin, a bearer header, a missing
+   cookie and any other protocol. The token never reaches the page.
+2. The gateway checks machine access, then opens an owner display session,
+   `POST /v1/machines/{id}/display-sessions` with `{id}`, under the browser's own
+   credential, and attaches as its consumer.
+3. The host learns of the session from its heartbeat and attaches outbound. It
+   serves only unleased `desktop` assignments; leased machines keep their lease
+   sessions. The host runs the same display endpoint and input arbiter as lease
+   display sessions.
+4. The controller relays each message only after checking, in process, that the
+   creating credential still has `machines:access` to that exact running,
+   unleased assignment on a fresh host whose credential has not rotated. A
+   250 ms monitor repeats the check, at most eight checks at a time. A busy or
+   briefly unavailable controller is not lost access: only a definite refusal,
+   or about 10 seconds of consecutive transient failures, ends the pair. The
+   gateway also rechecks machine access every second. A lost check closes both
+   sockets.
+
+The session is bound to the credential that created it: another account cannot
+open it, and another credential of the same owner cannot read or close it. Both
+peers must attach within 30 seconds; a ready session lasts as long as the viewer
+and the checks above, and releases its slot if the broker stops re-checking it
+for 10 seconds, for example after a lost disconnect. A machine accepts at most
+four live sessions, a host sixteen, one owner eight on the same host across all
+of their credentials, and one credential eight. At most 64 sessions per machine may be opened
+within five minutes. Closing the viewer closes the session. A controller restart
+disconnects every live session; the viewer reconnects with a new one.
+
+Input stops when access is lost. Logout, a scope change, stopping the machine
+or losing the host refuses the next relayed message and closes the pair. The
+host checks its socket before writing each event to the guest. Messages the
+controller forwarded before the loss can still be applied while they drain from
+the connection's buffers; nothing sent after it is.
+One WebSocket message may carry at most 64 RFB messages. A larger message ends
+the connection before any of its events is applied, on both the relayed and
+local paths. The local viewer also stops applying input once its socket closes.
+
+The relayed viewer does not support accessibility actions over its stream; use
+the guarded operation queue. The in-process `canaveral local` viewer and a
+relayed viewer of the same host use separate input arbiters, so attach a
+standalone dashboard to a deployed controller, not to `canaveral local`.
 
 ## Headless Linux setup
 
@@ -188,8 +233,9 @@ streams do; available operating-system resources remain the limit. It checks
 same-origin upgrade requests and a valid administrator account session
 before opening a guest channel. It rechecks session validity, owned machine state
 and attached host freshness while connected. Logout, stopping the guest or losing
-contact closes the channel. Remote runners without a locally attached connector
-use the separate [outbound transport](access-transport.md), whose consumer-lease
+contact closes the channel. A standalone dashboard reaches remote hosts through
+the [remote desktop relay](#remote-desktop-relay). Remote shells and files still
+need the separate [outbound transport](access-transport.md), whose consumer-lease
 and cross-network acceptance remain open.
 Provider connections close even if the WebSocket upgrade or stream fails.
 Disposable gateway fixtures keep 40 screen streams open while ordinary inventory

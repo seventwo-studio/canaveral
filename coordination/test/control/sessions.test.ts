@@ -26,7 +26,7 @@ function fixture() {
   const offer = { provider: "android", leaseProtocol: 1, templates: [image], leaseImages: [{ id: image.id, revision: image.revision, arch: image.arch, runtime: "android" }] };
   store.transaction(db => {
     db.prepare("INSERT INTO hosts VALUES (?,?,?,?,1)").run(host, legacyDigest(hostToken), JSON.stringify(offer), now);
-    db.prepare("INSERT INTO machines (id,request,host,template,desired,observed,detail,updated,preparation_state,prepared_at,owner) VALUES (?,?,?,?,'running','running','',?,'ready',?,NULL)")
+    db.prepare("INSERT INTO machines (id,request,host,template,desired,observed,detail,updated,preparation_state,prepared_at,owner,access_ready) VALUES (?,?,?,?,'running','running','',?,'ready',?,NULL,1)")
       .run(machine, JSON.stringify({ id: machine, resources: image.minimum }), host, JSON.stringify(image), now, now);
     db.prepare("INSERT INTO leases VALUES (?,?,?,'ready',1,?,?,?,?,'notRequested')").run(lease, app.id, "{}", now, now + 120, now + 60, legacyDigest(token));
     db.prepare("INSERT INTO lease_members VALUES (?,'primary',?)").run(lease, machine);

@@ -6,6 +6,35 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 
+const requestStates = [
+  "waiting",
+  "admitted",
+  "cancelled",
+  "expired",
+  "rejected",
+];
+const optionalTime = (v: unknown) =>
+  v === null || (typeof v === "string" && Number.isFinite(Date.parse(v)));
+/** The controller request behind a preview; absent until the controller has answered. */
+function queue(value: unknown) {
+  if (value === undefined) return undefined;
+  const q = record(value);
+  if (
+    typeof q.state !== "string" ||
+    !requestStates.includes(q.state) ||
+    !Number.isSafeInteger(q.priority) ||
+    !optionalTime(q.deadline) ||
+    !optionalTime(q.admittedAt) ||
+    (q.reason !== null && typeof q.reason !== "string")
+  )
+    throw new Error("Invalid preview response.");
+  return {
+    state: q.state,
+    priority: q.priority as number,
+    deadline: q.deadline as string | null,
+    reason: q.reason as string | null,
+  };
+}
 const states = [
   "provisioning",
   "starting",
@@ -27,7 +56,13 @@ function preview(value: unknown, expected?: string) {
     !Number.isFinite(Date.parse(p.expiresAt))
   )
     throw new Error("Invalid preview response.");
-  return { id: p.id, mode: p.mode, state: p.state, expiresAt: p.expiresAt };
+  return {
+    id: p.id,
+    mode: p.mode,
+    state: p.state,
+    expiresAt: p.expiresAt,
+    request: queue(p.request),
+  };
 }
 type Preview = ReturnType<typeof preview>;
 type Launch = {
@@ -262,44 +297,68 @@ export function WorkspacePreviews() {
         <p role="status">{loaded ? "No previews yet." : "Loading previews…"}</p>
       )}
       <ul aria-live="polite" className="space-y-3">
-        {rows.map((p) => (
-          <li key={p.id} className="space-y-2 rounded-lg border p-4">
-            <p>
-              {p.mode === "command" ? "Dynamic app" : "Static site"} · {p.state}
-            </p>
-            <code>{p.id}</code>
-            <p>
-              Expires{" "}
-              <time dateTime={p.expiresAt}>
-                {new Date(p.expiresAt).toLocaleString()}
-              </time>
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() => void act("inspect", p.id)}
-              >
-                Inspect
-              </Button>
-              {p.state === "ready" && (
-                <Button
-                  disabled={busy || Date.parse(p.expiresAt) <= Date.now()}
-                  onClick={() => void act("open", p.id)}
-                >
-                  Open preview
-                </Button>
+        {rows.map((p) => {
+          const waiting =
+            p.state === "provisioning" && p.request?.state === "waiting";
+          return (
+            <li key={p.id} className="space-y-2 rounded-lg border p-4">
+              <p>
+                {p.mode === "command" ? "Dynamic app" : "Static site"} ·{" "}
+                {waiting ? "waiting for capacity" : p.state}
+              </p>
+              <code>{p.id}</code>
+              {p.request && !waiting && p.request.state !== "admitted" && (
+                <p>
+                  Request {p.request.state}
+                  {p.request.reason ? ` (${p.request.reason})` : ""}
+                </p>
               )}
-              <Button
-                variant="outline"
-                disabled={busy || ["stopping", "stopped"].includes(p.state)}
-                onClick={() => void act("release", p.id)}
-              >
-                Release
-              </Button>
-            </div>
-          </li>
-        ))}
+              {waiting ? (
+                <p>
+                  Queued at priority {p.request!.priority}
+                  {p.request!.reason
+                    ? ` · last check: ${p.request!.reason}`
+                    : ""}
+                  {" · waits until "}
+                  <time dateTime={p.expiresAt}>
+                    {new Date(p.expiresAt).toLocaleString()}
+                  </time>
+                </p>
+              ) : (
+                <p>
+                  Expires{" "}
+                  <time dateTime={p.expiresAt}>
+                    {new Date(p.expiresAt).toLocaleString()}
+                  </time>
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void act("inspect", p.id)}
+                >
+                  Inspect
+                </Button>
+                {p.state === "ready" && (
+                  <Button
+                    disabled={busy || Date.parse(p.expiresAt) <= Date.now()}
+                    onClick={() => void act("open", p.id)}
+                  >
+                    Open preview
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  disabled={busy || ["stopping", "stopped"].includes(p.state)}
+                  onClick={() => void act("release", p.id)}
+                >
+                  {waiting ? "Cancel waiting preview" : "Release"}
+                </Button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

@@ -31,7 +31,7 @@ Earlier runs on the same day failed and are kept as evidence of what changed:
 
 ## Open
 
-- **Input latency.** In the passing run, 2.4 s of typing appeared in the guest file 12.4 s after typing began, about 12 input events per second. Each message still makes three authorization round trips to the controller. That is usable for short commands, not for sustained typing.
-- **Remote dashboards.** Only `canaveral local` attaches a desktop connector. A standalone dashboard beside a remote controller refuses the desktop WebSocket until an outbound display broker for machine owners exists.
+- **Input latency.** In the passing run, 2.4 s of typing appeared in the guest file 12.4 s after typing began, about 12 input events per second. Each message still makes three authorization round trips to the controller. That is usable for short commands, not for sustained typing. (Update, 19 November 2026: unchanged for `canaveral local`; a standalone dashboard's relayed viewer reached 51.5 events/s by the same metric. See the [relay trial](dashboard-desktop-relay.md#typing-rate).)
+- **Remote dashboards.** Only `canaveral local` attaches a desktop connector. A standalone dashboard beside a remote controller refuses the desktop WebSocket until an outbound display broker for machine owners exists. (Superseded, 19 November 2026: a standalone dashboard now relays the viewer through the controller to the host; see the [relay trial](dashboard-desktop-relay.md).)
 - **Image build verification.** CI builds the disk and smoke-starts Xtigervnc in the build container. It does not boot the disk; this trial is the only boot evidence.
 - **Not exercised.** Clipboard, accessibility inspection, files and terminals panels, reboots during a session, concurrent viewers, a second account, and long sessions.

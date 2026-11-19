@@ -86,11 +86,12 @@ interface Runtime extends NativeProvider {
   operate?(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, authorized?: () => boolean, handler?: (request: import('./providers/mobile.ts').DeviceRequest) => Promise<RecordValue>): Promise<RecordValue>;
   installArtifact?(machine: RecordValue, image: RecordValue, folder: string, source: import('./providers/mobile.ts').Download, sha256: string, authorized: () => boolean): Promise<RecordValue>;
   inspectInstall?(machine: RecordValue, image: RecordValue, args: RecordValue): Promise<RecordValue>;
-  openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
+  openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean, cleanupAuthorized?: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
   pipe?(argv: readonly string[]): Promise<import('./providers/mobile.ts').NativePipe>;
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
+  ownsStorage?(machine: RecordValue, image: RecordValue, storage: string): boolean;
   sweep?(active: Set<string>): Promise<unknown>;
   close?(): Promise<unknown>;
   resourceProcesses?(machine: RecordValue, image: RecordValue, folder: string): Promise<unknown[]>;
@@ -158,11 +159,26 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-function rejectUnsupportedLeases(config: RecordValue): void {
-  if ("leaseProtocol" in config || "leaseImages" in config) throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400);
+/** Only supervised Android emulators have independent native deadline enforcement and owned
+ * cleanup. Every other runtime keeps refusing lease declarations, whatever the configuration. */
+export function leaseOffer(config: RecordValue): RecordValue {
+  if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
+  const refuse = (): never => { throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400); };
+  if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
+  const provider = String(config.provider);
+  let android: unknown;
+  try { android = provider === "android" ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config).android : undefined; } catch { refuse(); }
+  const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
+  if (!android || !absolute(config.leaseClockHelper) || !absolute(object(android).leaseSupervisor) || !["darwin", "linux"].includes(process.platform)) refuse();
+  const leaseImages = (config.leaseImages as unknown[]).map(value => {
+    const entry = object(value);
+    if (Object.keys(entry).sort().join() !== "arch,id,revision,runtime" || entry.runtime !== "android") refuse();
+    return { id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch"), runtime: "android" };
+  });
+  return { leaseProtocol: 1, leaseImages };
 }
 export function hostOffer(config: RecordValue): RecordValue {
-  rejectUnsupportedLeases(config);
+  const leases = leaseOffer(config);
   const provider = text(config.provider, "provider");
   if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
@@ -177,6 +193,8 @@ export function hostOffer(config: RecordValue): RecordValue {
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === "android")) throw new ServiceError("Lease images must name offered Android templates.", 400);
+  Object.assign(offer, leases);
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
   if (config.inference !== undefined) {
@@ -208,7 +226,9 @@ export class HostRunner {
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [] };
+  /** Owner display attachments are attempted once per identity; a refused attach is not retried. */
+  private readonly displayAttempts = new Set<string>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; authorized: () => boolean }>();
   private readonly deviceMachines = new Set<string>();
   private loops: Promise<void>[] = [];
@@ -287,7 +307,7 @@ export class HostRunner {
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config);
-    rejectUnsupportedLeases(config);
+    leaseOffer(config);
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir); privateDirectory(this.state);
@@ -335,6 +355,8 @@ export class HostRunner {
   async initializeProviders(): Promise<void> {
     const factory = this.dependencies.providerFactory ?? createProvider, provider = String(this.config.provider);
     const clean = Object.fromEntries(Object.entries(this.config).filter(([key]) => !PRIVATE_CONFIG.has(key)));
+    // Leased Android guests must not reach the controller's port on this host; the probe needs only the number.
+    try { const controller = new URL(String(this.config.url)); clean.leaseControllerPort = Number(controller.port || (controller.protocol === "https:" ? 443 : 80)); } catch { /* no controller URL */ }
     if (Object.hasOwn(HOST_RUNTIMES, provider)) {
       for (const [kind, options] of Object.entries(enabledRuntimes(this.config))) this.runtimes.set(kind, await factory({ ...clean, ...options, provider: kind,
         storage: options.storage ?? join(String(clean.storage), kind), templates: (clean.templates as RecordValue[]).filter(i => runtimeFor(this.config, i) === kind) }, String(options.stateDirectory ?? this.state)));
@@ -373,7 +395,7 @@ export class HostRunner {
   }
   private sessionAuthorized(job: RunnerSessionJob): boolean {
     const machine = this.assignments.find(m => m.id === job.machineId);
-    return this.fresh() && this.queues.sessions!.some(s => s.id === job.id && s.generation === job.generation && s.leaseId === job.leaseId && s.machineId === job.machineId && s.capability === job.capability) && !!machine && machine.ready === true && machine.desired === "running" && !!machine.lease && object(machine.lease).id === job.leaseId && object(machine.lease).state === "ready" && this.offer.leaseProtocol === 1 && this.guard.allowed(job.machineId);
+    return this.fresh() && this.queues.sessions!.some(s => s.id === job.id && s.generation === job.generation && s.leaseId === job.leaseId && s.machineId === job.machineId && s.capability === job.capability) && !!machine && machine.ready === true && machine.desired === "running" && !!machine.lease && object(machine.lease).id === job.leaseId && object(machine.lease).state === "ready" && this.offer.leaseProtocol === 1 && this.leaseEligible(machine) && this.guard.allowed(job.machineId);
   }
   private sessionBackend(job: RunnerSessionJob): RunnerSessionBackend {
     const machine = this.assignments.find(m => m.id === job.machineId);
@@ -550,7 +572,7 @@ export class HostRunner {
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions') };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions') };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
@@ -592,7 +614,7 @@ export class HostRunner {
     if (this.updateAdmissionBlocked && machine.desired !== "stopped") throw new ServiceError("Host update admission is fenced.", 409);
     const { runtime, image: originalImage, folder } = this.context(machine), id = identifier(machine.id);
     if (machine.leaseCleanup) {
-      const nativeCleanup = runtime.kind === "apple" || runtime.kind === "libvirt" && !!runtime.stopForCleanup;
+      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
           this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
@@ -602,6 +624,7 @@ export class HostRunner {
           stop: () => runtime.stopForCleanup ? runtime.stopForCleanup(machine, originalImage, folder) : runtime.reconcile(machine, { ...originalImage, _leaseAuthorization: () => this.guard.authorization(id, String(object(machine.lease).id)) }, folder),
           remove: (requestId: string, preboot?: boolean) => runtime.removeOwnedStorage!(machine, originalImage, folder, requestId, preboot), preboot: runtime.kind === "apple",
         } : {}),
+        ...(runtime.ownsStorage ? { storageOwned: (storage: string) => runtime.ownsStorage!(machine, originalImage, storage) } : {}),
       });
     }
     return assignmentAccess(machine, folder, async () => {
@@ -620,11 +643,14 @@ export class HostRunner {
       }
       if (present(join(folder, "deletion.json"))) throw new ServiceError("Durable deletion intent prevents reconciliation.", 409);
       let current = machine, image = originalImage;
-      let leaseAuthorization: (() => LeaseAuthorization) | undefined;
+      let leaseAuthorization: (() => LeaseAuthorization) | undefined, refused = false;
       if (machine.lease) {
         // Default portable clock never authorizes leased starts; preserve and stop
         // pre-existing assignments while their independent native fence runs.
-        if (!this.guard.allowed(id)) current = { ...machine, desired: "stopped", leaseFenced: true };
+        // The host enforces its own lease gate rather than trusting the controller: an assignment
+        // outside its advertised Android lease images is never started, and is stopped if running.
+        refused = machine.desired === "running" && !this.leaseEligible(machine);
+        if (!this.guard.allowed(id) || refused) current = { ...machine, desired: "stopped", leaseFenced: true };
         if (current.desired === "running") {
           if (!runtime.refreshExecution) throw new ServiceError("Native independent lease fence is unavailable.", 409);
           const leaseId = String(object(machine.lease).id);
@@ -634,7 +660,10 @@ export class HostRunner {
         leaseAuthorization = () => this.guard.authorization(id, String(object(machine.lease).id));
       }
       // Stopping bypasses credentials, source preparation and guest connectivity.
-      if (current.desired === "stopped") return runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
+      if (current.desired === "stopped") {
+        const stopped = await runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
+        return refused ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail: "This host does not offer leased execution for this runtime and template." } : stopped;
+      }
       if (context && !context.authorized()) throw new ServiceError("Assignment authorization ended.", 410);
       if (image.source && !image.image && !image.catalogueImageId) throw new ServiceError("Prepare and verify the configured base image before runtime creation.", 409);
       if (image.catalogueImageId) this.library.verifyDefinition(image);
@@ -695,6 +724,14 @@ export class HostRunner {
       return result;
     });
   }
+  /** Leased execution runs only on the Android runtime, for a template this host advertised in leaseImages. */
+  leaseEligible(machine: RecordValue): boolean {
+    if (this.offer.leaseProtocol !== 1 || !Array.isArray(this.offer.leaseImages)) return false;
+    let context: { runtime: Runtime; image: RecordValue };
+    try { context = this.context(machine); } catch { return false; }
+    const { runtime, image } = context;
+    return runtime.kind === "android" && image.os === "android" && (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === "android" && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch);
+  }
   private machineAuthorized(id: string): boolean {
     const current = this.assignments.find(m => m.id === id);
     return this.fresh() && !!current && current.desired === "running" && !current.deletion && !current.leaseCleanup && this.guard.allowed(id);
@@ -704,7 +741,7 @@ export class HostRunner {
     const machine = this.assignments.find(m => m.id === operation.machineId);
     if (!machine || machine.ready !== true || machine.desired !== "running" || !machine.lease || object(machine.lease).id !== operation.leaseId || object(machine.lease).state !== "ready") return false;
     // This runner advertises no accepted consumer execution selector.
-    return this.offer.leaseProtocol === 1 && this.guard.allowed(String(machine.id));
+    return this.offer.leaseProtocol === 1 && this.leaseEligible(machine) && this.guard.allowed(String(machine.id));
   }
   private async durableWork(kind: string, task: RecordValue, target: Map<string, RecordValue>, work: (context: HostWorkContext) => Promise<RecordValue>, context: HostWorkContext): Promise<void> {
     const id = identifier(task.id), path = join(this.state, "work", kind, `${id}.json`);
@@ -808,6 +845,7 @@ export class HostRunner {
     }
     this.outboundSessions?.step((this.queues.sessions ?? []) as unknown as RunnerSessionJob[]);
     this.stepVideo();
+    this.stepDisplay();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
       const task = this.queues[kind]?.find(t => !TERMINAL.has(String(target.get(String(t.id))?.state)));
@@ -825,24 +863,76 @@ export class HostRunner {
       const path = join(this.state, 'work', 'video', `${id}.json`);
       if (present(path)) {
         const saved = readRecord(path);
-        if (saved.generation === generation && saved.machineId === machineId && saved.cleaned === true && this.identity) {
+        // A lease session may repeat its host-only receipt: the encoder exited, and the lease's own
+        // proven emulator removal settles the guest recorder on the controller.
+        const receipt = saved.cleaned === true ? { generation, cleaned: true } : saved.hostCleaned === true ? { generation, hostCleaned: true } : undefined;
+        if (saved.generation === generation && saved.machineId === machineId && receipt && this.identity) {
           const identity = this.identity;
           this.launch(key, () => this.fresh(), async () => {
-            await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, cleaned: true }, identity.credential, this.stopController.signal);
+            await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, receipt, identity.credential, this.stopController.signal);
           });
         }
         continue; // Only positive cleanup reports repeat; native capture never does.
       }
       if (!['pending','attaching','ready'].includes(String(job.state))) continue;
-      const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
+      const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.leasedCaptureAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
       this.launch(key, allowed, context => this.runVideo(job, path, context));
     }
+  }
+  /** A leased emulator records only while its lease is ready on this runner and the host offers
+   * leased execution for it; the lease guard (machineAuthorized) fences it at the deadline. */
+  private leasedCaptureAuthorized(machineId: string): boolean {
+    const machine = this.assignments.find(m => m.id === machineId);
+    if (!machine?.lease) return true;
+    return machine.ready === true && object(machine.lease).state === "ready" && this.offer.leaseProtocol === 1 && this.leaseEligible(machine);
+  }
+  /** Owner desktop viewers relayed by a standalone dashboard through the controller. Only
+   * unleased desktop assignments qualify; leased machines use their lease's sessions. */
+  private stepDisplay(): void {
+    const queued = new Set((this.queues.display ?? []).map(job => `${String(job.id)}:${String(job.generation)}`));
+    for (const attempt of this.displayAttempts) if (!queued.has(attempt)) this.displayAttempts.delete(attempt);
+    for (const job of this.queues.display ?? []) {
+      const id = identifier(job.id), machineId = identifier(job.machineId), generation = identifier(job.generation), key = `display:${id}`, attempt = `${id}:${generation}`;
+      if (this.active.has(key) || this.displayAttempts.has(attempt) || !this.fresh() || this.updateAdmissionBlocked || !this.displayControls) continue;
+      if (!['pending', 'attaching'].includes(String(job.state))) continue;
+      const allowed = () => this.machineAuthorized(machineId) && !this.assignments.find(m => m.id === machineId)?.lease &&
+        this.queues.display!.some(j => j.id === id && j.generation === generation && j.machineId === machineId);
+      if (!allowed()) continue;
+      this.displayAttempts.add(attempt);
+      this.launch(key, allowed, context => this.runDisplaySession(id, generation, machineId, context));
+    }
+  }
+  private async runDisplaySession(id: string, generation: string, machineId: string, context: HostWorkContext): Promise<void> {
+    const identity = this.identity, machine = this.assignments.find(m => m.id === machineId), controls = this.displayControls;
+    if (!identity || !machine || !controls || !context.authorized()) return;
+    const { image, folder } = this.context(machine), backend = this.accessBackend(machine);
+    let channel: SessionConnection | undefined;
+    // Input authority is tied to the relayed socket: once the controller ends the pair,
+    // no further buffered event is written to the guest.
+    const live = () => !context.signal.aborted && context.authorized() && channel?.open === true;
+    try {
+      channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/display-sessions/${id}/${generation}`, identity.credential,
+        { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      const ready = await channel.receive(30);
+      if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'display') return;
+      if (image.mode !== 'desktop' || !backend.desktop) return;
+      const endpoint = new DisplayEndpoint(controls, machineId, () => backend.desktop!(machine, image, folder), live, { viewer: id });
+      const stop = () => endpoint.close();
+      context.signal.addEventListener('abort', stop, { once: true });
+      try { await endpoint.runDisplay(channel); } finally { context.signal.removeEventListener('abort', stop); }
+    } catch {
+      // A viewer session holds no durable intent: a refused attach, a closed viewer or lost
+      // authority ends it, and the endpoint has already reset any held input.
+    } finally { channel?.close(); }
   }
   private async runVideo(job: RecordValue, path: string, context: HostWorkContext): Promise<void> {
     const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);
     if (!identity || !machine || !context.authorized()) return;
     const { runtime, image, folder } = this.context(machine);
-    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false;
+    // hostCleaned: this runner's own encoder is confirmed exited (or never started). For a leased
+    // emulator that alone may be reported when the guest recorder's stop is unproven.
+    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true;
+    const leased = machine.lease != null;
     saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
     try {
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/${identifier(job.generation)}`, identity.credential,
@@ -855,17 +945,26 @@ export class HostRunner {
       }
       const options = { fps: 30 as const, durationSeconds: Number(job.durationSeconds), bitRate: Number(job.bitRate) };
       captureStarted = true;
-      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized());
-      await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), positive => { cleaned = positive; });
+      // Capture ends with the session; stopping an early-cancelled recorder needs only the assignment,
+      // and only the same assignment that started the capture (fingerprint and lease unchanged).
+      // The lease's identity, not its whole assignment record: that carries the controller's clock and
+      // revision, which change on every heartbeat and renewal without changing the owner.
+      // A lease without a string id never matches, so a malformed record fails closed.
+      const leaseOf = (m: RecordValue) => { if (m.lease == null) return null; const id = object(m.lease).id; return typeof id === "string" && id ? id : Symbol("unidentified lease"); };
+      const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
+      const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
+      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
+      await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
       cleaned = true;
     } catch {
       if (!captureStarted) cleaned = true;
       try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
     } finally {
       channel?.close();
-      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned });
-      if (cleaned) {
-        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, { generation: job.generation, cleaned: true }, identity.credential, this.stopController.signal); }
+      const hostOnly = !cleaned && leased && hostCleaned;
+      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}) });
+      if (cleaned || hostOnly) {
+        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, cleaned ? { generation: job.generation, cleaned: true } : { generation: job.generation, hostCleaned: true }, identity.credential, this.stopController.signal); }
         catch { this.log('Video cleanup receipt was not acknowledged; its reservation is retained.'); }
       }
     }

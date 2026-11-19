@@ -15,13 +15,17 @@
 //   node coordination/native-acceptance/dashboard-desktop.mjs
 // It runs the real `canaveral local` controller, Apple host and dashboard on
 // loopback with fresh private state, launches one disposable desktop through
-// the dashboard, types into it through the viewer, then stops and deletes it.
+// the dashboard, types into it through the viewer, logs the browser out while it
+// owns input, then stops and deletes it. With CANAVERAL_TRIAL_TOPOLOGY=separate it
+// instead starts `canaveral serve`, `canaveral host` and a standalone
+// `canaveral dashboard` as three processes, so the viewer is relayed through the
+// controller to the host as on a deployed controller.
 // It never signals, inspects or removes VMs it did not create.
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +37,8 @@ import { CliClient } from '../dist/src/account-cli.js';
 const run = promisify(execFile);
 const input = name => { const value = process.env[name]; assert.ok(value?.startsWith('/'), `Set ${name} to an absolute path`); return value; };
 const os = process.env.CANAVERAL_TRIAL_OS ?? 'linux', mac = os === 'macos';
+const topology = process.env.CANAVERAL_TRIAL_TOPOLOGY ?? 'local', separate = topology === 'separate';
+assert.ok(['local', 'separate'].includes(topology), 'CANAVERAL_TRIAL_TOPOLOGY is local or separate');
 assert.ok(['linux', 'macos'].includes(os), 'CANAVERAL_TRIAL_OS is linux or macos');
 const runner = input('CANAVERAL_TRIAL_RUNNER');
 const macImage = mac ? input('CANAVERAL_TRIAL_MACOS_IMAGE') : undefined, restore = mac ? input('CANAVERAL_TRIAL_RESTORE_IMAGE') : undefined;
@@ -67,8 +73,18 @@ async function vmProcesses() {
 }
 
 let local, browser, failure, owner, machineId;
+/** Separate topology: the dashboard, host and controller, in shutdown order. */
+const services = [];
+function service(name, args) {
+  const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => process.stderr.write(`${name}: ${chunk}`));
+  services.unshift(child);
+  return { child, started: () => output.includes('"service"') };
+}
 try {
-  evidence.os = os;
+  Object.assign(evidence, { os, topology });
   for (const [name, path] of inputs) evidence[`${name}Sha256`] = await fileSha(path);
   evidence.runnerSignature = (await run('/usr/bin/codesign', ['-dv', runner]).catch(error => error)).stderr?.split('\n').filter(line => /^(Identifier|TeamIdentifier|Signed Time)=/.test(line));
   evidence.baselineVmProcesses = await vmProcesses();
@@ -77,15 +93,37 @@ try {
   const apiPort = 20000 + Math.floor(Math.random() * 20000), dashboardPort = apiPort + 1;
   // The host identity is bound to this controller URL; recovery must reuse it.
   evidence.apiPort = apiPort;
-  local = spawn(process.execPath, [cli, 'local', '--state', state, '--api-port', String(apiPort), '--dashboard-port', String(dashboardPort),
-    '--apple-runner', runner, ...(mac ? ['--macos-image', macImage, '--macos-restore-image', restore] : ['--linux-image', disk, '--guest-helper-manifest', bundle])], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = '';
-  local.stdout.on('data', chunk => { output += chunk; });
-  local.stderr.on('data', chunk => process.stderr.write('local: ' + chunk));
-  await until(() => output.includes('"dashboard"'), 'local services', 60000, 250);
-  const started = JSON.parse(output.split('\n').find(line => line.includes('"dashboard"')));
-  assert.equal(started.hostConfigured, true);
-  const api = `http://127.0.0.1:${apiPort}`, home = started.dashboard;
+  const api = `http://127.0.0.1:${apiPort}`;
+  const imageOptions = mac ? ['--macos-image', macImage, '--macos-restore-image', restore] : ['--linux-image', disk, '--guest-helper-manifest', bundle];
+  let home;
+  if (separate) {
+    // The same generated host configuration local mode uses, served by three processes.
+    await mkdir(state, { mode: 0o700 });
+    for (const name of ['admin.token', 'enrollment.token']) await writeFile(join(state, name), randomBytes(32).toString('base64url') + '\n', { mode: 0o600 });
+    const { localConfig } = await import('../dist/src/local.js');
+    const options = Object.fromEntries([['api-port', String(apiPort)], ['apple-runner', runner], ...Array.from({ length: imageOptions.length / 2 }, (_, i) => [imageOptions[2 * i].slice(2), imageOptions[2 * i + 1]])]);
+    const generated = await localConfig(state, { command: 'local', action: '', positionals: [], url: api, allowHttp: true, options }, api);
+    const controller = service('controller', ['serve', '--database', join(state, 'controller.sqlite3'), '--admin-token-file', join(state, 'admin.token'),
+      '--enrollment-token-file', join(state, 'enrollment.token'), '--port', String(apiPort)]);
+    await until(controller.started, 'controller', 60000, 250);
+    const host = service('host', ['--url', api, '--allow-http', 'host', '--config', join(state, 'machine-host.json'), '--state', generated.state,
+      '--enrollment-token-file', join(state, 'enrollment.token')]);
+    await until(host.started, 'host', 60000, 250);
+    const dashboard = service('dashboard', ['--url', api, '--allow-http', 'dashboard', '--port', String(dashboardPort)]);
+    await until(dashboard.started, 'dashboard', 60000, 250);
+    home = `http://127.0.0.1:${dashboardPort}`;
+    evidence.processes = { controller: controller.child.pid, host: host.child.pid, dashboard: dashboard.child.pid };
+  } else {
+    local = spawn(process.execPath, [cli, 'local', '--state', state, '--api-port', String(apiPort), '--dashboard-port', String(dashboardPort),
+      '--apple-runner', runner, ...imageOptions], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    local.stdout.on('data', chunk => { output += chunk; });
+    local.stderr.on('data', chunk => process.stderr.write('local: ' + chunk));
+    await until(() => output.includes('"dashboard"'), 'local services', 60000, 250);
+    const started = JSON.parse(output.split('\n').find(line => line.includes('"dashboard"')));
+    assert.equal(started.hostConfigured, true);
+    home = started.dashboard;
+  }
   const admin = new CliClient(api, (await readFile(join(state, 'admin.token'), 'utf8')).trim(), true);
   const password = randomBytes(24).toString('hex');
   // The dashboard account that launches the desktop; its session owns the machine.
@@ -99,9 +137,11 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.on('pageerror', error => console.log('Page error:', error.message));
   // Viewer transport evidence: control messages received and RFB input sent.
-  const wire = { control: [], sent: { key: 0, pointer: 0, other: 0 } };
+  const wire = { control: [], sent: { key: 0, pointer: 0, other: 0 }, sockets: 0, closed: [] };
   page.on('websocket', socket => {
     if (!socket.url().endsWith('/desktop')) return;
+    wire.sockets++;
+    socket.on('close', () => wire.closed.push(Date.now()));
     socket.on('framereceived', ({ payload }) => { if (typeof payload === 'string') wire.control.push(payload.slice(0, 200)); });
     socket.on('framesent', ({ payload }) => {
       if (typeof payload === 'string') { wire.control.push('sent ' + payload.slice(0, 200)); return; }
@@ -181,6 +221,9 @@ try {
   // Listing is a read that succeeds whether or not the file exists yet.
   await until(async () => (await operation('list-files', { path: typedDirectory })).entries?.some(entry => entry.name === 'canaveral-trial.txt' && entry.size > 0), 'typed file', 60000, 1000);
   evidence.typedFileVisibleMs = Date.now() - typingStarted;
+  // The #70 metric: key events the viewer sent, over the time until the guest file appeared.
+  evidence.typedKeyEvents = wire.sent.key;
+  evidence.inputEventsPerSecond = Math.round(wire.sent.key / (evidence.typedFileVisibleMs / 1000) * 10) / 10;
   await canvas.screenshot({ path: join(root, 'viewer-after.png') });
   await page.getByRole('button', { name: 'Release control', exact: true }).click();
   let typed, png = Buffer.alloc(0);
@@ -199,7 +242,31 @@ try {
   if (png.length) await writeFile(join(root, 'guest-after.png'), png, { mode: 0o600 });
   Object.assign(evidence, { typedFile: typed.trim(), viewerBefore: sha(await readFile(join(root, 'viewer-before.png'))), viewerAfter: sha(await readFile(join(root, 'viewer-after.png'))), guestScreenshotBytes: png.length });
   await save();
-  await page.getByRole('button', { name: 'Close machine workspace' }).click();
+  // 3b. Log the browser out while it owns input. A command typed before the logout waits in
+  // the terminal; its Enter is pressed right after the logout response. The guest file it
+  // would create must never appear, and the viewer connection must end.
+  await take.click();
+  await page.getByText('Mouse and keyboard connected', { exact: true }).waitFor({ timeout: 30000 });
+  const revokedNonce = randomUUID(), revokedName = 'canaveral-revoked.txt';
+  await page.keyboard.type(`echo revoked-${revokedNonce} > ${typedDirectory}/${revokedName}`, { delay: 30 });
+  await delay(3000);
+  const keysBeforeLogout = wire.sent.key, closedBefore = wire.closed.length, logoutAt = Date.now();
+  const logoutStatus = await page.evaluate(() => fetch('/api/v1/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.status));
+  await page.keyboard.press('Enter');
+  await until(() => wire.closed.length > closedBefore, 'viewer closed after logout', 10000, 50);
+  const revocation = { logoutStatus, keyEventsSentAfterLogout: wire.sent.key - keysBeforeLogout, viewerClosedMs: wire.closed.at(-1) - logoutAt };
+  await delay(10000);
+  revocation.revokedFileCreated = !!(await operation('list-files', { path: typedDirectory })).entries?.some(entry => entry.name === revokedName);
+  evidence.revocation = revocation;
+  await save();
+  assert.equal(logoutStatus, 200);
+  assert.equal(revocation.revokedFileCreated, false, 'input after logout reached the guest');
+  // Sign in again for the dashboard stop and delete.
+  await page.goto(home);
+  await page.getByLabel('Username').fill('trial');
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Account menu' }).waitFor();
 
   // 4. Stop, then delete with controller confirmation.
   await row.getByRole('button', { name: `Stop ${name}` }).click();
@@ -243,7 +310,7 @@ try {
 } finally {
   await browser?.close().catch(() => {});
   // A failed run still removes the VM it created, through its own controller.
-  if (failure && owner && machineId && local?.exitCode === null) {
+  if (failure && owner && machineId && (local?.exitCode === null || services.length && services.every(child => child.exitCode === null))) {
     try {
       const view = async () => (await owner.request('GET', '/v1/machines')).machines.find(m => m.id === machineId);
       if ((await view())?.desired !== 'stopped') await owner.request('POST', `/v1/machines/${machineId}/desired`, { state: 'stopped' });
@@ -252,6 +319,10 @@ try {
       await until(async () => !(await view()), 'recovery deletion', 300000, 2000);
       evidence.recovery = 'stopped and deleted after failure';
     } catch (error) { evidence.recovery = 'unconfirmed: ' + error.message; }
+  }
+  for (const child of services) if (child.exitCode === null) {
+    child.kill('SIGINT');
+    await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(30000)]);
   }
   if (local && local.exitCode === null) {
     local.kill('SIGINT');

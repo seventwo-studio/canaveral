@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { secret, ServiceError } from "./errors.ts";
 import type { ParseArgsConfig } from "node:util";
 import {
-  CliClient, CliError, credential, expandPath, handleAccount, metadata, option, positional,
+  CliClient, CliError, credential, expandPath, handleAccount, HOST_CONFIG_BYTES, metadata, option, positional,
   privateInput, privateOutput, promptPassword, record, removeSameFile, uuid,
 } from "./account-cli.ts";
 import type { AccountContext, CliArguments, RequestClient } from "./account-cli.ts";
@@ -156,10 +156,13 @@ async function readBounded(path: string, maximum: number): Promise<Buffer> {
   }
   const file = await fs.open(expandPath(path), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
-    if (!(await file.stat()).isFile()) throw new CliError("Input must be a regular file.");
-    const data = Buffer.alloc(maximum + 1); let size = 0;
+    const info = await file.stat();
+    if (!info.isFile()) throw new CliError("Input must be a regular file.");
+    // Size the buffer from the file, not the limit; one byte more detects growth past the limit.
+    const data = Buffer.alloc(Math.min(info.size, maximum) + 1); let size = 0;
     while (size < data.length) { const read = await file.read(data, size, data.length - size, null); if (!read.bytesRead) break; size += read.bytesRead; }
-    if (size > maximum) throw new CliError("Input file exceeds the command's size limit."); return data.subarray(0, size);
+    if (size > maximum) throw new CliError("Input file exceeds the command's size limit.");
+    if (size > info.size) throw new CliError("Input file changed while it was being read."); return data.subarray(0, size);
   } finally { await file.close(); }
 }
 async function jsonFile(path: string, maximum = 1_048_576): Promise<Record<string, unknown>> {
@@ -274,13 +277,13 @@ async function controllerConfig(args: CliArguments): Promise<Record<string, unkn
 }
 async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<HostOptions> {
   const file = resolve(expandPath(option(args, args.options["setup-file"] ? "setup-file" : "config")));
-  let config = await jsonFile(file); let url = args.url;
+  let config = await jsonFile(file, HOST_CONFIG_BYTES); let url = args.url;
   const managed = process.env.CANAVERAL_UPDATE_CANDIDATE === "1";
   if (managed && typeof config.url === "string") url = config.url;
   const enrollmentFile = args.options["enrollment-token-file"] ?? process.env.CANAVERAL_ENROLLMENT_TOKEN_FILE;
   let enrollment = typeof enrollmentFile === "string" ? await privateInput(enrollmentFile) : undefined;
   if (args.options["setup-file"]) {
-    config = await jsonFile(file);
+    config = await jsonFile(file, HOST_CONFIG_BYTES);
     if (config.schemaVersion !== 1 || typeof config.controllerUrl !== "string" || !config.config || !config.enrollmentToken) throw new CliError("Unsupported connection setup file.");
     url = config.controllerUrl; enrollment = String(config.enrollmentToken);
     config = record(config.config);

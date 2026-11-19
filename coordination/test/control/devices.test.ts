@@ -128,7 +128,7 @@ test("scoped eligibility withdrawal, rotation, readiness and expiry close before
       initializeLifecycle(db);
       db.exec("ALTER TABLE hosts ADD COLUMN offer TEXT; ALTER TABLE machines ADD COLUMN prepared_at REAL DEFAULT 0; ALTER TABLE machines ADD COLUMN access_ready INTEGER; CREATE TABLE consumers(id TEXT PRIMARY KEY,revoked INTEGER); CREATE TABLE leases(id TEXT PRIMARY KEY,state TEXT,credential TEXT,expires REAL,consumer TEXT); CREATE TABLE consumer_operations(id TEXT PRIMARY KEY,lease TEXT,member TEXT,credential TEXT,dispatched INTEGER)");
       db.prepare("UPDATE hosts SET offer=?").run(JSON.stringify(offer));
-      db.prepare("UPDATE machines SET template=?").run(JSON.stringify(image));
+      db.prepare("UPDATE machines SET template=?,access_ready=1").run(JSON.stringify(image));
       db.prepare("INSERT INTO consumers VALUES(?,0)").run(consumer);
       db.prepare("INSERT INTO leases VALUES(?,'ready','scoped',1100,?)").run(lease, consumer);
       db.prepare("INSERT INTO consumer_operations VALUES(?,?,'primary','scoped',0)").run(request.id, lease);

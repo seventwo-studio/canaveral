@@ -561,6 +561,8 @@ export interface LeaseCleanupOptions {
   remove?(requestId: string, preboot?: boolean): Promise<RecordValue>;
   preboot?: boolean;
   inspectHelper?(pid: number): number | null;
+  /** Provider ownership check for storage whose marker binds more than the assignment fingerprint. */
+  storageOwned?(storage: string): boolean;
 }
 /** External intent survives assignment credential erasure; only positive proofs complete it. */
 export async function cleanupLease(options: LeaseCleanupOptions): Promise<RecordValue> {
@@ -580,6 +582,7 @@ export async function cleanupLease(options: LeaseCleanupOptions): Promise<Record
       await options.closeSessions();
       return await assignmentAccess(machine, folder, async () => {
         if (!helpersClosed(machine, folder, options.inspectHelper)) throw new ServiceError("Owned helpers remain unconfirmed.", 409, { code: "operations_pending" });
+        const storageOwned = (path: string): boolean => options.storageOwned ? options.storageOwned(path) : readRecord(join(path, "canaveral-owner.json")).fingerprint === fingerprint;
         const assignmentOwned = (path: string): boolean => {
           const assignment = readRecord(join(path, "assignment.json"));
           return assignment.fingerprint === fingerprint && assignment.leaseId === lease.id;
@@ -587,7 +590,7 @@ export async function cleanupLease(options: LeaseCleanupOptions): Promise<Record
         if (proof.phase === "planned" && !present(join(folder, "deletion.json")) && guard.neverStarted(id, String(lease.id))) {
           const root = dirname(storage);
           if (present(root) && readdirSync(root).some(name => name.startsWith(`.removing-${id}-`))) throw new ServiceError("Unexplained storage quarantine.", 409, { code: "recovery" });
-          if (present(storage) && (readdirSync(storage).join() !== "canaveral-owner.json" || readRecord(join(storage, "canaveral-owner.json")).fingerprint !== fingerprint)) throw new ServiceError("Unstarted storage ownership differs.", 409, { code: "ownership" });
+          if (present(storage) && (readdirSync(storage).join() !== "canaveral-owner.json" || !storageOwned(storage))) throw new ServiceError("Unstarted storage ownership differs.", 409, { code: "ownership" });
           if (present(folder) && !assignmentOwned(folder)) throw new ServiceError("Assignment ownership differs.", 409, { code: "ownership" });
           Object.assign(proof, { phase: "unstarted", evidence: "never-started", executionStopped: true, storageExisted: present(storage) }); saveRecord(receipt, proof);
         }
@@ -595,7 +598,7 @@ export async function cleanupLease(options: LeaseCleanupOptions): Promise<Record
           if (present(storage)) {
             if (!proof.storageExisted || readdirSync(storage).some(name => name !== "canaveral-owner.json")) throw new ServiceError("Unstarted storage changed.", 409, { code: "ownership" });
             const marker = join(storage, "canaveral-owner.json");
-            if (present(marker)) { if (readRecord(marker).fingerprint !== fingerprint) throw new ServiceError("Storage ownership changed.", 409); unlinkSync(marker); }
+            if (present(marker)) { if (!storageOwned(storage)) throw new ServiceError("Storage ownership changed.", 409); unlinkSync(marker); }
             // Recursive removal is deliberately excluded for never-started storage.
             rmdirSync(storage); syncDirectory(dirname(storage));
           }
@@ -615,7 +618,7 @@ export async function cleanupLease(options: LeaseCleanupOptions): Promise<Record
         if (proof.phase === "planned") {
           if (!options.stop || !options.remove || !present(folder) || !assignmentOwned(folder)) throw new ServiceError("Native cleanup is unavailable.", 409, { code: "capability_unsupported" });
           if (!present(join(folder, "deletion.json"))) {
-            if (readRecord(join(storage, "canaveral-owner.json")).fingerprint !== fingerprint) throw new ServiceError("Native storage ownership differs.", 409);
+            if (!storageOwned(storage)) throw new ServiceError("Native storage ownership differs.", 409);
             if ((await options.stop()).state !== "stopped") throw new ServiceError("Native stop is unconfirmed.", 409, { code: "execution_pending" });
           }
           const removed = await options.remove(request);

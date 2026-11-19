@@ -70,6 +70,29 @@ host's completion. The receipt contains `bytes`, `sha256` and `cleaned: true`.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 
+### Recording a leased emulator with its lease key
+
+`LeaseVideoClient` (also `LeaseClient.video` in `coordination/src/sdk.ts`) records the
+lease's own Android emulator with the lease's current key, for CI and marketing capture.
+It uses the same broker protocol, verification and receipt as `MobileVideoClient`, at
+`/v1/leases/{lease}/video-sessions`. See
+[lease recording and large installs](mobile-control.md#lease-recording-and-large-installs).
+
+```ts
+const lease = new LeaseClient({ baseUrl, leaseId, leaseKey });
+const receipt = await lease.video.record(
+  { id: persistedSessionId, member: 'primary', fps: 30, durationSeconds: 30, bitRate: 4_000_000 },
+  writer, { timeoutMs: 60_000 },
+);
+```
+
+`record` creates the session (or replays the same persisted intent), attaches and writes
+the verified MP4. `create`, `connect`, `inspect` and `close` are also available. The
+session ends with the lease: expiry, release, a fence, supervisor loss or key rotation
+ends the stream without a finish receipt. Android emits no frames while the screen is
+static, so set `timeoutMs` above the longest expected static stretch. Another lease's
+key, the application key and administrative credentials are refused.
+
 For live playback, `video.chunks()` is a pull-driven async iterator of MP4 byte
 chunks; boundaries are neither decoded frames nor complete MP4 boxes. Feed them
 to an appropriate fragmented-MP4 player or decoder with backpressure. Initialization
@@ -96,8 +119,10 @@ is at most 64 KiB. The SDK's byte budget can be smaller; read and sink-write
 timeouts default to 30 seconds. Both sides apply backpressure. Native sources own
 finite termination; an additional ten-second exit grace ends in failure if they
 cannot stop. Positive source/encoder completion and cleanup are required before
-the host reports a complete recording. Android cancellation can leave remote
-capture termination uncertain, retaining its reservation for inspection.
+the host reports a complete recording. After an Android cancellation the runner
+stops and confirms the exact guest recorder it started; when that cannot be proven,
+for example on an unreachable device, the session keeps its reservation for
+inspection. See [Android recorder cleanup](mobile-control.md#android-recorder-cleanup-after-early-cancellation).
 
 Each session is a single capture attempt. Disconnects never reconnect or roll
 over to a new capture automatically. Persist the UUID before creation, inspect
