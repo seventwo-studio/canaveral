@@ -6,8 +6,10 @@ has no waiting value. Application model calls join the same request model as
 [queued model calls](#queued-model-calls): `kind: "model-job"` requests share this
 envelope, replay, waiting cap, priority, deadline and cancellation, and every
 unassigned model job (including direct `/v1/model-jobs` submissions) is admitted in
-request order. Embedded administrator inference (`/v1/jobs`) has no application
-identity and does not join this queue; it still fails when no host has capacity.
+request order. A preview is a `linux-lease` request with a preview service attached
+after admission; see [queued previews](#queued-previews). Embedded administrator
+inference (`/v1/jobs`) has no application identity and does not join this queue;
+it still fails when no host has capacity.
 
 | Method and route | Result |
 | --- | --- |
@@ -55,12 +57,25 @@ Grants, allowlists, application limits, health, drains and physical capacity are
 therefore checked by the existing acquisition code at admission. A failed attempt
 cannot leave a partial reservation or roll back another request's admission.
 
-Applications take round-robin turns, persisted across restart. Within an
-application, higher priority precedes FIFO sequence. A request that does not fit,
-or an application at quota, is skipped for the current scan cycle; subsequent
-requests remain eligible. There is no aging. Passes attempt at most 256 requests;
-a persisted scan continuation prevents a long unfit prefix from starving the
-rest of the queue across passes. Submission, control mutations (including host
+Requests are grouped into pools by kind and exact image pin (`templateId`,
+`templateRevision`, `arch`), because requests in one pool compete for the same
+approved runner domains or hosts. Each pool keeps its own application turn in
+`request_pool_turns`, persisted across restart: after an admission in a pool, the
+next application in UUID order goes first there. Admissions in one pool never move
+another pool's turn, so an application admitted continually on one runner domain
+cannot starve an application waiting for another. A pass visits pools by their
+oldest waiting request. Within an application, higher priority precedes FIFO
+sequence. There is no aging.
+
+A request whose attempt returns 429 or 503 is skipped for the current scan cycle.
+For the rest of that pass, so are the application's other waiting requests with the
+same normalized intent apart from UUID and name: they would meet the same limit or
+capacity. A large unservable backlog therefore costs one attempt per group, and
+servable requests behind it are reached in the same pass. Requests with different
+intent, and other applications, remain eligible. An unexpected failure blocks only
+its own request. Passes attempt at most 256 requests; a persisted scan continuation
+prevents a long unfit prefix of distinct groups from starving the rest of the queue
+across passes. Submission, control mutations (including host
 heartbeat and limits), identity-worker mutation completion (including approvals,
 release and reclamation), startup and a one-second timer trigger passes. SQLite
 serializes all ledger writers even when direct acquisitions use another worker.
@@ -149,15 +164,45 @@ listed under `/v1/requests`. A request UUID already used by a direct job, or a d
 submission reusing queued intent with a different submission, returns 409. An
 identical direct submission of queued intent replays the job.
 
+## Queued previews
+
+A preview runs a supervised foreground service inside a leased Linux workspace.
+Its request is therefore the workspace box: a `linux-lease` request for the preview
+image, admitted, reserved and bounded by `maxConcurrentBoxes` exactly like any other
+box. The owner attaches the preview service after admission by starting the
+`--preview-service` command operation with the rotated lease key; see the
+[preview dispatch contract](linux-command-operations.md#preview-dispatch-contract).
+There is no separate `preview` kind. The controller holds no preview files or
+command: those stay with the owner, so request views never echo them, and
+admission needs nothing a box does not already have. A distinct kind would have
+duplicated lease admission, placement, the box limit and cleanup, or moved file
+upload into the controller.
+
+A preview request therefore follows every rule above: it waits when capacity or
+the application's box limit is full, is admitted by pool turn, priority and FIFO,
+expires at its deadline, can be cancelled while waiting, and replays by UUID.
+Waiting never preempts, shrinks or relocates a running lease. Admission reserves
+on the mapped physical ledger in the pass transaction; lease TTL starts at
+admission.
+
+[Dashboard previews](dashboard.md#owner-workspace-previews) submit these requests
+for their owners and show the request state. All of one dashboard's previews share
+its application: the controller's per-application fairness and the waiting cap apply
+to the dashboard as a whole, not to each dashboard owner.
+
 ## Upgrade and backup boundary
 
 This feature creates only new tables (`requests`, `request_scheduler`,
-`request_scan`, `model_job_scheduler`) and partial indexes for waiting order and
-deadline. It neither alters nor converts existing tables; queued model calls add
+`request_scan`, `model_job_scheduler`, `request_pool_turns`) and partial indexes
+for waiting order and deadline. Each pass also builds a connection-local temporary
+table of its candidates; it is never persisted. It neither alters nor converts existing tables; queued model calls add
 rows to the existing `model_jobs` table in its current schema. Old databases and old application policy JSON
 remain usable.
 
-Downgrading after the first queued model call is unsupported. An older controller
+A controller from before per-pool turns ignores `request_pool_turns` and orders
+leases by the global turn in `request_scheduler`, which this version no longer
+advances; waiting requests and held reservations are unaffected. Downgrading after
+the first queued model call is unsupported. An older controller
 does not know the `model-job` kind and rejects the waiting request, but its FIFO claim
 still finds the open job in `model_jobs` and runs it, outside the request's priority,
 deadline and cancellation. Held reservations, application/runner identities, assignment and

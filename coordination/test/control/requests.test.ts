@@ -74,7 +74,8 @@ test("round robin, priority, FIFO, skips and failure isolation with durable turn
   },()=>{});
   f.store.transaction(db=>db.exec("CREATE TABLE fixture_effects(id TEXT PRIMARY KEY)"));
   const submit=(token:string,priority=0,templateId="fixture-image")=>{const req=envelope(f,{priority}); req.intent={...req.intent,templateId};queue.submit(token,req);return req.id;};
-  const bad=submit(app.credential,10,"bad"), head=submit(app.credential,9), high=submit(app.credential,5), fifo=submit(app.credential,5), other=submit(f.other.credential);
+  // The blocked head has its own image pin: identical intents have identical fit, so a capacity refusal skips its group.
+  const bad=submit(app.credential,10,"bad"), head=submit(app.credential,9,"blocked-image"), high=submit(app.credential,5), fifo=submit(app.credential,5), other=submit(f.other.credential);
   blocked.add(head);queue.pass();
   assert.equal(queue.inspect(app.credential,bad).state,"rejected");
   f.store.transaction(db=>assert.equal(db.prepare("SELECT count(*) n FROM fixture_effects WHERE id=?").get(bad)!.n,0));
@@ -117,7 +118,8 @@ test("quota-blocked application does not block another application with capacity
 test("bounded scan continuation reaches behind more than one pass of unfit requests",t=>{
   const f=leaseFixture(t), app=f.application({maxWaitingRequests:1000});let tail="";
   const queue=new Requests(f.store,f.apps,(_kind,_app,intent)=>{if(intent.id!==tail)throw new ServiceError("no fit",503);},()=>{});
-  f.store.transaction(()=>{for(let i=0;i<270;i++){const req=envelope(f);queue.submit(app.credential,req);tail=req.id;}});
+  // Distinct TTLs make distinct groups, so each unfit request is its own attempt.
+  f.store.transaction(()=>{for(let i=0;i<270;i++){const req=envelope(f);req.intent={...req.intent,ttlSeconds:60+i};queue.submit(app.credential,req);tail=req.id;}});
   queue.pass();assert.equal(queue.inspect(app.credential,tail).state,"waiting");
   const restored=new Requests(new SqliteStore(f.store.path,f.now),f.apps,(_kind,_app,intent)=>{if(intent.id!==tail)throw new ServiceError("no fit",503);},()=>{});
   restored.pass();assert.equal(restored.inspect(app.credential,tail).state,"admitted");
@@ -213,4 +215,32 @@ test("an invalid credential is refused before any admission pass runs",async t=>
   f.leases.requests.pass=()=>{passes++;original();};
   await assert.rejects(Promise.resolve().then(()=>f.leases.handle({method:"GET",path:"/v1/requests",parts:["v1","requests"],query:new URLSearchParams(),body:{},token:"not-a-credential",principal:()=>{throw new Error("unused");}} as never)));
   assert.equal(passes,0);
+});
+
+test("a large unservable backlog costs one attempt per group and does not hide servable work in the same pass",t=>{
+  const f=leaseFixture(t), app=f.application({maxWaitingRequests:1000,maxRequestPriority:10});
+  const attempts:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,_app,intent)=>{
+    attempts.push(String(intent.templateId));
+    if(intent.templateId==="full-image") throw new ServiceError("No approved runner domain serving this image has capacity.",503,{code:"capacity_unavailable"});
+  },()=>{});
+  const submit=(templateId:string,priority:number)=>{const req=envelope(f,{priority});req.intent={...req.intent,templateId};queue.submit(app.credential,req);return req.id;};
+  f.store.transaction(()=>{for(let i=0;i<300;i++) submit("full-image",10);});
+  const servable=submit("fixture-image",0);
+  queue.pass();
+  assert.equal(queue.inspect(app.credential,servable).state,"admitted");
+  assert.deepEqual(attempts,["full-image","fixture-image"]);
+});
+
+test("each image pool keeps its own application turn, so admissions in one pool cannot starve an application in another",t=>{
+  // Three applications sorted by UUID: low and mid contend for one slot in pool P; high is admitted in pool Q every pass.
+  const f=leaseFixture(t), [low,mid,high]=[f.application(),f.application(),f.application()].sort((a,b)=>a.id<b.id?-1:1) as [typeof f.app,typeof f.app,typeof f.app];
+  let used=0;const owners=new Map<string,string>(), served:string[]=[];
+  const queue=new Requests(f.store,f.apps,(_kind,application,intent)=>{
+    if(intent.templateId==="pool-p"){ if(used>=1) throw new ServiceError("capacity",503,{code:"capacity_unavailable"}); used++; served.push(owners.get(String(intent.id))!); }
+  },()=>{});
+  const submit=(app:typeof f.app,templateId:string,name:string)=>{const req=envelope(f);req.intent={...req.intent,templateId};owners.set(req.id,name);queue.submit(app.credential,req);};
+  for(let i=0;i<3;i++){submit(low,"pool-p","low");submit(mid,"pool-p","mid");}
+  for(let round=0;round<4;round++){ submit(high,"pool-q","high"); queue.pass(); used=0; }
+  assert.deepEqual(served,["low","mid","low","mid"]);
 });

@@ -408,13 +408,39 @@ POST `/api/v1/previews` with a client-generated lowercase UUID `id`, a
 `path` (a workspace-relative filename) and `data` (canonical base64).
 Command mode also requires `argv` (foreground executable and arguments) and
 `port` (guest loopback HTTP port). Static mode serves index.html at the root.
-Replay the same ID and body after a lost response. GET the collection for
+Optional `priority` (integer from -1000000 to 1000000, default 0, bounded by
+the dashboard application's `maxRequestPriority`) and `deadline` (UTC RFC3339,
+in the future and at most 24 hours ahead) queue the preview; see below.
+Replay the same ID and body after a lost response; a changed body, including
+priority or deadline, returns 409. GET the collection for
 `{previews: Preview[]}`; GET or DELETE `/api/v1/previews/{id}` to inspect or
 stop. All item and create responses contain the Preview object directly:
-`{id, mode, state, expiresAt}`, with UTC ISO expiry and state one of
+`{id, mode, state, expiresAt, request?}`, with UTC ISO expiry and state one of
 `provisioning`, `starting`, `ready`, `stopping`, `stopped`, `failed`.
 Poll until ready or terminal. A separate private gateway handles opening the
 preview. Lease and application credentials stay on the server.
+
+Each preview is a [queued `linux-lease` request](requests.md#queued-previews)
+for the configured pin. When capacity or the application's box limit is full,
+the preview waits in `provisioning` instead of failing. `request` appears once
+the controller has answered and is `{state, priority, deadline, reason,
+admittedAt}`: `waiting` while queued (with the reason of the last admission
+attempt), then `admitted`, `cancelled`, `expired` or `rejected`. It never
+contains files or the command. While waiting, `expiresAt` is the waiting
+deadline (default: creation plus `ttlSeconds`, as before). At admission it moves
+to the lease expiry, so `ttlSeconds` of preview lifetime starts at admission.
+DELETE cancels a waiting preview, which ends `stopped` with request reason
+`consumer_cancelled`. One that reaches its deadline or is rejected ends `failed`.
+If the controller rejects the dashboard's application credential, for example
+after revocation (which cancels waiting requests), a preview that was never seen
+admitted ends `failed`. A lost submission reply or a controller outage before
+admission is retried by replaying the same request on the next tick; the preview
+neither fails nor creates a second request. The controller's waiting cap
+(`request_waiting_limit`) and other submission refusals still fail the preview.
+All of one dashboard's previews share its application, so the controller's
+per-application fairness and waiting cap apply to the dashboard as a whole.
+The Workspace previews page shows a waiting preview's priority, last admission
+reason and waiting deadline, and offers **Cancel waiting preview**.
 
 Set `CANAVERAL_DASHBOARD_PREVIEW_CONFIG` to a server-local JSON file with
 `applicationKeyFile`, `database` (a dedicated SQLite file for one dashboard
@@ -425,8 +451,13 @@ The dashboard requires an approved workspace with Node for static serving and
 nested directory preparation. Command mode runs the supplied argv in /workspace
 and requires its executable in the image. The POST body limit is 1 MiB and up
 to 128 files. The controller's existing preview HTTP response limits apply.
-Restart fences active previews and reconciles cancellation against their stored
-request IDs. Cleanup remains stopping while the controller holds the reservation.
+Restart fences previews that were seen admitted and reconciles cancellation
+against their stored request IDs. A preview whose request was never seen admitted
+holds no key, workspace or service: it keeps its stored files and resumes waiting
+after restart. Cleanup remains stopping while the controller holds the reservation.
+The database gains a `workspace_requests` table holding pending files until launch
+or stop. A dashboard from before queued previews ignores it and fences every
+provisioning preview at startup, cancelling its request; it cannot resume one.
 
 For Kubernetes, mount the application credential read-only and give the dashboard
 UID a writable persistent volume for the SQLite directory. Run one dashboard

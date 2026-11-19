@@ -82,8 +82,10 @@ test("owner provisions a nested static asset after mkdir, fences access and wait
   t.mock.method(app, "submitRequest", async () => ({
     request: { state: "admitted" },
   }));
+  const leaseExpiry = new Date(Date.now() + 30000).toISOString();
   t.mock.method(app, "inspectLease", async () => ({
     state: "ready",
+    expiresAt: leaseExpiry,
     members: [{ ready: true }],
     cleanup: { state: cleanup ? "complete" : "pending" },
   }));
@@ -162,6 +164,7 @@ test("owner provisions a nested static asset after mkdir, fences access and wait
     "expiresAt",
     "id",
     "mode",
+    "request",
     "state",
   ]);
   manager.handle("owner", "DELETE", id);

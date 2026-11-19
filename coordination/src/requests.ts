@@ -28,8 +28,14 @@ export function requestSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS requests_deadline ON requests(deadline) WHERE state='waiting';
     CREATE TABLE IF NOT EXISTS request_scheduler (id INTEGER PRIMARY KEY CHECK(id=1),turn TEXT NOT NULL,sequence INTEGER NOT NULL);
     INSERT OR IGNORE INTO request_scheduler VALUES(1,'',0);
-    CREATE TABLE IF NOT EXISTS request_scan (sequence INTEGER PRIMARY KEY);`);
+    CREATE TABLE IF NOT EXISTS request_scan (sequence INTEGER PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS request_pool_turns (pool TEXT PRIMARY KEY,turn TEXT NOT NULL);`);
 }
+/** A lease pool is the kind and exact image pin. Requests in one pool compete for the same approved
+ * runner domains or hosts, so each pool keeps its own application turn. */
+const POOL = "kind||char(31)||coalesce(json_extract(intent,'$.templateId'),'')||char(31)||coalesce(json_extract(intent,'$.templateRevision'),'')||char(31)||coalesce(json_extract(intent,'$.arch'),'')";
+/** Requests of one application with the same normalized intent apart from UUID and name have the same fit. */
+const GROUP = "application||char(31)||kind||char(31)||json_remove(intent,'$.id','$.name')";
 
 /** Lease kinds are admitted only by the control worker; each acquisition is a nested savepoint in one
  * bounded write pass. Model-job requests share this table, envelope, replay, waiting cap and cancellation,
@@ -135,16 +141,24 @@ export class Requests {
       db.prepare("UPDATE requests SET state='cancelled',reason='application_revoked' WHERE state='waiting' AND application NOT IN (SELECT id FROM consumers WHERE revoked=0)").run();
       db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE state='waiting' AND deadline<=?").run(this.store.clock());
       settleModelRequests(db,this.store.clock());
-      let turn = String(db.prepare("SELECT turn FROM request_scheduler WHERE id=1").get()!.turn);
+      // Pool, group and pool order are computed once per pass into a connection-local table of the remaining
+      // candidates. Rows leave it when attempted or when their group is blocked; the transaction owns every change.
+      db.exec(`DROP TABLE IF EXISTS temp.request_pass;
+        CREATE TEMP TABLE request_pass AS SELECT application,id,sequence,priority,pool,grp,min(sequence) OVER (PARTITION BY pool) AS pool_order
+        FROM (SELECT application,id,sequence,priority,${POOL} AS pool,${GROUP} AS grp FROM requests
+          WHERE state='waiting' AND kind!='model-job' AND sequence NOT IN (SELECT sequence FROM request_scan));
+        CREATE INDEX temp.request_pass_group ON request_pass(grp);`);
 
       // At most 256 savepoint-isolated attempts; failed fits do not occupy an application turn twice in a round.
+      // Pools with the oldest waiting request go first; within a pool, applications take turns after the last one
+      // admitted there, then higher priority, then FIFO sequence.
       for (let i=0;i<256;i++) {
-        const row = db.prepare(`SELECT * FROM requests WHERE state='waiting' AND kind!='model-job' AND sequence NOT IN (SELECT sequence FROM request_scan)
-          ORDER BY application> ? DESC,application,priority DESC,sequence LIMIT 1`).get(turn) as unknown as Row | undefined;
-        if (!row) { db.exec("DELETE FROM request_scan"); break; }
+        const next = db.prepare(`SELECT p.application,p.id,p.pool,p.grp FROM temp.request_pass p LEFT JOIN request_pool_turns t ON t.pool=p.pool
+          ORDER BY p.pool_order,p.application>coalesce(t.turn,'') DESC,p.application,p.priority DESC,p.sequence LIMIT 1`).get() as { application: string; id: string; pool: string; grp: string } | undefined;
+        if (!next) { db.exec("DELETE FROM request_scan; DROP TABLE temp.request_pass"); break; }
+        db.prepare("DELETE FROM temp.request_pass WHERE application=? AND id=?").run(next.application,next.id);
+        const row = { ...this.row(db,next.application,next.id), pool: next.pool };
         db.prepare("INSERT OR IGNORE INTO request_scan VALUES(?)").run(row.sequence);
-        turn = row.application;
-        db.prepare("UPDATE request_scheduler SET turn=? WHERE id=1").run(turn);
         // Earlier attempts take time: decide expiry against the clock immediately before this acquisition.
         if (row.deadline !== null && this.store.clock() >= row.deadline) {
           db.prepare("UPDATE requests SET state='expired',reason='deadline' WHERE application=? AND id=?").run(row.application,row.id);
@@ -153,11 +167,15 @@ export class Requests {
         try {
           this.store.transaction(() => this.acquire(row.kind,row.application,JSON.parse(row.intent)));
           db.prepare("UPDATE requests SET state='admitted',admitted_at=?,target=?,reason=NULL WHERE application=? AND id=?").run(this.store.clock(),row.id,row.application,row.id);
+          db.prepare("INSERT INTO request_pool_turns VALUES(?,?) ON CONFLICT(pool) DO UPDATE SET turn=excluded.turn").run(row.pool,row.application);
         } catch (error) {
           // The savepoint already rolled this attempt back. An unexpected failure stays waiting with a
           // visible reason and is not retried until the next round, so it cannot stall other requests.
           const temporary = !(error instanceof ServiceError) || error.status === 429 || error.status === 503;
           db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(temporary ? "waiting" : "rejected",error instanceof ServiceError ? error.code : "admission_error",row.application,row.id);
+          // A capacity or quota refusal applies to the group's other requests for the rest of this pass, so a large
+          // unservable backlog costs one attempt per group and cannot hide servable work behind it.
+          if (error instanceof ServiceError && (error.status === 429 || error.status === 503)) db.prepare("DELETE FROM temp.request_pass WHERE grp=?").run(next.grp);
         }
       }
     });
