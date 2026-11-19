@@ -9,6 +9,7 @@ import { createModule as machinesModule, MachineStore } from "./machines.ts";
 import { createModule as lifecycleModule } from "./lifecycle.ts";
 import { createModule as devicesModule } from "./devices.ts";
 import { createAppArtifactsModule } from './app-artifacts.ts';
+import { createLeaseAppArtifactsModule } from './lease-app-artifacts.ts';
 import { MobileVideoSessions } from './mobile-video-sessions.ts';
 import { OwnerDisplaySessions } from './display-sessions.ts';
 import { createModule as imagesModule } from "./images.ts";
@@ -44,7 +45,7 @@ if (!(machines instanceof MachineStore)) throw new Error("Controller host authen
 const authenticateHost = machines.authenticateHost.bind(machines);
 const modules = [accountRoutes, machines, blueprintsModule(store), ...[lifecycleModule, devicesModule, imagesModule,
   infrastructureModule, inferenceModule].map(create => create(store, options))];
-modules.push(createAppArtifactsModule(store, machines));
+modules.push(createAppArtifactsModule(store, machines), createLeaseAppArtifactsModule(store, machines));
 const principalHash = (db: Parameters<typeof accounts.principalHashDb>[0], hash: string): Principal => {
   if (hash === operatorHash.toString('hex')) return { kind: 'operator', user: null, scopes: ['admin'] };
   return accounts.principalHashDb(db, hash);

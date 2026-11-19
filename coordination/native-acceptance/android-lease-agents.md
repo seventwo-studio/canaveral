@@ -79,7 +79,7 @@ The run exposed a bug in the driver's leftover check that predates the review fi
 
 - Host loss and controller loss on real hardware. The portable suite covers both with the real supervisor binary and stand-in emulator processes; natively, only the deadline expiry path ran.
 - Renewal, runner restart mid-lease and lost-reply recovery against a real emulator. Fixture only.
-- Lease file sessions, PTY and live display sessions, and MP4 recording with lease credentials. Not exercised; see [mobile control](../../docs/mobile-control.md#android-emulator-leases).
+- Lease file sessions, PTY and live display sessions. Not exercised; see [mobile control](../../docs/mobile-control.md#android-emulator-leases). Lease-key MP4 recording and large installs ran in the later [capture trial](android-lease-capture.md).
 - A supervisor that fails during launch, and a runner crash between the launch intent and the supervisor record (automatic recovery). Fixture only.
 - Guest isolation on Linux hosts and on emulator versions other than 37.2.13. The readiness probe fails closed there, but no native run exists.
 - iOS simulators, physical devices, remote hosts, concurrent emulators on one host, and the release build of the helper.

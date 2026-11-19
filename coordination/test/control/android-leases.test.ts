@@ -1,7 +1,7 @@
 import test from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { spawn } from "node:child_process";
@@ -13,8 +13,9 @@ import type { HostConfig } from "../../src/host.ts";
 import { AndroidProvider, LEASE_ISOLATION_ARGUMENTS } from "../../src/providers/android.ts";
 import { mobileNativeHelper, nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
 import { SUPERVISOR_REFUSED, SupervisorLaunchError } from "../../src/providers/mobile.ts";
-import type { CommandResult, LeaseSupervisorTransport, MobileTransport, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
+import type { CommandResult, LeaseSupervisorTransport, MobileTransport, NativePipe, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
 import { normalizeOperatorTemplate } from "../../src/control/templates.ts";
+import { LeaseClient } from "../../src/sdk.ts";
 
 /** Disposable Android lease fixtures. A real loopback controller, a real HostRunner with the
  * native continuous lease clock and the real `lease-supervise` helper own stand-in emulator
@@ -64,10 +65,83 @@ function reach(port: number): Promise<boolean> {
     socket.once("error", () => resolve(false));
   });
 }
+const ENCODER = "/fixture/ffmpeg", BOOT = "6a0e2f31-5b7c-4d8e-9f01-23456789abcd";
+function box(type: string, body = Buffer.alloc(0)): Buffer { const header = Buffer.alloc(8); header.writeUInt32BE(8 + body.length); header.write(type, 4); return Buffer.concat([header, body]); }
+// A container envelope proves transport, verification and accounting only; it is not decodable video.
+const MP4 = Buffer.concat([box("ftyp", Buffer.from("isom0000")), box("moov"), box("moof"), box("mdat", Buffer.from("fixture encoded video"))]);
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+/** One fake native process: queued stdout, an exit status, bounded reads and waits. */
+class FakePipe implements NativePipe {
+  private out: Buffer[] = []; private code: number | undefined; closed = false;
+  constructor(private readonly hooks: { write?: (data: Buffer) => Promise<void> | void; end?: () => void; close?: () => void; wait?: () => void } = {}) {}
+  push(data: Buffer): void { this.out.push(data); }
+  exit(code: number): void { if (this.code === undefined) this.code = code; }
+  get exited(): boolean { return this.code !== undefined; }
+  async read(count: number, timeoutMs: number): Promise<Uint8Array> {
+    const deadline = Date.now() + timeoutMs;
+    while (!this.out.length && this.code === undefined && !this.closed) { if (Date.now() > deadline) throw new Error("read timeout"); await sleep(20); }
+    const first = this.out[0];
+    if (!first) return Buffer.alloc(0);
+    if (first.length > count) { this.out[0] = first.subarray(count); return first.subarray(0, count); }
+    this.out.shift(); return first;
+  }
+  async write(data: Uint8Array): Promise<number> { if (this.closed) throw new Error("closed"); await this.hooks.write?.(Buffer.from(data)); return data.length; }
+  async end(): Promise<void> { this.hooks.end?.(); }
+  async wait(timeoutMs: number): Promise<number> {
+    this.hooks.wait?.();
+    const deadline = Date.now() + timeoutMs;
+    while (this.code === undefined) { if (Date.now() > deadline) throw new Error("wait timeout"); await sleep(20); }
+    return this.code;
+  }
+  async close(): Promise<void> { if (!this.closed) { this.closed = true; this.hooks.close?.(); this.exit(143); } }
+}
+/** Guest and host media state observed by the fakes, per emulator name. */
+interface Media { recorders: Map<string, { running: boolean; started: number }>; installs: Map<string, Buffer[]>; commits: number; encoders: number; encodersOpen: number }
 /** Fake adb/avdmanager. Every device answer comes from the live stand-in process registry. */
-function transport(paths: { sdk: string; registry: string; events: string }, counters: Map<string, number>, fixture: HarnessOptions = {}): MobileTransport {
+function transport(paths: { sdk: string; registry: string; events: string }, counters: Map<string, number>, fixture: HarnessOptions = {}, media?: Media): MobileTransport {
   const ok = (stdout: string | Buffer): CommandResult => ({ stdout, exitCode: 0 });
   return {
+    async pipe(argv: readonly string[]): Promise<NativePipe> {
+      if (!media) throw new Error("No native pipes in this fixture.");
+      if (argv[0] === ENCODER) {
+        assert.ok(argv.includes("libx264")); media.encoders++; media.encodersOpen++;
+        let open = true;
+        const encoder: FakePipe = new FakePipe({ end: () => { encoder.push(MP4); encoder.exit(0); }, close: () => { if (open) { open = false; media.encodersOpen--; } },
+          // A wedged encoder never confirms its exit.
+          wait: () => { if (fixture.encoder === "stuck") throw new Error("encoder exit unconfirmed"); } });
+        return encoder;
+      }
+      assert.equal(argv[1], "-s");
+      const serial = argv[2]!, args = argv.slice(3), live = () => emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
+      const device = live(); if (!device) throw new Error("device offline");
+      if (args.includes("install-write")) {
+        const size = Number(args[args.indexOf("-S") + 1]), received: Buffer[] = [];
+        const install: FakePipe = new FakePipe({
+          write: async data => {
+            // A stalled transfer holds until the emulator is gone.
+            while (fixture.installStall && live() && !install.closed) await sleep(50);
+            if (!live()) throw new Error("device lost during install");
+            received.push(data);
+          },
+          end: () => { media.installs.set(device.name, received); install.push(Buffer.from(`Success: streamed ${Buffer.concat(received).length === size ? size : 0} bytes\n`)); install.exit(0); },
+        });
+        return install;
+      }
+      if (args[0] === "shell" && String(args.at(-1)).includes("exec screenrecord")) {
+        const limit = Number(/--time-limit ([0-9]+)/.exec(String(args.at(-1)))![1]), state = { running: true, started: Date.now() };
+        media.recorders.set(device.name, state);
+        const recorder = new FakePipe();
+        recorder.push(Buffer.from(`canaveral-recorder ${BOOT} 4321 (sh) R 812 4321 812 0 -1 4194560 120 0 0 0 0 0 0 0 20 0 1 0 98765 10973184 512 18446744073709551615\n`));
+        const timer = setInterval(() => {
+          if (!live()) { state.running = false; recorder.exit(255); clearInterval(timer); return; }
+          if (!state.running) { recorder.exit(1); clearInterval(timer); return; }
+          if (Date.now() - state.started >= limit * 1000) { state.running = false; recorder.exit(0); clearInterval(timer); return; }
+          if (!recorder.closed) recorder.push(Buffer.from([0, 0, 0, 1, 0x65, 1, 2, 3]));
+        }, 100);
+        return recorder;
+      }
+      throw new Error("Unexpected pipe " + args.join(" "));
+    },
     async run(argv: readonly string[], options: RunOptions): Promise<CommandResult> {
       const tool = argv[0]!;
       if (tool.endsWith("avdmanager")) {
@@ -88,6 +162,16 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
       if (args.join(" ") === "shell pm path android") return ok("package:/system/framework/framework-res.apk");
       if (args.join(" ") === "shell getprop ro.debuggable") return ok(fixture.guest === "debuggable" ? "1" : "0");
       if (args.join(" ") === "exec-out screencap -p") return ok(PNG);
+      if (media && args[0] === "shell" && args[1] === "pm" && args[2] === "install-create") return ok("Success: created install session [77]");
+      if (media && args[0] === "shell" && args[1] === "pm" && args[2] === "install-commit") { media.commits++; return ok("Success"); }
+      if (media && args[0] === "shell" && args[1] === "pm" && args[2] === "install-abandon") return ok("Success");
+      // The exact-recorder probe: signals only the recorder this capture started.
+      if (media && args[0] === "shell" && args[1]?.includes("canaveral-recorder") && args[1].includes("boot_id")) {
+        const state = media.recorders.get(device.name);
+        if (!state?.running) return ok("canaveral-recorder absent");
+        if (/kill -(TERM|KILL)/.test(args[1])) state.running = false;
+        return ok("canaveral-recorder running");
+      }
       if (args[0] === "shell" && args[1]?.includes("canaveral-isolation")) {
         const ports = /for p in ([0-9 ]+); do/.exec(args[1])![1]!.trim().split(" ").map(Number), lines: string[] = [];
         for (const port of ports) {
@@ -104,13 +188,19 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
     leases: fixture.leases ?? nativeLeaseSupervisor,
   };
 }
-interface HarnessOptions { guest?: "isolated" | "leaky" | "debuggable"; leases?: LeaseSupervisorTransport }
+interface HarnessOptions {
+  guest?: "isolated" | "leaky" | "debuggable"; leases?: LeaseSupervisorTransport;
+  /** Host capacity beyond the emulators, for recording and upload reservations. */
+  extra?: { cpu?: number; memoryMiB?: number; diskGiB?: number };
+  encoder?: "ok" | "stuck"; installStall?: boolean;
+}
 
 interface Harness {
   url: string; admin: string; root: string; image: RecordValue; registry: string; events: string; counters: Map<string, number>;
   runner(): HostRunner; restartRunner(): Promise<void>; stopRunner(): Promise<void>; stopController(): Promise<void>; startController(): Promise<void>;
   api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any }>;
-  application(): Promise<string>;
+  application(resources?: { cpu: number; memoryMiB: number; diskGiB: number }): Promise<string>;
+  media: Media;
   storage(machineId: string): string;
   reserved(): Promise<RecordValue>;
 }
@@ -118,7 +208,7 @@ async function harness(t: TestContext, capacity = 1, options: HarnessOptions = {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "android-leases-")));
   const admin = randomBytes(32).toString("base64url"), enrollment = randomBytes(32).toString("base64url");
   writeFileSync(join(root, "admin"), admin, { mode: 0o600 }); writeFileSync(join(root, "enroll"), enrollment, { mode: 0o600 });
-  const paths = sdk(root), counters = new Map<string, number>();
+  const paths = sdk(root), counters = new Map<string, number>(), media: Media = { recorders: new Map(), installs: new Map(), commits: 0, encoders: 0, encodersOpen: 0 };
   const image: RecordValue = { id: "lease-phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: { systemImage, profile: "pixel_8" } };
   let controller: Awaited<ReturnType<typeof startController>> | undefined, port = 0, runner: HostRunner | undefined;
   const start = async () => {
@@ -128,10 +218,11 @@ async function harness(t: TestContext, capacity = 1, options: HarnessOptions = {
   await start();
   const url = `http://127.0.0.1:${port}`;
   const config: HostConfig = { url, stateDir: join(root, "runner"), enrollmentToken: enrollment, name: "android-lease-host", provider: "android", storage: join(root, "devices"),
-    androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity, memoryMiB: 2048 * capacity, diskGiB: 8 * capacity }, pollIntervalSeconds: .25, concurrency: 4,
+    androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity + (options.extra?.cpu ?? 0), memoryMiB: 2048 * capacity + (options.extra?.memoryMiB ?? 0), diskGiB: 8 * capacity + (options.extra?.diskGiB ?? 0) },
+    pollIntervalSeconds: .25, concurrency: 4, videoEncoder: ENCODER,
     leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }] };
   const launch = async () => {
-    runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options) }, state) });
+    runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state) });
     await runner.start();
   };
   await launch();
@@ -147,15 +238,15 @@ async function harness(t: TestContext, capacity = 1, options: HarnessOptions = {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: response.status, body: await response.json() as any };
   };
-  return { url, admin, root, image, registry: paths.registry, events: paths.events, counters, api,
+  return { url, admin, root, image, registry: paths.registry, events: paths.events, counters, api, media,
     runner: () => runner!,
     async restartRunner() { await runner!.close(); await launch(); },
     async stopRunner() { await runner!.close(); },
     async stopController() { await controller!.close(); },
     async startController() { await start(); },
-    async application() {
+    async application(resources = { cpu: 16, memoryMiB: 65536, diskGiB: 256 }) {
       const created = await api("POST", "/v1/consumers", { id: randomUUID(), name: "agents", templates: [{ id: image.id, revision: "1", arch }],
-        limits: { resources: { cpu: 16, memoryMiB: 65536, diskGiB: 256 }, activeLeases: 4, defaultTTLSeconds: 60, maxTTLSeconds: 600, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 120 } });
+        limits: { resources, activeLeases: 4, defaultTTLSeconds: 60, maxTTLSeconds: 600, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 120 } });
       assert.equal(created.status, 200, JSON.stringify(created.body)); return created.body.credential as string;
     },
     storage: (machineId: string) => join(root, "devices", machineId),
@@ -503,4 +594,226 @@ test("the native supervisor refuses ended authorization and never relaunches an 
   assert.equal(JSON.parse(readFileSync(join(root, "lease-stopped.json"), "utf8")).reason, "fenced");
   authorize(clock.continuous + 120);
   await assert.rejects(nativeLeaseSupervisor.supervise(helper, root, request));
+});
+
+/** Lease-key capture and large installs for CI and marketing capture: a job leases an emulator,
+ * installs its real build, drives screens and records verified MP4 through its own key only. */
+function leaseClient(h: Harness, lease: { id: string; key: string }): LeaseClient {
+  return new LeaseClient({ baseUrl: h.url, leaseId: lease.id, leaseKey: lease.key, allowLoopbackHttp: true, timeoutMs: 20000 });
+}
+function apk(h: Harness, bytes: number): { file: string; payload: Buffer; sha256: string } {
+  const payload = randomBytes(bytes), file = join(h.root, `build-${randomUUID()}.apk`);
+  writeFileSync(file, payload, { mode: 0o600 });
+  return { file, payload, sha256: createHash("sha256").update(payload).digest("hex") };
+}
+async function receipt(client: LeaseClient, id: string): Promise<any> {
+  let current: any;
+  await until(async () => { current = await client.operation(id); return current.state !== "queued"; }, "operation receipt", 30000);
+  return current;
+}
+function sink(): { chunks: Buffer[]; write(bytes: Uint8Array): number } {
+  const chunks: Buffer[] = [];
+  return { chunks, write(bytes) { chunks.push(Buffer.from(bytes)); return bytes.length; } };
+}
+const VIDEO = { fps: 30 as const, bitRate: 4_000_000 };
+
+test("a lease key installs a large APK and records verified MP4 of its own emulator; other keys are refused and replays are exact", { skip, timeout: 180000 }, async t => {
+  const h = await harness(t, 2, { extra: { cpu: 2, memoryMiB: 1024, diskGiB: 16 } }), app = await h.application();
+  const a = await acquire(h, app, 300), lease = leaseClient(h, a);
+  const build = apk(h, 1_300_000); // three chunks, over the 512 KiB single-push limit
+  // Upload through the lease key, resumable by UUID; the upload reserves host scratch until released.
+  const artifact = randomUUID(), uploaded = await lease.uploadApp({ id: artifact, member: "primary", file: build.file });
+  assert.deepEqual([uploaded.state, uploaded.bytes, uploaded.sha256, uploaded.leaseId, uploaded.machineId], ["ready", build.payload.length, build.sha256, a.id, a.machineId]);
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 10 });
+  // Lost replies: the same intent, an identical chunk and completion all replay without change.
+  const intent = { id: artifact, member: "primary", format: "apk", bytes: build.payload.length, sha256: build.sha256 };
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, intent, a.key)).status, 200);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { ...intent, bytes: 7 }, a.key)).status, 409);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts/${artifact}/chunks`, { offset: 0, data: build.payload.subarray(0, 524288).toString("base64") }, a.key)).status, 409, "a published upload takes no chunks");
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts/${artifact}/complete`, {}, a.key)).body.state, "ready");
+  // Install through the durable lease operation: streamed into one package session, digest-checked, committed once.
+  const install = randomUUID();
+  assert.equal((await lease.installApp({ id: install, member: "primary", artifact })).created, true);
+  const installed = await receipt(lease, install);
+  assert.equal(installed.state, "succeeded", JSON.stringify(installed));
+  assert.deepEqual(installed.result, { installed: true, sha256: build.sha256, bytes: build.payload.length, artifactCleaned: true });
+  assert.deepEqual(Buffer.concat(h.media.installs.get(`cvm-${a.machineId}`)!), build.payload);
+  assert.equal(h.media.commits, 1);
+  const replay = await lease.installApp({ id: install, member: "primary", artifact });
+  assert.equal(replay.created, false); assert.equal(replay.operation.state, "succeeded");
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/operations`, { id: install, member: "primary", action: "install-uploaded", arguments: { artifact: randomUUID() } }, a.key)).status, 409);
+  await new Promise(resolve => setTimeout(resolve, 1000)); assert.equal(h.media.commits, 1, "a replayed install never commits again");
+  // Drive named screens.
+  assert.equal((await operate(h, a.id, a.key, "launch", { app: "test.canaveral.trial/.TrialActivity" })).body.state, "succeeded");
+  const shot = await operate(h, a.id, a.key, "screenshot");
+  assert.equal(Buffer.from(shot.body.result.data, "base64").subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+  // Record through the lease key: the host's finish receipt carries bytes, SHA-256 and positive cleanup.
+  const video = randomUUID(), out = sink();
+  const finish = await lease.video.record({ id: video, member: "primary", durationSeconds: 2, ...VIDEO }, out, { timeoutMs: 20000 });
+  assert.deepEqual(Buffer.concat(out.chunks), MP4);
+  assert.deepEqual(finish, { type: "finish", bytes: MP4.length, sha256: createHash("sha256").update(MP4).digest("hex"), cleaned: true });
+  await until(async () => (await lease.video.inspect(video)).cleaned === true, "positive recording cleanup");
+  const saved = await lease.video.inspect(video);
+  assert.deepEqual([saved.state, saved.leaseId, saved.member, saved.hostCleaned], ["finished", a.id, "primary", true]);
+  assert.equal(h.media.encodersOpen, 0); assert.equal(h.media.recorders.get(`cvm-${a.machineId}`)!.running, false);
+  // A replayed session intent returns the same session and never records again.
+  const encoders = h.media.encoders, again = await lease.video.create({ id: video, member: "primary", durationSeconds: 2, ...VIDEO });
+  assert.equal(again.generation, saved.generation); assert.equal(again.state, "finished");
+  await new Promise(resolve => setTimeout(resolve, 1000)); assert.equal(h.media.encoders, encoders);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: video, member: "primary", durationSeconds: 3, ...VIDEO }, a.key)).status, 409);
+  // Another lease's key, the application key and the operator credential reach none of it.
+  const b = await acquire(h, app, 300);
+  for (const token of [b.key, app, h.admin]) {
+    assert.equal((await h.api("GET", `/v1/leases/${a.id}/app-artifacts/${artifact}`, undefined, token)).status, 401);
+    assert.equal((await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, token)).status, 401);
+    assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { ...intent, id: randomUUID() }, token)).status, 401);
+  }
+  assert.equal((await h.api("GET", `/v1/leases/${b.id}/app-artifacts/${artifact}`, undefined, b.key)).status, 404);
+  assert.equal((await h.api("GET", `/v1/leases/${b.id}/video-sessions/${video}`, undefined, b.key)).status, 404);
+  assert.equal((await h.api("POST", `/v1/leases/${b.id}/operations`, { id: randomUUID(), member: "primary", action: "install-uploaded", arguments: { artifact } }, b.key)).status, 409);
+  assert.equal((await h.api("GET", `/v1/app-artifacts/${artifact}`, undefined, h.admin)).status, 404, "lease uploads are not on the administrative routes");
+  assert.equal((await h.api("POST", `/v1/machines/${a.machineId}/app-artifacts`, { id: randomUUID(), format: "apk", bytes: 10, sha256: build.sha256 }, h.admin)).status, 409);
+  assert.equal((await h.api("POST", `/v1/machines/${a.machineId}/video-sessions`, { id: randomUUID(), durationSeconds: 2, ...VIDEO }, h.admin)).status, 409);
+  // A lease holds at most four uploads at once; deleting a clean upload releases its scratch.
+  const small = apk(h, 4096), extra: string[] = [];
+  for (let i = 0; i < 3; i++) { const id = randomUUID(); extra.push(id); assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id, member: "primary", format: "apk", bytes: 4096, sha256: small.sha256 }, a.key)).status, 201); }
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id: randomUUID(), member: "primary", format: "apk", bytes: 4096, sha256: small.sha256 }, a.key)).status, 429);
+  for (const id of [artifact, ...extra]) assert.equal((await lease.deleteAppArtifact(id)).state, "deleted");
+  assert.deepEqual(await h.reserved(), { cpu: 4, memoryMiB: 4096, diskGiB: 16 });
+  // Rotating the key revokes it for recording too.
+  const rotated = (await h.api("POST", `/v1/leases/${a.id}/credential`, {}, app)).body.credential as string;
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, a.key)).status, 401);
+  assert.equal((await h.api("GET", `/v1/leases/${a.id}/video-sessions/${video}`, undefined, rotated)).body.cleaned, true);
+  for (const l of [{ id: a.id, key: rotated }, b]) assert.equal((await h.api("POST", `/v1/leases/${l.id}/release`, { id: randomUUID() }, l.key)).status, 200);
+  await cleaned(h, app, a.id); await cleaned(h, app, b.id);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("expiry mid-recording ends the capture, and the reservation is released only after the lease proves its emulator gone", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { extra: { cpu: 1, memoryMiB: 256 } }), app = await h.application();
+  const a = await acquire(h, app, 12), lease = leaseClient(h, a), video = randomUUID();
+  const recording = lease.video.record({ id: video, member: "primary", durationSeconds: 60, ...VIDEO }, sink(), { timeoutMs: 40000 });
+  void recording.catch(() => {});
+  await until(() => h.media.recorders.get(`cvm-${a.machineId}`)?.running === true, "recording started");
+  assert.deepEqual(await h.reserved(), { cpu: 3, memoryMiB: 2304, diskGiB: 8 });
+  // The lease expires during the recording: the stream ends without a completion proof.
+  await assert.rejects(recording, (error: any) => ["video_incomplete", "session_incomplete", "session_disconnected"].includes(error.code));
+  await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease");
+  assert.ok(Date.now() - h.media.recorders.get(`cvm-${a.machineId}`)!.started < 30000, "the capture ended with the lease, not at its time limit");
+  // The host encoder exited; the guest recorder's own stop is not provable once the emulator is fenced.
+  await until(async () => (await lease.video.inspect(video)).hostCleaned === true, "host encoder cleanup", 30000);
+  assert.equal(h.media.encodersOpen, 0);
+  // The lease's positive cleanup (group gone, storage removed) is the guest's proof; then the reservation is released.
+  await cleaned(h, app, a.id);
+  await until(async () => (await lease.video.inspect(video)).cleaned === true, "recording settled by lease cleanup");
+  assert.equal((await lease.video.inspect(video)).state, "disconnected");
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+  // The ended lease cannot record again.
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, a.key)).status, 410);
+});
+
+test("key rotation and release each end an in-progress recording; the runner's exact-recorder proof or the lease's cleanup releases it", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { extra: { cpu: 1, memoryMiB: 256 } }), app = await h.application();
+  const a = await acquire(h, app, 120), name = `cvm-${a.machineId}`;
+  // Rotation: the old key's recording ends while the lease and emulator stay live, so the runner
+  // stops and proves the exact guest recorder itself.
+  const first = randomUUID(), rotating = leaseClient(h, a).video.record({ id: first, member: "primary", durationSeconds: 60, ...VIDEO }, sink(), { timeoutMs: 40000 });
+  void rotating.catch(() => {});
+  await until(() => h.media.recorders.get(name)?.running === true, "first recording started");
+  const key = (await h.api("POST", `/v1/leases/${a.id}/credential`, {}, app)).body.credential as string, lease = leaseClient(h, { id: a.id, key });
+  await assert.rejects(rotating);
+  await until(async () => (await lease.video.inspect(first)).cleaned === true, "runner recorder proof");
+  assert.equal(h.media.recorders.get(name)!.running, false);
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 8 });
+  // Release: the lease ends, the recording with it, and the reservation follows the cleanup proof.
+  const second = randomUUID(), releasing = lease.video.record({ id: second, member: "primary", durationSeconds: 60, ...VIDEO }, sink(), { timeoutMs: 40000 });
+  void releasing.catch(() => {});
+  await until(() => h.media.recorders.get(name)?.running === true, "second recording started");
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, key)).status, 200);
+  await assert.rejects(releasing);
+  await cleaned(h, app, a.id);
+  await until(async () => (await lease.video.inspect(second)).cleaned === true, "recording released after proof");
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("supervisor loss mid-recording ends the capture, fails the lease and holds the recording reservation until operator recovery", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { extra: { cpu: 1, memoryMiB: 256 } }), app = await h.application();
+  const a = await acquire(h, app, 120), group = supervised(h, a.machineId), lease = leaseClient(h, a), video = randomUUID();
+  const recording = lease.video.record({ id: video, member: "primary", durationSeconds: 90, ...VIDEO }, sink(), { timeoutMs: 40000 });
+  void recording.catch(() => {});
+  await until(() => h.media.recorders.get(`cvm-${a.machineId}`)?.running === true, "recording started");
+  process.kill(group.supervisorPid, "SIGKILL");
+  // The capture's native check sees the free supervisor lock and ends promptly.
+  await assert.rejects(recording);
+  await until(async () => (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state === "failed", "failed lease", 15000);
+  await until(async () => (await lease.video.inspect(video)).hostCleaned === true || (await lease.video.inspect(video)).cleaned === true, "capture teardown", 30000);
+  await until(async () => (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.cleanup.state === "blocked", "blocked cleanup");
+  // Unless the runner proved the exact recorder stopped, the session and the emulator stay reserved.
+  const held = await lease.video.inspect(video);
+  assert.deepEqual(await h.reserved(), held.cleaned ? { cpu: 2, memoryMiB: 2048, diskGiB: 8 } : { cpu: 3, memoryMiB: 2304, diskGiB: 8 });
+  assert.ok(alive(group.childPid));
+  // Documented recovery: the operator stops the process group named in lease-supervisor.json.
+  process.kill(-group.childPid, "SIGKILL");
+  await cleaned(h, app, a.id);
+  await until(async () => (await lease.video.inspect(video)).cleaned === true, "recording settled");
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("an unconfirmed encoder exit keeps the recording reserved after lease cleanup until an administrator abandons it", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { extra: { cpu: 1, memoryMiB: 256 }, encoder: "stuck" }), app = await h.application();
+  const a = await acquire(h, app, 10), lease = leaseClient(h, a), video = randomUUID();
+  const recording = lease.video.record({ id: video, member: "primary", durationSeconds: 1, ...VIDEO }, sink(), { timeoutMs: 40000 });
+  void recording.catch(() => {});
+  await assert.rejects(recording);
+  await cleaned(h, app, a.id);
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  const held = await lease.video.inspect(video);
+  assert.deepEqual([held.cleaned, held.hostCleaned], [false, false]);
+  assert.deepEqual(await h.reserved(), { cpu: 1, memoryMiB: 256, diskGiB: 0 });
+  // The application's limits keep counting it.
+  assert.equal(held.state, "disconnected");
+  // Abandonment needs administrator authority and the session deadline; then lease cleanup releases it.
+  await until(async () => (await h.api("POST", `/v1/machines/${a.machineId}/video-sessions/${video}/abandon`, { reason: "encoder wedged; host inspected" }, h.admin)).status === 200, "abandonment after the deadline", 90000);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("expiry mid-upload and mid-install: chunks are refused, and each upload is released only on proof", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { extra: { diskGiB: 8 }, installStall: true }), app = await h.application();
+  const a = await acquire(h, app, 14), lease = leaseClient(h, a), build = apk(h, 1_100_000);
+  // One upload stops after its first chunk.
+  const partial = randomUUID();
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id: partial, member: "primary", format: "apk", bytes: build.payload.length, sha256: build.sha256 }, a.key)).status, 201);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/app-artifacts/${partial}/chunks`, { offset: 0, data: build.payload.subarray(0, 524288).toString("base64") }, a.key)).body.received, 524288);
+  // Another is published and its install stalls mid-transfer.
+  const full = randomUUID(); await lease.uploadApp({ id: full, member: "primary", file: build.file });
+  const install = randomUUID(); await lease.installApp({ id: install, member: "primary", artifact: full });
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 12 });
+  await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease", 30000);
+  // The ended lease refuses further chunks and publication; the saved receipt stays readable.
+  const refused = await h.api("POST", `/v1/leases/${a.id}/app-artifacts/${partial}/chunks`, { offset: 524288, data: build.payload.subarray(524288, 1048576).toString("base64") }, a.key);
+  assert.equal(refused.status, 410); assert.equal(refused.body.code, "lease_ended");
+  // The never-installed upload has no native stage and is released at once.
+  await until(async () => (await lease.appArtifact(partial)).state === "deleted", "release of the never-installed upload");
+  // The interrupted install is never replayed; its upload is held until the emulator is proven gone.
+  const interrupted = await receipt(lease, install);
+  assert.ok(["unknown", "failed"].includes(interrupted.state), JSON.stringify(interrupted));
+  assert.equal(h.media.commits, 0);
+  await cleaned(h, app, a.id);
+  await until(async () => (await lease.appArtifact(full)).state === "deleted", "release after lease cleanup proof");
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("recording and upload reservations count against the application's limits", { skip, timeout: 120000 }, async t => {
+  const h = await harness(t, 1, { extra: { cpu: 2, memoryMiB: 1024, diskGiB: 8 } }), app = await h.application({ cpu: 2, memoryMiB: 4096, diskGiB: 8 });
+  const a = await acquire(h, app, 120), build = apk(h, 4096);
+  // The lease already uses the application's two CPUs and eight GiB: a recording or an upload would exceed them.
+  const video = await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, a.key);
+  assert.equal(video.status, 429);
+  const upload = await h.api("POST", `/v1/leases/${a.id}/app-artifacts`, { id: randomUUID(), member: "primary", format: "apk", bytes: 4096, sha256: build.sha256 }, a.key);
+  assert.equal(upload.status, 429);
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 8 });
+  // A member without the capability or another member name is refused before any reservation.
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "other", durationSeconds: 2, ...VIDEO }, a.key)).status, 404);
+  assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, a.key)).status, 200);
+  await cleaned(h, app, a.id);
 });

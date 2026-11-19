@@ -18,8 +18,10 @@ On 18 November 2026 the requested use cases expanded to exclusive device leases
 for parallel coding agents and unattended CI and automation jobs. One intended
 workflow installs a CI build and records the app's screens for marketing. These
 use cases require access through the job's own scoped credentials. Android emulator
-leases are now enabled; see [Android emulator leases](#android-emulator-leases). iOS
-simulator leases and unattended recording through lease credentials remain open.
+leases are now enabled; see [Android emulator leases](#android-emulator-leases). Since
+19 November 2026 a lease key can also install large builds and record MP4 of its own
+emulator ([lease recording and large installs](#lease-recording-and-large-installs)).
+iOS simulator leases remain open.
 
 ## Current implementation
 
@@ -33,8 +35,9 @@ for builds already present on the host.
 Use a private personal API token with `machines:access` for owned machines, or the
 existing operator credential. Other users, enrollment credentials, guest credentials
 and unrelated hosts cannot read these artifacts. Application/lease credentials are
-not supported by this administrative artifact API. Leased Android emulators install
-builds through lease operations instead; see [Android emulator leases](#android-emulator-leases).
+not supported by these administrative routes, and they refuse uploads for leased machines.
+A leased Android emulator takes uploads through its lease key on the same contract; see
+[lease recording and large installs](#lease-recording-and-large-installs).
 
 | Operation | Endpoint | Body |
 | --- | --- | --- |
@@ -241,7 +244,9 @@ attaches outbound at `/v1/hosts/{host}/video-sessions/{id}/{generation}`. Both u
 header credentials and the existing `canaveral-session-v1` WebSocket protocol.
 The consumer must use the same currently authorized credential that created the
 session; account revocation, scope changes, host loss, stop, expiry and assignment
-changes terminate authorization. Consumer lease keys do not authorize these routes.
+changes terminate authorization. Consumer lease keys do not authorize these machine
+routes; a lease key records its own emulator through the lease routes in
+[lease recording and large installs](#lease-recording-and-large-installs).
 
 After broker readiness, the host sends `{type:"video",mediaType:"video/mp4",
 codec:"avc1",fps:30}`, then binary MP4 bytes in messages no larger than 64 KiB.
@@ -411,7 +416,7 @@ keeps running after the host adb client closes, so the runner's SIGTERM is neede
 
 The local attached display path and consumer lease display keep their prior
 contracts. Administrative native video does not enable consumer lease execution
-or bypass that acceptance gate.
+or bypass that acceptance gate. Lease recording has its own routes and rules below.
 
 Existing [device controls](devices.md) cover gestures, text, app lifecycle, logs,
 accessibility, permissions, location, small files and Android shells. iOS has no
@@ -614,11 +619,12 @@ member `primary` and resolve to that lease's own machine, host and AVD:
 
 | Need | Action | Capability |
 | --- | --- | --- |
-| Install a build | `push` the APK to `/data/local/tmp` (up to 512 KiB per operation), then `shell` `["pm","install","-r",path]` | files, command |
+| Install a build | Upload it through the lease key, then `install-uploaded` (any size up to 2 GiB; see below). Small APKs may still use `push` (up to 512 KiB) and `shell` `["pm","install","-r",path]`. | files (`push`/`shell` also command) |
 | Launch, stop, list or remove apps | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | command |
 | Screens | `screenshot` (PNG), `hierarchy` | screenshot, hierarchy |
 | Input | `tap`, `swipe`, `text`, `key` | input |
 | Logs | `logs` (last 200 logcat lines) | command |
+| Record | MP4 video session (see below) | displayStream |
 
 App lifecycle and logs need `command` because the Android shell already grants
 them. They remain unavailable to iOS, which has no shell capability. Operations keep
@@ -630,17 +636,128 @@ The lease shell runs inside the guest. Because the guest has no network path, a 
 command or an installed APK cannot reach the host's adb server or any other host
 service.
 
-The administrative app-artifact API, MP4 video sessions and dashboard capture do not
-accept lease credentials. APKs larger than 512 KiB need a lease file session, which
-has not been accepted natively for Android leases. Recording through lease
-credentials (MP4 or the display stream) is not available yet: the host has no
-leased Android display transport.
+The administrative app-artifact and video routes and dashboard capture do not accept
+lease credentials. Lease file sessions and the live display stream are still not
+accepted natively for Android leases.
+
+### Lease recording and large installs
+
+Enabled 19 November 2026 for the CI and marketing-capture workflow: a job leases an
+emulator, installs its real build, drives named screens, takes PNGs (`screenshot`) and
+records a playable MP4, all with its lease key. Both paths extend existing mechanisms
+rather than adding parallel ones.
+
+**Large installs reuse the uploaded-app path**, not the lease file session. The upload
+path already provides what a build install needs: caller-UUID intents, sequential
+512 KiB chunks, digest-checked publication, host scratch reservations, streaming into one
+owned PackageManager session with a verified size and digest before commit, the
+never-replayed `unknown` receipt of an uncertain commit, and positive artifact cleanup.
+A file session only delivers bytes into the guest; installing them would then be an
+unjournaled `pm install` shell command with no digest check against the upload and no
+cleanup evidence. The lease file session also needs the separate native transfer
+helper, which has no Android lease acceptance.
+
+| Operation | Endpoint | Body |
+| --- | --- | --- |
+| Reserve upload | `POST /v1/leases/{lease}/app-artifacts` | `{id, member, format:"apk", bytes, sha256}` |
+| Read receipt | `GET /v1/leases/{lease}/app-artifacts/{id}` | none |
+| Append or repeat a chunk | `POST /v1/leases/{lease}/app-artifacts/{id}/chunks` | `{offset, data}` |
+| Verify and publish | `POST /v1/leases/{lease}/app-artifacts/{id}/complete` | `{}` |
+| Install | `POST /v1/leases/{lease}/operations` | `{id, member, action:"install-uploaded", arguments:{artifact}}` |
+| Release the upload | `POST /v1/leases/{lease}/app-artifacts/{id}/delete` | `{}` |
+
+Receipts add `leaseId`. Chunk, completion, replay and install rules are those of the
+[administrative upload](#current-implementation). The install operation is authorized for
+at most 30 minutes, and never beyond the lease. An upload binds one lease member, and only
+that lease's install of that member may read it from the controller. The runner reads it
+only while the lease is ready; the provider rechecks the lease supervisor, not only the
+AVD identity, throughout the transfer. Administrative routes neither read nor install
+lease uploads.
+
+**Recording reuses the native video session** (#67, #68, #72): the same table, the same
+`canaveral-session-v1` broker and MP4 verification, the same host reservation (one CPU
+and 256 MiB), the same one-session-per-machine and four-per-host slots and the same
+exact-recorder cleanup.
+
+| Operation | Endpoint | Body |
+| --- | --- | --- |
+| Create or replay | `POST /v1/leases/{lease}/video-sessions` | `{id, member, fps:30, durationSeconds, bitRate}` |
+| Read | `GET /v1/leases/{lease}/video-sessions/{id}` | none |
+| Close | `POST /v1/leases/{lease}/video-sessions/{id}/close` | `{}` |
+| Attach (WebSocket) | `/v1/leases/{lease}/video-sessions/{id}/{generation}` | lease key header |
+
+Receipts add `leaseId`, `member` and `hostCleaned` (below). The SDK exposes both paths
+on `LeaseClient`: `uploadApp`, `appArtifact`, `deleteAppArtifact`, `installApp` and
+`video` (`create`, `connect`, `inspect`, `close`, `record`); see the
+[video SDK](visual-sdk.md#recording-a-leased-emulator-with-its-lease-key).
+
+#### Scope
+
+Only the lease's current key reaches these routes; the application key, operator and
+account credentials and another lease's key get 401. Another lease's upload or session
+is not found (404), and an install naming an upload of another lease or member is refused
+(409). New uploads, chunks, publication and recordings need a ready, unexpired lease with
+a checked member (410 `lease_ended` after it ends, 409 `member_not_ready` before
+readiness). A recording stays authorized only while the lease is ready, its key unrotated,
+its application active and its device checked; the runner additionally requires its own
+lease guard and, about once a second, a held supervisor lock and an unfenced, unexpired
+native authorization. Expiry, release, a fence, supervisor loss or a key rotation
+therefore ends a recording within about a second: the stream stops without a finish
+receipt, and the SDK reports `session_disconnected` or `video_incomplete`. Reading receipts and deleting
+clean uploads remain available to the current key after the lease ends.
+
+#### Reservations and cleanup proof
+
+A recording or upload keeps its reservation until cleanup is proven, after the lease ends
+too:
+
+- **Recording.** As for administrative sessions, positive cleanup is the runner's proof
+  that the native recorder and the encoder stopped. When the lease ends first, the guest
+  recorder's stop cannot be proven by adb: the supervisor fences and stops the emulator.
+  The runner then reports `hostCleaned`: its own encoder exited. The session becomes
+  `cleaned` only when both that receipt exists and the lease's own cleanup has proven
+  the emulator's whole process group gone and its storage removed. If the encoder exit
+  is unconfirmed, the session stays held after lease cleanup. An administrator may then
+  abandon it through the machine route
+  (`POST /v1/machines/{machine}/video-sessions/{id}/abandon`, after its deadline), which
+  releases it once the lease's cleanup is complete, as deletion does for owned machines.
+- **Upload.** An upload that was never installed has no native stage and is released as
+  soon as the lease ends. An install attempt is clean when it succeeded with
+  `artifactCleaned`, was never handed to the runner, or its emulator was proven stopped
+  and removed by lease cleanup. An interrupted or `unknown` install therefore holds its
+  upload until the lease's cleanup completes. It is never replayed. Within a live lease,
+  `delete` releases an upload whose attempts are all clean; an unclean attempt blocks
+  both deletion and a repeat install of the same upload.
+- **Unprovable cleanup.** When the lease's own cleanup is blocked (for example after
+  supervisor loss with a surviving emulator), its recordings and uploads stay held with
+  it. Follow [unprovable cleanup and recovery](#unprovable-cleanup-and-recovery); the
+  reservations are released with the lease's cleanup proof.
+
+Accounting: each held recording counts one CPU and 256 MiB, and each held upload its host
+scratch (`1 + ceil(2 × bytes / GiB)` GiB), against the application's resource limits,
+alongside its leases. A request that would exceed them is refused with 429 before any
+reservation, and so are new leases while held recordings or uploads use the budget. A
+lease holds at most four uploads at once. The host-wide limits still apply: four held
+recordings per host, one per machine, and 8 GiB and 128 uploads per controller. Size the
+host's capacity for the recording (one CPU and 256 MiB) and upload scratch beside its
+emulators; otherwise those requests get 409.
+
+The [native capture trial](../coordination/native-acceptance/android-lease-capture.md) of
+19 November 2026 ran this workflow on the Mac Studio with a Google Play API 36 emulator.
+Through the lease key it installed a real 1,511,885-byte APK in three chunks, took two named
+1080×2400 PNGs and recorded a 30-second MP4 that ffprobe read as 820 H.264 frames over
+27.3 s and FFmpeg decoded without errors. A second recording started 45 s before expiry
+ended with the lease. The session held its reservation (`hostCleaned`, not `cleaned`)
+until the lease's cleanup proved the emulator's group gone about 3 s later; the host
+reservation then returned to zero. Release, key rotation and supervisor loss during a
+recording, interrupted installs and uploads, and limit refusals are fixture-covered only.
+Runner or controller loss during a lease recording is not covered.
 
 ### Expiry, release and loss
 
 At expiry or release the controller refuses the old credential at once (410
-`lease_ended` for operations, 401 after rotation), fails queued operations and
-issues the cleanup intent. The runner fences the supervisor. Cleanup then requires
+`lease_ended` for operations, 401 after rotation), fails queued operations, ends
+recordings and further uploads, and issues the cleanup intent. The runner fences the supervisor. Cleanup then requires
 the stop proof above before it removes the AVD storage and its `ANDROID_AVD_HOME`
 registration through the recoverable quarantine path. It then erases the
 assignment's credential directory, and only then reports completion. The controller
@@ -727,7 +844,14 @@ grandchild in its group) through fake adb and avdmanager. It covers:
   recovery);
 - a guest that reaches host loopback (a real canary connection): fenced, never ready;
 - the host's own lease gate for non-Android runtimes and unadvertised templates;
-- supervisor refusal of ended authorization and relaunch.
+- supervisor refusal of ended authorization and relaunch;
+- lease-key install of a 1.3 MB APK in three chunks and MP4 recording, with replayed
+  lost replies, refused keys of another lease, the application and the operator, the
+  per-lease upload cap and key rotation;
+- expiry mid-recording (released only after lease cleanup), key rotation (the runner's
+  exact-recorder proof) and release mid-recording, supervisor loss mid-recording, an unconfirmed encoder exit held until administrator abandonment,
+  expiry mid-upload and mid-install (the never-installed upload released at once, the
+  interrupted install's upload only after lease cleanup), and application limits.
 
 `lease_supervisor.rs` unit tests cover the lifetime lock, the refusal before spawn, a
 clock failure after spawn that still stops the whole group, and the log cap.

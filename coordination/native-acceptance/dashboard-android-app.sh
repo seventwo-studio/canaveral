@@ -1,7 +1,8 @@
 #!/bin/bash
 # Builds the disposable dashboard trial APK and prints its path. Needs a JDK and
 # ANDROID_HOME with build-tools and an android-36 platform. The signing key is
-# generated in the private build directory and is never reused.
+# generated in the private build directory and is never reused. TRIAL_PADDING_BYTES adds a
+# stored random asset of that size, for installs larger than one 512 KiB lease push.
 set -eu
 : "${ANDROID_HOME:?Set ANDROID_HOME}"
 tools="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS:-36.0.0}"
@@ -43,6 +44,11 @@ javac --release 11 -classpath "$platform" -d "$root/classes" "$root/src/test/can
 "$tools/d8" --release --min-api 26 --lib "$platform" --output "$root/dex" "$root"/classes/test/canaveral/dashboardtrial/*.class
 "$tools/aapt2" link -o "$root/unsigned.apk" -I "$platform" --manifest "$root/AndroidManifest.xml"
 (cd "$root/dex" && zip -q -X "$root/unsigned.apk" classes.dex)
+if [ -n "${TRIAL_PADDING_BYTES:-}" ]; then
+  mkdir -p "$root/padding/assets"
+  head -c "$TRIAL_PADDING_BYTES" /dev/urandom > "$root/padding/assets/padding.bin"
+  (cd "$root/padding" && zip -q -X -0 "$root/unsigned.apk" assets/padding.bin)
+fi
 "$tools/zipalign" -P 16 -f 4 "$root/unsigned.apk" "$root/aligned.apk"
 keytool -genkeypair -keystore "$root/trial.keystore" -storepass trialpass -keypass trialpass \
   -alias trial -keyalg RSA -keysize 2048 -validity 1 -dname "CN=Canaveral trial" >/dev/null 2>&1

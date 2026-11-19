@@ -58,7 +58,7 @@ export class Mp4Envelope {
 /** Source and encoder are owned by this attempt. No native process or input is replayed. */
 export async function serveMobileVideo(channel: SessionChannel, source: NativePipe,
   openEncoder: (argv: readonly string[]) => Promise<NativePipe>, ffmpeg: string, value: VideoOptions,
-  authorized: () => boolean, onCleanup?: (cleaned: boolean) => void): Promise<void> {
+  authorized: () => boolean, onCleanup?: (cleaned: boolean, parts: { source: boolean; encoder: boolean }) => void): Promise<void> {
   let encoder: NativePipe | undefined, timer: ReturnType<typeof setTimeout> | undefined, watch: ReturnType<typeof setInterval> | undefined;
   let sourceClosing: Promise<void> | undefined, pumping: Promise<void> | undefined;
   const closeSource = () => sourceClosing ??= source.close();
@@ -114,7 +114,9 @@ export async function serveMobileVideo(channel: SessionChannel, source: NativePi
     if (timer) clearTimeout(timer); if (watch) clearInterval(watch);
     const results = await Promise.allSettled([closeSource(), ...(encoder ? [(async () => { await encoder.close(); const code = await encoder.wait(5000); if (!Number.isInteger(code)) throw new Error('Encoder exit is unconfirmed.'); })()] : [])]);
     if (pumping) await pumping.catch(() => {});
-    const cleaned = results.every(result => result.status === 'fulfilled'); onCleanup?.(cleaned);
+    // The source is the native capture (for Android, the guest recorder); the encoder is a host process.
+    const source = results[0]!.status === 'fulfilled', encoderExited = results.length < 2 || results[1]!.status === 'fulfilled';
+    const cleaned = source && encoderExited; onCleanup?.(cleaned, { source, encoder: encoderExited });
     if (!cleaned) throw new ServiceError('Video process cleanup is unconfirmed.', 409, { outcome: 'unknown' });
   }
 }

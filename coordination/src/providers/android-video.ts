@@ -126,7 +126,7 @@ export async function openAndroidVideo(provider: AndroidProvider, machine: Recor
     if (!Number.isFinite(now) || now < lastNativeCheck) throw new ServiceError('Android capture clock identity changed.', 410);
     if (now - lastNativeCheck >= 1) {
       nativeCheck ??= (async () => {
-        await provider.owned(machine, serial); await authorized(check);
+        await provider.ownedLive(machine, image, serial, check); await authorized(check);
         if (canonical(provider.displayEpoch(machine, image) ?? null) !== epoch) throw new ServiceError('Android capture boot identity changed.', 410);
         lastNativeCheck = elapsed();
       })().finally(() => { nativeCheck = undefined; });

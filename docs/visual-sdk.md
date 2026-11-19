@@ -70,6 +70,29 @@ host's completion. The receipt contains `bytes`, `sha256` and `cleaned: true`.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 
+### Recording a leased emulator with its lease key
+
+`LeaseVideoClient` (also `LeaseClient.video` in `coordination/src/sdk.ts`) records the
+lease's own Android emulator with the lease's current key, for CI and marketing capture.
+It uses the same broker protocol, verification and receipt as `MobileVideoClient`, at
+`/v1/leases/{lease}/video-sessions`. See
+[lease recording and large installs](mobile-control.md#lease-recording-and-large-installs).
+
+```ts
+const lease = new LeaseClient({ baseUrl, leaseId, leaseKey });
+const receipt = await lease.video.record(
+  { id: persistedSessionId, member: 'primary', fps: 30, durationSeconds: 30, bitRate: 4_000_000 },
+  writer, { timeoutMs: 60_000 },
+);
+```
+
+`record` creates the session (or replays the same persisted intent), attaches and writes
+the verified MP4. `create`, `connect`, `inspect` and `close` are also available. The
+session ends with the lease: expiry, release, a fence, supervisor loss or key rotation
+ends the stream without a finish receipt. Android emits no frames while the screen is
+static, so set `timeoutMs` above the longest expected static stretch. Another lease's
+key, the application key and administrative credentials are refused.
+
 For live playback, `video.chunks()` is a pull-driven async iterator of MP4 byte
 chunks; boundaries are neither decoded frames nor complete MP4 boxes. Feed them
 to an appropriate fragmented-MP4 player or decoder with backpressure. Initialization
