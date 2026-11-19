@@ -101,11 +101,18 @@ node coordination/dist/src/cli.js local \
 
 ### Launch, use and delete a desktop from the dashboard
 
-On **Machines**, **Launch desktop** offers only Linux desktop images with guest
-access from online, accepting hosts. It asks for a name, the image and its CPU, memory and disk,
+On **Machines**, **Launch desktop** offers Linux and Apple-silicon macOS desktop
+images with guest access from online, accepting hosts. It asks for a name, the image and its CPU, memory and disk,
 prefilled from the image's defaults. The controller chooses the host. The row shows **Preparing** until the
-host confirms guest readiness, then **Ready**. **Control** opens the desktop in
+host confirms guest readiness, then **Ready**. A macOS desktop has no preparation
+recipe: it shows **Running** until its own guest helper answers the pinned
+identity challenge and shows a frame, then **Ready**. **Control** opens the desktop in
 the shared viewer. **Take control** sends pointer and keyboard input.
+
+A macOS desktop boots once with its own launch media. After **Stop**, delete it
+and launch a new one; starting it again is blocked. Its image is
+operator-supplied; see [macOS desktop image](macos-desktop-image.md) and
+[unleased dashboard desktops](macos-guest-access.md#unleased-dashboard-desktops).
 
 **Stop** requests a graceful shutdown. Once the host reports the machine stopped,
 **Delete machine** in the row menu asks for confirmation and sends one deletion
@@ -115,7 +122,7 @@ deletion only when the controller stops listing the machine. If the host cannot
 confirm removal, the row shows **Deletion blocked**: storage and its reservation
 stay in place until an operator inspects the host.
 
-The [native trial record](../coordination/native-acceptance/dashboard-desktop.md) covers this flow on Apple silicon. The local desktop socket authorizes each complete browser message with the gateway before and after reading it, so every input event costs three controller round trips. In that trial the guest applied about 12 input events per second.
+The [native trial record](../coordination/native-acceptance/dashboard-desktop.md) covers the Linux flow on Apple silicon. The macOS flow has not run natively; see its [trial record](../coordination/native-acceptance/dashboard-desktop-macos.md). The local desktop socket authorizes each complete browser message with the gateway before and after reading it, so every input event costs three controller round trips. In that trial the guest applied about 12 input events per second.
 
 The live viewer needs a dashboard with an attached desktop connector. Only
 `canaveral local` provides one. A standalone dashboard, such as one deployed

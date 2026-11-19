@@ -37,6 +37,7 @@ interpreter dependency to the controller, host or SDK; see
 - [durable waiting requests](requests.md)
 - [libvirt resource ownership](libvirt-resource-ownership.md)
 - [libvirt supervision](libvirt-supervision.md)
+- [macos desktop image](macos-desktop-image.md) (operator-supplied image, guest bundle and identity check)
 - [macos display input](macos-display-input.md)
 - [macos guest access](macos-guest-access.md)
 - [macos guest accessibility](macos-guest-accessibility.md)
