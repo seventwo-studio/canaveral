@@ -86,6 +86,20 @@ cvm-c5943df9-…).
   The reservation stayed at 1 CPU and 256 MiB until the deletion completed, then
   fell to zero. Deletion was confirmed and the inventory restored.
 
+### Re-run after the review fixes (Pjf3ib, 03:28–03:32 CET)
+
+The broker then changed so that any received frame counts as liveness, and so that
+it refuses a video acknowledgement before the host's `finish`. The 60-second run was
+repeated on that head (commit 1d13bcc) with machine dcfb9378-ebaa-4fb2-ac1f-a0ad476ddda9.
+Settings was scrolled from 03:29:19 to 03:29:28, left static until 03:30:04 and
+scrolled until 03:30:12. The page showed `Recording verified · 1717 frames · 57.2 s ·
+576 × 1280 · 15.8 MiB · capture session released`. ffprobe reported 1717 frames and
+57.233333 s, and the FFmpeg decode was clean. Session 85707038-… finished with
+`cleaned=1`. The left-page session 4744ec51-… again gave deletion 409, owner
+abandonment 403 and a recorded administrator abandonment, with 1 CPU and 256 MiB
+held until the deletion completed and zero afterwards. Deletion was confirmed, the
+runner's AVD directory is empty and the inventory was restored.
+
 The encoded duration again follows emitted frames: the static tail after the last
 scroll is not represented (54.4 s of 60 s, 153.0 s of 180 s). Static stretches
 inside the recording are present in the timeline.
