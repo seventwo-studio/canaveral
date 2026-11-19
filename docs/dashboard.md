@@ -517,9 +517,9 @@ The machine details of an owned, running iOS or Android device include
   `image/png` result with a valid PNG signature and header. The operator names
   the file, previews it and downloads it.
 - **Recording:** POST `/api/v1/machines/{machine}/video-sessions` with
-  `{id, fps:30, durationSeconds, bitRate:4000000}` for 5, 10, 15 or 20
-  seconds. Longer captures wait for the session-liveness fix described in
-  [mobile control](mobile-control.md#dashboard-capture). The page then opens a WebSocket to
+  `{id, fps:30, durationSeconds, bitRate:4000000}` for 5, 10, 15, 30, 60, 120
+  or 180 seconds; 180 is the backend maximum, and its file fits the page's
+  memory limit. The page then opens a WebSocket to
   `/api/v1/machines/{machine}/video-sessions/{id}/{generation}` with
   subprotocol `canaveral-session-v1`.
 
@@ -539,7 +539,9 @@ tables cover exactly the following media data, a key frame first, and at least
 one frame with a positive duration. Only then does the page acknowledge the
 stream, show frames, duration and size, preview the file and offer a download.
 A stream error, early close, stall, size or checksum mismatch, or failed
-structure check is shown as a failure without a file. The page holds a recording
+structure check is shown as a failure without a file. A stall is silence for the
+requested length plus 30 seconds: Android sends nothing while the screen is
+static, and a lost host closes the socket through the broker's liveness check. The page holds a recording
 in memory, up to 128 MiB.
 
 Cancelling, failing, closing the details or leaving the page closes the socket
@@ -549,4 +551,7 @@ unload uses a keepalive request. After success the page waits for the session's
 the reservation. A browser that cannot decode the verified file shows an error
 beside the preview. The [native trial](../coordination/native-acceptance/dashboard-mobile-capture.md)
 passed Android screenshots and recordings and iOS screenshots; iOS recording
-failed at idb's stop and remains open.
+failed at idb's stop and remains open. The [video lifecycle trial](../coordination/native-acceptance/dashboard-mobile-video-lifecycle.md)
+then verified 60- and 180-second Android recordings with static stretches longer
+than 30 seconds, and machine deletion refused until an uncleaned session was
+abandoned by an administrator.
