@@ -186,6 +186,9 @@ test("a macOS desktop is ready only after its verified helper shows a display fr
   // No preparation recipe, no lease: readiness is the helper's own verified frame.
   let report = await runner.reconcile(m); assert.equal(report.accessReady, false); assert.match(String(report.detail), /show the desktop/);
   frame = { pngBase64: "iVBORw0KGgoAAAANSUhEUg", width: 1440, height: 900 };
+  // A helper that has not answered is retried after a backoff, not on every poll.
+  report = await runner.reconcile(m); assert.equal(report.accessReady, false); assert.equal(reads, 1, "backoff skips the probe");
+  clock.mono += 6;
   report = await runner.reconcile(m); assert.equal(report.accessReady, true);
   report = await runner.reconcile(m); assert.equal(report.accessReady, true);
   assert.equal(reads, 2, "a recently confirmed binding is not re-probed for frames");

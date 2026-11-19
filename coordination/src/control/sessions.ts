@@ -656,7 +656,18 @@ export class GuestHelperAccess {
   async ready(machine: Record<string, unknown>, image: Record<string, unknown>, folder: string, now = performance.now()): Promise<boolean> {
     const b = await this.binding(machine, image, folder), last = this.displayed.get(b);
     if (last === undefined || now - last >= 30000) {
-      const value = await b.call("/v1/display/frame", null), frame = value.frame && typeof value.frame === "object" ? value.frame as Record<string, unknown> : {};
+      let value: Record<string, unknown>;
+      try { value = await b.call("/v1/display/frame", null); }
+      catch (error) {
+        // The helper refuses a frame while a user's input is in flight. That is a live helper,
+        // not a lost one: keep the last verified result and probe again on the next poll.
+        if (error instanceof ServiceError && error.status === 409 && ["input_busy", "input_stale"].includes(error.code)) {
+          if (!b.authorized()) throw new ServiceError("Guest helper binding ended.", 410);
+          return last !== undefined;
+        }
+        throw error;
+      }
+      const frame = value.frame && typeof value.frame === "object" ? value.frame as Record<string, unknown> : {};
       const size = (n: unknown) => Number.isSafeInteger(n) && (n as number) > 0 && (n as number) <= 4096;
       if (typeof frame.pngBase64 !== "string" || !frame.pngBase64.startsWith("iVBORw0KGgo") || !size(frame.width) || !size(frame.height)) { this.displayed.delete(b); return false; }
       this.displayed.set(b, now);

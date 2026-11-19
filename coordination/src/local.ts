@@ -128,6 +128,10 @@ export async function macOSDesktopTemplate(args: CliArguments): Promise<Record<s
     let info; try { info = await fs.lstat(path); } catch { throw new CliError(`The macOS image is missing ${path}.`); }
     // The provider refuses links for platform artifacts; fail here with the path.
     if (!info.isFile() || !info.size || await fs.realpath(path) !== path) throw new CliError(`${path} must be a non-empty regular file, not a link or under one.`);
+    // Whoever can write the golden image controls every future clone.
+    const owner = process.getuid?.();
+    for (const [target, stat] of [[path, info], [dirname(path), await fs.stat(dirname(path))]] as const)
+      if ((stat.uid !== owner && stat.uid !== 0) || (stat.mode & 0o022) !== 0) throw new CliError(`${target} must be owned by this user or root and not writable by group or others.`);
     sizes[name] = info.size;
   }
   const diskGiB = Math.max(64, Math.ceil(sizes.disk! / 1073741824));

@@ -44,7 +44,7 @@ done
 
 # Remote services would turn the shared auto-login password into a network credential.
 if disabled=$(launchctl print-disabled system 2>/dev/null); then
-  for service in com.openssh.sshd com.apple.screensharing; do
+  for service in com.openssh.sshd com.apple.screensharing com.apple.smbd com.apple.AEServer; do
     printf '%s\n' "$disabled" | grep -Eq "\"$service\" => (disabled|true)" || fail "$service is not disabled."
   done
 else fail "Cannot read disabled system services."; fi
@@ -55,6 +55,11 @@ if [ -f "$root/private/etc/RemoteManagement.launchd" ] && grep -q enabled "$root
 [ "$(fdesetup status 2>/dev/null)" = "FileVault is Off." ] || fail "FileVault must be off for automatic login."
 user=$(defaults read "$root/Library/Preferences/com.apple.loginwindow" autoLoginUser 2>/dev/null) || user=""
 [ -n "$user" ] && [ -f "$root/private/etc/kcpassword" ] || fail "Automatic login is not enabled."
+# A lock screen would ask dashboard users for the shared password, so it must never appear.
+sysadminctl -screenLock status 2>&1 | grep -qi 'off' || fail "The screen lock must be off for the automatic-login user."
+for setting in sleep displaysleep; do
+  [ "$(pmset -g 2>/dev/null | awk -v k="$setting" '$1 == k { print $2 }')" = 0 ] || fail "pmset $setting must be 0."
+done
 [ -f "$root/private/var/db/.AppleSetupDone" ] || fail "Setup Assistant has not finished."
 
 if [ "$failures" -gt 0 ]; then echo "Image identity check failed ($failures)." >&2; exit 1; fi

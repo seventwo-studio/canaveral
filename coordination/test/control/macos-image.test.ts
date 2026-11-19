@@ -11,7 +11,7 @@ function repository(path: string): string {
   return existsSync(source) ? source : fileURLToPath(new URL(`../../../../${path}`, import.meta.url));
 }
 const helper = "/Applications/Canaveral Assigned Guest.app/Contents/MacOS/CanaveralAssignedGuest";
-const disabled = `disabled services = {\n\t"com.openssh.sshd" => disabled\n\t"com.apple.screensharing" => disabled\n}\n`;
+const disabled = `disabled services = {\n\t"com.openssh.sshd" => disabled\n\t"com.apple.screensharing" => disabled\n\t"com.apple.smbd" => disabled\n\t"com.apple.AEServer" => disabled\n}\n`;
 /** A prepared guest's filesystem plus stand-ins for the macOS commands the check calls. */
 function guest(t: { after(f: () => void): void }) {
   const base = mkdtempSync(join(realpathSync(tmpdir()), "macos-image-")); t.after(() => rmSync(base, { recursive: true, force: true }));
@@ -33,6 +33,8 @@ function guest(t: { after(f: () => void): void }) {
   stub("fdesetup", `echo "\${STUB_FILEVAULT:-FileVault is Off.}"`);
   stub("defaults", `[ -n "\${STUB_AUTOLOGIN:-}" ] && echo "$STUB_AUTOLOGIN"`);
   stub("security", `[ "\${STUB_KEYCHAIN:-}" = present ]`);
+  stub("sysadminctl", `[ "$1" = -screenLock ] && [ "$2" = status ] && echo "screenLock is \${STUB_SCREENLOCK:-off}" >&2`);
+  stub("pmset", `printf ' sleep                %s\\n displaysleep         %s\\n' "\${STUB_SLEEP:-0}" "\${STUB_DISPLAYSLEEP:-0}"`);
   const run = (env: Record<string, string> = {}) => spawnSync("/bin/sh", [repository("tools/macos-image/check-image.sh")], { encoding: "utf8",
     env: { CANAVERAL_CHECK_ROOT: root, CANAVERAL_CHECK_PATH: `${bin}:/usr/bin:/bin`, STUB_DISABLED: disabled, STUB_AUTOLOGIN: "desktop", ...env } });
   return { root, file, run };
@@ -54,6 +56,11 @@ test("macOS image check refuses shared credentials, leftover launch state and re
     ["SSH host keys exist", g => g.file("/private/etc/ssh/ssh_host_ed25519_key")],
     ["com.openssh.sshd is not disabled", () => ({ STUB_DISABLED: disabled.replace('"com.openssh.sshd" => disabled', '"com.openssh.sshd" => enabled') })],
     ["com.apple.screensharing is not disabled", () => ({ STUB_DISABLED: disabled.replace('\t"com.apple.screensharing" => disabled\n', "") })],
+    ["com.apple.smbd is not disabled", () => ({ STUB_DISABLED: disabled.replace('\t"com.apple.smbd" => disabled\n', "") })],
+    ["com.apple.AEServer is not disabled", () => ({ STUB_DISABLED: disabled.replace('"com.apple.AEServer" => disabled', '"com.apple.AEServer" => enabled') })],
+    ["The screen lock must be off", () => ({ STUB_SCREENLOCK: "immediate" })],
+    ["pmset sleep must be 0", () => ({ STUB_SLEEP: "10" })],
+    ["pmset displaysleep must be 0", () => ({ STUB_DISPLAYSLEEP: "5" })],
     ["Remote Management is enabled", g => g.file("/private/etc/RemoteManagement.launchd", "enabled")],
     ["FileVault must be off", () => ({ STUB_FILEVAULT: "FileVault is On." })],
     ["FileVault must be off", () => ({ STUB_FILEVAULT: "FileVault is Off, but will be enabled after the next restart." })],

@@ -45,15 +45,20 @@ host's capacity within that limit; Canaveral does not count licenses.
    login Keychain.
 5. In **Privacy & Security**, allow **Screen Recording** and **Accessibility**
    for Canaveral Assigned Guest. Add the app with **+** if it is not listed.
-6. In **Users & Groups**, turn on automatic login for the desktop account.
+6. In **Users & Groups**, turn on automatic login for the desktop account. In
+   **Lock Screen**, set **Require password after screen saver begins or display
+   is turned off** to **Never**, and run `sudo pmset -a sleep 0 displaysleep 0`.
+   Otherwise an idle dashboard user returns to a password prompt.
 7. Run `sudo sh check-image.sh` from the bundle directory. It must print
    `Image identity check passed`. It fails in these cases:
    - the manual helper, its LaunchAgent or its Keychain item is present;
    - Canaveral Guest state is left in a user's Application Support, for example
      from a test launch;
    - there are SSH host keys or `authorized_keys`;
-   - sshd or Screen Sharing is not disabled, or Remote Management is on;
+   - sshd, Screen Sharing, File Sharing or Remote Apple Events is not disabled,
+     or Remote Management is on;
    - FileVault is on, automatic login is off, or Setup Assistant has not finished;
+   - the screen lock is on, or system or display sleep is not 0;
    - the assigned helper or its LaunchAgent is missing or invalid.
 
    If the check reports that sshd or Screen Sharing is not disabled while the
@@ -100,9 +105,17 @@ local creates a fresh host configuration.
 ## What clones share
 
 Every clone has the same local account and the same automatic-login password,
-because macOS stores that password in the image. With remote login, Screen
-Sharing and Remote Management off, the password works only at the VM's own
-console, which only the host can reach. It is not a network credential. Each
+because macOS stores that password in the image. The account is an
+administrator. The image check requires Remote Login, Screen Sharing, File
+Sharing, Remote Apple Events and Remote Management to be off, the screen lock
+to be off and system and display sleep to be disabled, so dashboard users never
+see a password prompt and need not be told the password.
+
+That check is a snapshot of the image. All clones share the host's NAT subnet
+and can reach each other, and an administrator inside a clone can turn a remote
+service back on. If the shared password is ever disclosed, a user who does so
+exposes that clone to every other clone. Per-clone password rotation or
+isolation between clones is an open gate, not a property of this release. Each
 clone receives its own helper credential, TLS key and launch identity on its
 launch media. The runner gives each clone a new machine identifier when it
 prepares the clone. The clone's MAC address is derived from its machine ID.
