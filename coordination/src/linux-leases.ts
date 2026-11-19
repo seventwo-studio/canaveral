@@ -1,3 +1,4 @@
+import { domainAdmissionClosed, requireDomainAdmission } from "./control/maintenance.ts";
 import { parsePreview, type PreviewResponse } from "./linux-preview.ts";
 import { LinuxTransfers, transferError, transferUUID } from "./linux-transfers.ts";
 import { applicationLeaseUsage, legacyTable, mergedLeasePage, refreshLegacyLeases } from "./control/leases.ts";
@@ -463,7 +464,7 @@ export class LinuxLeases {
       }
       const approval = this.approval(db, b);
       if (!approval) throw new ServiceError("This runner binding has no Linux lease approval.", 403);
-      if (updateDraining(db, b.runnerId, "runner")) return { assignment: null };
+      if (domainAdmissionClosed(db, approval.domain) || updateDraining(db, b.runnerId, "runner")) return { assignment: null };
       const open = db.prepare("SELECT count(*) AS n FROM linux_lease_assignments WHERE controller=? AND runner=? AND generation=? AND closed=0").get(b.controllerId, b.runnerId, b.generation) as { n: number };
       if (Number(open.n) >= MAX_ACTIVE_ASSIGNMENTS) return { assignment: null };
       const served = new Set(JSON.parse(approval.images) as string[]);
@@ -607,6 +608,7 @@ export class LinuxLeases {
         if (JSON.stringify(previous) !== request) throw new ServiceError("Operation intent changed.", 409);
         return { created: false, operation: this.operationView(old) };
       }
+      requireDomainAdmission(db, lease.domain);
       if (lease.workspace_version !== 1 && args.timeoutMs !== undefined) throw new ServiceError("Legacy commands do not accept timeoutMs.", 400);
       const a = db.prepare("SELECT * FROM linux_lease_assignments WHERE lease=?").get(lease.id) as unknown as AssignmentRow | undefined;
       if (!a || !this.commandEligible(db, lease, a)) throw new ServiceError("Command execution is not ready or authorized.", 409);
@@ -647,7 +649,11 @@ export class LinuxLeases {
     if (!["GET","HEAD"].includes(method) || target.length > 4096 || !/^\/(?!\/)[!-~]*$/.test(target) || /[#\\]/.test(target))
       throw new ServiceError("Invalid preview target.",400);
     operationId = identifier(operationId);
-    this.transaction((db,now) => this.previewOperation(db,this.operationAccess(db,leaseId,token),operationId,now));
+    this.transaction((db,now) => {
+      const lease = this.operationAccess(db,leaseId,token);
+      requireDomainAdmission(db, lease.domain);
+      this.previewOperation(db,lease,operationId,now);
+    });
     if (this.previews.has(operationId) || this.previews.size >= 32) throw new ServiceError("Preview busy.",429);
     return new Promise((resolve,reject) => {
       const deadline = performance.now() + 1000;
@@ -772,7 +778,7 @@ export class LinuxLeases {
     return this.transaction((db,now)=>{
       const l=this.transferAccess(db,leaseId,token),{a,owner}=this.transferOwner(db,l);
       const id=transferUUID(operationObject(value,['id'],['member','direction','path','bytes','sha256','replace']).id);
-      if(!this.transfers.row(db,id)) { if(!ACTIVE.includes(l.state)) transferError('lease_ended',410); if(!this.filesEligible(db,l,a)) transferError('files_not_ready',409); }
+      if(!this.transfers.row(db,id)) { requireDomainAdmission(db,l.domain); if(!ACTIVE.includes(l.state)) transferError('lease_ended',410); if(!this.filesEligible(db,l,a)) transferError('files_not_ready',409); }
       return this.transfers.create(db,owner,value,now);
     });
   }
@@ -843,7 +849,7 @@ export class LinuxLeases {
   private placements(db: DatabaseSync, image: ImageRow): string[] {
     const wanted = imageKey(image), domains = new Set<string>();
     for (const row of db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE revoked=0 AND backend=? ORDER BY domain,runner").all(image.backend) as unknown as ApprovalRow[]) {
-      if (updateDraining(db, row.runner, "runner")) continue;
+      if (domainAdmissionClosed(db, row.domain) || updateDraining(db, row.runner, "runner")) continue;
       if ((image.workspace_version === null || row.workspace_version === 1) && (JSON.parse(row.images) as string[]).includes(wanted) && this.runners?.current(db, bindingOf(row))) domains.add(row.domain);
     }
     return [...domains];

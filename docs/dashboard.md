@@ -457,6 +457,12 @@ confirms the size and digest. Output and artifacts survive cleanup and
 dashboard restart in the private SQLite database. Restart fences unfinished
 execution and reconciles its original request without rerunning the command.
 
+## Host maintenance
+
+Hosts in manual maintenance carry a Maintenance label. Open the host overview and select **Begin maintenance**. Enter an optional reason and confirm to close admission while existing work finishes. The legacy accepting switch controls placement independently.
+
+The panel refreshes the scope, phase, admission owners, runner confirmation and blockers. Read each blocker’s affected actions and next step. The power-off verdict covers Canaveral-managed workloads on a direct host. A KubeVirt pool cannot confirm physical node safety. **Resume admission** becomes available after reconciliation permits resume. If the controller refuses, inspect the returned blockers before retrying.
+
 ## Administrator model runs
 
 Administrators open **Models** (`#models`) to run a prompt against an installed

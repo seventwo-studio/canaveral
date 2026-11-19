@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { ServiceError, object } from "../errors.ts";
+import { noLinks, present } from "../runtime-process.ts";
 import { LibvirtLeaseBinding, SupervisorJournal, StorageHandleGuard, absolute, bindDomainXML, canonical, deadlineArtifact, digest, domainEmulator, domainHasTPM, escapeXML, exact, fingerprint, finite, hash, inode, matches, noSymlinks, owned, readPrivate, refuse, regular, sameInode, snapshotFile, uuid, validateDomainXML } from "./libvirt-ownership.ts";
 import type { BindingData, FileLeaseFactory, Inode, ManifestEntry, RecordValue } from "./libvirt-ownership.ts";
 
@@ -125,6 +126,14 @@ export class LibvirtProvider {
     return{kind:this.kind,libvirtLeaseArtifact:artifact!==null,leaseEligible:false,nativeAcceptance:false,warnings:["Kernel deadlines, native connection lifetime, storage leases and fresh-lease isolation require native acceptance."]};
   }
   private storagePath(machine:RecordValue):string{return join(absolute(this.config.storage),uuid(machine.id));}
+  async maintenanceStorage(machine:RecordValue):Promise<"present"|"absent"|"unknown">{
+    const path=this.storagePath(machine);noLinks(path);
+    if(!present(path))return "absent";
+    const directory=fs.lstatSync(path);owned(directory);if(!directory.isDirectory())return "unknown";
+    if(readPrivate(join(path,"canaveral-owner.json"))?.fingerprint!==fingerprint(machine))return "unknown";
+    const disk=join(path,"disk.qcow2");noLinks(disk);if(!present(disk))return "absent";
+    regular(fs.lstatSync(disk),false);return "present";
+  }
   private location(b:LibvirtLeaseBinding,s:ExecutionSpec):boolean{return s.uri===this.uri()&&b.disk===join(this.storagePath({id:b.machine_id}),"disk.qcow2");}
   private readSpec(j:SupervisorJournal,machine:RecordValue,storage=true):{binding:LibvirtLeaseBinding;spec:ExecutionSpec}{
     const value=j.readNamed("libvirt-binding.json");if(!value||!exact(value,["version","binding","uri","library","storageIdentity","diskIdentity"])||value.version!==1||!["qemu:///system","qemu:///session"].includes(String(value.uri)))refuse("Execution binding is missing or invalid.");
@@ -254,7 +263,7 @@ export class LibvirtProvider {
     const current=this.inspect(machine,folder);if(!current)return null;const ended=current.execution.phase==="fenced"||!this.location(current.binding,current.spec)||(current.execution.phase==="running"&&!this.supervisorAlive(current.binding,folder,current.launch));
     const auth=this.publish(machine,authorization?{...image,_leaseAuthorization:authorization}:image,folder,machine.desired==="stopped"||ended);if(auth.fenced===true)return{state:this.confirmExecutionStopped(machine,folder)?"stopped":"stopping",leaseFenced:true};return null;
   }
-  private confirmStoppedLocked(machine:RecordValue,j:SupervisorJournal):RecordValue|null{
+  private confirmStoppedLocked(machine:RecordValue,j:SupervisorJournal,readOnly=false):RecordValue|null{
     const{binding:b,spec:s}=this.readSpec(j,machine),observed=uuid(this.boot());if(!this.location(b,s))return null;const reboot=this.rebootContext(machine,j,b,s,observed),auth=j.readNamed("libvirt-authorization.json"),execution=j.read();
     if(!auth||!validAuthority(auth,b)||auth.fenced!==true||!matches(execution,b.identity())||!["prepared","starting","creating","resuming","running","fenced"].includes(String(execution.phase)))return null;
     const launch=j.readNamed("libvirt-launch.json"),never=launch===null&&(execution.phase==="prepared"||(execution.phase==="fenced"&&execution.stopEvidence==="never-launched"));
@@ -263,11 +272,11 @@ export class LibvirtProvider {
     try{connection.validate(b,false);if(canonical(j.readNamed("libvirt-launch.json"))!==canonical(launch)||(!reboot&&!never&&!this.supervisorGone(b,launch))||this.boot()!==observed||!this.location(b,s)||canonical(this.rebootContext(machine,j,b,s,observed))!==canonical(reboot)||canonical(this.readSpec(j,machine).spec)!==canonical(s))return null;
       connection.close();closed=true;if(this.boot()!==observed||!this.location(b,s)||canonical(this.readSpec(j,machine).spec)!==canonical(s)||canonical(j.readNamed("libvirt-launch.json"))!==canonical(launch))return null;
       const evidence=reboot?"host-reboot":never?"never-launched":"supervisor-exited";
-      if(reboot)this.markRebootStopped(machine,j,b,s,observed,reboot);else j.write({...b.identity(),phase:"fenced",stopEvidence:evidence});
+      if(!readOnly){if(reboot)this.markRebootStopped(machine,j,b,s,observed,reboot);else j.write({...b.identity(),phase:"fenced",stopEvidence:evidence});}
       return{...b.identity(),executionStopped:true,evidence,observedHostBootId:observed,storageHandles:"unknown",storageRemoved:false};
     }finally{if(!closed)connection.close();}
   }
-  confirmExecutionStopped(machine:RecordValue,folder:string):RecordValue|null{let j:SupervisorJournal|undefined;try{j=this.journal(folder);return this.confirmStoppedLocked(machine,j);}catch{return null;}finally{j?.close();}}
+  confirmExecutionStopped(machine:RecordValue,folder:string,readOnly=false):RecordValue|null{let j:SupervisorJournal|undefined;try{j=new SupervisorJournal(folder,undefined,{fixture:this.adapters.fixture===true,existingOnly:readOnly});return this.confirmStoppedLocked(machine,j,readOnly);}catch{return null;}finally{j?.close();}}
   private absent(s:ExecutionSpec,b:LibvirtLeaseBinding):void{const c=this.connection(s,b);try{if(!c.absent())refuse("Native definition remains.");}finally{c.close();}}
   private manifest(j:SupervisorJournal,records:ManifestEntry[]):string{
     const data=records.map(r=>{const line=canonical(r)+"\n";if(Buffer.byteLength(line)>65536)refuse("Storage manifest path is oversized.");return line;}).join("");

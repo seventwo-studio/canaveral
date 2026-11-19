@@ -127,3 +127,9 @@ Resolver maintenance acquires no provider/runtime locks. Agent shutdown retains
 and closes adapters selected by older operations after runtime changes. Socket
 closure is access cancellation only: native process exit, runtime-lock exclusion,
 closed disk handles and owned erasure remain separate positive cleanup proofs.
+
+## Planned maintenance and same-host recovery
+
+Follow the [maintenance procedure](infrastructure.md#planned-host-maintenance) before powering down a host. Keep persistent assignments and their storage on the same host. After restart, wait for inventory reconciliation and fresh confirmation before resuming. Same-boot resume can cancel the drain. This procedure does not provide cross-host recovery or failover.
+
+Verification scope is portable fixtures only. Native acceptance remains open: drain one direct Apple host, reboot, reconcile its persistent machines, and resume with the machines and their storage intact.

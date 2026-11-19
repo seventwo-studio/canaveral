@@ -80,6 +80,9 @@ Administrator account sessions can also authorize inventory and lifecycle paths.
 | `POST /v1/auth/logout` | Revoke the presented session |
 | `POST /v1/hosts/enroll` | Register UUID, credential and capacity/template offer |
 | `POST /v1/hosts/{id}/heartbeat` | Update offer and owned machine reports; receive assignments |
+| `GET /v1/hosts/{host}/maintenance` | Read current or latest drain status |
+| `POST /v1/hosts/{host}/maintenance` | Begin a drain with id and optional reason |
+| `POST /v1/hosts/{host}/maintenance/{drainId}/resume` | Resume the drain with a requestId |
 | `GET /v1/hosts` | List offers, accepting state, freshness and reserved resources |
 | `POST /v1/hosts/{id}/accepting` | Set `enabled` to true/false |
 | `POST /v1/machines` | Reserve and place a computer |
@@ -99,3 +102,15 @@ Persist the controller database, credentials, host identities and template disks
 ## Backend sources
 
 The adapters follow the [libvirt domain format](https://libvirt.org/formatdomain.html), [Hyper-V PowerShell interface](https://learn.microsoft.com/en-us/powershell/module/hyper-v/), [KubeVirt run strategies](https://kubevirt.io/user-guide/compute/run_strategies/) and [CDI volume-cloning contract](https://github.com/kubevirt/containerized-data-importer/blob/main/doc/datavolumes.md). The existing Apple runtime uses Apple's Virtualization framework. Actual images, firmware and installed hypervisor versions need acceptance on each target host.
+
+## Manual maintenance drain
+
+Administrators begin a drain with a UUID and an optional reason of up to 500 characters. Identical retries return the existing record. Admission closes where new work is committed. Work already committed continues to be delivered. Drain preserves desired state and reservations.
+
+Status returns the active drain, the latest resumed drain, or null. A direct host needs fresh runner confirmation matching the current controller run and inventory, and no blockers, for a positive power-off verdict. A proof expires 20 seconds after the controller issued its challenge. Completing an update that overlapped the drain requires a fresh proof.
+
+Backed assignments require positive storage evidence for power-off. A provider can report `storage: "notMaterialized"` when inspection finds no backing resources and no creation history. This value does not add a storage blocker. Libvirt still reports an unknown execution state when its execution history is missing. A provider that cannot inspect backing storage reports `storage: "unsupported"`, which blocks power-off only. A confirmed absence or inspection error for a materialized assignment blocks resume, as does unassigned storage found under an enumerable provider root. Upgrade the controller before sending the added storage values from runners.
+
+Uploaded app installs remain blockers while their cleanup is unconfirmed, including after a terminal install receipt. The existing install resolution endpoint remains available during a drain. A cleanup resolution changes the ledger and requires fresh runner confirmation. An unknown install outcome remains a separate blocker. A new runner inspection uses the device operation queue and must be submitted before the drain. Mobile deletion remains available during a drain and requires its normal ownership and cleanup receipts.
+
+Resume checks its own blockers again in the write transaction. A blocked resume returns HTTP 409 with code `maintenance_blocked` and current status. See the [operator procedure and CLI commands](infrastructure.md#planned-host-maintenance).

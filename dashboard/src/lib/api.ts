@@ -51,6 +51,14 @@ export async function api(
         ),
         {
           status: response.status,
+          ...(response.status === 409 &&
+          result &&
+          typeof result === "object" &&
+          "code" in result &&
+          result.code === "maintenance_blocked" &&
+          "status" in result
+            ? { blockedStatus: result.status }
+            : {}),
           ...(result !== null &&
           typeof result === "object" &&
           "outcome" in result &&

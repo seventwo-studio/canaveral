@@ -74,6 +74,29 @@ test("absent VM with VMI or unresolved creation is unknown, with complete absenc
   unlinkSync(join(f.folder, "kubevirt-owner.json")); assert.equal((await f.provider.reconcile(f.m, image, f.folder)).state, "unknown");
 });
 
+test("maintenance distinguishes unmaterialized KubeVirt storage from missing or unowned storage", async t => {
+  const f = fixture(t); f.m.desired = "stopped";
+  let vm = "";
+  f.hook = args => args[1] === "virtualmachine" ? vm : "";
+  assert.equal(await f.provider.maintenanceStorage(f.m, image, f.folder), "absent");
+  unlinkSync(join(f.folder, "kubevirt-owner.json"));
+  assert.equal(await f.provider.maintenanceStorage(f.m, image, f.folder), "absent");
+  unlinkSync(join(f.folder, "kubevirt-create.json"));
+  assert.equal(await f.provider.maintenanceStorage(f.m, image, f.folder), "notMaterialized");
+  vm = JSON.stringify(f.vm);
+  assert.equal(await f.provider.maintenanceStorage(f.m, image, f.folder), "unknown");
+});
+
+test("only an owned Bound PVC proves KubeVirt storage is present", async t => {
+  const f = fixture(t);
+  const pvc = { apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: { namespace: "guests", name: object(f.vm.metadata).name, uid: randomUUID() }, status: { phase: "Bound" } };
+  f.hook = args => JSON.stringify(args[1] === "pvc" ? pvc : f.vm);
+  for (const [phase, expected] of [["Bound", "present"], ["Lost", "absent"], ["Pending", "unknown"], ["Other", "unknown"]]) {
+    pvc.status.phase = phase!;
+    assert.equal(await f.provider.maintenanceStorage(f.m, image, f.folder), expected, phase);
+  }
+});
+
 test("leased creation fails closed before any mutation", async t => {
   const f = fixture(t); let calls = 0; f.provider.kubectl = async () => { calls++; return ""; }; f.m.lease = { id: randomUUID() };
   await assert.rejects(f.provider.reconcile(f.m, image, join(f.root, "fresh")), /independent native fencing/); assert.equal(calls, 1);

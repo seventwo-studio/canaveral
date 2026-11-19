@@ -29,7 +29,10 @@ export function origin(value: string, allowHttp = false): string {
   }
   return url.origin;
 }
-export interface RequestClient { request(method: "GET" | "POST", path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> }
+export interface RequestClient {
+  request(method: "GET" | "POST", path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  request(method: "GET", path: string, body: undefined, nullable: true): Promise<Record<string, unknown> | null>;
+}
 
 /** Bounded HTTP transport, no redirects and no retries. Error text cannot echo passwords or credentials. */
 export class CliClient implements RequestClient {
@@ -40,13 +43,15 @@ export class CliClient implements RequestClient {
     if (ca && !this.url.startsWith("https:")) throw new CliError("A CA file requires an HTTPS origin.");
     if (ca) { try { createSecureContext({ ca }); } catch { throw new CliError("Could not load the controller CA file."); } }
   }
-  async request(method: "GET" | "POST", path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  request(method: "GET" | "POST", path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  request(method: "GET", path: string, body: undefined, nullable: true): Promise<Record<string, unknown> | null>;
+  async request(method: "GET" | "POST", path: string, body?: Record<string, unknown>, nullable = false): Promise<Record<string, unknown> | null> {
     if (!path.startsWith("/v1/") || path.includes("#")) throw new CliError("Invalid controller route.");
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     if (payload && payload.length > 1_048_576) throw new CliError("Request body exceeds 1 MiB.");
     const mutating = method === "POST";
     let id: string | undefined;
-    try { if (typeof body?.id === "string") id = uuid(body.id); } catch { /* No invented identity for invalid requests. */ }
+    try { const key = body?.id ?? body?.requestId; if (typeof key === "string") id = uuid(key); } catch { /* No invented identity for invalid requests. */ }
     const uncertain = (message: string, status = 503) => new CliError(message, status, id, mutating ? "unknown" : undefined);
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -73,8 +78,11 @@ export class CliClient implements RequestClient {
         response.on("close", () => { if (!response.complete) fail(uncertain("Controller response was incomplete. Inspect state before retrying.")); });
         response.on("end", () => {
           if (settled) return;
-          let result: Record<string, unknown>;
-          try { result = record(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))) as unknown); }
+          let result: Record<string, unknown> | null;
+          try {
+            const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+            result = nullable && value === null && status >= 200 && status < 300 ? null : record(value);
+          }
           catch { fail(uncertain("Controller returned invalid JSON. Inspect state before another mutation.", 502)); return; }
           if (status < 200 || status >= 300) {
             // Provider diagnostics may contain user input. Only status and safe correlation data leave this client.

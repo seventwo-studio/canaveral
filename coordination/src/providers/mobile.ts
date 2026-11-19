@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ServiceError, object } from "../errors.ts";
+import { noLinks, present } from "../runtime-process.ts";
 import { createNodeMobileTransport, nativeElapsedClock } from "./mobile-native.ts";
 import { Inspections, inspectProvider, snapshot } from "../accessibility-sdk.ts";
 
@@ -240,6 +241,7 @@ export class MobileProvider {
       lease: lease ? Object.fromEntries(["id", "consumerId", "userId", "requestId", "resourceDomainId", "hostId"].map(k => [k, lease[k] ?? null])) : null,
       runtime: { kind: this.kind, state: this.state, storage: this.config.storage, androidSDK: this.config.androidSDK ?? null, xcrun: this.config.xcrun ?? null } };
   }
+  deletionFingerprint(machine: RecordValue, image: RecordValue): string { return digest(this.binding(machine, image)); }
   storage(machine: RecordValue, image?: RecordValue): string {
     const template = object(machine.template), selected = image ?? template;
     if (selected.os !== this.kind && this.kind !== "mobile") throw new ServiceError("Mobile image belongs to another runtime.", 400);
@@ -263,6 +265,16 @@ export class MobileProvider {
       try { fs.writeFileSync(fd, canonical({ fingerprint, binding })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       const parent = fs.openSync(dir, fs.constants.O_RDONLY); try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
     }
+    return dir;
+  }
+  protected maintenanceDirectory(machine: RecordValue, image: RecordValue): string | undefined {
+    const root = text(this.config.storage, "storage");
+    if (!path.isAbsolute(root)) throw new ServiceError("Mobile storage must be an absolute path.", 400);
+    const dir = path.join(root, uuid(machine.id)), marker = path.join(dir, "canaveral-owner.json");
+    noLinks(marker);
+    if (!present(dir)) return;
+    const stat = fs.lstatSync(dir), binding = this.binding(machine, image), owner = readJson(marker);
+    if (!stat.isDirectory() || (process.getuid && stat.uid !== process.getuid()) || stat.mode & 0o077 || owner?.fingerprint !== digest(binding) || canonical(owner.binding) !== canonical(binding)) throw new ServiceError("Mobile storage ownership is unconfirmed.", 409);
     return dir;
   }
   environment(): Record<string, string> {

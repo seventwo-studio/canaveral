@@ -1,3 +1,4 @@
+import { requireHostAdmission } from "./maintenance.ts";
 /** Machine-scoped CI build delivery. Payloads stay in bounded, private SQLite chunks. */
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -84,6 +85,7 @@ export function createAppArtifactsModule(store: SqliteStore, machines: MachineSt
         if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id!)) return fail(409);
         const old = db.prepare('SELECT * FROM app_artifacts WHERE id=?').get(id) as unknown as Artifact | undefined;
         if (old) { current(db, old, principal); if (old.machine !== m.id || old.format !== format || old.bytes !== size || old.sha256 !== sha) return fail(409); return { body: view(old) }; }
+        requireHostAdmission(db, String(m.host));
         const used = Number(db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM app_artifacts WHERE state!='deleted'").get()!.n);
         if (used + size > STORAGE_BYTES || Number(db.prepare("SELECT COUNT(*) AS n FROM app_artifacts WHERE state!='deleted'").get()!.n) >= 128) return fail(429);
         // Archive + extracted bytes, plus headroom for bounded filesystem metadata.

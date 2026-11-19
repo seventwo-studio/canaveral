@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
-import { assignmentFingerprint } from "../runtime-process.ts";
-import { MobileProvider, authorized, canonical, copyUpload, markNotStaged, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
+import { assignmentFingerprint, noLinks, present } from "../runtime-process.ts";
+import { MobileProvider, authorized, canonical, copyUpload, decodeData, digest, encoded, integer, locked, markNotStaged, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, NativeChild, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
 import { openAndroidVideo } from './android-video.ts';
 import type { AndroidVideoOptions } from './android-video.ts';
@@ -110,6 +110,23 @@ export class AndroidProvider extends MobileProvider {
     const resources = object(machine.resources);
     return [this.tool("emulator"), "-avd", this.name(machine), "-port", String(port), "-cores", String(integer(resources.cpu, "cpu", 1, 1024)), "-memory", String(integer(resources.memoryMiB, "memory", 1, 2 ** 30)), "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim"];
   }
+  async maintenanceStorage(machine: RecordValue, image: RecordValue): Promise<"present" | "absent" | "unknown" | "notMaterialized"> {
+    const storage = this.maintenanceDirectory(machine, image);
+    if (!storage) return "absent";
+    const receipt = path.join(storage, "avd-created.json"), avd = path.join(storage, "device.avd");
+    noLinks(receipt); noLinks(avd);
+    const owner = readJson(receipt);
+    if (!owner) {
+      const ini = path.join(this.environment().ANDROID_AVD_HOME!, this.name(machine) + ".ini");
+      noLinks(ini);
+      return present(ini) || [avd, ...["avd-create-started.json", "launch.json", "endpoint.json"].map(file => path.join(storage, file))].some(present)
+        ? "unknown" : "notMaterialized";
+    }
+    if (owner.name !== this.name(machine) || owner.fingerprint !== digest(this.binding(machine, image))) return "unknown";
+    if (!present(avd)) return "absent";
+    const stat = fs.lstatSync(avd);
+    return stat.isDirectory() && (!process.getuid || stat.uid === process.getuid()) ? "present" : "unknown";
+  }
   async provision(machine: RecordValue, image: RecordValue, storage: string): Promise<string> {
     const avds = this.environment().ANDROID_AVD_HOME!, avd = path.join(storage, "device.avd"), receipt = path.join(storage, "avd-created.json");
     privateDirectory(avds);
@@ -182,7 +199,7 @@ export class AndroidProvider extends MobileProvider {
     });
   }
   async removeOwnedStorage(machine: RecordValue, image: RecordValue, folder: string, requestId: string): Promise<RecordValue> {
-    const id = uuid(machine.id), request = uuid(requestId), fingerprint = digest(this.binding(machine, image));
+    const id = uuid(machine.id), request = uuid(requestId), fingerprint = this.deletionFingerprint(machine, image);
     const assignment = readJson(path.join(folder, "assignment.json"));
     if (machine.lease || machine.desired !== "stopped" || assignment?.fingerprint !== assignmentFingerprint(machine) || assignment.leaseId != null) {
       throw new ServiceError("Android removal requires a matching stopped dashboard assignment.");

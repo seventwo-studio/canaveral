@@ -17,6 +17,8 @@ export function matchesMachineState(
   return stateFilter(machineStatus(machine)) === filter;
 }
 export function hostIssue(host: Host): string | null {
+  if (host.maintenance?.phase === "draining")
+    return host.online ? "Maintenance" : "Offline · Maintenance";
   if (!host.online) return "Offline";
   if (!host.enabled) return "Draining";
   if (host.overcommitted) return "Overcommitted";

@@ -330,17 +330,17 @@ export class AppleProvider {
   private native(machine: Data, create = false): string { const root = create ? this.storage(machine) : ownedStorage(this.config, machine, false); return safePath(join(root, uuid(machine.id).toUpperCase())); }
   private async run(args: string[], input?: Data): Promise<string> { return command(this.config, [string(this.config.runner), ...args], input ? { input: JSON.stringify(input) } : {}); }
   private helper(): string { const path = typeof this.config.nativeHelper === "string" ? this.config.nativeHelper : join(dirname(fileURLToPath(import.meta.url)), "apple-native-helper"); if (!isAbsolute(path)) throw new ServiceError("The native storage helper requires an absolute installed path."); return path; }
-  private async withRuntimeLock<T>(path: string, consume: () => Promise<T>): Promise<T> {
+  private async withRuntimeLock<T>(path: string, consume: () => Promise<T>, readOnly = false): Promise<T> {
     if (typeof this.config.withRuntimeLock === "function") return this.config.withRuntimeLock(path, consume) as Promise<T>;
-    return this.withFileLock(join(path, "runtime.lock"), consume);
+    return this.withFileLock(join(path, "runtime.lock"), consume, readOnly);
   }
-  private async withFileLock<T>(file: string, consume: () => Promise<T>): Promise<T> {
+  private async withFileLock<T>(file: string, consume: () => Promise<T>, readOnly = false): Promise<T> {
     if (typeof this.config.withFileLock === "function") return this.config.withFileLock(file, consume) as Promise<T>;
     if (process.platform !== "darwin") throw new ServiceError("The native Apple runtime lock requires Darwin.", 503);
     const target = safePath(file);
     // Darwin sys/fcntl.h: O_EXLOCK=0x20. The kernel takes the same flock used
     // by CanaveralVMRunner atomically at open; O_NONBLOCK refuses a live owner.
-    const fd = openSync(target, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK | 0x20, 0o600);
+    const fd = openSync(target, (readOnly ? constants.O_RDONLY : constants.O_CREAT | constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK | 0x20, 0o600);
     try {
       const held = fstatSync(fd); const named = lstatSync(target);
       if (!held.isFile() || held.nlink !== 1 || held.uid !== process.getuid?.() || held.dev !== named.dev || held.ino !== named.ino) throw new ServiceError("Native runtime lock identity changed.");
@@ -367,7 +367,7 @@ export class AppleProvider {
     if (typeof this.config.processAbsent === "function") return this.config.processAbsent(pid) === true;
     try { process.kill(Number(pid), 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
   }
-  private async nativeStopEvidence(machine: Data, path: string, lockHeld = false): Promise<boolean> {
+  private async nativeStopEvidence(machine: Data, path: string, lockHeld = false, readOnly = false): Promise<boolean> {
     const launch = readRecord(join(path, "runner-launch.json"));
     const marker = join(path, "lease-fenced.json"); const statusPath = join(path, "status.json");
     let receipt: Data;
@@ -384,7 +384,7 @@ export class AppleProvider {
     if (!this.processExited(receipt.pid)) return false;
     const verify = async () => {
       if (!await this.diskClosed(path) || !this.processExited(receipt.pid) || readRecord(join(path, "runner-launch.json")).attemptedAt !== launch.attemptedAt) return false;
-      if (machine.lease && present(marker)) saveRecord(join(path, "fenced-stop.json"), { boot: launch.attemptedAt, stoppedAt: Date.now() / 1000, consistency: "crash-consistent", leaseID: uuid(object(machine.lease).id) });
+      if (!readOnly && machine.lease && present(marker)) saveRecord(join(path, "fenced-stop.json"), { boot: launch.attemptedAt, stoppedAt: Date.now() / 1000, consistency: "crash-consistent", leaseID: uuid(object(machine.lease).id) });
       return true;
     };
     try { return lockHeld ? await verify() : await this.withRuntimeLock(path, verify); }
@@ -415,19 +415,19 @@ export class AppleProvider {
     return status?.phase === "Stopped" && typeof status.updatedAt === "number" && status.updatedAt + 978307200 >= boot;
   }
   /** Software activation needs current ownership, kernel lock and closed-disk proof. */
-  async updateStopped(machine: Data, _image: Data, folder: string): Promise<boolean> {
+  async updateStopped(machine: Data, _image: Data, folder: string, readOnly = false): Promise<boolean> {
     try {
       verifyAssignment(machine, folder);
       const path = this.native(machine);
-      return await this.withRuntimeLock(path, async () => this.confirmedStopped(path) && await this.stopProof(machine, path, true));
+      return await this.withRuntimeLock(path, async () => this.confirmedStopped(path) && await this.stopProof(machine, path, true, readOnly), readOnly);
     } catch { return false; }
   }
-  private async stopProof(machine: Data, path: string, lockHeld = false): Promise<boolean> {
+  private async stopProof(machine: Data, path: string, lockHeld = false, readOnly = false): Promise<boolean> {
     if (!present(join(path, "runner-launch.json"))) {
       if (machine.lease || !this.confirmedStopped(path)) return false;
       return lockHeld ? this.diskClosed(path) : this.withRuntimeLock(path, () => this.diskClosed(path));
     }
-    if (typeof this.config.runtimeProof !== "function") return this.nativeStopEvidence(machine, path, lockHeld);
+    if (typeof this.config.runtimeProof !== "function") return this.nativeStopEvidence(machine, path, lockHeld, readOnly);
     const boot = readRecord(join(path, "runner-launch.json")).attemptedAt;
     const proof = object(await this.config.runtimeProof({ machine, path, boot }));
     return proof.boot === boot && proof.processExited === true && proof.runtimeUnlocked === true && proof.diskHandlesClosed === true;

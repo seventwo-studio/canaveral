@@ -59,7 +59,8 @@ function connection(worker: BrowserGatewayConfig["workers"][string]) {
   return { hostname: worker.connectHost, servername: origin.hostname, headers: { host: origin.host } };
 }
 
-export function createBrowserGateway(config: BrowserGatewayConfig, otherCredentials: string[], canLaunch: (hostId: string) => Promise<boolean>, authorizeAdmin?: (token: string) => Promise<void>) {
+export function createBrowserGateway(config: BrowserGatewayConfig, otherCredentials: string[], canLaunch: (hostId: string, intent: Record<string, unknown>, adminToken?: string) => Promise<boolean | "inspect">,
+  authorizeAdmin?: (token: string) => Promise<void>, recordLaunch?: (host: string, id: string, state: "active" | "closed") => Promise<void>) {
   const sockets = new Set<Duplex>();
   const credentials = new Set(otherCredentials);
   const workers = new Map(Object.entries(config.workers).map(([id, worker]) => {
@@ -105,13 +106,15 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
       const id = create ? identifier(body?.id) : browser!;
       if (create && body?.id !== id) throw new ServiceError("Use a canonical browser UUID.", 400);
       if (stop && !admin && Object.keys(body!).length) throw new ServiceError("Expected an empty object.", 400);
-      if (create && !await canLaunch(host)) throw new ServiceError("Browser host is offline or draining.", 409);
-      const endpoint = new URL(create ? "/v1/browsers" : `/v1/browsers/${id}`, worker.origin);
-      const bodyBytes = create ? Buffer.from(JSON.stringify(body)) : undefined;
+      const permission = create ? await canLaunch(host, body!, admin ? token : undefined) : false;
+      if (create && !permission) throw new ServiceError("Browser host is offline or draining.", 409);
+      const launch = create && permission !== "inspect";
+      const endpoint = new URL(launch ? "/v1/browsers" : `/v1/browsers/${id}`, worker.origin);
+      const bodyBytes = launch ? Buffer.from(JSON.stringify(body)) : undefined;
       const connect = connection(worker);
       const result = await new Promise<IncomingMessage>((resolve, reject) => {
         const request = httpsRequest(endpoint, {
-          ...connect, method: create ? "POST" : stop ? "DELETE" : "GET", signal: AbortSignal.timeout(15_000),
+          ...connect, method: launch ? "POST" : stop ? "DELETE" : "GET", signal: AbortSignal.timeout(15_000),
           headers: { ...connect.headers, authorization: `Bearer ${worker.credential}`, "content-type": "application/json",
             ...(bodyBytes ? { "content-length": bodyBytes.length } : {}) },
         }, resolve);
@@ -136,6 +139,7 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
       if (receipt.id !== id) throw new Error("Browser receipt identity mismatch.");
       if (stop) {
         if (receipt.state !== "closed") throw new Error("Browser cleanup was not confirmed.");
+        await recordLaunch?.(host, id, "closed");
         attachments.delete(`${host}/${id}`);
         respond(res, { id, state: "closed" });
         return;
@@ -150,11 +154,13 @@ export function createBrowserGateway(config: BrowserGatewayConfig, otherCredenti
         || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt - now > 3_600_000) throw new Error("Invalid worker browser receipt.");
       for (const [id, attachment] of attachments) if (attachment.expiresAt <= now) attachments.delete(id);
       if (attachments.size >= 2048 && !attachments.has(`${host}/${id}`)) throw new Error("Browser attachment capacity reached.");
+      await recordLaunch?.(host, id, "active");
       attachments.set(`${host}/${id}`, { digest: digest(key), expiresAt });
       respond(res, { id, engine: receipt.engine, expiresAt: new Date(expiresAt).toISOString(), endpoint: browserEndpoint.href, key }, status);
     } catch (error) {
       req.resume();
-      respond(res, { error: "browser_gateway_request_failed" }, error instanceof ServiceError ? error.status : 503);
+      const code = error instanceof ServiceError && error.code === "host_draining" ? error.code : undefined;
+      respond(res, code ? { error: code, code } : { error: "browser_gateway_request_failed" }, error instanceof ServiceError ? error.status : 503);
     } finally { pending--; }
   }
 

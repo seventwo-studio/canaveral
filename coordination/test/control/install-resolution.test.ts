@@ -37,10 +37,10 @@ function fixture(t: TestContext) {
   machines.enroll({ id: host, credential, offer }, options.enrollmentToken);
   const req = (method: string, p: string, body = {}, principal = owner): ControlRequest => ({ method, path: p, parts: p.split('/').filter(Boolean), body, principal: () => principal, token: '', query: new URLSearchParams() });
   const machine = machines.create({ id: randomUUID(), name: 'phone', templateId: 'phone', resources: {} }, req('POST', '/v1/machines'));
-  const observe = (state: string) => machines.heartbeat(host, credential, { offer, reports: { [machine.id]: { state } } });
+  const observe = (state: string, maintenance: Record<string, unknown> = { version: 1 }) => machines.heartbeat(host, credential, { offer, reports: { [machine.id]: { state } }, maintenance });
   observe('running');
   const call = async (method: string, p: string, body = {}, principal = owner) => {
-    const request = req(method, p, body, principal), result = await artifacts.handle(request) ?? await devices.handle(request) ?? await lifecycle.handle(request);
+    const request = req(method, p, body, principal), result = await artifacts.handle(request) ?? await devices.handle(request) ?? await lifecycle.handle(request) ?? await machines.handle(request);
     assert.ok(result); return result.body as Record<string, any>;
   };
   const available = () => store.transaction(db => machines.remainingCapacity(db, host).diskGiB);
@@ -52,18 +52,18 @@ function fixture(t: TestContext) {
     reportDeviceOperations(db, host, { [id]: { state, result } }, 1000);
   });
   /** The observed case: the install was dispatched and its outcome became unknown. */
-  const uncertainInstall = async () => {
+  const uncertainInstall = async (outcome = 'unknown') => {
     const initial = available();
     await call('POST', `/v1/machines/${machine.id}/app-artifacts`, { id: artifact, format: 'apk', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
     await call('POST', `/v1/app-artifacts/${artifact}/chunks`, { offset: 0, data: bytes.subarray(0, APP_CHUNK_BYTES).toString('base64') });
     await call('POST', `/v1/app-artifacts/${artifact}/chunks`, { offset: APP_CHUNK_BYTES, data: bytes.subarray(APP_CHUNK_BYTES).toString('base64') });
     await call('POST', `/v1/app-artifacts/${artifact}/complete`);
     await call('POST', ops, install);
-    report(install.id, 'unknown', { detail: 'Dispatched work outcome requires inspection; it is not replayed.' });
+    report(install.id, outcome, { detail: 'Dispatched work outcome requires inspection; it is not replayed.' });
     return initial;
   };
   const inspection = (id = randomUUID(), args: Record<string, unknown> = { operation: install.id, artifact }) => ({ id, action: 'inspect-install', arguments: args });
-  return { store, machine, artifact, install, ops, resolve, call, report, available, observe, uncertainInstall, inspection };
+  return { store, host, machine, artifact, install, ops, resolve, call, report, available, observe, uncertainInstall, inspection };
 }
 
 test('install inspection and resolution are owner-scoped and hide another account\'s operations', async t => {
@@ -123,6 +123,38 @@ test('positive runner evidence plus an owner decision releases the reservation; 
   assert.equal(f.available(), reserved);
   assert.equal((await f.call('POST', `/v1/app-artifacts/${f.artifact}/delete`)).state, 'deleted');
   assert.equal(f.available(), initial);
+});
+
+test('drain fingerprints unconfirmed cleanup after a terminal install and allows resolution and deletion', async t => {
+  const f = fixture(t); await f.uncertainInstall('failed');
+  const look = f.inspection();
+  await f.call('POST', f.ops, look);
+  const maintenance = `/v1/hosts/${f.host}/maintenance`;
+  await f.call('POST', maintenance, { id: randomUUID() }, admin);
+  await assert.rejects(f.call('POST', f.ops, f.inspection()), (e: unknown) => e instanceof ServiceError && e.status === 409 && e.code === 'host_draining');
+  assert.equal((await f.call('POST', f.ops, look)).id, look.id);
+  // The precommitted inspection still dispatches and its receipt is accepted.
+  f.report(look.id, 'succeeded', { operation: f.install.id, artifact: f.artifact, artifactCleaned: true });
+  const state = () => f.call('GET', maintenance, {}, admin);
+  const challenge = f.observe('running').maintenance as RecordValue;
+  f.observe('running', { version: 1, proof: { drainId: challenge.drainId, challenge: challenge.challenge, idle: false, workloadsStopped: false,
+    inventory: { complete: true, assignments: [{ id: f.machine.id, storage: 'present', stopProof: 'unsupported' }], unexpected: [] }, issues: [] } });
+  const before = await state();
+  assert.equal(before.readyToResume, false);
+  assert.deepEqual(before.blockers.find((b: RecordValue) => b.id === f.install.id), {
+    kind: 'uncertainOperation', id: f.install.id, state: 'uncertain', detail: 'Uploaded app install cleanup is unconfirmed.', blocks: ['powerOff', 'resume'],
+  });
+  assert.ok(!before.blockers.some((b: RecordValue) => b.kind === 'acknowledgement'));
+  await f.call('POST', f.resolve, { id: randomUUID(), decision: 'cleanup-confirmed', inspection: look.id, reason: 'Runner confirmed staging cleanup.' });
+  const after = await state();
+  assert.ok(!after.blockers.some((b: RecordValue) => b.id === f.install.id));
+  assert.ok(after.blockers.some((b: RecordValue) => b.kind === 'acknowledgement' && b.state === 'ledgerChanged'));
+  assert.equal((await f.call('POST', `/v1/app-artifacts/${f.artifact}/delete`)).state, 'deleted');
+  f.store.transaction(db => db.prepare("UPDATE machines SET desired='stopped' WHERE id=?").run(f.machine.id));
+  f.observe('stopped');
+  const deletion = await f.call('POST', `/v1/machines/${f.machine.id}/delete`, { id: randomUUID() });
+  assert.equal(deletion.state, 'queued');
+  assert.ok((await state()).blockers.some((b: RecordValue) => b.id === deletion.id && b.kind === 'operation'));
 });
 
 test('only an administrator can abandon unproven cleanup, and machine deletion waits for that decision', async t => {

@@ -324,6 +324,43 @@ test("independent SQLite workers arbitrate overlapping rollouts and exact replay
   assert.equal(f.drainCount(), 1);
 });
 
+test("component adoption cannot restore an earlier maintenance verdict", async t => {
+  const f = fixture(t), { release, job } = await f.assigned();
+  const path = `/v1/hosts/${f.host}/maintenance`, drainId = randomUUID();
+  f.machines.handle(request("POST", path, { id: drainId }, f.options.adminToken));
+  let n = 0;
+  for (const state of ["draining", "downloading", "staged", "activating", "verifying", "succeeded"]) {
+    await f.report(job, ++n, state, state === "succeeded" ? { installedReleaseId: release.manifest.releaseId } : {});
+  }
+  const beat = (challenge?: string) => f.machines.heartbeat(f.host, f.credential, { offer: f.offer, maintenance: { version: 1,
+    ...(challenge ? { proof: { drainId, challenge, idle: true, workloadsStopped: true,
+      inventory: { complete: true, assignments: [], unexpected: [] }, issues: [] } } : {}) } }).maintenance;
+  const verdict = () => {
+    const s = f.machines.handle(request("GET", path, {}, f.options.adminToken))!.body as Json;
+    return [s.safeToPowerOff, s.readyToResume];
+  };
+  const before = beat(beat().challenge);
+  assert.deepEqual(verdict(), [true, true]);
+  const { componentFileSetDigest } = await import("../../src/updates/components.ts");
+  const target = { component: "guest" as const, machineId: randomUUID(), assignmentId: randomUUID(), bootId: randomUUID(), generation: 1 };
+  f.options.componentEvidence = { targets: () => [target], acknowledged: () => true }; f.restart();
+  const context = { jobId: job.id, attemptId: job.attemptId, installationId: f.installationId, releaseId: release.manifest.releaseId };
+  const route = `/v1/hosts/${f.host}/updates/component-`;
+  await f.call("POST", route + "plan", { ...context, targets: [target] }, f.credential);
+  assert.equal(f.phase(job.id).phase, "unknown");
+  const receipt = { ...context, target, fileSetDigest: componentFileSetDigest(release.manifest, target.component) };
+  await f.call("POST", route + "report", { ...receipt, sequence: 1, state: "intent", evidence: null }, f.credential);
+  const adopted = { ...receipt, sequence: 2, state: "adopted", evidence: { boundary: "idle-closed", acknowledgement: "a".repeat(64) } };
+  await f.call("POST", route + "report", adopted, f.credential);
+  assert.equal(f.phase(job.id).phase, "succeeded");
+  assert.deepEqual(verdict(), [false, false]);
+  const next = beat(before.challenge);
+  assert.deepEqual(verdict(), [false, false]);
+  beat(next.challenge);
+  await f.call("POST", route + "report", adopted, f.credential);
+  assert.deepEqual(verdict(), [true, true]);
+});
+
 test('component ledger requires independent evidence, exact inventory, ordered receipts and retains uncertain drains', async t => {
   const f = fixture(t), { release, job } = await f.assigned();
   let n = 0;

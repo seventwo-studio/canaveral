@@ -1,3 +1,4 @@
+import { maintenanceSummary } from "./maintenance";
 import { record } from "./types";
 import { resources } from "./catalogue";
 import type { Resources } from "./catalogue";
@@ -226,6 +227,8 @@ export function hostsResponse(value: unknown): Host[] {
     }
     return {
       ...h,
+      maintenance:
+        h.maintenance == null ? null : maintenanceSummary(h.maintenance),
       platform: h.platform ?? undefined,
       capacity: resources(h.capacity),
       effectiveCapacity:

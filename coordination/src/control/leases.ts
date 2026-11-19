@@ -1,3 +1,4 @@
+import { hostAdmissionClosed } from "./maintenance.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Requests } from "../requests.ts";
@@ -281,7 +282,7 @@ export class LegacyLeases implements ControlModule {
       if (!row) return [];
       const image = object(JSON.parse(String(row.definition)));
       const available = db.prepare("SELECT * FROM hosts WHERE enabled=1").all().some(host => {
-        if (this.store.clock() - Number(host.seen) >= 30) return false;
+        if (hostAdmissionClosed(db, String(host.id)).closed || this.store.clock() - Number(host.seen) >= 30) return false;
         const health = legacyTable(db, "host_health") ? db.prepare("SELECT report,received FROM host_health WHERE host=?").get(host.id!) : undefined;
         if (health?.report && (this.store.clock() - Number(health.received) >= 120 || !["passed", "warning"].includes(object(JSON.parse(String(health.report))).status as string))) return false;
         return leaseEligible(object(JSON.parse(String(host.offer))), image);

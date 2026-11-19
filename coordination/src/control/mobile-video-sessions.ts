@@ -1,3 +1,4 @@
+import { requireHostAdmission } from "./maintenance.ts";
 /** Administrative native-video admission; independent of unaccepted consumer leases. */
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -131,6 +132,7 @@ export class MobileVideoSessions implements ControlModule {
       const request = JSON.stringify({ fps, durationSeconds, bitRate }), hash = tokenHash(req.token);
       const old = db.prepare('SELECT * FROM mobile_video_sessions WHERE id=?').get(id) as unknown as Row | undefined;
       if (old) { if (old.machine !== m.id || old.binding !== binding(m) || old.credential !== hash || old.request !== request) return fail(409); return { body: present(db, old) }; }
+      requireHostAdmission(db, String(m.host));
       if (!['android','ios'].includes(String(object(JSON.parse(String(m.template))).os)) || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id as string)) return fail(409);
       if (db.prepare('SELECT 1 FROM mobile_video_sessions WHERE machine=? AND cleaned=0').get(m.id as string)) return fail(409);

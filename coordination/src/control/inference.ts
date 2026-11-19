@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { updateDraining } from "../updates/drain.ts";
+import { hostAdmissionClosed, requireHostAdmission } from "./maintenance.ts";
 import { readFileSync, statfsSync } from "node:fs";
 import { platform } from "node:os";
 import type { DatabaseSync } from "node:sqlite";
@@ -263,7 +263,7 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
           const inventory = db.prepare("SELECT * FROM hosts WHERE id NOT IN (SELECT id FROM retired_runners) ORDER BY id").all() as unknown as Array<{ id: string; offer: string; seen: number; enabled: number }>;
           return { body: { models: inventory.flatMap(host => {
             const offer = object(JSON.parse(host.offer));
-            return offer.inference === undefined ? [] : inferenceOffer(offer.inference).models.map(model => ({ ...model, hostId: host.id, online: store.clock() - host.seen < INFERENCE_LEASE_SECONDS, accepting: Boolean(host.enabled) }));
+            return offer.inference === undefined ? [] : inferenceOffer(offer.inference).models.map(model => ({ ...model, hostId: host.id, online: store.clock() - host.seen < INFERENCE_LEASE_SECONDS, accepting: !hostAdmissionClosed(db, host.id).closed }));
           }) } };
         }
         if (collection && method === "POST") {
@@ -273,10 +273,11 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
             if (JSON.stringify(inferenceRequest(JSON.parse(old.request))) !== JSON.stringify(input)) throw new ServiceError("Request identity is already used for another inference specification.", 409);
             return { body: jobView(db, old, store.clock()) };
           }
+          if (input.hostId) requireHostAdmission(db, input.hostId);
           const candidates: Array<{ score: PlacementScore; host: string; model: InferenceModel }> = [];
           const hosts = db.prepare("SELECT * FROM hosts WHERE enabled=1 AND id NOT IN (SELECT id FROM retired_runners) ORDER BY id").all() as unknown as Array<{ id: string; offer: string; seen: number }>;
           for (const host of hosts) {
-            if (updateDraining(db, host.id)) continue;
+            if (hostAdmissionClosed(db, host.id).closed) continue;
             if (store.clock() - host.seen >= INFERENCE_LEASE_SECONDS || (input.hostId !== undefined && input.hostId !== host.id)) continue;
             const offer = object(JSON.parse(host.offer));
             if (offer.inference === undefined) continue;

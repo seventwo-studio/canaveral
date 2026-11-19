@@ -79,6 +79,26 @@ export class KubevirtProvider {
     validName(this.config.namespace); for (const value of list(this.config.templates)) { const image = object(value); if (image.os === "macos") throw new ServiceError("macOS guests must run on Apple hosts."); await this.kubectl(["get", "pvc", validName(image.pvc), "-o", "name"]); }
     return this.kubectl(["get", "virtualmachines.kubevirt.io", "-o", "name"]);
   }
+  async maintenanceStorage(machine: Data, _image: Data, folder: string): Promise<"present" | "absent" | "unknown" | "notMaterialized"> {
+    const name = this.name(machine), namespace = validName(this.config.namespace);
+    const probe = (kind: string) => this.kubectl(["get", kind, name, "--ignore-not-found", "-o", "json"], { timeoutMs: 5000 });
+    const raw = await probe("pvc");
+    if (!raw) {
+      if (["kubevirt-create.json", "kubevirt-owner.json"].some(file => present(safePath(join(folder, file))))) return "absent";
+      return await probe("virtualmachine") || await probe("virtualmachineinstance") ? "unknown" : "notMaterialized";
+    }
+    const pvc = object(JSON.parse(raw)), metadata = meta(pvc);
+    if (pvc.apiVersion !== "v1" || pvc.kind !== "PersistentVolumeClaim" || metadata.namespace !== namespace ||
+        metadata.name !== name || typeof metadata.uid !== "string" || !metadata.uid || metadata.deletionTimestamp) return "unknown";
+    const owner = loadOwnership(machine, namespace, folder), vmRaw = await probe("virtualmachine");
+    if (!vmRaw) return "unknown";
+    const vm = object(JSON.parse(vmRaw));
+    if (!matchesVM(vm, owner)) return "unknown";
+    const volumes = list(object(object(object(vm.spec).template).spec).volumes).map(object);
+    if (!volumes.some(volume => volume.name === "root" && dict(volume.dataVolume).name === name)) return "unknown";
+    const phase = dict(pvc.status).phase;
+    return phase === "Bound" ? "present" : phase === "Lost" ? "absent" : "unknown";
+  }
   async reconcile(machine: Data, image: Data, folder: string): Promise<Data> {
     safePath(folder); desired(machine); if (present(join(folder, "deletion.json"))) throw new ServiceError("Deletion intent blocks KubeVirt reconciliation.");
     const namespace = validName(this.config.namespace); const name = this.name(machine);

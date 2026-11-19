@@ -207,3 +207,7 @@ Record the exact source commit, signed release ID/digest, target installation ID
 7. Only after target-specific acceptance, select a small explicit host/runner list for a canary rollout. Inspect each rollout receipt before widening the list. Queued cancellation does not undo delivered work. Fleet completion requires evidence for every intended component/target, not merely host success.
 
 Record native VM boot, launch-medium delivery, device control, inference and fleet results independently from portable tests. Missing provider fencing, Windows ACL acceptance or platform admission remains a failed/open gate; never change eligibility to make an acceptance run pass.
+
+## Manual maintenance during updates
+
+Manual maintenance, managed updates and the legacy accepting switch close admission independently. Completing an update clears only its update fence. Resuming manual maintenance clears only the manual fence. Managed updates remain available during manual maintenance so an older agent can acquire maintenance proof support.

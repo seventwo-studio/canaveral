@@ -5,11 +5,13 @@ import { serveMobileVideo } from './mobile-video.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { opendir } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createSecureContext } from "node:tls";
 import { isAbsolute, join, resolve } from "node:path";
+import { setImmediate as yieldWork } from "node:timers/promises";
 import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { enabledRuntimes, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
@@ -73,8 +75,10 @@ export interface HostDependencies {
 interface Runtime extends NativeProvider {
   guestHelperBinding?(machine: RecordValue, image: RecordValue, folder: string, authority: OwnedGuestAuthority): Promise<GuestHelperBinding>;
   closeMachine?(id: string): Promise<void>;
-  updateStopped?(machine: RecordValue, image: RecordValue, folder: string): Promise<boolean>;
-  confirmExecutionStopped?(machine: RecordValue, folder: string): RecordValue | null;
+  updateStopped?(machine: RecordValue, image: RecordValue, folder: string, readOnly?: boolean): Promise<boolean>;
+  confirmExecutionStopped?(machine: RecordValue, folder: string, readOnly?: boolean): RecordValue | null;
+  deletionFingerprint?(machine: RecordValue, image: RecordValue): string;
+  maintenanceStorage?(machine: RecordValue, image: RecordValue, folder: string): Promise<StoragePresence>;
   readonly state?: string;
   readonly config?: RecordValue;
   operate?(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, authorized?: () => boolean, handler?: (request: import('./providers/mobile.ts').DeviceRequest) => Promise<RecordValue>): Promise<RecordValue>;
@@ -96,6 +100,16 @@ interface Runtime extends NativeProvider {
   resourceReport?(assignments: RecordValue[]): Promise<RecordValue>;
 }
 interface DurableWork { fingerprint: string; state: string; report?: RecordValue }
+interface MaintenanceFence { drainId: string; challenge: string }
+type StoragePresence = "present" | "absent" | "unknown" | "unsupported" | "notMaterialized";
+interface MaintenanceProof extends MaintenanceFence {
+  idle: boolean; workloadsStopped: boolean;
+  inventory: { complete: boolean; assignments: { id: string; storage: StoragePresence; stopProof: "native" | "unsupported" }[]; unexpected: string[] };
+  issues: string[];
+}
+type IdleReceipt = Pick<MaintenanceProof, "idle" | "workloadsStopped">;
+const NOT_IDLE = { idle: false, workloadsStopped: false };
+const MAX_HOST_MESSAGE = 8 * 1_048_576;
 const TERMINAL = new Set(["succeeded", "failed", "unknown", "cancelled"]);
 const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile", "leaseClockHelper"]);
 
@@ -114,7 +128,7 @@ export function hostTransport(config: HostConfig): HostTransport {
     if (!path.startsWith("/v1/") || path.includes("?") && !(method === "GET" && /^\/v1\/updates\/artifacts\/[a-f0-9]{64}\?jobId=[a-f0-9-]{36}&offset=(0|[1-9][0-9]*)&length=[1-9][0-9]*$/.test(path))) throw new ServiceError("Invalid host API path.", 400);
     secret(token);
     const data = method === "GET" ? undefined : Buffer.from(JSON.stringify(body));
-    if (data && data.length > 8 * 1_048_576) throw new ServiceError("Host report exceeds the request bound.", 413);
+    if (data && data.length > MAX_HOST_MESSAGE) throw new ServiceError("Host report exceeds the request bound.", 413);
     return new Promise((accept, reject) => {
       let settled = false;
       const finish = (error: Error | undefined, result?: RecordValue): void => { if (settled) return; settled = true; clearTimeout(deadline); if (error) reject(error); else accept(result!); };
@@ -123,7 +137,7 @@ export function hostTransport(config: HostConfig): HostTransport {
         const chunks: Buffer[] = []; let size = 0;
         response.on("data", (chunk: Buffer) => {
           size += chunk.length;
-          if (size > 8 * 1_048_576) { response.destroy(); finish(new ServiceError("Controller reply exceeds its bound.", 413)); } else chunks.push(chunk);
+          if (size > MAX_HOST_MESSAGE) { response.destroy(); finish(new ServiceError("Controller reply exceeds its bound.", 413)); } else chunks.push(chunk);
         });
         response.once("error", () => finish(unknownOutcome("Controller response was interrupted; retry only the saved intent.")));
         response.once("end", () => {
@@ -258,6 +272,10 @@ export class HostRunner {
   private readonly processBirth = Date.now() / 1000 - process.uptime();
   private cleanupDue = new Map<string, number>();
   private machineCursor = 0;
+  private maintenanceFence: MaintenanceFence | null = null;
+  private maintenanceChallenge: MaintenanceFence | null = null;
+  private maintenanceProof: { challenge: MaintenanceFence; proof: MaintenanceProof } | undefined;
+  private inspectingMaintenance = false;
   private updateAdmissionBlocked = false;
   private updateEpoch = 0;
   private updateExternalWork = 0;
@@ -384,26 +402,49 @@ export class HostRunner {
   }
   get guestAccess(): GuestAccess {
     return {
-      control: (m,i,f,o) => { const b=this.accessBackend(m); if (!b.control) throw new ServiceError("Access unsupported.",409,{code:"capability_unsupported"}); return b.control(m,i,f,o); },
-      streamUpload: (m,i,f,p,a,r,n,ok) => { const b=this.accessBackend(m); if (!b.streamUpload) throw new ServiceError("Upload unsupported.",409,{code:"capability_unsupported"}); return b.streamUpload(m,i,f,p,a,r,n,ok); },
-      streamDownload: (m,i,f,p,a,ok) => { const b=this.accessBackend(m); if (!b.streamDownload) throw new ServiceError("Download unsupported.",409,{code:"capability_unsupported"}); return b.streamDownload(m,i,f,p,a,ok); },
-      desktop: (m,i,f) => { const b=this.accessBackend(m); if (!b.desktop) throw new ServiceError("Desktop unsupported.",409,{code:"capability_unsupported"}); return b.desktop(m,i,f); },
+      control: (m,i,f,o) => this.localWork(async () => { const b=this.accessBackend(m); if (!b.control) throw new ServiceError("Access unsupported.",409,{code:"capability_unsupported"}); return b.control(m,i,f,o); }),
+      streamUpload: (m,i,f,p,a,r,n,ok) => this.localWork(async () => { const b=this.accessBackend(m); if (!b.streamUpload) throw new ServiceError("Upload unsupported.",409,{code:"capability_unsupported"}); return b.streamUpload(m,i,f,p,a,r,n,ok); }),
+      streamDownload: (m,i,f,p,a,ok) => this.localConnection(async () => { const b=this.accessBackend(m); if (!b.streamDownload) throw new ServiceError("Download unsupported.",409,{code:"capability_unsupported"}); return b.streamDownload(m,i,f,p,a,ok); }),
+      desktop: (m,i,f) => this.localConnection(async () => { const b=this.accessBackend(m); if (!b.desktop) throw new ServiceError("Desktop unsupported.",409,{code:"capability_unsupported"}); return b.desktop(m,i,f); }),
     };
   }
   get stopping(): boolean { return this.stopController.signal.aborted; }
+  /** Use at local connector admission only. Established work keeps its own authority. */
+  beginLocalWork(committed = false): () => void {
+    if (!committed && this.maintenanceFence) throw new ServiceError("Host maintenance admission is fenced.", 409, { code: "host_draining" });
+    this.updateEpoch++; this.updateExternalWork++;
+    let done = false;
+    return () => { if (!done) { done = true; this.updateExternalWork--; } };
+  }
+  private async localWork<T>(work: () => Promise<T>, committed = false): Promise<T> {
+    const done = this.beginLocalWork(committed);
+    try { return await work(); } finally { done(); }
+  }
+  private async localConnection<T extends { close(): void | Promise<void> }>(open: () => Promise<T>): Promise<T> {
+    const done = this.beginLocalWork();
+    try {
+      const connection = await open();
+      return new Proxy(connection, { get(target, key) {
+        if (key === "close") return async () => { await target.close(); done(); };
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    } catch (error) { done(); throw error; }
+  }
   async accessControl(machineId: string, operation: RecordValue): Promise<RecordValue> {
     if (this.updateAdmissionBlocked) throw new ServiceError("Host update admission is fenced.", 409);
-    const id = identifier(machineId), machine = this.assignments.find(m => m.id === id);
-    if (!machine || !this.machineAuthorized(id)) throw new ServiceError("Current assignment access is unavailable.", 410);
-    const { runtime, image, folder } = this.context(machine);
-    this.updateEpoch++; this.updateExternalWork++;
-    try { return await assignmentAccess(machine, folder, async () => {
-      if (!this.machineAuthorized(id)) throw new ServiceError("Assignment access ended.", 410);
-      const backend = this.accessBackend(machine);
-      if (backend.control) return backend.control(machine, image, folder, operation);
-      if (backend === runtime && runtime.operate) { const report = await runtime.operate(machine, image, folder, { ...operation, id: operation.id ?? randomUUID(), expiresAt: operation.expiresAt ?? this.clock.wall() + 30 }, () => this.machineAuthorized(id)); if (report.state !== "succeeded") throw unknownOutcome("Guest operation was not confirmed."); return object(report.result); }
-      throw new ServiceError("Verified assignment access is unavailable.", 409, { code: "capability_unsupported" });
-    }); } finally { this.updateExternalWork--; }
+    return this.localWork(async () => {
+      const id = identifier(machineId), machine = this.assignments.find(m => m.id === id);
+      if (!machine || !this.machineAuthorized(id)) throw new ServiceError("Current assignment access is unavailable.", 410);
+      const { runtime, image, folder } = this.context(machine);
+      return assignmentAccess(machine, folder, async () => {
+        if (!this.machineAuthorized(id)) throw new ServiceError("Assignment access ended.", 410);
+        const backend = this.accessBackend(machine);
+        if (backend.control) return backend.control(machine, image, folder, operation);
+        if (backend === runtime && runtime.operate) { const report = await runtime.operate(machine, image, folder, { ...operation, id: operation.id ?? randomUUID(), expiresAt: operation.expiresAt ?? this.clock.wall() + 30 }, () => this.machineAuthorized(id)); if (report.state !== "succeeded") throw unknownOutcome("Guest operation was not confirmed."); return object(report.result); }
+        throw new ServiceError("Verified assignment access is unavailable.", 409, { code: "capability_unsupported" });
+      });
+    });
   }
   private imageSettings(metadata: RecordValue): ImportOptions {
     const spec = specification(metadata), kind = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? runtimeFor(this.config, spec) : String(this.config.provider);
@@ -425,10 +466,9 @@ export class HostRunner {
     }
     return { memoryStep: kind === "apple" ? 1024 : 1, ...(spec.guestAccess ? { prepare: object(prepare) } : {}) };
   }
-  async importImage(metadata: RecordValue, source: ImageReader, size: number, authorized: () => boolean): Promise<RecordValue> {
+  async importImage(metadata: RecordValue, source: ImageReader, size: number, authorized: () => boolean, committed = false): Promise<RecordValue> {
     if (this.updateAdmissionBlocked) throw new ServiceError("Host update admission is fenced.", 409);
-    this.updateEpoch++; this.updateExternalWork++;
-    try { return await this.library.importStream(metadata, source, size, authorized, this.imageSettings(metadata)); } finally { this.updateExternalWork--; }
+    return this.localWork(() => this.library.importStream(metadata, source, size, authorized, this.imageSettings(metadata)), committed);
   }
   private async imageWork(task: RecordValue, context: HostWorkContext): Promise<RecordValue> {
     if (task.kind === "registry") return { ...await this.library.registryImport(task, {
@@ -463,13 +503,16 @@ export class HostRunner {
     if (!this.guest && installed.some(t => t.guestAccess)) this.guest = createGuestAccess(this.config, this.state);
   }
   context(machine: RecordValue): { runtime: Runtime; image: RecordValue; folder: string } {
+    const result = this.runtimeContext(machine); noLinks(result.folder); return result;
+  }
+  private runtimeContext(machine: RecordValue): { runtime: Runtime; image: RecordValue; folder: string } {
     const id = identifier(machine.id), template = object(machine.template);
     const image = (this.config.templates as RecordValue[]).find(t => t.id === machine.templateId && t.revision === template.revision && t.arch === template.arch);
     if (!image || legacyDigest(normalizeTemplate(image)) !== legacyDigest(normalizeTemplate(template))) throw new ServiceError("Assigned immutable template no longer matches this host.", 409);
     const name = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? runtimeFor(this.config, image) : String(this.config.provider);
     const runtime = this.runtimes.get(name);
     if (!runtime) throw new ServiceError("Assignment runtime is unavailable.", 409, { code: "capability_unsupported" });
-    const folder = join(runtime.state ?? this.state, "machines", id); noLinks(folder);
+    const folder = join(runtime.state ?? this.state, "machines", id);
     // Mobile storage binds the full public template, including normalized defaults.
     // Keep private host settings while giving the provider that exact definition.
     return { runtime, image: structuredClone(['android','ios'].includes(String(image.os)) ? { ...image, ...normalizeTemplate(image) } : image), folder };
@@ -483,11 +526,20 @@ export class HostRunner {
     const identity = readRecord(join(this.state, "identity.json"));
     if (identity.id !== this.identity.id || identity.orchestrator !== this.identity.orchestrator) throw new ServiceError("Persisted host identity binding changed.", 409);
     this.identity.credential = secret(identity.credential);
-    const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, ...(this.resourceSample ? { resources: this.resourceSample } : {}) }, this.identity.credential, this.stopController.signal);
+    const pending = this.maintenanceProof;
+    const proof = pending && pending.challenge === this.maintenanceChallenge && this.fresh() ?
+      { ...pending.proof, ...(!this.idleEligible() ? NOT_IDLE : {}) } : undefined;
+    // Dispatch can consume a challenge even if its response is lost.
+    this.maintenanceChallenge = null;
+    this.maintenanceProof = undefined;
+    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}) };
+    if (proof && Buffer.byteLength(JSON.stringify(body)) > MAX_HOST_MESSAGE) delete body.maintenance.proof;
+    const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, body, this.identity.credential, this.stopController.signal);
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
     const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions') };
+    const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
@@ -500,12 +552,15 @@ export class HostRunner {
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
     this.assignments = machines; this.queues = queues; this.lastContact = sent;
+    if (maintenance !== undefined) this.maintenanceFence = maintenance;
+    this.maintenanceChallenge = maintenance ?? null;
     for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports]] as const) {
       const ids = new Set(queues[key].map(r => String(r.id)));
       for (const id of Object.keys(sentMap)) if (!ids.has(id)) target.delete(id);
     }
     if (typeof response.checksRequestedAt === "number" && response.checksRequestedAt > this.lastCheckRequest) { this.lastCheckRequest = response.checksRequestedAt; this.checkRequested = true; }
     this.saveReports(); this.cancelUnauthorized();
+    this.inspectMaintenance();
   }
   fresh(): boolean {
     try { return !this.stopController.signal.aborted && contactFresh(this.lastContact, this.clock.now()); }
@@ -857,35 +912,148 @@ export class HostRunner {
   get updateAdmissionFenced(): boolean { return this.updateAdmissionBlocked; }
   fenceUpdateAdmission(): void { this.updateAdmissionBlocked = true; }
   resumeUpdateAdmission(): void { this.updateAdmissionBlocked = false; }
-  async updateIdle(): Promise<{ idle: boolean; workloadsStopped: boolean }> {
-    const negative = { idle: false, workloadsStopped: false };
-    const eligible = (): boolean => this.fresh() && !this.closed && this.active.size === 0 && this.updateExternalWork === 0 &&
+  private idleEligible(): boolean {
+    return this.fresh() && !this.closed && this.active.size === 0 && this.updateExternalWork === 0 &&
       Object.values(this.queues).every(queue => queue.length === 0) &&
       [this.reports, this.deviceReports, this.inferenceReports, this.imageReports, this.sessionReports].every(reports =>
         [...reports.values()].every(r => ["stopped", "succeeded", "failed", "cancelled"].includes(String(r.state)) && (r.stopped === undefined || r.stopped === true) && !["pending", "unknown"].includes(String(r.cleanup))));
-    if (!eligible()) return negative;
+  }
+  private retainedAssignments(current: RecordValue[]): Map<string, RecordValue> {
+    const retained = new Map(this.updateAssignments);
+    for (const [id, record] of this.guard.records) {
+      if (record.retired) retained.delete(id);
+      else if (!retained.has(id) || record.fenced) retained.set(id, record.fenced ? { ...record.machine, desired: "stopped" } : record.machine);
+    }
+    for (const machine of current) retained.set(String(machine.id), machine);
+    return retained;
+  }
+  private machineRoots(): Set<string> {
+    return new Set([this.state, ...[...this.runtimes.values()].map(r => r.state ?? this.state)].map(state => resolve(state, "machines")));
+  }
+  private async inspectStopped(retained: Map<string, RecordValue>, readOnly = false): Promise<IdleReceipt> {
+    if (!this.idleEligible() || [...retained.values()].some(m => m.desired !== "stopped")) return NOT_IDLE;
+    const epoch = this.updateEpoch;
+    let inspected = 0;
+    for (const machine of retained.values()) {
+      if (readOnly && inspected++ % 32 === 0) await yieldWork();
+      if (epoch !== this.updateEpoch || !this.fresh()) return NOT_IDLE;
+      const { runtime, image, folder } = this.context(machine);
+      if (!helpersClosed(machine, folder)) return NOT_IDLE;
+      const stopped = runtime.updateStopped ? await runtime.updateStopped(machine, image, folder, readOnly) :
+        runtime.confirmExecutionStopped?.(machine, folder, readOnly)?.executionStopped === true;
+      if (!stopped || epoch !== this.updateEpoch || !this.fresh()) return NOT_IDLE;
+    }
+    return this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
+  }
+  async updateIdle(): Promise<IdleReceipt> {
+    if (!this.idleEligible()) return NOT_IDLE;
     const epoch = this.updateEpoch;
     const retained = new Map(this.updateAssignments);
     for (const machine of this.guard.assignments(this.assignments)) retained.set(String(machine.id), machine);
-    if ([...retained.values()].some(m => m.desired !== "stopped")) return negative;
     try {
       // Unknown older local assignment directories cannot be inferred stopped from an empty heartbeat.
-      for (const state of new Set([this.state, ...[...this.runtimes.values()].map(r => r.state ?? this.state)])) {
-        const root = join(state, "machines"); noLinks(root);
-        if (present(root) && readdirSync(root).some(id => !retained.has(id) && !this.guard.records.get(id)?.retired)) return negative;
+      for (const root of this.machineRoots()) {
+        noLinks(root);
+        if (present(root) && readdirSync(root).some(id => !retained.has(id) && !this.guard.records.get(id)?.retired)) return NOT_IDLE;
       }
-      for (const machine of retained.values()) {
-        const { runtime, image, folder } = this.context(machine);
-        if (!helpersClosed(machine, folder)) return negative;
-        const stopped = runtime.updateStopped ? await runtime.updateStopped(machine, image, folder) :
-          runtime.confirmExecutionStopped?.(machine, folder)?.executionStopped === true;
-        if (!stopped || epoch !== this.updateEpoch || !eligible()) return negative;
-      }
+      if (!(await this.inspectStopped(retained)).workloadsStopped) return NOT_IDLE;
       // Only stopped assignments reach helper closure; a live VM is never closed for an update.
       await this.sweepAccess(new Set());
       for (const machine of retained.values()) await this.context(machine).runtime.closeShells?.(machine);
-    } catch { return negative; }
-    return epoch === this.updateEpoch && eligible() ? { idle: true, workloadsStopped: true } : negative;
+    } catch { return NOT_IDLE; }
+    return epoch === this.updateEpoch && this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
+  }
+  private inspectMaintenance(): void {
+    const challenge = this.maintenanceChallenge;
+    if (this.closed || !challenge || this.inspectingMaintenance) return;
+    this.inspectingMaintenance = true;
+    // Inventory and provider probes never run on the heartbeat's critical path.
+    void yieldWork().then(async () => {
+      if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
+      const proof = await this.collectMaintenance(challenge);
+      if (proof && challenge === this.maintenanceChallenge && this.fresh()) this.maintenanceProof = { challenge, proof };
+    }).catch(() => this.log("Host maintenance inspection failed; no proof was sent.")).finally(() => {
+      this.inspectingMaintenance = false;
+      if (challenge !== this.maintenanceChallenge) this.inspectMaintenance();
+    });
+  }
+  private async collectMaintenance(challenge: MaintenanceFence): Promise<MaintenanceProof | undefined> {
+    const current = this.assignments, retained = this.retainedAssignments(current);
+    const assignments: MaintenanceProof["inventory"]["assignments"] = [];
+    const knownFolders = new Set<string>(), knownStorage = new Set<string>(), knownQuarantines = new Set<string>();
+    const unexpected = new Set<string>(), issues: string[] = [];
+    let complete = true, entries = 0;
+    for (const machine of current) {
+      if (assignments.length % 32 === 0) await yieldWork();
+      if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
+      const id = identifier(machine.id);
+      let storage: StoragePresence = "unknown", stopProof: "native" | "unsupported" = "unsupported";
+      try {
+        const { runtime, image, folder } = this.runtimeContext(machine);
+        knownFolders.add(resolve(folder));
+        const root = maintenanceStorageRoot(runtime);
+        if (root) {
+          knownStorage.add(join(root, id));
+          if (["apple", "libvirt", "android"].includes(runtime.kind)) {
+            for (const intent of runtime.kind === "android" ? [machine.deletion] : [machine.deletion, machine.leaseCleanup]) {
+              const receipt = object(intent ?? {});
+              if (["queued", "pending", "running", "blocked", "unknown", "uncertain"].includes(String(receipt.state))) {
+                knownQuarantines.add(join(root, `.removing-${id}-${identifier(receipt.id)}`));
+              }
+            }
+          }
+        }
+        if (runtime.updateStopped || runtime.confirmExecutionStopped) stopProof = "native";
+        storage = await maintenanceStorage(machine, image, folder, runtime);
+      } catch { /* A broken or foreign path cannot prove storage presence or absence. */ }
+      assignments.push({ id, storage, stopProof });
+    }
+    // A deleted administrative assignment can leave a journal in its local
+    // directory. Only a matching completion receipt and absent backing storage
+    // explain it after the controller stops delivering that assignment.
+    const currentIds = new Set(assignments.map(a => a.id));
+    let checkedRetirements = 0;
+    for (const [id, machine] of retained) {
+      if (currentIds.has(id) || !machine.deletion) continue;
+      if (checkedRetirements++ % 32 === 0) await yieldWork();
+      if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
+      try {
+        const { runtime, image, folder } = this.context(machine), root = runtime.config?.storage;
+        const receipt = readOwnedRecord(join(folder, "deletion.json"));
+        const fingerprint = runtime.deletionFingerprint?.(machine, image) ?? assignmentFingerprint(machine);
+        if (receipt.state !== "complete" || receipt.id !== object(machine.deletion).id || (receipt.machineId ?? receipt.machine_id) !== id || receipt.fingerprint !== fingerprint ||
+            typeof root !== "string" || !isAbsolute(root) || ownedDirectory(join(root, id))) continue;
+        knownFolders.add(resolve(folder)); retained.delete(id);
+      } catch { /* Retain assignments with unconfirmed retirement. */ }
+    }
+    const journalRoots = this.machineRoots(), storageRoots = new Set([...this.runtimes.values()].map(maintenanceStorageRoot).filter(root => root !== undefined));
+    for (const root of new Set([...journalRoots, ...storageRoots])) {
+      try {
+        if (!ownedDirectory(root)) continue;
+        const before = lstatSync(root);
+        for await (const entry of await opendir(root)) {
+          if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
+          if (++entries > 20_000) { complete = false; break; }
+          if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+          const path = join(root, entry.name);
+          const quarantine = storageRoots.has(root) && removalQuarantine.test(entry.name);
+          if (quarantine && entry.isDirectory() && knownQuarantines.has(path)) continue;
+          // Retirement only explains an old journal, never backing storage that still exists.
+          const unexplainedJournal = journalRoots.has(root) && !knownFolders.has(path) && !this.guard.records.get(entry.name)?.retired;
+          const unexplainedStorage = storageRoots.has(root) && !knownStorage.has(path) && storageId.test(entry.name);
+          if (!quarantine && !unexplainedJournal && !unexplainedStorage) continue;
+          if (unexpected.size >= 100 && !unexpected.has(entry.name) || entry.name.length > 200) { complete = false; break; }
+          unexpected.add(entry.name);
+        }
+        noLinks(root);
+        const after = lstatSync(root);
+        if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeMs !== before.mtimeMs) complete = false;
+      } catch { complete = false; }
+      if (!complete) { issues.push("Local journal or provider storage inventory could not be completed."); break; }
+    }
+    const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
+      await this.inspectStopped(retained, true) : NOT_IDLE;
+    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
   }
   async quiesceForUpdate(): Promise<{ idle: boolean; workloadsStopped: boolean; quiesced: boolean }> {
     this.fenceUpdateAdmission();
@@ -939,6 +1107,68 @@ export class HostRunner {
     if (!failed) { this.lock?.close(); this.lock = undefined; }
     else { void Promise.allSettled([...this.loops, ...[...this.active.values()].map(w => w.promise)]).then(() => { this.lock?.close(); this.lock = undefined; }); throw new ServiceError("Host shutdown was not fully confirmed.", 409, { code: "host_shutdown_incomplete", retryable: false, outcome: "unknown" }); }
   }
+}
+function maintenanceResponse(value: unknown): MaintenanceFence | null {
+  const envelope = object(value);
+  if (envelope.version === 1) {
+    if (envelope.phase === "open" && envelope.drainId === null && Object.keys(envelope).length === 3) return null;
+    if (envelope.phase === "draining" || envelope.phase === "resumed") {
+      const drainId = identifier(envelope.drainId);
+      if (drainId === envelope.drainId) {
+        if (envelope.phase === "resumed" && Object.keys(envelope).length === 3) return null;
+        if (envelope.phase === "draining" && Object.keys(envelope).length === 4 && typeof envelope.challenge === "string" && /^[a-f0-9]{64}$/.test(envelope.challenge)) return { drainId, challenge: envelope.challenge };
+      }
+    }
+  }
+  throw new ServiceError("Invalid host maintenance response.", 400);
+}
+function ownedDirectory(path: string): boolean {
+  noLinks(path);
+  if (!present(path)) return false;
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || (process.getuid && stat.uid !== process.getuid()) || stat.mode & 0o022) throw new ServiceError("Expected an owned machine directory.", 409);
+  return true;
+}
+function readOwnedRecord(path: string): RecordValue {
+  noLinks(path);
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.nlink !== 1 || (process.getuid && stat.uid !== process.getuid()) || stat.mode & 0o022) throw new ServiceError("Expected an owned machine record.", 409);
+  return readRecord(path, 4096);
+}
+const storageIdPattern = "[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}";
+const storageId = new RegExp(`^${storageIdPattern}$`);
+const removalQuarantine = new RegExp(`^\\.removing-${storageIdPattern}-${storageIdPattern}$`);
+function maintenanceStorageRoot(runtime: Runtime): string | undefined {
+  const root = runtime.config?.storage;
+  if (["apple", "hyperv", "libvirt", "android", "ios"].includes(runtime.kind) && typeof root === "string" && isAbsolute(root)) return resolve(root);
+}
+async function maintenanceStorage(machine: RecordValue, image: RecordValue, folder: string, runtime: Runtime): Promise<StoragePresence> {
+  const hasAssignment = ownedDirectory(folder), fingerprint = assignmentFingerprint(machine);
+  if (hasAssignment) {
+    const owner = readOwnedRecord(join(folder, "assignment.json"));
+    if (owner.fingerprint !== fingerprint || (owner.leaseId ?? null) !== (machine.lease ? object(machine.lease).id : null)) return "unknown";
+  }
+  const root = runtime.config?.storage;
+  if (runtime.maintenanceStorage) return runtime.maintenanceStorage(machine, image, folder);
+  const id = identifier(machine.id);
+  const disk = runtime.kind === "apple" ? join(id.toUpperCase(), "disk.img") : runtime.kind === "hyperv" ? "disk.vhdx" : undefined;
+  if (!disk) return "unsupported";
+  if (typeof root !== "string" || !isAbsolute(root)) return "unknown";
+  const storage = join(root, id);
+  if (!ownedDirectory(storage)) return "absent";
+  if (readOwnedRecord(join(storage, "canaveral-owner.json")).fingerprint !== fingerprint) return "unknown";
+  const path = join(storage, disk);
+  noLinks(path);
+  if (!present(path)) {
+    if (runtime.kind === "apple" && !present(join(storage, id.toUpperCase())) &&
+        !["apple-prepare.json", "guest-launch.json"].some(file => present(join(storage, file))) &&
+        !["apple-boot-request.json", "provisioning.json"].some(file => present(join(folder, file)))) return "notMaterialized";
+    if (runtime.kind === "hyperv" &&
+        !["hyperv-owner.json", "hyperv-operation.json"].some(file => present(join(folder, file)))) return "notMaterialized";
+    return "absent";
+  }
+  const stat = lstatSync(path);
+  return stat.isFile() && stat.nlink === 1 && (!process.getuid || stat.uid === process.getuid()) ? "present" : "unknown";
 }
 function objectOrStatus(value: unknown): string { if (value === false) return "failed"; if (value && typeof value === "object" && "status" in value) return String((value as RecordValue).status); return "passed"; }
 function records(value: unknown, label: string): RecordValue[] { if (!Array.isArray(value) || value.length > 10_000) throw new ServiceError(`Invalid ${label}.`, 400); return value.map(v => { const r = object(v); identifier(r.id); return r; }); }

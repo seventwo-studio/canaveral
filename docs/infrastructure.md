@@ -439,3 +439,17 @@ blocks mapped accounting with 503, including mapping while its work cannot be
 proved absent. Persisted sources are not automatically removed on restart;
 removing an extension requires an operator-owned migration after positive cleanup.
 These are controller fixture guarantees, not native execution acceptance.
+
+## Planned host maintenance
+
+Use an administrator credential. Record the host ID and a UUID for the drain.
+
+1. Run `canaveral maintenance begin HOST --id UUID --reason TEXT`. The reason is optional. The CLI generates and prints a UUID if omitted. Retry an interrupted request with the same UUID, host and reason.
+2. Watch `canaveral maintenance status HOST`. Admission closes for new work. Existing work finishes. Stop persistent machines explicitly, release leases and wait for receipts. Check the action beside each blocker in the dashboard. Upgrade an old agent using a managed update during the drain.
+3. Read the current verdict immediately before power off or reboot. Safe to power off covers Canaveral-managed workloads on this direct host. Unsupported proof requires independent verification and keeps the verdict unsafe. A KubeVirt pool cannot establish safety for physical nodes.
+4. Bring the same host back with its identity and storage intact. Wait for a fresh runner confirmation and a complete inventory. Investigate missing storage, unexpected resources and uncertain operations before resuming.
+5. When readyToResume is true, run `canaveral maintenance resume HOST DRAIN_ID --request-id UUID` with a new request UUID. Reuse it on retries. Check the phase is resumed and inspect remaining admission owners. To cancel maintenance on the same boot, reconcile and resume in the same way.
+
+A resume refusal (409 maintenance_blocked) includes current blockers. Resolve those marked for resume and retry. Power-off-only blockers allow resume.
+
+Maintenance inventory checks the assigned KubeVirt root PVC by name in the configured namespace. A missing PVC or failed inspection blocks resume for materialized assignments. Unsupported storage inspection blocks only the power-off verdict. Apple and libvirt removal quarantines count as unexpected resources unless a current assignment has a matching unfinished deletion or lease cleanup.

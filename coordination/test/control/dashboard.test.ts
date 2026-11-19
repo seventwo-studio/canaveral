@@ -72,6 +72,34 @@ async function fixture(connectors: DashboardConnectors = {}, intervalMs = 1000) 
   return { url, calls, state, mutations, async close() { await dashboard.close(); await close(upstream); } };
 }
 
+test("maintenance gateway forwards null status and blocked resume details only on their routes", async t => {
+  const status = { readyToResume: false, blockers: [{ kind: "acknowledgement" }] }, drain = randomUUID();
+  const path = `/v1/hosts/${host}/maintenance`;
+  const remote = createServer((request, response) => {
+    const blocked = request.url?.endsWith("/resume") || request.url?.endsWith("/accepting");
+    response.writeHead(blocked ? 409 : 200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(blocked ? { error: "Blocked", code: "maintenance_blocked", status } : null));
+  });
+  const upstream = await listen(remote);
+  const dashboard = await startDashboard({ orchestratorUrl: upstream, listen: { host: "127.0.0.1", port: 0 } });
+  t.after(async () => { await dashboard.close(); await close(remote); });
+  const url = `http://127.0.0.1:${dashboard.address.port}`, token = operator;
+  await t.test("null is accepted only for GET maintenance status", async () => {
+    const empty = await fetch(url, "/api" + path, { token });
+    assert.equal(empty.status, 200);
+    assert.equal(empty.json(), null);
+    assert.equal((await fetch(url, "/api/v1/hosts", { token })).status, 502);
+    assert.equal((await fetch(url, "/api" + path, { token, body: { id: drain } })).status, 502);
+  });
+  await t.test("only a blocked resume forwards the status object", async () => {
+    const blocked = await fetch(url, `/api${path}/${drain}/resume`, { token, body: { requestId: randomUUID() } });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.json().code, "maintenance_blocked");
+    assert.deepEqual(blocked.json().status, status);
+    assert.equal((await fetch(url, `/api/v1/hosts/${host}/accepting`, { token, body: { enabled: true } })).json().status, undefined);
+  });
+});
+
 test("exact static assets use fresh CSP nonces and never contain bootstrap credentials", async () => {
   const f = await fixture();
   try {

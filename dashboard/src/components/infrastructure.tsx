@@ -1,3 +1,4 @@
+import { Maintenance } from "./maintenance";
 import { BrowserLaunch } from "./browser-launch";
 import type { FormEvent, ReactNode } from "react";
 import {
@@ -349,6 +350,38 @@ function ReservationMeters({
     </div>
   );
 }
+type AcceptingProps = {
+  host: Host;
+  busy: boolean;
+  mutate: (path: string, value: unknown, message: string) => void;
+};
+function AcceptingToggle({ host, busy, mutate }: AcceptingProps) {
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <span>Legacy placement switch</span>{" "}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        onClick={() =>
+          mutate(
+            `hosts/${host.id}/accepting`,
+            { enabled: !host.enabled },
+            host.enabled
+              ? `Placement disabled for ${host.name}. Existing machines keep running.`
+              : `Placement switch enabled for ${host.name}. Check admission owners before placing work.`,
+          )
+        }
+      >
+        {host.enabled
+          ? kind(host) === "orchestrator"
+            ? "Drain pool"
+            : "Drain host"
+          : "Accept machines"}
+      </Button>
+    </div>
+  );
+}
 export function InfrastructureCard({
   host,
   busy,
@@ -400,6 +433,7 @@ export function InfrastructureCard({
           </p>
         )}
         <div>
+          {host.maintenance?.phase === "draining" && <Badge>Maintenance</Badge>}
           <Health host={host} />
         </div>
       </CardHeader>
@@ -426,38 +460,26 @@ export function InfrastructureCard({
         </a>
       </CardContent>
       <CardFooter className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={busy}
-          onClick={() =>
-            mutate(
-              `hosts/${host.id}/accepting`,
-              { enabled: !host.enabled },
-              host.enabled
-                ? `${host.name} is draining. Existing machines keep running; new placements and restarts are disabled.`
-                : `${host.name} accepts placements when checks and capacity allow.`,
-            )
-          }
-        >
-          {host.enabled
-            ? orchestrator
-              ? "Drain pool"
-              : "Drain host"
-            : "Accept machines"}
-        </Button>
+        <AcceptingToggle host={host} busy={busy} mutate={mutate} />
+        <a className="text-sm underline" href={resourcesHref}>
+          Manage maintenance
+        </a>
       </CardFooter>
     </Card>
   );
 }
 export function InfrastructureDetails({
   host,
+  busy,
+  mutate,
   machines = [],
   onInspect,
   onControl,
   onRefresh,
 }: {
   host: Host;
+  busy: boolean;
+  mutate: AcceptingProps["mutate"];
   machines?: HostAllocation[];
   onInspect?: (id: string) => void;
   onControl?: (id: string) => void;
@@ -529,6 +551,8 @@ export function InfrastructureDetails({
           </Button>
         </div>
       )}
+      <AcceptingToggle host={host} busy={busy} mutate={mutate} />
+      <Maintenance key={host.id} host={host.id} />
       <BrowserLaunch key={host.id} host={host} />
       <StackedResources host={host} data={data} unavailable={Boolean(error)} />
       <HostLimits
