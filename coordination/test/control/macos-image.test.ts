@@ -21,6 +21,7 @@ function guest(t: { after(f: () => void): void }) {
   file("/Library/LaunchAgents/app.canaveral.assigned-guest.plist", readFileSync(repository("tools/macos-image/app.canaveral.assigned-guest.plist"), "utf8"));
   file("/Library/Preferences/com.apple.loginwindow.plist");
   file("/private/var/db/.AppleSetupDone");
+  file("/private/etc/kcpassword", "", 0o600);
   file("/Users/desktop/Library/Keychains/login.keychain-db");
   // A boot during preparation leaves the helper's empty service lock.
   file("/Users/desktop/Library/Application Support/Canaveral Guest/guest-helper.lock");
@@ -55,6 +56,8 @@ test("macOS image check refuses shared credentials, leftover launch state and re
     ["com.apple.screensharing is not disabled", () => ({ STUB_DISABLED: disabled.replace('\t"com.apple.screensharing" => disabled\n', "") })],
     ["Remote Management is enabled", g => g.file("/private/etc/RemoteManagement.launchd", "enabled")],
     ["FileVault must be off", () => ({ STUB_FILEVAULT: "FileVault is On." })],
+    ["FileVault must be off", () => ({ STUB_FILEVAULT: "FileVault is Off, but will be enabled after the next restart." })],
+    ["Automatic login is not enabled", g => rmSync(join(g.root, "private/etc/kcpassword"))],
     ["Automatic login is not enabled", () => ({ STUB_AUTOLOGIN: "" })],
     ["Setup Assistant has not finished", g => rmSync(join(g.root, "private/var/db/.AppleSetupDone"))],
     ["signature does not verify", () => ({ STUB_SIGNATURE: "invalid" })],

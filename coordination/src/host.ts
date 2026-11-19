@@ -602,7 +602,7 @@ export class HostRunner {
         const ready = "ready" in backend ? backend.ready : undefined;
         if (!ready) result.detail = "This host has no verified macOS guest connection.";
         else try { if (await ready.call(backend, current, image, folder)) result.accessReady = true; else result.detail = "Waiting for the guest helper to show the desktop."; }
-        catch { result.detail = "Waiting for the verified macOS guest helper."; }
+        catch { result.detail = "Waiting for the verified macOS guest helper. A desktop whose helper stopped or whose launch certificate expired needs a new launch."; }
       }
       if (prepared && preparation) {
         if (result.state === "running" && image.guestAccess && backend.control) {

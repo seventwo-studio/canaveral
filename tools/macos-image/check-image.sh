@@ -51,9 +51,10 @@ else fail "Cannot read disabled system services."; fi
 if [ -f "$root/private/etc/RemoteManagement.launchd" ] && grep -q enabled "$root/private/etc/RemoteManagement.launchd"; then fail "Remote Management is enabled."; fi
 
 # The helper runs in the desktop session, which must start without a password prompt.
-fdesetup status 2>/dev/null | grep -q "FileVault is Off" || fail "FileVault must be off for automatic login."
+# Exactly "FileVault is Off." — not "Off, but will be enabled after the next restart".
+[ "$(fdesetup status 2>/dev/null)" = "FileVault is Off." ] || fail "FileVault must be off for automatic login."
 user=$(defaults read "$root/Library/Preferences/com.apple.loginwindow" autoLoginUser 2>/dev/null) || user=""
-[ -n "$user" ] || fail "Automatic login is not enabled."
+[ -n "$user" ] && [ -f "$root/private/etc/kcpassword" ] || fail "Automatic login is not enabled."
 [ -f "$root/private/var/db/.AppleSetupDone" ] || fail "Setup Assistant has not finished."
 
 if [ "$failures" -gt 0 ]; then echo "Image identity check failed ($failures)." >&2; exit 1; fi

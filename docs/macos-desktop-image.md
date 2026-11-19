@@ -55,6 +55,12 @@ host's capacity within that limit; Canaveral does not count licenses.
    - sshd or Screen Sharing is not disabled, or Remote Management is on;
    - FileVault is on, automatic login is off, or Setup Assistant has not finished;
    - the assigned helper or its LaunchAgent is missing or invalid.
+
+   If the check reports that sshd or Screen Sharing is not disabled while the
+   Sharing settings show them off, run
+   `sudo launchctl disable system/com.openssh.sshd` or
+   `sudo launchctl disable system/com.apple.screensharing` to record it.
+   Then run the check again.
 8. Shut the guest down from the Apple menu. Do not boot it again before export;
    every later change becomes part of every clone. Without launch media the
    helper stops at startup and leaves only its empty service lock, which the
@@ -97,8 +103,17 @@ Every clone has the same local account and the same automatic-login password,
 because macOS stores that password in the image. With remote login, Screen
 Sharing and Remote Management off, the password works only at the VM's own
 console, which only the host can reach. It is not a network credential. Each
-clone receives its own helper credential, TLS key, launch identity, machine
-identifier and MAC address on its launch media.
+clone receives its own helper credential, TLS key and launch identity on its
+launch media. The runner gives each clone a new machine identifier when it
+prepares the clone. The clone's MAC address is derived from its machine ID.
+
+## Lifetime
+
+The launch certificate is valid for two days from when the media is built, and
+there is no renewal. After that the host refuses the helper's TLS, the
+desktop leaves **Ready**, and only a new launch restores access. A stopped
+desktop cannot be started again either. In both cases, delete it and launch a
+new one.
 
 ## Open gates
 

@@ -9,7 +9,8 @@ with `CANAVERAL_TRIAL_OS=macos` in `dashboard-desktop.mjs`. That means launching
 through the dashboard, waiting for Ready, then opening the viewer and taking
 control. It would open Terminal with Spotlight and click into its window. It
 would then type a nonce command and confirm the file's size through the guest
-file listing. Finally it would stop the VM, delete it with controller
+file listing. Size alone does not bind the content to the nonce; it relies on
+the VM being fresh for each trial. Finally it would stop the VM, delete it with controller
 confirmation, and check the baseline.
 
 ## Observed

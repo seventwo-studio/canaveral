@@ -188,7 +188,10 @@ test("a macOS desktop is ready only after its verified helper shows a display fr
   frame = { pngBase64: "iVBORw0KGgoAAAANSUhEUg", width: 1440, height: 900 };
   report = await runner.reconcile(m); assert.equal(report.accessReady, true);
   report = await runner.reconcile(m); assert.equal(report.accessReady, true);
-  assert.equal(reads, 2, "a confirmed binding is not re-probed for frames");
+  assert.equal(reads, 2, "a recently confirmed binding is not re-probed for frames");
+  // A later probe that sees no frame drops Ready again.
+  const access = runner.accessBackend(m) as unknown as { ready(m: RecordValue, i: RecordValue, f: string, now: number): Promise<boolean> };
+  frame = {}; assert.equal(await access.ready(m, mac, runner.context(m).folder, performance.now() + 31000), false); assert.equal(reads, 3);
   fail = true; const other = machine(mac);
   report = await runner.reconcile(other); assert.equal(report.accessReady, false); assert.doesNotMatch(String(report.detail), /private/);
   assert.ok(resolves >= 3); await runner.close();

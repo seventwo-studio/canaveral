@@ -251,6 +251,9 @@ test("local macOS desktop config uses an operator-prepared disk and offers guest
     await fs.symlink(join(root, "aux"), join(image, "auxiliary.bin"));
     await assert.rejects(localConfig(root, args({ "macos-image": image, "macos-restore-image": restore }), "x"), /not a link/);
     await fs.rm(join(image, "auxiliary.bin")); await fs.rename(join(root, "aux"), join(image, "auxiliary.bin"));
+    // The provider refuses linked ancestors too, so local refuses them before writing a config.
+    await fs.symlink(image, join(root, "linked"));
+    await assert.rejects(localConfig(root, args({ "macos-image": join(root, "linked"), "macos-restore-image": restore }), "x"), /under one/);
     await assert.rejects(fs.stat(join(root, "linux-host.json")));
     // No Linux guest bundle or SSH identity is needed for a macOS-only local host.
     const created = await localConfig(root, args({ "macos-image": image, "macos-restore-image": restore }), "http://127.0.0.1:8875");

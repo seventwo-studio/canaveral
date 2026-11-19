@@ -484,8 +484,16 @@ remain refused.
 - The host reports guest connection readiness without a preparation recipe.
   The machine becomes **Ready** after the resolver verifies the helper's pinned
   identity and the helper returns one well-formed display frame. That probe is a
-  read: it claims and resets no input. Each verified binding is probed once.
-  Resolver failures report a generic waiting detail.
+  read: it claims and resets no input. A verified binding is probed again after
+  30 seconds, so Ready drops within about that time once the helper stops or
+  returns no frame. Resolver failures report a generic waiting detail.
+- The per-launch certificate expires two days after the media is built. An
+  unleased desktop has no lease deadline, so this is its access lifetime: after
+  it the binding fails and the desktop must be deleted and launched again.
+- Until the helper answers, every host poll attempts a resolution, bounded by
+  the 1-second process probe and the TLS handshake timeout. A guest that drops
+  packets can therefore delay other machines' reconciliation on a host with
+  little concurrency. This is unmeasured.
 
 Portable tests cover the machine-scoped receipt, pin and native validation, the
 refusal of unleased macOS without guest access, resolution through injected TLS,

@@ -1745,8 +1745,9 @@ function CreateMachine({
                 )}
                 {config.desktop && template?.os === "macos" && (
                   <FieldDescription>
-                    A macOS desktop boots once with its own guest credential.
-                    After you stop it, delete it and launch a new one.
+                    A macOS desktop boots once with its own guest credential,
+                    valid for two days. After you stop it or the credential
+                    expires, delete it and launch a new one.
                   </FieldDescription>
                 )}
               </Field>

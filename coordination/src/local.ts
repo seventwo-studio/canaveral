@@ -127,7 +127,7 @@ export async function macOSDesktopTemplate(args: CliArguments): Promise<Record<s
   for (const [name, path] of Object.entries(files)) {
     let info; try { info = await fs.lstat(path); } catch { throw new CliError(`The macOS image is missing ${path}.`); }
     // The provider refuses links for platform artifacts; fail here with the path.
-    if (!info.isFile() || !info.size) throw new CliError(`${path} must be a non-empty regular file, not a link.`);
+    if (!info.isFile() || !info.size || await fs.realpath(path) !== path) throw new CliError(`${path} must be a non-empty regular file, not a link or under one.`);
     sizes[name] = info.size;
   }
   const diskGiB = Math.max(64, Math.ceil(sizes.disk! / 1073741824));
