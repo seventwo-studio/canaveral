@@ -194,7 +194,9 @@ export class HostRunner {
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [] };
+  /** Owner display attachments are attempted once per identity; a refused attach is not retried. */
+  private readonly displayAttempts = new Set<string>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; authorized: () => boolean }>();
   private readonly deviceMachines = new Set<string>();
   private loops: Promise<void>[] = [];
@@ -499,7 +501,7 @@ export class HostRunner {
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions') };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions') };
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
@@ -753,6 +755,7 @@ export class HostRunner {
     }
     this.outboundSessions?.step((this.queues.sessions ?? []) as unknown as RunnerSessionJob[]);
     this.stepVideo();
+    this.stepDisplay();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
       const task = this.queues[kind]?.find(t => !TERMINAL.has(String(target.get(String(t.id))?.state)));
@@ -782,6 +785,45 @@ export class HostRunner {
       const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
       this.launch(key, allowed, context => this.runVideo(job, path, context));
     }
+  }
+  /** Owner desktop viewers relayed by a standalone dashboard through the controller. Only
+   * unleased desktop assignments qualify; leased machines use their lease's sessions. */
+  private stepDisplay(): void {
+    const queued = new Set((this.queues.display ?? []).map(job => `${String(job.id)}:${String(job.generation)}`));
+    for (const attempt of this.displayAttempts) if (!queued.has(attempt)) this.displayAttempts.delete(attempt);
+    for (const job of this.queues.display ?? []) {
+      const id = identifier(job.id), machineId = identifier(job.machineId), generation = identifier(job.generation), key = `display:${id}`, attempt = `${id}:${generation}`;
+      if (this.active.has(key) || this.displayAttempts.has(attempt) || !this.fresh() || this.updateAdmissionBlocked || !this.displayControls) continue;
+      if (!['pending', 'attaching'].includes(String(job.state))) continue;
+      const allowed = () => this.machineAuthorized(machineId) && !this.assignments.find(m => m.id === machineId)?.lease &&
+        this.queues.display!.some(j => j.id === id && j.generation === generation && j.machineId === machineId);
+      if (!allowed()) continue;
+      this.displayAttempts.add(attempt);
+      this.launch(key, allowed, context => this.runDisplaySession(id, generation, machineId, context));
+    }
+  }
+  private async runDisplaySession(id: string, generation: string, machineId: string, context: HostWorkContext): Promise<void> {
+    const identity = this.identity, machine = this.assignments.find(m => m.id === machineId), controls = this.displayControls;
+    if (!identity || !machine || !controls || !context.authorized()) return;
+    const { image, folder } = this.context(machine), backend = this.accessBackend(machine);
+    let channel: SessionConnection | undefined;
+    // Input authority is tied to the relayed socket: once the controller ends the pair,
+    // no further buffered event is written to the guest.
+    const live = () => !context.signal.aborted && context.authorized() && channel?.open === true;
+    try {
+      channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/display-sessions/${id}/${generation}`, identity.credential,
+        { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      const ready = await channel.receive(30);
+      if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'display') return;
+      if (image.mode !== 'desktop' || !backend.desktop) return;
+      const endpoint = new DisplayEndpoint(controls, machineId, () => backend.desktop!(machine, image, folder), live, { viewer: id });
+      const stop = () => endpoint.close();
+      context.signal.addEventListener('abort', stop, { once: true });
+      try { await endpoint.runDisplay(channel); } finally { context.signal.removeEventListener('abort', stop); }
+    } catch {
+      // A viewer session holds no durable intent: a refused attach, a closed viewer or lost
+      // authority ends it, and the endpoint has already reset any held input.
+    } finally { channel?.close(); }
   }
   private async runVideo(job: RecordValue, path: string, context: HostWorkContext): Promise<void> {
     const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);

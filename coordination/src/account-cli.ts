@@ -8,6 +8,9 @@ import https from "node:https";
 import { createSecureContext } from "node:tls";
 import { secret } from "./errors.ts";
 
+/** A desktop host config embeds the private operator guest bundle (up to 128 MiB) in its
+ * preparation recipe, its runtime copy and the template recipe; other JSON stays at 1 MiB. */
+export const HOST_CONFIG_BYTES = 3 * 128 * 1048576 + 1048576;
 export class CliError extends Error {
   readonly retryable = false;
   constructor(message: string, readonly status = 400, readonly requestId?: string, readonly outcome?: "unknown") { super(message); }

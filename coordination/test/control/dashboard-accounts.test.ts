@@ -63,7 +63,8 @@ test("disposable account fixture preserves real claim, inventory, scope and revo
     for (const suffix of ["desktop", "accessibility", `shells/${randomUUID()}/stream`, "files/download/" + Buffer.from(JSON.stringify({ path: "/private" })).toString("base64url")]) {
       assert.equal((await api(`/v1/machines/${bootstrap.legacyMachine}/${suffix}`, undefined, alice)).status, 404);
     }
-    assert.equal((await api(`/v1/machines/${machineId}/desktop`, undefined, alice)).status, 409);
+    // The desktop relays only a same-origin cookie WebSocket; an ordinary request is refused.
+    assert.equal((await api(`/v1/machines/${machineId}/desktop`, undefined, alice)).status, 403);
     const token = await api("/v1/auth/tokens", { id: randomUUID(), name: "Read only", scopes: ["machines:read"], expiresInSeconds: 60 }, alice);
     assert.equal(token.status, 200); assert.equal(typeof token.body.token, "string");
     const personal = token.body.token as string;

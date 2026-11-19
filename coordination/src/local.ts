@@ -2,7 +2,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { CliError, expandPath, option, privateInput, privateOutput, record, removeSameFile, uuid } from "./account-cli.ts";
+import { CliError, expandPath, HOST_CONFIG_BYTES, option, privateInput, privateOutput, record, removeSameFile, uuid } from "./account-cli.ts";
 import type { CliArguments } from "./account-cli.ts";
 import type { CliIO, CliService } from "./cli.ts";
 const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
@@ -13,9 +13,8 @@ async function exported(name: string, fn: string): Promise<(...args: never[]) =>
 }
 function numberOption(args: CliArguments, name: string, fallback: number, min: number, max: number): number { const text = option(args, name, String(fallback)), value = Number(text); if (!/^\d+$/.test(text) || !Number.isSafeInteger(value) || value < min || value > max) throw new CliError(`Invalid --${name}.`); return value; }
 async function exists(path: string): Promise<boolean> { try { await fs.lstat(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
-/** Generated local host configs embed the private operator guest bundle (up to 128 MiB) in the
- * preparation recipe, its runtime copy and the template recipe; other local JSON stays at 1 MiB. */
-export const LOCAL_HOST_CONFIG_BYTES = 3 * 128 * 1048576 + 1048576;
+/** Generated local host configs share the host configuration envelope; other local JSON stays at 1 MiB. */
+export const LOCAL_HOST_CONFIG_BYTES = HOST_CONFIG_BYTES;
 async function jsonFile(path: string, maximum = 1048576): Promise<Record<string, unknown>> { const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); try { const info = await file.stat(); if (!info.isFile() || info.size > maximum) throw new CliError("Local configuration requires a bounded regular JSON file."); return record(JSON.parse(await file.readFile("utf8")) as unknown); } finally { await file.close(); } }
 async function stopped(signal: AbortSignal): Promise<void> { if (!signal.aborted) await new Promise<void>(done => signal.addEventListener("abort", () => done(), { once: true })); }
 export async function localConfig(root: string, args: CliArguments, url: string): Promise<{ config: Record<string, unknown>; state: string } | undefined> {
@@ -350,7 +349,8 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
     desktop: {
       check(id) { try { const context = attached(id, true); return context.image.mode !== "headless" && (typeof backend(context).desktop === "function" || ["android", "ios"].includes(String(context.image.os))); } catch { return false; } },
       async attach(request) {
-        const context = attached(request.machineId), check = () => !request.signal.aborted && still(context);
+        // Socket liveness also fences input: a closed viewer's buffered events are never applied.
+        const context = attached(request.machineId), check = () => !request.signal.aborted && !request.socket.destroyed && still(context);
         const release = await holdAssignment(context.machine, context.folder);
         try {
           const factory = () => displayFactory(context, check);

@@ -147,3 +147,89 @@ test("real noVNC client accepts separate runner control acknowledgements", async
   await expect(page.getByText("View only", { exact: true })).toBeVisible();
   await expect(take).toBeEnabled();
 });
+
+test("relayed viewer ignores the controller broker's ready control before RFB", async ({
+  page,
+}) => {
+  const machine = {
+    id: "relay-fixture",
+    name: "Relayed desktop",
+    hostId: "host",
+    observed: "running",
+    desired: "running",
+    ready: true,
+    updatedAt: Date.now() / 1000,
+    preparation: { state: "ready" },
+    templateId: "linux",
+    template: {
+      id: "linux",
+      name: "Linux",
+      os: "linux",
+      arch: "arm64",
+      mode: "desktop",
+      guestAccess: true,
+    },
+    resources: { cpu: 2, memoryMiB: 2048, diskGiB: 16 },
+  };
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      json:
+        path.endsWith("auth/status") || path.endsWith("auth/session")
+          ? { setupRequired: false, user: adminUser }
+          : path.endsWith("/machines")
+            ? { machines: [machine] }
+            : path.endsWith("/hosts")
+              ? { hosts: [] }
+              : path.endsWith("/templates")
+                ? { templates: [] }
+                : {},
+    });
+  });
+  let controlRequest,
+    peer,
+    stage = 0;
+  await page.routeWebSocket("**/desktop", (ws) => {
+    peer = ws;
+    ws.onMessage((data) => {
+      if (typeof data === "string") {
+        controlRequest = JSON.parse(data);
+        return;
+      }
+      if (stage === 0) ws.send(Buffer.from([1, 1]));
+      else if (stage === 1) ws.send(Buffer.alloc(4));
+      else if (stage === 2) {
+        const header = Buffer.alloc(24);
+        header.writeUInt16BE(16, 0);
+        header.writeUInt16BE(16, 2);
+        Buffer.from([
+          32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0,
+        ]).copy(header, 4);
+        ws.send(header);
+        ws.send(JSON.stringify({ type: "control", state: "view-only" }));
+      }
+      stage++;
+    });
+    ws.send(
+      JSON.stringify({
+        type: "ready",
+        sessionId: "11111111-2222-4333-8444-555555555555",
+        generation: "11111111-2222-4333-8444-666666666666",
+        capability: "display",
+      }),
+    );
+    ws.send(Buffer.from("RFB 003.008\n"));
+  });
+  await page.goto("/#machines");
+  await page.getByRole("button", { name: "Control", exact: true }).click();
+  const take = page.getByRole("button", { name: "Take control", exact: true });
+  await expect(take).toBeEnabled();
+  await take.click();
+  await expect
+    .poll(() => controlRequest)
+    .toEqual({ type: "input-control", action: "take" });
+  peer.send(JSON.stringify({ type: "control", state: "owned" }));
+  await expect(
+    page.getByText("Mouse and keyboard connected", { exact: true }),
+  ).toBeVisible();
+});

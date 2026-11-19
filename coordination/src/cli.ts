@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { secret, ServiceError } from "./errors.ts";
 import type { ParseArgsConfig } from "node:util";
 import {
-  CliClient, CliError, credential, expandPath, handleAccount, metadata, option, positional,
+  CliClient, CliError, credential, expandPath, handleAccount, HOST_CONFIG_BYTES, metadata, option, positional,
   privateInput, privateOutput, promptPassword, record, removeSameFile, uuid,
 } from "./account-cli.ts";
 import type { AccountContext, CliArguments, RequestClient } from "./account-cli.ts";
@@ -268,13 +268,13 @@ async function controllerConfig(args: CliArguments): Promise<Record<string, unkn
 }
 async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<HostOptions> {
   const file = resolve(expandPath(option(args, args.options["setup-file"] ? "setup-file" : "config")));
-  let config = await jsonFile(file); let url = args.url;
+  let config = await jsonFile(file, HOST_CONFIG_BYTES); let url = args.url;
   const managed = process.env.CANAVERAL_UPDATE_CANDIDATE === "1";
   if (managed && typeof config.url === "string") url = config.url;
   const enrollmentFile = args.options["enrollment-token-file"] ?? process.env.CANAVERAL_ENROLLMENT_TOKEN_FILE;
   let enrollment = typeof enrollmentFile === "string" ? await privateInput(enrollmentFile) : undefined;
   if (args.options["setup-file"]) {
-    config = await jsonFile(file);
+    config = await jsonFile(file, HOST_CONFIG_BYTES);
     if (config.schemaVersion !== 1 || typeof config.controllerUrl !== "string" || !config.config || !config.enrollmentToken) throw new CliError("Unsupported connection setup file.");
     url = config.controllerUrl; enrollment = String(config.enrollmentToken);
     config = record(config.config);

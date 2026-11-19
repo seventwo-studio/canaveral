@@ -228,3 +228,46 @@ test("clipboard permission completing after a machine change never targets the r
   expect(first.clipboardPasteFrom).not.toHaveBeenCalled();
   expect(state.connections[1]!.clipboardPasteFrom).not.toHaveBeenCalled();
 });
+
+test("offers the relay protocol and ignores the controller broker's ready control", () => {
+  const offered: unknown[] = [];
+  class Socket extends EventTarget {
+    static OPEN = 1;
+    readyState = 1;
+    send = vi.fn<(value: string) => void>();
+    constructor(_url: string, protocols: unknown) {
+      super();
+      offered.push(protocols);
+      state.socket = this;
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  render(
+    <DesktopView machine={{ id: "fixture", template: { mode: "desktop" } }} />,
+  );
+  expect(offered).toEqual([["binary", "canaveral-session-v1"]]);
+  const socket = state.socket!;
+  const connection = state.connections[0]!;
+  act(() =>
+    socket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ready",
+          sessionId: "11111111-2222-4333-8444-555555555555",
+          generation: "11111111-2222-4333-8444-666666666666",
+          capability: "display",
+        }),
+      }),
+    ),
+  );
+  expect(connection.disconnect).not.toHaveBeenCalled();
+  expect(connection.viewOnly).toBe(true);
+  act(() =>
+    socket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "control", state: "owned" }),
+      }),
+    ),
+  );
+  expect(connection.viewOnly).toBe(false);
+});
