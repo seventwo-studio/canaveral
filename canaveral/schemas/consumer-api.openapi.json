@@ -1529,7 +1529,7 @@
               "minimum": 1,
               "maximum": 15
             },
-            "description": "Hold the reply for up to this many seconds while the request is waiting and its state, position and reason are unchanged."
+            "description": "Hold the reply for up to this many seconds while the request is waiting and its state, position and reason are unchanged. It must be the only query parameter. Beyond 32 held reads across the controller or 4 per application credential the read is refused with 429 request_wait_limit."
           }
         ]
       }

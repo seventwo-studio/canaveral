@@ -28,8 +28,11 @@ function view(row: Row, position: number | null): RequestView {
  * admitted before any, then by their best request), and each turn offers that application's highest-priority,
  * oldest request. `rank` is a request's place within its application and `slot` the application's place in a round.
  * It is an attempt order, not a promise: a request that does not fit is skipped, so a later position can be admitted
- * first, and a refused attempt does not cost its application a turn. Requests past their deadline are left out, as
- * the next pass expires them. Model calls are admitted by runner claims per domain and have no single order.
+ * first, and a refused attempt does not cost its application a turn. It deliberately leaves out the pass's
+ * transient state, which changes every second: the scan continuation (`request_scan`, so with more than 256
+ * candidates a pass resumes behind the requests it already tried this cycle) and the set-aside of an application
+ * that used its 16 refusals. In those cases a pass tries a later position before an earlier one.
+ * Requests past their deadline are left out, as the next pass expires them. Model calls are admitted by runner claims per domain and have no single order.
  * The count discloses how many other waiting requests come first, never whose they are or what they ask for. */
 const POSITIONS = `WITH w AS (SELECT r.application,r.id,r.priority,r.sequence,coalesce(a.admitted,0) AS turn,
       ROW_NUMBER() OVER (PARTITION BY r.application ORDER BY r.priority DESC,r.sequence) AS rank
@@ -132,6 +135,23 @@ export class Requests {
     return view(row, row.state === "waiting" && row.kind !== "model-job" ? positions(db,this.store.clock(),row.application).get(row.id) ?? null : null);
   }
   inspect(token: string,id: string): RequestView { return this.store.transaction(db => this.view(db,this.row(db,this.applications.verify(db,token).id,id))); }
+  /** Views for held reads, in one transaction: every waiter shares one write boundary and each application's
+   * order is computed once. Each read verifies its own credential and ownership; a refusal is returned in its
+   * place and does not affect the others. No admission pass runs here. */
+  read(reads: { token: string; id: string }[]): ({ view: RequestView } | { error: ServiceError })[] {
+    return this.store.transaction(db => {
+      const orders = new Map<string, Map<string, number>>();
+      return reads.map(read => {
+        try {
+          const row = this.row(db,this.applications.verify(db,read.token).id,read.id);
+          if (row.state !== "waiting" || row.kind === "model-job") return { view: view(row,null) };
+          let order = orders.get(row.application);
+          if (!order) orders.set(row.application,order = positions(db,this.store.clock(),row.application));
+          return { view: view(row,order.get(row.id) ?? null) };
+        } catch (error) { if (error instanceof ServiceError) return { error }; throw error; }
+      });
+    });
+  }
   list(token: string, after?: string): { requests: RequestView[]; nextCursor: string | null } {
     return this.store.transaction(db => {
       const app = this.applications.verify(db,token);

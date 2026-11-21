@@ -127,6 +127,8 @@ test("a lease key can rotate, set a position and grant an app permission, each b
   await assert.rejects(f.submit(f.command({ action: "rotate", arguments: { orientation: "SIDEWAYS" } })), failure(400));
   await assert.rejects(f.submit(f.command({ action: "location", arguments: { latitude: 91, longitude: 0 } })), failure(400));
   await assert.rejects(f.submit(f.command({ action: "permission", arguments: { app: "com.example.fixture", permission: "android.permission.CAMERA", state: "allow" } })), failure(400));
+  // The Android provider grants or revokes only, so a reset is refused here instead of queued to fail on the host.
+  await assert.rejects(f.submit(f.command({ action: "permission", arguments: { app: "com.example.fixture", permission: "android.permission.CAMERA", state: "reset" } })), failure(400));
   // Only this lease's key: the application key and another lease's key are refused.
   await assert.rejects(f.submit(f.command(rotate), f.app.credential), failure(401));
   const other = await f.request("POST", "/v1/leases", f.acquire()), foreign = await f.scoped(other.id);
@@ -139,4 +141,7 @@ test("a lease key can rotate, set a position and grant an app permission, each b
   assert.equal(((await ios.submit(ios.command(rotate)))!.body as any).state, "queued");
   const headless = await operationFixture(t, "linux", "headless"); headless.ready(headless.lease);
   for (const action of [rotate, location]) await assert.rejects(headless.submit(headless.command(action)), failure(409, "capability_unsupported"));
+  // A desktop guest has the input capability, but these are device actions.
+  const desktop = await operationFixture(t, "linux", "desktop"); desktop.ready(desktop.lease);
+  for (const action of [rotate, location]) await assert.rejects(desktop.submit(desktop.command(action)), failure(409, "capability_unsupported"));
 });

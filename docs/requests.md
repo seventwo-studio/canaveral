@@ -135,37 +135,54 @@ Position is an order of attempts, not a promise:
   example `capacity_unavailable`.
 - A refused attempt does not cost its application its turn, so the application's
   next request is tried in the same pass.
+- Position leaves out the pass's transient state, which changes every second.
+  When more than 256 requests wait, a pass resumes behind the requests it already
+  tried in the current scan cycle. When an application has used its 16 refused
+  attempts in a pass, its remaining requests are set aside behind everyone else's.
+  In both cases a pass tries a later position before an earlier one.
 - Positions move as other requests are admitted, cancelled, expired or submitted
   with a higher priority. A request can move back as well as forward.
 - The number says how many other waiting requests come first. It reveals nothing
   about whose they are or what they ask for.
 
 `GET /v1/requests/{id}?wait=N` holds the reply for up to `N` seconds, a whole
-number from 1 to 15. The controller answers as soon as the request's `state`,
-`position` or `reason` changes, and otherwise when the time is up. Either way the
-body is the ordinary current view. A request that is not waiting is answered at
-once. The hold is one bounded read: to keep waiting, call again.
+number from 1 to 15, counted from the request's arrival. The controller answers as
+soon as it sees the request's `state`, `position` or `reason` change, and otherwise
+when the time is up. Either way the body is the ordinary view. A request that is
+not waiting is answered at once. The hold is one bounded read: to keep waiting,
+call again.
 
-- Other values, a repeated `wait`, and `wait` on any other route return 400.
-- A held read does not run admission. The one-second timer and the existing
-  triggers still own it, so many waiters cost no extra passes.
-- Each re-read checks the application credential again. Revoking the application
-  ends a hold with the ordinary 401.
-- At most 32 reads are held at once across the controller. Beyond that a `wait`
-  is answered immediately with the current view, so a client must accept an early
-  reply that shows no change.
-- Fifteen seconds stays below the controller's 20-second idle limit on a
-  connection. A proxy in front of the controller needs an idle limit above the
-  wait a client asks for.
+- `wait` must be the only parameter. Other values, a repeated `wait`, another
+  parameter beside it, and `wait` on any other route return 400.
+- A held read never runs admission, including its first look. The one-second timer
+  and the existing triggers still own admission. The controller looks at every held
+  request once a second in one batched read and one transaction, so the cost of
+  looking does not grow with the number of waiters. A change is therefore seen
+  within about a second, and the view returned at the limit is at most about a
+  second old.
+- Every look checks the application credential and ownership again. Revoking the
+  application ends a hold with the ordinary 401.
+- At most 32 reads are held at once across the controller, and at most 4 by one
+  application credential, so one application cannot take every slot. A read beyond
+  either bound is refused with 429 `request_wait_limit`, `retryable: true` and
+  `Retry-After` set to the wait that was asked for. Pause for that long, or read
+  without `wait`; a plain read is never refused for this reason.
+- A held connection gets the wait plus the controller's usual 20-second idle
+  allowance. A proxy in front of the controller needs an idle limit above the wait
+  a client asks for.
+- A client that disconnects frees its slot at once.
 
 The SDK exposes the hold as `inspectRequest(id, { waitSeconds })`. It sends one
-request, validates the range, and refuses a wait that does not leave two seconds
-inside the client's own `timeoutMs`. The SDK still never polls or retries.
+request, validates the range, and refuses a wait that does not leave five seconds
+inside the client's own `timeoutMs`. The SDK still never polls or retries. A
+controller that predates held reads answers 400 to the parameter.
 
-Position and held reads have portable fixture coverage only: the order is checked
+Position and held reads have portable fixture coverage only. The order is checked
 against real admission passes over mixed applications, priorities and admission
-histories, and the hold against a controller process with its control worker. No
-native lease run exercised them.
+histories. The hold, its limits, a disconnect and revocation are checked against a
+controller process with its control worker, and the batching against a scripted
+control client. No native lease run exercised them, and the hold was not measured
+under a slow or busy control worker.
 
 Administrators set `limits.maxWaitingRequests` (default 100, maximum 1000) and
 `limits.maxRequestPriority` (default 0, range 0..1000000) when creating an

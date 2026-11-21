@@ -139,7 +139,8 @@ export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: numb
       ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
   });
   // The caller's label from acquisition (default `lease-<uuid>`). Display only: nothing is selected or authorized by it.
-  const name = object(object(JSON.parse(row.request)).machine).name;
+  // Read tolerantly: a row whose stored request predates this shape still has to be inspected and released.
+  const name = (JSON.parse(row.request) as { machine?: { name?: unknown } } | null)?.machine?.name;
   return { id: row.id, name: typeof name === "string" ? name : null, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
     createdAt: utc(row.created), expiresAt: utc(row.expires), cleanup: { state: row.cleanup }, members,
     capabilities: members.length === 1 ? members[0]!.capabilities : {} };

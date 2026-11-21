@@ -522,7 +522,8 @@ export class ConsumerClient extends LeaseOperations {
     const id = uuid(requestId,"requestId"), wait = exact(options,["waitSeconds"],"Inspect options")["waitSeconds"];
     if (wait !== undefined) {
       positive(wait,"waitSeconds",MAX_REQUEST_WAIT_SECONDS);
-      if (Number(wait) * 1000 + 2000 > this.#transport.timeoutMs) throw new ConsumerConfigurationError("waitSeconds must leave two seconds within timeoutMs.","invalid_request");
+      // The reply arrives after the wait plus the controller's own latency; without this margin a healthy hold would be reported as a timeout.
+      if (Number(wait) * 1000 + 5000 > this.#transport.timeoutMs) throw new ConsumerConfigurationError("waitSeconds must leave five seconds within timeoutMs.","invalid_request");
     }
     return (await parsed(this.#transport,"GET",`/v1/requests/${id}` + (wait === undefined ? "" : `?wait=${wait}`),undefined,[200],false,undefined,v => waitingRequest(v,id))).value;
   }

@@ -119,7 +119,8 @@ Return 201 for new admission, 200 for an identical retry. Example response shape
 can tell their leases apart in lists. It is for display only: it selects nothing,
 authorizes nothing and need not be unique. On the generic host path an omitted name
 defaults to `lease-<uuid>`; a Linux workspace lease acquired without one reports
-`null`. The label stays readable after the lease ends.
+`null`. The label stays readable after the lease ends. Both the application key
+and the lease's own key see it, as they see the rest of the lease view.
 
 Capabilities describe the pinned template contract, not current readiness. Each
 member exposes its own capabilities and file scopes; pair readiness requires both

@@ -633,8 +633,10 @@ already grants them. They remain unavailable to iOS, which has no shell capabili
 Since 21 November 2026 a lease key can also rotate its emulator, set its simulated
 position and grant or revoke an app permission. These use the same argument checks,
 fenced provider path and receipts as the administrative actions of the same name,
-and reach only the lease's own emulator. Operator-configured `install` and
-`inspect-install` stay administrative. The three lease-key actions have portable
+and reach only the lease's own emulator. They apply to device images only, and a
+lease key cannot `reset` a permission: the Android provider grants or revokes, so
+a reset is refused with 400 instead of being queued to fail. Operator-configured
+`install` and `inspect-install` stay administrative. The three lease-key actions have portable
 fixture coverage against the real controller, runner and lease supervisor with a
 stand-in adb; no native emulator run exercised them through a lease key. Operations keep
 the durable receipt semantics: the same UUID replays its receipt without running
