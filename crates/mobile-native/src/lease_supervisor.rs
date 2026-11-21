@@ -378,7 +378,7 @@ pub struct Simulator {
     inventory: fn() -> Result<Vec<Process>>,
     /// The exit status of `simctl boot`, when it returned one.
     boot: Option<i32>,
-    /// CoreSimulator accepted the boot, or reported the device as anything but shut down.
+    /// CoreSimulator accepted the boot, the boot result is uncertain, or the device appeared active.
     /// A process tree is then expected, and one that was never observed proves nothing.
     expected: bool,
 }
@@ -583,10 +583,18 @@ impl Simulator {
             }
             Ok((status, _)) => {
                 self.boot = status;
+                self.expected |= status.is_none();
                 Some("boot")
             }
-            Err(Halt::Reason(reason)) => Some(reason),
-            Err(_) => Some("boot"),
+            Err(Halt::Reason(reason)) => {
+                self.expected = true;
+                Some(reason)
+            }
+            Err(Halt::Limit) => {
+                self.expected = true;
+                Some("boot")
+            }
+            Err(Halt::Failed) => Some("boot"),
         }
     }
     /// Stops every member before killing any, so none can start another process between an
@@ -1610,6 +1618,20 @@ esac
         assert_eq!(stopped["treeAbsent"], true);
         assert!(!process_alive(root) && !process_alive(child));
         assert_eq!(status(&stand.path).unwrap(), "free");
+        stand.remove();
+    }
+
+    #[test]
+    fn an_interrupted_boot_without_an_observed_tree_keeps_cleanup_unproven() {
+        let stand = simulated("interrupted", BLOCKED_BOOT, GRACEFUL);
+        let worker = interrupted(&stand);
+        assert_eq!(worker.join().unwrap(), 0);
+        let stopped = stand.stopped();
+        assert_eq!(stopped["reason"], "fenced");
+        assert_eq!(stopped["bootStatus"], Value::Null);
+        assert_eq!(stopped["deviceState"], "Shutdown");
+        assert_eq!(stopped["treeObserved"], false);
+        assert_eq!(stopped["treeAbsent"], false);
         stand.remove();
     }
 

@@ -1086,8 +1086,9 @@ the boot request while still reporting `Shutdown`.
 
 - the device's `launchd_sim` was observed at some point (`treeObserved`), so its absence means
   something; or
-- nothing indicates that the device ever left `Shutdown`: CoreSimulator refused the boot or
-  never acted on it, and never reported another state.
+- the boot command was never sent or returned a definite failure, and CoreSimulator
+  gave no indication that the device left `Shutdown`. If the boot was interrupted,
+  timed out or lost its exit status, cleanup requires an observed tree.
 
 A simulator that CoreSimulator booted but whose `launchd_sim` was never seen gets
 `treeAbsent: false` and `treeObserved: false`. The premise that the tree is visible in the
@@ -1108,9 +1109,9 @@ When the receipt was written, on this host and among the processes this macOS ac
 
 - **A process that a member started and that outlived it unrecorded.** A member can start a
   child and exit, or the child's parent can exit, between two samples. The child then names
-  nothing, descends from nothing and is not found. The window is one sample interval: 250 ms
-  before the tree is first observed, 2 s during the lease and 500 ms during the graceful part
-  of the stop. It exists for the whole lease, not only at its end. The forced path closes it
+  nothing, descends from nothing and is not found. The target sampling intervals are 250 ms before the tree is first observed, 2 s
+  during the lease and 500 ms between graceful stop passes. Process inventory
+  and CoreSimulator calls can extend the gap between stop samples. It exists for the whole lease, not only at its end. The forced path closes it
   by stopping members before killing them; the graceful path cannot.
 - **Work handed to the host outside the tree**: a launchd job the simulated code registered, a
   host service that launchd started on its behalf, a file it wrote outside the device set, or
