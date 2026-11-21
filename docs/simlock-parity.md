@@ -39,10 +39,10 @@ states its own evidence. Fixture coverage does not establish native acceptance.
 | Live screen for a lease | Live stream for the holder and for operators | Screenshots and bounded recordings only | [#87](https://github.com/seventwo-studio/canaveral/pull/87) |
 | Runtime and capacity upkeep | Install and remove runtimes and images, idle-device cleanup, back-off under memory or disk pressure | Operators installed runtimes by hand; observed load never affected placement | [#84](https://github.com/seventwo-studio/canaveral/pull/84) |
 
-One pull request per area, each with its contract documentation. Every pull
-request had an independent review before it was offered for merge, and each lists
-its own evidence and open items. The dashboard change builds on the queue
-visibility, observability and live screen changes.
+One draft pull request per area, each with its contract documentation, evidence
+and open items. Review and portable checks apply to the revision they examined.
+The dashboard builds on the queue visibility, observability and live screen
+changes and needs combined verification with their reviewed revisions.
 
 ## Decisions and their reasons
 
@@ -59,8 +59,9 @@ that are not accepted.
 
 **Dev-loop networking is tunnels only.** A lease gets explicit port tunnels carried
 over the device's own control channel and relayed through the controller to the
-lease holder. The leased guest keeps no network of its own and no internet, so the
-isolation guarantee of Android leases is unchanged. Public HTTPS egress through an
+lease holder. The guest has no route through the device host's network. A reverse
+tunnel can reach services the lease holder exposes, including a proxy the holder
+runs. Public HTTPS egress through an
 allowlisting proxy was considered and left out, because it changes that guarantee
 and is a larger design.
 
@@ -94,9 +95,19 @@ correction. Each is recorded in the pull request that carries it.
   run.
 - **Tunnel traffic is authorized on a short interval, not per message**, with a
   per-tunnel rate bound, so tunnels cannot monopolise the single control worker.
-- **A recording takes priority over live views** for a host's capture slots.
+- **A recording takes priority over live views** for a host's capture slots. The
+  runner must prove a prior live capture of the same device stopped before it
+  dispatches the recording.
 - **An administrator saves a baseline only from a device their own account owns.**
   The operator credential saves only a device with no user owner.
+
+## Acceptance still open
+
+Native trials require operator authorization. The device-side drafts record the
+assumptions each trial must check, including CoreSimulator process ownership and
+stop proof, Android baseline restoration, adb tunnel mappings, native screen
+capture and runtime installation and removal. Leased screens remain visible to
+their lease holders. The dashboard screen wall covers account-owned devices.
 
 ## Known differences that are not gaps
 
