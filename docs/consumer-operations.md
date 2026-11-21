@@ -44,7 +44,9 @@ failed or issue a new UUID as an automatic retry.
 Command tools should accept a persisted request file or the original operation
 UUID to inspect, using an existing private lease key. Print receipt metadata
 without guest output or credentials. Tool availability does not establish native
-consumer execution acceptance.
+consumer execution acceptance. `canaveral lease ID device` and `canaveral lease ID operation`
+follow this ([lease-key commands](agent-surfaces.md#lease-key-commands)); the MCP tool
+`device_action` returns the output to its agent instead.
 
 ## Capability and execution boundaries
 
@@ -54,8 +56,9 @@ and native bridges have contracts for screenshot, hierarchy, accessibility, inpu
 files and shells. Those contracts do not make every action available on the Linux
 lease wire. Each route must validate its own action envelope and refuse missing
 provider bindings before dispatch. App installation,
-launch, permissions and other mobile administrative actions are outside this
-consumer subset. iOS shell and headless graphical operations remain unsupported.
+launch, permissions and other mobile actions are outside the Linux subset. A
+leased Android emulator has its own bounded set through its lease key; see
+[scoped control](mobile-control.md#scoped-control). iOS shell and headless graphical operations remain unsupported.
 
 Submission requires a ready member, an online enabled host and explicit pinned
 image/runtime lease eligibility. Each intent has a 120-second start window,

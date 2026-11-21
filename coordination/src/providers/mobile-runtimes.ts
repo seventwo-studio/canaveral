@@ -42,7 +42,7 @@ const failed = (code: string, detail: string, extra: RecordValue = {}): RuntimeR
 const unknown = (code: string, detail: string): RuntimeReport => code === "unstarted" ? failed("tool_unavailable", "The native tool could not be started; nothing was changed.") : { state: "unknown", result: { code, detail } };
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-type ToolOutcome = { kind: "exit"; code: number; text: string } | { kind: "timeout" | "interrupted" | "error" | "unstarted"; text: string };
+type ToolOutcome = { kind: "exit"; exitCode: number; text: string } | { kind: "timeout" | "interrupted" | "error" | "unstarted"; text: string };
 /** Runs one tool to completion with a hard deadline, optional stdin and bounded output.
  * Loss of authorization or the deadline closes the retained child; that outcome is uncertain. */
 async function streamTool(provider: MobileProvider, argv: readonly string[], context: RuntimeContext, deadline: number, input?: Buffer,
@@ -67,7 +67,7 @@ async function streamTool(provider: MobileProvider, argv: readonly string[], con
       tail = (tail + text).slice(-16_384); onText?.(text);
     }
     if (interrupted) return { kind: "interrupted", text: tail };
-    try { return { kind: "exit", code: await pipe.wait(Math.max(1000, Math.min(30_000, deadline - performance.now()))), text: tail }; }
+    try { return { kind: "exit", exitCode: await pipe.wait(Math.max(1000, Math.min(30_000, deadline - performance.now()))), text: tail }; }
     catch { return { kind: interrupted ? "interrupted" : "timeout", text: tail }; }
   } finally { clearInterval(watcher); await pipe.close().catch(() => {}); }
 }
@@ -172,9 +172,9 @@ async function androidInstall(provider: AndroidProvider, args: RecordValue, cont
   if (outcome.kind !== "exit") return unknown(outcome.kind, "The Android installer did not finish; list this host's system images before another change.");
   context.progress({ phase: "verifying" });
   if (androidImageInstalled(provider, identifier)) return { state: "succeeded", result: { platform: "android", identifier, installed: true } };
-  if (outcome.code === 0) return unknown("not_verified", "The installer finished but the system image is not present; list before another change.");
+  if (outcome.exitCode === 0) return unknown("not_verified", "The installer finished but the system image is not present; list before another change.");
   const licence = /licen[cs]e/i.test(outcome.text) && /not (?:been )?accepted/i.test(outcome.text);
-  return failed(licence ? "license_not_accepted" : "installer_failed", "The Android installer reported a failure and the system image is not installed.", { exitCode: outcome.code });
+  return failed(licence ? "license_not_accepted" : "installer_failed", "The Android installer reported a failure and the system image is not installed.", { exitCode: outcome.exitCode });
 }
 async function androidRemove(provider: AndroidProvider, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport> {
   const identifier = String(args.identifier), tool = sdkManager(provider);
@@ -187,8 +187,8 @@ async function androidRemove(provider: AndroidProvider, args: RecordValue, conte
   if (outcome.kind !== "exit") return unknown(outcome.kind, "The Android uninstaller did not finish; list this host's system images before another change.");
   context.progress({ phase: "verifying" });
   if (!androidImageInstalled(provider, identifier)) return { state: "succeeded", result: { platform: "android", identifier, removed: true } };
-  return outcome.code === 0 ? unknown("not_verified", "The uninstaller finished but the system image is still present; list before another change.")
-    : failed("uninstall_failed", "The Android uninstaller reported a failure and the system image is still installed.", { exitCode: outcome.code });
+  return outcome.exitCode === 0 ? unknown("not_verified", "The uninstaller finished but the system image is still present; list before another change.")
+    : failed("uninstall_failed", "The Android uninstaller reported a failure and the system image is still installed.", { exitCode: outcome.exitCode });
 }
 
 // iOS simulator runtimes.
@@ -239,8 +239,8 @@ async function iosInstall(provider: IosProvider, args: RecordValue, context: Run
   let present: boolean;
   try { present = await usable(); } catch { return unknown("not_verified", "The runtime inventory could not be read after the download; list before another change."); }
   if (present) return { state: "succeeded", result: { platform: "ios", identifier, installed: true } };
-  return outcome.code === 0 ? unknown("not_verified", "The download finished but the runtime is not usable yet; list before another change.")
-    : failed("installer_failed", "Xcode reported a failure and the runtime is not installed.", { exitCode: outcome.code });
+  return outcome.exitCode === 0 ? unknown("not_verified", "The download finished but the runtime is not usable yet; list before another change.")
+    : failed("installer_failed", "Xcode reported a failure and the runtime is not installed.", { exitCode: outcome.exitCode });
 }
 async function iosRemove(provider: IosProvider, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport> {
   const identifier = String(args.identifier);
@@ -264,11 +264,11 @@ async function iosRemove(provider: IosProvider, args: RecordValue, context: Runt
   for (let attempt = 0; attempt < 30 && performance.now() < deadline && context.authorized(); attempt++) {
     try { if (!(await iosImages(provider)).some(candidate => candidate.identifier === image.identifier)) return { state: "succeeded", result: { platform: "ios", identifier, removed: true } }; }
     catch { break; }
-    if (outcome.code !== 0) break;
+    if (outcome.exitCode !== 0) break;
     await sleep(Number(provider.config.runtimePollMilliseconds ?? 2000));
   }
-  return outcome.code === 0 ? unknown("not_verified", "The removal was requested but the runtime image is still listed; list before another change.")
-    : failed("uninstall_failed", "Xcode reported a failure and the runtime image is still present.", { exitCode: outcome.code });
+  return outcome.exitCode === 0 ? unknown("not_verified", "The removal was requested but the runtime image is still listed; list before another change.")
+    : failed("uninstall_failed", "Xcode reported a failure and the runtime image is still present.", { exitCode: outcome.exitCode });
 }
 
 /** One entry point per provider. Failures before any tool ran are `failed`; anything after is `unknown`. */

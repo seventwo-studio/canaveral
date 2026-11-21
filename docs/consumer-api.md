@@ -26,6 +26,8 @@ by the controller modules and provider implementations described in this guide.
 | Submit or inspect a durable member operation | That lease's current key |
 | Create, inspect or close a member session | That lease's current key |
 | Attach the consumer WebSocket peer | That lease's current key and session generation |
+| Read or follow the application's own [events](events.md) | Application key |
+| Read the application's own [usage](usage.md) | Application key |
 
 Credentials are opaque bearer secrets, not OAuth scopes or JWT claims. The
 contract introduces no enrollment or host-approval policy. Administrative,
@@ -82,6 +84,15 @@ acceptance. Binary interoperability, live client examples, recovery and
 portable release acceptance remain open. Provider acceptance must be recorded separately from portable fixture results.
 
 The additive [durable waiting request API](requests.md) accepts over-requested lease intent through `/v1/requests`; direct lease acquisition retains its existing errors.
+
+`GET /v1/events`, `GET /v1/events/stream` and `GET /v1/usage` are additive read
+routes for the application key only. They are filtered to the authenticated
+application and never return host identity or another application's records.
+`/v1/events/stream` answers with `text/event-stream` and `/v1/usage?format=csv`
+with `text/csv`; every refusal is still the JSON error object. The stable codes
+are listed in the [error catalogue](error-codes.md). A portable fixture checks that
+real replies carry the keys their OpenAPI schemas name; it is not a full schema
+validation.
 
 <a id="st-535-linux-file-routes-unimplemented-contract"></a>
 

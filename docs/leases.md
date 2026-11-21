@@ -38,7 +38,9 @@ way to extend it. Operators retain recovery access through a separate boundary.
 ## Lifecycle
 
 `state` is consumer lifecycle, `runtimeState` is observed execution, and `cleanup`
-is reclamation. These must remain separate. A stale host produces unknown runtime
+is reclamation. These must remain separate. Each transition below is recorded in
+the [event log](events.md) by the transaction that makes it; an application can read
+its own with `GET /v1/events`. A stale host produces unknown runtime
 state without extending the lease or freeing reservations.
 
 | Current state | Trigger | Result |
@@ -112,8 +114,15 @@ Acquisition example (UUIDs are caller-generated):
 Return 201 for new admission, 200 for an identical retry. Example response shape:
 
 ```json
-{"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
+{"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","name":"checkout-flow","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
 ```
+
+`name` is the label the caller gave at acquisition, returned so people and agents
+can tell their leases apart in lists. It is for display only: it selects nothing,
+authorizes nothing and need not be unique. On the generic host path an omitted name
+defaults to `lease-<uuid>`; a Linux workspace lease acquired without one reports
+`null`. The label stays readable after the lease ends. Both the application key
+and the lease's own key see it, as they see the rest of the lease view.
 
 Capabilities describe the pinned template contract, not current readiness. Each
 member exposes its own capabilities and file scopes; pair readiness requires both

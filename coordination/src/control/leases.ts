@@ -15,6 +15,7 @@ import { cleanupView, computeReserved, ensureLeaseCleanup, initializeLifecycle, 
 import { createModule as operationModule, initializeConsumerOperations, refreshConsumerOperations } from "./consumer-operations.ts";
 import { applicationArtifactDisk, releaseLeaseArtifacts } from "./install-cleanup.ts";
 import { applicationVideoUsage, settleLeaseVideoSessions } from "./video-cleanup.ts";
+import { recordLeaseRefusal } from "../observability.ts";
 
 export const ACTIVE = ["provisioning", "ready"];
 export interface LegacyLeaseRow {
@@ -139,7 +140,10 @@ export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: numb
       ready: ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
       ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
   });
-  return { id: row.id, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
+  // The caller's label from acquisition (default `lease-<uuid>`). Display only: nothing is selected or authorized by it.
+  // Read tolerantly: a row whose stored request predates this shape still has to be inspected and released.
+  const name = (JSON.parse(row.request) as { machine?: { name?: unknown } } | null)?.machine?.name;
+  return { id: row.id, name: typeof name === "string" ? name : null, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
     createdAt: utc(row.created), expiresAt: utc(row.expires), cleanup: { state: row.cleanup }, members,
     capabilities: members.length === 1 ? members[0]!.capabilities : {} };
 }
@@ -266,7 +270,8 @@ export class LegacyLeases implements ControlModule {
     });
   }
   acquire(token: string, value: unknown): ControlResponse {
-    return this.acquireAuthorized(value, db => this.applications.verify(db, token));
+    try { return this.acquireAuthorized(value, db => this.applications.verify(db, token)); }
+    catch (error) { recordLeaseRefusal(this.store, db => this.applications.verify(db, token).id, error, "generic", value); throw error; }
   }
   /** Internal queue entry; shares every validation, reservation and lifecycle rule with direct acquisition. */
   acquireForApplication(application: string, value: unknown) {

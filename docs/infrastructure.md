@@ -33,6 +33,8 @@ canaveral host --setup-file ./canaveral-setup.json --state ./state/runner
 ```
 
 The check command exits nonzero on failures; it does not enroll or create VMs.
+It inspects this machine. [`canaveral doctor`](doctor.md) inspects a controller
+and what its hosts last reported.
 It checks storage with a temporary write and probes installed runtime tools.
 Provider validation may contact the backend or start the local adb server.
 It does not install runtimes. Normal startup registers diagnostics even when a
@@ -128,10 +130,10 @@ axis, without connecting or interpolating across gaps. Exact timestamps and valu
 are available in a disclosure. Fewer than two measurements stays an explicit
 insufficient-data state. Usage older than 30 seconds or from an offline host
 is explicitly stale. These values do not replace the reservation ledger or
-establish per-VM CPU/RSS attribution, GPU metrics, alerts or billing.
-Placement still ranks hosts by reservation share, not by these samples. The only
-observed signal that can affect admission is the separate pressure state above, on a
-host whose operator opted in.
+establish per-VM CPU/RSS attribution, GPU metrics or billing. The controller raises
+`host.disk_pressure` and `host.memory_pressure` [events](events.md) from these
+host-wide samples, which an [alert](alerts.md) destination can select. Placement still ranks hosts by reservation share. Only the separate, opt-in
+pressure policy can stop new placements on a reporting host.
 
 Resource details include `categories`, a breakdown of the same reservation ledger:
 virtual machines, simulators, stopped machine disks, registered images (deduplicated
