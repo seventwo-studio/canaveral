@@ -35,6 +35,18 @@ app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
 app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
+requests [list|show ID|submit --request-file FILE|cancel ID]   Durable waiting requests (application key)
+lease hold --template ID [--revision R --arch A --ttl S --name N --priority N --wait S]
+           [--request-id UUID --source-file FILE --lease-key-file FILE --bind-pid PID | --detach]
+                                         Lease a device, print one JSON grant line, renew, release on exit
+lease ID device ACTION [--request-id UUID --arguments-file FILE] | lease ID device --request-file FILE
+lease ID operation OPERATION | lease ID install FILE.apk [--request-id UUID --install-id UUID]
+                                         Lease-key commands: --lease-key-file FILE [--wait S --output FILE]
+mcp                                      MCP server over stdio for coding agents (application key)
+instructions [--skill]                   Print the rules for coding agents
+setup [--agent claude|codex|all] [--project [--directory DIR]] [--force]
+                                         Write the agent skill files (user scope unless --project);
+                                         print the MCP registration
 image capture --request-file FILE | image-task ID
 updates [options] COMMAND                Manage signed runtime releases and rollouts
 install [options]                        Verify a fresh Unix installation; generate service config
@@ -44,6 +56,11 @@ serve flags: --bind IP --port PORT --database FILE --admin-token-file FILE
 serve --config FILE accepts the explicit controller configuration used by src/main.ts.
 Account create/mint commands require a stable --request-id. Passwords and issued
 credentials stay in private files. Never retry an uncertain mutation with a new ID.
+lease hold releases on exit, SIGINT, SIGTERM, parent exit or exit of the --bind-pid
+process; --detach prints the grant and returns without holding. mcp, lease hold and
+the lease-key commands need HTTPS or a loopback IP URL, and accept --ca-file FILE.
+The lease key comes from --lease-key-file or CANAVERAL_LEASE_KEY_FILE. An operation
+reported as unknown may have happened and is never sent again; inspect before acting.
 Local Linux: --linux-image FILE --apple-runner FILE --guest-helper-manifest FILE
 (or CANAVERAL_GUEST_BUNDLE) requires an installed, runnable TypeScript guest bundle.
 Local macOS: --macos-image DIR --macos-restore-image FILE.ipsw --apple-runner FILE
@@ -78,6 +95,8 @@ const schemas: Record<string, Schema> = {
   maintenance: { actions: ["begin", "status", "resume"] },
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
+  requests: { actions: ["list", "show", "submit", "cancel"], defaultAction: "list" },
+  mcp: { values: ["ca-file"] }, instructions: { flags: ["skill"] }, setup: { flags: ["force", "project"], values: ["agent", "directory"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
 };
@@ -93,6 +112,12 @@ const subSchemas: Record<string, Schema> = {
   "tokens:list": {}, "tokens:create": { values: ["name", "scope", "expires-in", "request-id", "output-file"], required: ["name", "scope", "request-id", "output-file"] },
   "tokens:revoke": { positional: 1 },
   "leases:acquire": { values: ["request-file"], required: ["request-file"] }, "leases:templates": {}, "leases:list": { values: ["after"] },
+  "requests:list": { values: ["after"] }, "requests:show": { positional: 1 }, "requests:cancel": { positional: 1 },
+  "requests:submit": { values: ["request-file"], required: ["request-file"] },
+  "lease:hold": { flags: ["detach"], values: ["template", "revision", "arch", "ttl", "name", "priority", "wait", "request-id", "source-file", "lease-key-file", "bind-pid", "ca-file"], required: ["template"] },
+  "lease:device": { positional: 2, values: ["lease-key-file", "request-id", "arguments-file", "request-file", "member", "wait", "output", "ca-file"] },
+  "lease:operation": { positional: 2, values: ["lease-key-file", "wait", "output", "ca-file"] },
+  "lease:install": { positional: 2, flags: ["keep-upload"], values: ["lease-key-file", "request-id", "install-id", "member", "wait", "ca-file"] },
   "apps:list": {}, "apps:create": { values: ["request-file", "output-file"], required: ["request-file", "output-file"] },
   "apps:credential": { positional: 1, values: ["output-file"], required: ["output-file"] }, "apps:revoke": { positional: 1 },
 };
@@ -118,16 +143,23 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
     else action = initial.defaultAction ?? "";
     if (!initial.actions.includes(action)) throw new CliError(`Supply a valid ${command} action: ${initial.actions.join(", ")}.`);
   }
+  if (command === "lease") {
+    // `lease hold` names no lease; the lease-key actions follow the lease UUID. Other lease actions keep their trailing position.
+    if (tail[0] === "hold") { action = "hold"; tail = tail.slice(1); }
+    else if (tail[0] && !tail[0].startsWith("-") && ["device", "operation", "install"].includes(tail[1] ?? "")) { action = tail[1]!; tail = [tail[0], ...tail.slice(2)]; }
+  }
   const schema = subSchemas[`${command}:${action}`] ?? initial;
   const options: NonNullable<ParseArgsConfig["options"]> = {};
   for (const name of schema.flags ?? []) options[name] = { type: "boolean" };
   for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" ? { multiple: true } : {}) };
   const result = parseArgs({ args: tail, options, allowPositionals: true, strict: true });
-  if (command === "lease" && result.positionals.length === 2) {
+  if (command === "lease" && !action && result.positionals.length === 2) {
     action = result.positionals.pop()!;
     if (!["renew", "release", "credential"].includes(action)) throw new CliError("Lease action must be renew, release or credential.");
   }
-  if (result.positionals.length !== (schema.positional ?? 0)) throw new CliError(`Invalid arguments for ${command}${action ? " " + action : ""}.`);
+  // A saved request file already names the device action.
+  const expected = command === "lease" && action === "device" && result.values["request-file"] !== undefined ? 1 : schema.positional ?? 0;
+  if (result.positionals.length !== expected) throw new CliError(`Invalid arguments for ${command}${action ? " " + action : ""}.`);
   for (const key of schema.required ?? []) if (!result.values[key]) throw new CliError(`Supply --${key}.`);
   for (const [key, choices] of Object.entries({ role: ["admin", "user"], status: ["active", "pending", "disabled"], arch: ["amd64", "arm64"] })) {
     const value = result.values[key]; if (typeof value === "string" && !choices.includes(value)) throw new CliError(`Invalid --${key}.`);
@@ -428,6 +460,13 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
     else if (args.action === "acquire") { const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id)); result = await client.request("POST", "/v1/leases", body); }
     else result = await client.request("GET", "/v1/leases" + (args.options.after ? "?after=" + encodeURIComponent(option(args, "after")) : ""));
   }
+  else if (args.command === "requests") {
+    if (args.action === "submit") { const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id)); result = await client.request("POST", "/v1/requests", body); }
+    else if (args.action === "show") result = await client.request("GET", `/v1/requests/${uuid(positional(args))}`);
+    // Withdraws waiting intent, or releases the lease of an admitted request. Safe to repeat.
+    else if (args.action === "cancel") result = await client.request("POST", `/v1/requests/${uuid(positional(args))}/cancel`, {});
+    else result = await client.request("GET", "/v1/requests" + (args.options.after ? "?after=" + uuid(option(args, "after")) : ""));
+  }
   else if (args.command === "lease") {
     const route = `/v1/leases/${uuid(positional(args))}`;
     if (!args.action) result = await client.request("GET", route);
@@ -505,6 +544,10 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       const value = await jsonFile(positional(args)); const result = await io.runtime.template(value);
       if (args.action === "prepare") { if (!value.source) throw new CliError("This template has no base image source to cache."); result.image = await io.runtime.prepareImage(record(value.source), option(args, "cache", "./state/images")); }
       io.stdout(JSON.stringify(result, null, 2) + "\n"); return 0;
+    }
+    if (["mcp", "instructions", "setup"].includes(args.command) || (args.command === "lease" && ["hold", "device", "operation", "install"].includes(args.action))) {
+      const { agentCommand } = await import("./agent-cli.ts");
+      return await agentCommand(args, io, { jsonFile, number: numberOption });
     }
     const account: AccountContext = { client: token => io.client(args.url, token, args.allowHttp), password: io.password, output: io.output, print: value => io.stdout(JSON.stringify(value, null, 2) + "\n") };
     if (!await handleAccount(args, account)) await handleRemote(args, io);

@@ -434,6 +434,10 @@ fair order and then gets a booted, checked, network-isolated emulator to itself.
 lease follows the generic [lease contract](leases.md). iOS simulators and physical
 devices still refuse leased execution.
 
+Coding agents and CI jobs need not call these routes themselves. The
+[agent surfaces](agent-surfaces.md) provide an MCP server, a CLI lease that is held and
+renewed, lease-key commands and a [CI recipe](agent-surfaces.md#ci-recipe).
+
 ### Host configuration
 
 A host advertises lease execution only when all of these hold. Every other runtime,
@@ -790,7 +794,8 @@ before its current deadline. A renewal that reaches the host after that deadline
 (for example, sent in the last second, or delayed by a slow heartbeat) cannot revive
 the emulator: the supervisor has already stopped it and the lease ends `failed`.
 Renew well before expiry, for example when a third of the TTL remains, and allow at
-least a few heartbeat intervals.
+least a few heartbeat intervals. `canaveral mcp` and `canaveral lease hold` renew at
+that point for the leases they hold ([agent surfaces](agent-surfaces.md#what-the-session-does-for-the-caller)).
 
 - **Controller loss:** the runner keeps its persisted deadline, fences locally and the
   supervisor stops the emulator. Cleanup completes when the controller returns.

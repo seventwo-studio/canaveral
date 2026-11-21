@@ -20,6 +20,9 @@ it still fails when no host has capacity.
 | GET /v1/requests/{id} | Current own request; `?wait=N` holds the reply while it is still waiting ([position and waiting](#position-and-waiting)) |
 | POST /v1/requests/{id}/cancel | Empty object; cancel waiting or release admitted lease |
 
+The CLI maps these to `canaveral requests list|show|submit|cancel`. The
+[agent surfaces](agent-surfaces.md) submit `lease` requests for a caller and wait on them.
+
 Every route requires the application credential. Another application's UUID is
 404, including submission; scoped lease, host and administrator keys cannot act
 as application keys. Persist the UUID and complete envelope before sending it.

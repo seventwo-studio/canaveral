@@ -9,6 +9,7 @@ interpreter dependency to the controller, host or SDK; see
 
 - [access transport](access-transport.md)
 - [user accounts and personal API tokens](accounts-and-tokens.md)
+- [agent surfaces](agent-surfaces.md) (MCP server, held CLI leases, agent rules and a CI recipe; fixture-covered, no native or client acceptance)
 - [android runtime ownership](android-runtime-ownership.md)
 - [android transfer](android-transfer.md)
 - [applications](applications.md)

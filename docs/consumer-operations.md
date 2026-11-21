@@ -44,7 +44,9 @@ failed or issue a new UUID as an automatic retry.
 Command tools should accept a persisted request file or the original operation
 UUID to inspect, using an existing private lease key. Print receipt metadata
 without guest output or credentials. Tool availability does not establish native
-consumer execution acceptance.
+consumer execution acceptance. `canaveral lease ID device` and `canaveral lease ID operation`
+follow this ([lease-key commands](agent-surfaces.md#lease-key-commands)); the MCP tool
+`device_action` returns the output to its agent instead.
 
 ## Capability and execution boundaries
 
