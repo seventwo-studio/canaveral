@@ -10,6 +10,8 @@ import { MobileProvider, SUPERVISOR_REFUSED, SupervisorLaunchError, authorized, 
 import type { Authorized, ByteReader, DeviceRequest, Download, LeaseSupervisorStatus, NativeChild, NativePipe, RecordValue, RunOptions, SupervisedChild } from "./mobile.ts";
 import { fenceLeaseAuthorization, publishLeaseAuthorization, requireLeaseAccess } from "./lease-supervision.ts";
 import { openAndroidVideo } from './android-video.ts';
+import { androidOrphan, purgeOrphan, runtimeOperation, storageDevices, strayDevices } from "./mobile-runtimes.ts";
+import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./mobile-runtimes.ts";
 import type { AndroidVideoOptions } from './android-video.ts';
 
 /** Leased guests get no network path to the host. User-mode networking (slirp) maps
@@ -94,6 +96,12 @@ export class AndroidProvider extends MobileProvider {
     await this.run([this.tool("adb"), "start-server"]);
     return { ready: true, nativeAcceptance: false, androidUploadHelper: this.config.transferHelperManifest != null };
   }
+  /** Operator-requested system-image listing, install and removal; never called by reconciliation. */
+  runtimeOperation(kind: string, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport> { return runtimeOperation(this, kind, args, context); }
+  storageDevices(): { id: string; runtime: string | null }[] { return storageDevices(this); }
+  orphanEvidence(name: string): Promise<OrphanEvidence> { return androidOrphan(this, name); }
+  strayDevices(): Promise<{ name: string; machineId: string; kind: "avd-registration" | "simulator" }[]> { return strayDevices(this); }
+  purgeOrphan(name: string, requestId: string, hostId: string | undefined): Promise<{ assignmentFingerprint: string | undefined; removed: OrphanRemoval[] }> { return purgeOrphan(this, name, requestId, hostId); }
   async devices(): Promise<Record<string, string>> {
     const lines = (await this.runText([this.tool("adb"), "devices"])).split(/\r?\n/);
     const result: Record<string, string> = {};

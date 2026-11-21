@@ -423,9 +423,18 @@ or bypass that acceptance gate. Lease recording has its own routes and rules bel
 Existing [device controls](devices.md) cover gestures, text, app lifecycle, logs,
 accessibility, permissions, location, small files and Android shells. iOS has no
 general guest shell; exposing the Mac host shell would violate simulator scope.
-Network-condition control, reset/delete/snapshot capabilities and broader native
-inputs require explicit platform adapters and acceptance rather than claims of
-platform parity.
+A stopped device can be [deleted](devices.md#delivery-and-recovery) with its owned
+storage. Network-condition control, reset and snapshot capabilities and broader
+native inputs require explicit platform adapters and acceptance rather than claims
+of platform parity.
+
+Host upkeep is separate from device control and is administrator-only; see
+[mobile host upkeep](mobile-host-upkeep.md). An administrator lists, installs and
+removes runtimes and system images on request, never as a side effect of a lease or
+a device. An idle running device can be stopped by an operator-set rule, a host
+reports and purges orphan storage only on request, and a host reports memory and
+disk pressure. A pressured host takes no new device or lease only when its operator
+opted in; its running ones continue either way.
 
 ## Android emulator leases
 
@@ -461,6 +470,11 @@ and any partial configuration, keeps refusing `leaseProtocol` and `leaseImages`.
 ```
 
 Size the host's `capacity` to the number of emulators it may run. Requests beyond that wait.
+On hosts whose operator set `pressure.gatePlacement`, a request also waits, with reason
+`host_pressure`, while every lease host that fits is under
+[memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure); leases already
+running are not stopped or shortened to make room. Without that setting pressure is
+reported and delays nothing.
 `leaseIsolationPorts` is optional. It lists more host loopback ports, such as a
 separately served dashboard, that the readiness probe must find unreachable from the
 guest; see [Guest network isolation](#guest-network-isolation).

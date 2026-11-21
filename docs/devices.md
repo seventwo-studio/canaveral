@@ -27,8 +27,11 @@ upstream, so retain compatible installed SDK tools for this adapter.
 
 Copy [host-android.json](../examples/host-android.json), set absolute SDK/storage
 paths and choose a profile installed in that SDK. The example image is ARM64;
-on AMD64 set `arch: amd64` and use an `x86_64` system image. Runtime installation
-and downloads happen before enrollment, rather than during device reconciliation.
+on AMD64 set `arch: amd64` and use an `x86_64` system image. Device reconciliation
+never installs or downloads a runtime, and neither does a lease or a machine
+creation. Install system images before enrollment, or later through an explicit
+administrator [runtime operation](mobile-host-upkeep.md#runtimes-and-system-images);
+an Android install must acknowledge the SDK licences in that request.
 The host checks that the required tools and offered system-image directories exist.
 
 For iOS, use a native Mac with full Xcode, its selected developer directory and
@@ -61,7 +64,20 @@ names that set. Leasing is an operator opt-in under the `shared-host` isolation 
 iOS CPU, memory and disk values are scheduling reservations. CoreSimulator manages
 actual resources; Canaveral cannot impose VM-style CPU/RAM/disk limits on it. Allow
 headroom for Xcode services and runtimes. Android memory/cores/data size also exclude
-SDK binaries, system images and emulator overhead. Shared runtimes are owner-managed.
+SDK binaries, system images and emulator overhead. Shared runtimes are owner-managed;
+an administrator can [list, install and remove](mobile-host-upkeep.md#runtimes-and-system-images)
+them through the controller, and a runtime that a template, device or lease uses
+cannot be removed.
+
+A device runs until its owner stops it. An operator can configure an
+[idle stop](mobile-host-upkeep.md#idle-stop) per host or template; it is off by
+default, never stops a device with work in flight or an uncertain operation, never
+deletes anything and never touches a leased device. Its owner starts it again with
+the normal start. Hosts report [memory and disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure).
+That is an observation unless the host's operator opts in: with `pressure.gatePlacement`
+a pressured host takes no new device, and only with `pressure.gateRestart` is starting
+a stopped device there refused until it recovers. Running devices are left alone
+either way.
 
 Enroll a runner using the normal credential flow:
 
@@ -193,8 +209,22 @@ release reservations. Stop/start retains the same AVD.
 For iOS, a lost create response leaves `create-started.json`; verify the exact
 assignment's device before restoring its `simulator.json` UDID receipt. Never point
 a receipt at a personal or different assignment's device. Unknown/missing/replaced
-resources require inspection rather than automatic adoption. Deletion, snapshots
-and migration remain outside the existing machine lifecycle.
+resources require inspection rather than automatic adoption.
+
+A stopped device can be deleted with `POST /v1/machines/{id}/delete` and a stable
+`{"id":"<request UUID>"}`, on a connected host with a confirmed stop. The runner
+removes the owned AVD and its registration, or the receipted simulator and its
+storage, and only its matching completion receipt releases the disk reservation; see
+[owned storage deletion](power-and-recovery.md#owned-storage-deletion). Deletion is
+refused while an install lacks cleanup or a resolution, or a video session lacks
+cleanup or an abandonment ([mobile control](mobile-control.md#deleting-a-machine-with-a-video-session)).
+Lease-owned devices use lease cleanup instead. The dashboard offers this action; the
+CLI has no delete command. Android and iOS deletions completed in the native
+[dashboard capture trial](../coordination/native-acceptance/dashboard-mobile-capture.md)
+of 19 November 2026; interrupted and uncertain removals are fixture-covered only.
+Nothing deletes a device automatically. Storage that no assignment explains is reported, and removed only by
+an explicit [orphan purge](mobile-host-upkeep.md#orphan-storage). Snapshots, reset and
+migration remain outside the machine lifecycle.
 
 The portable tests exercise real HTTP delivery, credential separation, large
 screenshot receipts, crash/timeout replay protection and fixture SDK ownership/

@@ -47,6 +47,7 @@ const TEMPLATE_CODES: Record<string, string[]> = {
 /** Code positions that are not error codes, or that this scan cannot follow. Each says why, and names
  * the codes it stands for when the value comes from somewhere the scan does not look. */
 const ACKNOWLEDGED: Record<string, { why: string; codes?: string[] }> = {
+  "src/providers/mobile-runtimes.ts outcome.kind": { why: "Non-exit tool outcomes; unstarted is translated to tool_unavailable.", codes: ["timeout", "interrupted", "error"] },
   "src/control/event-stream.ts stream_lifetime": { why: "end-of-stream code of the event stream, documented in docs/events.md" },
   "src/control/event-stream.ts controller_closing": { why: "end-of-stream code of the event stream, documented in docs/events.md" },
   "src/runtime-process.ts child.exitCode": { why: "a process exit status in a helper result, not an error code" },

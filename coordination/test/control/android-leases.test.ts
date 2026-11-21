@@ -221,6 +221,8 @@ async function harness(t: TestContext, capacity = 1, options: HarnessOptions = {
   const config: HostConfig = { url, stateDir: join(root, "runner"), enrollmentToken: enrollment, name: "android-lease-host", provider: "android", storage: join(root, "devices"),
     androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity + (options.extra?.cpu ?? 0), memoryMiB: 2048 * capacity + (options.extra?.memoryMiB ?? 0), diskGiB: 8 * capacity + (options.extra?.diskGiB ?? 0) },
     pollIntervalSeconds: .25, concurrency: 4, videoEncoder: ENCODER,
+    // This runner's real loops would otherwise sample this machine's memory and disk pressure.
+    pressure: { enabled: false },
     leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }] };
   const launch = async () => {
     runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state) });

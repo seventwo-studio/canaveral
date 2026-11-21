@@ -83,6 +83,17 @@ Existing reservations and running guest disks are retained. Legacy runners that
 do not report diagnostics remain compatible and display **Checks not reported**;
 upgrade them for the health admission gate.
 
+Direct hosts also report a [memory and disk pressure state](mobile-host-upkeep.md#memory-and-disk-pressure)
+from the platform's own signal and free disk, debounced with enter and exit
+thresholds. The state is an observation: by default it is shown and refuses nothing.
+A host's operator opts in to refusals in the host file, separately for new placements
+(`pressure.gatePlacement`) and for starting a stopped machine (`pressure.gateRestart`).
+With a gate on, a pressured host, one that cannot read its signal, and one whose last
+sample is older than 60 seconds refuse that work with the codes `host_pressure` and
+`host_pressure_unknown`. A runner that reports no pressure is never refused for it,
+and a runner that stops reporting returns its host to that state. Pressure never
+stops, shrinks or moves existing work.
+
 Configured capabilities distinguish VMs, simulators, desktop stream, files,
 shells and native accessibility. These describe adapters and image configuration,
 not live acceptance of every guest OS or a remote display broker. Runtime checks
@@ -121,8 +132,8 @@ insufficient-data state. Usage older than 30 seconds or from an offline host
 is explicitly stale. These values do not replace the reservation ledger or
 establish per-VM CPU/RSS attribution, GPU metrics or billing. The controller raises
 `host.disk_pressure` and `host.memory_pressure` [events](events.md) from these
-host-wide samples, which an [alert](alerts.md) destination can select. They do not
-change placement.
+host-wide samples, which an [alert](alerts.md) destination can select. Placement still ranks hosts by reservation share. Only the separate, opt-in
+pressure policy can stop new placements on a reporting host.
 
 Resource details include `categories`, a breakdown of the same reservation ledger:
 virtual machines, simulators, stopped machine disks, registered images (deduplicated
@@ -317,7 +328,8 @@ Account sessions or the operator credential authorize these administrative paths
 | `GET /v1/connection-setups` | List the latest 100 setup states without secrets |
 | `POST /v1/connection-setups/{id}/revoke` | Revoke enrollment credential; existing host identity survives |
 | `POST /v1/hosts/{id}/checks` | Request an outbound environment check refresh |
-| `GET /v1/hosts/{id}/resources` | Host capacity, limits, reservations, observed sample history and machine allocations |
+| `GET /v1/hosts/{id}/resources` | Host capacity, limits, reservations, pressure state, observed sample history and machine allocations |
+| `POST /v1/hosts/{id}/operations`, `POST /v1/host-operations/{id}/resolve`, `GET /v1/hosts/{id}/runtimes`, `GET /v1/hosts/{id}/upkeep` | Mobile [host upkeep](mobile-host-upkeep.md): runtime and storage operations, an administrator's decision on one that ended unknown, runtime inventory and the upkeep dry run |
 
 `POST /v1/hosts/{id}/limits` saves `{limits: {cpu, memoryMiB, diskGiB}}` and
 returns `{hostId, limits}`. Values are positive integers up to 1,048,576. A save
@@ -325,10 +337,10 @@ is atomic with placement admission and does not stop or resize existing machines
 The dashboard binds the response to the requested host and amounts and does not
 automatically replay an uncertain save.
 
-`GET /v1/hosts` adds `limits`, `kind`, `health`, `usage`, `available`, `overcommitted` and
-`placementReady`. Image offers use health-qualified accepting state. Heartbeats
-optionally carry bounded `health` and `resources` reports and receive
-`checksRequestedAt`. Host identity may not switch provider after enrollment.
+`GET /v1/hosts` adds `limits`, `kind`, `health`, `pressure`, `usage`, `available`, `overcommitted` and
+`placementReady`. Image offers use health-qualified accepting state, which is also false
+while pressure blocks placement on a host that gates it. Heartbeats optionally carry bounded `health`, `resources`,
+`pressure` and `upkeep` reports and receive `checksRequestedAt`. Host identity may not switch provider after enrollment.
 Scoped setup credentials authorize only `/v1/hosts/enroll`; they cannot read
 inventory, issue setups or control guests. The dashboard proxies the administrative
 paths with its existing session/CSRF checks. Its setup response also supplies the
@@ -450,9 +462,9 @@ These are controller fixture guarantees, not native execution acceptance.
 Use an administrator credential. Record the host ID and a UUID for the drain.
 
 1. Run `canaveral maintenance begin HOST --id UUID --reason TEXT`. The reason is optional. The CLI generates and prints a UUID if omitted. Retry an interrupted request with the same UUID, host and reason.
-2. Watch `canaveral maintenance status HOST`. Admission closes for new work. Existing work finishes. Stop persistent machines explicitly, release leases and wait for receipts. Check the action beside each blocker in the dashboard. Upgrade an old agent using a managed update during the drain.
+2. Watch `canaveral maintenance status HOST`. Admission closes for new work. Existing work finishes. Stop persistent machines explicitly, release leases and wait for receipts. Check the action beside each blocker in the dashboard. Upgrade an old agent using a managed update during the drain. [Runtime and storage upkeep](mobile-host-upkeep.md#host-operations) stays available during a drain; a queued or running operation blocks the power-off verdict, and one that ended unknown blocks resume until a listing or storage inspection acknowledges it, or an administrator records a [decision](mobile-host-upkeep.md#settling-an-unknown-change) for a host that can no longer be inspected. A host draining for a managed update accepts no new host operation.
 3. Read the current verdict immediately before power off or reboot. Safe to power off covers Canaveral-managed workloads on this direct host. Unsupported proof requires independent verification and keeps the verdict unsafe. A KubeVirt pool cannot establish safety for physical nodes.
-4. Bring the same host back with its identity and storage intact. Wait for a fresh runner confirmation and a complete inventory. Investigate missing storage, unexpected resources and uncertain operations before resuming.
+4. Bring the same host back with its identity and storage intact. Wait for a fresh runner confirmation and a complete inventory. Investigate missing storage, unexpected resources and uncertain operations before resuming. On Android and iOS hosts, `canaveral upkeep inspect HOST` reports what each unexpected storage entry is, and an [orphan purge](mobile-host-upkeep.md#orphan-storage) removes the ones the host proves it created and no one owns.
 5. When readyToResume is true, run `canaveral maintenance resume HOST DRAIN_ID --request-id UUID` with a new request UUID. Reuse it on retries. Check the phase is resumed and inspect remaining admission owners. To cancel maintenance on the same boot, reconcile and resume in the same way.
 
 A resume refusal (409 maintenance_blocked) includes current blockers. Resolve those marked for resume and retry. Power-off-only blockers allow resume.
