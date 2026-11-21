@@ -31,7 +31,9 @@ const { created, lease } = await client.acquireLease(request);
 ## Identity and mutations
 
 The caller owns every mutation UUID and persists the complete request before dispatch.
-The SDK generates no identifiers and never retries, polls, rotates or renews. Request
+The SDK generates no identifiers and never retries, polls, rotates or renews. The
+[agent surfaces](agent-surfaces.md) (`canaveral mcp`, `canaveral lease hold`) are the layer
+that waits, renews and releases for a caller, on top of these clients. Request
 bodies are serialized deterministically, so an explicit replay with the same object sends
 identical bytes (`created` is false for a 200 replay). For renewal, replay with the original
 `expectedRevision`. Unknown request fields, malformed UUIDs and bodies over 1 MiB are
