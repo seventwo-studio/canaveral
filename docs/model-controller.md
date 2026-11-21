@@ -24,7 +24,8 @@ node coordination/dist/src/main.js /absolute/controller-config.json
 ```
 
 `tls` and `enrollmentTokenFile` are optional; other fields are required, and unknown
-fields are refused. `enrollmentTokenFile` enables the separate compatibility host
+fields are refused. An optional `observability` object bounds event retention, the
+usage ledger and alert thresholds; see the [event log](events.md#retention). `enrollmentTokenFile` enables the separate compatibility host
 enrollment flow; bound Rust runners use explicit runner approval. Paths must be
 absolute. `listen.host` must be an IP literal. Plain HTTP is allowed only on loopback.
 Any other address needs `tls`, served with TLS 1.2 or later. The process starts identity and control workers on the same selected SQLite

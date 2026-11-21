@@ -35,6 +35,11 @@ that scoped credential first. Host attachment uses the assigned host credential.
 | GET `/v1/leases/{lease}/sessions/{session}/{generation}` | Consumer WebSocket attachment |
 | GET `/v1/hosts/{host}/sessions/{session}/{generation}` | Outbound runner WebSocket attachment |
 
+Recordings and live views of mobile devices use the same broker and protocol through
+their own session families, `/v1/leases/{lease}/video-sessions` and
+`/v1/leases/{lease}/live-views`, with the same lease-key rule; see
+[remote mobile control](mobile-control.md#live-screen).
+
 WebSockets negotiate `canaveral-session-v1`. Both receive a JSON `type: ready`
 control only after both upgrades succeed and authorization is rechecked. Session
 states are `pending`, `attaching`, `ready`, `closed`, `expired`, `revoked` and
@@ -67,6 +72,12 @@ independent fixture PTYs, durable multi-megabyte/empty uploads and verified
 downloads, reject missing/wrong finish controls and changed sources, and close
 PTYs at the local monotonic deadline with controller polling stopped. They do
 not establish live VM/simulator execution or complete lease cleanup.
+
+[Lease port tunnels](mobile-control.md#lease-port-tunnels) use the same broker and
+`canaveral-session-v1` framing through their own paths
+(`/v1/leases/{lease}/tunnels/{id}/{generation}` and the runner's
+`/v1/hosts/{host}/tunnels/{id}/{generation}`). They are not one of the session
+capabilities above: they have their own admission, limits and teardown rules.
 
 ## Runner provider workers and file completion
 

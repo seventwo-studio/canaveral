@@ -213,3 +213,53 @@ export function verifyMp4(data: Uint8Array): Mp4Summary {
     fragments,
   };
 }
+
+/** What a decoder is told before the first frame: the RFC 6381 codec string from an initialization
+ * segment's H.264 configuration, and the picture size. An initialization segment is `ftyp` and
+ * `moov` with one AVC video track, as the runner's encoder writes it for recordings and live views. */
+export function initSegment(data: Uint8Array): {
+  codec: string;
+  width: number;
+  height: number;
+} {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const top = boxes(view, 0, data.byteLength);
+  if (top[0]?.type !== "ftyp") fail("it does not start with ftyp");
+  const moovs = top.filter((b) => b.type === "moov");
+  if (moovs.length !== 1) fail("it needs one movie header");
+  const traks = boxes(view, moovs[0]!.body, moovs[0]!.end).filter(
+    (b) => b.type === "trak",
+  );
+  if (traks.length !== 1) fail("it needs exactly one track");
+  const tkhd = child(view, traks[0]!, "tkhd");
+  const dimensions = need(
+    tkhd,
+    view.getUint8(need(tkhd, 0, 1)) === 1 ? 88 : 76,
+    8,
+  );
+  const width = Math.round(view.getUint32(dimensions) / 65536),
+    height = Math.round(view.getUint32(dimensions + 4) / 65536);
+  if (width < 1 || height < 1) fail("the track has no picture size");
+  const stsd = child(
+    view,
+    child(view, child(view, child(view, traks[0]!, "mdia"), "minf"), "stbl"),
+    "stsd",
+  );
+  const entry = boxes(view, need(stsd, 8, 0), stsd.end)[0];
+  if (entry?.type !== "avc1") fail("the track is not H.264");
+  const avcC = boxes(view, need(entry, 78, 0), entry.end).find(
+    (b) => b.type === "avcC",
+  );
+  if (!avcC) fail("the H.264 configuration is missing");
+  // Profile, constraint flags and level follow the configuration version.
+  const at = need(avcC, 1, 3);
+  const hex = [0, 1, 2]
+    .map((i) =>
+      view
+        .getUint8(at + i)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("");
+  return { codec: `avc1.${hex}`, width, height };
+}

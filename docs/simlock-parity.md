@@ -39,10 +39,10 @@ states its own evidence. Fixture coverage does not establish native acceptance.
 | Live screen for a lease | Live stream for the holder and for operators | Screenshots and bounded recordings only | [#87](https://github.com/seventwo-studio/canaveral/pull/87) |
 | Runtime and capacity upkeep | Install and remove runtimes and images, idle-device cleanup, back-off under memory or disk pressure | Operators installed runtimes by hand; observed load never affected placement | [#84](https://github.com/seventwo-studio/canaveral/pull/84) |
 
-One draft pull request per area, each with its contract documentation, evidence
-and open items. Review and portable checks apply to the revision they examined.
-The dashboard builds on the queue visibility, observability and live screen
-changes and needs combined verification with their reviewed revisions.
+Each pull request records its contract, evidence and open items. The dashboard
+builds on queue visibility, observability and live views. Portable integration
+tests cover the administrator queue and gateway. Headless Chromium fixtures
+exercise the fleet pages and decode a screen-wall stream at 320px and 1440px.
 
 ## Decisions and their reasons
 
@@ -91,8 +91,9 @@ correction. Each is recorded in the pull request that carries it.
 - **A host may declare port tunnels only if it offers no account-owned Android
   devices.** The host's adb server is reachable by any local process and by an
   unfenced emulator, so a tunnel on a mixed host would extend that reach to the lease
-  holder's machine. A runner-private adb server is the proper fix and needs a native
-  run.
+  holder's machine. Supervised warm devices may share a tunnel host. The runner
+  audits their mappings before offering them and again when a lease adopts them.
+  A runner-private adb server is needed for mixed hosts.
 - **Tunnel traffic is authorized on a short interval, not per message**, with a
   per-tunnel rate bound, so tunnels cannot monopolise the single control worker.
 - **A recording takes priority over live views** for a host's capture slots. The
@@ -103,7 +104,7 @@ correction. Each is recorded in the pull request that carries it.
 
 ## Acceptance still open
 
-Native trials require operator authorization. The device-side drafts record the
+Native trials require operator authorization. The device-side pull requests record the
 assumptions each trial must check, including CoreSimulator process ownership and
 stop proof, Android baseline restoration, adb tunnel mappings, native screen
 capture and runtime installation and removal. Leased screens remain visible to

@@ -7,11 +7,17 @@ a paired WebSocket relay. Terminal cleanup coordination, the owned Apple cleanup
 worker and provider-independent unstarted-assignment cleanup have fixture coverage.
 Full provider deadline enforcement, paired environments and live consumer acceptance
 remain open. [Durable consumer operations](consumer-operations.md) have controller/runner
-fixture coverage. Ordinary runners do not advertise lease execution protocol 1. The only
-exception is a supervised Android emulator host with the native lease clock and lease
-supervisor ([Android emulator leases](mobile-control.md#android-emulator-leases)); every
+fixture coverage. Ordinary runners do not advertise lease execution protocol 1. There are
+two exceptions, both with the native lease clock and lease supervisor: a supervised Android
+emulator host ([Android emulator leases](mobile-control.md#android-emulator-leases)), and,
+since 21 November 2026, a macOS host whose iOS lease images each declare the `shared-host`
+isolation class ([iOS simulator leases](mobile-control.md#ios-simulator-leases)). Every
 other runtime still refuses the declaration. Fixture hosts explicitly opt into that
 protocol for lifecycle tests.
+
+Leases do not all isolate equally. An iOS simulator lease is not isolated from the Mac host
+that runs it and is for trusted code only. The catalogue entry, the lease and its member
+carry `isolation: "shared-host"` for it; a template without a declared class has no such field.
 
 ## Ownership and compatibility
 
@@ -20,6 +26,11 @@ are machine assignments. Initially an environment has one member; an iPhone/watc
 environment has two named members and a persisted pairing identity. One assignment
 cannot belong to multiple leases. Existing administrative machines are not adopted
 or expired automatically. Existing `/v1/machines` behavior remains compatible.
+
+One assignment can exist before its lease: a [warm pool device](warm-pool-and-baselines.md).
+It is created by the pool, owned by nobody and not an administrative machine. A lease
+takes over its machine row and reservation at admission, at most one lease ever does,
+and from then on it is that lease's member in every respect, including cleanup.
 
 The consumer principal has a template allowlist and aggregate CPU, memory, disk
 and active-lease limits. Admission checks these and host capacity in the same
@@ -33,12 +44,15 @@ access. Store only credential hashes; issue credentials through authenticated
 exchange, never URLs, logs or persisted operation bodies. A consumer can exchange
 its credential for a fresh lease credential after a lost response. Rotation revokes
 the previous credential. Sessions are subordinate to lease authorization, never a
-way to extend it. Operators retain recovery access through a separate boundary.
+way to extend it. [Port tunnels](mobile-control.md#lease-port-tunnels) follow the same
+rule. Operators retain recovery access through a separate boundary.
 
 ## Lifecycle
 
 `state` is consumer lifecycle, `runtimeState` is observed execution, and `cleanup`
-is reclamation. These must remain separate. A stale host produces unknown runtime
+is reclamation. These must remain separate. Each transition below is recorded in
+the [event log](events.md) by the transaction that makes it; an application can read
+its own with `GET /v1/events`. A stale host produces unknown runtime
 state without extending the lease or freeing reservations.
 
 | Current state | Trigger | Result |
@@ -102,6 +116,20 @@ gateway; do not remove existing direct-origin protections.
 | POST /v1/leases/{id}/sessions/{sessionId}/close | lease | close an owned session with `{}` |
 | POST /v1/leases/{id}/operations | lease | Submit or replay a durable discrete device/command operation |
 | GET /v1/leases/{id}/operations/{operationId} | lease | Inspect an owned operation receipt |
+| POST /v1/leases/{id}/live-views | lease | Open or replay a live view of a leased Android emulator's screen |
+| GET /v1/leases/{id}/live-views/{viewId} | lease | Inspect an owned live view and why it ended |
+| POST /v1/leases/{id}/live-views/{viewId}/close | lease | End an owned live view with `{}` |
+| POST /v1/leases/{id}/tunnels | lease | Open or replay a port tunnel of a leased Android emulator |
+| GET /v1/leases/{id}/tunnels | lease | List the lease's tunnels, including ended ones |
+| GET /v1/leases/{id}/tunnels/{tunnelId} | lease | Inspect one tunnel |
+| POST /v1/leases/{id}/tunnels/{tunnelId}/close | lease | Close a tunnel with `{}` |
+
+Port tunnels are off unless the member's host declares them and the application's policy
+allows them. They accept only the lease's current key, hold no capacity reservation and
+end with the lease, a fence, a key rotation or supervisor loss. A tunnel never extends a
+lease and never delays its cleanup; see
+[lease port tunnels](mobile-control.md#lease-port-tunnels) for the contract and its
+native acceptance gaps.
 
 Acquisition example (UUIDs are caller-generated):
 
@@ -112,13 +140,24 @@ Acquisition example (UUIDs are caller-generated):
 Return 201 for new admission, 200 for an identical retry. Example response shape:
 
 ```json
-{"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
+{"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","name":"checkout-flow","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
 ```
+
+A member may carry `source`: `warm` when its device was taken over from the host's warm
+pool without another boot, `cold` when it was booted for the lease. It is absent while a
+claimed warm device is still being handed over. It says nothing else about the host.
+`name` is the label the caller gave at acquisition, returned so people and agents
+can tell their leases apart in lists. It is for display only: it selects nothing,
+authorizes nothing and need not be unique. On the generic host path an omitted name
+defaults to `lease-<uuid>`; a Linux workspace lease acquired without one reports
+`null`. The label stays readable after the lease ends. Both the application key
+and the lease's own key see it, as they see the rest of the lease view.
 
 Capabilities describe the pinned template contract, not current readiness. Each
 member exposes its own capabilities and file scopes; pair readiness requires both
 members and pairing. Never infer a device shell from host process access. iOS
-initially exposes app-container files and discrete visuals/input, without shell.
+exposes app-container files, app lifecycle and logs (under `files`) and discrete
+visuals/input, without shell.
 Headless templates expose no display capability. PTY, command, hierarchy,
 screenshots, live display and input are distinct capabilities. Advertise formats,
 coordinate units, file roots, transfer limits and session concurrency limits.
@@ -241,7 +280,11 @@ acceptance. Other provider stop paths and access locks still need bounded
 cancellation/priority, and native running-VM expiry requires live acceptance.
 Automatic Apple cleanup now uses the owned deletion and credential-erasure path
 below. Android emulator leases use the native lease supervisor's group-exit proof
-before the same owned removal and erasure; other provider cleanup remains unimplemented. The
+before the same owned removal and erasure, also for a device that was adopted from the
+warm pool or claimed and never adopted. iOS simulator leases use the same supervisor,
+whose proof is CoreSimulator reporting the lease's own simulator shut down together with the
+absence of that simulator's process tree, both held across a settling period; that proof has
+no native acceptance. Other provider cleanup remains unimplemented. The
 runner explicitly rejects configuration that attempts to advertise protocol 1
 for any other runtime until those gates are complete. It must not be enabled just to make admission pass.
 
@@ -249,7 +292,8 @@ Controller eligibility now also requires explicit image revision, architecture
 and runtime selectors; a host-wide protocol flag alone grants no execution.
 Withdrawal closes affected sessions without claiming cleanup or freeing their
 reservations. Ordinary runners also reject selector configuration until native
-acceptance is complete; supervised Android hosts accept only Android selectors. See the [eligibility contract](lease-eligibility.md).
+acceptance is complete; supervised Android hosts accept Android selectors, and macOS hosts
+accept iOS selectors only with their explicit `shared-host` declaration. See the [eligibility contract](lease-eligibility.md).
 
 ### Owned lease cleanup
 
@@ -382,6 +426,17 @@ A process that deliberately escapes its group still requires native fencing;
 bounded pipe timeout retains uncertainty instead of claiming successful cleanup.
 Disposable process fixtures establish this host-helper behavior, not native VM
 expiry or guest process isolation.
+
+A lease key can watch its own Android emulator live through
+`/v1/leases/{id}/live-views`. A live view is a broker session of its own family: it
+shares the device's one native capture with the lease's other viewers, has a
+bounded lifetime that only an attached viewer renews, and ends with the lease,
+its key or its device within about a second. Its capture holds a recording's
+reservation against the host and the application until the recording path's
+cleanup proof. Renewing a view never renews the lease. The application key, the
+operator and another lease's key are refused, and no administrative route shows a
+leased device's screen. The contract and its open native questions are in
+[live screen](mobile-control.md#live-screen); it has fixture coverage only.
 
 Session negotiation returns an opaque session ID and the selected transport,
 without host credentials or raw host addresses. The controller relay is implemented; runner/network acceptance remains incomplete. An operation targets an explicit

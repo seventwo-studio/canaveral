@@ -3,7 +3,7 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Canaveral consumer lease API",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Implemented controller consumer subset. Independently usable execution; ordinary runners remain gated for consumer lease execution. No administrator, enrollment, model, registry or host API is implied. POST bodies are JSON objects of at most 1 MiB with a single Content-Length. Browser Origin requests are rejected. Remote use requires HTTPS; the embedded server uses HTTP behind operator TLS termination. Credentials are opaque bearer secrets, never URL parameters."
   },
   "paths": {
@@ -1255,6 +1255,495 @@
         "description": "The current scoped lease key can inspect retained receipts after lease termination or credential rotation. Other lease operations remain hidden. Unknown effects must be inspected before submitting another command."
       }
     },
+    "/v1/leases/{leaseId}/tunnels": {
+      "post": {
+        "operationId": "createLeaseTunnel",
+        "summary": "Open a port tunnel for a leased Android emulator",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires the current lease key, a ready Android member, a host that declares leaseTunnelProtocol 1 and an application policy with limits.tunnelsPerLease above zero. Application, operator and other lease credentials are refused with 401. Persist the request UUID: a replay returns the saved tunnel in its current state and never opens a second one; a changed body is 409. Refusal codes: tunnels_not_permitted (403), capability_unsupported, member_not_ready and tunnel_port_busy (409), lease_ended (410), tunnel_limit, tunnel_host_limit, tunnel_residue_limit and tunnel_identity_limit (429). The body names a device port and a direction only; the holder-side target or listener never reaches the controller. The mapping is installed only after both peers attach.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTunnel"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "get": {
+        "operationId": "listLeaseTunnels",
+        "summary": "List the lease's tunnels",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TunnelList"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Requires the current lease key. Returns every tunnel identity of the lease in creation order, including ended ones; identities are tombstones."
+      }
+    },
+    "/v1/leases/{leaseId}/tunnels/{tunnelId}": {
+      "get": {
+        "operationId": "inspectLeaseTunnel",
+        "summary": "Inspect one tunnel",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Requires the current lease key, also after the lease ended. Another lease's tunnel is not found."
+      }
+    },
+    "/v1/leases/{leaseId}/tunnels/{tunnelId}/close": {
+      "post": {
+        "operationId": "closeLeaseTunnel",
+        "summary": "Close a tunnel idempotently",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Requires the current lease key. Ends the tunnel and every connection on it; the runner then removes the device mapping and reports it. mappingRemoved becomes true once that removal is proven, or once the lease's own cleanup proved the emulator stopped and removed."
+      }
+    },
+    "/v1/leases/{leaseId}/tunnels/{tunnelId}/{generation}": {
+      "get": {
+        "operationId": "attachLeaseTunnel",
+        "summary": "Attach the lease holder's WebSocket peer of a tunnel",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
+            "headers": {
+              "Sec-WebSocket-Protocol": {
+                "schema": {
+                  "const": "canaveral-session-v1"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "HTTP handshake only, as for sessions: Upgrade: websocket, Sec-WebSocket-Version: 13 and Sec-WebSocket-Protocol: canaveral-session-v1, with the current lease key in the Authorization header. No Origin, body or query. One consumer peer attaches once per tunnel; the runner attaches outbound separately. After the broker's ready message the runner sends a tunnel control once the device mapping is installed; connections are then multiplexed as numbered streams with per-stream credit (session control schema, tunnel capability). Expiry, release, a fence, key rotation and supervisor loss end the relay within about a second. Nothing is replayed after a disconnect.",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
     "/v1/requests": {
       "post": {
         "operationId": "submitRequest",
@@ -1520,6 +2009,16 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 15
+            },
+            "description": "Hold the reply for up to this many seconds while the request is waiting and its state, position and reason are unchanged. It must be the only query parameter. Beyond 32 held reads across the controller or 4 per application credential the read is refused with 429 request_wait_limit."
           }
         ]
       }
@@ -1875,6 +2374,812 @@
           }
         }
       }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "summary": "listEvents",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "description": "This application's own events, oldest first: its leases, waiting requests, leased machines, operation outcomes and lease video sessions. Filtered to the authenticated application; host identity is never included. A read with a kind or subject filter examines a bounded stretch of the log, so its page can be short or empty with more: true; read again from cursor. See docs/events.md. The SDK never polls.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Sequence cursor, exclusive.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "description": "The newest N matching events. Not with after.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "UTC lower bound on the event time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "An event kind, or a family such as lease.*. Repeat or separate with commas; at most 32.",
+            "schema": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z]+\\.(?:[a-z_]+|\\*)$"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "lease",
+            "in": "query",
+            "description": "Only events about this lease.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "request",
+            "in": "query",
+            "description": "Only events about this request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/stream": {
+      "get": {
+        "operationId": "followEvents",
+        "summary": "followEvents",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "description": "Live follow of this application's own events as server-sent events. Each event is one unnamed message whose id is its sequence and whose data is an Event. Named messages: open ({cursor}, always first), cursor ({cursor}, after ten quiet seconds), truncated ({after}, retention removed history after the resume cursor) and end ({code, cursor}). open, cursor and end carry the stream position as their id, so a client that reconnects with its last id resumes without loss or repetition. The Last-Event-ID header is the resume cursor and wins over after; without either the stream starts after the newest matching event. End codes: stream_lifetime after one hour, controller_closing, unauthenticated or forbidden when the credential stops being valid, unavailable. At most 4 streams per credential; a refused request is 429 event_stream_limit. Refusals before the stream begins are ordinary JSON errors. See docs/events.md. The SDK never reconnects.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Sequence cursor, exclusive.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "description": "Resume cursor. Wins over after when both are present.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,15})$"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "An event kind, or a family such as lease.*. Repeat or separate with commas; at most 32.",
+            "schema": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z]+\\.(?:[a-z_]+|\\*)$"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "lease",
+            "in": "query",
+            "description": "Only events about this lease.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "request",
+            "in": "query",
+            "description": "Only events about this request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event stream",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-sent events; each unnamed message carries one Event as JSON."
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "usage",
+        "summary": "usage",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "description": "This application's own usage over a UTC range: request outcomes and wait time, lease counts, time to ready, hold time and device-seconds. Derived from controller ledgers, not measured utilisation. A range holding more than 200000 requests and leases is refused with 400 usage_range_too_large. See docs/usage.md.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Default: 24 hours before to.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Default: now. The range is at most 400 days.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "groupBy",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "application",
+                "template",
+                "platform"
+              ],
+              "default": "application"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "json",
+                "csv"
+              ],
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "description": "One header line, one line per group and a total line; see docs/usage.md."
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/leases/{leaseId}/live-views": {
+      "post": {
+        "operationId": "createLiveView",
+        "summary": "Open a live view of a leased Android emulator's screen",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires the current lease key and a ready member with the displayStream capability on an Android image. Application, operator and account credentials and another lease's key are refused. Persist the request UUID; a replay returns the same view. The first view of a device admits its shared live capture, which reserves one CPU and 256 MiB against the host and the application until its cleanup is proven; later views join it. 409 capture_cleanup_pending (retryable) while an earlier capture of the device awaits cleanup proof; 429 live_view_limit beyond four views per device. Fixture-covered only: no native run has measured frame rate, latency or decoder compatibility.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLiveView"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/live-views/{viewId}": {
+      "get": {
+        "operationId": "inspectLiveView",
+        "summary": "Inspect a live view and why it ended",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "viewId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Available to the lease's current key after the lease has ended."
+      }
+    },
+    "/v1/leases/{leaseId}/live-views/{viewId}/close": {
+      "post": {
+        "operationId": "closeLiveView",
+        "summary": "End a live view idempotently",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "viewId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "The device's shared capture stops when its last view has ended."
+      }
+    },
+    "/v1/leases/{leaseId}/live-views/{viewId}/{generation}": {
+      "get": {
+        "operationId": "attachLiveView",
+        "summary": "Attach the viewer WebSocket peer of a live view",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
+            "headers": {
+              "Sec-WebSocket-Protocol": {
+                "schema": {
+                  "const": "canaveral-session-v1"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "HTTP handshake only. Requires Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Version: 13, a valid WebSocket key and Sec-WebSocket-Protocol: canaveral-session-v1. No Origin, body, credentials in URLs or query fields. Exactly one viewer peer may attach to a view. After the broker's ready message the host sends live metadata, then MP4 segments: an init or segment control followed by exactly its announced bytes in binary messages of at most 64 KiB. The viewer may send only {\"type\":\"renew\"}, which the broker answers with a renewal control. The session control schema defines liveHost, liveConsumer and liveBroker. The stream ends with the lease, its key, its device or the view's unrenewed lifetime; nothing is replayed after disconnect.",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "viewId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -2031,6 +3336,13 @@
             "minimum": 0,
             "maximum": 1000000,
             "default": 0
+          },
+          "tunnelsPerLease": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8,
+            "default": 0,
+            "description": "Port tunnels one lease may hold at once. Absent or zero permits none; normalized to a number in administrator and catalogue responses."
           }
         },
         "required": [
@@ -2201,6 +3513,37 @@
                 "additionalProperties": false
               }
             ]
+          },
+          "baseline": {
+            "type": "object",
+            "description": "The saved device baseline every device of this image starts from. It carries whatever its preparer installed, signed in to or configured. Android only.",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"
+              },
+              "revision": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "name",
+              "revision",
+              "digest"
+            ],
+            "additionalProperties": false
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "shared-host"
+            ],
+            "description": "Present only when leases of this template run in a declared isolation class weaker than their runtime's own contract. `shared-host`: an iOS simulator lease is an ordinary process tree of the Mac host's user, with the host's network and files; it is not isolated from the host or from other simulators on it, and is for trusted code only."
           }
         },
         "required": [
@@ -2386,8 +3729,23 @@
           "resources": {
             "$ref": "#/components/schemas/Resources"
           },
+          "source": {
+            "type": "string",
+            "enum": [
+              "warm",
+              "cold"
+            ],
+            "description": "How the device was obtained: taken over from the host's warm pool without another boot, or booted for this lease. Absent while a claimed warm device is still being handed over. A warm device passes the same readiness, network isolation and image checks as a cold one. No host detail is exposed."
+          },
           "cleanup": {
             "$ref": "#/components/schemas/MemberCleanup"
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "shared-host"
+            ],
+            "description": "The declared isolation class of this member, when its template has one. `shared-host`: the member is not isolated from the host that runs it."
           }
         },
         "required": [
@@ -2406,6 +3764,13 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's label from acquisition. Display only; it selects and authorizes nothing."
           },
           "state": {
             "type": "string",
@@ -2475,10 +3840,18 @@
                 "$ref": "#/components/schemas/Empty"
               }
             ]
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "shared-host"
+            ],
+            "description": "The isolation class of a single-member lease, repeated from its member. Absent when the template declares none."
           }
         },
         "required": [
           "id",
+          "name",
           "state",
           "runtimeState",
           "revision",
@@ -2725,6 +4098,189 @@
           "createdAt",
           "attachBefore",
           "authorizationDeadline"
+        ],
+        "additionalProperties": false
+      },
+      "CreateTunnel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "reverse",
+              "forward"
+            ],
+            "description": "reverse: the device's port reaches one target on the lease holder's machine. forward: a listener on the holder's machine reaches one port on the device."
+          },
+          "devicePort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Reverse tunnels use 1024-65535 (the device's adb daemon cannot bind a privileged port). 5555 is refused in both directions."
+          },
+          "idleSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 3600,
+            "default": 600,
+            "description": "A connection that carried no byte in either direction for this long is reset."
+          }
+        },
+        "required": [
+          "id",
+          "member",
+          "direction",
+          "devicePort"
+        ],
+        "additionalProperties": false
+      },
+      "Tunnel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "reverse",
+              "forward"
+            ],
+            "description": "reverse: the device's port reaches one target on the lease holder's machine. forward: a listener on the holder's machine reaches one port on the device."
+          },
+          "devicePort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Reverse tunnels use 1024-65535 (the device's adb daemon cannot bind a privileged port). 5555 is refused in both directions."
+          },
+          "idleSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 3600,
+            "default": 600,
+            "description": "A connection that carried no byte in either direction for this long is reset."
+          },
+          "generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "const": "tunnel"
+          },
+          "protocol": {
+            "const": "canaveral-session-v1"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "attaching",
+              "ready",
+              "closed",
+              "expired",
+              "revoked",
+              "disconnected"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "attachBefore": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authorizationDeadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mappingRemoved": {
+            "type": "boolean",
+            "description": "True once the device mapping is known to be gone: the runner never installed one, reported its removal, or the lease's cleanup proved the emulator stopped and removed. Until then an ended tunnel keeps its host slot and device port."
+          },
+          "endReason": {
+            "type": "string",
+            "enum": [
+              "mapping_failed",
+              "mapping_lost",
+              "open_rate"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "connections": {
+                "type": "integer",
+                "const": 32,
+                "description": "Concurrent connections; a further one is closed at once."
+              },
+              "windowBytes": {
+                "type": "integer",
+                "const": 262144,
+                "description": "Unacknowledged bytes per connection and direction."
+              }
+            },
+            "required": [
+              "connections",
+              "windowBytes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "leaseId",
+          "member",
+          "direction",
+          "devicePort",
+          "idleSeconds",
+          "generation",
+          "capability",
+          "protocol",
+          "state",
+          "createdAt",
+          "attachBefore",
+          "authorizationDeadline",
+          "mappingRemoved",
+          "limits"
+        ],
+        "additionalProperties": false
+      },
+      "TunnelList": {
+        "type": "object",
+        "properties": {
+          "tunnels": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/Tunnel"
+            }
+          }
+        },
+        "required": [
+          "tunnels"
         ],
         "additionalProperties": false
       },
@@ -3683,7 +5239,8 @@
           "createdAt",
           "admittedAt",
           "target",
-          "reason"
+          "reason",
+          "position"
         ],
         "properties": {
           "id": {
@@ -3757,6 +5314,14 @@
               "string",
               "null"
             ]
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "1-based place in the controller's attempt order while a lease or linux-lease request is waiting; null otherwise. An order of attempts, not a promise of admission."
           }
         }
       },
@@ -4155,6 +5720,440 @@
           "receipt",
           "updatedAt"
         ]
+      },
+      "Event": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "at",
+          "kind",
+          "data"
+        ],
+        "description": "One entry of the controller's durable event log, as its owning application sees it.",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Monotonic and never reused; the resume cursor."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z]+\\.[a-z_]+$",
+            "description": "See docs/events.md for the catalogue."
+          },
+          "applicationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "data": {
+            "type": "object",
+            "description": "Identifiers, states and bounded reason codes. Never credentials, arguments or results."
+          }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "events",
+          "cursor",
+          "more",
+          "truncated"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Pass as after to continue: the last event of a full page, otherwise as far as the read examined."
+          },
+          "more": {
+            "type": "boolean",
+            "description": "More can be read now from cursor. A filtered page can be short or empty while this is true."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Retention removed history after the supplied cursor."
+          }
+        }
+      },
+      "UsageDistribution": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "p50",
+          "p95",
+          "samples"
+        ],
+        "properties": {
+          "p50": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "samples": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "leases"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "submitted",
+              "admitted",
+              "cancelled",
+              "expired",
+              "rejected",
+              "waiting",
+              "waitSeconds"
+            ],
+            "properties": {
+              "submitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "admitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cancelled": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "expired": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rejected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "waiting": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "waitSeconds": {
+                "$ref": "#/components/schemas/UsageDistribution"
+              }
+            }
+          },
+          "leases": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "admitted",
+              "ready",
+              "released",
+              "expired",
+              "failed",
+              "active",
+              "cleanupBlocked",
+              "deviceSeconds",
+              "timeToReadySeconds",
+              "holdSeconds"
+            ],
+            "properties": {
+              "admitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "ready": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "released": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "expired": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "active": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cleanupBlocked": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "deviceSeconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "timeToReadySeconds": {
+                "$ref": "#/components/schemas/UsageDistribution"
+              },
+              "holdSeconds": {
+                "$ref": "#/components/schemas/UsageDistribution"
+              }
+            }
+          }
+        }
+      },
+      "UsageReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to",
+          "groupBy",
+          "generatedAt",
+          "retention",
+          "rows",
+          "totals"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "groupBy": {
+            "enum": [
+              "application",
+              "template",
+              "platform"
+            ]
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "applicationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retention": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requestRecords",
+              "leaseLedgerSeconds",
+              "leaseLedgerStartedAt"
+            ],
+            "properties": {
+              "requestRecords": {
+                "const": "not pruned"
+              },
+              "leaseLedgerSeconds": {
+                "type": "integer",
+                "minimum": 86400
+              },
+              "leaseLedgerStartedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageRow"
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageRow"
+          }
+        }
+      },
+      "CreateLiveView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 120,
+            "default": 120,
+            "description": "The view's lifetime from readiness; each accepted renewal restarts it."
+          }
+        },
+        "required": [
+          "id",
+          "member"
+        ],
+        "additionalProperties": false
+      },
+      "LiveView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "captureId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The device's shared live capture: a video session of kind live that holds the reservation."
+          },
+          "generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "const": "live"
+          },
+          "protocol": {
+            "const": "canaveral-session-v1"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "attaching",
+              "ready",
+              "ended"
+            ]
+          },
+          "endReason": {
+            "type": "string",
+            "enum": [
+              "closed",
+              "view_expired",
+              "attach_timeout",
+              "lease_expired",
+              "lease_released",
+              "lease_failed",
+              "key_rotated",
+              "application_revoked",
+              "access_revoked",
+              "device_stopped",
+              "host_unavailable",
+              "capture_ended",
+              "disconnected",
+              "controller_restarted"
+            ]
+          },
+          "mediaType": {
+            "const": "video/mp4"
+          },
+          "codec": {
+            "const": "avc1"
+          },
+          "fps": {
+            "const": 30
+          },
+          "bitRate": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 120
+          },
+          "attachBefore": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authorizationDeadline": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "machineId",
+          "leaseId",
+          "member",
+          "captureId",
+          "generation",
+          "capability",
+          "protocol",
+          "state",
+          "mediaType",
+          "codec",
+          "fps",
+          "bitRate",
+          "ttlSeconds",
+          "attachBefore",
+          "authorizationDeadline"
+        ],
+        "additionalProperties": false
       }
     }
   }

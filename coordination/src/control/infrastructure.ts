@@ -8,6 +8,7 @@ import type { Resources } from "../consumers.ts";
 import { object, secret, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import { requireAdmin } from "./contracts.ts";
+import { pressureView } from "./pressure.ts";
 import type { ControlModule, ControlOptions } from "./contracts.ts";
 import { enabledRuntimes, HOST_RUNTIMES, legacyDigest, legacyJson, normalizeTemplate, resources, runtimeFor, text } from "./templates.ts";
 import type { Template } from "./templates.ts";
@@ -377,7 +378,7 @@ export class InfrastructureStore {
         categories.set(shared.id, shared);
       }
       for (const resource of keys) if ([...categories.values()].reduce((n, g) => n + g[resource], 0) !== reserved[resource]) throw new ServiceError("Reservation category accounting is unavailable.", 503);
-      return { hostId: id, ...(mapping ? { physicalDomainId: mapping.domainId } : {}), capacity: offer.capacity, limits: this.capacity.hostLimits(db, id), reserved, images, categories: [...categories.values()], available: this.capacity.remaining(db, id), samples: db.prepare("SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 360").all(id).map(r => ({ receivedAt: r.captured, ...parse(r.report) })), allocations };
+      return { hostId: id, ...(mapping ? { physicalDomainId: mapping.domainId } : {}), capacity: offer.capacity, limits: this.capacity.hostLimits(db, id), reserved, images, categories: [...categories.values()], available: this.capacity.remaining(db, id), pressure: pressureView(db, id, this.store.clock()), samples: db.prepare("SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 360").all(id).map(r => ({ receivedAt: r.captured, ...parse(r.report) })), allocations };
     });
   }
 }

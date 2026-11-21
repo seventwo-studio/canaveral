@@ -71,6 +71,13 @@ export async function api(
           typeof result.retryable === "boolean"
             ? { retryable: result.retryable }
             : {}),
+          // The stable refusal code, for callers that explain a refusal in their own words.
+          ...(result !== null &&
+          typeof result === "object" &&
+          "code" in result &&
+          typeof result.code === "string"
+            ? { code: result.code }
+            : {}),
         },
       );
     }

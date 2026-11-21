@@ -3,7 +3,7 @@
  */
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ServiceError } from '../errors.ts';
-import { authorized, canonical, integer, unsupported } from './mobile.ts';
+import { authorized, canonical, integer, markCaptureNotRunning, unsupported } from './mobile.ts';
 import { MAX_VIDEO_READ_MS } from '../mobile-video.ts';
 import type { Authorized, NativePipe, RecordValue } from './mobile.ts';
 import type { AndroidProvider } from './android.ts';
@@ -94,19 +94,25 @@ export async function stopAndroidRecorder(provider: AndroidProvider, machine: Re
 
 export async function openAndroidVideo(provider: AndroidProvider, machine: RecordValue, image: RecordValue, _folder: string,
   options: AndroidVideoOptions, check: Authorized, cleanupCheck?: Authorized): Promise<AndroidVideoPipe> {
-  const seconds = integer(options.durationSeconds, 'video duration', 1, 180), bitRate = integer(options.bitRate, 'video bitrate', 100000, 20000000);
-  if (options.fps !== 30 || Object.keys(options).some(key => !['durationSeconds','bitRate','fps'].includes(key))) throw new ServiceError('Android video requests a 30 fps target with bounded duration and bitrate.', 400);
-  provider.executionAllowed(machine); await authorized(check);
-  if (image.os !== 'android' || machine.desired !== 'running') throw new ServiceError('Android video requires a running Android assignment.', 409);
-  if (!provider.transport?.pipe) unsupported('Native Android video pipe transport is not configured.');
-  const storage = provider.storage(machine, image), serial = await provider.endpoint(machine, storage, check);
-  if (!serial || await provider.adb(serial, ['shell','getprop','sys.boot_completed']) !== '1') throw new ServiceError('Android device is not ready.', 409);
-  await authorized(check); await provider.owned(machine, serial); await authorized(check);
-  const initial = provider.displayEpoch(machine, image);
-  if (!initial) throw new ServiceError('Android capture requires an owned boot identity.', 409);
-  const epoch = canonical(initial), elapsed = provider.transport.elapsed ?? (() => performance.now() / 1000);
-  let lastNativeCheck = elapsed();
-  if (!Number.isFinite(lastNativeCheck)) throw new ServiceError('Android capture clock is unavailable.', 409);
+  // Everything before the recorder is spawned only validates and reads: a refusal here, including
+  // authorization that ended meanwhile, provably started no capture and is marked as such.
+  const preflight = async () => {
+    const seconds = integer(options.durationSeconds, 'video duration', 1, 180), bitRate = integer(options.bitRate, 'video bitrate', 100000, 20000000);
+    if (options.fps !== 30 || Object.keys(options).some(key => !['durationSeconds','bitRate','fps'].includes(key))) throw new ServiceError('Android video requests a 30 fps target with bounded duration and bitrate.', 400);
+    provider.executionAllowed(machine); await authorized(check);
+    if (image.os !== 'android' || machine.desired !== 'running') throw new ServiceError('Android video requires a running Android assignment.', 409);
+    if (!provider.transport?.pipe) unsupported('Native Android video pipe transport is not configured.');
+    const storage = provider.storage(machine, image), serial = await provider.endpoint(machine, storage, check);
+    if (!serial || await provider.adb(serial, ['shell','getprop','sys.boot_completed']) !== '1') throw new ServiceError('Android device is not ready.', 409);
+    await authorized(check); await provider.owned(machine, serial); await authorized(check);
+    const initial = provider.displayEpoch(machine, image);
+    if (!initial) throw new ServiceError('Android capture requires an owned boot identity.', 409);
+    const epoch = canonical(initial), elapsed = provider.transport.elapsed ?? (() => performance.now() / 1000), started = elapsed();
+    if (!Number.isFinite(started)) throw new ServiceError('Android capture clock is unavailable.', 409);
+    return { seconds, bitRate, serial, epoch, elapsed, started };
+  };
+  const { seconds, bitRate, serial, epoch, elapsed, started } = await preflight().catch(error => { throw markCaptureNotRunning(error); });
+  let lastNativeCheck = started;
   // -T preserves binary bytes; omitting -x retains separate stderr and remote exit status.
   const native = await provider.pipe([provider.tool('adb'), '-s', serial, 'shell', '-T', '-n', recorderCommand(seconds, bitRate)]);
   let completed = false, closed = false, reading = false, failure: unknown, closing: Promise<void> | undefined, nativeCheck: Promise<void> | undefined;

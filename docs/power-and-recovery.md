@@ -63,11 +63,12 @@ is used only for explicit power off here.
 ## Owned storage deletion
 
 The administrative API now accepts `POST /v1/machines/{id}/delete` with a stable
-`{"id":"<request UUID>"}`. This implementation supports Apple Linux/macOS VM
-storage only. It requires a connected host and confirmed stopped state, rejects
-unresolved power-off/capture operations and cannot delete lease-owned assignments.
-There is no dashboard deletion action yet. Retrying the same UUID returns its
-durable state; another intent cannot replace it.
+`{"id":"<request UUID>"}`. It supports Apple Linux/macOS VM storage and stopped Android and
+iOS devices ([devices](devices.md#delivery-and-recovery)); other runtimes return
+`capability_unsupported`. It requires a connected host and confirmed stopped state,
+rejects unresolved power-off/capture operations and cannot delete lease-owned
+assignments. The dashboard offers deletion; the CLI does not. Retrying the same UUID
+returns its durable state; another intent cannot replace it.
 
 The host checks both assignment and storage fingerprints, takes the native
 runtime lock and verifies shutdown and closed disk handles. It writes a durable

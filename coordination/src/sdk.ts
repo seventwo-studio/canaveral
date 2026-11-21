@@ -15,7 +15,8 @@ import { TerminalClient } from './terminal-sdk.ts';
 import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
 import { receiveSnapshot, MAX_SNAPSHOT_BYTES } from './accessibility-sdk.ts';
-import { LeaseVideoClient } from './video-sdk.ts';
+import { LeaseLiveClient, LeaseVideoClient } from './video-sdk.ts';
+import { LeaseTunnelClient } from './tunnel-sdk.ts';
 import { uploadAppArtifactFile } from './app-artifact-client.ts';
 import { appArtifactMetadata } from './app-artifact-contract.ts';
 import type { AppArtifactMetadata } from './app-artifact-contract.ts';
@@ -25,6 +26,8 @@ export { containerDownloadFiles, linuxDownloadFiles, scopedDownloadFiles, window
 export type { DownloadDirectory, DownloadFiles, DownloadStage, PublishResult, WindowsPublicationAPI, WindowsPublicationBridge } from './sdk-files.ts';
 export * from './consumer-client.ts';
 export { TerminalClient, DisplayClient };
+export { LeaseTunnel, LeaseTunnelClient } from './tunnel-sdk.ts';
+export type { Tunnel, TunnelBinding, TunnelClosed, TunnelListen, TunnelOpenOptions, TunnelRequest, TunnelTarget } from './tunnel-sdk.ts';
 export { validateSnapshot, snapshotSchema } from './accessibility-sdk.ts';
 
 export function record(value: unknown): value is Record<string, unknown> {
@@ -65,6 +68,9 @@ const WORKER_MESSAGES: Record<string, string> = {
   capability_unsupported: 'This worker does not support the requested capability. Inspect the session before selecting another environment.',
   session_incomplete: 'Access ended without confirmed completion. Inspect before retrying.',
   upload_publication_uncertain: 'Upload publication may have occurred. Inspect the destination before retrying.',
+  tunnel_mapping_failed: 'The device port mapping could not be created; the device port may be in use. Inspect the tunnel before opening another.',
+  tunnel_mapping_lost: 'The device port mapping disappeared, for example because the adb server or the device transport restarted. The tunnel ended; open a new one.',
+  tunnel_open_rate: "Connections kept arriving faster than the tunnel's open rate. The tunnel ended; open a new one once the client behaves.",
 };
 export function checked<T>(value: T, requestId: string): T {
   if (record(value) && value.type === 'error') {
@@ -351,24 +357,34 @@ export class LeaseClient {
     return new LeaseClient({ ...options, leaseKey: credentialFile(options.credentialFile) });
   }
   #video: LeaseVideoClient;
-  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); }
-  /** MP4 recording of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `record`. */
+  #live: LeaseLiveClient;
+  #tunnels: LeaseTunnelClient;
+  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); this.#tunnels = new LeaseTunnelClient(options); this.#live = new LeaseLiveClient(options); }
+  /** Port tunnels between this lease's device and the holder's machine: `open`, `create`,
+   * `connect`, `inspect`, `list` and `close`. Off unless the host and the application allow them. */
+  get tunnels(): LeaseTunnelClient { return this.#tunnels; }
+  /** Live screen of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `watch`. */
+  get live(): LeaseLiveClient { return this.#live; }
+  /** MP4 recording of this lease's own Android emulator: `create`, `connect`, `inspect`, `close`
+   * and `record`. An iOS simulator lease refuses recording with `capability_unsupported`. */
   get video(): LeaseVideoClient { return this.#video; }
   async #artifactCall(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string): Promise<AppArtifactMetadata> {
     const { status, json } = await this.transport.call(method, path, body, [200, 201], method === 'POST', method === 'POST' ? id : undefined);
     try { const value = appArtifactMetadata(json); if (value.id !== id || value.leaseId !== this.id) throw new Error('identity'); return value; }
     catch { throw new ConsumerProtocolError('Invalid app upload receipt.', 'response_invalid', status, { requestId: id, ...(method === 'POST' ? { outcome: 'unknown' as const } : {}) }); }
   }
-  /** Uploads one APK for `member` in verified 512 KiB chunks, resuming confirmed chunks of the
-   * same caller UUID. It does not install; follow with `installApp`. Any app size up to 2 GiB. */
-  uploadApp(request: { id: string; member: string; file: string; format?: 'apk' }): Promise<AppArtifactMetadata> {
-    const id = identifier(request.id);
-    if (Object.keys(request).some(k => !['id','member','file','format'].includes(k)) || (request.format ?? 'apk') !== 'apk' || typeof request.file !== 'string') throw new ConsumerConfigurationError('Invalid lease app upload.');
+  /** Uploads one app build for `member` in verified 512 KiB chunks, resuming confirmed chunks of
+   * the same caller UUID. `format` is `apk` (the default) for an Android member, or `ios-app-tar`
+   * for an iOS member: an iOS Simulator `.app` as an uncompressed POSIX ustar archive. It does not
+   * install; follow with `installApp`. Any app size up to 2 GiB. */
+  uploadApp(request: { id: string; member: string; file: string; format?: 'apk' | 'ios-app-tar' }): Promise<AppArtifactMetadata> {
+    const id = identifier(request.id), format = request.format ?? 'apk';
+    if (Object.keys(request).some(k => !['id','member','file','format'].includes(k)) || !['apk', 'ios-app-tar'].includes(format) || typeof request.file !== 'string') throw new ConsumerConfigurationError('Invalid lease app upload.');
     return uploadAppArtifactFile({ request: async (method, path, body) => {
       const { json } = await this.transport.call(method as 'GET' | 'POST', path, body, [200, 201], method === 'POST', id);
       if (!record(json)) throw new ConsumerProtocolError('Invalid app upload receipt.', 'response_invalid', 200, { requestId: id, outcome: 'unknown' });
       return json;
-    } }, { lease: { leaseId: this.id, member: request.member }, id, format: 'apk', file: request.file });
+    } }, { lease: { leaseId: this.id, member: request.member }, id, format, file: request.file });
   }
   appArtifact(artifactId: string): Promise<AppArtifactMetadata> { const id = identifier(artifactId); return this.#artifactCall('GET', `/v1/leases/${this.id}/app-artifacts/${id}`, undefined, id); }
   /** Releases the upload's bytes and host scratch once every install attempt of it is clean. */

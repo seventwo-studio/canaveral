@@ -15,11 +15,15 @@ The supplied release link requires a Mobbin login in the shared browser. The con
 | Signed out | Sign in | Enter the machine workspace. An invitation or recovery link opens the password claim form. |
 | Workspace | Overview (`#admin`, administrators) | Inspect machines needing attention, review fleet and access counts, or open an operational destination. |
 | Workspace | Machines (`#machines`) | Filter the fleet, create a machine, inspect details, start or control an eligible machine. Capture and power-off actions open against the selected machine. |
+| Workspace | Screens (`#screens`) | Choose up to four running, account-owned mobile devices and watch them live side by side. Open a device's control from its tile. `#screens/<uuid>+<uuid>` names the devices on the wall. |
 | Machine control | Selected machine | Use the available display, input, accessibility, file and terminal tools. A headless machine can expose files and terminals without a display connection. |
 | Machine sources | Image library (`#images`) | Search downloaded artifacts, inspect provenance and open a blueprint from a source. Administrators can open the registry, import images and inspect image activity. |
 | Machine sources | Machine blueprints (`#blueprints`) | Inspect immutable revisions and create a machine from an eligible offer. Administrators can create blueprints and revisions. |
 | Infrastructure, administrators | Hosts (`#hosts`) and Orchestrators (`#orchestrators`) | Connect a runner or open a named resource at `#hosts/<id>` or `#orchestrators/<id>`. Inspect resource reports, limits and inventory, then return to the parent list. |
-| Infrastructure, administrators | System (`#system`) | Inspect applications, leases, waiting requests, jobs, operations and access sessions. |
+| Infrastructure, administrators | System (`#system`) | Inspect applications, leases, waiting requests, jobs, operations and access sessions. Leases show their holder's label and the time remaining. |
+| Infrastructure, administrators | Queue (`#queue`) | Read the waiting requests in attempt order with position and the reason each waits, and the leases that hold capacity. Cancel a named request, or open the events of a request, lease or application. |
+| Infrastructure, administrators | Activity (`#activity`) | Follow the event log live, filter by family, kind, attention, application, host or lease, and load older events. `#activity/<subject>/<uuid>` opens it on one application, lease, request, host or machine. |
+| Infrastructure, administrators | Usage (`#usage`) | Choose a range and a grouping, read requests by outcome, waits, leases, held device time and failures, and download the CSV. |
 | Administration | Users (`#admin/users`) | Search accounts, invite a user, initiate recovery or confirm a role or status change. |
 | Administration | API access (`#admin/tokens`) | Inspect token ownership, permissions and expiry. Confirm revocation for a named token. |
 | Administration | Configuration (`#configuration`) | Select a named administrative API action and review its fields and result. |
@@ -36,3 +40,5 @@ The image library also accepts `#templates`, user administration accepts `#users
 - Lead Overview with up to four actionable exceptions. When machines and connections both need attention, include at least one of each in the preview. Put fleet and host health before account administration, with one refresh action for the whole overview.
 - Show where a number came from. Keep reservations distinct from measured consumption, label stale snapshots and surface missing measurements where a value would appear.
 - Bind consequential actions to their subject. Name the affected machine, account or token in confirmations. A failed read offers a refresh. An uncertain operation offers status recovery using the original request identity.
+- Say what a number is where it is shown. A queue position is an order of attempts, not a promise. Device time is held lease time, not measured utilisation. A percentile names its sample count, and no sample reads as "No samples", not zero. Count time against the controller's clock when it sent one.
+- Keep long identifiers on a line of their own below the short figures, so a UUID is not broken across a narrow column. On phones, fold filters that are rarely used so the first row of content stays near the top.

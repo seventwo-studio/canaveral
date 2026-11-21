@@ -77,6 +77,8 @@ lease's own Android emulator with the lease's current key, for CI and marketing 
 It uses the same broker protocol, verification and receipt as `MobileVideoClient`, at
 `/v1/leases/{lease}/video-sessions`. See
 [lease recording and large installs](mobile-control.md#lease-recording-and-large-installs).
+An iOS simulator lease refuses recording with `capability_unsupported`; see
+[iOS scoped control](mobile-control.md#ios-scoped-control).
 
 ```ts
 const lease = new LeaseClient({ baseUrl, leaseId, leaseKey });
@@ -93,8 +95,9 @@ ends the stream without a finish receipt. Android emits no frames while the scre
 static, so set `timeoutMs` above the longest expected static stretch. Another lease's
 key, the application key and administrative credentials are refused.
 
-For live playback, `video.chunks()` is a pull-driven async iterator of MP4 byte
-chunks; boundaries are neither decoded frames nor complete MP4 boxes. Feed them
+To play a recording while it is captured, `video.chunks()` is a pull-driven async
+iterator of MP4 byte chunks; boundaries are neither decoded frames nor complete MP4
+boxes. To watch a device without recording it, use a [live screen view](#live-screen-views). Feed them
 to an appropriate fragmented-MP4 player or decoder with backpressure. Initialization
 precedes media fragments, and the stream identifies its codec family as `avc1`.
 A browser MediaSource adapter must inspect the initialization segment for the
@@ -129,6 +132,92 @@ over to a new capture automatically. Persist the UUID before creation, inspect
 that session after uncertainty, and use a new explicit session for another clip.
 Portable fixtures check transport, byte preservation, envelopes, process exit
 handling and recovery; they do not establish a working native 30 fps recording.
+
+## Live screen views
+
+`LeaseLiveClient` (also `LeaseClient.live` in `coordination/src/sdk.ts`) and
+`MachineLiveClient`, both exported from `canaveral-machines/video-sdk`, watch a
+device's screen as it happens. The contract, its limits and its open native
+questions are in [live screen](mobile-control.md#live-screen). A live view is not a
+recording: it has no finish receipt and no digest, and it starts wherever the viewer
+joined. Fixture-covered only; no native run has measured frame rate, latency or
+decoder compatibility.
+
+```ts
+const lease = new LeaseClient({ baseUrl, leaseId, leaseKey });
+const stream = await lease.live.watch({ id: persistedViewId, member: 'primary' });
+for await (const segment of stream.segments()) {
+  if (segment.kind === 'init') await decoder.reset(segment.data); // a new epoch
+  else await decoder.append(segment.data);
+}
+console.log(stream.ended); // { reason: 'lease_expired', source: 'controller' }
+```
+
+| Client | Credential | Device |
+| --- | --- | --- |
+| `LeaseLiveClient` | The lease's current key | That lease's own Android emulator |
+| `MachineLiveClient` | A personal API token with `machines:access`, or the operator credential | An account-owned Android or iOS device; leased machines are refused |
+
+`create` persists nothing by itself: save the view UUID first, and replaying the
+same request returns the same view. `watch` is `create` followed by `connect`;
+`inspect` and `close` read and end a view. A request may set `ttlSeconds` from 10
+to 120.
+
+`stream.segments()` is a pull-driven async iterator of complete MP4 segments:
+
+- `kind: 'init'` is the initialization segment (`ftyp` and `moov`) that opens an
+  epoch. An epoch is one run of the device's native capture, at most 180 seconds;
+  a longer view receives a new `init` and continues. A recording of the same device
+  also appears as an epoch.
+- `kind: 'media'` is one `moof` with its `mdat`. `sequence` only increases within an
+  epoch. The first media segment of an epoch, and the first after any gap in
+  `sequence`, has `keyframe: true`. A gap means the runner skipped this viewer
+  ahead because it was not keeping up.
+
+The SDK checks this ordering and that each segment consists of exactly the expected
+boxes; a violation is a `session_protocol_error`. It does not decode video. Feed
+the segments in order to a fragmented-MP4 decoder. A browser `SourceBuffer` should
+accept them after the page reads the codec profile from the initialization segment;
+no browser has been tried. The stream
+identifies its codec family as `avc1`. Consuming a stream twice is rejected.
+
+The iterator waits without a time limit for the next segment, because Android
+emits no frames while the screen is static. `timeoutMs` (default 30 seconds) bounds
+the handshake and each renewal reply only; the attachment request uses the client's
+own request timeout. Pass `signal` to cancel.
+
+**Renewal.** A view lasts `ttlSeconds` and ends with `view_expired` unless renewed.
+With `autoRenew` (default `true`) the stream sends a renewal after every third of
+that lifetime, but only while the caller is waiting in the iterator: a consumer
+that stops pulling stops renewing, and the broker also drops a viewer that reads
+nothing for 30 seconds. `stream.renew()` renews explicitly when `autoRenew` is
+`false`. `stream.authorizationDeadline` is the controller's latest answer. Renewal
+never renews, extends or releases a lease.
+
+**Why a stream ended.** The iterator returns, and `stream.ended` holds,
+`{ reason, source }`:
+
+| `source` | Meaning |
+| --- | --- |
+| `host` | The capturing host ended a stream it was still serving: `capture_failed`, `capture_unavailable` or `capture_ended` |
+| `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed` or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
+| `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost` (the controller could not be reached) |
+
+After a dropped stream the SDK reads the view for up to three seconds, because the
+host enforces a lease deadline slightly before the controller records it; within
+that time `disconnected`, and for a lease `device_stopped` or `host_unavailable`,
+may still give way to the lease's own ending. It does
+the same when the host reports `capture_failed`: if the
+view's lease, credential or device ended in that moment, that cause is reported
+with source `controller`; otherwise the host's reason stands. A worker
+error, such as `capability_unsupported` from a host without live capture for that
+device, is thrown instead: by `connect` when the host refuses at once, otherwise by
+the iterator. The SDK never reconnects, never opens a new view and never replays
+anything; open a new view with a new UUID to continue watching.
+
+**Input.** The stream is view-only. Send `tap`, `swipe`, `key`, `text` and `rotate`
+through the existing durable operations (`LeaseClient.createOperation`) while
+watching; see [input beside the stream](mobile-control.md#input-beside-the-stream).
 
 ## Sampled PNG frames and APNG recordings
 
@@ -177,7 +266,8 @@ produces a 30-second APNG playback with 120 sampled screens. Its playback uses t
 requested interval; capture or sink delays can make wall-clock recording slower.
 The return value contains `mediaType`, `frames`, `bytes`, `width`, `height` and
 the playback `durationMs`. This is sampled screen animation, with no audio or
-MP4 encoding. Native video and low-latency streaming remain separate work.
+MP4 encoding. Native video is the [MP4 recording](#native-mp4-video) above; a
+continuous view is the [live screen view](#live-screen-views).
 
 Rotation during recording fails rather than stretching frames or producing a
 misleading complete artifact. Cancellation, disconnection, byte-budget exhaustion,

@@ -34,6 +34,11 @@ import {
   useAdminUsers,
 } from "@/components/admin-dashboard";
 import { SystemControl } from "@/components/system-control";
+import { RequestQueue } from "@/components/request-queue";
+import { ActivityFeed } from "@/components/activity-feed";
+import { UsageReport } from "@/components/usage-report";
+import { ScreenWall } from "@/components/screen-wall";
+import { subjects, validSubject } from "@/lib/activity";
 import { ApiWorkspace } from "@/components/api-workspace";
 import { ownerLabel } from "@/lib/admin";
 import {
@@ -198,6 +203,7 @@ const views = {
   orchestrators: {
     filters: ["all", "online", "offline", "draining"],
   },
+  screens: { filters: [] },
   builds: { filters: [] },
   previews: { filters: [] },
   models: { filters: [] },
@@ -223,10 +229,21 @@ const currentView = (): View => {
           "users",
           "api-access",
           "system",
+          "queue",
+          "activity",
+          "usage",
           "configuration",
         ].includes(name) || Object.hasOwn(views, name)
       ? (name as View)
       : "machines";
+};
+/** `#activity/<subject>/<uuid>` opens Activity on one application, lease, request, host or machine. */
+const currentActivitySubject = () => {
+  const [name, subject, id, ...rest] = location.hash.slice(1).split("/");
+  const known = subjects.find(([, , key]) => key === subject);
+  return name === "activity" && known && id && !rest.length && validSubject(id)
+    ? { [known[2]]: id }
+    : undefined;
 };
 const currentInfrastructure = () => {
   const parts = location.hash.slice(1).split("/");
@@ -313,6 +330,9 @@ export function App() {
       "host" | "orchestrator" | null
     >(null),
     [infrastructureId, setInfrastructureId] = useState(currentInfrastructure);
+  const [activitySubject, setActivitySubject] = useState(
+    currentActivitySubject,
+  );
   const [imageImport, setImageImport] = useState<boolean | RegistryEntry>(
       false,
     ),
@@ -331,6 +351,9 @@ export function App() {
       "admin",
       "api-access",
       "system",
+      "queue",
+      "activity",
+      "usage",
       "configuration",
       "models",
     ].includes(requestedView)
@@ -500,6 +523,7 @@ export function App() {
     const change = () => {
       setView(currentView());
       setInfrastructureId(currentInfrastructure());
+      setActivitySubject(currentActivitySubject());
       setFilter("all");
       setQuery("");
       setOwner("all");
@@ -844,6 +868,37 @@ export function App() {
                 );
               }}
             />
+          ) : view === "queue" && user.role === "admin" ? (
+            <RequestQueue
+              key={user.id}
+              user={user}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : view === "activity" && user.role === "admin" ? (
+            <ActivityFeed
+              key={user.id}
+              user={user}
+              initial={activitySubject}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
+          ) : view === "usage" && user.role === "admin" ? (
+            <UsageReport
+              key={user.id}
+              user={user}
+              onDenied={() => {
+                void signOut(
+                  "Administrator access ended. Sign in again to continue.",
+                );
+              }}
+            />
           ) : view === "configuration" && user.role === "admin" ? (
             <ApiWorkspace
               key={user.id}
@@ -904,6 +959,20 @@ export function App() {
                 void signOut(
                   "Administrator access ended. Sign in again to continue.",
                 );
+              }}
+            />
+          ) : view === "screens" ? (
+            <ScreenWall
+              key={user.id}
+              machines={inventory.machines}
+              hosts={inventory.hosts}
+              users={directory.data ?? []}
+              admin={user.role === "admin"}
+              loaded={loaded}
+              stale={stale}
+              onControl={setControlId}
+              onDenied={() => {
+                void signOut("Your session ended. Sign in again to continue.");
               }}
             />
           ) : view === "builds" ? (

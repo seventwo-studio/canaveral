@@ -9,6 +9,10 @@ import { jobView } from "./inference.ts";
 import { requireAdmin } from "./contracts.ts";
 import { endLegacyLease, legacyTable, legacyLeaseView, refreshLegacyLeases } from "./leases.ts";
 import type { LegacyLeases, LegacyLeaseRow } from "./leases.ts";
+import { waitingRequests } from "../requests.ts";
+
+/** Rows per list in the queue view. Each list reports its full count, so a bounded reply says what it left out. */
+const QUEUE_LIMIT = 500;
 
 /** Administrator recovery never borrows an application or lease credential.
  * Payloads, command arguments, results, credential hashes and provider reports
@@ -24,17 +28,19 @@ export class AdminSystem implements ControlModule {
     if (!req.path.startsWith("/v1/admin/")) return undefined;
     const match = /^\/v1\/admin\/(leases|sessions|applications|requests|jobs)\/([^/]+)\/(release|close|revoke|cancel)$/.exec(req.path);
     const inspect = /^\/v1\/admin\/(system|configuration)(?:\/pages\/(0|[1-9][0-9]{0,6}))?$/.exec(req.path);
+    const queue = req.path === "/v1/admin/queue";
     if (req.method === "GET" && req.path === "/v1/admin/model-jobs") return this.leases.store.transaction(db => {
       requireAdmin(req);
       if ([...req.query.keys()].length) throw new ServiceError("Queries are not supported.", 400);
       return { body: { jobs: this.modelJobs(db) } };
     });
-    if (!(req.method === "GET" && inspect) && !(req.method === "POST" && match)) return undefined;
+    if (!(req.method === "GET" && (inspect || queue)) && !(req.method === "POST" && match)) return undefined;
     return this.leases.store.transaction(db => {
       const principal = requireAdmin(req);
       if ([...req.query.keys()].length) throw new ServiceError("Queries are not supported.", 400);
       this.leases.linux.administrativeRefresh(db);
       refreshLegacyLeases(db, this.leases.store.clock());
+      if (req.method === "GET" && queue) return { body: this.queue(db) };
       if (req.method === "GET") {
         const page = Number(inspect![2] ?? 0);
         if (page > 1000000) throw new ServiceError("Page exceeds the supported range.",400);
@@ -129,6 +135,66 @@ export class AdminSystem implements ControlModule {
     db.prepare("UPDATE inference_jobs SET desired='cancelled',updated=? WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')").run(this.leases.store.clock(),id);
     return inference && ["succeeded","failed","cancelled"].includes(String(inference.state)) ? String(inference.state) : "cancel_requested";
   }
+  /** The waiting queue and the leases that hold capacity now, for the dashboard's Queue page.
+   *
+   * Position and reason come from the request ledger in one statement for every waiting request, in the same
+   * attempt order an application sees for its own requests (see POSITIONS in requests.ts). An application's view
+   * discloses only its own rows; this one is the administrator's and is read under administrator authority, never
+   * with an application credential. Rows carry identifiers, the caller's display label, queue state and
+   * deadlines. Intent bodies, resources, sources, credentials and lease members are left out.
+   * Both lists are bounded and each reports its full count. Portable fixtures cover this view; no native lease
+   * run exercised it. */
+  private queue(db: DatabaseSync) {
+    const now = this.leases.store.clock(), utc = (n: number) => new Date(n * 1000).toISOString();
+    const names = new Map<string, string | undefined>(), platforms = new Map<string, string | undefined>();
+    const applicationName = (id: string) => {
+      if (!names.has(id)) {
+        const row = legacyTable(db, "consumers") ? db.prepare("SELECT CASE WHEN json_valid(specification) THEN json_extract(specification,'$.name') END AS name FROM consumers WHERE id=?").get(id) : undefined;
+        names.set(id, typeof row?.name === "string" ? row.name : undefined);
+      }
+      return names.get(id);
+    };
+    const text = (value: unknown) => typeof value === "string" && value.length <= 200 ? value : null;
+    /** A template pin as identifiers, with the operating system its definition names when the catalogue has it. */
+    const template = (id: string | null, revision: string | null, arch: string | null, fixed?: string) => {
+      if (id === null || revision === null || arch === null) return {};
+      const key = [id, revision, arch].join("\n");
+      if (fixed === undefined && !platforms.has(key)) {
+        const row = legacyTable(db, "templates") ? db.prepare("SELECT CASE WHEN json_valid(definition) THEN json_extract(definition,'$.os') END AS os FROM templates WHERE id=? AND revision=? AND arch=?").get(id, revision, arch) : undefined;
+        platforms.set(key, typeof row?.os === "string" ? row.os : undefined);
+      }
+      const platform = fixed ?? platforms.get(key);
+      return { template: { id, revision, arch }, ...(platform ? { platform } : {}) };
+    };
+    const waiting = waitingRequests(db, now, QUEUE_LIMIT);
+    const requests = waiting.requests.map(r => {
+      const name = applicationName(r.application);
+      return { id: r.id, applicationId: r.application, ...(name ? { applicationName: name } : {}), kind: r.kind, position: r.position, reason: r.reason, priority: r.priority,
+        createdAt: utc(r.created), deadline: r.deadline === null ? null : utc(r.deadline), ...(r.label ? { label: r.label } : {}),
+        ...(r.kind === "model-job" ? (r.model ? { model: r.model } : {}) : template(r.templateId, r.templateRevision, r.arch, r.kind === "linux-lease" ? "linux" : undefined)) };
+    });
+    const active: { id: string; ledger: "generic" | "linux"; application: string; state: string; created: number; expires: number; name: string | null; templateId: string | null; revision: string | null; arch: string | null }[] = [];
+    let activeTotal = 0;
+    for (const [ledger, table, sql] of [
+      ["generic", "leases", "SELECT id,consumer AS application,state,created,expires,CASE WHEN json_valid(request) THEN json_extract(request,'$.machine.name') END AS name,CASE WHEN json_valid(request) THEN json_extract(request,'$.machine.templateId') END AS templateId,CASE WHEN json_valid(request) THEN json_extract(request,'$.machine.templateRevision') END AS revision,CASE WHEN json_valid(request) THEN json_extract(request,'$.machine.arch') END AS arch FROM leases"],
+      ["linux", "linux_leases", "SELECT id,application,state,created,expires,CASE WHEN json_valid(request) THEN json_extract(request,'$.name') END AS name,image_id AS templateId,image_revision AS revision,arch FROM linux_leases"],
+    ] as const) {
+      if (!legacyTable(db, table)) continue;
+      activeTotal += Number(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE state IN ('provisioning','ready')`).get()!.n);
+      for (const row of db.prepare(sql + " WHERE state IN ('provisioning','ready') ORDER BY expires,id LIMIT ?").all(QUEUE_LIMIT)) {
+        active.push({ id: String(row.id), ledger, application: String(row.application), state: String(row.state), created: Number(row.created), expires: Number(row.expires),
+          name: text(row.name), templateId: text(row.templateId), revision: text(row.revision), arch: text(row.arch) });
+      }
+    }
+    // The lease that frees capacity soonest comes first, across both ledgers.
+    active.sort((a, b) => a.expires - b.expires || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const leases = active.slice(0, QUEUE_LIMIT).map(l => {
+      const name = applicationName(l.application);
+      return { id: l.id, ledger: l.ledger, applicationId: l.application, ...(name ? { applicationName: name } : {}), name: l.name, state: l.state,
+        createdAt: utc(l.created), expiresAt: utc(l.expires), ...template(l.templateId, l.revision, l.arch, l.ledger === "linux" ? "linux" : undefined) };
+    });
+    return { observedAt: utc(now), limit: QUEUE_LIMIT, requests, waitingTotal: waiting.total, leases, activeTotal };
+  }
   private pageReader(db:DatabaseSync, page:number, state:{more:boolean}) {
     return (table:string,sql:string) => {
       if (!legacyTable(db,table)) return [];
@@ -178,9 +244,11 @@ export class AdminSystem implements ControlModule {
   }
   private legacyProjection(db: DatabaseSync, l: Record<string, unknown>) {
     const row = db.prepare("SELECT * FROM leases WHERE id=?").get(String(l.id)) as unknown as LegacyLeaseRow;
-    const members = legacyLeaseView(db,row,this.leases.store.clock()).members.map(m => ({machineId:m.machineId,name:m.name,runtimeState:m.state,ready:m.ready,requestedState:String(db.prepare("SELECT desired FROM machines WHERE id=?").get(m.machineId)!.desired),...(m.cleanup ? {cleanup:m.cleanup.state} : {})}));
+    // `name` is the caller's label from acquisition: display only, like the consumer lease view.
+    const view = legacyLeaseView(db,row,this.leases.store.clock());
+    const members = view.members.map(m => ({machineId:m.machineId,name:m.name,runtimeState:m.state,ready:m.ready,requestedState:String(db.prepare("SELECT desired FROM machines WHERE id=?").get(m.machineId)!.desired),...(m.cleanup ? {cleanup:m.cleanup.state} : {})}));
     const cleanup = db.prepare("SELECT reason,attempts,next_retry FROM lease_cleanup_members WHERE lease=? ORDER BY CASE WHEN state='blocked' THEN 0 ELSE 1 END,machine LIMIT 1").get(String(l.id));
-    return { ...l, members, runtimeState:members.length === 1 ? members[0]!.runtimeState : "unknown", requestedState:members.length === 1 ? members[0]!.requestedState : "unknown", reservationHeld:members.some(m => !isDeleted(db,m.machineId)), ...(cleanup ? { ...(cleanup.reason ? {cleanupReason:String(cleanup.reason)} : {}),cleanupAttempts:Number(cleanup.attempts),cleanupRetryAt:Number(cleanup.next_retry) } : {}) };
+    return { ...l, ...(view.name === null ? {} : {name:view.name}), members, ...(view.isolation ? { isolation:view.isolation } : {}), runtimeState:members.length === 1 ? members[0]!.runtimeState : "unknown", requestedState:members.length === 1 ? members[0]!.requestedState : "unknown", reservationHeld:members.some(m => !isDeleted(db,m.machineId)), ...(cleanup ? { ...(cleanup.reason ? {cleanupReason:String(cleanup.reason)} : {}),cleanupAttempts:Number(cleanup.attempts),cleanupRetryAt:Number(cleanup.next_retry) } : {}) };
   }
   private snapshot(db: DatabaseSync, page:number) {
     const state={more:false},read=this.pageReader(db,page,state);
@@ -188,7 +256,7 @@ export class AdminSystem implements ControlModule {
       applications: read("consumers", "SELECT id,'application' AS family,json_extract(specification,'$.name') AS name,revoked,created AS createdAt FROM consumers").map(a => ({...a,state:a.revoked ? "revoked" : "active",revoked:Boolean(a.revoked)})),
       leases: [
         ...read("leases", "SELECT id,'legacy' AS family,consumer AS applicationId,state,revision,created AS createdAt,expires AS expiresAt,cleanup FROM leases").map(l => this.legacyProjection(db,l)),
-        ...read("linux_leases", "SELECT id,'linux' AS family,application AS applicationId,state,runtime AS runtimeState,revision,created AS createdAt,expires AS expiresAt,cleanup,member AS machineId FROM linux_leases").map(l => ({...l,...this.leases.linux.administrativeStatus(db,String(l.id)),requestedState:["provisioning","ready"].includes(String(l.state)) ? "running" : "stopped",reservationHeld:db.prepare("SELECT r.state FROM linux_leases l JOIN resource_reservations r ON r.id=l.reservation AND r.owner=l.id AND r.kind='linux-lease' WHERE l.id=?").get(l.id!)?.state !== "released"})),
+        ...read("linux_leases", "SELECT id,'linux' AS family,application AS applicationId,state,runtime AS runtimeState,revision,created AS createdAt,expires AS expiresAt,cleanup,member AS machineId,CASE WHEN json_valid(request) THEN json_extract(request,'$.name') END AS name FROM linux_leases").map(l => ({...l,...this.leases.linux.administrativeStatus(db,String(l.id)),requestedState:["provisioning","ready"].includes(String(l.state)) ? "running" : "stopped",reservationHeld:db.prepare("SELECT r.state FROM linux_leases l JOIN resource_reservations r ON r.id=l.reservation AND r.owner=l.id AND r.kind='linux-lease' WHERE l.id=?").get(l.id!)?.state !== "released"})),
       ],
       requests: read("requests", "SELECT id,'request' AS family,application AS applicationId,kind,state,priority,created AS createdAt,deadline AS expiresAt,target FROM requests"),
       jobs: [
@@ -207,6 +275,6 @@ export class AdminSystem implements ControlModule {
         ...read("mobile_video_sessions", "SELECT id,'video' AS family,machine AS machineId,state,created AS createdAt,deadline AS expiresAt FROM mobile_video_sessions"),
       ],
     };
-    return {...Object.fromEntries(Object.entries(snapshot).map(([category,rows]) => [category, rows.map(row => Object.fromEntries(Object.entries(row).filter(([,value]) => value !== null)))])),page,nextPage:state.more && page<1000000 ? page+1 : null};
+    return {...Object.fromEntries(Object.entries(snapshot).map(([category,rows]) => [category, rows.map(row => Object.fromEntries(Object.entries(row).filter(([,value]) => value !== null)))])),observedAt:this.leases.store.clock(),page,nextPage:state.more && page<1000000 ? page+1 : null};
   }
 }

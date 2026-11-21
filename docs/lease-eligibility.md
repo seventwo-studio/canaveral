@@ -3,9 +3,11 @@
 Controller and worker contract, 2026-11-03. Fixture coverage establishes scoped
 eligibility and withdrawal behavior. Native deadline/cancellation/cleanup
 acceptance remains open; ordinary `Agent` configuration still rejects both
-`leaseProtocol` and `leaseImages` before creating runner state. Since 2026-11-19 the
-only exception is a supervised Android host with Android-only selectors; see
-[Android emulator leases](mobile-control.md#android-emulator-leases).
+`leaseProtocol` and `leaseImages` before creating runner state. There are two exceptions.
+Since 2026-11-19 a supervised Android host accepts Android selectors; see
+[Android emulator leases](mobile-control.md#android-emulator-leases). Since 2026-11-21 a
+supervised macOS host accepts iOS selectors that each declare the `shared-host` isolation
+class; see [iOS simulator leases](mobile-control.md#ios-simulator-leases).
 
 An installed image is not automatically eligible for consumer execution. A host
 offering `leaseProtocol: 1` must explicitly identify each eligible image revision,
@@ -32,7 +34,8 @@ gate to make this example acquire a machine.
 
 ## Binding and defaults
 
-Each entry has exactly `id`, `revision`, `arch` and `runtime`. It must uniquely
+Each entry has exactly `id`, `revision`, `arch` and `runtime`. An iOS entry, and only an iOS
+entry, has a fifth field, `isolation`; see [isolation class](#isolation-class). It must uniquely
 match a currently offered installed image and that image's actual configured
 runtime. Physical hosts resolve runtimes through the existing platform/runtime
 configuration; legacy single-runtime and KubeVirt offers bind to their adapter.
@@ -50,6 +53,49 @@ controller contract; ordinary administrative hosts never advertised consumer
 execution. No installed image, imported image, new revision or architecture
 inherits eligibility from another entry.
 
+## Isolation class
+
+Accepted decision, 2026-11-21. An iOS simulator app is an ordinary process of the Mac host's
+user, with the host's network and files, so a leased simulator cannot be fenced from its host.
+iOS simulator leases are therefore operator opt-in under a declared class, for trusted code
+only. The declaration is part of the selector:
+
+```json
+{ "id": "ios-phone", "revision": "1", "arch": "arm64", "runtime": "ios", "isolation": "shared-host" }
+```
+
+- `shared-host` is the only value, and `runtime: "ios"` is the only runtime that takes it.
+- An iOS selector without it is refused by the host at start-up and rejected by the controller
+  in the offer. There is no default, no host-wide switch and no environment variable.
+- A selector of any other runtime that carries `isolation` is rejected.
+- The controller matches the complete selector, so an iOS image is eligible on a host only
+  while that host's selector carries the declaration. Withdrawing it has the effects under
+  [enforcement and withdrawal](#enforcement-and-withdrawal).
+- The declaration does not replace the application's template allowlist. Both must admit a lease.
+- The controller shows the class to the consumer as `isolation: "shared-host"` on the catalogue
+  entry and on the lease and its member. A template without a declared class has no such field.
+
+Nothing may describe an iOS lease as isolated from its host.
+
+## Lease tunnel declaration
+
+Since 2026-11-21 a host that offers lease execution may additionally declare
+`"leaseTunnelProtocol": 1`. It offers [lease port tunnels](mobile-control.md#lease-port-tunnels)
+for its Android lease images. The declaration is separate and explicit:
+
+- Absent, it grants nothing. A persisted or re-sent offer without it offers no tunnels,
+  and `leaseProtocol: 1` alone never implies them.
+- It is refused without `leaseProtocol: 1`, with any value other than 1, and on a runner
+  whose Android storage path cannot hold a tunnel socket.
+- The controller requires it when a tunnel is opened and on every later authority check.
+  Withdrawing it ends the affected tunnels (`disconnected`) like a withdrawn image
+  selector ends sessions. The runner enforces its own declaration independently.
+- It is a runner contract, not evidence of native acceptance; tunnels have fixture
+  coverage only.
+
+An application additionally needs `limits.tunnelsPerLease` above zero
+([applications](applications.md)).
+
 ## Enforcement and withdrawal
 
 The same binding check applies to:
@@ -58,6 +104,9 @@ The same binding check applies to:
 - New session admission and both attachment peers.
 - Persisted session refresh, live-session queries and the read-only frame check.
 - Runner session authorization before provider access and while streaming.
+- [Live view](mobile-control.md#live-screen) admission, every relayed message of a
+  lease's live view and the runner's own capture authority. A lease's live view
+  additionally requires an Android image; other leased runtimes have none.
 
 An existing assignment must still match the complete pinned public image
 definition in the current offer. A matching selector cannot authorize a stale or
@@ -66,7 +115,8 @@ remain independent of consumer eligibility.
 
 Withdrawing one selector disconnects only its affected sessions, removes pending
 attachments from heartbeat delivery and rejects new sessions or acquisition for
-that image. The frame check reads current persisted eligibility without waiting
+that image. A lease's live views end with `host_unavailable`; their shared capture
+keeps its reservation until its cleanup proof, like every other reservation here. The frame check reads current persisted eligibility without waiting
 for a session refresh transaction. The local worker also closes affected sessions
 when its own declaration changes before the controller receives a heartbeat.
 
@@ -76,7 +126,24 @@ original lease receipt without placing another machine. Withdrawal alone does
 not claim a VM stopped, erase storage, end the lease or release reservations.
 Those require the existing lifecycle and positive cleanup contracts.
 
+## Warm devices and baselines
+
+Eligibility also bounds the [warm pool](warm-pool-and-baselines.md). A warm device is
+kept only for an image the host lists in `leaseImages`, and only on a host whose offer
+carries `warmPool` (from the host's `leaseWarmPool`). Withdrawing the selector or the
+opt-in gives the host's warm devices up; it never turns one into a lease.
+
+A template may pin a device `baseline` by name, revision and digest. That reference is
+part of the immutable definition this page binds, so a baseline-backed image is a
+distinct revision that an application must be allowlisted for. A host is eligible for
+such an image only while it stores exactly that baseline, made from the template's own
+device definition and not stale.
+
 ## Evidence and remaining work
+
+The iOS selector gate, the isolation class in consumer views and the host's own refusal are
+covered by [ios-leases.test.ts](../coordination/test/control/ios-leases.test.ts). That is
+fixture evidence only; no leased simulator has run on real CoreSimulator.
 
 Eight dedicated controller fixtures cover mixed Apple/Android offers, legacy
 default denial, immutable revision/architecture/runtime binding, newly installed

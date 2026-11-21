@@ -13,6 +13,7 @@ import type { Binding, RunnerEnrollment } from "./enrollment.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { SqliteStore } from "./sqlite.ts";
+import { recordLeaseRefusal } from "./observability.ts";
 
 /** Execution backends that can host a Linux guest. The guest OS is always Linux. */
 export const BACKENDS = ["kubevirt", "appleVirtualization"] as const;
@@ -339,7 +340,8 @@ export class LinuxLeases {
   }
 
   acquire(token: string, value: unknown): { created: boolean; lease: unknown } {
-    return this.acquireAuthorized(value, db => this.applications.verify(db, token));
+    try { return this.acquireAuthorized(value, db => this.applications.verify(db, token)); }
+    catch (error) { recordLeaseRefusal(this.store, db => this.applications.verify(db, token).id, error, "linux", value); throw error; }
   }
   /** Internal queue entry; shares every validation, reservation and lifecycle rule with direct acquisition. */
   acquireForApplication(application: string, value: unknown) {
@@ -355,6 +357,20 @@ export class LinuxLeases {
     const overrides = input.resources === undefined ? {} : exact(input.resources, [], "resources", keys);
     for (const key of Object.keys(overrides)) positive(overrides[key], 1_048_576, key);
     return { input, id, imageId, revision, a, name, required, overrides };
+  }
+  /** Read-only: what a waiting acquisition would reserve and the runner domains that could serve
+   * it right now if they had the capacity, by the same image, minimum and approval rules as
+   * admission. Undefined when no domain could. The warm pool uses it to decide whether giving up
+   * a warm device on a mapped host would admit the request; nothing is reserved here. */
+  demand(db: DatabaseSync, value: unknown): { need: Resources; domains: string[] } | undefined {
+    let parsed: ReturnType<LinuxLeases["validateAcquisition"]>;
+    try { parsed = this.validateAcquisition(value); } catch { return undefined; }
+    const image = this.imageRow(db, parsed.imageId, parsed.revision, parsed.a);
+    if (!image) return undefined;
+    const minimum = JSON.parse(image.resources) as Resources, need = { ...minimum, ...parsed.overrides } as Resources;
+    if (keys.some(key => need[key] < minimum[key])) return undefined;
+    const domains = this.placements(db, image);
+    return domains.length ? { need, domains } : undefined;
   }
   private acquireAuthorized(value: unknown, authorize: (db: DatabaseSync) => ReturnType<ConsumerIdentities["verify"]>) {
     const { input, id, imageId, revision, a, name, required, overrides } = this.validateAcquisition(value);
@@ -915,7 +931,9 @@ export class LinuxLeases {
       member.cleanup = { id: lease.cleanup_id, state: lease.cleanup,
         reason: lease.cleanup === "complete" ? null : stale || lease.cleanup === "blocked" ? "recovery" : "execution_pending", attempts: 0, retryAt: null };
     }
-    return { id: lease.id, state: lease.state, runtimeState: runtime, revision: lease.revision, createdAt: utc(lease.created), expiresAt: utc(lease.expires),
+    // The caller's optional label from acquisition; null when none was given. Display only.
+    const name = (JSON.parse(lease.request) as { name?: unknown }).name;
+    return { id: lease.id, name: typeof name === "string" ? name : null, state: lease.state, runtimeState: runtime, revision: lease.revision, createdAt: utc(lease.created), expiresAt: utc(lease.expires),
       cleanup: { state: terminal ? lease.cleanup : "notRequested" }, members: [member], capabilities };
   }
   private authorization(lease: LeaseRow, now: number): unknown {
