@@ -184,7 +184,7 @@ export async function upkeepHarness(t: TestContext, options: HarnessOptions = {}
   const android: RecordValue = { id: "android-phone", revision: "1", os: "android", arch: "arm64", mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: { systemImage: ANDROID_INSTALLED, profile: "pixel_8" } };
   const ios: RecordValue = { id: "ios-phone", revision: "1", os: "ios", arch: "arm64", mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: { runtime: IOS_INSTALLED, deviceType: IOS_DEVICE_TYPE } };
   const config: HostConfig = { name: "upkeep-host", provider: "macos", storage: join(root, "storage"), stateDir: join(root, "state"), capacity: options.capacity ?? { cpu: 16, memoryMiB: 32768, diskGiB: 200 },
-    hostArch: "arm64", hostPlatform: "darwin", runtimes: { android: { androidSDK: sdk }, ios: { xcrun: join(bin, "xcrun"), xcodebuild: join(bin, "xcodebuild"), idb: join(bin, "idb"), runtimePollMilliseconds: 25 } },
+    hostArch: "arm64", runtimes: { android: { androidSDK: sdk }, ios: { xcrun: join(bin, "xcrun"), xcodebuild: join(bin, "xcodebuild"), idb: join(bin, "idb"), runtimePollMilliseconds: 25 } },
     templates: options.templates ?? [android, ios], url: "http://127.0.0.1:1", enrollmentToken: settings.enrollmentToken, pollIntervalSeconds: 0.25,
     // Fixtures never read this machine's memory or disk pressure.
     pressure: { enabled: false }, ...(options.upkeep ? { upkeep: options.upkeep } : {}) };
@@ -200,9 +200,9 @@ export async function upkeepHarness(t: TestContext, options: HarnessOptions = {}
   const providers: { android?: AndroidProvider; ios?: IosProvider } = {};
   async function startRunner(enroll: boolean): Promise<HostRunner> {
     const saved = { ...config }; if (!enroll) delete saved.enrollmentToken;
-    const runner = new HostRunner(saved, { clock, transport, providerFactory: (provider, state) => {
+    const runner = new HostRunner(saved, { clock, transport, platform: "darwin", providerFactory: (provider, state) => {
       if (provider.provider === "android") return providers.android = new AndroidProvider({ ...provider, transport: processes }, state);
-      return providers.ios = new IosProvider({ ...provider, transport: processes }, state);
+      return providers.ios = new IosProvider({ ...provider, transport: processes }, state, { platform: "darwin" });
     } });
     runners.add(runner);
     await runner.initializeProviders(); await runner.connect(); await runner.checkEnvironment();

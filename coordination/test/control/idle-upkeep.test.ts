@@ -250,7 +250,7 @@ test("upkeep policy is validated on the host and on the controller", async t => 
   assert.deepEqual([pressureConfig(android.pressure).enabled, pressureConfig(ios.pressure).thresholds.disk], [true, { enterFreeGiB: 10, exitFreeGiB: 20 }]);
   // The examples report pressure and gate nothing on it.
   for (const config of [android, ios]) assert.deepEqual(pressureConfig(config.pressure).gates, { placement: false, restart: false });
-  assert.deepEqual([hostOffer(android).provider, hostOffer(ios).provider], ["android", "ios"]);
+  assert.deepEqual([hostOffer(android).provider, hostOffer(ios, "darwin").provider], ["android", "ios"]);
   const f = idleFixture(t), id = await f.device();
   for (const upkeep of [{ version: 1, platforms: ["android"], idleStop: { defaultSeconds: 10, templates: {} }, busy: [] }, { version: 2, platforms: [], idleStop: { defaultSeconds: null, templates: {} }, busy: [] },
     { version: 1, platforms: ["tvos"], idleStop: { defaultSeconds: null, templates: {} }, busy: [] }, { version: 1, platforms: [], idleStop: { defaultSeconds: null, templates: {} }, busy: ["not-a-uuid"] },
