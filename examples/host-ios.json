@@ -6,6 +6,8 @@
   "idb": "/opt/homebrew/bin/idb",
   "artifacts": {"development": "/Users/operator/Builds/Development.app"},
   "pressure": {
+    "gatePlacement": false,
+    "gateRestart": false,
     "memory": {"darwinEnterLevel": "warning"},
     "disk": {"enterFreeGiB": 10, "exitFreeGiB": 20},
     "enterSeconds": 10,

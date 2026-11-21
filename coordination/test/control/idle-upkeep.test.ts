@@ -122,26 +122,59 @@ test("work in flight holds a device, and finished work restarts its idle clock",
   f.setBusy([local]); f.advance(5000);
   assert.equal(f.beat().get(local), "running");
   assert.deepEqual([(await f.candidate(local)).reason, (await f.candidate(local)).blockers], ["work_in_flight", ["host_work_in_flight"]]);
-  f.setBusy([]); assert.equal(f.beat().get(local), "stopped");
+  // The viewer closes. Its end is activity, so the device is not stopped on the next heartbeat;
+  // it gets a full idle time from the moment it was last held.
+  f.setBusy([]);
+  assert.equal(f.beat().get(local), "running");
+  assert.deepEqual([(await f.candidate(local)).reason, (await f.candidate(local)).idleSeconds], ["active", 0]);
+  f.advance(599); assert.equal(f.beat().get(local), "running");
+  f.advance(1); assert.equal(f.beat().get(local), "stopped");
 
-  // A recording and an upload are work too, and a recording that just ended is recent activity.
+  // A recording and an upload are work too. Without them both devices would be idle here.
   const recorded = await f.device(), uploading = await f.device();
-  f.advance(700); f.beat({ upkeep: undefined });
+  f.advance(590); f.beat();
   const recording = await f.request("POST", `/v1/machines/${recorded}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 60, bitRate: 4_000_000 });
   f.store.transaction(db => db.prepare("INSERT INTO app_artifacts (id,machine,host,binding,format,bytes,sha256,received,state,reserved_disk) VALUES (?,?,?,'{}','apk',1024,?,0,'uploading',1)").run(randomUUID(), uploading, f.host, "0".repeat(64)));
+  f.advance(20);
   const held = f.beat();
   assert.deepEqual([held.get(recorded), held.get(uploading)], ["running", "running"]);
   assert.deepEqual([(await f.candidate(recorded)).blockers, (await f.candidate(uploading)).blockers], [["video_session"], ["upload_in_flight"]]);
   assert.equal((await f.candidate(uploading)).reason, "work_in_flight");
   await f.request("POST", `/v1/machines/${recorded}/video-sessions/${recording.id}/close`, {});
   f.store.transaction(db => db.exec("UPDATE app_artifacts SET state='ready'"));
+  // The upload has no timestamp of its own. Its end still counts: the build that was just
+  // published can be installed without the device being stopped under it first.
   const after = f.beat();
-  // The recording was live a moment ago; the published upload left no later activity.
-  assert.deepEqual([after.get(recorded), after.get(uploading)], ["running", "stopped"]);
-  assert.deepEqual((await f.candidate(recorded)).blockers, []);
+  assert.deepEqual([after.get(recorded), after.get(uploading)], ["running", "running"]);
+  assert.deepEqual([(await f.candidate(uploading)).blockers, (await f.candidate(uploading)).reason, (await f.candidate(uploading)).idleSeconds], [[], "active", 0]);
+  f.advance(599);
+  const waiting = f.beat();
+  assert.deepEqual([waiting.get(recorded), waiting.get(uploading)], ["running", "running"]);
+  f.advance(1); assert.equal(f.beat().get(uploading), "stopped");
   // A recording counts as activity up to its authorization deadline, then the idle time runs.
-  f.advance(599); assert.equal(f.beat().get(recorded), "running");
-  f.advance(600); assert.equal(f.beat().get(recorded), "stopped");
+  f.advance(700); assert.equal(f.beat().get(recorded), "stopped");
+});
+
+test("an owner's start is activity: a device started right after an idle stop is not stopped again", async t => {
+  const f = idleFixture(t, { defaultSeconds: 600, templates: {} }), id = await f.device();
+  f.advance(600);
+  assert.equal(f.beat().get(id), "stopped");
+  // The owner starts it again before the host has reported the stop, so the host still says running.
+  assert.equal((await f.request("POST", `/v1/machines/${id}/desired`, { state: "running" })).desired, "running");
+  for (let heartbeat = 0; heartbeat < 3; heartbeat++) { f.advance(5); assert.equal(f.beat().get(id), "running"); }
+  assert.deepEqual([(await f.candidate(id)).reason, (await f.candidate(id)).idleSeconds], ["active", 15]);
+  // It is stopped again only after a whole idle time from that start.
+  f.advance(584); assert.equal(f.beat().get(id), "running");
+  f.advance(1); assert.equal(f.beat().get(id), "stopped");
+  // The same holds for a start that follows the owner's own stop.
+  const other = await f.device();
+  f.advance(595); f.beat();
+  await f.request("POST", `/v1/machines/${other}/desired`, { state: "stopped" });
+  await f.request("POST", `/v1/machines/${other}/desired`, { state: "running" });
+  f.advance(10);
+  assert.equal(f.beat().get(other), "running");
+  f.advance(589); assert.equal(f.beat().get(other), "running");
+  f.advance(1); assert.equal(f.beat().get(other), "stopped");
 });
 
 test("a device with an uncertain operation is never stopped until that operation is resolved", async t => {
@@ -168,8 +201,13 @@ test("a device with an uncertain operation is never stopped until that operation
     db.prepare("INSERT INTO device_operation_resolutions VALUES (?,?,'abandoned',NULL,'fixture','{}',?)").run(randomUUID(), install, f.now());
     db.exec("UPDATE mobile_video_sessions SET cleaned=1");
   });
+  // The hold itself counted as activity, so each gets a whole idle time from its end.
   const released = f.beat();
-  assert.deepEqual([released.get(installing), released.get(recording)], ["stopped", "stopped"]);
+  assert.deepEqual([released.get(installing), released.get(recording)], ["running", "running"]);
+  assert.deepEqual([(await f.candidate(installing)).blockers, (await f.candidate(installing)).reason], [[], "active"]);
+  f.advance(600);
+  const idle = f.beat();
+  assert.deepEqual([idle.get(installing), idle.get(recording)], ["stopped", "stopped"]);
 });
 
 test("leased devices and devices that are not confirmed running are never stopped by upkeep", async t => {
@@ -210,6 +248,8 @@ test("upkeep policy is validated on the host and on the controller", async t => 
   assert.deepEqual(upkeepPolicy(android.upkeep, android.templates.map(template => String(template.id))), { defaultSeconds: null, templates: { "android-phone": 3600 } });
   assert.deepEqual(upkeepPolicy(ios.upkeep, ios.templates.map(template => String(template.id))), { defaultSeconds: 7200, templates: {} });
   assert.deepEqual([pressureConfig(android.pressure).enabled, pressureConfig(ios.pressure).thresholds.disk], [true, { enterFreeGiB: 10, exitFreeGiB: 20 }]);
+  // The examples report pressure and gate nothing on it.
+  for (const config of [android, ios]) assert.deepEqual(pressureConfig(config.pressure).gates, { placement: false, restart: false });
   assert.deepEqual([hostOffer(android).provider, hostOffer(ios).provider], ["android", "ios"]);
   const f = idleFixture(t), id = await f.device();
   for (const upkeep of [{ version: 1, platforms: ["android"], idleStop: { defaultSeconds: 10, templates: {} }, busy: [] }, { version: 2, platforms: [], idleStop: { defaultSeconds: null, templates: {} }, busy: [] },
@@ -240,8 +280,18 @@ test("a real runner stops an idle device through its provider, holds it during l
   f.advance(300); await f.poll();
   assert.deepEqual((f.lastBeat.upkeep as any).busy.sort(), [android.id, ios.id].sort());
   assert.equal((await f.request("GET", `/v1/machines/${android.id}`)).body.desired, "running");
+  // The local work ends. Its end starts the idle time over instead of stopping the device at once.
   release(); await f.poll();
   assert.deepEqual((f.lastBeat.upkeep as any).busy, []);
+  assert.equal((await f.request("GET", `/v1/machines/${android.id}`)).body.desired, "running");
+  // Work that begins and ends between two heartbeats is still reported on the next one.
+  f.advance(200); f.runner().beginLocalWork()(); await f.poll();
+  assert.deepEqual((f.lastBeat.upkeep as any).busy.sort(), [android.id, ios.id].sort());
+  await f.poll();
+  assert.deepEqual((f.lastBeat.upkeep as any).busy, []);
+  f.advance(299); await f.poll();
+  assert.equal((await f.request("GET", `/v1/machines/${android.id}`)).body.desired, "running");
+  f.advance(1); await f.poll();
   assert.equal((await f.request("GET", `/v1/machines/${android.id}`)).body.desired, "stopped");
   assert.equal((await f.request("GET", `/v1/machines/${ios.id}`)).body.desired, "running");
   // The provider's ordinary stop: one acknowledged shutdown of the owned serial, then confirmed exit.

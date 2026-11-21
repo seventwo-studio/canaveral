@@ -430,8 +430,9 @@ Host upkeep is separate from device control and is administrator-only; see
 [mobile host upkeep](mobile-host-upkeep.md). An administrator lists, installs and
 removes runtimes and system images on request, never as a side effect of a lease or
 a device. An idle running device can be stopped by an operator-set rule, a host
-reports and purges orphan storage only on request, and a host under memory or disk
-pressure takes no new device or lease while its running ones continue.
+reports and purges orphan storage only on request, and a host reports memory and
+disk pressure. A pressured host takes no new device or lease only when its operator
+opted in; its running ones continue either way.
 
 ## Android emulator leases
 
@@ -462,9 +463,11 @@ and any partial configuration, keeps refusing `leaseProtocol` and `leaseImages`.
 ```
 
 Size the host's `capacity` to the number of emulators it may run. Requests beyond that wait.
-A request also waits, with reason `host_pressure`, while every lease host that fits is under
+On hosts whose operator set `pressure.gatePlacement`, a request also waits, with reason
+`host_pressure`, while every lease host that fits is under
 [memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure); leases already
-running are not stopped or shortened to make room.
+running are not stopped or shortened to make room. Without that setting pressure is
+reported and delays nothing.
 `leaseIsolationPorts` is optional. It lists more host loopback ports, such as a
 separately served dashboard, that the readiness probe must find unreachable from the
 guest; see [Guest network isolation](#guest-network-isolation).

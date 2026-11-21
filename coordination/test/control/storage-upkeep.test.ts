@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { legacyDigest } from "../../src/control/templates.ts";
 import { STORAGE_INSPECTION_SECONDS } from "../../src/control/upkeep.ts";
 import { AndroidProvider } from "../../src/providers/android.ts";
 import { digest, saveJson } from "../../src/providers/mobile.ts";
@@ -54,6 +55,12 @@ test("inspection reports orphans with ownership evidence, and a purge removes on
   // A removal this runner began and never finished.
   const interrupted = await androidOrphan(f, false), quarantine = `.removing-${interrupted.id}-${randomUUID()}`;
   renameSync(interrupted.storage, join(f.storage.android, quarantine));
+  // A receipt this runner wrote for an assignment issued to another host identity.
+  const stranger: RecordValue = { ...assignment(f, "android"), hostId: randomUUID() }, strangerStorage = f.providers.android.storage(stranger, f.images.android);
+  // A symbolic link under an assignment's name proves nothing about what it points at.
+  const linked = randomUUID(), target = join(f.root, "link-target"); mkdirSync(target, { mode: 0o700 }); symlinkSync(target, join(f.storage.android, linked));
+  // A quarantine of the device this host still holds belongs to that device's own removal.
+  const held = `.removing-${live.id}-${randomUUID()}`; mkdirSync(join(f.storage.android, held), { mode: 0o700 });
   const shutdown = iosOrphan(f, "Shutdown"), booted = iosOrphan(f, "Booted");
   f.tools.update(tools => { tools.ios.devices[IOS_INSTALLED]!.push({ udid: randomUUID().toUpperCase(), name: "personal iPhone", state: "Shutdown", isAvailable: true, deviceTypeIdentifier: IOS_DEVICE_TYPE }); });
   const neighbour = join(f.storage.android, "avds", "personal.ini"); writeFileSync(neighbour, "path=/Users/operator/.android/avd/personal.avd\n");
@@ -75,9 +82,21 @@ test("inspection reports orphans with ownership evidence, and a purge removes on
   assert.deepEqual(reasons(quarantine), ["removal-quarantine", "android", true, true, "interrupted_removal"]);
   assert.deepEqual(reasons(shutdown.id), ["device-storage", "ios", true, true, "owned_and_stopped"]);
   assert.deepEqual(reasons(booted.id), ["device-storage", "ios", true, false, "simulator_running"]);
-  // A journal is not removable on its own; it goes with the storage whose assignment it records.
-  assert.deepEqual([entry(found, owned.id, "journal").removable, entry(found, owned.id, "journal").reason], [false, "removed_with_its_storage"]);
-  assert.deepEqual([entry(found, running.id, "journal").removable, entry(found, running.id, "journal").reason], [false, "journal_without_storage_proof"]);
+  assert.deepEqual(reasons(String(stranger.id)), ["device-storage", "android", true, false, "owner_receipt_differs"]);
+  assert.deepEqual(reasons(linked), ["device-storage", "android", false, false, "ownership_unreadable"]);
+  assert.deepEqual(reasons(held), ["removal-quarantine", "android", true, false, "assignment_retained"]);
+  // Every removable entry lists all a purge would remove for it; nothing else carries such a list.
+  const removes = (name: string) => entry(found, name).removes;
+  assert.deepEqual(removes(owned.id), ["device-storage", "avd-registration", "assignment-journal"]);
+  assert.deepEqual(removes(mismatched.id), ["device-storage", "avd-registration"]);
+  assert.deepEqual(removes(quarantine), ["removal-quarantine", "avd-registration"]);
+  assert.deepEqual(removes(shutdown.id), ["device-storage", "simulator"]);
+  for (const kept of [running.id, exposed.id, foreign, String(stranger.id), linked, held, booted.id]) assert.equal(removes(kept), undefined, kept);
+  // A journal is never named in a purge; it goes with the storage whose assignment it records.
+  const journal = (result: any, id: string) => { const e = entry(result, id, "journal"); return [e.removable, e.removedWith, e.reason]; };
+  assert.deepEqual(journal(found, owned.id), [false, owned.id, "removed_with_its_storage"]);
+  assert.deepEqual(journal(found, mismatched.id), [false, undefined, "journal_records_another_assignment"]);
+  assert.deepEqual(journal(found, running.id), [false, undefined, "journal_without_storage_proof"]);
   assert.deepEqual(found.registries, { android: "listed", ios: "listed" });
   assert.deepEqual([entry(found, `cvm-${named}.ini`, "registry"), entry(found, `cvm-${simulated}`, "registry")].map(e => [e.machineId, e.runtime, e.kind, e.removable, e.reason]),
     [[named, "android", "avd-registration", false, "no_storage_or_receipt"], [simulated, "ios", "simulator", false, "no_storage_or_receipt"]]);
@@ -93,6 +112,15 @@ test("inspection reports orphans with ownership evidence, and a purge removes on
   assert.deepEqual(would(changed.id), ["live", false, "live_owner"]);
   assert.deepEqual(would(foreign), ["absent", false, "no_owner_receipt"]);
   assert.deepEqual(would(booted.id), ["absent", false, "simulator_running"]);
+  // The preview names everything a purge would remove, the journal included, and only that.
+  assert.deepEqual(entry(preview, owned.id).removes, ["device-storage", "avd-registration", "assignment-journal"]);
+  assert.deepEqual([entry(preview, owned.id, "journal").wouldRemove, entry(preview, owned.id, "journal").removedWith], [true, owned.id]);
+  assert.equal(entry(preview, mismatched.id, "journal").wouldRemove, false);
+  // Its storage has a live owner, so neither the storage nor its journal would go, and the
+  // preview lists nothing to remove for it although the host alone would.
+  assert.deepEqual([removes(changed.id), entry(preview, changed.id).removes], [["device-storage", "avd-registration", "assignment-journal"], undefined]);
+  assert.deepEqual([entry(preview, changed.id, "journal").wouldRemove, entry(preview, changed.id, "journal").removedWith], [false, changed.id]);
+  const previewed = Object.fromEntries(preview.entries.filter((candidate: any) => candidate.wouldRemove && candidate.root === "storage").map((candidate: any) => [candidate.name, candidate.removes]));
   for (const kept of [owned, changed, mismatched, running, exposed]) assert.ok(existsSync(kept.storage));
 
   // A purge is refused as a whole when it names storage that is unproven or still owned.
@@ -100,6 +128,7 @@ test("inspection reports orphans with ownership evidence, and a purge removes on
   await assert.rejects(f.request("POST", f.hostPath + "/operations", purge([owned.id, foreign])), failure(409, "storage_owner_exists"));
   await assert.rejects(f.request("POST", f.hostPath + "/operations", purge([changed.id])), failure(409, "storage_owner_exists"));
   await assert.rejects(f.request("POST", f.hostPath + "/operations", purge([live.id])), failure(409, "storage_owner_exists"));
+  for (const unproven of [String(stranger.id), linked, held]) await assert.rejects(f.request("POST", f.hostPath + "/operations", purge([unproven])), failure(409, "storage_owner_exists"), unproven);
   await assert.rejects(f.request("POST", f.hostPath + "/operations", purge([owned.id], randomUUID())), failure(409, "host_inspection_required"));
   f.store.transaction(db => db.prepare("DELETE FROM machines WHERE id=?").run(changed.id));
   assert.equal(f.tools.calls("xcrun").filter(call => call.args[1] === "delete").length, 0);
@@ -110,17 +139,20 @@ test("inspection reports orphans with ownership evidence, and a purge removes on
   const done = await f.run(request.kind, request.arguments, request.id);
   assert.equal(done.state, "succeeded");
   const outcome = (name: string) => done.result.entries.find((candidate: any) => candidate.name === name);
-  assert.deepEqual(outcome(owned.id), { name: owned.id, state: "removed", journalRemoved: true });
+  assert.deepEqual(outcome(owned.id), { name: owned.id, state: "removed", removed: ["device-storage", "avd-registration", "assignment-journal"] });
   assert.deepEqual(outcome(changed.id), { name: changed.id, state: "refused", reason: "execution_not_proven_stopped" });
-  // Its journal carries another assignment's fingerprint, so only the storage goes.
-  assert.deepEqual(outcome(mismatched.id), { name: mismatched.id, state: "removed", journalRemoved: false });
-  assert.deepEqual(outcome(quarantine), { name: quarantine, state: "removed", journalRemoved: false });
-  assert.deepEqual(outcome(shutdown.id), { name: shutdown.id, state: "removed", journalRemoved: false });
+  // Its journal carries another assignment's fingerprint, so only the storage and registration go.
+  assert.deepEqual(outcome(mismatched.id), { name: mismatched.id, state: "removed", removed: ["device-storage", "avd-registration"] });
+  assert.deepEqual(outcome(quarantine), { name: quarantine, state: "removed", removed: ["removal-quarantine", "avd-registration"] });
+  assert.deepEqual(outcome(shutdown.id), { name: shutdown.id, state: "removed", removed: ["device-storage", "simulator"] });
+  // What was removed is exactly what the dry run listed for those entries.
+  for (const name of [owned.id, mismatched.id, quarantine, shutdown.id]) assert.deepEqual(outcome(name).removed, previewed[name], name);
   for (const gone of [owned.storage, owned.ini, owned.folder, mismatched.storage, mismatched.ini, join(f.storage.android, quarantine), interrupted.ini, shutdown.storage]) assert.equal(existsSync(gone), false, gone);
   assert.ok(existsSync(mismatched.folder));
   // Everything unproven, running or live is exactly as it was.
   for (const kept of [changed.storage, changed.ini, running.storage, running.ini, exposed.storage, join(f.storage.android, foreign), join(f.storage.android, String(elsewhere.id)), booted.storage,
-    join(f.storage.android, live.id), join(f.storage.android, "avds", `cvm-${live.id}.ini`), join(f.state, "machines", live.id), neighbour]) assert.ok(existsSync(kept), kept);
+    join(f.storage.android, live.id), join(f.storage.android, "avds", `cvm-${live.id}.ini`), join(f.state, "machines", live.id), neighbour,
+    strangerStorage, target, join(f.storage.android, linked), join(f.storage.android, held)]) assert.ok(existsSync(kept), kept);
   assert.equal(readFileSync(neighbour, "utf8"), "path=/Users/operator/.android/avd/personal.avd\n");
   // Exactly the receipted, shut-down simulator was deleted; no simulator was shut down.
   assert.deepEqual(f.tools.calls("xcrun").filter(call => call.args[1] === "delete").map(call => call.args[2]), [shutdown.udid.toLowerCase()]);
@@ -162,6 +194,57 @@ test("a purge needs a current inspection, and one that ended unknown must be re-
   const request = purge([first.id, second.id], again.id), done = await f.run(request.kind, request.arguments, request.id);
   assert.deepEqual(done.result.entries.map((result: any) => result.state), ["removed", "removed"]);
   assert.equal(existsSync(first.storage), false); assert.equal(existsSync(second.storage), false);
+  assert.deepEqual((await f.run("storage-inspect", {})).result.entries, []);
+});
+
+test("a purge that stops part-way is never resumed: the next inspection finds what is left and a new purge finishes it", async t => {
+  const f = await upkeepHarness(t), crashed = await androidOrphan(f), clean = await androidOrphan(f), simulator = iosOrphan(f, "Shutdown");
+  const purge = (entries: string[], inspection: string) => ({ id: randomUUID(), kind: "storage-purge", arguments: { inspection, entries } });
+  const deletes = (): number => f.tools.calls("xcrun").filter(call => call.args[1] === "delete").length;
+  const first = await f.run("storage-inspect", {});
+
+  // A partial failure: the simulator's delete fails after another entry was already removed.
+  f.tools.update(tools => { tools.ios.failDelete = true; });
+  const partial = purge([clean.id, simulator.id], first.id), outcome = await f.run(partial.kind, partial.arguments, partial.id);
+  assert.equal(outcome.state, "unknown");
+  const result = (name: string) => outcome.result.entries.find((candidate: any) => candidate.name === name);
+  assert.deepEqual(result(clean.id), { name: clean.id, state: "removed", removed: ["device-storage", "avd-registration", "assignment-journal"] });
+  assert.deepEqual(result(simulator.id), { name: simulator.id, state: "unknown" });
+  assert.equal(existsSync(clean.storage), false); assert.ok(existsSync(simulator.storage)); assert.equal(deletes(), 1);
+  assert.deepEqual(simulators(f), [`cvm-${simulator.id}`]);
+  // An unknown purge is followed by an inspection, never by another purge of an old one.
+  await assert.rejects(f.request("POST", f.hostPath + "/operations", purge([crashed.id], first.id)), failure(409, "host_inspection_required"));
+  const second = await f.run("storage-inspect", {});
+  assert.ok((await f.receipt(partial.id)).acknowledgedAt > 0);
+  assert.deepEqual([entry(second.result, simulator.id).removable, entry(second.result, simulator.id).removes], [true, ["device-storage", "simulator"]]);
+  assert.equal(entry(second.result, clean.id), undefined);
+
+  // A runner crash in the middle of a purge. What it leaves on disk is the operation's started
+  // journal and the storage it had already moved aside.
+  const interrupted = purge([crashed.id, simulator.id], second.id);
+  const queued = await f.operation(interrupted.kind, interrupted.arguments, interrupted.id);
+  saveRecord(join(f.state, "work", "hostOperations", `${interrupted.id}.json`), { fingerprint: legacyDigest({ id: interrupted.id, kind: "storage-purge", arguments: queued.arguments }), state: "started" });
+  const aside = `.removing-${crashed.id}-${interrupted.id}`;
+  renameSync(crashed.storage, join(f.storage.android, aside));
+  await f.pump(async () => (await f.receipt(interrupted.id)).state === "unknown", "the interrupted purge to be reported");
+  assert.match((await f.receipt(interrupted.id)).result.detail, /not replayed/);
+  for (let round = 0; round < 3; round++) { await f.poll(); await f.runner().step(); }
+  // Nothing was resumed: the moved storage, its registration, its journal and the other entry are as the crash left them.
+  for (const kept of [join(f.storage.android, aside), crashed.ini, crashed.folder, simulator.storage]) assert.ok(existsSync(kept), kept);
+  assert.equal(deletes(), 1);
+
+  // The next inspection finds the storage in its quarantine, and a new purge finishes both entries.
+  f.tools.update(tools => { tools.ios.failDelete = false; });
+  const third = await f.run("storage-inspect", {});
+  assert.ok((await f.receipt(interrupted.id)).acknowledgedAt > 0);
+  const moved = entry(third.result, aside);
+  assert.deepEqual([moved.kind, moved.machineId, moved.removable, moved.reason, moved.removes], ["removal-quarantine", crashed.id, true, "interrupted_removal", ["removal-quarantine", "avd-registration", "assignment-journal"]]);
+  assert.equal(entry(third.result, crashed.id, "journal").removedWith, aside);
+  const finish = purge([aside, simulator.id], third.id), done = await f.run(finish.kind, finish.arguments, finish.id);
+  assert.equal(done.state, "succeeded");
+  assert.deepEqual(done.result.entries.map((candidate: any) => [candidate.state, candidate.removed]).sort(), [["removed", ["device-storage", "simulator"]], ["removed", ["removal-quarantine", "avd-registration", "assignment-journal"]]]);
+  for (const gone of [join(f.storage.android, aside), crashed.storage, crashed.ini, crashed.folder, simulator.storage]) assert.equal(existsSync(gone), false, gone);
+  assert.deepEqual(simulators(f), []); assert.equal(deletes(), 2);
   assert.deepEqual((await f.run("storage-inspect", {})).result.entries, []);
 });
 

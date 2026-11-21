@@ -209,6 +209,8 @@ export interface MachineHooks {
   afterHeartbeat?(db: DatabaseSync, hostId: string, body: Json): void;
   assignment?(db: DatabaseSync, machine: Json, forHost: boolean): Json;
   heartbeatResponse?(db: DatabaseSync, hostId: string, body: Json): Json;
+  /** An owner or administrator changed a machine's desired state through the machine API. */
+  desiredChanged?(db: DatabaseSync, machineId: string, state: "running" | "stopped"): void;
   /** SQL SELECT returning cpu, memoryMiB, diskGiB; one positional host parameter.
    * Required for mapped hosts; use a stable id across restarts. */
   additionalReservationsSql?: { id: string; query: string };
@@ -433,7 +435,8 @@ export class MachineStore implements ControlModule {
     if (request.hostId) requireHostAdmission(db, request.hostId);
     const preset = request.blueprintId ? blueprint(db, request.blueprintId, request.blueprintRevision) : null;
     const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
-    // Hosts that would have fitted but are under memory or disk pressure, or have no current sample.
+    // Hosts that would have fitted but whose operator gates placement on pressure, and that are
+    // under memory or disk pressure or have no current sample.
     const pressured = new Set<PressureCode>();
     for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
       if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
@@ -446,7 +449,7 @@ export class MachineStore implements ControlModule {
         if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
         const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
         if (size.memoryMiB % (image.memoryStepMiB ?? 1) !== 0 || !resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) continue;
-        // Pressure only withholds new work; it never stops or shrinks what the host already runs.
+        // An opted-in host only withholds new work; pressure never stops or shrinks what it already runs.
         if (pressure.blocked) pressured.add(pressure.code!); else candidates.push({ score: placementScore(capacity, used, size), host, image, size });
       }
     }
@@ -479,12 +482,14 @@ export class MachineStore implements ControlModule {
         if (table(db, "image_tasks") && db.prepare("SELECT 1 FROM image_tasks WHERE machine=? AND state IN ('queued','running','unknown')").get(id)) failure("Resolve the pending image capture before restarting this machine.", 409);
         const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(row.host!);
         if (!host || !persistedOffer(host.offer) || !host.enabled || !this.healthReady(db, String(row.host)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds) failure("Assigned host is offline or draining.", 409);
-        const pressure = pressureAdmission(db, String(row.host), this.store.clock());
+        // Refused only when this host's operator opted into gating restarts on pressure.
+        const pressure = pressureAdmission(db, String(row.host), this.store.clock(), "restart");
         if (pressure.blocked) throw pressureRefusal(new Set([pressure.code!]), 409);
         const remaining = this.remainingCapacity(db, String(row.host), id), size = machineResources(JSON.parse(String(row.request)).resources);
         if (!resourceKeys.every(key => size[key] <= remaining[key])) failure("Assigned host has insufficient unreserved capacity to restart.", 409);
       }
       db.prepare("UPDATE machines SET desired=? WHERE id=?").run(String(state), id);
+      for (const hook of this.hooks) hook.desiredChanged?.(db, id, state as "running" | "stopped");
       const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(row.host!);
       return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
     });

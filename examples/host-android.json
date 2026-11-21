@@ -6,6 +6,8 @@
   "androidSDK": "/opt/android-sdk",
   "artifacts": {"development": "/srv/canaveral/apps/development.apk"},
   "pressure": {
+    "gatePlacement": false,
+    "gateRestart": false,
     "memory": {"psiEnterPercent": 10, "psiExitPercent": 5, "availableEnterPercent": 5, "availableExitPercent": 10},
     "disk": {"enterFreeGiB": 5, "exitFreeGiB": 10},
     "enterSeconds": 10,

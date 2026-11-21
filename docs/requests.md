@@ -4,7 +4,8 @@ Applications opt into `/v1/requests` when capacity may be full. `lease` requests
 Android templates queue leased emulators on supervised Android hosts; see
 [Android emulator leases](mobile-control.md#android-emulator-leases). Direct lease
 acquisition is unchanged: it still returns 503 `capacity_unavailable`, or 503
-`host_pressure` when the hosts that fit are under memory or disk pressure. LeaseState
+`host_pressure` when the hosts that fit refuse placement under memory or disk pressure,
+which only a host whose operator opted in does. LeaseState
 has no waiting value. Application model calls join the same request model as
 [queued model calls](#queued-model-calls): `kind: "model-job"` requests share this
 envelope, replay, waiting cap, priority, deadline and cancellation, and every
@@ -137,10 +138,11 @@ after a lost response; never invent another UUID to resolve an uncertain outcome
 A waiting cap returns actionable 429 `request_waiting_limit`, with retryability
 and Retry-After. Cancel outstanding intent or wait before submitting more. This
 cap is distinct from admission quota: acquisition 429 and 503 leave intent waiting
-for a later pass. That includes a host under
-[memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure): when every
-host that fits a `lease` request is pressured, or has no current pressure sample, the
-request stays `waiting` with `reason` `host_pressure` or `host_pressure_unknown`
+for a later pass. That includes a host that refuses placement under
+[memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure), which is an
+operator's opt-in per host (`pressure.gatePlacement`): when every host that fits a
+`lease` request is such a host and is pressured, or has no current pressure sample,
+the request stays `waiting` with `reason` `host_pressure` or `host_pressure_unknown`
 instead of `capacity_unavailable`, and is admitted once a host recovers. Waiting
 never stops or shrinks a lease that is already running there. Other acquisition ServiceErrors reject only that request; the
 stable code appears in `reason`. Missing or removed grants are permanent rejection.

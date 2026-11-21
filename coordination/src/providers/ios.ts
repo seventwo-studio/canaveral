@@ -11,7 +11,7 @@ import { materializeIosApp } from "./ios-artifact.ts";
 import { openIosVideo } from "./ios-video.ts";
 import type { IosVideoOptions } from "./ios-video.ts";
 import { iosOrphan, purgeOrphan, runtimeOperation, storageDevices, strayDevices } from "./mobile-runtimes.ts";
-import type { OrphanEvidence, RuntimeContext, RuntimeReport } from "./mobile-runtimes.ts";
+import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./mobile-runtimes.ts";
 
 export class IosProvider extends MobileProvider {
   override readonly kind = "ios";
@@ -29,7 +29,7 @@ export class IosProvider extends MobileProvider {
   storageDevices(): { id: string; runtime: string | null }[] { return storageDevices(this); }
   orphanEvidence(name: string): Promise<OrphanEvidence> { return iosOrphan(this, name); }
   strayDevices(): Promise<{ name: string; machineId: string; kind: "avd-registration" | "simulator" }[]> { return strayDevices(this); }
-  purgeOrphan(name: string, requestId: string): Promise<{ assignmentFingerprint: string | undefined }> { return purgeOrphan(this, name, requestId); }
+  purgeOrphan(name: string, requestId: string, hostId: string | undefined): Promise<{ assignmentFingerprint: string | undefined; removed: OrphanRemoval[] }> { return purgeOrphan(this, name, requestId, hostId); }
   async inventory(): Promise<{ runtime: string; device: RecordValue }[]> {
     const devices = object(object(JSON.parse(await this.simctl(["list", "devices", "--json"]))).devices), result = [];
     for (const [runtime, entries] of Object.entries(devices)) {

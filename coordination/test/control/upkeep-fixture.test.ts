@@ -115,7 +115,9 @@ if (tool === "xcrun" && args[0] === "simctl") {
     if (!ios.keepImages) { ios.runtimes = ios.runtimes.filter(runtime => runtime.imageId !== args[3]); write(state); }
     log({ phase: "end" });
   } else if (args[1] === "delete") {
-    log({}); for (const runtime of Object.keys(ios.devices)) ios.devices[runtime] = ios.devices[runtime].filter(device => device.udid.toLowerCase() !== args[2].toLowerCase()); write(state);
+    log({});
+    if (ios.failDelete) process.exit(1);
+    for (const runtime of Object.keys(ios.devices)) ios.devices[runtime] = ios.devices[runtime].filter(device => device.udid.toLowerCase() !== args[2].toLowerCase()); write(state);
   } else if (args[1] === "create") {
     const udid = randomUUID().toUpperCase();
     (ios.devices[args[4]] ??= []).push({ udid, name: args[2], state: "Shutdown", isAvailable: true, deviceTypeIdentifier: args[3] }); write(state); log({}); process.stdout.write(udid);
@@ -128,7 +130,7 @@ process.exit(0);
 export interface Tools {
   android: { available: string[]; devices: Record<string, string>; installMs: number; hold?: boolean; hang?: boolean; fail?: boolean; vanish?: boolean; offline?: boolean };
   ios: { runtimes: { identifier: string; version: string; buildversion: string; isAvailable: boolean; name: string; imageId?: string; deletable?: boolean }[];
-    devices: Record<string, { udid: string; name: string; state: string; isAvailable: boolean; deviceTypeIdentifier: string }[]>; sdkVersion: string; downloadMs: number; hang?: boolean; fail?: boolean; noImages?: boolean; keepImages?: boolean };
+    devices: Record<string, { udid: string; name: string; state: string; isAvailable: boolean; deviceTypeIdentifier: string }[]>; sdkVersion: string; downloadMs: number; hang?: boolean; fail?: boolean; noImages?: boolean; keepImages?: boolean; failDelete?: boolean };
 }
 export interface Call { tool: string; args: string[]; at: number; phase?: string; answers?: number }
 export type Reply<T = any> = { status: number; body: T };
@@ -232,7 +234,17 @@ export async function upkeepHarness(t: TestContext, options: HarnessOptions = {}
     return receipt(id);
   }
   await poll();
-  return { root, sdk, bin, storage: { android: join(root, "storage", "android"), ios: join(root, "storage", "ios") }, state: join(root, "state"), hostId, hostPath, store, machines, tools, clock, images: { android, ios },
+  /** A second host that speaks the host protocol directly, for cases that need exact control of
+   * what a heartbeat carries. It runs nothing. */
+  function standIn(platforms: string[] = ["android"]) {
+    const id = randomUUID(), token = randomBytes(32).toString("base64url"), offer = { name: "stand-in " + id.slice(0, 8), provider: "android", capacity: { cpu: 8, memoryMiB: 16384, diskGiB: 64 }, templates: [android] };
+    machines.enroll({ id, credential: token, offer }, settings.enrollmentToken);
+    const beat = (extra: RecordValue = {}, upkeep: RecordValue | null = { version: 1, platforms, idleStop: { defaultSeconds: null, templates: {} }, busy: [] }): any =>
+      machines.heartbeat(id, token, { offer, ...(upkeep ? { upkeep } : {}), ...extra });
+    beat();
+    return { id, path: `/v1/hosts/${id}`, beat };
+  }
+  return { root, sdk, bin, settings, standIn, storage: { android: join(root, "storage", "android"), ios: join(root, "storage", "ios") }, state: join(root, "state"), hostId, hostPath, store, machines, tools, clock, images: { android, ios },
     request, operation, run, receipt, poll, pump, providers: providers as { android: AndroidProvider; ios: IosProvider },
     runner: () => runner, get lastBeat() { return lastBeat; }, setConnected(value: boolean) { connected = value; }, advance(seconds: number) { offset += seconds; },
     async stopRunner(): Promise<void> { await runner.close().catch(() => {}); runners.delete(runner); },

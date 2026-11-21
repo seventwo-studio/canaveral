@@ -64,10 +64,12 @@ cannot be removed.
 A device runs until its owner stops it. An operator can configure an
 [idle stop](mobile-host-upkeep.md#idle-stop) per host or template; it is off by
 default, never stops a device with work in flight or an uncertain operation, never
-deletes anything and never touches a leased device. A host under
-[memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure) takes no
-new device, and starting a stopped device there is refused until it recovers;
-running devices are left alone.
+deletes anything and never touches a leased device. Its owner starts it again with
+the normal start. Hosts report [memory and disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure).
+That is an observation unless the host's operator opts in: with `pressure.gatePlacement`
+a pressured host takes no new device, and only with `pressure.gateRestart` is starting
+a stopped device there refused until it recovers. Running devices are left alone
+either way.
 
 Enroll a runner using the normal credential flow:
 

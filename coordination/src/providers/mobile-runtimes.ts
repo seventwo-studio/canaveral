@@ -2,15 +2,17 @@
  *
  * Nothing here runs on device reconciliation: a lease or machine creation never downloads.
  * Android uses the SDK's classic `sdkmanager` (deprecated upstream, like `avdmanager`); iOS
- * uses `xcodebuild -downloadPlatform` and `simctl runtime`. Tool output never leaves the host:
- * reports carry fixed codes and numbers only. The command lines follow the upstream documents
+ * uses `xcodebuild -downloadPlatform` and `simctl runtime`. Installer and uninstaller output
+ * never leaves the host: those reports carry fixed codes and numbers. Listings do carry what the
+ * tools report about each runtime, bounded: identifiers, versions, descriptions, names and states.
+ * No report carries a host path. The command lines follow the upstream documents
  * cited in docs/mobile-host-upkeep.md and have fixture coverage only; no native acceptance. */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ServiceError, object } from "../errors.ts";
 import { legacyDigest } from "../control/templates.ts";
 import { noLinks } from "../runtime-process.ts";
-import { canonical, digest, privateDirectory, readJson, readRegular, saveJson, uuid } from "./mobile.ts";
+import { canonical, digest, readJson, readRegular, uuid } from "./mobile.ts";
 import type { MobileProvider, NativePipe, RecordValue } from "./mobile.ts";
 import type { AndroidProvider } from "./android.ts";
 import type { IosProvider } from "./ios.ts";
@@ -24,9 +26,15 @@ export interface RuntimeContext {
   uses(identifier: string): string[];
 }
 export interface RuntimeReport { state: "succeeded" | "failed" | "unknown"; result: RecordValue }
+/** One thing a purge removes for an orphan, as the dry run lists it. */
+export type OrphanRemoval = "device-storage" | "removal-quarantine" | "avd-registration" | "simulator" | "assignment-journal";
 export interface OrphanEvidence {
   name: string; kind: "device-storage" | "removal-quarantine"; machineId: string;
   owned: boolean; removable: boolean; reason: string; leased?: boolean;
+  /** Everything a purge of this entry would remove, when it is removable. */
+  removes?: OrphanRemoval[];
+  /** The host identity the owner receipt was issued to; compared by the host, never reported. */
+  hostId?: string | null;
   /** Fingerprint of the assignment the owner receipt binds, for its matching local journal. */
   assignmentFingerprint?: string;
 }
@@ -283,7 +291,10 @@ export async function runtimeOperation(provider: AndroidProvider | IosProvider, 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const QUARANTINE = /^\.removing-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 function identity(file: string): string | null { const stat = fs.lstatSync(file, { bigint: true, throwIfNoEntry: false }); return stat ? `${stat.dev}/${stat.ino}` : null; }
-/** The owner receipt Canaveral wrote when it created this storage, bound to this exact runtime. */
+/** The owner receipt Canaveral wrote when it created this storage. It must bind this machine ID
+ * and this exact runtime: its kind, runner state directory, storage root and SDK or xcrun
+ * setting. The host identity the receipt names is returned for the host to compare; nothing in
+ * a receipt names a controller. */
 function ownerEvidence(provider: MobileProvider, name: string): OrphanEvidence & { directory: string; binding?: RecordValue } {
   const quarantine = QUARANTINE.exec(name), machineId = quarantine?.[1] ?? name, root = String(provider.config.storage), directory = path.join(root, name);
   const base = { name, kind: quarantine ? "removal-quarantine" as const : "device-storage" as const, machineId, owned: false, removable: false, directory };
@@ -296,20 +307,30 @@ function ownerEvidence(provider: MobileProvider, name: string): OrphanEvidence &
     if (!marker) return { ...base, reason: "no_owner_receipt" };
     const binding = object(marker.binding), expected = { kind: provider.kind, state: provider.state, storage: provider.config.storage, androidSDK: provider.config.androidSDK ?? null, xcrun: provider.config.xcrun ?? null };
     if (binding.version !== 1 || binding.id !== machineId || marker.fingerprint !== digest(binding) || canonical(binding.runtime) !== canonical(expected)) return { ...base, reason: "owner_receipt_differs" };
-    return { ...base, owned: true, reason: "owned", leased: binding.lease !== null, binding,
+    return { ...base, owned: true, reason: "owned", leased: binding.lease !== null, binding, hostId: typeof binding.hostId === "string" ? binding.hostId : null,
       assignmentFingerprint: legacyDigest({ id: binding.id, template: object(binding.template), resources: object(binding.resources) }) };
   } catch { return { ...base, reason: "ownership_unreadable" }; }
 }
-function publicEvidence(evidence: ReturnType<typeof ownerEvidence>, removable: boolean, reason: string): OrphanEvidence {
+function publicEvidence(evidence: ReturnType<typeof ownerEvidence>, removable: boolean, reason: string, removes: OrphanRemoval[] = []): OrphanEvidence {
   const { directory: _directory, binding: _binding, ...rest } = evidence;
-  return { ...rest, removable, reason };
+  return { ...rest, removable, reason, ...(removable ? { removes } : {}) };
+}
+/** The registration of this assignment's AVD, while it points at that assignment's own storage. */
+function ownRegistration(provider: AndroidProvider, machineId: string): { file: string; state: "absent" | "own" | "differs" } {
+  const file = path.join(provider.environment().ANDROID_AVD_HOME!, provider.name({ id: machineId }) + ".ini");
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })) return { file, state: "absent" };
+  if (!fs.lstatSync(file).isFile()) return { file, state: "differs" };
+  const paths = readRegular(file, 65_536).toString("utf8").split(/\r?\n/).filter(line => line.startsWith("path="));
+  return { file, state: paths.length === 1 && paths[0] === "path=" + path.join(String(provider.config.storage), machineId, "device.avd") ? "own" : "differs" };
 }
 export async function androidOrphan(provider: AndroidProvider, name: string): Promise<OrphanEvidence> {
   const evidence = ownerEvidence(provider, name), dir = evidence.directory, refuse = (reason: string) => publicEvidence(evidence, false, reason);
   if (!evidence.owned) return refuse(evidence.reason);
-  // A quarantine exists only after this runner proved the stop and began removing the storage.
-  if (evidence.kind === "removal-quarantine") return publicEvidence(evidence, true, "interrupted_removal");
   try {
+    const registration = ownRegistration(provider, evidence.machineId), removes: OrphanRemoval[] = [evidence.kind, ...(registration.state === "own" ? ["avd-registration" as const] : [])];
+    // A quarantine exists only after this runner proved the stop and began removing the storage.
+    // A registration that no longer points at that assignment's AVD is left where it is.
+    if (evidence.kind === "removal-quarantine") return publicEvidence(evidence, true, "interrupted_removal", removes);
     if (fs.existsSync(path.join(dir, "assignment.lock"))) return refuse("assignment_lock_present");
     const launch = readJson(path.join(dir, "launch.json")), endpoint = readJson(path.join(dir, "endpoint.json")), lease = evidence.binding!.lease === null ? null : object(evidence.binding!.lease);
     if (lease || launch?.supervised === true) {
@@ -320,27 +341,30 @@ export async function androidOrphan(provider: AndroidProvider, name: string): Pr
       if (!Number.isSafeInteger(pid) || await provider.transport?.processAbsent?.(pid as number) !== true) return refuse("execution_not_proven_stopped");
       if (endpoint && `emulator-${String(endpoint.port)}` in await provider.devices()) return refuse("device_connected");
     }
-    const ini = path.join(provider.environment().ANDROID_AVD_HOME!, provider.name({ id: evidence.machineId }) + ".ini");
-    if (fs.lstatSync(ini, { throwIfNoEntry: false })) {
-      const paths = readRegular(ini, 65_536).toString("utf8").split(/\r?\n/).filter(line => line.startsWith("path="));
-      if (paths.length !== 1 || paths[0] !== "path=" + path.join(dir, "device.avd")) return refuse("avd_registration_differs");
-    }
-    return publicEvidence(evidence, true, "owned_and_stopped");
+    if (registration.state === "differs") return refuse("avd_registration_differs");
+    return publicEvidence(evidence, true, "owned_and_stopped", removes);
   } catch { return refuse("evidence_unavailable"); }
+}
+/** The simulator a receipt names, when it is listed under the assignment's own name. */
+async function receiptedSimulator(provider: IosProvider, directory: string, machineId: string): Promise<{ state: "none" | "absent" | "differs" | "running" | "shutdown" | "unreceipted"; udid?: string }> {
+  const receipt = readJson(path.join(directory, "simulator.json")), inventory = await provider.inventory(), assigned = provider.name({ id: machineId });
+  if (!receipt) return { state: inventory.some(({ device }) => device.name === assigned) ? "unreceipted" : "none" };
+  const udid = uuid(receipt.udid), found = inventory.filter(({ device }) => typeof device.udid === "string" && device.udid.toLowerCase() === udid);
+  if (!found.length) return { state: "absent", udid };
+  if (found.length > 1 || found[0]!.device.name !== assigned) return { state: "differs", udid };
+  return { state: found[0]!.device.state === "Shutdown" ? "shutdown" : "running", udid };
 }
 export async function iosOrphan(provider: IosProvider, name: string): Promise<OrphanEvidence> {
   const evidence = ownerEvidence(provider, name), dir = evidence.directory, refuse = (reason: string) => publicEvidence(evidence, false, reason);
   if (!evidence.owned) return refuse(evidence.reason);
   try {
     if (fs.existsSync(path.join(dir, "assignment.lock"))) return refuse("assignment_lock_present");
-    const receipt = readJson(path.join(dir, "simulator.json")), inventory = await provider.inventory(), assigned = provider.name({ id: evidence.machineId });
-    if (receipt) {
-      const udid = uuid(receipt.udid), found = inventory.filter(({ device }) => typeof device.udid === "string" && device.udid.toLowerCase() === udid);
-      if (found.length > 1 || found.length === 1 && found[0]!.device.name !== assigned) return refuse("simulator_identity_differs");
-      // A purge removes storage; it never shuts a simulator down.
-      if (found.length === 1 && found[0]!.device.state !== "Shutdown") return refuse("simulator_running");
-    } else if (inventory.some(({ device }) => device.name === assigned)) return refuse("simulator_without_receipt");
-    return publicEvidence(evidence, true, "owned_and_stopped");
+    const simulator = await receiptedSimulator(provider, dir, evidence.machineId);
+    if (simulator.state === "differs") return refuse("simulator_identity_differs");
+    // A purge removes storage; it never shuts a simulator down.
+    if (simulator.state === "running") return refuse("simulator_running");
+    if (simulator.state === "unreceipted") return refuse("simulator_without_receipt");
+    return publicEvidence(evidence, true, evidence.kind === "removal-quarantine" ? "interrupted_removal" : "owned_and_stopped", [evidence.kind, ...(simulator.state === "shutdown" ? ["simulator" as const] : [])]);
   } catch { return refuse("evidence_unavailable"); }
 }
 /** AVD registrations and simulators that carry an assignment's name but have no storage
@@ -361,60 +385,48 @@ export async function strayDevices(provider: AndroidProvider | IosProvider): Pro
   }
   return result;
 }
-/** Removes one proven orphan. The purge journal lives outside the storage it removes, so an
- * interrupted purge can only be finished for the same request and the same directory. Nothing is
- * stopped: a simulator is deleted only when its receipt names it and it is shut down. */
-export async function purgeOrphan(provider: AndroidProvider | IosProvider, name: string, requestId: string): Promise<{ assignmentFingerprint: string | undefined }> {
-  const request = uuid(requestId), root = String(provider.config.storage), journalDirectory = path.join(provider.state, "upkeep-purges");
-  privateDirectory(provider.state); privateDirectory(journalDirectory);
-  const journalPath = path.join(journalDirectory, `${request}${name.startsWith(".") ? name : "-" + name}.json`), saved = readJson(journalPath);
+/** Removes one proven orphan and returns what it removed. Nothing is stopped: a simulator is
+ * deleted only when its receipt names it and it is shut down. The evidence is read again here,
+ * so what is removed is what an inspection at this moment would list.
+ *
+ * A purge is never resumed: its host operation runs once. One that stops part-way leaves the
+ * storage in its `.removing-` quarantine, or untouched, where the next inspection finds it and a
+ * new purge can finish it. A failure after the first change is reported as uncertain. */
+export async function purgeOrphan(provider: AndroidProvider | IosProvider, name: string, requestId: string, hostId: string | undefined): Promise<{ assignmentFingerprint: string | undefined; removed: OrphanRemoval[] }> {
+  const request = uuid(requestId), root = String(provider.config.storage);
   const directory = path.join(root, name), quarantine = QUARANTINE.test(name) ? directory : path.join(root, `.removing-${name}-${request}`);
   const uncertain = (message: string): ServiceError => new ServiceError(message, 409, { outcome: "unknown" });
-  /** Erases the storage this request moved aside, with the registration that pointed at it. */
-  const erase = (machineId: string): void => {
+  const refused = (message: string): ServiceError => new ServiceError(message, 409, { code: "orphan_refused" });
+  const evidence = provider.kind === "android" ? await androidOrphan(provider as AndroidProvider, name) : await iosOrphan(provider as IosProvider, name);
+  // The receipt must still name the host identity this runner holds, as the inspection required.
+  if (!evidence.removable || !hostId || evidence.hostId !== hostId) throw refused("Storage is not a proven orphan of this host.");
+  const storageIdentity = identity(directory), also: OrphanRemoval[] = [];
+  if (!storageIdentity) throw refused("Storage disappeared before its purge.");
+  if (quarantine !== directory && identity(quarantine)) throw refused("Removal quarantine is already occupied.");
+  if (provider.kind === "ios") {
+    const ios = provider as IosProvider;
+    // Owned by receipt and name, shut down, and read again immediately before the delete.
+    const simulator = await receiptedSimulator(ios, directory, evidence.machineId);
+    if (simulator.state !== "none" && simulator.state !== "absent" && simulator.state !== "shutdown") throw refused("Simulator changed before its purge.");
+    if (simulator.state === "shutdown") {
+      await ios.simctl(["delete", simulator.udid!]);
+      if ((await receiptedSimulator(ios, directory, evidence.machineId)).state !== "absent") throw uncertain("Simulator removal is unconfirmed.");
+      also.push("simulator");
+    }
+  }
+  try {
+    if (identity(directory) !== storageIdentity) throw uncertain("Storage changed during its purge.");
+    if (quarantine !== directory) fs.renameSync(directory, quarantine);
     if (provider.kind === "android") {
-      const android = provider as AndroidProvider, ini = path.join(android.environment().ANDROID_AVD_HOME!, android.name({ id: machineId }) + ".ini");
-      // A registration goes only while it points at this assignment's own AVD. An interrupted
-      // removal can leave one behind after its storage was already moved aside.
-      if (fs.lstatSync(ini, { throwIfNoEntry: false })?.isFile()) {
-        const paths = readRegular(ini, 65_536).toString("utf8").split(/\r?\n/).filter(line => line.startsWith("path="));
-        if (paths.length === 1 && paths[0] === "path=" + path.join(root, machineId, "device.avd")) fs.unlinkSync(ini);
-      }
+      const registration = ownRegistration(provider as AndroidProvider, evidence.machineId);
+      if (registration.state === "own") { fs.unlinkSync(registration.file); also.push("avd-registration"); }
     }
     fs.rmSync(quarantine, { recursive: true });
-    if (identity(quarantine) || quarantine !== directory && identity(directory)) throw uncertain("Storage removal remains incomplete.");
+    if (identity(quarantine) || identity(directory)) throw uncertain("Storage removal remains incomplete.");
     const parent = fs.openSync(root, fs.constants.O_RDONLY); try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
-  };
-  if (saved) {
-    if (saved.request !== request || saved.name !== name || typeof saved.machineId !== "string") throw new ServiceError("Purge journal belongs to another request.", 409);
-    const fingerprint = typeof saved.assignmentFingerprint === "string" ? saved.assignmentFingerprint : undefined;
-    if (saved.state === "complete") return { assignmentFingerprint: fingerprint };
-    // Interrupted after the storage was moved aside: only that same directory may be finished.
-    if (quarantine !== directory && !identity(directory) && identity(quarantine)) {
-      if (identity(quarantine) !== saved.storageIdentity) throw uncertain("Storage changed since this purge began.");
-      erase(saved.machineId); saveJson(journalPath, { ...saved, state: "complete" });
-      return { assignmentFingerprint: fingerprint };
-    }
-    // Otherwise nothing was moved yet: everything is proven again below.
+  } catch (error) {
+    // From here something may already be gone, so no failure is a clean refusal.
+    throw error instanceof ServiceError && error.outcome === "unknown" ? error : uncertain("Storage removal stopped part-way.");
   }
-  const evidence = provider.kind === "android" ? await androidOrphan(provider as AndroidProvider, name) : await iosOrphan(provider as IosProvider, name);
-  if (!evidence.removable) throw new ServiceError("Storage is not a proven orphan.", 409, { code: "orphan_refused" });
-  const storageIdentity = identity(directory);
-  if (!storageIdentity) throw new ServiceError("Storage disappeared before its purge.", 409, { code: "orphan_refused" });
-  const journal = { request, name, machineId: evidence.machineId, storageIdentity, assignmentFingerprint: evidence.assignmentFingerprint ?? null, state: "removing" };
-  saveJson(journalPath, journal);
-  if (provider.kind === "ios") {
-    const ios = provider as IosProvider, receipt = readJson(path.join(directory, "simulator.json"));
-    if (receipt) {
-      const udid = uuid(receipt.udid), listed = async (): Promise<boolean> => (await ios.inventory()).some(({ device }) => typeof device.udid === "string" && device.udid.toLowerCase() === udid);
-      // Owned by receipt and name, shut down, and read again immediately before the delete.
-      if (await listed()) { if ((await iosOrphan(ios, name)).removable !== true) throw new ServiceError("Simulator changed before its purge.", 409, { code: "orphan_refused" }); await ios.simctl(["delete", udid]); }
-      if (await listed()) throw uncertain("Simulator removal is unconfirmed.");
-    }
-  }
-  if (identity(directory) !== storageIdentity) throw uncertain("Storage changed during its purge.");
-  if (quarantine !== directory) { if (identity(quarantine)) throw uncertain("Removal quarantine is already occupied."); fs.renameSync(directory, quarantine); }
-  erase(evidence.machineId);
-  saveJson(journalPath, { ...journal, state: "complete" });
-  return { assignmentFingerprint: evidence.assignmentFingerprint };
+  return { assignmentFingerprint: evidence.assignmentFingerprint, removed: [evidence.kind, ...also] };
 }

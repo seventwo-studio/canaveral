@@ -36,7 +36,8 @@ runtimes remove HOST --platform P --identifier ID --request-id UUID
 upkeep status HOST [--idle-stop-seconds N]  Dry run: idle stops and orphan removals, with reasons
 upkeep inspect HOST [--request-id UUID]  Ask the host to inspect its storage for orphans
 upkeep purge HOST --inspection UUID --entry NAME [--entry NAME] --request-id UUID
-host-operation ID                        Read a runtime or storage operation receipt
+host-operation ID [--resolve-file FILE]  Read a runtime or storage operation receipt, or record
+                                         an administrator's decision on one that ended unknown
 create NAME --template ID --request-id UUID [--cpu N --memory-mib N --disk-gib N]
 generate --model ID --prompt-file FILE --request-id UUID [--max-tokens N]
 device ID ACTION --request-id UUID [--arguments-file FILE]
@@ -63,9 +64,11 @@ configured runtimes. Missing support fails closed; local never downloads runtime
 Runtime installs and removals happen only through an explicit runtimes command; a
 lease or machine creation never downloads. An Android install must pass
 --accept-android-licenses. A change that ends unknown is never replayed: run
-runtimes list (or upkeep inspect) before another change. upkeep status changes
-nothing; orphan storage is removed only by upkeep purge of inspected entries.
-hosts shows each host's memory and disk pressure beside its health.
+runtimes list (or upkeep inspect) before another change, or record a decision with
+host-operation ID --resolve-file when the host can no longer be inspected. upkeep
+status changes nothing; orphan storage is removed only by upkeep purge of inspected
+entries. hosts shows each host's memory and disk pressure beside its health; pressure
+refuses placement only on a host whose own file opts in (pressure.gatePlacement).
 `;
 type Schema = { flags?: string[]; values?: string[]; required?: string[]; positional?: number; actions?: string[]; defaultAction?: string };
 const schemas: Record<string, Schema> = {
@@ -91,7 +94,7 @@ const schemas: Record<string, Schema> = {
   template: { actions: ["validate", "prepare"], positional: 1, values: ["cache"] },
   start: { positional: 1 }, stop: { positional: 1 }, drain: { positional: 1 }, accept: { positional: 1 },
   maintenance: { actions: ["begin", "status", "resume"] },
-  runtimes: { actions: ["show", "list", "install", "remove"] }, upkeep: { actions: ["status", "inspect", "purge"] }, "host-operation": { positional: 1 },
+  runtimes: { actions: ["show", "list", "install", "remove"] }, upkeep: { actions: ["status", "inspect", "purge"] }, "host-operation": { positional: 1, values: ["resolve-file"] },
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
@@ -441,7 +444,11 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
       result = await client.request("POST", `${path}/${drain}/resume`, { requestId });
     }
   }
-  else if (args.command === "host-operation") result = await client.request("GET", `/v1/host-operations/${uuid(positional(args))}`);
+  else if (args.command === "host-operation" && args.options["resolve-file"]) {
+    // {id, decision, reason}: the mutation UUID, "inspected" or "abandoned", and why.
+    const body = await jsonFile(option(args, "resolve-file")); body.id = uuid(String(body.id));
+    result = await client.request("POST", `/v1/host-operations/${uuid(positional(args))}/resolve`, body);
+  } else if (args.command === "host-operation") result = await client.request("GET", `/v1/host-operations/${uuid(positional(args))}`);
   else if (args.command === "runtimes" || args.command === "upkeep") {
     const host = `/v1/hosts/${uuid(positional(args))}`;
     // A read may take a generated UUID; a change must name one the operator has saved.

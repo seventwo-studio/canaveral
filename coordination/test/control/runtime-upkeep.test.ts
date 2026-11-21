@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Principal } from "../../src/control/contracts.ts";
+import { createModule as updatesModule } from "../../src/control/updates.ts";
 import { ServiceError } from "../../src/errors.ts";
 import { IosProvider } from "../../src/providers/ios.ts";
 import { parseSdkManagerList } from "../../src/providers/mobile-runtimes.ts";
@@ -309,4 +310,177 @@ test("only administrators reach runtime and upkeep routes, and requests are vali
   await assert.rejects(f.request("POST", `/v1/hosts/${randomUUID()}/operations`, { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } }), failure(404));
   await assert.rejects(f.request("GET", `/v1/host-operations/${randomUUID()}`), failure(404));
   assert.equal((await f.request("GET", f.hostPath + "/operations")).body.operations.length, 1);
+});
+
+test("a host cannot report another host's operation, and only what a heartbeat delivers counts as collected", async t => {
+  const f = await upkeepHarness(t), other = f.standIn();
+  const listing = await f.operation("runtime-list", { platform: "android" });
+  // The operation belongs to the fixture's real host. Another host's credential cannot settle it.
+  for (const report of [{ state: "succeeded", result: { platform: "android", installed: [] } }, { state: "running" }, { state: "failed", result: {} }])
+    assert.throws(() => other.beat({ hostOperationReports: { [listing.id]: report } }), failure(403));
+  assert.throws(() => other.beat({ hostOperationReports: { [randomUUID()]: { state: "succeeded", result: {} } } }), failure(403));
+  assert.equal((await f.receipt(listing.id)).state, "queued");
+  // The refused heartbeat changed nothing else either: the other host still gets none of it.
+  assert.deepEqual(other.beat().hostOperations, []);
+
+  // One heartbeat delivers at most eight operations. The ninth was never collected, so it fails
+  // as never started; the eight that were collected and then lost end unknown.
+  const queued: string[] = [];
+  for (let index = 0; index < 9; index++) queued.push(((await f.request("POST", other.path + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } })).body as { id: string }).id);
+  assert.deepEqual((other.beat().hostOperations as { id: string }[]).map(operation => operation.id), queued.slice(0, 8));
+  f.advance(121);
+  assert.deepEqual([(await f.receipt(queued[8]!)).state, (await f.receipt(queued[8]!)).result.code], ["failed", "expired"]);
+  assert.deepEqual(await Promise.all(queued.slice(0, 8).map(async id => (await f.receipt(id)).state)), Array(8).fill("queued"));
+  f.advance(420);
+  assert.deepEqual(await Promise.all(queued.slice(0, 8).map(async id => (await f.receipt(id)).state)), Array(8).fill("unknown"));
+});
+
+test("a listing acknowledges an unknown change only when it was submitted after the change ended", async t => {
+  const f = await upkeepHarness(t), other = f.standIn();
+  const submit = async (kind: string, args: Record<string, unknown>) => (await f.request("POST", other.path + "/operations", { id: randomUUID(), kind, arguments: args })).body as { id: string };
+  const install = await submit("runtime-install", { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true });
+  // Submitted while the install was still running: whatever it lists, it says nothing about how the install ended.
+  const early = await submit("runtime-list", { platform: "android" });
+  assert.equal(other.beat().hostOperations.length, 2);
+  other.beat({ hostOperationReports: { [install.id]: { state: "unknown", result: { code: "timeout", detail: "fixture" } } } });
+  const listed = { state: "succeeded", result: { platform: "android", installed: [], available: { state: "unavailable" } } };
+  other.beat({ hostOperationReports: { [early.id]: listed } });
+  assert.equal((await f.receipt(early.id)).state, "succeeded");
+  assert.equal((await f.receipt(install.id)).acknowledgedAt, undefined);
+  const retry = { id: randomUUID(), kind: "runtime-install", arguments: { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true } };
+  await assert.rejects(f.request("POST", other.path + "/operations", retry), failure(409, "host_inspection_required"));
+  // A storage inspection is about storage, not runtimes.
+  const inspection = await submit("storage-inspect", {});
+  other.beat(); other.beat({ hostOperationReports: { [inspection.id]: { state: "succeeded", result: { complete: true, entries: [] } } } });
+  await assert.rejects(f.request("POST", other.path + "/operations", retry), failure(409, "host_inspection_required"));
+  const later = await submit("runtime-list", { platform: "android" });
+  other.beat(); other.beat({ hostOperationReports: { [later.id]: listed } });
+  assert.ok((await f.receipt(install.id)).acknowledgedAt > 0);
+  assert.equal((await f.request("POST", other.path + "/operations", retry)).status, 201);
+});
+
+test("what a runner advertised does not outlive it: no upkeep report, no operations", async t => {
+  const f = await upkeepHarness(t), other = f.standIn();
+  const queued = (await f.request("POST", other.path + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } })).body as { id: string };
+  // The runner is replaced by one that advertises no upkeep: an older build, or a host file without mobile runtimes.
+  assert.deepEqual(other.beat({}, null).hostOperations, []);
+  assert.deepEqual((await f.request("GET", other.path + "/runtimes")).body, { hostId: other.id, supported: false, platforms: [] });
+  await assert.rejects(f.request("POST", other.path + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } }), failure(409, "upkeep_unsupported"));
+  await assert.rejects(f.request("POST", other.path + "/operations", { id: randomUUID(), kind: "storage-inspect", arguments: {} }), failure(409, "upkeep_unsupported"));
+  // What was queued for the old runner is never handed to the new one, and fails as never started.
+  f.advance(121); other.beat({}, null);
+  assert.deepEqual([(await f.receipt(queued.id)).state, (await f.receipt(queued.id)).result.code], ["failed", "expired"]);
+  // A runner that drops one platform keeps the other.
+  const both = f.standIn(["android", "ios"]);
+  both.beat({}, { version: 1, platforms: ["ios"], idleStop: { defaultSeconds: null, templates: {} }, busy: [] });
+  await assert.rejects(f.request("POST", both.path + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } }), failure(409, "upkeep_unsupported"));
+  assert.equal((await f.request("POST", both.path + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "ios" } })).status, 201);
+});
+
+test("an unknown change blocks drain resume until it is re-inspected or an administrator records a decision", async t => {
+  const f = await upkeepHarness(t);
+  f.tools.update(state => { state.android.vanish = true; });
+  const lost = await f.run("runtime-install", { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true });
+  assert.deepEqual([lost.state, lost.result.code], ["unknown", "not_verified"]);
+  const drain = (await f.request("POST", f.hostPath + "/maintenance", { id: randomUUID() })).body as { id: string };
+  const status = async (): Promise<any> => (await f.request("GET", f.hostPath + "/maintenance")).body;
+  await f.pump(async () => (await status()).blockers.every((blocker: any) => blocker.id === lost.id), "the drain to settle on the unknown install");
+  const blocked = await status();
+  assert.deepEqual(blocked.blockers.map((blocker: any) => [blocker.kind, blocker.id, blocker.state, blocker.blocks]), [["uncertainOperation", lost.id, "unknown", ["powerOff", "resume"]]]);
+  assert.deepEqual([blocked.safeToPowerOff, blocked.readyToResume], [false, false]);
+  const refused = await f.request("POST", `${f.hostPath}/maintenance/${drain.id}/resume`, { requestId: randomUUID() });
+  assert.deepEqual([refused.status, refused.body.code], [409, "maintenance_blocked"]);
+
+  // Only an administrator may decide, with a stated decision and reason.
+  const route = `/v1/host-operations/${lost.id}/resolve`, decision = { id: randomUUID(), decision: "abandoned", reason: "Android was removed from this host; nothing can list it." };
+  const user = (): Principal => ({ kind: "session", user: { id: randomUUID(), username: "owner", role: "user", status: "active" }, scopes: ["machines:read", "machines:write", "machines:access"] });
+  await assert.rejects(f.request("POST", route, decision, user), failure(403));
+  await assert.rejects(f.request("POST", route, decision, () => { throw new ServiceError("Credential rejected.", 401); }), failure(401));
+  for (const invalid of [{ ...decision, decision: "retry" }, { ...decision, reason: "" }, { ...decision, reason: "x".repeat(1001) }, { id: decision.id, decision: "abandoned" }, { ...decision, force: true }])
+    await assert.rejects(f.request("POST", route, invalid), failure(400));
+  await assert.rejects(f.request("POST", `/v1/host-operations/${randomUUID()}/resolve`, decision), failure(404));
+  assert.equal((await f.receipt(lost.id)).acknowledgedAt, undefined);
+  const administrator = (): Principal => ({ kind: "token", user: { id: "0d7a1b0e-52a4-4a55-8f3e-6f0c7d0e1c1b", username: "operator-on-call", role: "admin", status: "active" }, scopes: ["admin"] });
+  const resolved = await f.request("POST", route, decision, administrator);
+  assert.equal(resolved.status, 201);
+  // The receipt keeps its outcome: nothing is retried or rewritten, only acknowledged.
+  assert.deepEqual([resolved.body.state, resolved.body.result.code, resolved.body.acknowledgedAt > 0], ["unknown", "not_verified", true]);
+  assert.deepEqual({ ...resolved.body.resolution, decidedAt: null }, { id: decision.id, decision: "abandoned", reason: decision.reason, decidedAt: null,
+    decidedBy: { kind: "token", userId: "0d7a1b0e-52a4-4a55-8f3e-6f0c7d0e1c1b", username: "operator-on-call" } });
+  // A lost reply is safe to repeat; a changed or second decision is a conflict.
+  const replay = await f.request("POST", route, decision);
+  assert.deepEqual([replay.status, replay.body.resolution], [200, resolved.body.resolution]);
+  await assert.rejects(f.request("POST", route, { ...decision, reason: "Another reason." }), failure(409));
+  await assert.rejects(f.request("POST", route, { ...decision, decision: "inspected" }), failure(409));
+  await assert.rejects(f.request("POST", route, { ...decision, id: randomUUID() }), failure(409));
+  assert.deepEqual((await f.receipt(lost.id)).resolution, resolved.body.resolution);
+  assert.equal(f.tools.calls("sdkmanager").filter(call => call.args.includes("--install") && call.phase === "start").length, 1);
+
+  // The drain can now be resumed, and the platform accepts changes again.
+  await f.pump(async () => (await status()).readyToResume === true, "the drain to become resumable");
+  assert.deepEqual((await status()).blockers, []);
+  const resumed = await f.request("POST", `${f.hostPath}/maintenance/${drain.id}/resume`, { requestId: randomUUID() });
+  assert.deepEqual([resumed.status, resumed.body.phase], [200, "resumed"]);
+  f.tools.update(state => { state.android.vanish = false; });
+  const again = await f.run("runtime-install", { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true });
+  assert.equal(again.state, "succeeded");
+  // Only an unknown change that nothing has acknowledged can be resolved.
+  await assert.rejects(f.request("POST", `/v1/host-operations/${again.id}/resolve`, { ...decision, id: randomUUID() }), failure(409));
+  const listed = await f.run("runtime-list", { platform: "android" });
+  await assert.rejects(f.request("POST", `/v1/host-operations/${listed.id}/resolve`, { ...decision, id: randomUUID() }), failure(409));
+  f.tools.update(state => { state.android.vanish = true; });
+  const second = await f.run("runtime-install", { platform: "android", identifier: "system-images;android-33;google_apis;arm64-v8a", acceptLicenses: true });
+  assert.equal(second.state, "unknown");
+  await f.run("runtime-list", { platform: "android" });
+  // Already acknowledged by the listing: no decision is needed, and none is recorded.
+  await assert.rejects(f.request("POST", `/v1/host-operations/${second.id}/resolve`, { ...decision, id: randomUUID() }), failure(409));
+  assert.equal((await f.receipt(second.id)).resolution, undefined);
+});
+
+test("a decision can be recorded for a host that can no longer be listed", async t => {
+  const f = await upkeepHarness(t), other = f.standIn();
+  const install = (await f.request("POST", other.path + "/operations", { id: randomUUID(), kind: "runtime-install", arguments: { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true } })).body as { id: string };
+  other.beat(); other.beat({ hostOperationReports: { [install.id]: { state: "unknown", result: { code: "timeout", detail: "fixture" } } } });
+  // The operator removes Android from the host file. No listing can be submitted for it any more.
+  other.beat({}, null);
+  await assert.rejects(f.request("POST", other.path + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } }), failure(409, "upkeep_unsupported"));
+  assert.deepEqual((await f.request("GET", other.path + "/upkeep")).body.pending.map((operation: any) => [operation.id, operation.state]), [[install.id, "unknown"]]);
+  const resolved = await f.request("POST", `/v1/host-operations/${install.id}/resolve`, { id: randomUUID(), decision: "inspected", reason: "Checked the SDK directory over SSH: the image is not installed." });
+  assert.deepEqual([resolved.status, resolved.body.resolution.decision, resolved.body.resolution.decidedBy], [201, "inspected", { kind: "operator", userId: null, username: null }]);
+  assert.deepEqual((await f.request("GET", other.path + "/upkeep")).body.pending, []);
+  assert.deepEqual((await f.request("GET", other.path + "/operations")).body.operations[0].resolution, resolved.body.resolution);
+});
+
+test("a runner that will not start an operation says so: a missed start window and an update fence fail as never started", async t => {
+  const f = await upkeepHarness(t);
+  // Collected, but the runner gets to it only after the start window.
+  const late = await f.operation("runtime-install", { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true });
+  await f.poll();
+  f.advance(121);
+  assert.equal((await f.receipt(late.id)).state, "queued");
+  await f.poll(); await f.runner().step(); await f.poll();
+  assert.deepEqual([(await f.receipt(late.id)).state, (await f.receipt(late.id)).result.code], ["failed", "expired"]);
+  // A runner fenced for an update declines at once instead of holding the operation to its deadline.
+  f.runner().fenceUpdateAdmission();
+  const fenced = await f.operation("runtime-install", { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true });
+  const listing = await f.operation("runtime-list", { platform: "android" });
+  await f.poll(); await f.runner().step(); await f.poll();
+  for (const id of [fenced.id, listing.id]) assert.deepEqual([(await f.receipt(id)).state, (await f.receipt(id)).result.code], ["failed", "update_fenced"]);
+  // A failed change needs no re-inspection, and the runner holds nothing that would keep it from quiescing.
+  await f.poll();
+  assert.deepEqual((f.lastBeat.hostOperationReports as Record<string, unknown>), {});
+  assert.deepEqual((await f.runner().updateIdle()), { idle: true, workloadsStopped: true });
+  assert.equal(f.tools.calls("sdkmanager").length, 0);
+  assert.equal(installed(f, ANDROID_AVAILABLE), false);
+  f.runner().resumeUpdateAdmission();
+  assert.equal((await f.run("runtime-list", { platform: "android" })).state, "succeeded");
+
+  // The controller refuses new operations for a host that is draining for a runtime update.
+  updatesModule(f.store, f.settings);
+  f.store.transaction(db => db.prepare(`INSERT INTO host_update_jobs (id,rollout,host,target_kind,release,attempt,installation,credential,phase,components,created,updated)
+    VALUES (?,?,?,'host','fixture-release',?,?,'fixture','draining','[]',0,0)`).run(randomUUID(), randomUUID(), f.hostId, randomUUID(), randomUUID()));
+  for (const [kind, args] of [["runtime-list", { platform: "android" }], ["runtime-install", { platform: "android", identifier: ANDROID_AVAILABLE, acceptLicenses: true }], ["storage-inspect", {}]] as [string, Record<string, unknown>][])
+    await assert.rejects(f.request("POST", f.hostPath + "/operations", { id: randomUUID(), kind, arguments: args }), failure(409, "host_draining"));
+  f.store.transaction(db => db.exec("UPDATE host_update_jobs SET phase='succeeded'"));
+  assert.equal((await f.request("POST", f.hostPath + "/operations", { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } })).status, 201);
 });

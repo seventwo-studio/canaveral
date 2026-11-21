@@ -20,7 +20,7 @@ interpreter dependency to the controller, host or SDK; see
 - [dashboard](dashboard.md)
 - [devices](devices.md)
 - [remote mobile control and CI builds](mobile-control.md)
-- [mobile host upkeep](mobile-host-upkeep.md) (runtime and system-image management, idle stop, orphan storage, and memory and disk pressure back-off; fixture evidence only)
+- [mobile host upkeep](mobile-host-upkeep.md) (runtime and system-image management, idle stop, orphan storage, and memory and disk pressure reporting with opt-in back-off; fixture evidence only)
 - [guest access](guest-access.md)
 - [image registry](image-registry.md)
 - [images](images.md)

@@ -55,8 +55,14 @@ test("runtime and upkeep commands send explicit, UUID-keyed requests", async () 
   const purged = await cli(["upkeep", "purge", host, "--inspection", inspection, "--entry", first, "--entry", second, "--request-id", request]);
   assert.deepEqual(purged.calls, [{ method: "POST", path: `/v1/hosts/${host}/operations`, body: { id: request, kind: "storage-purge", arguments: { inspection, entries: [first, second] } } }]);
   assert.deepEqual((await cli(["host-operation", request])).calls, [{ method: "GET", path: `/v1/host-operations/${request}`, body: undefined }]);
+  // An administrator's decision on an operation that ended unknown is read from a file, like an install resolution.
+  const decision = join(tmpdir(), `canaveral-upkeep-decision-${randomUUID()}.json`), mutation = randomUUID();
+  writeFileSync(decision, JSON.stringify({ id: mutation, decision: "abandoned", reason: "The host was retired." }), { mode: 0o600 });
+  try {
+    assert.deepEqual((await cli(["host-operation", request, "--resolve-file", decision])).calls, [{ method: "POST", path: `/v1/host-operations/${request}/resolve`, body: { id: mutation, decision: "abandoned", reason: "The host was retired." } }]);
+  } finally { rmSync(decision, { force: true }); }
   const help = (await cli(["--help"])).stdout;
-  for (const text of ["runtimes install HOST", "--accept-android-licenses", "upkeep purge HOST", "never downloads", "pressure"]) assert.ok(help.includes(text), text);
+  for (const text of ["runtimes install HOST", "--accept-android-licenses", "upkeep purge HOST", "never downloads", "pressure.gatePlacement", "--resolve-file"]) assert.ok(help.includes(text), text);
 });
 
 test("through the real controller: other credentials are refused, hosts show pressure and a waiting request names it", async t => {
@@ -73,10 +79,13 @@ test("through the real controller: other credentials are refused, hosts show pre
   // A stand-in Android host speaking the host protocol: no runner, SDK or device is involved.
   const host = randomUUID(), hostToken = key(), systemImage = "system-images;android-35;google_apis;arm64-v8a";
   const image = { id: "phone", revision: "1", arch: "arm64", os: "android", mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: { systemImage, profile: "pixel_8" } };
-  const offer = { name: "upkeep http fixture", provider: "android", capacity: { cpu: 4, memoryMiB: 4096, diskGiB: 16 }, templates: [image], leaseProtocol: 1, leaseImages: [{ id: "phone", revision: "1", arch: "arm64", runtime: "android" }] };
+  // Room for three devices: a released lease keeps its reservation until its cleanup is proven.
+  const offer = { name: "upkeep http fixture", provider: "android", capacity: { cpu: 6, memoryMiB: 6144, diskGiB: 24 }, templates: [image], leaseProtocol: 1, leaseImages: [{ id: "phone", revision: "1", arch: "arm64", runtime: "android" }] };
   assert.equal((await api("POST", "/v1/hosts/enroll", { id: host, credential: hostToken, offer }, enrollment)).status, 200);
-  let sample = 0;
-  const pressure = (level: MemoryLevel) => new PressureMonitor({ ...DEFAULT_PRESSURE, enterSeconds: 0, clearSeconds: 0 }).observe({ memory: { source: "darwin-pressure-level", level }, disk: { freeGiB: 100, totalGiB: 500 } }, 0, Date.now() / 1000 + ++sample);
+  let sample = 0, gatePlacement = false;
+  // What a host file with or without `pressure.gatePlacement` makes its runner report.
+  const pressure = (level: MemoryLevel) => ({ ...new PressureMonitor({ ...DEFAULT_PRESSURE, enterSeconds: 0, clearSeconds: 0 }).observe({ memory: { source: "darwin-pressure-level", level }, disk: { freeGiB: 100, totalGiB: 500 } }, 0, Date.now() / 1000 + ++sample),
+    gates: { placement: gatePlacement, restart: false } });
   const beat = async (level: MemoryLevel, extra: Record<string, unknown> = {}) => {
     const reply = await api("POST", `/v1/hosts/${host}/heartbeat`, { offer, pressure: pressure(level), upkeep: { version: 1, platforms: ["android"], idleStop: { defaultSeconds: null, templates: {} }, busy: [] }, ...extra }, hostToken);
     assert.equal(reply.status, 200, JSON.stringify(reply.body)); return reply.body;
@@ -92,17 +101,36 @@ test("through the real controller: other credentials are refused, hosts show pre
   const leaseKey = (await api("POST", `/v1/leases/${lease.body.id}/credential`, {}, appKey)).body.credential as string;
   assert.match(leaseKey, /^[A-Za-z0-9_-]{43,}$/);
 
-  // Application, lease, enrollment and host credentials, and an unknown one, reach none of the routes.
+  // Real accounts: an administrator, a signed-in ordinary user, and personal tokens of each
+  // that lack the admin scope.
+  const password = "disposable-upkeep-test-password";
+  const administrator = (await api("POST", "/v1/auth/setup", { username: "administrator", password })).body;
+  const invited = (await api("POST", "/v1/users", { id: randomUUID(), username: "owner" }, administrator.token)).body;
+  const claim = (await api("POST", `/v1/users/${invited.id}/invite`, {}, administrator.token)).body;
+  const owner = (await api("POST", "/v1/auth/claim", { token: claim.token, password }, "")).body;
+  assert.deepEqual([administrator.user.role, owner.user.role], ["admin", "user"]);
+  const scopes = ["machines:read", "machines:write", "machines:access"];
+  const ownerToken = (await api("POST", "/v1/auth/tokens", { id: randomUUID(), name: "ci", scopes }, owner.token)).body.token as string;
+  const scopedAdminToken = (await api("POST", "/v1/auth/tokens", { id: randomUUID(), name: "automation", scopes }, administrator.token)).body.token as string;
+  for (const credential of [ownerToken, scopedAdminToken]) assert.match(credential, /^[A-Za-z0-9_-]{43,}$/);
+
   const operation = { id: randomUUID(), kind: "runtime-list", arguments: { platform: "android" } };
-  for (const credential of [appKey, leaseKey, enrollment, hostToken, key()]) {
-    for (const [method, route, body] of [["GET", `/v1/hosts/${host}/runtimes`], ["GET", `/v1/hosts/${host}/upkeep`], ["GET", `/v1/hosts/${host}/operations`], ["GET", `/v1/host-operations/${operation.id}`],
-      ["POST", `/v1/hosts/${host}/operations`, operation]] as [string, string, unknown?][]) assert.equal((await api(method, route, body, credential)).status, 401, `${method} ${route}`);
-  }
+  const routes: [string, string, unknown?][] = [["GET", `/v1/hosts/${host}/runtimes`], ["GET", `/v1/hosts/${host}/upkeep`], ["GET", `/v1/hosts/${host}/operations`], ["GET", `/v1/host-operations/${operation.id}`],
+    ["POST", `/v1/hosts/${host}/operations`, operation], ["POST", `/v1/host-operations/${operation.id}/resolve`, { id: randomUUID(), decision: "abandoned", reason: "fixture" }]];
+  // Application, lease, enrollment and host credentials, and an unknown one, are not accounts: 401.
+  for (const credential of [appKey, leaseKey, enrollment, hostToken, key()]) for (const [method, route, body] of routes) assert.equal((await api(method, route, body, credential)).status, 401, `${method} ${route}`);
+  // A signed-in ordinary user, their personal token, and an administrator's token without the
+  // admin scope are accounts without administrator authority: 403.
+  for (const credential of [owner.token as string, ownerToken, scopedAdminToken]) for (const [method, route, body] of routes) assert.equal((await api(method, route, body, credential)).status, 403, `${method} ${route}`);
   assert.deepEqual((await api("GET", `/v1/hosts/${host}/operations`)).body.operations, []);
+  // The administrator's own session works, and is recorded as the requester.
+  const bySession = await api("POST", `/v1/hosts/${host}/operations`, { id: randomUUID(), kind: "storage-inspect", arguments: {} }, administrator.token);
+  assert.deepEqual([bySession.status, bySession.body.requestedBy], [201, `session:${administrator.user.id}`]);
 
   // The operator's listing travels out on the host's next heartbeat and its result comes back the same way.
   assert.equal((await api("POST", `/v1/hosts/${host}/operations`, operation)).status, 201);
-  assert.deepEqual((await beat("normal", { reports: { [leased]: { state: "running", accessReady: true } } })).hostOperations.map((entry: any) => [entry.id, entry.kind, entry.arguments]), [[operation.id, "runtime-list", { platform: "android" }]]);
+  assert.deepEqual((await beat("normal", { reports: { [leased]: { state: "running", accessReady: true } } })).hostOperations.map((entry: any) => [entry.id, entry.kind, entry.arguments]),
+    [[bySession.body.id, "storage-inspect", {}], [operation.id, "runtime-list", { platform: "android" }]]);
   await beat("normal", { reports: { [leased]: { state: "running", accessReady: true } }, hostOperationReports: { [operation.id]: { state: "succeeded", result: { platform: "android", installed: [{ identifier: systemImage, compatible: true, devices: 1 }], available: { state: "unavailable" } } } } });
   const adminFile = join(root, "admin"), run = async (...args: string[]) => {
     let stdout = "", stderr = "";
@@ -126,9 +154,18 @@ test("through the real controller: other credentials are refused, hosts show pre
   // Pressure is shown wherever host health is: the host list, through the CLI too.
   const view = async () => JSON.parse((await run("hosts")).stdout).hosts[0];
   assert.deepEqual([(await view()).pressure.state, (await view()).placementReady, (await view()).health], ["normal", true, null]);
+  // By default it is an observation: a pressured host is shown as such and still takes a lease.
+  await beat("critical", { reports: { [leased]: { state: "running", accessReady: true } } });
+  const observed = await view();
+  assert.deepEqual([observed.pressure.state, observed.pressure.gates, observed.pressure.placementBlocked, observed.placementReady], ["pressured", { placement: false, restart: false }, false, true]);
+  const taken = await api("POST", "/v1/leases", { id: randomUUID(), templateId: "phone", templateRevision: "1", arch: "arm64" }, appKey);
+  assert.equal(taken.status, 201, JSON.stringify(taken.body));
+  assert.equal((await api("POST", `/v1/leases/${taken.body.id}/release`, { id: randomUUID() }, appKey)).status, 200);
+  // The operator opts this host into gating placement in its host file.
+  gatePlacement = true;
   await beat("critical", { reports: { [leased]: { state: "running", accessReady: true } } });
   const pressured = await view();
-  assert.deepEqual([pressured.pressure.state, pressured.pressure.placementBlocked, pressured.pressure.reasons, pressured.pressure.memory.level, pressured.placementReady], ["pressured", true, ["memory"], "critical", false]);
+  assert.deepEqual([pressured.pressure.state, pressured.pressure.placementBlocked, pressured.pressure.restartBlocked, pressured.pressure.reasons, pressured.pressure.memory.level, pressured.placementReady], ["pressured", true, false, ["memory"], "critical", false]);
   // New work waits with a reason that names the pressure; the lease already running is untouched.
   const direct = await api("POST", "/v1/leases", { id: randomUUID(), templateId: "phone", templateRevision: "1", arch: "arm64" }, appKey);
   assert.deepEqual([direct.status, direct.body.code, direct.body.retryable], [503, "host_pressure", true]);
