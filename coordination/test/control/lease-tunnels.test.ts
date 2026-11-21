@@ -1090,6 +1090,8 @@ test("connections are bounded, a stalled endpoint applies backpressure, idle con
   for (let stream = 1; stream <= TUNNEL_CONNECTIONS + 1; stream++) await raw.connection.sendControl({ type: "open", stream });
   await until(() => raw.controls("accept").length === TUNNEL_CONNECTIONS && raw.controls("reset").length === 1, "the runner's connection limit as connector");
   assert.deepEqual(raw.controls("reset")[0], { type: "reset", stream: TUNNEL_CONNECTIONS + 1, reason: "limit" });
+  // A relay accept confirms the connecting socket. The fixture's server callbacks run separately.
+  await until(() => holding.sockets.size >= TUNNEL_CONNECTIONS, "the device app accepted the allowed connections");
   assert.equal(dialed(), TUNNEL_CONNECTIONS, "the stream beyond the limit was never dialed");
   // Opening and resetting in a loop: the controller lets only so many opens through per interval,
   // and the runner answers the ones beyond its open rate without dialing the device.
