@@ -27,6 +27,11 @@ environment has two named members and a persisted pairing identity. One assignme
 cannot belong to multiple leases. Existing administrative machines are not adopted
 or expired automatically. Existing `/v1/machines` behavior remains compatible.
 
+One assignment can exist before its lease: a [warm pool device](warm-pool-and-baselines.md).
+It is created by the pool, owned by nobody and not an administrative machine. A lease
+takes over its machine row and reservation at admission, at most one lease ever does,
+and from then on it is that lease's member in every respect, including cleanup.
+
 The consumer principal has a template allowlist and aggregate CPU, memory, disk
 and active-lease limits. Admission checks these and host capacity in the same
 SQLite transaction as creation. Paired environments reserve all members on a
@@ -135,6 +140,9 @@ Return 201 for new admission, 200 for an identical retry. Example response shape
 {"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","name":"checkout-flow","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
 ```
 
+A member may carry `source`: `warm` when its device was taken over from the host's warm
+pool without another boot, `cold` when it was booted for the lease. It is absent while a
+claimed warm device is still being handed over. It says nothing else about the host.
 `name` is the label the caller gave at acquisition, returned so people and agents
 can tell their leases apart in lists. It is for display only: it selects nothing,
 authorizes nothing and need not be unique. On the generic host path an omitted name
@@ -269,7 +277,8 @@ acceptance. Other provider stop paths and access locks still need bounded
 cancellation/priority, and native running-VM expiry requires live acceptance.
 Automatic Apple cleanup now uses the owned deletion and credential-erasure path
 below. Android emulator leases use the native lease supervisor's group-exit proof
-before the same owned removal and erasure. iOS simulator leases use the same supervisor,
+before the same owned removal and erasure, also for a device that was adopted from the
+warm pool or claimed and never adopted. iOS simulator leases use the same supervisor,
 whose proof is CoreSimulator reporting the lease's own simulator shut down together with the
 absence of that simulator's process tree, both held across a settling period; that proof has
 no native acceptance. Other provider cleanup remains unimplemented. The

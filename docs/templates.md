@@ -28,7 +28,8 @@ pins its full public definition, including any artifact checksum and preparation
 digest. Private paths, credentials and preparation contents never enter the
 blueprint. Source choices can include downloaded base media, prepared captures
 and existing operator-configured VM definitions. Mobile SDK profiles remain in
-their existing device workflow.
+their existing device workflow; a prepared Android device state is a
+[baseline](warm-pool-and-baselines.md#baselines), not a blueprint.
 
 Minimums cannot be smaller than the source minimums. Defaults must satisfy those
 constraints and the source's memory granularity. The same ID/revision/body is an
@@ -68,6 +69,12 @@ base, boots the VM, runs preparation and reports readiness. See the
 A reusable JSON definition has these fields:
 
 - `id`, `revision`, `os` (`linux`, `windows`, `macos`, `android`, `ios`), `arch` (`amd64`, `arm64`) and `mode` (`headless`, `desktop`, `device`). Mobile templates require `device` mode and an immutable SDK `device` definition; see [mobile devices](devices.md). VM templates use headless/desktop mode.
+- Optional `baseline` for Android device templates: `{name, revision, digest}` of a
+  [saved device baseline](warm-pool-and-baselines.md#devices-from-a-baseline). Every
+  device of the template then starts from its own copy of that state. The reference is
+  part of the immutable definition, so another baseline or digest needs a new revision.
+  Only leases of an allowlisted application, the warm pool and administrators can make a
+  device from such a template.
 - `minimum` and optional `defaults`, each specifying `cpu`, `memoryMiB` and `diskGiB`. Defaults must satisfy the minimum and any `memoryStepMiB` constraint.
 - Optional `source`, selecting a local `path` or HTTPS `url`, a `format` (`raw`, `qcow2`, `vhdx`, `ipsw`) and the exact `sha256` of the base artifact.
 - Optional `prepare`, selecting a driver and guest setup steps.

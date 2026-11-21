@@ -90,7 +90,7 @@ export class AndroidTunnels {
   private readonly live = new Map<string, Live>();
   private readonly servers = new Map<string, { server: Server; sockets: Set<Socket> }>();
   private readonly liveness = new Map<string, { at: number; check: Promise<void> }>();
-  private readonly audited = new Map<string, { boot: unknown; at: number }>();
+  private readonly audited = new Map<string, { boot: unknown; lease: unknown; at: number }>();
   private readonly snapshots = new Map<string, Snapshot>();
   constructor(readonly provider: AndroidProvider) {}
 
@@ -239,11 +239,11 @@ export class AndroidTunnels {
    * is never reused, so it reaches nothing; it is removed here on a best-effort basis and never
    * makes the device unready. Any other entry was not created by a tunnel: `foreign`. A list that
    * cannot be read for this device is `inconclusive`; other devices' lines are never judged.
-   * Throttled to once a second per boot after it first passed. Runs only on a host that declares
+   * Throttled to once a second for the same boot and lease after it first passed. Runs only on a host that declares
    * tunnels (AndroidProvider.leasedReadiness). */
-  async audit(machine: RecordValue, serial: string, storage: string, boot: unknown): Promise<"clean" | "foreign" | "inconclusive"> {
+  async audit(machine: RecordValue, serial: string, storage: string, boot: unknown, lease: unknown): Promise<"clean" | "foreign" | "inconclusive"> {
     const provider = this.provider, machineId = uuid(machine.id), last = this.audited.get(machineId), now = performance.now();
-    if (last && last.boot === boot && now - last.at < 1000) return "clean";
+    if (last && last.boot === boot && last.lease === lease && now - last.at < 1000) return "clean";
     const own = `localfilesystem:${path.join(storage, SOCKET_DIRECTORY)}${path.sep}`;
     const open = (): Live[] => [...this.live.values()].filter(tunnel => tunnel.machineId === machineId);
     try {
@@ -261,7 +261,7 @@ export class AndroidTunnels {
         await provider.adb(serial, ["forward", "--remove", entry.local], { timeoutMs: ADB_MS }).catch(() => {});
       }
     } catch { return "inconclusive"; }
-    this.audited.set(machineId, { boot, at: performance.now() });
+    this.audited.set(machineId, { boot, lease, at: performance.now() });
     return "clean";
   }
 

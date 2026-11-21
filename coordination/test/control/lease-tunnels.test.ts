@@ -81,6 +81,7 @@ interface Device {
   busy: Set<number>;
 }
 interface Fixture {
+  warmPool?: boolean;
   tunnels?: boolean; guest?: "isolated" | "leaky"; removeFails?: boolean;
   /** Raw lines appended to `forward --list`, which is server-wide: other devices, or odd output. */
   forwardNoise?: string;
@@ -237,7 +238,8 @@ async function harness(t: TestContext, capacity = 1, fixture: Fixture = { tunnel
   const url = `http://127.0.0.1:${port}`;
   const config: HostConfig = { url, stateDir: join(root, "r"), enrollmentToken: enrollment, name: "android-tunnel-host", provider: "android", storage: join(root, "d"),
     androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity, memoryMiB: 2048 * capacity, diskGiB: 8 * capacity }, pollIntervalSeconds: fixture.poll ?? .25, concurrency: 4,
-    leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }], ...(fixture.tunnels ? { leaseTunnelProtocol: 1 } : {}) };
+    leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }], ...(fixture.tunnels ? { leaseTunnelProtocol: 1 } : {}),
+    ...(fixture.warmPool ? { leaseWarmPool: { maxDevices: 1, maxAgeSeconds: 600 } } : {}) };
   const launch = async () => {
     runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, devices, fixture) }, state) });
     await runner.start();
@@ -808,8 +810,25 @@ test("the packaged contracts describe the tunnel routes and controls", () => {
 });
 
 test("a lease key tunnels in both directions through the controller; other credentials are refused; limits hold; no mapping survives a close", { skip, timeout: 240000 }, async t => {
-  const h = await harness(t, 2), app = await h.application(2), plain = await h.application();
-  const [a, b] = await Promise.all([acquire(h, app, 300), acquire(h, plain, 300)]);
+  const h = await harness(t, 2, { tunnels: true, warmPool: true }), app = await h.application(2), plain = await h.application();
+  const host = h.runner().identity!.id;
+  const pool = `/v1/hosts/${host}/warm-pool`;
+  const configured = await h.api("POST", pool, { targets: [{ templateId: h.image.id, templateRevision: "1", arch, count: 1 }] });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+  let warmMachine: string | undefined;
+  await until(async () => {
+    warmMachine = (await h.api("GET", pool)).body.devices.find((device: any) => device.state === "ready")?.machineId;
+    return !!warmMachine;
+  }, "a warm device that passed the mapping audit", 40000);
+  assert.deepEqual(mappingsOf(h, warmMachine!), { reverse: [], forward: [] });
+  const warmAudits = h.calls(warmMachine!, "reverse --list");
+  assert.ok(warmAudits > 0);
+  const a = await acquire(h, app, 300);
+  assert.equal(a.machineId, warmMachine);
+  assert.ok(h.calls(a.machineId, "reverse --list") > warmAudits, "adoption checks the mappings again");
+  assert.equal((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.members[0].source, "warm");
+  const b = await acquire(h, plain, 300);
+  assert.equal((await h.api("POST", pool, { targets: [] })).status, 200);
   const lease = client(h, a), name = `cvm-${a.machineId}`;
   // Readiness audited the device's mappings, and a lease without a tunnel has none.
   assert.ok(h.calls(a.machineId, "reverse --list") > 0 && h.calls(a.machineId, "forward --list") > 0, "readiness listed the device's mappings");

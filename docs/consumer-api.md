@@ -35,6 +35,11 @@ contract introduces no enrollment or host-approval policy. Administrative,
 host-runner, model, image-import and dashboard endpoints are outside this document.
 These routes do not imply additional consumer integrations.
 
+A lease member's optional `source` is `warm` or `cold`: whether its device was taken
+over from the host's [warm pool](warm-pool-and-baselines.md#what-a-consumer-sees) or
+booted for the lease. A catalogue image's optional `baseline` names the saved device
+state its devices start from. Neither exposes host detail.
+
 Acquisition currently creates a `primary` member. Naming a member explicitly in
 session requests does not implement paired phone/watch acquisition. Capabilities
 describe adapter contracts; readiness and live platform support remain separate.

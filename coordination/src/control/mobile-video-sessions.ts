@@ -12,6 +12,7 @@ import { owns, requireScope } from './contracts.ts';
 import type { ControlModule, Principal } from './contracts.ts';
 import { MachineStore, machineDigest, registerMachineHooks } from './machines.ts';
 import { uuid } from './transfers.ts';
+import { requireNotPooled } from './pool-ledger.ts';
 import type { SessionSide } from './session-protocol.ts';
 import { HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions } from './video-cleanup.ts';
 import { legacyMachineReady, leaseScopedMember, legacySessionLease, requireApplicationCapacity } from './leases.ts';
@@ -166,6 +167,7 @@ export class MobileVideoSessions implements ControlModule {
       requireHostAdmission(db, String(m.host));
       if (!['android','ios'].includes(String(object(JSON.parse(String(m.template))).os)) || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id as string)) return fail(409);
+      requireNotPooled(db, String(m.id));
       this.admit(db, m);
       this.insert(db, id, m, hash, request, null, null);
       return { status: 201, body: present(db, row(db, id)) };

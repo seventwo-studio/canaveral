@@ -11,6 +11,7 @@ import { refreshConsumerOperations } from "./consumer-operations.ts";
 import { legacyDigest } from "./templates.ts";
 import { validateUploadedArtifact } from './app-artifacts.ts';
 import { initializeInstallResolutions, installAttemptClean } from './install-cleanup.ts';
+import { pendingBaselineSave, requireNotPooled } from './pool-ledger.ts';
 import { decodeData, guestPath, jsonBytes, uuid } from "./transfers.ts";
 
 export const MAX_RESULT = 6 * 1048576;
@@ -228,6 +229,8 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
         return { body: receipt(old) };
       }
       const row = machine(db, mid, principal);
+      requireNotPooled(db, mid);
+      if (pendingBaselineSave(db, mid)) throw new ServiceError("This device's disk state is being saved as a baseline.", 409);
       requireHostAdmission(db, row.host);
       platformArguments(object(JSON.parse(row.template)), request);
       if (request.action === 'install-uploaded') validateUploadedArtifact(db, mid, request.arguments.artifact);

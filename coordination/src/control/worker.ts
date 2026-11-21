@@ -20,6 +20,7 @@ import { createModule as inferenceModule } from "./inference.ts";
 import { createModule as sessionsModule } from "./sessions.ts";
 import { AdminSystem } from "./admin-system.ts";
 import { LegacyLeases } from "./leases.ts";
+import { createBaselinesModule } from "./baselines.ts";
 import { createModule as updatesModule } from "./updates.ts";
 import { createModule as upkeepModule } from "./upkeep.ts";
 import { requireHostAdmission, hostAdmissionClosed } from "./maintenance.ts";
@@ -63,6 +64,7 @@ const leaseTunnels = new LeaseTunnels(store, machines);
 modules.push(videoSessions, displaySessions, leaseTunnels);
 modules.push(sessions);
 const leases = new LegacyLeases(store, options);
+modules.push(leases.warm, createBaselinesModule(store, machines));
 modules.push(leases);
 modules.push(new AdminSystem(leases));
 modules.push(updatesModule(store, options));
@@ -87,8 +89,9 @@ function principal(token: string): Principal {
 }
 
 // wake() contains failures: a busy database must not terminate this worker or its unrelated routes.
-leases.requests.wake();
-setInterval(() => { leases.requests.wake(); }, 1000).unref();
+// Waiting requests are admitted first; the warm pool only then settles and refills.
+leases.wake();
+setInterval(() => { leases.wake(); }, 1000).unref();
 
 async function dispatch(command: ControlCommand): Promise<unknown> {
   if (command.type === "browsers.authorize") {
@@ -145,7 +148,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
   };
   for (const module of modules) {
     const result = await module.handle(request);
-    if (result !== undefined) { leases.requests.wake(); return result; }
+    if (result !== undefined) { leases.wake(); return result; }
   }
   // Account URLs must never fall through to the legacy administrator-only router.
   if (/^\/v1\/(?:auth(?:\/|$)|users(?:\/|$)|admin\/tokens(?:\/|$))/.test(command.path)) {
