@@ -27,6 +27,7 @@ import { owns, requireScope } from './contracts.ts';
 import type { ControlModule, ControlRequest, Principal } from './contracts.ts';
 import { MachineStore, machineDigest, registerMachineHooks } from './machines.ts';
 import { hostAdmissionClosed, requireHostAdmission } from './maintenance.ts';
+import { HELD_VIDEO_SESSION } from './video-cleanup.ts';
 import { legacyMachineReady, leaseScopedMember, legacySessionLease } from './leases.ts';
 import type { MobileVideoSessions, VideoSessionRow } from './mobile-video-sessions.ts';
 import { uuid } from './transfers.ts';
@@ -83,6 +84,9 @@ export class MobileLiveViews implements ControlModule {
       UPDATE mobile_live_views SET state='ended',reason='controller_restarted',ended=created WHERE state IN ('pending','attaching','ready');`));
     // A capture is authorized exactly while one of its views is.
     video.liveAuthority = (db, capture) => { this.refreshViews(db, capture.id); return db.prepare("SELECT 1 FROM mobile_live_views WHERE capture=? AND state IN ('pending','attaching','ready')").get(capture.id) !== undefined; };
+    // A recording has priority for a host's capture slots: the views of a capture ended to make
+    // room for one are told so.
+    video.livePreempted = (db, capture) => { db.prepare("UPDATE mobile_live_views SET state='ended',reason='preempted_by_recording',ended=? WHERE capture=? AND state IN ('pending','attaching','ready')").run(this.store.clock(), capture.id); };
     registerMachineHooks(store, {
       heartbeatResponse: (db, host) => {
         this.refresh(db);
@@ -90,9 +94,11 @@ export class MobileLiveViews implements ControlModule {
         db.prepare("DELETE FROM mobile_live_views WHERE state='ended' AND COALESCE(ended,created)<?").run(this.store.clock() - RETAIN_SECONDS);
         const views = db.prepare(`SELECT w.*,c.generation AS capture_generation FROM mobile_live_views w JOIN mobile_video_sessions c ON c.id=w.capture
           WHERE w.host=? AND w.state IN ('pending','attaching','ready') ORDER BY w.created,w.id LIMIT ?`).all(host, LIVE_VIEWS_PER_HOST) as unknown as (Row & { capture_generation: string })[];
-        // Held live captures, so the runner can repeat a saved cleanup receipt. Recordings travel
-        // in `videoSessions`; a runner that predates live views ignores both fields.
-        const captures = db.prepare("SELECT id,generation,machine,state FROM mobile_video_sessions WHERE host=? AND kind='live' AND cleaned=0 ORDER BY created,id LIMIT 8").all(host);
+        // Held live captures, so the runner can repeat a saved cleanup receipt: the same rule as
+        // for recordings, so an abandoned capture of a removed device leaves the runner's queue
+        // and no longer keeps it from being idle. Recordings travel in `videoSessions`; a runner
+        // that predates live views ignores both fields.
+        const captures = db.prepare(`SELECT v.id,v.generation,v.machine,v.state FROM mobile_video_sessions v WHERE v.host=? AND v.kind='live' AND ${HELD_VIDEO_SESSION} ORDER BY v.created,v.id LIMIT 32`).all(host);
         return { liveViews: views.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine, state: r.state, captureId: r.capture, captureGeneration: r.capture_generation, ...(r.lease ? { leaseId: r.lease } : {}) })),
           liveCaptures: captures.map(c => ({ id: c.id, generation: c.generation, machineId: c.machine, state: c.state })) };
       },

@@ -1011,16 +1011,17 @@ a recording of one device therefore coexist as follows.
 
 - The "one per machine" rule keeps its meaning for each kind: one recording, and
   one live capture. A live capture that is still running does not refuse a
-  recording. Each holds its own host slot and reservation while both exist, so a
-  host sized for exactly one capture per device refuses the second with 409 or 429,
-  as it refuses any session it has no capacity for.
+  recording. Both share one host slot and reservation on the same device. A recording
+  short of host capacity can end the oldest eligible live capture on another device.
+  That capture keeps its reservation until its own cleanup is proven.
 - **A recording takes the device.** Before a recording opens its native source,
   the runner stops the live epoch and requires the same proof as for a cancelled
   recording. The recording's start is delayed by that stop, within the bounds in
   [Android recorder cleanup](#android-recorder-cleanup-after-early-cancellation);
   the native recording trial proved a cancelled recorder stopped in about five
   seconds, and the delay for a live epoch has no native measurement. The runner
-  waits at most 30 seconds for the proof.
+  waits at most 15 seconds for the proof, and counts that time separately from
+  the requested recording duration.
   If the stop cannot be proven, the recording captures nothing and ends with
   `session_incomplete`; its session is cleaned because it started no capture.
 - **Viewers follow the recording.** While it runs, the runner also feeds the
@@ -1108,15 +1109,16 @@ by the recording path's rules. A wedged encoder never frees capacity.
   the recorder ran inside that process. This rule applies to live captures only;
   recording cleanup is unchanged.
 - **Unknown.** An unconfirmed encoder exit, an iOS source whose stop is unproven,
-  a source that failed to open, or a runner that restarted mid-capture leaves the
+  a source whose dispatch outcome is uncertain, or a runner that restarted mid-capture leaves the
   session uncleaned. It keeps its reservation and its host slot, blocks further
   captures of that device and blocks the machine's deletion until an administrator
   [abandons](#deleting-a-machine-with-a-video-session) it through
   `POST /v1/machines/{machine}/video-sessions/{captureId}/abandon`, at least a
   minute after the capture ended. For an owned Android device whose encoder exit
   was confirmed, stopping the device settles it instead.
-- A graceful runner shutdown stops live captures first, while the runner can still
-  prove each recorder stopped. A runner that is killed leaves its captures unknown.
+- A graceful runner shutdown stops active live captures first, while the runner can
+  still prove each recorder stopped. An idle live hub stops immediately. A runner
+  that is killed during a capture leaves its cleanup unknown.
 
 Machine deletion is refused while the device's live capture is live or uncleaned,
 as for recordings. `GET .../video-sessions/{captureId}` shows the capture with

@@ -9,18 +9,20 @@
  *   leaving, or losing authority, ends the epoch like a cancelled recording.
  * - An epoch lasts at most `LIVE_EPOCH_SECONDS` (Android screenrecord's own limit). While viewers
  *   remain, the next epoch starts and they receive a new initialization segment.
- * - One native capture per device at a time. A recording takes the device: the live epoch is
- *   stopped and proven stopped first, then the recording's own stream is also fed to the viewers.
- *   If that stop cannot be proven, the recording does not start.
- * - A failed epoch is never retried, and an epoch whose cleanup is unproven ends the capture as
- *   unknown: no receipt is sent, so the controller keeps its reservation.
+ * - A recording has priority. No live epoch starts while a recording of the device is queued or
+ *   running. A recording that finds a live epoch running has it stopped and waits a bounded time
+ *   for the stop proof before starting. The recording's own stream is also fed to the viewers.
+ * - A failed epoch is never retried. An epoch whose cleanup is unproven ends the capture as
+ *   unknown: no positive receipt is sent, so the controller keeps its reservation. An epoch that
+ *   provably started nothing native, such as one whose viewer left while its source was still
+ *   being opened, is clean.
  *
  * The runner journals a capture before its first attachment and before native dispatch, and
  * never resumes one after a restart. Fixture-covered only; see docs/mobile-control.md. */
 import { ServiceError } from './errors.ts';
 import { serveMobileVideo } from './mobile-video.ts';
 import type { VideoOptions } from './mobile-video.ts';
-import { LIVE_BIT_RATE, LIVE_EPOCH_SECONDS, LIVE_FPS, LiveSegmenter } from './mobile-live.ts';
+import { LIVE_BIT_RATE, LIVE_EPOCH_SECONDS, LIVE_FPS, LIVE_HANDOVER_SECONDS, LiveSegmenter } from './mobile-live.ts';
 import type { LiveHostEndReason, LiveItem } from './mobile-live.ts';
 import type { NativePipe } from './providers/mobile.ts';
 import type { SessionChannel } from './control/session-protocol.ts';
@@ -34,6 +36,12 @@ export interface LiveCaptureSource {
   /** The native source is a recorder inside the device's own process (Android), so the device's
    * proven stop also proves the recorder gone. False for a host-process source (iOS idb). */
   guestSource: boolean;
+  /** True for an `openSource` rejection after which provably nothing native of that attempt runs:
+   * refused before any spawn, or spawned and stopped with proof. Any other rejection is unknown. */
+  notRunning(error: unknown): boolean;
+  /** A recording of this device is waiting to start. No live epoch starts meanwhile, so the
+   * recording finds the device free. */
+  recordingQueued?(): boolean;
 }
 export type LiveReceipt = { cleaned: true } | { hostCleaned: true };
 export interface LiveHubOptions {
@@ -41,8 +49,9 @@ export interface LiveHubOptions {
   save(captureId: string, value: Record<string, unknown>): void;
   /** Delivers the cleanup receipt. A failure is retried later from the saved journal. */
   report(job: LiveCaptureJob, receipt: LiveReceipt): Promise<void>;
-  /** Test seam: the epoch length in seconds. */
+  /** Test seams: the epoch length in seconds, and the hand-over bound in milliseconds. */
   epochSeconds?: number;
+  handoverMs?: number;
 }
 export type LiveViewItem =
   | { type: 'init'; epoch: number; data: Buffer }
@@ -50,7 +59,17 @@ export type LiveViewItem =
   | { type: 'end'; reason: LiveHostEndReason };
 export interface LiveSubscription { next(timeoutMs: number): Promise<LiveViewItem | null>; close(): void }
 export interface LiveCaptureHandle { subscribe(live: () => boolean): LiveSubscription; release(): void }
-export interface RecordingTap { push(data: Uint8Array): void; end(cleaned: boolean): void }
+export interface RecordingTap {
+  /** How long the recording waited for the device's live epoch to stop, and whether that stop
+   * was proven in time. */
+  waitedMs: number; proven: boolean;
+  push(data: Uint8Array): void; end(cleaned: boolean): void;
+}
+/** Thrown by `acquire`. `journaled` tells whether this runner holds a journal for the capture:
+ * only then may it attach as its host, because only then will a cleanup receipt follow. */
+export class LiveCaptureRefused extends ServiceError {
+  constructor(message: string, readonly journaled: boolean) { super(message, 409); }
+}
 
 /** Media a slow viewer may have queued before it is skipped ahead to the next key frame, and the
  * most recent group of pictures kept so a joining viewer starts with a picture. */
@@ -58,11 +77,13 @@ const VIEW_QUEUE_BYTES = 4 * 1_048_576, GOP_CACHE_BYTES = 8 * 1_048_576;
 /** Three epochs in a row that end by themselves in under half their length (at most this long)
  * are a failing source, not a rollover. */
 const SHORT_EPOCH_MS = 5000;
-/** A recording waits this long for the device's live run to stop and be proven stopped. */
-const SETTLE_MS = 30_000;
-/** How long a device stays closed to recordings after its live capture ended without proof.
- * Longer than a recording admitted just before that can take to reach its capture. */
-const UNPROVEN_MS = 90_000;
+/** Resolves with `work`, or with `fallback` after `ms`. The timer never outlives the race, so
+ * it cannot keep a stopping process alive. */
+async function within<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([work, new Promise<T>(resolve => { timer = setTimeout(() => resolve(fallback), ms); })]); }
+  finally { clearTimeout(timer); }
+}
 type Segment = Extract<LiveItem, { type: 'segment' }> & { data: Buffer };
 
 /** One fragmented MP4 stream being split: its header and its latest group of pictures. */
@@ -156,7 +177,7 @@ class Capture {
   /** Resolves once no native epoch of this capture is running. */
   async settled(): Promise<void> { while (this.running) await this.running; }
   private wanted(): boolean {
-    return !this.closing && !this.ended && !this.halted && !!this.source && !this.hub.recording(this.job.machineId) && [...this.subscribers].some(s => !s.closed && s.live());
+    return !this.closing && !this.ended && !this.halted && !!this.source && !this.hub.recording(this.job.machineId) && this.source.recordingQueued?.() !== true && [...this.subscribers].some(s => !s.closed && s.live());
   }
   private attach(feed: Feed): void {
     this.detach(); this.feed = feed; this.epoch++;
@@ -213,11 +234,18 @@ class Capture {
       this.nativeStarted = true;
     }
     this.attach(feed);
-    try {
-      const pipe = await source.openSource(options, authorized);
-      await serveMobileVideo(channel, pipe, argv => source.openEncoder(argv), source.encoder, options, authorized, (positive, parts) => { cleaned = positive; encoderExited = parts.encoder; });
-      cleaned = true; natural = true;
-    } catch { /* The cleanup callback decided; a source that never opened stays unproven, as for recordings. */ }
+    let pipe: NativePipe | undefined;
+    // A viewer can leave, or a recording can take the device, while the source is still being
+    // opened. A refusal after which provably nothing native runs is clean at once; any other
+    // failure to open stays unproven.
+    try { pipe = await source.openSource(options, authorized); }
+    catch (error) { cleaned = source.notRunning(error); }
+    if (pipe) {
+      try {
+        await serveMobileVideo(channel, pipe, argv => source.openEncoder(argv), source.encoder, options, authorized, (positive, parts) => { cleaned = positive; encoderExited = parts.encoder; });
+        cleaned = true; natural = true;
+      } catch { /* The cleanup callback decided. */ }
+    }
     this.detach(feed);
     if (!encoderExited) this.encodersExited = false;
     return { cleaned, natural };
@@ -236,7 +264,7 @@ class Capture {
       this.running = new Promise<void>(resolve => { release = resolve; });
       let outcome: { cleaned: boolean; natural: boolean };
       try { outcome = await this.runEpoch(this.source); } finally { this.running = undefined; release(); }
-      if (!outcome.cleaned) { this.unknown = true; this.hub.unproven(this.job.machineId); await this.fail(); }
+      if (!outcome.cleaned) { this.unknown = true; await this.fail(); }
       // An epoch that stopped while its viewers still held authority failed; it is not retried.
       else if (!outcome.natural && this.wanted()) await this.fail();
       else if (outcome.natural) { short = performance.now() - started < brief ? short + 1 : 0; if (short >= 3) this.finish('capture_failed'); }
@@ -255,11 +283,9 @@ class Capture {
 export class LiveCaptureHub {
   private readonly captures = new Map<string, Capture>();
   private readonly recordings = new Map<string, Feed>();
-  private readonly unprovenUntil = new Map<string, number>();
   private closed = false;
   constructor(readonly options: LiveHubOptions) {}
   recording(machineId: string): Feed | undefined { return this.recordings.get(machineId); }
-  unproven(machineId: string): void { this.unprovenUntil.set(machineId, performance.now() + UNPROVEN_MS); }
   journal(job: LiveCaptureJob, state: Record<string, unknown>): void { this.options.save(job.id, { generation: job.generation, machineId: job.machineId, ...state }); }
   forget(capture: Capture): void { if (this.captures.get(capture.job.machineId) === capture) this.captures.delete(capture.job.machineId); }
   /** True while this process holds the capture; its saved journal then describes live work. */
@@ -268,53 +294,60 @@ export class LiveCaptureHub {
   /** Joins the device's capture or journals a new one. `source` is undefined when this host
    * cannot capture: the viewer is told so and the capture is reported clean without running. */
   acquire(job: LiveCaptureJob, source: LiveCaptureSource | undefined): LiveCaptureHandle {
-    if (this.closed) throw new ServiceError('This runner is stopping.', 409);
+    const journaled = () => { try { return this.options.load(job.id) !== undefined; } catch { return false; } };
+    // A stopping runner takes no new capture, and never attaches for one it has not journaled.
+    if (this.closed) throw new LiveCaptureRefused('This runner is stopping.', false);
     let capture = this.captures.get(job.machineId);
     if (capture) {
-      if (capture.job.id !== job.id || capture.job.generation !== job.generation || capture.closing) throw new ServiceError('The device\'s live capture is ending.', 409);
+      if (capture.job.id !== job.id || capture.job.generation !== job.generation || capture.closing) throw new LiveCaptureRefused('The device\'s live capture is ending.', journaled());
     } else {
       // A journal from an earlier attempt, in this process or before a restart, is never reused.
-      if (this.options.load(job.id)) throw new ServiceError('This live capture was already attempted; it is never repeated.', 409);
-      this.journal(job, { state: 'attaching' });
+      if (journaled()) throw new LiveCaptureRefused('This live capture was already attempted; it is never repeated.', true);
+      // Without a durable journal no receipt could ever follow, so nothing is attached or started.
+      try { this.journal(job, { state: 'attaching' }); } catch { throw new LiveCaptureRefused('The live capture could not be journaled.', false); }
       capture = new Capture(this, job, source); this.captures.set(job.machineId, capture);
     }
     const held = capture; held.refs++;
     let released = false;
     return { subscribe: live => held.subscribe(live), release: () => { if (!released) { released = true; held.release(); } } };
   }
-  /** Called by a recording before it opens its native source. Stops the device's live epoch and
-   * requires proof that it stopped; the returned tap then feeds the recording's stream to viewers.
-   * It never changes what the recording receives. */
+  /** Called by a recording before it opens its native source. It never refuses and never changes
+   * what the recording receives. The device's live epoch, if one runs, is stopped; the recording
+   * waits a bounded time for proof before starting. The returned tap feeds the recording's stream
+   * to viewers. */
   async beginRecording(machineId: string): Promise<RecordingTap> {
-    const refusal = () => new ServiceError('A capture of this device has not been proven stopped.', 409, { outcome: 'unknown' });
-    if (this.recordings.has(machineId) || (this.unprovenUntil.get(machineId) ?? 0) > performance.now()) throw refusal();
-    const feed = new Feed(), capture = this.captures.get(machineId);
-    this.recordings.set(machineId, feed);
+    const began = performance.now(), capture = this.captures.get(machineId);
+    // The controller admits one recording per device; a second would simply not be fed to viewers.
+    const feed = this.recordings.has(machineId) ? undefined : new Feed();
+    if (feed) this.recordings.set(machineId, feed);
+    let proven = true;
     if (capture) {
       capture.poke();
-      // The stop is bounded by the native source's own cleanup; a source that never returns is unproven.
-      const stopped = await Promise.race([capture.settled().then(() => true), new Promise<boolean>(resolve => setTimeout(() => resolve(false), SETTLE_MS))]);
-      if (!stopped || capture.unknown) { this.recordings.delete(machineId); capture.poke(); throw refusal(); }
+      proven = await within(capture.settled().then(() => !capture.unknown), this.options.handoverMs ?? LIVE_HANDOVER_SECONDS * 1000, false);
     }
     let ended = false;
     return {
+      waitedMs: performance.now() - began, proven,
       // A stream the segmenter refuses ends the tee for the viewers, never the recording.
-      push: data => { if (!ended) try { feed.push(data); } catch { /* viewers simply receive no more of this stream */ } },
+      push: data => { if (!ended && feed) try { feed.push(data); } catch { /* viewers simply receive no more of this stream */ } },
       end: cleaned => {
         if (ended) return; ended = true;
+        if (!feed) return;
         if (this.recordings.get(machineId) === feed) this.recordings.delete(machineId);
         const current = this.captures.get(machineId);
         current?.detach(feed);
         // A recording whose stop is unproven leaves the device without a provable capture state.
-        if (!cleaned) { this.unproven(machineId); current?.finish('capture_unavailable'); }
+        if (!cleaned) current?.finish('capture_unavailable');
         current?.poke();
       },
     };
   }
+  /** Stops every capture and waits for its cleanup proof. Immediate when nothing is captured. */
   async close(): Promise<void> {
     this.closed = true;
     const captures = [...this.captures.values()];
+    if (!captures.length) return;
     for (const capture of captures) { capture.closing = true; capture.poke(); }
-    await Promise.race([Promise.all(captures.map(c => c.done)), new Promise(resolve => setTimeout(resolve, 15000))]);
+    await within(Promise.all(captures.map(c => c.done)).then(() => {}), 15000, undefined);
   }
 }

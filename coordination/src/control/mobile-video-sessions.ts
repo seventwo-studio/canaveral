@@ -18,7 +18,8 @@ import type { ControlModule, Principal } from './contracts.ts';
 import { MachineStore, machineDigest, registerMachineHooks } from './machines.ts';
 import { uuid } from './transfers.ts';
 import type { SessionSide } from './session-protocol.ts';
-import { HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions, settleStoppedLiveCaptures } from './video-cleanup.ts';
+import { COUNTED_VIDEO_SESSION, HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions, settleStoppedLiveCaptures } from './video-cleanup.ts';
+import { LIVE_HANDOVER_SECONDS } from '../mobile-live.ts';
 import { legacyMachineReady, leaseScopedMember, legacySessionLease, requireApplicationCapacity } from './leases.ts';
 export type VideoSessionCommand =
   | { type: 'video-sessions.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
@@ -31,7 +32,7 @@ type Row = { id: string; machine: string; host: string; binding: string; generat
   kind: 'record' | 'live' };
 export type VideoSessionRow = Row;
 const live = ['pending','attaching','ready'];
-const reservations = `SELECT COALESCE(SUM(1),0) AS cpu,COALESCE(SUM(256),0) AS memoryMiB,0 AS diskGiB FROM mobile_video_sessions v WHERE v.host=? AND ${HELD_VIDEO_SESSION}`;
+const reservations = `SELECT COALESCE(SUM(1),0) AS cpu,COALESCE(SUM(256),0) AS memoryMiB,0 AS diskGiB FROM mobile_video_sessions v WHERE v.host=? AND ${COUNTED_VIDEO_SESSION}`;
 const fail = (status = 409): never => { throw new ServiceError('Mobile video session rejected.', status); };
 function exact(body: Record<string, unknown>, fields: string[]): void { if (Object.keys(body).length !== fields.length || fields.some(k => !Object.hasOwn(body, k))) fail(400); }
 function binding(m: Record<string, unknown>): string { return machineDigest([m.id,m.host,m.owner,m.template,m.request]); }
@@ -51,8 +52,10 @@ function leaseDigest(token: string): string | undefined { try { return machineDi
 function view(r: Row) { return { id: r.id, machineId: r.machine, ...(r.lease ? { leaseId: r.lease, member: r.member } : {}), ...(r.kind === 'live' ? { kind: 'live' as const } : {}), generation: r.generation, capability: 'video' as const, protocol: 'canaveral-session-v1' as const, state: r.state, ...object(JSON.parse(r.request)), attachBefore: new Date((r.created + 30) * 1000).toISOString(), authorizationDeadline: new Date(r.deadline * 1000).toISOString() }; }
 
 export class MobileVideoSessions implements ControlModule {
-  /** Set by the live-view module: whether a live capture still has an authorized view. */
+  /** Set by the live-view module: whether a live capture still has an authorized view, and how
+   * its views are told that a recording took their capture's place on the host. */
   liveAuthority: ((db: DatabaseSync, capture: Row) => boolean) | undefined;
+  livePreempted: ((db: DatabaseSync, capture: Row) => void) | undefined;
   constructor(readonly store: SqliteStore, readonly machines: MachineStore, readonly principalHash: (db: DatabaseSync, hash: string) => Principal) {
     store.transaction(db => { db.exec(`CREATE TABLE IF NOT EXISTS mobile_video_sessions (
       id TEXT PRIMARY KEY,machine TEXT NOT NULL,host TEXT NOT NULL,binding TEXT NOT NULL,generation TEXT NOT NULL,
@@ -183,40 +186,77 @@ export class MobileVideoSessions implements ControlModule {
       requireHostAdmission(db, String(m.host));
       if (!['android','ios'].includes(String(object(JSON.parse(String(m.template))).os)) || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id as string)) return fail(409);
-      this.admit(db, m);
-      this.insert(db, id, m, hash, request, null, null);
+      this.insert(db, id, m, hash, request, null, null, this.admit(db, m));
       return { status: 201, body: present(db, row(db, id)) };
     });
   }
-  /** Host slots and capacity shared by both routes. An abandoned session keeps blocking this
-   * machine's capture until positive cleanup. A live capture that is still running does not
-   * block a recording: the runner stops its native capture, proves that, and then feeds its
-   * viewers from the recording, so the device never runs two native captures at once. */
-  private admit(db: DatabaseSync, m: Record<string, unknown>): void {
-    if (db.prepare("SELECT 1 FROM mobile_video_sessions WHERE machine=? AND cleaned=0 AND NOT (kind='live' AND state IN ('pending','attaching','ready'))").get(m.id as string)) fail(409);
-    if (Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v WHERE v.host=? AND ${HELD_VIDEO_SESSION}`).get(m.host as string)!.n) >= 4) fail(429);
-    const available = this.machines.remainingCapacity(db, String(m.host));
-    if (available.cpu < VIDEO_SESSION_RESERVATION.cpu || available.memoryMiB < VIDEO_SESSION_RESERVATION.memoryMiB) fail(409);
+  private slots(db: DatabaseSync, host: string): number { return Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v WHERE v.host=? AND ${COUNTED_VIDEO_SESSION}`).get(host)!.n); }
+  /** Admission of a recording. Its own rule is unchanged: one recording per device, and an
+   * uncleaned or abandoned recording keeps refusing another until positive cleanup.
+   *
+   * Recordings have priority over live views. A recording requires stop proof from a previous
+   * live capture of the same device.
+   * - A device runs one native capture, so the recording of a device whose live capture is
+   *   running takes over that capture's slot and reservation and needs none of its own.
+   * - Otherwise it needs a host slot and capacity. When those are short and a running live
+   *   capture holds them, the oldest such capture on the host is ended to make room. Its slot
+   *   and reservation stay counted until the runner proves it stopped, so the host is over its
+   *   four slots, or its capacity, by one for that moment.
+   *
+   * Returns the seconds to add to the recording's deadline: the bounded wait for the stop proof
+   * of this device's live capture, which the recording's own duration must not pay for. */
+  private admit(db: DatabaseSync, m: Record<string, unknown>, application?: string): number {
+    const machine = String(m.id), host = String(m.host);
+    if (db.prepare("SELECT 1 FROM mobile_video_sessions WHERE machine=? AND kind='record' AND cleaned=0").get(machine)) fail(409);
+    const own = db.prepare("SELECT state FROM mobile_video_sessions WHERE machine=? AND kind='live' AND cleaned=0").all(machine);
+    if (own.some(r => !live.includes(String(r.state)))) throw new ServiceError('A prior live capture of this device is not proven clean.', 409, { code: 'capture_cleanup_pending', retryable: true });
+    if (!own.some(r => live.includes(String(r.state)))) {
+      const available = this.machines.remainingCapacity(db, host);
+      const short = (freed: number): number => this.slots(db, host) - freed >= 4 ? 429
+        : available.cpu + freed * VIDEO_SESSION_RESERVATION.cpu < VIDEO_SESSION_RESERVATION.cpu || available.memoryMiB + freed * VIDEO_SESSION_RESERVATION.memoryMiB < VIDEO_SESSION_RESERVATION.memoryMiB ? 409 : 0;
+      if (short(0)) {
+        const oldest = db.prepare(`SELECT * FROM mobile_video_sessions v WHERE v.host=? AND v.kind='live' AND v.state IN ('pending','attaching','ready') AND ${COUNTED_VIDEO_SESSION} ORDER BY v.created,v.id LIMIT 1`).get(host) as unknown as Row | undefined;
+        const status = short(oldest ? 1 : 0);
+        if (status || !oldest) return fail(status || 409);
+        this.livePreempted?.(db, oldest); this.disconnect(db, oldest);
+      }
+      if (application) requireApplicationCapacity(db, application, VIDEO_SESSION_RESERVATION);
+    }
+    return own.length ? LIVE_HANDOVER_SECONDS : 0;
   }
   /** The live capture of one device: created with its first view, in that view's transaction.
-   * It takes one of the host's four slots and the reservation of a recording; a second live
-   * capture of the device, or one beside an ended session whose cleanup is unproven, is refused. */
+   * It takes one of the host's four slots and the reservation of a recording, unless a recording
+   * of the device is running: then it shares that recording's. Live captures never end other
+   * sessions to make room. Beside an ended session of the device whose cleanup is not yet proven,
+   * no new capture starts; the refusal says whether waiting can help. */
   admitLiveCapture(db: DatabaseSync, m: Record<string, unknown>, request: string, lifetimeSeconds: number, lease: { id: string; consumer: string; credential: string; member: string } | null): Row {
-    if (db.prepare('SELECT 1 FROM mobile_video_sessions WHERE machine=? AND cleaned=0 AND (kind=? OR state NOT IN (?,?,?))').get(m.id as string, 'live', ...live))
-      throw new ServiceError('A capture of this device is still being cleaned up.', 409, { code: 'capture_cleanup_pending', retryable: true });
-    if (Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v WHERE v.host=? AND ${HELD_VIDEO_SESSION}`).get(m.host as string)!.n) >= 4) fail(429);
-    const available = this.machines.remainingCapacity(db, String(m.host));
-    if (available.cpu < VIDEO_SESSION_RESERVATION.cpu || available.memoryMiB < VIDEO_SESSION_RESERVATION.memoryMiB) fail(409);
-    if (lease) requireApplicationCapacity(db, lease.consumer, VIDEO_SESSION_RESERVATION);
+    const uncleaned = db.prepare(`SELECT v.kind,v.state,v.deadline,EXISTS (SELECT 1 FROM mobile_video_session_resolutions r WHERE r.session=v.id) AS abandoned
+      FROM mobile_video_sessions v WHERE v.machine=? AND v.cleaned=0`).all(String(m.id));
+    const ended = uncleaned.filter(r => !live.includes(String(r.state)));
+    if (ended.length) {
+      // Until its deadline the runner may still report an ended session clean. After that, or
+      // once it was abandoned, waiting does not help: only the device's stop (an owned Android
+      // capture), the lease's cleanup or the machine's deletion can clear it.
+      const pending = ended.every(r => !r.abandoned && this.store.clock() < Number(r.deadline));
+      throw new ServiceError('An earlier capture of this device is not proven clean.', 409, pending ? { code: 'capture_cleanup_pending', retryable: true } : { code: 'capture_cleanup_unproven', retryable: false });
+    }
+    // A running live capture is joined by the caller; a device never has a second one.
+    if (uncleaned.some(r => r.kind === 'live')) fail(409);
+    if (!uncleaned.some(r => r.kind === 'record')) {
+      if (this.slots(db, String(m.host)) >= 4) fail(429);
+      const available = this.machines.remainingCapacity(db, String(m.host));
+      if (available.cpu < VIDEO_SESSION_RESERVATION.cpu || available.memoryMiB < VIDEO_SESSION_RESERVATION.memoryMiB) fail(409);
+      if (lease) requireApplicationCapacity(db, lease.consumer, VIDEO_SESSION_RESERVATION);
+    }
     const id = randomUUID(), now = this.store.clock();
     db.prepare(`INSERT INTO mobile_video_sessions (id,machine,host,binding,generation,credential,host_credential,request,state,created,deadline,host_attached,consumer_attached,cleaned,lease,member,host_cleaned,kind)
       VALUES (?,?,?,?,?,?,NULL,?,'pending',?,?,0,0,0,?,?,0,'live')`).run(id, String(m.id), String(m.host), binding(m), randomUUID(), lease?.credential ?? '', request, now, now + lifetimeSeconds + 60, lease?.id ?? null, lease?.member ?? null);
     return row(db, id);
   }
-  private insert(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, request: string, lease: string | null, member: string | null): void {
+  private insert(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, request: string, lease: string | null, member: string | null, handoverSeconds: number): void {
     const now = this.store.clock(), durationSeconds = Number(object(JSON.parse(request)).durationSeconds);
     db.prepare(`INSERT INTO mobile_video_sessions (id,machine,host,binding,generation,credential,host_credential,request,state,created,deadline,host_attached,consumer_attached,cleaned,lease,member,host_cleaned)
-      VALUES (?,?,?,?,?,?,NULL,?,'pending',?,?,0,0,0,?,?,0)`).run(id, String(m.id), String(m.host), binding(m), randomUUID(), credential, request, now, now + durationSeconds + 60, lease, member);
+      VALUES (?,?,?,?,?,?,NULL,?,'pending',?,?,0,0,0,?,?,0)`).run(id, String(m.id), String(m.host), binding(m), randomUUID(), credential, request, now, now + durationSeconds + 60 + handoverSeconds, lease, member);
   }
   /** Lease-key recording of the lease's own member. Only the lease's current key reaches it; a
    * session ends with the lease (expiry, release, fence, failure) or a key rotation. Reading and
@@ -239,9 +279,7 @@ export class MobileVideoSessions implements ControlModule {
       const { machine } = leaseScopedMember(db, leaseId, req.token, member, 'displayStream', this.store.clock());
       const m = this.target(db, String(machine.id));
       if (String(object(JSON.parse(String(m.template))).os) !== 'android') return fail(409);
-      this.admit(db, m);
-      requireApplicationCapacity(db, lease.consumer, VIDEO_SESSION_RESERVATION);
-      this.insert(db, id, m, lease.credential!, request, lease.id, String(member));
+      this.insert(db, id, m, lease.credential!, request, lease.id, String(member), this.admit(db, m, lease.consumer));
       return { status: 201, body: present(db, row(db, id)) };
     });
   }

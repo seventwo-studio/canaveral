@@ -16,6 +16,9 @@ export const LIVE_EPOCH_SECONDS = 180;
 /** A view's lifetime without renewal: chosen per view within these bounds, default the maximum.
  * A client renews after a third of it. */
 export const LIVE_VIEW_SECONDS = 120, LIVE_VIEW_MIN_SECONDS = 10;
+/** A recording that takes a watched device waits at most this long for the live run's stop
+ * proof, then starts regardless. The controller adds it to such a recording's deadline. */
+export const LIVE_HANDOVER_SECONDS = 15;
 export const MAX_LIVE_INIT_BYTES = 1_048_576, MAX_LIVE_SEGMENT_BYTES = 8 * 1_048_576, MAX_LIVE_MOOF_BYTES = 1_048_576;
 /** Why the host ended a stream it was still serving. A host whose own authority ended sends
  * nothing more, so that cause is the controller's to record, with its other reasons. */

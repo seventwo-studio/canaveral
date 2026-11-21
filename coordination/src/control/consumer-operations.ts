@@ -14,13 +14,17 @@ interface Row {
 }
 const actionCapabilities: Record<string, string> = {
   screenshot: "screenshot", hierarchy: "hierarchy", accessibility: "hierarchy", "accessibility-action": "hierarchy",
-  tap: "input", swipe: "input", text: "input", key: "input", rotate: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
+  tap: "input", swipe: "input", text: "input", key: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
   // App lifecycle and logs are subsets of the device shell, so they need the same capability.
   apps: "command", launch: "command", terminate: "command", uninstall: "command", "open-url": "command", logs: "command",
+  // Orientation is a device input: a lease holder watching its emulator live turns it through the
+  // same fenced provider path as every other action here.
+  rotate: "input",
   // A lease-key upload of this lease's own member (lease-app-artifacts.ts); see install-cleanup.ts.
   "install-uploaded": "files",
   "shell-open": "pty", "shell-read": "pty", "shell-write": "pty", "shell-close": "pty", "shell-resize": "pty",
 };
+const DEVICE_ONLY = new Set(["rotate"]);
 export function initializeConsumerOperations(db: DatabaseSync): void {
   initializeDevices(db);
   db.exec(`CREATE TABLE IF NOT EXISTS consumer_operations (id TEXT PRIMARY KEY,lease TEXT NOT NULL,member TEXT NOT NULL,credential TEXT NOT NULL,dispatched INTEGER NOT NULL DEFAULT 0);
@@ -84,6 +88,8 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       requireHostAdmission(db, String(machine.host));
       const image = object(JSON.parse(String(machine.template))), cap = actionCapabilities[request.action];
       if (!cap || !capabilities(image)[cap as keyof ReturnType<typeof capabilities>]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
+      // Device-only actions: a desktop guest has `input` too, but nothing there rotates or takes a position.
+      if (DEVICE_ONLY.has(request.action) && image.os !== "android" && image.os !== "ios") throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
       if (lease.state !== "ready" || !legacyMachineReady(db, machine, store.clock())) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });
       // Only an upload made through this lease's key, for this member, can be installed.
       if (request.action === "install-uploaded") validateUploadedArtifact(db, String(machine.id), request.arguments.artifact, lease.id);
