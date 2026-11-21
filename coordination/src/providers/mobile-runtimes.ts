@@ -390,8 +390,8 @@ export async function strayDevices(provider: AndroidProvider | IosProvider): Pro
  * so what is removed is what an inspection at this moment would list.
  *
  * A purge is never resumed: its host operation runs once. One that stops part-way leaves the
- * storage in its `.removing-` quarantine, or untouched, where the next inspection finds it and a
- * new purge can finish it. A failure after the first change is reported as uncertain. */
+ * storage in its `.removing-` quarantine or untouched. A new purge requires ownership proof on
+ * the remaining entry. A failure after the first change is reported as uncertain. */
 export async function purgeOrphan(provider: AndroidProvider | IosProvider, name: string, requestId: string, hostId: string | undefined): Promise<{ assignmentFingerprint: string | undefined; removed: OrphanRemoval[] }> {
   const request = uuid(requestId), root = String(provider.config.storage);
   const directory = path.join(root, name), quarantine = QUARANTINE.test(name) ? directory : path.join(root, `.removing-${name}-${request}`);

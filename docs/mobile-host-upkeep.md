@@ -227,10 +227,9 @@ A device is stopped when all of these hold:
     right after an idle stop therefore runs for a whole idle time again;
   - a device operation (including an install) being submitted or finishing;
   - a video session's start or authorization deadline;
-  - **the last heartbeat on which anything held it.** The end of in-flight work is
-    activity. An upload or a local viewer has no timestamp of its own, so the hold
-    itself is recorded: when it ends, the idle time starts over. A build can be
-    installed right after its upload without the device being stopped in between.
+  - **the last heartbeat on which a hold was recorded.** The idle period starts
+    from that observation. A controller-side hold, such as an upload, can start
+    and finish between heartbeats without extending the idle period.
 
 The stop sets the device's desired state to `stopped`, exactly as an owner's stop
 does. The host reconciles and proves it through the provider's normal path, and
@@ -346,7 +345,10 @@ removed, and must then be [settled](#settling-an-unknown-change).
 **A purge is never resumed.** It runs once; after a runner crash it is `unknown` and
 nothing continues it. What it left is found by the next inspection: storage it had
 already moved aside appears as a removal quarantine, and storage it had not reached is
-unchanged. A new purge of that inspection finishes it.
+unchanged. A new purge can remove entries that still have complete ownership
+proof. If an interrupted deletion removed the owner receipt, or left an assignment
+journal after removing its storage, inspection reports the remainder for manual
+recovery.
 
 ## Memory and disk pressure
 
@@ -370,7 +372,7 @@ Every five seconds a direct host samples, whatever runtimes it has:
 Disk is the free space of the tightest filesystem among the host's storage roots. A
 KubeVirt pool runner reports no pressure, because its own pod is not the pool.
 
-The state is debounced, so it does not flap. Thresholds are configurable in the host
+The runner debounces changes between collected pressure samples. Thresholds are configurable in the host
 file; these are the defaults:
 
 ```json
@@ -435,7 +437,9 @@ its report, or when its current runner reports no pressure. **A runner that stop
 reporting returns its host to the never-reported state**: a heartbeat without a
 pressure report clears what an earlier runner reported. A managed update that is
 rolled back to an older runner therefore cannot leave the host blocked by a report
-that has gone stale.
+that has gone stale. On restart the first heartbeat can precede the first pressure
+sample. The pressure row is then unreported while the host's own readiness checks
+are still in progress.
 
 What a refusal looks like:
 
