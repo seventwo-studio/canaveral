@@ -25,6 +25,14 @@ const removed = `(EXISTS (SELECT 1 FROM machine_deletions d WHERE d.machine=v.ma
 /** Host-level predicate over alias `v`: the session still holds host capacity and a slot. */
 export const HELD_VIDEO_SESSION = `v.cleaned=0 AND NOT (${abandoned} AND ${removed})`;
 
+/** Capacity predicate over alias `v`: a held session that takes a host slot and a reservation of
+ * its own. A device runs one native capture, so a running live capture shares the slot and
+ * reservation of a recording of the same device and counts by itself again once that recording
+ * is clean. An ended live capture always counts until its cleanup is proven: its encoder may
+ * still run. Use HELD_VIDEO_SESSION to ask what still awaits cleanup. */
+export const COUNTED_VIDEO_SESSION = `${HELD_VIDEO_SESSION} AND NOT (v.kind='live' AND v.state IN ('pending','attaching','ready')
+  AND EXISTS (SELECT 1 FROM mobile_video_sessions o WHERE o.machine=v.machine AND o.kind='record' AND o.cleaned=0))`;
+
 function tableExists(db: DatabaseSync, name: string): boolean { return db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined; }
 
 /** True while a session on this machine is live, or ended without positive cleanup or an
@@ -46,10 +54,26 @@ export function settleLeaseVideoSessions(db: DatabaseSync): void {
     AND EXISTS (SELECT 1 FROM lease_cleanup_members c WHERE c.machine=mobile_video_sessions.machine AND c.state='complete')`).run();
 }
 
+/** Records positive cleanup for the ended live capture of an owned Android device whose runner
+ * confirmed its own encoder exit, once that device's host reports it stopped. The host reports
+ * `stopped` only after the emulator process has exited, and the guest recorder ran inside that
+ * process. A capture needs a running device, so a later `stopped` is always the exit of the
+ * emulator that held its recorder. Stopping a watched device ends the runner's authority to
+ * signal the recorder; without this rule every such capture would need abandonment.
+ *
+ * Not for iOS, whose capture source is a host process the simulator's stop does not end, and not
+ * for recordings, whose cleanup rules are unchanged. Leased captures settle through the lease. */
+export function settleStoppedLiveCaptures(db: DatabaseSync): void {
+  if (!['mobile_video_sessions', 'machines'].every(name => tableExists(db, name))) return;
+  db.prepare(`UPDATE mobile_video_sessions SET cleaned=1 WHERE cleaned=0 AND kind='live' AND lease IS NULL AND host_cleaned=1
+    AND state NOT IN ('pending','attaching','ready')
+    AND EXISTS (SELECT 1 FROM machines m WHERE m.id=mobile_video_sessions.machine AND m.observed='stopped' AND json_extract(m.template,'$.os')='android')`).run();
+}
+
 /** Each held lease session reserves one CPU and 256 MiB; it counts against its application. */
 export const VIDEO_SESSION_RESERVATION = { cpu: 1, memoryMiB: 256 } as const;
 export function applicationVideoUsage(db: DatabaseSync, applicationId: string): { cpu: number; memoryMiB: number } {
   if (!['mobile_video_sessions', 'mobile_video_session_resolutions', 'leases', 'machine_deletions', 'lease_cleanup_members'].every(name => tableExists(db, name))) return { cpu: 0, memoryMiB: 0 };
-  const held = Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v JOIN leases l ON l.id=v.lease WHERE l.consumer=? AND ${HELD_VIDEO_SESSION}`).get(applicationId)!.n);
+  const held = Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v JOIN leases l ON l.id=v.lease WHERE l.consumer=? AND ${COUNTED_VIDEO_SESSION}`).get(applicationId)!.n);
   return { cpu: held * VIDEO_SESSION_RESERVATION.cpu, memoryMiB: held * VIDEO_SESSION_RESERVATION.memoryMiB };
 }

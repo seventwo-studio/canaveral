@@ -125,6 +125,9 @@ status.
 | `unsupported` | receipt | The host does not support the requested upkeep operation | Choose a host and platform with that capability |
 | `update_fenced` | receipt | A pending host update prevented the runner from starting upkeep | Wait for the update and confirm host readiness before retrying |
 | `upkeep_unsupported` | 409, receipt | The host does not offer runtime or storage upkeep for this platform | Choose a host with the required upkeep capability |
+| `capture_cleanup_pending` | 409 | A prior live capture or recording has ended and its stop proof is still pending | Wait for the host to report cleanup before requesting another capture |
+| `capture_cleanup_unproven` | 409 | The prior capture's stop proof is missing after the reporting deadline, or its cleanup was abandoned | Resolve the device or lease cleanup before requesting another capture |
+| `live_view_limit` | 429 | A device, host or credential reached its viewer limit, or the device reached its limit for retained view records | Wait for a view to close or a retained record to expire, then retry after `Retry-After` |
 | `tunnel_cancelled` | client | The caller cancelled the tunnel before attaching its peer | Inspect the tunnel receipt if a create request was sent |
 | `tunnel_ended` | 410, client | The tunnel identity already attached or reached a terminal state | Use a new UUID when opening another tunnel |
 | `tunnel_host_limit` | 429 | The host reached its limit for retained lease tunnels | Wait for active tunnels and pending mapping removals to settle |

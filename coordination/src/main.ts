@@ -101,6 +101,7 @@ export async function startController(config: ControllerConfig) {
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let displayBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  let liveBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let tunnelBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let streams: { close?(): void } | undefined;
   const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async (hostId, intent, adminToken) =>
@@ -127,8 +128,10 @@ export async function startController(config: ControllerConfig) {
     broker = createSessionUpgradeHandler(control);
     videoBroker = createSessionUpgradeHandler(control, { video: true });
     displayBroker = createSessionUpgradeHandler(control, { display: true });
+    liveBroker = createSessionUpgradeHandler(control, { live: true });
     tunnelBroker = createSessionUpgradeHandler(control, { tunnel: true });
     const sessions = createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/') ? videoBroker!.handle(req, socket, head)
+      : req.url?.includes('/live-views/') ? liveBroker!.handle(req, socket, head)
       : req.url?.includes('/display-sessions/') ? displayBroker!.handle(req, socket, head) : req.url?.includes('/tunnels/') ? tunnelBroker!.handle(req, socket, head) : broker!.handle(req, socket, head));
     server.on("upgrade", (req, socket, head) => {
       if (browsers?.matches(req)) browsers.upgrade(req, socket, head);
@@ -143,6 +146,7 @@ export async function startController(config: ControllerConfig) {
     broker?.close();
     videoBroker?.close();
     displayBroker?.close();
+    liveBroker?.close();
     tunnelBroker?.close();
     streams?.close?.();
     server?.close();
@@ -164,6 +168,7 @@ export async function startController(config: ControllerConfig) {
         broker?.close();
         videoBroker?.close();
         displayBroker?.close();
+        liveBroker?.close();
         tunnelBroker?.close();
         browsers?.close();
         await new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });

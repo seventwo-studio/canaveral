@@ -15,7 +15,7 @@ import { TerminalClient } from './terminal-sdk.ts';
 import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
 import { receiveSnapshot, MAX_SNAPSHOT_BYTES } from './accessibility-sdk.ts';
-import { LeaseVideoClient } from './video-sdk.ts';
+import { LeaseLiveClient, LeaseVideoClient } from './video-sdk.ts';
 import { LeaseTunnelClient } from './tunnel-sdk.ts';
 import { uploadAppArtifactFile } from './app-artifact-client.ts';
 import { appArtifactMetadata } from './app-artifact-contract.ts';
@@ -357,11 +357,14 @@ export class LeaseClient {
     return new LeaseClient({ ...options, leaseKey: credentialFile(options.credentialFile) });
   }
   #video: LeaseVideoClient;
+  #live: LeaseLiveClient;
   #tunnels: LeaseTunnelClient;
-  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); this.#tunnels = new LeaseTunnelClient(options); }
+  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); this.#tunnels = new LeaseTunnelClient(options); this.#live = new LeaseLiveClient(options); }
   /** Port tunnels between this lease's device and the holder's machine: `open`, `create`,
    * `connect`, `inspect`, `list` and `close`. Off unless the host and the application allow them. */
   get tunnels(): LeaseTunnelClient { return this.#tunnels; }
+  /** Live screen of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `watch`. */
+  get live(): LeaseLiveClient { return this.#live; }
   /** MP4 recording of this lease's own Android emulator: `create`, `connect`, `inspect`, `close`
    * and `record`. An iOS simulator lease refuses recording with `capability_unsupported`. */
   get video(): LeaseVideoClient { return this.#video; }

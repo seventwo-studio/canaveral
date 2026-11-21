@@ -2774,6 +2774,412 @@
           }
         }
       }
+    },
+    "/v1/leases/{leaseId}/live-views": {
+      "post": {
+        "operationId": "createLiveView",
+        "summary": "Open a live view of a leased Android emulator's screen",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires the current lease key and a ready member with the displayStream capability on an Android image. Application, operator and account credentials and another lease's key are refused. Persist the request UUID; a replay returns the same view. The first view of a device admits its shared live capture, which reserves one CPU and 256 MiB against the host and the application until its cleanup is proven; later views join it. 409 capture_cleanup_pending (retryable) while an earlier capture of the device awaits cleanup proof; 429 live_view_limit beyond four views per device. Fixture-covered only: no native run has measured frame rate, latency or decoder compatibility.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLiveView"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/leases/{leaseId}/live-views/{viewId}": {
+      "get": {
+        "operationId": "inspectLiveView",
+        "summary": "Inspect a live view and why it ended",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "viewId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Available to the lease's current key after the lease has ended."
+      }
+    },
+    "/v1/leases/{leaseId}/live-views/{viewId}/close": {
+      "post": {
+        "operationId": "closeLiveView",
+        "summary": "End a live view idempotently",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveView"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "viewId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "The device's shared capture stops when its last view has ended."
+      }
+    },
+    "/v1/leases/{leaseId}/live-views/{viewId}/{generation}": {
+      "get": {
+        "operationId": "attachLiveView",
+        "summary": "Attach the viewer WebSocket peer of a live view",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
+            "headers": {
+              "Sec-WebSocket-Protocol": {
+                "schema": {
+                  "const": "canaveral-session-v1"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "HTTP handshake only. Requires Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Version: 13, a valid WebSocket key and Sec-WebSocket-Protocol: canaveral-session-v1. No Origin, body, credentials in URLs or query fields. Exactly one viewer peer may attach to a view. After the broker's ready message the host sends live metadata, then MP4 segments: an init or segment control followed by exactly its announced bytes in binary messages of at most 64 KiB. The viewer may send only {\"type\":\"renew\"}, which the broker answers with a renewal control. The session control schema defines liveHost, liveConsumer and liveBroker. The stream ends with the lease, its key, its device or the view's unrenewed lifetime; nothing is replayed after disconnect.",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "viewId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -3816,7 +4222,11 @@
           },
           "endReason": {
             "type": "string",
-            "enum": ["mapping_failed", "mapping_lost", "open_rate"]
+            "enum": [
+              "mapping_failed",
+              "mapping_lost",
+              "open_rate"
+            ]
           },
           "limits": {
             "type": "object",
@@ -5606,6 +6016,144 @@
             "$ref": "#/components/schemas/UsageRow"
           }
         }
+      },
+      "CreateLiveView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 120,
+            "default": 120,
+            "description": "The view's lifetime from readiness; each accepted renewal restarts it."
+          }
+        },
+        "required": [
+          "id",
+          "member"
+        ],
+        "additionalProperties": false
+      },
+      "LiveView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "captureId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The device's shared live capture: a video session of kind live that holds the reservation."
+          },
+          "generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "const": "live"
+          },
+          "protocol": {
+            "const": "canaveral-session-v1"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "attaching",
+              "ready",
+              "ended"
+            ]
+          },
+          "endReason": {
+            "type": "string",
+            "enum": [
+              "closed",
+              "view_expired",
+              "attach_timeout",
+              "lease_expired",
+              "lease_released",
+              "lease_failed",
+              "key_rotated",
+              "application_revoked",
+              "access_revoked",
+              "device_stopped",
+              "host_unavailable",
+              "capture_ended",
+              "disconnected",
+              "controller_restarted"
+            ]
+          },
+          "mediaType": {
+            "const": "video/mp4"
+          },
+          "codec": {
+            "const": "avc1"
+          },
+          "fps": {
+            "const": 30
+          },
+          "bitRate": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 120
+          },
+          "attachBefore": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authorizationDeadline": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "machineId",
+          "leaseId",
+          "member",
+          "captureId",
+          "generation",
+          "capability",
+          "protocol",
+          "state",
+          "mediaType",
+          "codec",
+          "fps",
+          "bitRate",
+          "ttlSeconds",
+          "attachBefore",
+          "authorizationDeadline"
+        ],
+        "additionalProperties": false
       }
     }
   }

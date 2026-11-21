@@ -27,6 +27,7 @@ proof. Session admission and peer attachment retain their
 | Accessibility | Empty begin | Snapshot schema/size; finish; worker error | Host snapshot bytes only |
 | Display | Take/release input; discrete action; receipt lookup | Ownership; action result; worker error | RFB in both directions |
 | Administrative video | Completion acknowledgement | MP4 metadata; verified finish; worker error | Host fragmented MP4 only |
+| Live view | Renewal request, answered by the broker | Live metadata; segment headers; end; worker error | Host MP4 segments only |
 | Lease tunnel | Stream open/accept/end/reset; credit | Mapping installed; the same stream controls; worker error | Stream data in both directions |
 
 The `x-canaveral-streams` metadata records these bindings. Binary data is carried
@@ -104,7 +105,18 @@ carried a tunnel.
 Administrative `video` is a separate relay capability from consumer lease access.
 Its session identities, finite capture limits, credential revalidation and cleanup
 reservations follow [remote mobile control](mobile-control.md#native-video-sessions).
-Validate `videoConsumer` and `videoHost` for its controls. Binary MP4 fragments are
+Validate `videoConsumer` and `videoHost` for its controls.
+
+`live` is the relay capability of a [live view](mobile-control.md#live-screen), for
+a lease key on its own emulator or an owner on an account-owned device. Validate
+`liveHost` for the host's controls and `liveConsumer` for the viewer's only
+message, `{type:"renew"}`. The broker answers that message itself with
+`liveBroker` (`{type:"renewal", renewed, authorizationDeadline}`) and never relays
+it; like `ready`, the reply originates in the broker and may arrive between any two
+host messages. Each `init` or `segment` control announces exactly `bytes` binary
+bytes that follow in order. The relay checks each control's shape and bounds and
+the binary direction. It does not count the announced bytes or parse the MP4; the
+SDK checks byte counts, segment order and box framing, and nothing decodes video. Binary MP4 fragments are
 opaque to the relay; the SDK verifies the byte count, digest and bounded MP4 box
 envelope. A valid box envelope does not prove video decoding or a measured frame
 rate. Display input ownership and consumer lease eligibility remain independent.

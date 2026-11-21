@@ -5,6 +5,7 @@ import type { ControlOptions, ControlResponse } from "./contracts.ts";
 import type { SessionCommand } from "./sessions.ts";
 import type { VideoSessionCommand } from './mobile-video-sessions.ts';
 import type { DisplaySessionCommand } from './display-sessions.ts';
+import type { LiveViewCommand } from './live-views.ts';
 import type { TunnelCommand } from './lease-tunnels.ts';
 
 /** Plain, cloneable requests only. Credentials never appear in events. */
@@ -24,11 +25,11 @@ type BrowserReceiptCommand = { type: "browsers.receipt"; hostId: string; id: str
  * admission pass. Each read is verified against its own credential; one refusal does not affect the others. */
 export interface RequestReadsCommand { type: "requests.read"; reads: { token: string; id: string }[] }
 export type RequestRead = { view: unknown } | { error: { message: string; status: number; code: string; retryable: boolean } };
-export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | TunnelCommand | HostAuthenticateCommand | RequestReadsCommand | { type: "requests.wake" } | { type: "events.latest" };
+export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | LiveViewCommand | TunnelCommand | HostAuthenticateCommand | RequestReadsCommand | { type: "requests.wake" } | { type: "events.latest" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
   return command.type === "browsers.launch" || command.type === "browsers.receipt" || command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
-    command.type === 'display-sessions.attach' || command.type === 'display-sessions.disconnect' || command.type === 'tunnels.attach' || command.type === 'tunnels.disconnect';
+    command.type === 'display-sessions.attach' || command.type === 'display-sessions.disconnect' || command.type === 'live-views.attach' || command.type === 'live-views.disconnect' || command.type === 'live-views.renew' || command.type === 'tunnels.attach' || command.type === 'tunnels.disconnect';
 }
 export type ControlReply =
   | { kind: "ready" }

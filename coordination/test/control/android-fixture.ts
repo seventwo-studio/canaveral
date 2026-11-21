@@ -12,6 +12,7 @@ import type { HostConfig } from "../../src/host.ts";
 import { AndroidProvider } from "../../src/providers/android.ts";
 import { mobileNativeHelper, nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
 import type { CommandResult, LeaseSupervisorTransport, MobileTransport, NativePipe, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
+import { FragmentEncoder } from "./live-fixture.ts";
 
 /** Disposable Android lease fixtures. A real loopback controller, a real HostRunner with the
  * native continuous lease clock and the real `lease-supervise` helper own stand-in emulator
@@ -132,7 +133,8 @@ export class FakePipe implements NativePipe {
   async close(): Promise<void> { if (!this.closed) { this.closed = true; this.hooks.close?.(); this.exit(143); } }
 }
 /** Guest and host media state observed by the fakes, per emulator name. */
-export interface Media { recorders: Map<string, { running: boolean; started: number }>; installs: Map<string, Buffer[]>; commits: number; encoders: number; encodersOpen: number }
+export interface Media { recorders: Map<string, { running: boolean; started: number }>; installs: Map<string, Buffer[]>; commits: number; encoders: number; encodersOpen: number;
+  started: Map<string, { running: boolean; started: number }[]>; peak: number }
 /** Fake adb/avdmanager. Every device answer comes from the live stand-in process registry. */
 export function transport(paths: { sdk: string; registry: string; events: string; devices: string }, counters: Map<string, number>, fixture: HarnessOptions = {}, media?: Media): MobileTransport {
   const ok = (stdout: string | Buffer): CommandResult => ({ stdout, exitCode: 0 });
@@ -142,6 +144,9 @@ export function transport(paths: { sdk: string; registry: string; events: string
       if (argv[0] === ENCODER) {
         assert.ok(argv.includes("libx264")); media.encoders++; media.encodersOpen++;
         let open = true;
+        // A streaming stand-in for live views: fragments while its input flows.
+        if (fixture.encoder === "fragments" || fixture.encoder === "fragments-stuck") return new FragmentEncoder({ close: () => { if (open) { open = false; media.encodersOpen--; } },
+          wait: () => { if (fixture.encoder === "fragments-stuck") throw new Error("encoder exit unconfirmed"); } });
         const encoder: FakePipe = new FakePipe({ end: () => { encoder.push(MP4); encoder.exit(0); }, close: () => { if (open) { open = false; media.encodersOpen--; } },
           // A wedged encoder never confirms its exit.
           wait: () => { if (fixture.encoder === "stuck") throw new Error("encoder exit unconfirmed"); } });
@@ -166,6 +171,8 @@ export function transport(paths: { sdk: string; registry: string; events: string
       if (args[0] === "shell" && String(args.at(-1)).includes("exec screenrecord")) {
         const limit = Number(/--time-limit ([0-9]+)/.exec(String(args.at(-1)))![1]), state = { running: true, started: Date.now() };
         media.recorders.set(device.name, state);
+        const all = media.started.get(device.name) ?? []; all.push(state); media.started.set(device.name, all);
+        media.peak = Math.max(media.peak, all.filter(recorder => recorder.running).length);
         const recorder = new FakePipe();
         recorder.push(Buffer.from(`canaveral-recorder ${BOOT} 4321 (sh) R 812 4321 812 0 -1 4194560 120 0 0 0 0 0 0 0 20 0 1 0 98765 10973184 512 18446744073709551615\n`));
         const timer = setInterval(() => {
@@ -252,7 +259,8 @@ export interface HarnessOptions {
   guest?: "isolated" | "leaky" | "debuggable"; leases?: LeaseSupervisorTransport;
   /** Host capacity beyond the emulators, for recording and upload reservations. */
   extra?: { cpu?: number; memoryMiB?: number; diskGiB?: number };
-  encoder?: "ok" | "stuck"; installStall?: boolean;
+  encoder?: "ok" | "stuck" | "fragments" | "fragments-stuck";
+  liveEpochSeconds?: number; installStall?: boolean;
   /** The host's own warm device opt-in and bounds (`leaseWarmPool`). */
   warmPool?: { maxDevices: number; maxAgeSeconds: number };
   /** More lease images beside `lease-phone`. */
@@ -281,7 +289,7 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
   const root = realpathSync(mkdtempSync(join(tmpdir(), "android-leases-")));
   const admin = randomBytes(32).toString("base64url"), enrollment = randomBytes(32).toString("base64url");
   writeFileSync(join(root, "admin"), admin, { mode: 0o600 }); writeFileSync(join(root, "enroll"), enrollment, { mode: 0o600 });
-  const paths = { ...sdk(root), devices: join(root, "devices") }, counters = new Map<string, number>(), media: Media = { recorders: new Map(), installs: new Map(), commits: 0, encoders: 0, encodersOpen: 0 };
+  const paths = { ...sdk(root), devices: join(root, "devices") }, counters = new Map<string, number>(), media: Media = { recorders: new Map(), installs: new Map(), commits: 0, encoders: 0, encodersOpen: 0, started: new Map(), peak: 0 };
   const image: RecordValue = { id: "lease-phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: { systemImage, profile: "pixel_8" } };
   let controller: Awaited<ReturnType<typeof startController>> | undefined, port = 0, runner: HostRunner | undefined;
   const start = async () => {
@@ -296,7 +304,8 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
     leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [image, ...(options.templates ?? [])].map(entry => ({ id: entry.id, revision: entry.revision, arch, runtime: "android" })),
     ...(options.warmPool ? { leaseWarmPool: options.warmPool } : {}) };
   const launch = async () => {
-    runner = new HostRunner({ ...config, pressure: { enabled: false } }, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state) });
+    runner = new HostRunner({ ...config, pressure: { enabled: false } }, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state),
+      ...(options.liveEpochSeconds === undefined ? {} : { liveEpochSeconds: options.liveEpochSeconds }) });
     await runner.start();
   };
   await launch();

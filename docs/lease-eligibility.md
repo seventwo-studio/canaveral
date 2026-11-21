@@ -104,6 +104,9 @@ The same binding check applies to:
 - New session admission and both attachment peers.
 - Persisted session refresh, live-session queries and the read-only frame check.
 - Runner session authorization before provider access and while streaming.
+- [Live view](mobile-control.md#live-screen) admission, every relayed message of a
+  lease's live view and the runner's own capture authority. A lease's live view
+  additionally requires an Android image; other leased runtimes have none.
 
 An existing assignment must still match the complete pinned public image
 definition in the current offer. A matching selector cannot authorize a stale or
@@ -112,7 +115,8 @@ remain independent of consumer eligibility.
 
 Withdrawing one selector disconnects only its affected sessions, removes pending
 attachments from heartbeat delivery and rejects new sessions or acquisition for
-that image. The frame check reads current persisted eligibility without waiting
+that image. A lease's live views end with `host_unavailable`; their shared capture
+keeps its reservation until its cleanup proof, like every other reservation here. The frame check reads current persisted eligibility without waiting
 for a session refresh transaction. The local worker also closes affected sessions
 when its own declaration changes before the controller receives a heartbeat.
 

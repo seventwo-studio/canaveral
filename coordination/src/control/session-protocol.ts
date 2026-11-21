@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { identifier } from "../consumers.ts";
 import { object, ServiceError } from "../errors.ts";
+import { LIVE_HOST_END_REASONS, MAX_LIVE_INIT_BYTES, MAX_LIVE_SEGMENT_BYTES } from "../mobile-live.ts";
 import { TUNNEL_RESET_REASONS, TUNNEL_WINDOW_BYTES } from "../tunnel-relay.ts";
 
 export const SESSION_PROTOCOL = "canaveral-session-v1";
@@ -10,7 +11,7 @@ export const INSPECTION_SCHEMA = "canaveral-accessibility-v1";
 export const MAX_INSPECTION_BYTES = 6 * 1_048_576;
 export const MAX_INSPECTION_NODES = 2_000;
 export type SessionCapability = "pty" | "display" | "upload" | "download" | "accessibility";
-export type RelayCapability = SessionCapability | 'video' | 'tunnel';
+export type RelayCapability = SessionCapability | 'video' | 'live' | 'tunnel';
 export type SessionSide = "host" | "consumer";
 export type SessionMessage = Record<string, unknown> | Uint8Array;
 export interface SessionChannel {
@@ -55,7 +56,7 @@ export function validateRelayMessage(capability: RelayCapability, side: SessionS
     // Tunnel bytes flow both ways: a four-byte stream number and at least one payload byte.
     if (capability === 'tunnel' && data.byteLength < 5) throw new ServiceError("Tunnel data needs a stream number and payload.", 400);
     if ((capability === "pty" && side === "consumer") || (capability === "upload" && side === "host") ||
-        ((capability === "download" || capability === "accessibility" || capability === 'video') && side === "consumer"))
+        ((capability === "download" || capability === "accessibility" || capability === 'video' || capability === 'live') && side === "consumer"))
       throw new ServiceError("Binary payload is not valid in this session direction.", 400);
     return data;
   }
@@ -77,6 +78,27 @@ export function validateRelayMessage(capability: RelayCapability, side: SessionS
       const v = exact(value, ['type','code','message','outcome']);
       if (typeof v.code !== 'string' || !Object.hasOwn(WORKER_MESSAGES, v.code) || typeof v.message !== 'string' || v.outcome !== 'unknown') throw new ServiceError('Invalid video worker error.', 400);
     } else throw new ServiceError('Invalid video control.', 400);
+  }
+  if (capability === 'live') {
+    const count = (v: unknown, maximum: number, minimum = 0) => typeof v === 'number' && Number.isSafeInteger(v) && v >= minimum && v <= maximum;
+    // A viewer's only message renews its view; the broker answers it and never relays it.
+    if (side === 'consumer') { const v = exact(value, ['type']); if (v.type !== 'renew') throw new ServiceError('Live viewers may only renew their view.', 400); }
+    else if (value.type === 'live') {
+      const v = exact(value, ['type','mediaType','codec','fps']);
+      if (v.mediaType !== 'video/mp4' || v.codec !== 'avc1' || v.fps !== 30) throw new ServiceError('Invalid live metadata.', 400);
+    } else if (value.type === 'init') {
+      const v = exact(value, ['type','epoch','bytes']);
+      if (!count(v.epoch, Number.MAX_SAFE_INTEGER) || !count(v.bytes, MAX_LIVE_INIT_BYTES, 16)) throw new ServiceError('Invalid live initialization segment.', 400);
+    } else if (value.type === 'segment') {
+      const v = exact(value, ['type','epoch','sequence','keyframe','bytes']);
+      if (!count(v.epoch, Number.MAX_SAFE_INTEGER) || !count(v.sequence, Number.MAX_SAFE_INTEGER) || typeof v.keyframe !== 'boolean' || !count(v.bytes, MAX_LIVE_SEGMENT_BYTES, 16)) throw new ServiceError('Invalid live media segment.', 400);
+    } else if (value.type === 'end') {
+      const v = exact(value, ['type','reason']);
+      if (!(LIVE_HOST_END_REASONS as readonly unknown[]).includes(v.reason)) throw new ServiceError('Invalid live end reason.', 400);
+    } else if (value.type === 'error') {
+      const v = exact(value, ['type','code','message','outcome']);
+      if (typeof v.code !== 'string' || !Object.hasOwn(WORKER_MESSAGES, v.code) || typeof v.message !== 'string' || v.outcome !== 'unknown') throw new ServiceError('Invalid live worker error.', 400);
+    } else throw new ServiceError('Invalid live control.', 400);
   }
   if (capability === 'tunnel') tunnelControl(value, side);
   return value;

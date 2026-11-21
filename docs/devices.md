@@ -112,7 +112,9 @@ mean an application has been installed or passed its tests.
 Operations are authenticated administrator actions. Submit one operation with a
 stable request UUID; read its receipt to obtain `queued`, `succeeded`, `failed` or
 `unknown`. Submission is asynchronous, with normal five-second host polling latency.
-This interface provides screenshots and discrete input, rather than a video stream.
+This interface provides screenshots and discrete input, rather than a video stream;
+to watch a device continuously, use a [live view](mobile-control.md#live-screen)
+and keep sending input through these operations.
 For builds produced on another machine, use the
 [CI upload and installation API](mobile-control.md); it transfers verified builds
 through the controller without direct access to the device host.

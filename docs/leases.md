@@ -116,6 +116,9 @@ gateway; do not remove existing direct-origin protections.
 | POST /v1/leases/{id}/sessions/{sessionId}/close | lease | close an owned session with `{}` |
 | POST /v1/leases/{id}/operations | lease | Submit or replay a durable discrete device/command operation |
 | GET /v1/leases/{id}/operations/{operationId} | lease | Inspect an owned operation receipt |
+| POST /v1/leases/{id}/live-views | lease | Open or replay a live view of a leased Android emulator's screen |
+| GET /v1/leases/{id}/live-views/{viewId} | lease | Inspect an owned live view and why it ended |
+| POST /v1/leases/{id}/live-views/{viewId}/close | lease | End an owned live view with `{}` |
 | POST /v1/leases/{id}/tunnels | lease | Open or replay a port tunnel of a leased Android emulator |
 | GET /v1/leases/{id}/tunnels | lease | List the lease's tunnels, including ended ones |
 | GET /v1/leases/{id}/tunnels/{tunnelId} | lease | Inspect one tunnel |
@@ -423,6 +426,17 @@ A process that deliberately escapes its group still requires native fencing;
 bounded pipe timeout retains uncertainty instead of claiming successful cleanup.
 Disposable process fixtures establish this host-helper behavior, not native VM
 expiry or guest process isolation.
+
+A lease key can watch its own Android emulator live through
+`/v1/leases/{id}/live-views`. A live view is a broker session of its own family: it
+shares the device's one native capture with the lease's other viewers, has a
+bounded lifetime that only an attached viewer renews, and ends with the lease,
+its key or its device within about a second. Its capture holds a recording's
+reservation against the host and the application until the recording path's
+cleanup proof. Renewing a view never renews the lease. The application key, the
+operator and another lease's key are refused, and no administrative route shows a
+leased device's screen. The contract and its open native questions are in
+[live screen](mobile-control.md#live-screen); it has fixture coverage only.
 
 Session negotiation returns an opaque session ID and the selected transport,
 without host credentials or raw host addresses. The controller relay is implemented; runner/network acceptance remains incomplete. An operation targets an explicit

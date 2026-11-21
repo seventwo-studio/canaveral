@@ -1,6 +1,6 @@
 /** Continuous native H.264 capture; frame acquisition never uses screenshots or input locks. */
 import { ServiceError } from "../errors.ts";
-import { authorized, unsupported } from "./mobile.ts";
+import { authorized, markCaptureNotRunning, unsupported } from "./mobile.ts";
 import { MAX_VIDEO_READ_MS } from "../mobile-video.ts";
 import type { Authorized, NativePipe, RecordValue } from "./mobile.ts";
 import type { IosProvider } from "./ios.ts";
@@ -13,12 +13,18 @@ export interface IosVideoOptions { durationSeconds: number; bitRate: number; fps
  * Upstream: https://github.com/meta/idb/blob/main/idb/cli/commands/video.py
  */
 export async function openIosVideo(provider: IosProvider, machine: RecordValue, image: RecordValue, _folder: string, options: IosVideoOptions, check: Authorized): Promise<NativePipe> {
-  if (!Number.isInteger(options.durationSeconds) || options.durationSeconds < 1 || options.durationSeconds > 180 || options.fps !== 30 || !Number.isInteger(options.bitRate) || options.bitRate < 100_000 || options.bitRate > 20_000_000) throw new ServiceError("Invalid native iOS video options.", 400);
-  await authorized(check);
-  if (!provider.transport?.pipe) unsupported("Native iOS video pipe transport is not configured.");
-  const udid = await provider.ready(machine, image);
-  await authorized(check);
-  const pipe = await provider.transport.pipe([String(provider.config.idb ?? "idb"), "video-stream", "--format", "h264", "--fps", "30", "--scale-factor", "1", "--udid", udid], { env: { ...provider.idbEnvironment(), PYTHONUNBUFFERED: "1" }, timeoutMs: 30000, maxBytes: 65536 });
+  // Everything before idb is spawned only validates and reads: a refusal here, including
+  // authorization that ended meanwhile, provably started no capture and is marked as such.
+  const preflight = async () => {
+    if (!Number.isInteger(options.durationSeconds) || options.durationSeconds < 1 || options.durationSeconds > 180 || options.fps !== 30 || !Number.isInteger(options.bitRate) || options.bitRate < 100_000 || options.bitRate > 20_000_000) throw new ServiceError("Invalid native iOS video options.", 400);
+    await authorized(check);
+    if (!provider.transport?.pipe) unsupported("Native iOS video pipe transport is not configured.");
+    const ready = await provider.ready(machine, image);
+    await authorized(check);
+    return ready;
+  };
+  const udid = await preflight().catch(error => { throw markCaptureNotRunning(error); });
+  const pipe = await provider.transport!.pipe!([String(provider.config.idb ?? "idb"), "video-stream", "--format", "h264", "--fps", "30", "--scale-factor", "1", "--udid", udid], { env: { ...provider.idbEnvironment(), PYTHONUNBUFFERED: "1" }, timeoutMs: 30000, maxBytes: 65536 });
   let stopped: Promise<void> | undefined, reason: "duration" | "cancelled" | "failed" | undefined, timer: ReturnType<typeof setTimeout> | undefined;
   let reading = false, checkedAt = Number.NEGATIVE_INFINITY;
   let nativeRead: Promise<Uint8Array> | undefined;
@@ -67,8 +73,10 @@ export async function openIosVideo(provider: IosProvider, machine: RecordValue, 
     }
     await authorized(check);
   };
+  // A source refused right after its spawn is stopped first. When that stop is proven, nothing of
+  // this attempt runs; when it is not, the stop's own failure propagates unmarked.
   try { await verify(true); }
-  catch (error) { await close(); throw error; }
+  catch (error) { await close(); throw markCaptureNotRunning(error); }
   timer = setTimeout(() => { void stop("duration").catch(() => {}); }, options.durationSeconds * 1000);
   timer.unref();
   return {

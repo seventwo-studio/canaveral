@@ -230,8 +230,9 @@ const staticFiles: Record<string, [string, string]> = {
 };
 const browserCollection = new RegExp(`^/api/v1/hosts/${UUID}/browsers$`);
 const browserItem = new RegExp(`^/api/v1/hosts/${UUID}/browsers/${UUID}$`);
-/** Consumer attachment of an existing administrative video session; WebSocket upgrades only. */
-const videoAttachment = new RegExp(`^/api/v1/machines/(${UUID})/video-sessions/(${UUID})/(${UUID})$`);
+/** Consumer attachment of an existing administrative video session or live view of an owned
+ * device; WebSocket upgrades only. Both are relayed unchanged under the browser's own session. */
+const videoAttachment = new RegExp(`^/api/v1/machines/(${UUID})/(?:video-sessions|live-views)/(${UUID})/(${UUID})$`);
 const SESSION_PROTOCOL = "canaveral-session-v1";
 
 function attachmentName(path: string): string {
@@ -248,8 +249,8 @@ function routeAllowed(method: string, route: string): boolean {
   if (method === "POST" && new RegExp(`^/api/v1/admin/(?:leases/${UUID}/release|sessions/${UUID}/close|applications/${UUID}/revoke|(?:requests|jobs)/${UUID}/cancel)$`).test(route)) return true;
   if (method === "GET" && (route === "/api/v1/consumers" || new RegExp(`^/api/v1/(?:runner-enrollments|resource-domains)/${UUID}$`).test(route))) return true;
   if (method === "POST" && (["runners/credential", "runners/revoke", "consumers", "runner-enrollments", "model-catalog", "resource-domains", "model-grants", "model-grants/revoke", "model-runner-approvals", "model-runner-approvals/revoke", "linux-lease-images", "linux-lease-grants", "linux-lease-grants/revoke", "linux-lease-runner-approvals", "linux-lease-runner-approvals/revoke"].some(path => route === `/api/v1/${path}`) || new RegExp(`^/api/v1/(?:consumers/${UUID}/(?:credential|revoke)|runner-enrollments/${UUID}/revoke|updates/artifacts/[a-f0-9]{64})$`).test(route))) return true;
-  if (method === "GET" && (["/api/v1/models", "/api/v1/jobs"].includes(route) || new RegExp(`^/api/v1/(?:jobs/${UUID}|app-artifacts/${UUID}|machines/${UUID}/video-sessions/${UUID})$`).test(route))) return true;
-  if (method === "POST" && (route === "/api/v1/jobs" || new RegExp(`^/api/v1/(?:jobs/${UUID}/cancel|machines/${UUID}/(?:app-artifacts|video-sessions)|machines/${UUID}/video-sessions/${UUID}/close|app-artifacts/${UUID}/(?:chunks|complete|delete))$`).test(route))) return true;
+  if (method === "GET" && (["/api/v1/models", "/api/v1/jobs"].includes(route) || new RegExp(`^/api/v1/(?:jobs/${UUID}|app-artifacts/${UUID}|machines/${UUID}/(?:video-sessions|live-views)/${UUID})$`).test(route))) return true;
+  if (method === "POST" && (route === "/api/v1/jobs" || new RegExp(`^/api/v1/(?:jobs/${UUID}/cancel|machines/${UUID}/(?:app-artifacts|video-sessions|live-views)|machines/${UUID}/(?:video-sessions|live-views)/${UUID}/close|app-artifacts/${UUID}/(?:chunks|complete|delete))$`).test(route))) return true;
   if (method === "GET" && new RegExp(`^/api/v1/updates/(?:releases|rollouts)(?:/${UUID})?$`).test(route)) return true;
   if (method === "POST" && (route === "/api/v1/updates/releases" || route === "/api/v1/updates/rollouts" || new RegExp(`^/api/v1/updates/rollouts/${UUID}/cancel$`).test(route))) return true;
   if (method === "GET") return ["/api/v1/auth/status", "/api/v1/auth/session", "/api/v1/auth/tokens", "/api/v1/users", "/api/v1/admin/tokens",

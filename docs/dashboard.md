@@ -645,3 +645,68 @@ then verified 60- and 180-second Android recordings with static stretches longer
 than 30 seconds, and machine deletion refused until an uncleaned session was
 abandoned by an administrator. Android Cancel and leaving the page now reach
 positive cleanup without abandonment; see the [recording cleanup trial](../coordination/native-acceptance/dashboard-android-recording-cleanup.md).
+
+## Owner live screen
+
+The gateway relays a live view of an account-owned mobile device, so a dashboard
+can show devices that run on another machine than the dashboard itself. This is the
+API and relay only; the pages that show one or several screens are separate work
+and use the routes and messages below. The contract is
+[live screen](mobile-control.md#live-screen). Fixture-covered only: no browser has
+decoded a live view, and no native run has measured its frame rate or latency.
+
+Send JSON mutations with the dashboard session cookie and matching Origin.
+
+| Step | Request | Notes |
+| --- | --- | --- |
+| Open | POST `/api/v1/machines/{machine}/live-views` with `{id, ttlSeconds?}` | `id` is a client-generated UUID; 201, or 200 for a replay. `ttlSeconds` is 10–120, default 120 |
+| Attach | WebSocket `/api/v1/machines/{machine}/live-views/{id}/{generation}`, subprotocol `canaveral-session-v1` | Within 30 seconds of opening |
+| Inspect | GET `/api/v1/machines/{machine}/live-views/{id}` | `state` and, once ended, `endReason` |
+| Close | POST `/api/v1/machines/{machine}/live-views/{id}/close` with `{}` | On leaving the page; use a keepalive request on unload |
+
+Refusals a page should expect when opening: 404 for a device of another account,
+409 for a leased or stopped device or a host without capacity for the capture, 409
+`capture_cleanup_pending` (retryable) while an earlier capture of the device is
+still being cleaned up, 409 `capability_unsupported` for a device that is not
+mobile, and 429 (`live_view_limit`, or all four video sessions of the host held).
+A leased device is never shown here: its screen belongs to its lease holder.
+
+The gateway relays the WebSocket exactly as it relays the
+[recording attachment](#owner-mobile-capture): only for a same-origin request with
+the session cookie and a matching Origin; a bearer header, a missing or foreign
+Origin, or another account is refused. It checks machine access before the upgrade
+and every second after it, opens the controller attachment with that cookie's own
+session token and copies frames unchanged. An ordinary GET to the attachment path
+stays 404.
+
+Messages the page receives, in order:
+
+1. `{"type":"ready","sessionId","generation","capability":"live"}` from the broker.
+2. `{"type":"live","mediaType":"video/mp4","codec":"avc1","fps":30}`.
+3. Segments. Each is one text message followed by binary messages (at most 64 KiB
+   each) that total exactly its `bytes`:
+   - `{"type":"init","epoch","bytes"}`: the initialization segment (`ftyp` and
+     `moov`) of an epoch. The page reads the codec string from it. When a later
+     epoch starts, the page is expected to append its `init` to the `SourceBuffer`
+     it already has; no browser has been tried.
+   - `{"type":"segment","epoch","sequence","keyframe","bytes"}`: one media segment
+     (`moof` and `mdat`). The first of an epoch, and the first after a gap in
+     `sequence`, is a key frame segment.
+4. Possibly `{"type":"end","reason"}` when the host ends the stream, or
+   `{"type":"error","code","message","outcome":"unknown"}` when it cannot serve it
+   (for example `capability_unsupported` on an iOS host that has not opted in).
+   Otherwise the socket simply closes; read `endReason` with the inspect request.
+
+The page sends one message only, `{"type":"renew"}`, and receives
+`{"type":"renewal","renewed","authorizationDeadline"}`, possibly between the binary
+messages of a segment. An unrenewed view ends after `ttlSeconds`. Renew after about
+a third of it, and only while the screen is visible, so that a hidden tab lets its
+capture stop. Any other message from the page ends the session.
+
+Viewers of one device share one capture and one reservation (one CPU and 256 MiB
+on its host); a device accepts four viewers. A page showing several devices holds
+one capture per device and so at most four per host, together with any recordings.
+While a recording of the device runs, its viewers are fed the recording's stream
+as an epoch of its own. Input stays on the existing device operations (`tap`,
+`swipe`, `text`, `key`, `rotate` through POST `/api/v1/machines/{machine}/operations`);
+the live view carries none.
