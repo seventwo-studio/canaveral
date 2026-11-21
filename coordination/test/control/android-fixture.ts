@@ -231,6 +231,7 @@ export function transport(paths: { sdk: string; registry: string; events: string
         return ok(lines.join("\n") + "\ncanaveral-isolation-done\n");
       }
       if (args[0] === "shell" || args[0] === "logcat") return ok("ok");
+      if (args.slice(0, 3).join(" ") === "emu geo fix") return ok("OK");
       return { stdout: "", exitCode: 1 };
     },
     // An account-owned device is launched by the runner itself, unsupervised, as in production.

@@ -1,3 +1,4 @@
+import { dropEventTriggers } from "../src/events.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -166,7 +167,11 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
     inspectDomain, acquire, rows,
     clock(seconds: number) { writeFileSync(clockFile, String(seconds)); },
     leaseClient(leaseId: string, leaseKey: string) { return new LeaseClient({ baseUrl: `http://127.0.0.1:${port()}`, leaseId, leaseKey, allowLoopbackHttp: true }); },
-    async restart() { await primary.kill(); primary = await start(); },
+    async restart(editState?: () => void) {
+      await primary.kill();
+      editState?.();
+      primary = await start();
+    },
   };
 }
 
@@ -252,6 +257,8 @@ test("application/lease roles, ownership and opaque lease credentials through th
   assert.equal(first.lease.expiresAt, new Date((T0 + 200) * 1000).toISOString());
   const replay = await a.client().acquireLease({ ...request });
   assert.deepEqual([replay.created, replay.lease.id], [false, request.id]);
+  // The caller's label is returned for display; a lease acquired without one reports null.
+  assert.deepEqual([first.lease.name, replay.lease.name], ["job", "job"]);
   await rejectsWith(a.client().acquireLease({ ...request, ttlSeconds: 201 }), 409);
   await rejectsWith(b.client().acquireLease({ ...request }), 409);
   await rejectsWith(b.client().inspectLease(request.id), 404);
@@ -260,6 +267,7 @@ test("application/lease roles, ownership and opaque lease credentials through th
   assert.equal((await f.get(`/v1/leases/${request.id}`, runner.credential)).status, 401);
 
   const second = await a.client().acquireLease(f.acquire());
+  assert.equal(second.lease.name, null);
   await rejectsWith(a.client().acquireLease(f.acquire()), 429);
   const page = await a.client().listLeases();
   assert.deepEqual(page.leases.map(l => l.id), [request.id, second.lease.id].sort());
@@ -596,8 +604,14 @@ test("additive failure-reason migration preserves existing lease and reservation
   const f = await fixture(t), app = await f.application(); await f.grant(app.id);
   const domain = await f.domain(VM), runner = await f.enroll(); await f.approve(runner, domain);
   const {lease} = await app.client().acquireLease(f.acquire());
-  const db = new DatabaseSync(f.statePath); db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason'); db.close();
-  await f.restart();
+  // Simulate the older schema between controller runs. Its event triggers did not exist yet.
+  await f.restart(() => {
+    const db = new DatabaseSync(f.statePath);
+    try {
+      dropEventTriggers(db);
+      db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason');
+    } finally { db.close(); }
+  });
   assert.equal((await app.client().inspectLease(lease.id)).state, 'provisioning');
   assert.equal((await f.inspectDomain(domain)).reservations, 1);
   assert.equal(f.rows('SELECT failure_reason FROM linux_leases')[0]!.failure_reason, null);

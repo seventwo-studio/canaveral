@@ -71,10 +71,20 @@ export function machineImageRuntime(host: Json, image: Json): string {
   if (!names.includes(name) || !systems[name]?.includes(image.os)) failure("Image operating system is incompatible with its enabled runtime.");
   return name;
 }
+/** The isolation class of an iOS simulator lease. A simulator app is an ordinary process of the
+ * Mac host's user, so the lease is not fenced from its host (owner decision, 21 November 2026). */
+export const SHARED_HOST_ISOLATION = "shared-host";
+/** The exact selector a host must advertise before this image can be leased on it. An iOS
+ * selector carries the explicit shared-host declaration, so one without it never matches;
+ * the controller applies the same gate as the host and has no default for it. */
+export function leaseImageReference(host: Json, image: Json): Json {
+  const runtime = machineImageRuntime(host, image);
+  return { id: image.id, revision: image.revision, arch: image.arch, runtime, ...(runtime === "ios" ? { isolation: SHARED_HOST_ISOLATION } : {}) };
+}
 export function machineLeaseEligible(host: Json, image: Json): boolean {
   if (host.leaseProtocol !== 1 || !Array.isArray(host.templates) || !host.templates.some((offered: Json) => equal(offered, image)) || !Array.isArray(host.leaseImages)) return false;
   try {
-    const reference = { id: image.id, revision: image.revision, arch: image.arch, runtime: machineImageRuntime(host, image) };
+    const reference = leaseImageReference(host, image);
     return host.leaseImages.some((entry: Json) => equal(entry, reference));
   } catch (error) { if (error instanceof ServiceError) return false; throw error; }
 }
@@ -108,8 +118,10 @@ export function validateOffer(value: unknown): Json {
     if (!Array.isArray(images) || images.length > 100) failure("Lease images must explicitly list at most 100 installed image/runtime identities.");
     const seen = new Set<string>();
     result.leaseImages = (images as unknown[]).map(value => {
-      const entry = object(value); fields(entry, ["id", "revision", "arch", "runtime"]);
+      const entry = object(value); fields(entry, ["id", "revision", "arch", "runtime", "isolation"]);
       for (const key of ["id", "revision", "arch", "runtime"]) text(entry[key], `lease image ${key}`);
+      // Only an iOS selector declares an isolation class, and it must be exactly shared-host.
+      if (entry.runtime === "ios" ? entry.isolation !== SHARED_HOST_ISOLATION : "isolation" in entry) failure("An iOS lease image must declare the shared-host isolation class; no other runtime may declare one.");
       const identity = pythonJson([entry.id, entry.revision, entry.arch]);
       const image = result.templates.find((image: Json) => equal([image.id, image.revision, image.arch], [entry.id, entry.revision, entry.arch]));
       if (seen.has(identity) || !image || entry.runtime !== machineImageRuntime(result, image)) failure("Lease image must uniquely match an installed image and its configured runtime.");

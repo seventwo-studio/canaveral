@@ -571,6 +571,8 @@ export interface LeaseCleanupOptions {
   storageOwned?(storage: string): boolean;
 }
 /** External intent survives assignment credential erasure; only positive proofs complete it. */
+/** The blocked-cleanup reasons the controller's lifecycle contract accepts. */
+const CLEANUP_REASONS = new Set(["execution_pending", "operations_pending", "sessions_pending", "ownership", "storage_removal", "credential_erasure", "unsupported", "recovery"]);
 export async function cleanupLease(options: LeaseCleanupOptions): Promise<RecordValue> {
   const { machine, folder, guard } = options, id = identifier(machine.id), lease = object(machine.lease), intent = object(machine.leaseCleanup), request = identifier(intent.id);
   if (identifier(intent.leaseId) !== identifier(lease.id) || !["released", "expired", "failed"].includes(String(lease.state)) || machine.desired !== "stopped") throw new ServiceError("Cleanup requires its terminal pinned lease and stopped intent.", 409);
@@ -650,7 +652,11 @@ export async function cleanupLease(options: LeaseCleanupOptions): Promise<Record
         return report("complete");
       }, { exclusive: true });
     } catch (error) {
-      const reason = error instanceof ServiceError ? error.code === "assignment_busy" ? "operations_pending" : error.code : "recovery";
+      // The controller accepts only its bounded reasons. A missing capability is `unsupported`
+      // and any other provider error is `recovery`, so one blocked cleanup can never make the
+      // whole heartbeat invalid.
+      const code = error instanceof ServiceError ? ({ assignment_busy: "operations_pending", capability_unsupported: "unsupported" } as Record<string, string>)[error.code] ?? error.code : "recovery";
+      const reason = CLEANUP_REASONS.has(code) ? code : "recovery";
       proof.reason = reason; saveRecord(receipt, proof); return report("blocked", reason);
     }
   } finally { lock.close(); }

@@ -2,8 +2,13 @@
   "name": "ios-devices",
   "provider": "ios",
   "capacity": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 40},
-  "storage": "/Users/operator/Library/Application Support/Canaveral/ios",
+  "storage": "/Users/operator/Canaveral/ios",
   "idb": "/opt/homebrew/bin/idb",
+  "idbCompanion": "/opt/homebrew/bin/idb_companion",
   "artifacts": {"development": "/Users/operator/Builds/Development.app"},
-  "templates": [{"templateFile": "templates/ios-phone.json"}]
+  "templates": [{"templateFile": "templates/ios-phone.json"}],
+  "leaseClockHelper": "/usr/local/bin/canaveral-mobile-native",
+  "leaseSupervisor": "/usr/local/bin/canaveral-mobile-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{"id": "ios-phone", "revision": "1", "arch": "arm64", "runtime": "ios", "isolation": "shared-host"}]
 }

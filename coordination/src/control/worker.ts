@@ -22,6 +22,8 @@ import { LegacyLeases } from "./leases.ts";
 import { createBaselinesModule } from "./baselines.ts";
 import { createModule as updatesModule } from "./updates.ts";
 import { requireHostAdmission, hostAdmissionClosed } from "./maintenance.ts";
+import { Observability } from "./observability.ts";
+import { installObservability, observabilitySettings } from "../observability.ts";
 import { requireAdmin } from "./contracts.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
 import { mutatesControlCommand } from "./client.ts";
@@ -34,10 +36,13 @@ const options: ControlOptions = {
   ...(workerData.enrollmentToken === undefined ? {} : { enrollmentToken: secret(workerData.enrollmentToken) }),
   ...(workerData.updatePublicKeys === undefined ? {} : { updatePublicKeys: workerData.updatePublicKeys as Record<string, string> }),
   ...(Array.isArray(workerData.browserHosts) ? { browserHosts: workerData.browserHosts.map(identifier) } : {}),
+  ...(workerData.observability === undefined ? {} : { observability: observabilitySettings(workerData.observability) }),
 };
 if (options.adminToken === options.enrollmentToken) throw new Error("Admin and enrollment credentials must be different.");
 const operatorHash = createHash("sha256").update(options.adminToken, "ascii").digest();
 const store = new SqliteStore(workerData.path as string);
+// Before any module: triggers kept from an earlier run already fire during module construction.
+installObservability(store);
 const accounts = new Accounts(store);
 // Imports are required. A missing or broken module prevents startup.
 const sessions = sessionsModule(store, options);
@@ -60,6 +65,11 @@ modules.push(leases.warm, createBaselinesModule(store, machines));
 modules.push(leases);
 modules.push(new AdminSystem(leases));
 modules.push(updatesModule(store, options));
+const observability = new Observability(store, options, leases.applications);
+modules.unshift(observability);
+// Every module above has created and migrated its tables; capture can now name their columns.
+observability.installCapture();
+observability.start();
 if (options.browserHosts?.length) store.transaction(db => db.exec(`
   CREATE TABLE IF NOT EXISTS browser_launches (host TEXT NOT NULL,id TEXT NOT NULL,intent TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(host,id))`));
 
@@ -115,6 +125,9 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
     db.prepare("UPDATE browser_launches SET state=? WHERE host=? AND id=? AND state!='closed'").run(command.state, command.hostId, command.id);
   });
   if (command.type === "requests.wake") return { ok: leases.requests.wake() };
+  // The one-second timer above owns admission. Held reads only look, all of them in one transaction.
+  if (command.type === "requests.read") return leases.requests.read(command.reads).map(item => "view" in item ? item : { error: described(item.error) });
+  if (command.type === "events.latest") return observability.latestSequence();
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);
     return { authenticated: true };
@@ -144,6 +157,17 @@ const messages: Record<number, string> = {
   410: "Authorization or resource lifetime ended.", 413: "Request exceeds its size limit.",
   429: "Controller service is busy.", 501: "This capability is unavailable.", 503: "Controller storage or service unavailable.",
 };
+/** Provider text and interpolated request values cannot enter errors or logs. */
+function described(known: ServiceError) {
+  return {
+    message: ({ request_kind_unsupported: "Use kind lease, linux-lease or model-job.",
+      request_waiting_limit: "Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",
+      request_priority_invalid: "Priority must be an integer within the application maximum.",
+      request_conflict: "Request UUID already has a different intent." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,
+    code: /^[a-z][a-z0-9_]{0,63}$/.test(known.code) ? known.code : "request_failed", retryable: known.retryable,
+    ...(known.outcome ? { outcome: known.outcome } : {}),
+  };
+}
 function reply(value: ControlReply): void { port.postMessage(value); }
 port.on("message", (message: { id: number; command: ControlCommand }) => {
   reply({ kind: "accepted", id: message.id });
@@ -152,15 +176,7 @@ port.on("message", (message: { id: number; command: ControlCommand }) => {
     const known = error instanceof ServiceError ? error : new ServiceError("Controller storage or service unavailable.", 503, {
       retryable: false, ...(mutation ? { outcome: "unknown" as const } : {}),
     });
-    // Provider text and interpolated request values cannot enter errors or logs.
-    reply({ kind: "error", id: message.id, error: {
-      message: ({ request_kind_unsupported: "Use kind lease, linux-lease or model-job.",
-        request_waiting_limit: "Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",
-        request_priority_invalid: "Priority must be an integer within the application maximum.",
-        request_conflict: "Request UUID already has a different intent." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,
-      code: /^[a-z][a-z0-9_]{0,63}$/.test(known.code) ? known.code : "request_failed", retryable: known.retryable,
-      ...(known.outcome ? { outcome: known.outcome } : {}),
-    } });
+    reply({ kind: "error", id: message.id, error: described(known) });
   });
 });
 reply({ kind: "ready" });

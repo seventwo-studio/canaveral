@@ -3,9 +3,11 @@
 Controller and worker contract, 2026-11-03. Fixture coverage establishes scoped
 eligibility and withdrawal behavior. Native deadline/cancellation/cleanup
 acceptance remains open; ordinary `Agent` configuration still rejects both
-`leaseProtocol` and `leaseImages` before creating runner state. Since 2026-11-19 the
-only exception is a supervised Android host with Android-only selectors; see
-[Android emulator leases](mobile-control.md#android-emulator-leases).
+`leaseProtocol` and `leaseImages` before creating runner state. There are two exceptions.
+Since 2026-11-19 a supervised Android host accepts Android selectors; see
+[Android emulator leases](mobile-control.md#android-emulator-leases). Since 2026-11-21 a
+supervised macOS host accepts iOS selectors that each declare the `shared-host` isolation
+class; see [iOS simulator leases](mobile-control.md#ios-simulator-leases).
 
 An installed image is not automatically eligible for consumer execution. A host
 offering `leaseProtocol: 1` must explicitly identify each eligible image revision,
@@ -32,7 +34,8 @@ gate to make this example acquire a machine.
 
 ## Binding and defaults
 
-Each entry has exactly `id`, `revision`, `arch` and `runtime`. It must uniquely
+Each entry has exactly `id`, `revision`, `arch` and `runtime`. An iOS entry, and only an iOS
+entry, has a fifth field, `isolation`; see [isolation class](#isolation-class). It must uniquely
 match a currently offered installed image and that image's actual configured
 runtime. Physical hosts resolve runtimes through the existing platform/runtime
 configuration; legacy single-runtime and KubeVirt offers bind to their adapter.
@@ -49,6 +52,30 @@ Selectors without the protocol are inactive. This tightens the experimental
 controller contract; ordinary administrative hosts never advertised consumer
 execution. No installed image, imported image, new revision or architecture
 inherits eligibility from another entry.
+
+## Isolation class
+
+Accepted decision, 2026-11-21. An iOS simulator app is an ordinary process of the Mac host's
+user, with the host's network and files, so a leased simulator cannot be fenced from its host.
+iOS simulator leases are therefore operator opt-in under a declared class, for trusted code
+only. The declaration is part of the selector:
+
+```json
+{ "id": "ios-phone", "revision": "1", "arch": "arm64", "runtime": "ios", "isolation": "shared-host" }
+```
+
+- `shared-host` is the only value, and `runtime: "ios"` is the only runtime that takes it.
+- An iOS selector without it is refused by the host at start-up and rejected by the controller
+  in the offer. There is no default, no host-wide switch and no environment variable.
+- A selector of any other runtime that carries `isolation` is rejected.
+- The controller matches the complete selector, so an iOS image is eligible on a host only
+  while that host's selector carries the declaration. Withdrawing it has the effects under
+  [enforcement and withdrawal](#enforcement-and-withdrawal).
+- The declaration does not replace the application's template allowlist. Both must admit a lease.
+- The controller shows the class to the consumer as `isolation: "shared-host"` on the catalogue
+  entry and on the lease and its member. A template without a declared class has no such field.
+
+Nothing may describe an iOS lease as isolated from its host.
 
 ## Enforcement and withdrawal
 
@@ -90,6 +117,10 @@ such an image only while it stores exactly that baseline, made from the template
 device definition and not stale.
 
 ## Evidence and remaining work
+
+The iOS selector gate, the isolation class in consumer views and the host's own refusal are
+covered by [ios-leases.test.ts](../coordination/test/control/ios-leases.test.ts). That is
+fixture evidence only; no leased simulator has run on real CoreSimulator.
 
 Eight dedicated controller fixtures cover mixed Apple/Android offers, legacy
 default denial, immutable revision/architecture/runtime binding, newly installed

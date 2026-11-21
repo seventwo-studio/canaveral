@@ -19,7 +19,11 @@ export interface HostAuthenticateCommand { type: "hosts.authenticate"; hostId: s
 interface BrowserAuthorizeCommand { type: "browsers.authorize"; token: string }
 type BrowserLaunchCommand = { type: "browsers.launch"; hostId: string; intent: Record<string, unknown>; adminToken?: string };
 type BrowserReceiptCommand = { type: "browsers.receipt"; hostId: string; id: string; state: "active" | "closed" };
-export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
+/** Views of waiting requests for held reads, answered in one transaction. Unlike the HTTP route it runs no
+ * admission pass. Each read is verified against its own credential; one refusal does not affect the others. */
+export interface RequestReadsCommand { type: "requests.read"; reads: { token: string; id: string }[] }
+export type RequestRead = { view: unknown } | { error: { message: string; status: number; code: string; retryable: boolean } };
+export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | RequestReadsCommand | { type: "requests.wake" } | { type: "events.latest" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
   return command.type === "browsers.launch" || command.type === "browsers.receipt" || command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
@@ -67,6 +71,7 @@ export class ControlClient extends EventEmitter {
       ...(options.enrollmentToken === undefined ? {} : { enrollmentToken: options.enrollmentToken }),
       ...(options.updatePublicKeys === undefined ? {} : { updatePublicKeys: options.updatePublicKeys }),
       ...(options.browserHosts === undefined ? {} : { browserHosts: options.browserHosts }),
+      ...(options.observability === undefined ? {} : { observability: options.observability }),
     } });
     this.startup = setTimeout(() => { void this.close(); }, 20_000);
     this.startup.unref();
@@ -76,6 +81,7 @@ export class ControlClient extends EventEmitter {
   }
 
   wakeRequests(): Promise<unknown> { return this.request({ type: "requests.wake" }); }
+  readRequests(reads: { token: string; id: string }[]): Promise<RequestRead[]> { return this.request({ type: "requests.read", reads }); }
 
   private unavailable(mutation = false): ServiceError {
     return new ServiceError("Controller response was not confirmed. Inspect state before another mutation.", 503, {
@@ -108,6 +114,8 @@ export class ControlClient extends EventEmitter {
   }
 
   request(command: { type: "requests.wake" }): Promise<unknown>;
+  request(command: RequestReadsCommand): Promise<RequestRead[]>;
+  request(command: { type: "events.latest" }): Promise<number>;
   request(command: BrowserAuthorizeCommand | BrowserReceiptCommand): Promise<unknown>;
   request(command: BrowserLaunchCommand): Promise<boolean | "inspect">;
   request(command: HttpCommand): Promise<ControlResponse | undefined>;

@@ -77,6 +77,8 @@ lease's own Android emulator with the lease's current key, for CI and marketing 
 It uses the same broker protocol, verification and receipt as `MobileVideoClient`, at
 `/v1/leases/{lease}/video-sessions`. See
 [lease recording and large installs](mobile-control.md#lease-recording-and-large-installs).
+An iOS simulator lease refuses recording with `capability_unsupported`; see
+[iOS scoped control](mobile-control.md#ios-scoped-control).
 
 ```ts
 const lease = new LeaseClient({ baseUrl, leaseId, leaseKey });

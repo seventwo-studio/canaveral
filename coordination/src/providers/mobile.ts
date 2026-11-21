@@ -26,7 +26,8 @@ export interface NativePipe {
   resize?(rows: number, cols: number): Promise<void>;
 }
 export interface NativeChild { pid: number; processStartedAt?: number; stopped(): Promise<boolean> }
-/** A leased emulator owned by the independent native lease supervisor. */
+/** The supervised child of the independent native lease supervisor: a leased emulator, or a
+ * leased simulator's control companion. */
 export interface SupervisedChild { pid: number; supervisorPid: number; supervisorExited(): Promise<boolean> }
 /** `lease-supervise` exit status that proves it spawned nothing. Any other status is not that proof. */
 export const SUPERVISOR_REFUSED = 75;
@@ -40,7 +41,7 @@ export interface WarmAuthorization { holdID: string; remainingSeconds: number }
 /** One native sample: the clock, plus whether a live supervisor holds the storage's lifetime lock. */
 export interface LeaseSupervisorStatus extends LeaseClockSample { supervisor: "held" | "free" | "absent" }
 export interface LeaseSupervisorTransport {
-  /** Starts `lease-supervise` detached; resolves after its launch record names the emulator. */
+  /** Starts `lease-supervise` detached; resolves after its launch record names the supervised child. */
   supervise(helper: string, storage: string, request: RecordValue): Promise<SupervisedChild>;
   clock(helper: string): Promise<LeaseClockSample>;
   /** Positively absent process group only; never signals it. */
@@ -49,7 +50,15 @@ export interface LeaseSupervisorTransport {
   status(helper: string, storage: string): Promise<LeaseSupervisorStatus>;
   /** Every visible process command line, for proving that a launch left nothing running. */
   commandLines(): Promise<string[]>;
+  /** One bounded, read-only process inventory against a leased simulator's own device. `tree`
+   * is `absent` when no member of its tree is present (its own launchd_sim, an executable
+   * started from inside the device, a member the supervisor recorded, or a descendant of
+   * those), `present` when one is, and `unknown` when the record lost members. `observed`
+   * says whether the device's launchd_sim was ever seen: an absent tree that was never
+   * observed is no evidence that a booted simulator stopped. Never signals anything. */
+  simulatorTree(helper: string, storage: string, deviceSet: string, udid: string): Promise<SimulatorTree>;
 }
+export interface SimulatorTree { tree: "absent" | "present" | "unknown"; observed: boolean }
 export interface MobileTransport {
   run(argv: readonly string[], options: RunOptions): Promise<CommandResult>;
   spawn?(argv: readonly string[], options: RunOptions & { log: string }): Promise<NativeChild>;
