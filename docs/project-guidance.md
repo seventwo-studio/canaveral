@@ -8,6 +8,7 @@ interpreter dependency to the controller, host or SDK; see
 [managed model runtimes](model-runtimes.md).
 
 - [access transport](access-transport.md)
+- [alerts](alerts.md) (Slack and signed webhook destinations, durable at-least-once delivery; fixture-covered)
 - [user accounts and personal API tokens](accounts-and-tokens.md)
 - [android runtime ownership](android-runtime-ownership.md)
 - [android transfer](android-transfer.md)
@@ -19,6 +20,9 @@ interpreter dependency to the controller, host or SDK; see
 - [consumer operations](consumer-operations.md)
 - [dashboard](dashboard.md)
 - [devices](devices.md)
+- [canaveral doctor](doctor.md) (read-only diagnosis with stable finding codes)
+- [error codes](error-codes.md) (every stable `code`, its status, meaning and retry guidance; checked against source)
+- [event log](events.md) (durable history captured with each state change, cursor reads and live follow; fixture-covered)
 - [remote mobile control and CI builds](mobile-control.md)
 - [guest access](guest-access.md)
 - [image registry](image-registry.md)
@@ -55,6 +59,7 @@ interpreter dependency to the controller, host or SDK; see
 - [session protocol](session-protocol.md)
 - [templates](templates.md)
 - [terminal sdk](terminal-sdk.md)
+- [usage reporting](usage.md) (requests, waits, leases and device-seconds from controller ledgers; not measured utilisation)
 - [tls clients](tls-clients.md)
 - [visual sdk](visual-sdk.md)
 - [windows guest accessibility](windows-guest-accessibility.md)

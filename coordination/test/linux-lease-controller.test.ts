@@ -1,3 +1,4 @@
+import { dropEventTriggers } from "../src/events.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -596,7 +597,8 @@ test("additive failure-reason migration preserves existing lease and reservation
   const f = await fixture(t), app = await f.application(); await f.grant(app.id);
   const domain = await f.domain(VM), runner = await f.enroll(); await f.approve(runner, domain);
   const {lease} = await app.client().acquireLease(f.acquire());
-  const db = new DatabaseSync(f.statePath); db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason'); db.close();
+  // A database from before this column has no event capture either; SQLite refuses to drop a column a trigger reads.
+  const db = new DatabaseSync(f.statePath); dropEventTriggers(db); db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason'); db.close();
   await f.restart();
   assert.equal((await app.client().inspectLease(lease.id)).state, 'provisioning');
   assert.equal((await f.inspectDomain(domain)).reservations, 1);

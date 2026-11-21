@@ -21,6 +21,8 @@ import { AdminSystem } from "./admin-system.ts";
 import { LegacyLeases } from "./leases.ts";
 import { createModule as updatesModule } from "./updates.ts";
 import { requireHostAdmission, hostAdmissionClosed } from "./maintenance.ts";
+import { Observability } from "./observability.ts";
+import { installObservability, observabilitySettings } from "../observability.ts";
 import { requireAdmin } from "./contracts.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
 import { mutatesControlCommand } from "./client.ts";
@@ -33,10 +35,13 @@ const options: ControlOptions = {
   ...(workerData.enrollmentToken === undefined ? {} : { enrollmentToken: secret(workerData.enrollmentToken) }),
   ...(workerData.updatePublicKeys === undefined ? {} : { updatePublicKeys: workerData.updatePublicKeys as Record<string, string> }),
   ...(Array.isArray(workerData.browserHosts) ? { browserHosts: workerData.browserHosts.map(identifier) } : {}),
+  ...(workerData.observability === undefined ? {} : { observability: observabilitySettings(workerData.observability) }),
 };
 if (options.adminToken === options.enrollmentToken) throw new Error("Admin and enrollment credentials must be different.");
 const operatorHash = createHash("sha256").update(options.adminToken, "ascii").digest();
 const store = new SqliteStore(workerData.path as string);
+// Before any module: triggers kept from an earlier run already fire during module construction.
+installObservability(store);
 const accounts = new Accounts(store);
 // Imports are required. A missing or broken module prevents startup.
 const sessions = sessionsModule(store, options);
@@ -58,6 +63,11 @@ const leases = new LegacyLeases(store, options);
 modules.push(leases);
 modules.push(new AdminSystem(leases));
 modules.push(updatesModule(store, options));
+const observability = new Observability(store, options, leases.applications);
+modules.unshift(observability);
+// Every module above has created and migrated its tables; capture can now name their columns.
+observability.installCapture();
+observability.start();
 if (options.browserHosts?.length) store.transaction(db => db.exec(`
   CREATE TABLE IF NOT EXISTS browser_launches (host TEXT NOT NULL,id TEXT NOT NULL,intent TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(host,id))`));
 
@@ -112,6 +122,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
     db.prepare("UPDATE browser_launches SET state=? WHERE host=? AND id=? AND state!='closed'").run(command.state, command.hostId, command.id);
   });
   if (command.type === "requests.wake") return { ok: leases.requests.wake() };
+  if (command.type === "events.latest") return observability.latestSequence();
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);
     return { authenticated: true };

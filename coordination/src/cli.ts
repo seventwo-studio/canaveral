@@ -10,6 +10,8 @@ import {
   privateInput, privateOutput, promptPassword, record, removeSameFile, uuid,
 } from "./account-cli.ts";
 import type { AccountContext, CliArguments, RequestClient } from "./account-cli.ts";
+import { handleObservability, OBSERVABILITY_COMMANDS } from "./observability-cli.ts";
+import type { ObservabilityIO } from "./observability-cli.ts";
 
 const HELP = `Canaveral machine and inference orchestration
 Usage: canaveral [--url ORIGIN] [--token-file FILE] [--allow-http] COMMAND [options]
@@ -36,6 +38,14 @@ app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
 image capture --request-file FILE | image-task ID
+events [--after SEQ | --tail N] [--kind KIND]... [--since TIME] [--limit N] [--follow] [--own] [--text]
+                                         Durable event log; --follow streams, --own reads as an application
+usage [--last 24h | --from TIME --to TIME] [--group-by application|template|platform|host]
+      [--format text|json|csv] [--own]   Requests, waits, leases and device-seconds over a range
+alerts list | deliveries | remove ID | test ID [--request-id UUID]
+alerts add --request-id UUID --name NAME --type slack|webhook --url-file FILE
+           [--secret-file FILE] [--kind KIND]...
+doctor [--json]                          Read-only diagnosis; exits 1 when it has findings
 updates [options] COMMAND                Manage signed runtime releases and rollouts
 install [options]                        Verify a fresh Unix installation; generate service config
 
@@ -44,6 +54,9 @@ serve flags: --bind IP --port PORT --database FILE --admin-token-file FILE
 serve --config FILE accepts the explicit controller configuration used by src/main.ts.
 Account create/mint commands require a stable --request-id. Passwords and issued
 credentials stay in private files. Never retry an uncertain mutation with a new ID.
+events and usage filters: --application ID --lease ID --request ID --host ID --machine ID
+(events), --application ID (usage). KIND is an event kind or a family such as lease.*.
+Alert webhook URLs and signing secrets are read from private 0600 files, never arguments.
 Local Linux: --linux-image FILE --apple-runner FILE --guest-helper-manifest FILE
 (or CANAVERAL_GUEST_BUNDLE) requires an installed, runnable TypeScript guest bundle.
 Local macOS: --macos-image DIR --macos-restore-image FILE.ipsw --apple-runner FILE
@@ -80,6 +93,10 @@ const schemas: Record<string, Schema> = {
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
+  events: { flags: ["follow", "own", "text"], values: ["after", "tail", "kind", "since", "limit", "application", "lease", "request", "host", "machine"] },
+  usage: { flags: ["own"], values: ["from", "to", "last", "group-by", "format", "application"] },
+  alerts: { actions: ["list", "add", "remove", "test", "deliveries"], defaultAction: "list" },
+  doctor: { flags: ["json"] },
 };
 const subSchemas: Record<string, Schema> = {
   "maintenance:begin": { positional: 1, values: ["id", "reason"] },
@@ -95,6 +112,8 @@ const subSchemas: Record<string, Schema> = {
   "leases:acquire": { values: ["request-file"], required: ["request-file"] }, "leases:templates": {}, "leases:list": { values: ["after"] },
   "apps:list": {}, "apps:create": { values: ["request-file", "output-file"], required: ["request-file", "output-file"] },
   "apps:credential": { positional: 1, values: ["output-file"], required: ["output-file"] }, "apps:revoke": { positional: 1 },
+  "alerts:list": {}, "alerts:deliveries": { values: ["destination", "state"] }, "alerts:remove": { positional: 1 }, "alerts:test": { positional: 1, values: ["request-id"] },
+  "alerts:add": { values: ["request-id", "name", "type", "url-file", "secret-file", "kind"], required: ["request-id", "name", "type", "url-file"] },
 };
 
 /** Strict, command-specific parsing. Global flags retain their original before-command position. */
@@ -121,7 +140,7 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
   const schema = subSchemas[`${command}:${action}`] ?? initial;
   const options: NonNullable<ParseArgsConfig["options"]> = {};
   for (const name of schema.flags ?? []) options[name] = { type: "boolean" };
-  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" ? { multiple: true } : {}) };
+  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" || name === "kind" ? { multiple: true } : {}) };
   const result = parseArgs({ args: tail, options, allowPositionals: true, strict: true });
   if (command === "lease" && result.positionals.length === 2) {
     action = result.positionals.pop()!;
@@ -228,6 +247,8 @@ export interface CliIO {
   output: typeof privateOutput;
   runtime: CliRuntime;
   signal?: AbortSignal;
+  /** Connection probe used by `doctor`; portable tests replace it. */
+  probe?: ObservabilityIO["probe"];
 }
 function signals(external?: AbortSignal): { signal: AbortSignal; dispose(): void } {
   if (external) return { signal: external, dispose() {} };
@@ -506,6 +527,7 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       if (args.action === "prepare") { if (!value.source) throw new CliError("This template has no base image source to cache."); result.image = await io.runtime.prepareImage(record(value.source), option(args, "cache", "./state/images")); }
       io.stdout(JSON.stringify(result, null, 2) + "\n"); return 0;
     }
+    if (OBSERVABILITY_COMMANDS.includes(args.command)) return await handleObservability(args, { stdout: io.stdout, stderr: io.stderr, client: io.client, ...(io.signal ? { signal: io.signal } : {}), ...(io.probe ? { probe: io.probe } : {}) });
     const account: AccountContext = { client: token => io.client(args.url, token, args.allowHttp), password: io.password, output: io.output, print: value => io.stdout(JSON.stringify(value, null, 2) + "\n") };
     if (!await handleAccount(args, account)) await handleRemote(args, io);
     return 0;

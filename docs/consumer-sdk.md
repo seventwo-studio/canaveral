@@ -110,6 +110,15 @@ and fake-peer fixture coverage, without native execution acceptance.
 
 The [waiting request contract](requests.md) is opt-in. Request methods use only the application key, preserve caller UUIDs, and never poll or retry. `submitRequest` accepts `kind: "model-job"` with a `ModelJobIntent` (`{adapter, model, digest, prompt, maxTokens}`) for [queued model calls](requests.md#queued-model-calls); request views of that kind return a `ModelJobRequestIntent` (`{adapter, model, digest, promptDigest, maxTokens}`), never the prompt. Types and methods are also exposed through `sdk.ts`.
 
+`listEvents`, `followEvents` and `usage` read the application's own
+[event history](events.md) and [usage](usage.md) with the application key.
+`listEvents` returns one page and its `cursor`. `followEvents` is an async
+iterator over one server-sent event stream: it ends when the controller ends the
+stream, throws a transport error when the connection fails and never reconnects.
+Resume with `after` set to the last `sequence` received. Stop iterating or abort
+its `signal` to close it. `usage` returns the JSON report; request CSV from the
+route directly. A lease key cannot call these methods. Fixture coverage only.
+
 Linux lease acquisition and renewal require integer `ttlSeconds >= 30`, bounded
 by the application's maximum. The controller returns 400
 `linux_ttl_below_minimum` below this minimum. Acquisition also refuses a

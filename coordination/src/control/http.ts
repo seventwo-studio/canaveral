@@ -6,6 +6,8 @@ import { object, ServiceError } from "../errors.ts";
 import { createIdentityHandler, limitServer } from "../http.ts";
 import type { IdentityClient } from "../identity-client.ts";
 import type { ControlClient, HttpCommand } from "./client.ts";
+import { createEventStream } from "./event-stream.ts";
+import type { StreamRequester } from "./event-stream.ts";
 
 type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
 export type ControllerHandler = (request: IncomingMessage, response: ServerResponse) => void;
@@ -86,7 +88,15 @@ export function respond(response: ServerResponse, value: unknown, status = 200):
   response.end(encoded);
 }
 
-function envelope(error: unknown, requestId: string, mutation: boolean) {
+/** Text a module produced in a named media type, such as a CSV report. Never used for errors. */
+function respondText(response: ServerResponse, text: string, contentType: string, status = 200): void {
+  if (response.destroyed) return;
+  const encoded = Buffer.from(text);
+  response.writeHead(status, { "Content-Type": contentType, "Content-Length": encoded.length, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Connection": "close" });
+  response.end(encoded);
+}
+
+export function envelope(error: unknown, requestId: string, mutation: boolean) {
   const known = error instanceof ServiceError ? error : new ServiceError("Controller storage or service unavailable.", 503, {
     retryable: false, ...(mutation ? { outcome: "unknown" as const } : {}),
   });
@@ -100,9 +110,19 @@ function envelope(error: unknown, requestId: string, mutation: boolean) {
 export function createControllerHandler(control: Requester, identities: IdentityClient): ControllerHandler {
   const bodies = new WeakMap<IncomingMessage, Record<string, unknown>>();
   const identity = createIdentityHandler(identities, request => bodies.get(request));
+  const streams = createEventStream(control as unknown as StreamRequester);
   let inFlight = 0;
   return (request, response) => {
     const requestId = randomUUID();
+    // A follower holds its connection for up to an hour; it has its own bound and never occupies a request slot.
+    if (request.method === "GET" && /^\/v1\/(?:admin\/)?events\/stream\/?(?:\?|$)/.test(request.url ?? "")) {
+      void (async () => { await streams.handle(request, response, requestTarget(request)); })().catch((error: unknown) => {
+        request.resume();
+        const result = envelope(error, requestId, false);
+        if (response.headersSent) response.destroy(); else respond(response, result.body, result.status);
+      });
+      return;
+    }
     if (inFlight >= 64) {
       const result = envelope(new ServiceError("Controller service is busy.", 429, { retryable: false }), requestId, false);
       respond(response, result.body, result.status); request.resume(); return;
@@ -144,7 +164,8 @@ export function createControllerHandler(control: Requester, identities: Identity
         // Identity-owned releases, runner receipts and policy changes wake the sole queue owner.
         response.once("finish", () => { if (request.method === "POST") void control.wakeRequests?.().catch(() => {}); });
         identity(request, response);
-      } else respond(response, result.body, result.status);
+      } else if (result.contentType !== undefined && typeof result.body === "string") respondText(response, result.body, result.contentType, result.status);
+      else respond(response, result.body, result.status);
     })().catch((error: unknown) => {
       request.resume();
       const result = envelope(error, requestId, dispatched && request.method === "POST");
