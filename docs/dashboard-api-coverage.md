@@ -83,7 +83,8 @@ building or testing these screens.
 
 | Method and path | Request | Effect |
 | --- | --- | --- |
-| `GET /v1/admin/system` | none | Redacted activity across application, lease, request, job, operation and session ledgers |
+| `GET /v1/admin/system` | none | Redacted activity across application, lease, request, job, operation and session ledgers. Leases carry `name`, the caller's label, when one was given; `observedAt` is the controller's clock for the page |
+| `GET /v1/admin/queue` | none | The waiting queue in attempt order with position and last refusal code, and the active leases that hold capacity; see [the administrator queue view](requests.md#administrator-queue-view) |
 | `GET /v1/admin/configuration` | none | Configured models, domains, grants, approvals, runner bindings/enrollments and application artifact metadata |
 | `POST /v1/admin/leases/{id}/release` | `{id: mutationUUID}` | Terminalize the lease using its owning backend's cleanup rules |
 | `POST /v1/admin/sessions/{id}/close` | `{id: mutationUUID}` | Revoke a single access/video session without ending its lease |

@@ -44,6 +44,36 @@ function positions(db: DatabaseSync, now: number, application: string): Map<stri
   const rows = db.prepare(`SELECT id,position FROM (${POSITIONS}) WHERE application=?`).all(now, application) as unknown as { id: string; position: number }[];
   return new Map(rows.map(row => [row.id, Number(row.position)]));
 }
+/** A waiting request as the administrator queue view reads it. Only identifiers, the caller's display label and
+ * queue state leave the row: the stored intent, resources and source are never part of it. */
+export interface WaitingRequest {
+  application: string; id: string; kind: RequestKind; priority: number; created: number; deadline: number | null; reason: string | null;
+  /** The same attempt order request views carry; null for model calls and for a request past its deadline. */
+  position: number | null;
+  label: string | null; templateId: string | null; templateRevision: string | null; arch: string | null; model: string | null;
+}
+/** Every waiting request across applications in the order the admission pass would try them, read in one statement
+ * from the same POSITIONS order the consumer view uses, so an administrator and an application never see two
+ * orders. Positioned requests come first, in position order; model calls and requests past their deadline have no
+ * position and follow in arrival order. `total` counts every waiting request, so a bounded page can say what it
+ * left out. It reads only: no admission pass and no expiry runs here. */
+export function waitingRequests(db: DatabaseSync, now: number, limit: number): { requests: WaitingRequest[]; total: number } {
+  const field = (path: string, name: string) => `CASE WHEN json_valid(r.intent) THEN json_extract(r.intent,'${path}') END AS ${name}`;
+  const rows = db.prepare(`SELECT r.application,r.id,r.kind,r.priority,r.created,r.deadline,r.reason,p.position,
+      ${field("$.name", "label")},${field("$.templateId", "templateId")},${field("$.templateRevision", "templateRevision")},${field("$.arch", "arch")},${field("$.model", "model")}
+    FROM requests r LEFT JOIN (${POSITIONS}) p ON p.application=r.application AND p.id=r.id
+    WHERE r.state='waiting' ORDER BY p.position IS NULL,p.position,r.sequence LIMIT ?`).all(now, limit) as unknown as Record<string, unknown>[];
+  const text = (value: unknown) => typeof value === "string" && value.length <= 200 ? value : null;
+  return {
+    requests: rows.map(row => ({ application: String(row.application), id: String(row.id), kind: row.kind as RequestKind, priority: Number(row.priority), created: Number(row.created),
+      deadline: row.deadline === null ? null : Number(row.deadline),
+      // A refusal reason is a stable code; anything else stays in the ledger.
+      reason: typeof row.reason === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(row.reason) ? row.reason : null,
+      position: row.position === null ? null : Number(row.position), label: text(row.label), templateId: text(row.templateId), templateRevision: text(row.templateRevision),
+      arch: text(row.arch), model: text(row.model) })),
+    total: Number(db.prepare("SELECT COUNT(*) AS n FROM requests WHERE state='waiting'").get()!.n),
+  };
+}
 export function requestSchema(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS requests (
     application TEXT NOT NULL,id TEXT NOT NULL,kind TEXT NOT NULL,intent TEXT NOT NULL,resources TEXT NOT NULL,priority INTEGER NOT NULL,
