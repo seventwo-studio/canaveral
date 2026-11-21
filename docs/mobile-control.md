@@ -1204,8 +1204,8 @@ logs therefore cannot depend on `command` as they do on Android. On an iOS membe
 `files`, the capability that already covers installing a build and reading its app container.
 This is a mapping, not a new capability: the capability set on the wire is unchanged.
 
-`install` (a host-configured artifact), `permission`, `location` and `rotate` are not lease
-actions on either platform.
+The `input` capability also permits `location` and `rotate` on the leased simulator.
+Host-configured `install` and iOS app permission changes require administrator access.
 
 **What a lease holder sees of the host.** `simctl` output carries the host's layout, so a
 lease result is not passed through raw:

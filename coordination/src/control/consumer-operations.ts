@@ -96,8 +96,8 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       requireHostAdmission(db, String(machine.host));
       const image = object(JSON.parse(String(machine.template))), cap = actionCapability(request.action, image);
       if (!cap || !capabilities(image)[cap as keyof ReturnType<typeof capabilities>]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
-      // These extra lease actions are covered by the Android device contract.
-      if (DEVICE_ONLY.has(request.action) && image.os !== "android") throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
+      // These inputs need a mobile device. Their capabilities still gate each action.
+      if (DEVICE_ONLY.has(request.action) && image.os !== "android" && image.os !== "ios") throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
       // The Android provider grants or revokes; refuse a reset here instead of queueing an operation that can only fail.
       if (request.action === "permission" && request.arguments.state === "reset") throw new ServiceError("A lease key grants or revokes a permission; reset is unsupported.", 400);
       if (lease.state !== "ready" || !legacyMachineReady(db, machine, store.clock())) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });

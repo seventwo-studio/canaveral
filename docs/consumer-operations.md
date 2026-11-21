@@ -58,7 +58,8 @@ lease wire. Each route must validate its own action envelope and refuse missing
 provider bindings before dispatch. Mobile lease members accept the device actions listed
 for [Android](mobile-control.md#scoped-control) and [iOS](mobile-control.md#ios-scoped-control).
 The host-side `install` action stays administrative. Android lease keys can also use
-`permission`, `location` and `rotate` on their own emulator. iOS
+`permission`, `location` and `rotate` on their own emulator. iOS lease keys can use
+`location` and `rotate` on their own simulator. iOS
 shell and headless graphical operations remain unsupported: an iOS template has no `command`
 or `pty` capability, so on an iOS member the app lifecycle and log actions need `files`
 instead of `command`.
