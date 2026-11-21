@@ -311,11 +311,8 @@ the request ledger for its range.
 - Component tests, gateway tests against a real loopback controller and browser
   fixtures at 320 and 1440 pixels cover these pages. No host, emulator, simulator or
   lease run took part. Nothing here establishes native runtime acceptance.
-- There is no side-by-side live view of several mobile devices. It depends on a
-  live screen relay for mobile devices on remote hosts, which is separate work. It
-  is not approximated by polling screenshots: each screenshot is a durable,
-  journaled device operation. A leased device's screen is never an administrator
-  view either way, because lease sessions accept only the lease's own key.
+- These three pages show no device screens. Live pictures are on the
+  [screen wall](#screen-wall), for account-owned devices only.
 - Alerts, diagnosis, host pressure, runtime management, iOS leases and warm pools
   have no dashboard page.
 - Activity shows the administrator view only. Access sessions and model job state
@@ -769,11 +766,13 @@ positive cleanup without abandonment; see the [recording cleanup trial](../coord
 ## Owner live screen
 
 The gateway relays a live view of an account-owned mobile device, so a dashboard
-can show devices that run on another machine than the dashboard itself. This is the
-API and relay only; the pages that show one or several screens are separate work
-and use the routes and messages below. The contract is
-[live screen](mobile-control.md#live-screen). Fixture-covered only: no browser has
-decoded a live view, and no native run has measured its frame rate or latency.
+can show devices that run on another machine than the dashboard itself. The
+[screen wall](#screen-wall) uses the routes and messages below; Machine Control
+does not use them yet. The contract is
+[live screen](mobile-control.md#live-screen). Fixture-covered only: Chromium has
+decoded fixture segments through this relay (see the screen wall), no browser has
+decoded a native device's stream, and no native run has measured its frame rate or
+latency.
 
 Send JSON mutations with the dashboard session cookie and matching Origin.
 
@@ -807,8 +806,9 @@ Messages the page receives, in order:
    each) that total exactly its `bytes`:
    - `{"type":"init","epoch","bytes"}`: the initialization segment (`ftyp` and
      `moov`) of an epoch. The page reads the codec string from it. When a later
-     epoch starts, the page is expected to append its `init` to the `SourceBuffer`
-     it already has; no browser has been tried.
+     epoch starts, the page appends its `init` to the `SourceBuffer` it already
+     has. Chromium accepts that for fixture segments; no native stream has been
+     tried.
    - `{"type":"segment","epoch","sequence","keyframe","bytes"}`: one media segment
      (`moof` and `mdat`). The first of an epoch, and the first after a gap in
      `sequence`, is a key frame segment.
@@ -830,3 +830,59 @@ While a recording of the device runs, its viewers are fed the recording's stream
 as an epoch of its own. Input stays on the existing device operations (`tap`,
 `swipe`, `text`, `key`, `rotate` through POST `/api/v1/machines/{machine}/operations`);
 the live view carries none.
+
+## Screen wall
+
+**Screens** (`#screens`, under Workspace, for every account) shows up to four
+running mobile devices side by side, live and watch-only. It is built on the
+[owner live screen](#owner-live-screen) relay and adds no route of its own.
+
+- **Which devices.** A device is offered while it is a running Android or iOS
+  device that belongs to an account: its owner sees it, and an administrator sees
+  every account's. A device without a user owner is not offered to anyone. A leased
+  machine never has a user owner, so no leased device can appear, and the
+  controller refuses a leased device on this route as well. A leased device's
+  screen belongs to its lease holder.
+- **Nothing is captured until asked.** Opening the page opens no view. **Watch**
+  adds a device to the wall, up to four; `#screens/<uuid>+<uuid>` in the address
+  names the devices, so a reload or a shared link shows the same ones. Nothing is
+  kept in browser storage. The page states the cost: each watched device runs one
+  capture on its host, one of that host's four video sessions, with one CPU and
+  256 MiB reserved.
+- **One view per tile.** A tile opens a view with a 60-second lifetime and renews
+  it in-band every 20 seconds, only while its picture is on screen and the tab is
+  visible. A tile that is scrolled away or a tab in the background stops renewing,
+  so its view lapses and the capture stops within a minute. When the picture
+  returns it renews at once, or opens a new view if the old one lapsed meanwhile.
+  **Stop watching**, leaving the page and page unload (with a keepalive request)
+  close the view.
+- **Watch-only.** The picture has no controls and takes no input. **Open control**
+  opens the device's Machine Control, where input goes through the durable device
+  operations.
+- **States.** A tile says *Connecting*, then *Connected* until the first frame
+  (a still Android screen sends none until it changes), then *Live*. An ending is
+  shown in words from its reason. Endings that are an ordinary state are shown as
+  one and not as an error: *Not offered* for a host that does not serve live
+  views (iOS is off unless the host opts in), *Full* when the device or host has
+  all its viewers or video sessions, *Stopped*, and *Paused* for a view that
+  lapsed off screen. Failures offer **Watch again** unless asking again cannot
+  help. A 401 signs the session out.
+- **Playback.** Segments are appended through Media Source Extensions in
+  `sequence` mode, so a later epoch or a gap where the runner dropped a slow
+  viewer's backlog continues on one timeline. The codec string comes from each
+  initialization segment. The element stays within 1.5 seconds of the newest frame
+  and keeps about ten seconds behind the playhead. A browser without Media Source
+  Extensions or H.264 decoding says so in the tile and leaves the view.
+- **One module.** The routes and messages are used by
+  `dashboard/src/lib/live-view.ts` only, because the relay is still under review.
+
+What has been verified: component and module tests with a stand-in socket, and a
+browser test in which the production gateway relays a stand-in controller's stream
+to Chromium at 320 and 1440 pixels. That stream is cut from an FFmpeg recording made
+with the runner's encoder arguments. Chromium decoded it, reported the encoded
+picture size, and accepted a second epoch's initialization segment on the same
+source buffer. What has not: a native device's stream, its frame rate and latency,
+rotation, a recording taking over and handing back, and any browser other than
+Chromium. `ManagedMediaSource`, which iPhone Safari offers in place of
+`MediaSource`, is selected when it is the only one present but has not been tried
+on a device. Nothing here establishes native runtime acceptance.

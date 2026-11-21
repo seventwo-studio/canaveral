@@ -50,13 +50,12 @@ store; browser storage is not used.
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
 | Mobile video admission, inspection and closure | Configuration; owner capture in machine details (PNG screenshot, verified MP4 recording) |
-| Live views of account-owned mobile devices | Gateway routes and relay only ([owner live screen](dashboard.md#owner-live-screen)); no page yet. A live capture appears under System as a video session |
+| Live views of account-owned mobile devices | Screens: up to four devices side by side, watch-only ([screen wall](dashboard.md#screen-wall)), over the [owner live screen](dashboard.md#owner-live-screen) relay. A live capture appears under System as a video session. Leased devices are never offered |
 | Managed update releases and rollouts | Configuration |
 | Event log (`/v1/admin/events`, `/v1/admin/events/kinds`) | Activity; filters, scroll-back and live updates by cursor |
 | Live event stream (`/v1/admin/events/stream`) | API and CLI only; not forwarded by the dashboard gateway. Activity reads the list route by cursor instead |
 | Usage reports (`/v1/admin/usage`) | Usage; JSON report and CSV download |
 | Alert destinations, deliveries and diagnosis (`/v1/admin/alerts`, `/v1/admin/diagnosis`) | API and CLI only; not forwarded by the dashboard gateway |
-| Side-by-side live view of several owned mobile devices | Not built. It needs the live screen relay for mobile devices on remote hosts, which is separate work; Machine Control shows one device at a time |
 
 ## Credential-specific protocols
 

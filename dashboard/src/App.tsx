@@ -37,6 +37,7 @@ import { SystemControl } from "@/components/system-control";
 import { RequestQueue } from "@/components/request-queue";
 import { ActivityFeed } from "@/components/activity-feed";
 import { UsageReport } from "@/components/usage-report";
+import { ScreenWall } from "@/components/screen-wall";
 import { subjects, validSubject } from "@/lib/activity";
 import { ApiWorkspace } from "@/components/api-workspace";
 import { ownerLabel } from "@/lib/admin";
@@ -202,6 +203,7 @@ const views = {
   orchestrators: {
     filters: ["all", "online", "offline", "draining"],
   },
+  screens: { filters: [] },
   builds: { filters: [] },
   previews: { filters: [] },
   models: { filters: [] },
@@ -957,6 +959,20 @@ export function App() {
                 void signOut(
                   "Administrator access ended. Sign in again to continue.",
                 );
+              }}
+            />
+          ) : view === "screens" ? (
+            <ScreenWall
+              key={user.id}
+              machines={inventory.machines}
+              hosts={inventory.hosts}
+              users={directory.data ?? []}
+              admin={user.role === "admin"}
+              loaded={loaded}
+              stale={stale}
+              onControl={setControlId}
+              onDenied={() => {
+                void signOut("Your session ended. Sign in again to continue.");
               }}
             />
           ) : view === "builds" ? (

@@ -961,8 +961,9 @@ starts at the most recent key frame the runner still holds, or else at the next
 one. A viewer that cannot keep up is not disconnected: the runner drops its backlog
 of more than 4 MiB and continues at a key frame, which shows as a gap in `sequence`.
 The first segment after any gap is a key frame segment. A new epoch starts with a new
-`init`, and a consumer restarts its decoder with it. A browser page is expected to
-append it to the `SourceBuffer` it already has; no browser has been tried.
+`init`, and a consumer restarts its decoder with it. A browser page appends it to
+the `SourceBuffer` it already has; the dashboard's screen wall does so, and Chromium
+accepts it for fixture segments. No native stream has been tried.
 
 Fragments and their key frames come from the encoder: the recording's FFmpeg
 arguments produce fragments of about 250 ms and a key frame every second, so a
@@ -1174,8 +1175,8 @@ routes, sharing, endings and accounting; no iOS live view has run natively.
 
 The dashboard gateway relays an owned device's live view for a same-origin cookie
 session, exactly as it relays the recording attachment; see
-[owner live screen](dashboard.md#owner-live-screen). The dashboard pages that show
-several screens are separate work.
+[owner live screen](dashboard.md#owner-live-screen). The dashboard's
+[screen wall](dashboard.md#screen-wall) shows up to four owned devices on it.
 
 ### Open native questions for live views
 
@@ -1183,8 +1184,11 @@ No device, emulator, simulator, adb, idb or FFmpeg ran for this work. Open:
 
 - Frame rate and end-to-end latency of a live view, and the delay before a
   joining viewer's first picture.
-- Whether a browser's Media Source Extensions accept these segments, and a new
-  initialization segment at each epoch.
+- Whether a browser's Media Source Extensions accept a native device's segments,
+  and a new initialization segment at each epoch. The dashboard's screen wall has
+  shown Chromium accepting both for segments cut from an FFmpeg fixture recording
+  made with the runner's encoder arguments. No native stream and no other browser
+  has been tried.
 - Key frame detection relies on the sample flags FFmpeg writes into each fragment
   (`trun`, `tfhd`, `trex`). The dashboard's verifier read the same flags from
   natively recorded files; the runner's parser has only seen fixture fragments.

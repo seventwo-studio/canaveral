@@ -285,6 +285,64 @@ describe("dashboard contracts", () => {
       expect(screen.getByRole("heading", { name: "Machines" })).toBeTruthy();
     },
   );
+  it("offers the screen wall to an ordinary account and lists only its running mobile devices", async () => {
+    const original = handler;
+    const phone = {
+      ...machine,
+      id: "m-phone",
+      name: "Pixel",
+      ownerId: "alice",
+      ready: true,
+      preparation: { state: "ready" },
+      template: { ...template, os: "android", mode: "device" },
+    };
+    handler = (p) =>
+      ["auth/login", "auth/session"].includes(p)
+        ? json({
+            user: {
+              id: "alice",
+              username: "alice",
+              role: "user",
+              status: "active",
+            },
+          })
+        : p === "machines"
+          ? json({
+              machines: [
+                { ...machine, ownerId: "alice" },
+                phone,
+                // A leased device has no user owner and is never offered.
+                { ...phone, id: "m-leased", name: "Leased", ownerId: null },
+              ],
+            })
+          : original(p);
+    location.hash = "screens";
+    const actor = userEvent.setup();
+    render(<App />);
+    await actor.type(await screen.findByLabelText("Username"), "alice");
+    await actor.type(screen.getByLabelText("Password"), "correct password");
+    await actor.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByRole("heading", { name: "Screens" });
+    await screen.findByRole("list", { name: "Devices you can watch" });
+    expect(
+      within(screen.getByRole("navigation", { name: "Main navigation" }))
+        .getByRole("link", { name: "Screens" })
+        .getAttribute("aria-current"),
+    ).toBe("page");
+    const offered = within(
+      screen.getByRole("list", { name: "Devices you can watch" }),
+    ).getAllByRole("listitem");
+    expect(offered.map((item) => item.querySelector("p")!.textContent)).toEqual(
+      ["Pixel"],
+    );
+    // Opening the page starts no capture and asks for nothing privileged.
+    expect(calls.some((c) => c.path.includes("live-views"))).toBe(false);
+    expect(calls.some((c) => c.path.startsWith("admin/"))).toBe(false);
+    await actor.click(screen.getByRole("link", { name: "Machines" }));
+    expect(
+      await screen.findByRole("heading", { name: "Machines" }),
+    ).toBeTruthy();
+  });
   it("shows fleet ownership and filters without changing lifecycle controls", async () => {
     const original = handler;
     handler = (p) =>

@@ -12,6 +12,7 @@ import {
   Settings,
   Library,
   Monitor,
+  MonitorPlay,
   Server,
   Orbit,
   Layers,
@@ -54,6 +55,13 @@ export const destinations = {
     label: "Machines",
     href: "#machines",
     icon: Monitor,
+    adminOnly: false,
+  },
+  screens: {
+    group: "Workspace",
+    label: "Screens",
+    href: "#screens",
+    icon: MonitorPlay,
     adminOnly: false,
   },
   builds: {

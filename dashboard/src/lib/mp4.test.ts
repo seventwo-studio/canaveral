@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
-import { verifyMp4 } from "./mp4";
+import { initSegment, verifyMp4 } from "./mp4";
 
 // Produced by FFmpeg with the runner's exact encoder arguments (src/mobile-video.ts).
 const fixture = new Uint8Array(
@@ -73,4 +73,21 @@ it("rejects a sample count beyond the file without iterating it", () => {
   const started = performance.now();
   expect(() => verifyMp4(data)).toThrow(/malformed|exceeds/);
   expect(performance.now() - started).toBeLessThan(200);
+});
+
+it("reads the codec string and picture size a decoder needs from an initialization segment", () => {
+  // The fixture's first two boxes, ftyp and moov, are what a live view sends as `init`.
+  const init = fixture.subarray(0, boxStarts(fixture, "moof")[0]!);
+  const info = initSegment(init);
+  expect(info.width).toBe(64);
+  expect(info.height).toBe(112);
+  // RFC 6381: profile, constraint flags and level from the H.264 configuration.
+  expect(info.codec).toMatch(/^avc1\.[0-9a-f]{6}$/);
+  expect(() => initSegment(init.subarray(28))).toThrow(
+    /does not start with ftyp/,
+  );
+  expect(() => initSegment(init.subarray(0, 400))).toThrow(/truncated/);
+  expect(() => initSegment(fixture.subarray(0, 28))).toThrow(
+    /one movie header/,
+  );
 });

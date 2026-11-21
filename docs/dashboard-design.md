@@ -15,6 +15,7 @@ The supplied release link requires a Mobbin login in the shared browser. The con
 | Signed out | Sign in | Enter the machine workspace. An invitation or recovery link opens the password claim form. |
 | Workspace | Overview (`#admin`, administrators) | Inspect machines needing attention, review fleet and access counts, or open an operational destination. |
 | Workspace | Machines (`#machines`) | Filter the fleet, create a machine, inspect details, start or control an eligible machine. Capture and power-off actions open against the selected machine. |
+| Workspace | Screens (`#screens`) | Choose up to four running, account-owned mobile devices and watch them live side by side. Open a device's control from its tile. `#screens/<uuid>+<uuid>` names the devices on the wall. |
 | Machine control | Selected machine | Use the available display, input, accessibility, file and terminal tools. A headless machine can expose files and terminals without a display connection. |
 | Machine sources | Image library (`#images`) | Search downloaded artifacts, inspect provenance and open a blueprint from a source. Administrators can open the registry, import images and inspect image activity. |
 | Machine sources | Machine blueprints (`#blueprints`) | Inspect immutable revisions and create a machine from an eligible offer. Administrators can create blueprints and revisions. |
