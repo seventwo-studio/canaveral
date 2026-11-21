@@ -11,10 +11,8 @@
  * backing path is the clone's own copied base image; otherwise it would read another device's
  * live file. Saving and cloning fail closed when that cannot be arranged.
  *
- * Implementation limit: which AVD files an emulator needs to boot from copied user data, and
- * whether it accepts a rebased overlay, is unverified. The backing check reads the recorded path
- * in the qcow2 header; no real overlay chain has been opened. No real AVD has been captured or
- * booted from a clone. Native acceptance is open. */
+ * The emulator uses a system-image version cache when deciding whether to recreate overlays.
+ * The clone gets a fresh cache derived from the pinned image's build properties. */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -50,22 +48,42 @@ const ZERO = Buffer.alloc(CHUNK);
 const refuse = (message: string, code: string): never => { throw new ServiceError(message, 409, { code }); };
 const identity = (stat: fs.BigIntStats): string => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join("/");
 function excluded(name: string): boolean { return EXCLUDED_FILES.has(name) || name.endsWith(".lock") || name.endsWith(".log") || name.endsWith(".tmp"); }
-function sha256File(file: string, limit: number): string | null {
+function readImageMetadata(file: string, limit: number): Buffer | null {
   let fd: number;
   try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > limit) return null;
-    return createHash("sha256").update(fs.readFileSync(fd)).digest("hex");
+    return fs.readFileSync(fd);
   } finally { fs.closeSync(fd); }
+}
+const metadataDigest = (data: Buffer | null): string | null =>
+  data === null ? null : createHash("sha256").update(data).digest("hex");
+const BUILD_PROP_LIMIT = 4 << 20;
+function imageDirectory(sdk: string, systemImage: string): string { return path.join(sdk, ...systemImage.split(";")); }
+function buildProperties(directory: string): Buffer | null {
+  return readImageMetadata(path.join(directory, "build.prop"), BUILD_PROP_LIMIT);
 }
 /** Identity of the installed system image a baseline was made from. The package path alone does
  * not change when the SDK manager replaces an image in place; its package and build metadata do. */
 export function systemImageIdentity(sdk: string, systemImage: string): BaselineManifest["systemImage"] | undefined {
-  const directory = path.join(sdk, ...systemImage.split(";"));
+  const directory = imageDirectory(sdk, systemImage);
   try { if (!fs.statSync(directory).isDirectory()) return undefined; } catch { return undefined; }
-  return { sourceProperties: sha256File(path.join(directory, "source.properties"), 1 << 20), buildProp: sha256File(path.join(directory, "build.prop"), 4 << 20) };
+  return { sourceProperties: metadataDigest(readImageMetadata(path.join(directory, "source.properties"), 1 << 20)),
+    buildProp: metadataDigest(buildProperties(directory)) };
+}
+/** QEMU recreates qcow2 disks when this cache is missing or differs from the system image.
+ * Derive it from the verified build.prop so previously saved baselines work without a new digest.
+ * The emulator reads the incremental property as a signed int and uses -1 when unavailable. */
+function restoreVersionCache(avd: string, build: Buffer | null): void {
+  const match = /^\s*ro\.build\.version\.incremental\s*=([^\r\n]*)/m.exec(build?.toString("utf8") ?? "");
+  const value = match?.[1]?.trim() ?? "";
+  const parsed = /^[+-]?\d+$/.test(value) ? Number(value) : -1;
+  const version = parsed >= -2147483648 && parsed <= 2147483647 ? parsed : -1;
+  const fd = fs.openSync(path.join(avd, "version_num.cache"), "wx", 0o600);
+  try { fs.writeFileSync(fd, `${version}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  syncDirectory(avd);
 }
 function contentDigest(manifest: Pick<BaselineManifest, "arch" | "device" | "diskGiB" | "systemImage" | "files">): string {
   return digest({ version: 1, arch: manifest.arch, device: manifest.device, diskGiB: manifest.diskGiB, systemImage: manifest.systemImage, files: manifest.files });
@@ -322,7 +340,8 @@ export class BaselineStore {
     // No copied overlay may read anything but the clone's own copied base. A saved overlay names
     // the device it was captured from, so it is rebased, and the recorded path is read back.
     const copied = new Set(manifest.files.map(file => file.path)), relocated: string[] = [];
-    for (const relative of manifest.files.map(file => file.path).filter(name => name.endsWith(OVERLAY))) {
+    const overlays = [...copied].filter(name => name.endsWith(OVERLAY));
+    for (const relative of overlays) {
       const overlay = path.join(avd, relative), base = path.join(avd, relative.slice(0, -OVERLAY.length));
       const own = (): boolean => { const backing = overlayBacking(overlay); return backing === null || path.resolve(path.dirname(overlay), backing) === base && copied.has(relative.slice(0, -OVERLAY.length)); };
       if (own()) continue;
@@ -331,6 +350,12 @@ export class BaselineStore {
       await rebase!(overlay, base);
       if (!own()) refuse("A copied overlay still records a backing file outside this device after the rebase.", "baseline_overlay_unsupported");
       relocated.push(relative);
+    }
+    if (overlays.length) {
+      if (!authorized()) throw new ServiceError("Baseline clone lost its authorization.", 410);
+      const build = buildProperties(imageDirectory(this.sdk, String(manifest.device.systemImage)));
+      if (metadataDigest(build) !== manifest.systemImage.buildProp) refuse("The installed system image changed while restoring the baseline.", "baseline_stale");
+      restoreVersionCache(avd, build);
     }
     return { name: manifest.name, revision: manifest.revision, digest: manifest.digest, files: manifest.files.map(file => file.path), bytes: manifest.bytes, reflinked, relocated };
   }

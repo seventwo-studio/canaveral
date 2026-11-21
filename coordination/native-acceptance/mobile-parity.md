@@ -50,19 +50,20 @@ multi-viewer timing and live capture on owned iOS remain open.
 
 ## Android baseline state
 
-**Clone booted. Prepared state did not carry over in the trial.** The runner
-captured a stopped emulator, returned a digest, and booted a new lease from
-that pin. The clone receipt matched the digest and the lease reached ready.
-A file probe returned an unknown outcome. A second trial wrote a global Android
-setting, confirmed it on the source and requested a flush before stopping.
-The clone returned `null` for that setting. A control run then confirmed the
-setting survived a stop and restart of the source before capture. The clone
-again returned `null`. This establishes a reproducible state-retention failure
-in the save-and-restore workflow. The exact loss point remains open.
+**Passed after the restore fix.** On `116cd52`, a baseline-backed clone reached
+ready but returned `null` for a setting that survived a restart of the source.
+The emulator recreates qcow2 disks when the AVD's system-image version cache is
+missing or mismatched. The restore now writes that cache from the baseline's
+digest-verified system-image metadata before starting the clone. Existing
+baseline manifests and digests remain valid.
+[Android Emulator disk initialization](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android-qemu2-glue/drive-share.cpp)
 
-The clone lease, saved baseline and owned source were removed through their
-controller APIs. Cleanup returned all reservations and left the default AVD
-inventory unchanged.
+In the rerun, the source retained the setting after a stop and restart. The
+runner captured it, booted a lease from the pinned baseline, and the clone's
+lease key read back the exact setting. The clone needed no overlay rebase,
+so rebasing an absolute backing path remains unverified natively. The clone lease,
+saved baseline and owned source were removed through the controller APIs.
+Cleanup returned all reservations and left the default AVD inventory unchanged.
 
 ## Android port tunnels
 

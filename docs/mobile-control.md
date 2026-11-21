@@ -23,8 +23,8 @@ leases are now enabled; see [Android emulator leases](#android-emulator-leases).
 emulator ([lease recording and large installs](#lease-recording-and-large-installs)).
 Since 21 November 2026 a host can keep Android emulators warm for leases and start them
 from a saved device baseline ([warm devices and baselines](#warm-devices-and-baselines)).
-The [native trial](../coordination/native-acceptance/mobile-parity.md) verified warm adoption and boot from a baseline,
-with prepared state retention still open.
+The [native trial](../coordination/native-acceptance/mobile-parity.md) verified
+warm adoption and restoration of a prepared setting.
 
 Since 21 November 2026 iOS simulators can be leased too, as an operator opt-in under a
 declared `shared-host` isolation class for trusted code; see

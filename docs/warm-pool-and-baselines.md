@@ -5,8 +5,8 @@ A **warm pool** keeps devices of the leased kinds booted and checked, so a lease
 without waiting for a boot. A **baseline** is a saved, prepared device state that every
 device of one lease image starts from.
 
-The [native trial](../coordination/native-acceptance/mobile-parity.md) verified immediate warm adoption on one Mac.
-The baseline-backed emulator booted, but the prepared setting was absent in the clone.
+The [native trial](../coordination/native-acceptance/mobile-parity.md) verified
+immediate warm adoption and restored a prepared guest setting on one Mac.
 See [limits and open native questions](#limits-and-open-native-questions) and
 [iOS follow-ups](#follow-ups).
 
@@ -298,6 +298,12 @@ per-launch and lock files, logs and quick-boot `snapshots`. A link in the AVD di
 refuses the capture. Each file is hashed while it is copied, zero regions stay sparse,
 and the copy is abandoned if the source changes underneath it.
 
+For a restore that includes qcow2 files, the runner writes `version_num.cache` into
+the new AVD before the first boot. It derives the value from the pinned system
+image's verified `ro.build.version.incremental`. The emulator would otherwise
+recreate the overlays when it sees a missing or mismatched cache. The cache stays
+outside the baseline manifest, so previously saved baselines retain their digest.
+
 The manifest records each file's size and SHA-256, the device definition, architecture
 and data-partition size, and the identity of the installed system image. The baseline's
 **digest** covers all of that. The whole directory is published by one rename; a failure
@@ -415,12 +421,11 @@ processes. They cover:
 
 ## Limits and open native questions
 
-The first [native trial](../coordination/native-acceptance/mobile-parity.md#android-baseline-state) found the prepared
-setting absent in a clone that booted. Open checks include:
+The [native rerun](../coordination/native-acceptance/mobile-parity.md#android-baseline-state)
+verified prepared-setting retention without overlay rebasing. Open checks include:
 
-- Where the prepared state was lost, whether a copied AVD needs `qemu-img rebase`
-  on other emulator versions, and how encryption keys, modem state and Google Play
-  services behave on a copy.
+- Restoring overlays with absolute backing paths through `qemu-img rebase`, and
+  how encryption keys, modem state and Google Play services behave on a copy.
 - Whether an idle emulator stays healthy, booted and isolated for its whole maximum age,
   and what it costs in CPU and memory while idle.
 - The range of adoption times under load. The native trial's immediate
