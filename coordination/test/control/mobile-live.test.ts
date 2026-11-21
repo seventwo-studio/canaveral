@@ -122,11 +122,10 @@ interface HubOptions {
   stop?: "unprovable" | "hangs";
   /** The time the source takes to open, and how its opening fails. */
   openMs?: number; open?: "refuses" | "fails";
-  frameBytes?: number;
 }
 function hubFixture(options: HubOptions = {}) {
   const journal = new Map<string, Record<string, unknown>>(), receipts: LiveReceipt[] = [], stats = { sources: 0, open: 0, peak: 0, encoders: 0, opening: 0 };
-  const control = { queued: false, saveFails: false, paused: false };
+  const control = { queued: false, saveFails: false };
   const source: LiveCaptureSource = {
     encoder: "/fixture/ffmpeg", guestSource: options.guestSource ?? true, notRunning: captureNotRunning, recordingQueued: () => control.queued,
     openEncoder: async () => { stats.encoders++; return new FragmentEncoder(); },
@@ -143,7 +142,7 @@ function hubFixture(options: HubOptions = {}) {
           for (;;) {
             if (closed || !authorized()) throw new Error("ended");
             if (Date.now() - started >= video.durationSeconds * 1000) { if (!completed) { completed = true; stats.open--; } return Buffer.alloc(0); }
-            await sleep(20); if (!closed && !control.paused) return Buffer.alloc(options.frameBytes ?? 1, frame++ & 0xff);
+            await sleep(20); if (!closed) return Buffer.alloc(1, frame++ & 0xff);
           }
         },
         async wait() { if (!completed) throw new Error("not complete"); return 0; },
@@ -322,26 +321,35 @@ test("recording hand-over reports an unproven live stop within the wait bound", 
 });
 
 test("a viewer that cannot keep up is skipped ahead to a key frame instead of holding the capture back", async () => {
-  // About 1.3 MiB of frames a second: an unread viewer passes its four-mebibyte backlog in a few seconds.
-  const f = hubFixture({ frameBytes: 28_000 }), handle = f.hub.acquire(JOB, f.source);
+  const f = hubFixture();
+  const tap = await f.hub.beginRecording(JOB.machineId);
+  tap.push(initSegment());
+  const handle = f.hub.acquire(JOB, f.source);
   const slow = handle.subscribe(() => true), fast = handle.subscribe(() => true);
-  const read: LiveViewItem[] = [];
-  for (const deadline = Date.now() + 6000; Date.now() < deadline;) { const item = await fast.next(100); if (item) read.push(item); }
-  const sequences = read.filter(item => item.type === "segment").map(item => (item as { sequence: number }).sequence);
-  assert.ok(sequences.length > 200 && sequences.every((sequence, i) => i === 0 || sequence === sequences[i - 1]! + 1), "the reading viewer missed nothing");
-  // The unread viewer's backlog was dropped: what it reads now starts with the header, then a key
-  // frame well past the start, with no segment in between that it could not decode.
-  f.control.paused = true;
-  const backlog: LiveViewItem[] = [];
-  for (let item = await slow.next(50); item; item = await slow.next(50)) backlog.push(item);
-  const media = backlog.filter(item => item.type === "segment") as Extract<LiveViewItem, { type: "segment" }>[];
-  assert.equal(backlog[0]!.type, "init");
-  assert.ok(media[0]!.sequence > 20 && media[0]!.keyframe, `resumed at ${media[0]!.sequence}`);
-  assert.ok(media.reduce((bytes, item) => bytes + item.data.length, 0) <= 4 * 1_048_576 + 28_200, "the backlog stays bounded");
-  assert.ok(media.every((item, i) => i === 0 || item.sequence === media[i - 1]!.sequence + 1 || item.keyframe), "every gap resumes on a key frame");
-  slow.close(); fast.close(); handle.release();
-  await receipt(f);
-  assert.deepEqual(f.receipts, [{ cleaned: true }]); assert.equal(f.stats.sources, 1);
+  try {
+    assert.equal((await fast.next(5000))?.type, "init");
+    // Send an exact number of frames through the same queue as native live capture. The fast
+    // viewer reads every frame while the slow viewer falls more than four MiB behind.
+    const payload = Buffer.alloc(28_000);
+    for (let sequence = 0; sequence < 256; sequence++) {
+      tap.push(fragment(sequence, sequence % 4 === 0, payload));
+      const item = await fast.next(100);
+      assert.equal(item?.type, "segment");
+      assert.equal(item.sequence, sequence);
+    }
+    const backlog: LiveViewItem[] = [];
+    for (let item = await slow.next(50); item; item = await slow.next(50)) backlog.push(item);
+    const media = backlog.filter(item => item.type === "segment");
+    assert.equal(backlog[0]?.type, "init");
+    assert.ok(media[0] && media[0].sequence > 20 && media[0].keyframe, `resumed at ${media[0]?.sequence}`);
+    assert.ok(media.reduce((bytes, item) => bytes + item.data.length, 0) <= 4 * 1_048_576, "the backlog stays bounded");
+    assert.ok(media.every((item, i) => i === 0 || item.sequence === media[i - 1]!.sequence + 1 || item.keyframe), "every gap resumes on a key frame");
+  } finally {
+    slow.close(); fast.close(); handle.release(); tap.end(true);
+    await f.hub.close();
+  }
+  assert.deepEqual(f.receipts, [{ cleaned: true }]);
+  assert.equal(f.stats.sources, 0, "viewers share the recording feed");
 });
 
 test("a stopping or journal-less hub refuses captures without a journal, and stopping leaves no timer behind", async () => {
