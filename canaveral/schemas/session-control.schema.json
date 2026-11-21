@@ -66,6 +66,24 @@
     },
     {
       "$ref": "#/$defs/VideoAck"
+    },
+    {
+      "$ref": "#/$defs/LiveMetadata"
+    },
+    {
+      "$ref": "#/$defs/LiveInit"
+    },
+    {
+      "$ref": "#/$defs/LiveSegment"
+    },
+    {
+      "$ref": "#/$defs/LiveEnd"
+    },
+    {
+      "$ref": "#/$defs/LiveRenew"
+    },
+    {
+      "$ref": "#/$defs/LiveRenewal"
     }
   ],
   "$defs": {
@@ -97,7 +115,8 @@
             "upload",
             "download",
             "accessibility",
-            "video"
+            "video",
+            "live"
           ]
         }
       },
@@ -1213,6 +1232,167 @@
           "$ref": "#/$defs/WorkerError"
         }
       ]
+    },
+    "LiveMetadata": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "live"
+        },
+        "mediaType": {
+          "const": "video/mp4"
+        },
+        "codec": {
+          "const": "avc1"
+        },
+        "fps": {
+          "const": 30
+        }
+      },
+      "required": [
+        "type",
+        "mediaType",
+        "codec",
+        "fps"
+      ],
+      "additionalProperties": false
+    },
+    "LiveInit": {
+      "type": "object",
+      "description": "Announces one initialization segment (ftyp and moov). Exactly `bytes` binary bytes follow. Each epoch is one native capture run and opens with its own initialization segment.",
+      "properties": {
+        "type": {
+          "const": "init"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 1048576
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "LiveSegment": {
+      "type": "object",
+      "description": "Announces one media segment (one moof and its mdat). Exactly `bytes` binary bytes follow. `sequence` counts the fragments of the epoch; after any gap the next delivered segment starts on a key frame.",
+      "properties": {
+        "type": {
+          "const": "segment"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keyframe": {
+          "type": "boolean"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 8388608
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "sequence",
+        "keyframe",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "LiveEnd": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "end"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "capture_ended",
+            "capture_failed",
+            "capture_unavailable"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "LiveRenew": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "renew"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "LiveRenewal": {
+      "type": "object",
+      "description": "Broker reply to a viewer renewal. It may arrive between any two messages, including between the binary messages of one segment.",
+      "properties": {
+        "type": {
+          "const": "renewal"
+        },
+        "renewed": {
+          "type": "boolean"
+        },
+        "authorizationDeadline": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "type",
+        "renewed",
+        "authorizationDeadline"
+      ],
+      "additionalProperties": false
+    },
+    "liveConsumer": {
+      "$ref": "#/$defs/LiveRenew"
+    },
+    "liveHost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LiveMetadata"
+        },
+        {
+          "$ref": "#/$defs/LiveInit"
+        },
+        {
+          "$ref": "#/$defs/LiveSegment"
+        },
+        {
+          "$ref": "#/$defs/LiveEnd"
+        },
+        {
+          "$ref": "#/$defs/WorkerError"
+        }
+      ]
+    },
+    "liveBroker": {
+      "$ref": "#/$defs/LiveRenewal"
     }
   },
   "x-canaveral-streams": {
@@ -1293,6 +1473,22 @@
         "host": "fragmented-mp4",
         "maxMessageBytes": 65536
       }
+    },
+    "live": {
+      "consumerControl": {
+        "$ref": "#/$defs/liveConsumer"
+      },
+      "hostControl": {
+        "$ref": "#/$defs/liveHost"
+      },
+      "brokerControl": {
+        "$ref": "#/$defs/liveBroker"
+      },
+      "binary": {
+        "consumer": "forbidden",
+        "host": "fragmented-mp4-segments",
+        "maxMessageBytes": 65536
+      }
     }
   },
   "x-canaveral-limits": {
@@ -1300,6 +1496,8 @@
     "maxBinaryMessageBytes": 65536,
     "maxQueuedMessagesPerDirection": 1,
     "accessibilityMaxBytes": 6291456,
-    "accessibilityMaxNodes": 2000
+    "accessibilityMaxNodes": 2000,
+    "liveMaxInitBytes": 1048576,
+    "liveMaxSegmentBytes": 8388608
   }
 }

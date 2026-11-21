@@ -15,9 +15,10 @@ it is not idempotent, is never retried, revokes the previous lease key, and its 
 be logged. After an unknown outcome, inspect the lease before deliberately exchanging again.
 The companion `coordination/src/sdk.ts` extends these clients with private credential
 file loaders, `scopedLease`, session creation/attachment, streaming files,
-lease-key app installs (`uploadApp`, `appArtifact`, `deleteAppArtifact`, `installApp`) and
-MP4 recording (`video`) for leased Android emulators
-([lease recording and large installs](mobile-control.md#lease-recording-and-large-installs)),
+lease-key app installs (`uploadApp`, `appArtifact`, `deleteAppArtifact`, `installApp`),
+MP4 recording (`video`) and live screen views (`live`) for leased Android emulators
+([lease recording and large installs](mobile-control.md#lease-recording-and-large-installs),
+[live screen views](visual-sdk.md#live-screen-views)),
 [terminals](terminal-sdk.md), [display](visual-sdk.md) and
 [accessibility](scoped-accessibility.md). Administrative, host and model routes use
 separate interfaces. The SDK does not establish provider eligibility.

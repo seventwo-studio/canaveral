@@ -26,6 +26,8 @@ by the controller modules and provider implementations described in this guide.
 | Submit or inspect a durable member operation | That lease's current key |
 | Create, inspect or close a member session | That lease's current key |
 | Attach the consumer WebSocket peer | That lease's current key and session generation |
+| Open, inspect or close a [live view](mobile-control.md#live-screen) of a leased Android emulator | That lease's current key |
+| Attach the viewer WebSocket peer of a live view | That lease's current key and view generation |
 
 Credentials are opaque bearer secrets, not OAuth scopes or JWT claims. The
 contract introduces no enrollment or host-approval policy. Administrative,

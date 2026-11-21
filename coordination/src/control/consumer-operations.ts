@@ -14,7 +14,7 @@ interface Row {
 }
 const actionCapabilities: Record<string, string> = {
   screenshot: "screenshot", hierarchy: "hierarchy", accessibility: "hierarchy", "accessibility-action": "hierarchy",
-  tap: "input", swipe: "input", text: "input", key: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
+  tap: "input", swipe: "input", text: "input", key: "input", rotate: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
   // App lifecycle and logs are subsets of the device shell, so they need the same capability.
   apps: "command", launch: "command", terminate: "command", uninstall: "command", "open-url": "command", logs: "command",
   // A lease-key upload of this lease's own member (lease-app-artifacts.ts); see install-cleanup.ts.

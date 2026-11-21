@@ -15,7 +15,7 @@ import { TerminalClient } from './terminal-sdk.ts';
 import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
 import { receiveSnapshot, MAX_SNAPSHOT_BYTES } from './accessibility-sdk.ts';
-import { LeaseVideoClient } from './video-sdk.ts';
+import { LeaseLiveClient, LeaseVideoClient } from './video-sdk.ts';
 import { uploadAppArtifactFile } from './app-artifact-client.ts';
 import { appArtifactMetadata } from './app-artifact-contract.ts';
 import type { AppArtifactMetadata } from './app-artifact-contract.ts';
@@ -351,7 +351,10 @@ export class LeaseClient {
     return new LeaseClient({ ...options, leaseKey: credentialFile(options.credentialFile) });
   }
   #video: LeaseVideoClient;
-  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); }
+  #live: LeaseLiveClient;
+  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); this.#live = new LeaseLiveClient(options); }
+  /** Live screen of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `watch`. */
+  get live(): LeaseLiveClient { return this.#live; }
   /** MP4 recording of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `record`. */
   get video(): LeaseVideoClient { return this.#video; }
   async #artifactCall(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string): Promise<AppArtifactMetadata> {
