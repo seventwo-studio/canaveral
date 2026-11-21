@@ -274,7 +274,7 @@ test("a recording takes the device's one native capture and feeds the live viewe
   // The other order: a viewer joins a recording already in progress.
   viewer.stream.close(); await viewer.got.done;
   await until(async () => (await h.reserved()).cpu === 2, "the live capture's reservation released");
-  const second = sink(), long = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 6, ...VIDEO }, second, { timeoutMs: 30000 });
+  const second = sink(), long = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 20, ...VIDEO }, second, { timeoutMs: 45000 });
   await until(() => h.media.started.get(name)!.length === 4 && second.chunks.length > 0, "a recording in progress");
   const late = await watching(h, a);
   await until(() => media(late.got).length >= 3, "segments from the recording in progress");
