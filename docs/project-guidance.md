@@ -52,6 +52,7 @@ interpreter dependency to the controller, host or SDK; see
 - [Rust Apple satellite](../crates/apple-satellite/README.md)
 - [scoped accessibility](scoped-accessibility.md)
 - [self hosting](self-hosting.md)
+- [simlock parity](simlock-parity.md) (comparison, scope and decisions accepted on 21 November 2026, and where each area is delivered)
 - [session protocol](session-protocol.md)
 - [templates](templates.md)
 - [terminal sdk](terminal-sdk.md)
