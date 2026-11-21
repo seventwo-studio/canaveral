@@ -44,7 +44,9 @@ failed or issue a new UUID as an automatic retry.
 Command tools should accept a persisted request file or the original operation
 UUID to inspect, using an existing private lease key. Print receipt metadata
 without guest output or credentials. Tool availability does not establish native
-consumer execution acceptance.
+consumer execution acceptance. `canaveral lease ID device` and `canaveral lease ID operation`
+follow this ([lease-key commands](agent-surfaces.md#lease-key-commands)); the MCP tool
+`device_action` returns the output to its agent instead.
 
 ## Capability and execution boundaries
 
@@ -55,7 +57,8 @@ files and shells. Those contracts do not make every action available on the Linu
 lease wire. Each route must validate its own action envelope and refuse missing
 provider bindings before dispatch. Mobile lease members accept the device actions listed
 for [Android](mobile-control.md#scoped-control) and [iOS](mobile-control.md#ios-scoped-control).
-Host-configured `install`, `permission`, `location` and `rotate` stay administrative. iOS
+The host-side `install` action stays administrative. Android lease keys can also use
+`permission`, `location` and `rotate` on their own emulator. iOS
 shell and headless graphical operations remain unsupported: an iOS template has no `command`
 or `pty` capability, so on an iOS member the app lifecycle and log actions need `files`
 instead of `command`.

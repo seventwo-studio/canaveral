@@ -437,6 +437,10 @@ lease follows the generic [lease contract](leases.md). iOS simulators are leased
 own opt-in and isolation class ([iOS simulator leases](#ios-simulator-leases)). Physical
 devices still refuse leased execution.
 
+Coding agents and CI jobs need not call these routes themselves. The
+[agent surfaces](agent-surfaces.md) provide an MCP server, a CLI lease that is held and
+renewed, lease-key commands and a [CI recipe](agent-surfaces.md#ci-recipe).
+
 ### Host configuration
 
 A host advertises lease execution only when all of these hold. Every other runtime,
@@ -634,12 +638,23 @@ member `primary` and resolve to that lease's own machine, host and AVD:
 | Launch, stop, list or remove apps | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | command |
 | Screens | `screenshot` (PNG), `hierarchy` | screenshot, hierarchy |
 | Input | `tap`, `swipe`, `text`, `key` | input |
+| Orientation and simulated position | `rotate` (portrait or landscape), `location` (latitude, longitude) | input |
+| App permissions | `permission` (`grant` or `revoke` one permission of one app) | command |
 | Logs | `logs` (last 200 logcat lines) | command |
 | Record | MP4 video session (see below) | displayStream |
 
-App lifecycle and logs need `command` because the Android shell already grants
-them. iOS has no shell capability, so on an iOS member the same actions need `files`
-instead; see [iOS scoped control](#ios-scoped-control). Operations keep
+App lifecycle, logs and app permissions need `command` because the Android shell
+already grants them. iOS has no shell capability. Its app lifecycle and logs use
+`files` under the [iOS scoped control](#ios-scoped-control) contract.
+Since 21 November 2026 a lease key can also rotate its emulator, set its simulated
+position and grant or revoke an app permission. These use the same argument checks,
+fenced provider path and receipts as the administrative actions of the same name,
+and reach only the lease's own emulator. They apply to device images only, and a
+lease key cannot `reset` a permission: the Android provider grants or revokes, so
+a reset is refused with 400 instead of being queued to fail. Operator-configured
+`install` and `inspect-install` stay administrative. The three lease-key actions have portable
+fixture coverage against the real controller, runner and lease supervisor with a
+stand-in adb; no native emulator run exercised them through a lease key. Operations keep
 the durable receipt semantics: the same UUID replays its receipt without running
 again; a changed body is 409; an operation in flight when authorization ends is
 `unknown` and is never replayed. Rotating the credential revokes the previous one.
@@ -795,7 +810,8 @@ before its current deadline. A renewal that reaches the host after that deadline
 (for example, sent in the last second, or delayed by a slow heartbeat) cannot revive
 the emulator: the supervisor has already stopped it and the lease ends `failed`.
 Renew well before expiry, for example when a third of the TTL remains, and allow at
-least a few heartbeat intervals.
+least a few heartbeat intervals. `canaveral mcp` and `canaveral lease hold` renew at
+that point for the leases they hold ([agent surfaces](agent-surfaces.md#what-the-session-does-for-the-caller)).
 
 - **Controller loss:** the runner keeps its persisted deadline, fences locally and the
   supervisor stops the emulator. Cleanup completes when the controller returns.

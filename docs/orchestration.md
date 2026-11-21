@@ -17,6 +17,15 @@ and ownership; storing a role in an old token is not sufficient authorization.
 
 `coordination/src/sqlite.ts` provides synchronous `BEGIN IMMEDIATE` transactions
 through `node:sqlite`; asynchronous work must not escape a transaction callback.
+Transaction hooks run when an outer transaction begins and commit hooks just before
+it commits. The [event log](events.md) uses a commit hook to stamp and project the
+events that triggers wrote during the transaction, so a module that changes a ledger
+row needs no event code of its own. A new ledger table needs a trigger in
+`coordination/src/events.ts` to appear in the log. Capture triggers read the state
+columns of the ledger tables, and SQLite refuses to drop a column that a trigger
+reads. Adding a column needs nothing. A migration that drops or rewrites a captured
+column must call `dropEventTriggers` first; the control worker reinstalls capture
+after every module has migrated.
 Credential revalidation, owner checks, idempotent intent comparison and durable
 receipt updates belong at the protected effect boundary. Another owner's UUID
 must be hidden before comparing its request. New module tables do not imply a
@@ -92,6 +101,10 @@ Administrator account sessions can also authorize inventory and lifecycle paths.
 | `POST /v1/machines/{id}/desired` | Request `running` or `stopped` |
 | `POST /v1/machines/{id}/operations` | Queue a mobile device control action with a stable UUID |
 | `GET /v1/operations/{id}` | Read a durable device action receipt and result |
+| `GET /v1/admin/events`, `/v1/admin/events/stream` | Read or follow the durable [event log](events.md) |
+| `GET /v1/admin/usage` | [Usage](usage.md) over a time range, JSON or CSV |
+| `GET`/`POST /v1/admin/alerts/destinations` | Manage [alert](alerts.md) destinations |
+| `GET /v1/admin/diagnosis` | Read-only findings for [`canaveral doctor`](doctor.md) |
 
 Creation fields are `id`, `name`, `templateId`, optional resource overrides (`cpu`, `memoryMiB`, `diskGiB`), and optional `templateRevision`/`arch`/`hostId`. Defaults come from the selected template and are pinned on first creation. Choose a revision explicitly when multiple revisions can be placed. The returned machine includes its pinned template definition, host and desired/observed state. A heartbeat sends `offer` plus `reports`, a map from assignment UUID to `state`, optional `detail` and preparation receipt state. A host cannot report another host's assignment. The API never returns host or guest-preparation credential hashes.
 

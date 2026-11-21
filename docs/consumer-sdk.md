@@ -37,7 +37,9 @@ const { created, lease } = await client.acquireLease(request);
 ## Identity and mutations
 
 The caller owns every mutation UUID and persists the complete request before dispatch.
-The SDK generates no identifiers and never retries, polls, rotates or renews. Request
+The SDK generates no identifiers and never retries, polls, rotates or renews. The
+[agent surfaces](agent-surfaces.md) (`canaveral mcp`, `canaveral lease hold`) are the layer
+that waits, renews and releases for a caller, on top of these clients. Request
 bodies are serialized deterministically, so an explicit replay with the same object sends
 identical bytes (`created` is false for a 200 replay). For renewal, replay with the original
 `expectedRevision`. Unknown request fields, malformed UUIDs and bodies over 1 MiB are
@@ -115,6 +117,24 @@ command arguments and returned output as private. These methods have controller
 and fake-peer fixture coverage, without native execution acceptance.
 
 The [waiting request contract](requests.md) is opt-in. Request methods use only the application key, preserve caller UUIDs, and never poll or retry. `submitRequest` accepts `kind: "model-job"` with a `ModelJobIntent` (`{adapter, model, digest, prompt, maxTokens}`) for [queued model calls](requests.md#queued-model-calls); request views of that kind return a `ModelJobRequestIntent` (`{adapter, model, digest, promptDigest, maxTokens}`), never the prompt. Types and methods are also exposed through `sdk.ts`.
+
+Request views carry `position`, the request's place in the controller's attempt order while it waits, and lease views carry `name`, the caller's label. Both are optional in the SDK types because an older controller omits them. `inspectRequest(id, { waitSeconds })` asks the controller to hold one read for 1 to 15 seconds until the request's state, position or reason changes; it is a single bounded request, and it is refused when the wait does not leave five seconds inside the client's `timeoutMs`. The controller refuses a held read beyond its limits with 429 `request_wait_limit`, which the SDK reports as a retryable `ConsumerServiceError` with `retryAfterSeconds`; a controller that predates held reads answers 400. See [position and waiting](requests.md#position-and-waiting).
+
+`listEvents`, `followEvents` and `usage` read the application's own
+[event history](events.md) and [usage](usage.md) with the application key.
+`listEvents` returns one page and its `cursor`; a filtered page can be short or
+empty with `more: true`, in which case read again from `cursor`. `followEvents` is
+an async iterator over one server-sent event stream and never reconnects. It
+returns `{reason, cursor}` for an ordinary end (`stream_lifetime`,
+`controller_closing` or `aborted`), throws a service error when the credential is
+no longer accepted (`unauthenticated`, `forbidden`) or the controller reports
+`unavailable`, and throws a transport error when the connection stops without an
+end message. If retention removed history after `after`, it calls `onTruncated`
+and continues, or throws `events_truncated` when no handler was given. `onCursor`
+reports the position of a quiet stream. Resume with `after` set to the returned
+cursor or the last `sequence` received. Stop iterating or abort its `signal` to
+close it. `usage` returns the JSON report; request CSV from the
+route directly. A lease key cannot call these methods. Fixture coverage only.
 
 Linux lease acquisition and renewal require integer `ttlSeconds >= 30`, bounded
 by the application's maximum. The controller returns 400

@@ -17,10 +17,15 @@ const actionCapabilities: Record<string, string> = {
   tap: "input", swipe: "input", text: "input", key: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
   // App lifecycle and logs are subsets of the device shell, so they need the same capability.
   apps: "command", launch: "command", terminate: "command", uninstall: "command", "open-url": "command", logs: "command",
+  // Orientation and simulated position are device inputs. Granting or revoking an app permission is a subset of the
+  // device shell (`pm grant`), like the app lifecycle above. All three act only on the lease's own member through
+  // the same fenced provider path as every other action here.
+  rotate: "input", location: "input", permission: "command",
   // A lease-key upload of this lease's own member (lease-app-artifacts.ts); see install-cleanup.ts.
   "install-uploaded": "files",
   "shell-open": "pty", "shell-read": "pty", "shell-write": "pty", "shell-close": "pty", "shell-resize": "pty",
 };
+const DEVICE_ONLY = new Set(["rotate", "location", "permission"]);
 /** iOS has no shell, so its app lifecycle and logs cannot depend on `command`: on an iOS member
  * they need `files`, the capability that already covers installing a build and reading its app
  * container. `command` and `pty` stay false for iOS and every shell action stays refused. */
@@ -91,6 +96,10 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       requireHostAdmission(db, String(machine.host));
       const image = object(JSON.parse(String(machine.template))), cap = actionCapability(request.action, image);
       if (!cap || !capabilities(image)[cap as keyof ReturnType<typeof capabilities>]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
+      // These extra lease actions are covered by the Android device contract.
+      if (DEVICE_ONLY.has(request.action) && image.os !== "android") throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
+      // The Android provider grants or revokes; refuse a reset here instead of queueing an operation that can only fail.
+      if (request.action === "permission" && request.arguments.state === "reset") throw new ServiceError("A lease key grants or revokes a permission; reset is unsupported.", 400);
       if (lease.state !== "ready" || !legacyMachineReady(db, machine, store.clock())) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });
       // Only an upload made through this lease's key, for this member, can be installed.
       if (request.action === "install-uploaded") validateUploadedArtifact(db, String(machine.id), request.arguments.artifact, lease.id);

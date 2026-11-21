@@ -181,6 +181,7 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
         return ok(lines.join("\n") + "\ncanaveral-isolation-done\n");
       }
       if (args[0] === "shell" || args[0] === "logcat") return ok("ok");
+      if (args.slice(0, 3).join(" ") === "emu geo fix") return ok("OK");
       return { stdout: "", exitCode: 1 };
     },
     async processAbsent(pid) { return !alive(pid); },
@@ -403,6 +404,13 @@ test("renewal extends the native deadline; lost replies replay by UUID; runner a
   assert.equal((await operate(h, a.id, a.key, "tap", { x: 7, y: 8 }, operation)).body.state, "succeeded");
   const taps = h.counters.get(`cvm-${a.machineId}:shell 'input' 'tap' '7' '8'`);
   assert.equal(taps, 1);
+  // Orientation, simulated position and an app permission go through the same fenced lease path to this emulator only.
+  assert.equal((await operate(h, a.id, a.key, "rotate", { orientation: "LANDSCAPE_LEFT" })).body.state, "succeeded");
+  assert.equal((await operate(h, a.id, a.key, "location", { latitude: 52.37, longitude: 4.9 })).body.state, "succeeded");
+  assert.equal((await operate(h, a.id, a.key, "permission", { app: "com.example.fixture", permission: "android.permission.CAMERA", state: "grant" })).body.state, "succeeded");
+  assert.equal(h.counters.get(`cvm-${a.machineId}:shell 'wm' 'user-rotation' 'lock' '1'`), 1);
+  assert.equal(h.counters.get(`cvm-${a.machineId}:emu geo fix 4.9 52.37`), 1);
+  assert.equal(h.counters.get(`cvm-${a.machineId}:shell 'pm' 'grant' 'com.example.fixture' 'android.permission.CAMERA'`), 1);
   // A lost operation reply: the same UUID returns the receipt without running again.
   const replay = await h.api("POST", `/v1/leases/${a.id}/operations`, { id: operation, member: "primary", action: "tap", arguments: { x: 7, y: 8 } }, a.key);
   assert.equal(replay.body.state, "succeeded");
