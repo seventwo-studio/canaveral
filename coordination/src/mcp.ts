@@ -88,7 +88,7 @@ const TOOLS = [
     } },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false } },
   { name: "release_device", title: "Release a device",
-    description: "Releases a lease this session holds and stops renewing it. Always call this when the device work is done, also after a failure. The device is wiped and handed to the next waiting request.",
+    description: "Releases a lease this session holds and stops renewing it. Always call this when the device work is done, also after a failure. The device is destroyed, never reused: the next waiting request gets a fresh one.",
     inputSchema: { type: "object", additionalProperties: false, properties: { leaseId } },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } },
 ];
