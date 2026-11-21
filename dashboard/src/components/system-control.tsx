@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
+import {
+  clockReading,
+  controllerNow,
+  duration,
+  useTick,
+  type ClockReading,
+} from "@/lib/clock";
 import type { User } from "@/lib/inventory";
 import {
   systemCollections,
@@ -88,6 +95,19 @@ function actionFor(
   return null;
 }
 const date = (value: number) => new Date(value * 1000).toLocaleString();
+/** Time until a lease deadline, against the controller's clock when the inventory carried it. It ticks
+ * on its own so the inventory is not rendered again every second. */
+function Remaining({
+  expiresAt,
+  clock,
+}: {
+  expiresAt: number;
+  clock: ClockReading;
+}) {
+  useTick();
+  const seconds = expiresAt - controllerNow(clock) / 1000;
+  return <>{seconds > 0 ? duration(seconds) : "Deadline passed"}</>;
+}
 function actionLabel(
   collection: SystemCollection,
   item: SystemRecord,
@@ -147,6 +167,7 @@ function SystemControlPage({
 }) {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [observedAt, setObservedAt] = useState<number | null>(null);
+  const [clock, setClock] = useState<ClockReading | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [intent, setIntent] = useState<Intent | null>(null);
@@ -197,6 +218,12 @@ function SystemControlPage({
       if (current()) {
         setSnapshot(next);
         setObservedAt(Date.now() / 1000);
+        // Countdowns use the controller's clock. An older controller sends none; the browser's is used.
+        setClock(
+          clockReading(
+            next.observedAt === undefined ? Date.now() : next.observedAt * 1000,
+          ),
+        );
         setError("");
       }
     } catch (e) {
@@ -371,6 +398,13 @@ function SystemControlPage({
                         <dl className="grid grid-cols-1 gap-2 text-sm">
                           {(
                             [
+                              // A lease's `name` is the label its holder gave it.
+                              [
+                                "Label",
+                                collection === "leases"
+                                  ? (item.name ?? "None given")
+                                  : undefined,
+                              ],
                               ["Application", item.applicationId],
                               ["Lease", item.leaseId],
                               ["Machine", item.machineId],
@@ -408,6 +442,20 @@ function SystemControlPage({
                                   : date(item.expiresAt),
                               ],
                               [
+                                "Time remaining",
+                                collection === "leases" &&
+                                clock &&
+                                item.expiresAt !== undefined &&
+                                ["provisioning", "ready"].includes(
+                                  item.state,
+                                ) ? (
+                                  <Remaining
+                                    expiresAt={item.expiresAt}
+                                    clock={clock}
+                                  />
+                                ) : undefined,
+                              ],
+                              [
                                 "Created",
                                 item.createdAt === undefined
                                   ? undefined
@@ -422,7 +470,7 @@ function SystemControlPage({
                                     ? "Yes"
                                     : "No",
                               ],
-                            ] as const
+                            ] as [string, React.ReactNode][]
                           ).map(
                             ([label, value]) =>
                               value !== undefined && (

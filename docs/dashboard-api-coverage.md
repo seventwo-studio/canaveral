@@ -1,9 +1,10 @@
 # Dashboard API coverage
 
-The dashboard has two administrator workspaces in addition to the existing machine,
+The dashboard has administrator workspaces in addition to the existing machine,
 image, infrastructure and account screens. **System** is the operational inventory;
-**Configuration** exposes named administrative API actions and their exact request
-configuration. Complex immutable definitions use an editable JSON configuration with
+**Queue**, **Activity** and **Usage** show the waiting queue, the event log and
+usage reports; **Configuration** exposes named administrative API actions and their
+exact request configuration. Complex immutable definitions use an editable JSON configuration with
 an example. The gateway forwards only explicitly permitted routes to its fixed
 controller; it is not an arbitrary URL proxy.
 
@@ -36,8 +37,9 @@ store; browser storage is not used.
 | Administrative machine creation, desired state, power off and deletion | Machines and machine details |
 | Guest screen, files, shells and accessibility | Machine Control |
 | Application identities and policies | System and Configuration |
-| Application-owned legacy and Linux leases | System; administrator release |
+| Application-owned legacy and Linux leases | System; administrator release, with the holder's label and time remaining. Queue lists the leases that hold capacity |
 | Waiting requests, operation receipts and jobs | System; request/job cancellation and machine-operation receipt inspection |
+| Waiting queue with position and reason (`/v1/admin/queue`) | Queue; administrator cancellation of a named request |
 | Access and video sessions | System; administrator close |
 | Model catalog, resource domains, grants and runner approvals | Configuration |
 | Linux lease images, grants and runner approvals | Configuration |
@@ -49,7 +51,11 @@ store; browser storage is not used.
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
 | Mobile video admission, inspection and closure | Configuration; owner capture in machine details (PNG screenshot, verified MP4 recording) |
 | Managed update releases and rollouts | Configuration |
-| Event log, usage reports, alert destinations and diagnosis (`/v1/admin/events`, `/v1/admin/usage`, `/v1/admin/alerts`, `/v1/admin/diagnosis`) | API and CLI only; not forwarded by the dashboard gateway |
+| Event log (`/v1/admin/events`, `/v1/admin/events/kinds`) | Activity; filters, scroll-back and live updates by cursor |
+| Live event stream (`/v1/admin/events/stream`) | API and CLI only; not forwarded by the dashboard gateway. Activity reads the list route by cursor instead |
+| Usage reports (`/v1/admin/usage`) | Usage; JSON report and CSV download |
+| Alert destinations, deliveries and diagnosis (`/v1/admin/alerts`, `/v1/admin/diagnosis`) | API and CLI only; not forwarded by the dashboard gateway |
+| Side-by-side live view of several owned mobile devices | Not built. It needs the live screen relay for mobile devices on remote hosts, which is separate work; Machine Control shows one device at a time |
 
 ## Credential-specific protocols
 

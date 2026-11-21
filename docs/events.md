@@ -284,7 +284,9 @@ restarts. `--own` reads the application view with an application credential.
 - A refused direct acquisition is throttled and so cannot be counted.
 - Alerts and the usage ledger derive from events. A row written by another tool is
   projected when the controller next reads or writes events, not at once.
-- The dashboard does not show events. The dashboard gateway does not forward these
-  routes.
+- The dashboard's Activity page shows the administrator view by reading the list
+  route with its cursor; see [the dashboard contract](dashboard.md#queue-activity-and-usage).
+  The gateway forwards `/v1/admin/events` and `/v1/admin/events/kinds` only. It
+  does not forward either stream or the application routes.
 - Host liveness is judged from heartbeats, as elsewhere in the controller. An event
   says that the host stopped reporting. It does not say that its machines stopped.

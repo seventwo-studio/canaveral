@@ -42,6 +42,8 @@ export interface SystemRecord {
 export type SystemSnapshot = Record<SystemCollection, SystemRecord[]> & {
   page?: number;
   nextPage?: number | null;
+  /** The controller's clock for this page, in seconds. Absent from a controller that predates it. */
+  observedAt?: number;
 };
 const strings = [
   "applicationId",
@@ -74,6 +76,15 @@ export function systemSnapshot(value: unknown): SystemSnapshot {
       throw new Error("Invalid system page.");
     result.page = root.page;
     result.nextPage = root.nextPage as number | null;
+  }
+  if (root.observedAt !== undefined) {
+    if (
+      typeof root.observedAt !== "number" ||
+      !Number.isFinite(root.observedAt) ||
+      root.observedAt < 0
+    )
+      throw new Error("Invalid system clock.");
+    result.observedAt = root.observedAt;
   }
   for (const collection of systemCollections) {
     const entries = root[collection];

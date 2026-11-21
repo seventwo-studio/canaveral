@@ -140,6 +140,9 @@ describe("dashboard contracts", () => {
   it.each([
     ["system", "System control", "admin/system"],
     ["configuration", "API controls", "admin/configuration"],
+    ["queue", "Queue", "admin/queue"],
+    ["activity", "Activity", "admin/events/kinds"],
+    ["usage", "Usage", "admin/usage"],
   ])(
     "opens the administrator %s workspace from a deep link",
     async (hash, heading, endpoint) => {
@@ -174,12 +177,77 @@ describe("dashboard contracts", () => {
           screen.getAllByRole("button", { name: /^Refresh$/ }).at(-1)!,
         );
       await waitFor(() =>
-        expect(calls.some((call) => call.path === endpoint)).toBe(true),
+        expect(calls.some((call) => call.path.split("?")[0] === endpoint)).toBe(
+          true,
+        ),
       );
+      // The destination is in the rail under Infrastructure and marked as the current page.
+      if (["queue", "activity", "usage"].includes(hash!))
+        expect(
+          within(
+            screen.getByRole("navigation", {
+              name: "Infrastructure navigation",
+            }),
+          )
+            .getByRole("link", { name: heading })
+            .getAttribute("aria-current"),
+        ).toBe("page");
     },
   );
+  it("opens Activity on the subject named in the address", async () => {
+    const lease = "b7682a27-b32e-472a-8a4d-f54a98a6d962";
+    const original = handler;
+    handler = (path, options) =>
+      path === "admin/events/kinds"
+        ? json({
+            kinds: [
+              {
+                kind: "lease.admitted",
+                summary: "A lease was admitted.",
+                routine: false,
+                attention: false,
+              },
+            ],
+          })
+        : path.startsWith("admin/events?")
+          ? json({
+              events: [],
+              cursor: 0,
+              more: false,
+              truncated: false,
+              oldestSequence: null,
+              latestSequence: 0,
+            })
+          : original(path, options);
+    location.hash = `activity/lease/${lease}`;
+    render(<App />);
+    await userEvent.type(await screen.findByLabelText("Username"), "admin");
+    await userEvent.type(
+      screen.getByLabelText("Password"),
+      "a sufficiently long password",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByRole("heading", { name: "Activity" });
+    await waitFor(() =>
+      expect(calls.map((call) => call.path)).toContain(
+        `admin/events?tail=100&lease=${lease}`,
+      ),
+    );
+    // A subject that is not an identifier is ignored rather than sent.
+    expect(calls.every((call) => !call.path.includes("lease=x"))).toBe(true);
+  });
 
-  it.each(["admin", "admin/users", "admin/tokens", "system", "configuration"])(
+  it.each([
+    "admin",
+    "admin/users",
+    "admin/tokens",
+    "system",
+    "configuration",
+    "queue",
+    "activity",
+    "activity/lease/b7682a27-b32e-472a-8a4d-f54a98a6d962",
+    "usage",
+  ])(
     "blocks ordinary-user deep link %s before requesting admin data",
     async (hash) => {
       const original = handler;
@@ -208,6 +276,9 @@ describe("dashboard contracts", () => {
           ].includes(c.path),
         ),
       ).toBe(false);
+      expect(calls.some((c) => c.path.startsWith("admin/"))).toBe(false);
+      for (const name of ["Queue", "Activity", "Usage", "System"])
+        expect(screen.queryByRole("link", { name })).toBeNull();
       expect(
         screen.queryByRole("navigation", { name: "Administration navigation" }),
       ).toBeNull();
