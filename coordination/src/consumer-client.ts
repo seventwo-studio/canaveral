@@ -18,9 +18,15 @@ import tls from "node:tls";
 export type Capability = "command" | "pty" | "files" | "screenshot" | "displayStream" | "input" | "hierarchy";
 export interface Resources { cpu: number; memoryMiB: number; diskGiB: number }
 export type Capabilities = Record<Capability, boolean>;
+/** A declared isolation class weaker than the runtime's own contract. `shared-host`: an iOS
+ * simulator lease runs as ordinary processes of the Mac host's user, with the host's network
+ * and files. It is not isolated from that host or from other simulators on it; lease it for
+ * trusted code only. Absent on templates that declare no such class. */
+export type LeaseIsolation = "shared-host";
 export interface CatalogueImage {
   id: string; revision: string; os: string; arch: "arm64" | "amd64"; mode: string;
   minimum: Resources; defaults: Resources; memoryStepMiB: number; available: boolean; capabilities: Capabilities;
+  isolation?: LeaseIsolation;
   [field: string]: unknown;
 }
 export interface Catalogue { templates: CatalogueImage[]; limits: Record<string, unknown> }
@@ -29,6 +35,8 @@ export interface Lease {
   id: string; state: LeaseState; runtimeState: string; revision: number; createdAt: string; expiresAt: string;
   cleanup: { state: "notRequested" | "pending" | "running" | "blocked" | "complete" };
   members: Array<Record<string, unknown>>; capabilities: Partial<Capabilities>;
+  /** Repeated from the single member, which also carries it as `members[].isolation`. */
+  isolation?: LeaseIsolation;
 }
 export interface LeasePage { leases: Lease[]; nextCursor: string | null }
 export interface Mutation { id: string; state: LeaseState; revision: number; expiresAt: string }
@@ -150,6 +158,8 @@ const TOKEN = /^[A-Za-z0-9_-]{43,128}(?![\s\S])/;
 const LEASE_STATES = ["provisioning", "ready", "failed", "released", "expired"];
 const CLEANUP_STATES = ["notRequested", "pending", "running", "blocked", "complete"];
 const CAPABILITIES = ["command", "pty", "files", "screenshot", "displayStream", "input", "hierarchy"];
+/** An isolation class this client does not know is never silently treated as stronger. */
+function isolationKnown(value: Record<string, unknown>): boolean { return !Object.hasOwn(value, "isolation") || value["isolation"] === "shared-host"; }
 const TLS_CODES = /^(CERT_|ERR_TLS_CERT|ERR_SSL|UNABLE_TO_(GET|VERIFY)|DEPTH_ZERO|SELF_SIGNED|HOSTNAME_MISMATCH|ERR_TLS)/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -382,7 +392,8 @@ function lease(value: unknown): Lease {
     || typeof value["createdAt"] !== "string" || typeof value["expiresAt"] !== "string"
     || !isRecord(value["cleanup"]) || !CLEANUP_STATES.includes(value["cleanup"]["state"] as string)
     || !Array.isArray(value["members"]) || !value["members"].every(isRecord) || !isRecord(value["capabilities"])
-    || !Object.values(value["capabilities"]).every(v => typeof v === "boolean")) {
+    || !Object.values(value["capabilities"]).every(v => typeof v === "boolean")
+    || !isolationKnown(value) || !value["members"].every(isolationKnown)) {
     throw new TypeError("lease");
   }
   return value as unknown as Lease;
@@ -406,7 +417,7 @@ function catalogue(value: unknown): Catalogue {
     if (!isRecord(image) || typeof image["id"] !== "string" || typeof image["revision"] !== "string"
       || typeof image["os"] !== "string" || typeof image["arch"] !== "string" || typeof image["mode"] !== "string"
       || typeof image["available"] !== "boolean" || !isRecord(image["minimum"]) || !isRecord(image["defaults"])
-      || !Number.isSafeInteger(image["memoryStepMiB"]) || !isRecord(image["capabilities"])) throw new TypeError("catalogue");
+      || !Number.isSafeInteger(image["memoryStepMiB"]) || !isRecord(image["capabilities"]) || !isolationKnown(image)) throw new TypeError("catalogue");
   }
   return value as unknown as Catalogue;
 }

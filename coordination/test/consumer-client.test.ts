@@ -341,3 +341,21 @@ test("typed lifecycle and capability fields reject malformed success replies", a
     await assert.rejects(client.inspectLease(leaseId), e => e instanceof ConsumerProtocolError && e.outcome === undefined);
   }
 });
+
+test("the shared-host isolation class is exposed, and an unknown class is never accepted as if it were stronger", async t => {
+  let reply: unknown;
+  const { url } = await server(t, (_request, response) => json(response, 200, reply));
+  const client = app(url), member = lease().members[0]!;
+  // An iOS simulator lease states its class on the catalogue entry, the lease and its member.
+  reply = { templates: [{ ...image, id: "ios-phone", os: "ios", mode: "device", isolation: "shared-host" }, image], limits: {} };
+  assert.deepEqual((await client.catalogue()).templates.map(entry => entry.isolation), ["shared-host", undefined]);
+  reply = { ...lease(), isolation: "shared-host", members: [{ ...member, isolation: "shared-host" }] };
+  const inspected = await client.inspectLease(leaseId);
+  assert.equal(inspected.isolation, "shared-host"); assert.equal(inspected.members[0]!.isolation, "shared-host");
+  for (const changed of [{ isolation: "isolated" }, { isolation: true }, { members: [{ ...member, isolation: "other" }] }]) {
+    reply = { ...lease(), ...changed };
+    await assert.rejects(client.inspectLease(leaseId), e => e instanceof ConsumerProtocolError);
+  }
+  reply = { templates: [{ ...image, isolation: "fully-isolated" }], limits: {} };
+  await assert.rejects(client.catalogue(), e => e instanceof ConsumerProtocolError);
+});

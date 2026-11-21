@@ -21,6 +21,13 @@ const actionCapabilities: Record<string, string> = {
   "install-uploaded": "files",
   "shell-open": "pty", "shell-read": "pty", "shell-write": "pty", "shell-close": "pty", "shell-resize": "pty",
 };
+/** iOS has no shell, so its app lifecycle and logs cannot depend on `command`: on an iOS member
+ * they need `files`, the capability that already covers installing a build and reading its app
+ * container. `command` and `pty` stay false for iOS and every shell action stays refused. */
+const iosAppActions = new Set(["apps", "launch", "terminate", "uninstall", "open-url", "logs"]);
+export function actionCapability(action: string, image: Record<string, unknown>): string | undefined {
+  return image.os === "ios" && iosAppActions.has(action) ? "files" : Object.hasOwn(actionCapabilities, action) ? actionCapabilities[action] : undefined;
+}
 export function initializeConsumerOperations(db: DatabaseSync): void {
   initializeDevices(db);
   db.exec(`CREATE TABLE IF NOT EXISTS consumer_operations (id TEXT PRIMARY KEY,lease TEXT NOT NULL,member TEXT NOT NULL,credential TEXT NOT NULL,dispatched INTEGER NOT NULL DEFAULT 0);
@@ -82,7 +89,7 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       const machine = db.prepare("SELECT m.*,h.seen,h.enabled,h.offer AS host_offer FROM machines m JOIN hosts h ON h.id=m.host JOIN lease_members lm ON lm.machine=m.id WHERE lm.lease=? AND lm.name=?").get(lease.id, input.member);
       if (!machine) throw new ServiceError("Unknown environment member.", 404);
       requireHostAdmission(db, String(machine.host));
-      const image = object(JSON.parse(String(machine.template))), cap = actionCapabilities[request.action];
+      const image = object(JSON.parse(String(machine.template))), cap = actionCapability(request.action, image);
       if (!cap || !capabilities(image)[cap as keyof ReturnType<typeof capabilities>]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
       if (lease.state !== "ready" || !legacyMachineReady(db, machine, store.clock())) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });
       // Only an upload made through this lease's key, for this member, can be installed.

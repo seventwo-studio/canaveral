@@ -204,7 +204,8 @@ export class MobileVideoSessions implements ControlModule {
       if (old) { if (old.lease !== lease.id) return fail(404); if (old.member !== member || old.credential !== lease.credential || old.request !== request) return fail(409); return { body: present(db, old) }; }
       const { machine } = leaseScopedMember(db, leaseId, req.token, member, 'displayStream', this.store.clock());
       const m = this.target(db, String(machine.id));
-      if (String(object(JSON.parse(String(m.template))).os) !== 'android') return fail(409);
+      // iOS lease recording stays refused: native iOS recording has no accepted stop and cleanup proof.
+      if (String(object(JSON.parse(String(m.template))).os) !== 'android') throw new ServiceError('Lease recording is available for Android emulators only.', 409, { code: 'capability_unsupported' });
       this.admit(db, m);
       requireApplicationCapacity(db, lease.consumer, VIDEO_SESSION_RESERVATION);
       this.insert(db, id, m, lease.credential!, request, lease.id, String(member));

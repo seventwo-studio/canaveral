@@ -9,7 +9,7 @@ import type { Application, ApplicationSpec } from "../consumers.ts";
 import { object, secret, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import type { ControlModule, ControlOptions, ControlRequest, ControlResponse } from "./contracts.ts";
-import { MachineStore, machineDigest, machineIdentifier, machineImageRuntime, registerMachineHooks, validateMachineRequest } from "./machines.ts";
+import { MachineStore, SHARED_HOST_ISOLATION, leaseImageReference, machineDigest, machineIdentifier, registerMachineHooks, validateMachineRequest } from "./machines.ts";
 import { cleanupView, computeReserved, ensureLeaseCleanup, initializeLifecycle, isDeleted, leaseCleanup, refreshLeaseCleanup } from "./lifecycle.ts";
 import { createModule as operationModule, initializeConsumerOperations, refreshConsumerOperations } from "./consumer-operations.ts";
 import { applicationArtifactDisk, releaseLeaseArtifacts } from "./install-cleanup.ts";
@@ -43,13 +43,20 @@ export function capabilities(image: Record<string, unknown>): Record<Capability,
   const shell = image.os === "android" || guest, display = (mobile || guest) && image.mode !== "headless";
   return { command: shell, pty: shell, files: mobile || guest, screenshot: display, displayStream: display, input: display, hierarchy: display };
 }
-/** Exact installed definition and explicit runtime selector; no host-wide inheritance. */
+/** Exact installed definition and explicit runtime selector; no host-wide inheritance. An iOS
+ * selector matches only with its explicit shared-host isolation declaration. */
 export function leaseEligible(offer: Record<string, unknown>, image: Record<string, unknown>): boolean {
   if (offer.leaseProtocol !== 1 || !Array.isArray(offer.templates) || !offer.templates.some(item => sameJson(item, image)) || !Array.isArray(offer.leaseImages)) return false;
   try {
-    const reference = { id: image.id, revision: image.revision, arch: image.arch, runtime: machineImageRuntime(offer, image) };
+    const reference = leaseImageReference(offer, image);
     return offer.leaseImages.some(item => sameJson(item, reference));
   } catch { return false; }
+}
+/** The isolation class a lease of this template runs in, when it is weaker than its runtime's
+ * own contract. Today that is only `shared-host`: an iOS simulator lease is never isolated from
+ * the Mac host that runs it. Shown in the catalogue and on every lease and member view. */
+export function leaseIsolation(image: Record<string, unknown>): typeof SHARED_HOST_ISOLATION | undefined {
+  return image.os === "ios" ? SHARED_HOST_ISOLATION : undefined;
 }
 function template(row: LegacyMachineRow): Record<string, unknown> { return object(typeof row.template === "string" ? JSON.parse(row.template) : row.template); }
 /** Inventory is not readiness: guests and leased devices need the runner's positive access check. */
@@ -133,14 +140,15 @@ export function legacyLeaseAssignment<T extends { id: string }>(db: DatabaseSync
 }
 export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: number) {
   const members = db.prepare("SELECT m.*,h.seen,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
-    const cleanup = leaseCleanup(db, String(m.id));
+    const cleanup = leaseCleanup(db, String(m.id)), isolation = leaseIsolation(template(m));
     return { name: String(m.member_name), machineId: String(m.id), state: now - Number(m.seen) < 30 ? String(m.observed) : "unknown",
       ready: ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
-      ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
+      ...(isolation ? { isolation } : {}), ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
   });
+  const isolation = members.length === 1 ? members[0]!.isolation : undefined;
   return { id: row.id, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
     createdAt: utc(row.created), expiresAt: utc(row.expires), cleanup: { state: row.cleanup }, members,
-    capabilities: members.length === 1 ? members[0]!.capabilities : {} };
+    capabilities: members.length === 1 ? members[0]!.capabilities : {}, ...(isolation ? { isolation } : {}) };
 }
 /** Application quotas span both independently scheduled ledgers. Terminal reservations remain held. */
 export function applicationLeaseUsage(db: DatabaseSync, applicationId: string): { active: number; resources: { cpu: number; memoryMiB: number; diskGiB: number } } {
@@ -318,7 +326,8 @@ export class LegacyLeases implements ControlModule {
         if (health?.report && (this.store.clock() - Number(health.received) >= 120 || !["passed", "warning"].includes(object(JSON.parse(String(health.report))).status as string))) return false;
         return leaseEligible(object(JSON.parse(String(host.offer))), image);
       });
-      return [{ ...image, available, capabilities: capabilities(image) }];
+      const isolation = leaseIsolation(image);
+      return [{ ...image, available, capabilities: capabilities(image), ...(isolation ? { isolation } : {}) }];
     });
     return { templates, limits: app.limits };
   }

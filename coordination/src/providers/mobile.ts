@@ -26,7 +26,8 @@ export interface NativePipe {
   resize?(rows: number, cols: number): Promise<void>;
 }
 export interface NativeChild { pid: number; processStartedAt?: number; stopped(): Promise<boolean> }
-/** A leased emulator owned by the independent native lease supervisor. */
+/** The supervised child of the independent native lease supervisor: a leased emulator, or a
+ * leased simulator's control companion. */
 export interface SupervisedChild { pid: number; supervisorPid: number; supervisorExited(): Promise<boolean> }
 /** `lease-supervise` exit status that proves it spawned nothing. Any other status is not that proof. */
 export const SUPERVISOR_REFUSED = 75;
@@ -38,7 +39,7 @@ export interface LeaseClockSample { version: number; bootSessionID: string; cont
 /** One native sample: the clock, plus whether a live supervisor holds the storage's lifetime lock. */
 export interface LeaseSupervisorStatus extends LeaseClockSample { supervisor: "held" | "free" | "absent" }
 export interface LeaseSupervisorTransport {
-  /** Starts `lease-supervise` detached; resolves after its launch record names the emulator. */
+  /** Starts `lease-supervise` detached; resolves after its launch record names the supervised child. */
   supervise(helper: string, storage: string, request: RecordValue): Promise<SupervisedChild>;
   clock(helper: string): Promise<LeaseClockSample>;
   /** Positively absent process group only; never signals it. */
@@ -47,6 +48,10 @@ export interface LeaseSupervisorTransport {
   status(helper: string, storage: string): Promise<LeaseSupervisorStatus>;
   /** Every visible process command line, for proving that a launch left nothing running. */
   commandLines(): Promise<string[]>;
+  /** One read-only process inventory against a leased simulator's private device set. Only
+   * `absent` is proof: no process names the device set, descends from one that does, or was
+   * recorded as a member by the supervisor and is still alive. Never signals anything. */
+  simulatorTree(helper: string, storage: string, deviceSet: string): Promise<"absent" | "present" | "unknown">;
 }
 export interface MobileTransport {
   run(argv: readonly string[], options: RunOptions): Promise<CommandResult>;
