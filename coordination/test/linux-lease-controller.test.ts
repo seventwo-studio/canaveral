@@ -252,6 +252,8 @@ test("application/lease roles, ownership and opaque lease credentials through th
   assert.equal(first.lease.expiresAt, new Date((T0 + 200) * 1000).toISOString());
   const replay = await a.client().acquireLease({ ...request });
   assert.deepEqual([replay.created, replay.lease.id], [false, request.id]);
+  // The caller's label is returned for display; a lease acquired without one reports null.
+  assert.deepEqual([first.lease.name, replay.lease.name], ["job", "job"]);
   await rejectsWith(a.client().acquireLease({ ...request, ttlSeconds: 201 }), 409);
   await rejectsWith(b.client().acquireLease({ ...request }), 409);
   await rejectsWith(b.client().inspectLease(request.id), 404);
@@ -260,6 +262,7 @@ test("application/lease roles, ownership and opaque lease credentials through th
   assert.equal((await f.get(`/v1/leases/${request.id}`, runner.credential)).status, 401);
 
   const second = await a.client().acquireLease(f.acquire());
+  assert.equal(second.lease.name, null);
   await rejectsWith(a.client().acquireLease(f.acquire()), 429);
   const page = await a.client().listLeases();
   assert.deepEqual(page.leases.map(l => l.id), [request.id, second.lease.id].sort());

@@ -915,7 +915,9 @@ export class LinuxLeases {
       member.cleanup = { id: lease.cleanup_id, state: lease.cleanup,
         reason: lease.cleanup === "complete" ? null : stale || lease.cleanup === "blocked" ? "recovery" : "execution_pending", attempts: 0, retryAt: null };
     }
-    return { id: lease.id, state: lease.state, runtimeState: runtime, revision: lease.revision, createdAt: utc(lease.created), expiresAt: utc(lease.expires),
+    // The caller's optional label from acquisition; null when none was given. Display only.
+    const name = (JSON.parse(lease.request) as { name?: unknown }).name;
+    return { id: lease.id, name: typeof name === "string" ? name : null, state: lease.state, runtimeState: runtime, revision: lease.revision, createdAt: utc(lease.created), expiresAt: utc(lease.expires),
       cleanup: { state: terminal ? lease.cleanup : "notRequested" }, members: [member], capabilities };
   }
   private authorization(lease: LeaseRow, now: number): unknown {
