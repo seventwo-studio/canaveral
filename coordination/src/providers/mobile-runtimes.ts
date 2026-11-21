@@ -73,7 +73,7 @@ async function streamTool(provider: MobileProvider, argv: readonly string[], con
 }
 /** Percentages and a coarse phase are the only things read from installer output. */
 function progressReader(context: RuntimeContext, initial: RuntimePhase): (text: string) => void {
-  let phase = initial, percent: number | undefined, sent = 0;
+  let phase = initial, percent: number | undefined, sent = Number.NEGATIVE_INFINITY;
   return text => {
     if (/download/i.test(text)) phase = "downloading"; else if (/unzip|install|extract|mount|verif/i.test(text)) phase = "installing";
     const matches = [...text.matchAll(/(\d{1,3})(?:\.\d+)?\s?%/g)], last = matches.at(-1);
