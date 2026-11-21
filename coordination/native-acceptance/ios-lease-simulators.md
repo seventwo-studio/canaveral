@@ -1,9 +1,9 @@
-# iOS simulator lease trial (not run)
+# iOS simulator lease trial
 
-Status, 21 November 2026: **unexecuted plan**. The owner had not authorized native runs when
-[iOS simulator leases](../../docs/mobile-control.md#ios-simulator-leases) were implemented, so
-nothing below has been done. The implementation has portable fixture evidence only. Record
-the results here when an authorized trial runs, and keep each claim to what that run showed.
+The authorized [mobile parity trial](mobile-parity.md#ios-simulator-lease) on 21 November
+2026 verified private-set creation, boot and readiness, lease-key app listing, and release
+with proven cleanup. The table below describes the original test plan. The trial record
+identifies the checks that still need native verification.
 
 The lease runs in the `shared-host` isolation class. The trial does not test isolation from
 the host, because there is none to test.
@@ -21,7 +21,7 @@ identical. The trial may only create simulators inside lease device sets under `
 
 ## Checks
 
-| Question | How to check | Open because |
+| Question | How to check | Evidence at implementation |
 | --- | --- | --- |
 | Does a simulator in a private device set create, boot, shut down and delete under the host's account? | Lease once; watch `simulator.log` and `xcrun simctl --set <device set> list devices` | Only a stand-in `simctl` has run |
 | Is `launchd_sim` named and argued as `launchd_sim <device directory>/…`, and do installed apps run from inside the device directory? | `ps -axww -o pid=,ppid=,command=` while leased, with an app launched. If not, every lease ends with `treeObserved: false` and blocked cleanup | The tree identification depends on it; this is the first check |
