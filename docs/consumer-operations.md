@@ -55,10 +55,14 @@ The bounded Linux ledger implements `shell` with an argv array; see
 and native bridges have contracts for screenshot, hierarchy, accessibility, input,
 files and shells. Those contracts do not make every action available on the Linux
 lease wire. Each route must validate its own action envelope and refuse missing
-provider bindings before dispatch. App installation,
-launch, permissions and other mobile actions are outside the Linux subset. A
-leased Android emulator has its own bounded set through its lease key; see
-[scoped control](mobile-control.md#scoped-control). iOS shell and headless graphical operations remain unsupported.
+provider bindings before dispatch. Mobile lease members accept the device actions listed
+for [Android](mobile-control.md#scoped-control) and [iOS](mobile-control.md#ios-scoped-control).
+The host-side `install` action stays administrative. Android lease keys can also use
+`permission`, `location` and `rotate` on their own emulator. iOS lease keys can use
+`location` and `rotate` on their own simulator. iOS
+shell and headless graphical operations remain unsupported: an iOS template has no `command`
+or `pty` capability, so on an iOS member the app lifecycle and log actions need `files`
+instead of `command`.
 
 Submission requires a ready member, an online enabled host and explicit pinned
 image/runtime lease eligibility. Each intent has a 120-second start window,

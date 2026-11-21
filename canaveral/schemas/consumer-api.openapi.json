@@ -2611,6 +2611,13 @@
                 "additionalProperties": false
               }
             ]
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "shared-host"
+            ],
+            "description": "Present only when leases of this template run in a declared isolation class weaker than their runtime's own contract. `shared-host`: an iOS simulator lease is an ordinary process tree of the Mac host's user, with the host's network and files; it is not isolated from the host or from other simulators on it, and is for trusted code only."
           }
         },
         "required": [
@@ -2798,6 +2805,13 @@
           },
           "cleanup": {
             "$ref": "#/components/schemas/MemberCleanup"
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "shared-host"
+            ],
+            "description": "The declared isolation class of this member, when its template has one. `shared-host`: the member is not isolated from the host that runs it."
           }
         },
         "required": [
@@ -2892,6 +2906,13 @@
                 "$ref": "#/components/schemas/Empty"
               }
             ]
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "shared-host"
+            ],
+            "description": "The isolation class of a single-member lease, repeated from its member. Absent when the template declares none."
           }
         },
         "required": [

@@ -38,6 +38,9 @@ Xcode for the runner and its child tools without changing the system default.
 Install `idb` and `idb_companion`; the
 companion must be on the agent's PATH. Configure the idb executable in
 [host-ios.json](../examples/host-ios.json), or omit `idb` to resolve it on PATH.
+That example also opts into [iOS simulator leases](mobile-control.md#ios-simulator-leases)
+with the explicit `shared-host` declaration. To offer owned simulators only, remove
+`idbCompanion`, `leaseClockHelper`, `leaseSupervisor`, `leaseProtocol` and `leaseImages`.
 Run the agent as the account that owns these simulators, with access to CoreSimulator.
 An iOS simulator build (`.app`) is required; an iPhone device build is incompatible.
 The runtime and device type in [ios-phone.json](../examples/templates/ios-phone.json)
@@ -49,6 +52,11 @@ It launches without a window, audio or snapshots and retains app data across sto
 Each iOS assignment creates its own simulator in the account's standard device set,
 with a saved UDID and unique assignment name. All subsequent commands target that
 UDID. Existing personal/project devices are neither imported nor adopted.
+
+A leased iOS simulator is different: it is created in a private device set inside the
+lease's own storage, which Xcode and a plain `simctl` do not list, and every command for it
+names that set. Leasing is an operator opt-in under the `shared-host` isolation class; see
+[iOS simulator leases](mobile-control.md#ios-simulator-leases).
 
 iOS CPU, memory and disk values are scheduling reservations. CoreSimulator manages
 actual resources; Canaveral cannot impose VM-style CPU/RAM/disk limits on it. Allow
@@ -205,4 +213,5 @@ available, the child process birth time. Read-only
 [resource attribution](android-runtime-ownership.md) uses this evidence after a
 runner restart without querying ADB or adopting another AVD. Legacy or incomplete
 receipts keep simulator metrics unknown. This does not enable leased execution,
-change stop semantics or establish native cleanup.
+change stop semantics or establish native cleanup. A leased iOS simulator's processes
+are not attributed at all; its CPU, memory and disk remain scheduling reservations.

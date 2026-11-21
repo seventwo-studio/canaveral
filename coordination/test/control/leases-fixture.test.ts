@@ -28,7 +28,8 @@ export function leaseFixture(t: TestContext, system = "linux", mode = "headless"
     ...(system === "ios" ? { device: { runtime: "com.apple.CoreSimulator.SimRuntime.iOS-18-0", deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-16" } } : {}) };
   const provider = system === "android" || system === "ios" ? system : "libvirt";
   let offer: Record<string, any> = { name: "disposable fixture", provider, capacity: { cpu: 512, memoryMiB: 1048576, diskGiB: 4096 }, templates: [image],
-    leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch: "amd64", runtime: provider }] };
+    // An iOS selector is eligible only with its explicit shared-host isolation declaration.
+    leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch: "amd64", runtime: provider, ...(provider === "ios" ? { isolation: "shared-host" } : {}) }] };
   leases.machines.enroll({ id: host, credential: hostToken, offer }, options.enrollmentToken);
   const application = (limits: Record<string, unknown> = {}, templates = [{ id: image.id, revision: "1", arch: "amd64" }]) => apps.create({ id: randomUUID(), name: "Fixture application", templates,
     limits: { resources: { cpu: 512, memoryMiB: 1048576, diskGiB: 4096 }, activeLeases: 200, defaultTTLSeconds: 120,

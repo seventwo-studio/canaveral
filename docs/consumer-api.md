@@ -39,6 +39,10 @@ session requests does not implement paired phone/watch acquisition. Capabilities
 describe adapter contracts; readiness and live platform support remain separate.
 Ordinary runners still cannot advertise consumer lease execution.
 
+`CatalogueImage`, `Lease` and `LeaseMember` carry an optional `isolation` field. Its only
+value is `shared-host`, on iOS simulator templates and their leases: such a lease is not
+isolated from the host that runs it. Treat an unknown value as weaker, never as stronger.
+
 The [durable operation contract](consumer-operations.md) describes scoped commands,
 retained receipts and uncertain effects.
 
