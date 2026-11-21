@@ -296,7 +296,7 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
     leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [image, ...(options.templates ?? [])].map(entry => ({ id: entry.id, revision: entry.revision, arch, runtime: "android" })),
     ...(options.warmPool ? { leaseWarmPool: options.warmPool } : {}) };
   const launch = async () => {
-    runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state) });
+    runner = new HostRunner({ ...config, pressure: { enabled: false } }, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state) });
     await runner.start();
   };
   await launch();

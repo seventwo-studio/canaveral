@@ -15,6 +15,8 @@ import { fenceLeaseAuthorization, publishLeaseAuthorization, requireLeaseAccess 
 import { materializeIosApp } from "./ios-artifact.ts";
 import { openIosVideo } from "./ios-video.ts";
 import type { IosVideoOptions } from "./ios-video.ts";
+import { iosOrphan, purgeOrphan, runtimeOperation, storageDevices, strayDevices } from "./mobile-runtimes.ts";
+import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./mobile-runtimes.ts";
 
 /** The only isolation class an iOS simulator lease runs in. A simulator app is an ordinary
  * process of the Mac host's user, with the host's network and files, so a leased simulator
@@ -73,6 +75,12 @@ export class IosProvider extends MobileProvider {
   async idb(udid: string, args: readonly string[]): Promise<string> {
     return this.runText(this.idbCommand(udid, args), { env: this.idbEnvironment() });
   }
+  /** Operator-requested runtime listing, install and removal; never called by reconciliation. */
+  runtimeOperation(kind: string, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport> { return runtimeOperation(this, kind, args, context); }
+  storageDevices(): { id: string; runtime: string | null }[] { return storageDevices(this); }
+  orphanEvidence(name: string): Promise<OrphanEvidence> { return iosOrphan(this, name); }
+  strayDevices(): Promise<{ name: string; machineId: string; kind: "avd-registration" | "simulator" }[]> { return strayDevices(this); }
+  purgeOrphan(name: string, requestId: string, hostId: string | undefined): Promise<{ assignmentFingerprint: string | undefined; removed: OrphanRemoval[] }> { return purgeOrphan(this, name, requestId, hostId); }
   async inventory(): Promise<{ runtime: string; device: RecordValue }[]> {
     const devices = object(object(JSON.parse(await this.simctl(["list", "devices", "--json"]))).devices), result = [];
     for (const [runtime, entries] of Object.entries(devices)) {

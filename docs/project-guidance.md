@@ -25,6 +25,7 @@ interpreter dependency to the controller, host or SDK; see
 - [error codes](error-codes.md) (every stable `code`, its status, meaning and retry guidance; checked against source)
 - [event log](events.md) (durable history captured with each state change, cursor reads and live follow; fixture-covered)
 - [remote mobile control and CI builds](mobile-control.md)
+- [mobile host upkeep](mobile-host-upkeep.md) (runtime and system-image management, idle stop, orphan storage, and memory and disk pressure reporting with opt-in back-off; fixture evidence only)
 - [guest access](guest-access.md)
 - [image registry](image-registry.md)
 - [images](images.md)

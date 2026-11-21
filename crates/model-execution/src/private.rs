@@ -76,6 +76,13 @@ pub(super) struct Directory {
     dir: File,
     lock: File,
 }
+impl Drop for Directory {
+    fn drop(&mut self) {
+        // A concurrent fork can keep this file description open until it execs.
+        // Release ownership explicitly when the owning Directory is dropped.
+        unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
 impl Directory {
     pub fn open(path: &Path) -> Result<Self> {
         let parent = walk(path.parent().ok_or_else(invalid)?)?;
@@ -474,6 +481,25 @@ fn remove_tree(parent: &File, n: &CString) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dropping_the_owner_unlocks_even_with_another_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("state");
+        let directory = Directory::open(&root).unwrap();
+        let inherited = directory.lock.try_clone().unwrap();
+        assert!(matches!(
+            Directory::open(&root),
+            Err("executor already owned")
+        ));
+        drop(directory);
+        let reopened = Directory::open(&root).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            Directory::open(&root),
+            Err("executor already owned")
+        ));
+        drop(reopened);
+    }
     #[test]
     fn cleanup_rechecks_directory_after_many_removals() {
         use std::os::unix::fs::PermissionsExt;

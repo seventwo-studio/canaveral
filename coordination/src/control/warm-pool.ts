@@ -1,3 +1,4 @@
+import { pressureAdmission } from "./pressure.ts";
 /** Warm pool for leased mobile devices.
  *
  * A warm device is an ordinary machine row that the pool creates on one host, so every capacity
@@ -81,7 +82,7 @@ function adoptable(db: DatabaseSync, row: WarmRow, now: number): boolean {
 function offerOf(host: Json): Json | undefined { try { return object(JSON.parse(String(host.offer))); } catch { return undefined; } }
 /** Online, accepting, healthy and not draining: the same gate as lease placement. */
 function hostReady(db: DatabaseSync, host: Json, now: number): boolean {
-  return !!host.enabled && now - Number(host.seen) < HOST_LEASE_SECONDS && !hostAdmissionClosed(db, String(host.id)).closed && healthReady(db, String(host.id), now) &&
+  return !!host.enabled && now - Number(host.seen) < HOST_LEASE_SECONDS && !hostAdmissionClosed(db, String(host.id)).closed && healthReady(db, String(host.id), now) && !pressureAdmission(db, String(host.id), now).blocked &&
     !(table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(String(host.id)));
 }
 function template(db: DatabaseSync, id: string, revision: string, arch: string): Json | undefined {

@@ -30,6 +30,16 @@ hosts | machines | templates | models | jobs | images | image-tasks
 machine ID | job ID | cancel-job ID | start ID | stop ID | drain ID | accept ID
 maintenance begin HOST [--id UUID] [--reason TEXT]
 maintenance status HOST | maintenance resume HOST DRAIN_ID [--request-id UUID]
+runtimes show HOST                       Mobile runtimes and system images with their users
+runtimes list HOST --platform android|ios [--request-id UUID]
+runtimes install HOST --platform P --identifier ID --request-id UUID
+         [--accept-android-licenses] [--timeout-seconds N]
+runtimes remove HOST --platform P --identifier ID --request-id UUID
+upkeep status HOST [--idle-stop-seconds N]  Dry run: idle stops and orphan removals, with reasons
+upkeep inspect HOST [--request-id UUID]  Ask the host to inspect its storage for orphans
+upkeep purge HOST --inspection UUID --entry NAME [--entry NAME] --request-id UUID
+host-operation ID [--resolve-file FILE]  Read a runtime or storage operation receipt, or record
+                                         an administrator's decision on one that ended unknown
 create NAME --template ID --request-id UUID [--cpu N --memory-mib N --disk-gib N]
 generate --model ID --prompt-file FILE --request-id UUID [--max-tokens N]
 device ID ACTION --request-id UUID [--arguments-file FILE]
@@ -87,6 +97,14 @@ uses an operator-prepared disk (disk.raw, auxiliary.bin, hardware-model.bin).
 Retained legacy identities require explicit offline consolidation; no state is adopted.
 Native host adapters and local desktop preparation require installed, explicitly
 configured runtimes. Missing support fails closed; local never downloads runtimes.
+Runtime installs and removals happen only through an explicit runtimes command; a
+lease or machine creation never downloads. An Android install must pass
+--accept-android-licenses. A change that ends unknown is never replayed: run
+runtimes list (or upkeep inspect) before another change, or record a decision with
+host-operation ID --resolve-file when the host can no longer be inspected. upkeep
+status changes nothing; orphan storage is removed only by upkeep purge of inspected
+entries. hosts shows each host's memory and disk pressure beside its health; pressure
+refuses placement only on a host whose own file opts in (pressure.gatePlacement).
 `;
 type Schema = { flags?: string[]; values?: string[]; required?: string[]; positional?: number; actions?: string[]; defaultAction?: string };
 const schemas: Record<string, Schema> = {
@@ -114,6 +132,7 @@ const schemas: Record<string, Schema> = {
   template: { actions: ["validate", "prepare"], positional: 1, values: ["cache"] },
   start: { positional: 1 }, stop: { positional: 1 }, drain: { positional: 1 }, accept: { positional: 1 },
   maintenance: { actions: ["begin", "status", "resume"] },
+  runtimes: { actions: ["show", "list", "install", "remove"] }, upkeep: { actions: ["status", "inspect", "purge"] }, "host-operation": { positional: 1, values: ["resolve-file"] },
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
   requests: { actions: ["list", "show", "submit", "cancel"], defaultAction: "list" },
@@ -129,6 +148,11 @@ const subSchemas: Record<string, Schema> = {
   "maintenance:begin": { positional: 1, values: ["id", "reason"] },
   "maintenance:status": { positional: 1 },
   "maintenance:resume": { positional: 2, values: ["request-id"] },
+  "runtimes:show": { positional: 1 }, "runtimes:list": { positional: 1, values: ["platform", "request-id"], required: ["platform"] },
+  "runtimes:install": { positional: 1, flags: ["accept-android-licenses"], values: ["platform", "identifier", "timeout-seconds", "request-id"], required: ["platform", "identifier", "request-id"] },
+  "runtimes:remove": { positional: 1, values: ["platform", "identifier", "timeout-seconds", "request-id"], required: ["platform", "identifier", "request-id"] },
+  "upkeep:status": { positional: 1, values: ["idle-stop-seconds"] }, "upkeep:inspect": { positional: 1, values: ["request-id"] },
+  "upkeep:purge": { positional: 1, values: ["inspection", "entry", "request-id"], required: ["inspection", "entry", "request-id"] },
   "users:list": {}, "users:create": { values: ["username", "role", "request-id"], required: ["username", "request-id"] },
   "users:update": { positional: 1, values: ["role", "status"] },
   "users:invite": { positional: 1, values: ["dashboard-url", "output-file"], required: ["dashboard-url", "output-file"] },
@@ -181,7 +205,7 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
   const schema = subSchemas[`${command}:${action}`] ?? initial;
   const options: NonNullable<ParseArgsConfig["options"]> = {};
   for (const name of schema.flags ?? []) options[name] = { type: "boolean" };
-  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" || name === "kind" ? { multiple: true } : {}) };
+  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" || name === "entry" || name === "kind" ? { multiple: true } : {}) };
   const result = parseArgs({ args: tail, options, allowPositionals: true, strict: true });
   if (command === "lease" && !action && result.positionals.length === 2) {
     action = result.positionals.pop()!;
@@ -191,7 +215,7 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
   const expected = command === "lease" && action === "device" && result.values["request-file"] !== undefined ? 1 : schema.positional ?? 0;
   if (result.positionals.length !== expected) throw new CliError(`Invalid arguments for ${command}${action ? " " + action : ""}.`);
   for (const key of schema.required ?? []) if (!result.values[key]) throw new CliError(`Supply --${key}.`);
-  for (const [key, choices] of Object.entries({ role: ["admin", "user"], status: ["active", "pending", "disabled"], arch: ["amd64", "arm64"] })) {
+  for (const [key, choices] of Object.entries({ role: ["admin", "user"], status: ["active", "pending", "disabled"], arch: ["amd64", "arm64"], platform: ["android", "ios"] })) {
     const value = result.values[key]; if (typeof value === "string" && !choices.includes(value)) throw new CliError(`Invalid --${key}.`);
   }
   if (Array.isArray(result.values.scope) && result.values.scope.some(scope => typeof scope !== "string" || !["machines:read", "machines:write", "machines:access", "admin"].includes(scope))) throw new CliError("Invalid --scope.");
@@ -498,6 +522,29 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
       if (args.options["request-id"] === undefined) io.stderr(`Resume request UUID ${requestId}\n`);
       result = await client.request("POST", `${path}/${drain}/resume`, { requestId });
     }
+  }
+  else if (args.command === "host-operation" && args.options["resolve-file"]) {
+    // {id, decision, reason}: the mutation UUID, "inspected" or "abandoned", and why.
+    const body = await jsonFile(option(args, "resolve-file")); body.id = uuid(String(body.id));
+    result = await client.request("POST", `/v1/host-operations/${uuid(positional(args))}/resolve`, body);
+  } else if (args.command === "host-operation") result = await client.request("GET", `/v1/host-operations/${uuid(positional(args))}`);
+  else if (args.command === "runtimes" || args.command === "upkeep") {
+    const host = `/v1/hosts/${uuid(positional(args))}`;
+    // A read may take a generated UUID; a change must name one the operator has saved.
+    const operation = (kind: string, values: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const id = args.options["request-id"] === undefined ? randomUUID() : uuid(option(args, "request-id"));
+      if (args.options["request-id"] === undefined) io.stderr(`Operation UUID ${id}\n`);
+      return client.request("POST", host + "/operations", { id, kind, arguments: values });
+    };
+    const timeout = (): Record<string, number> => args.options["timeout-seconds"] === undefined ? {} : { timeoutSeconds: numberOption(args, "timeout-seconds", undefined, 60, 14_400) };
+    if (args.command === "runtimes" && args.action === "show") result = await client.request("GET", host + "/runtimes");
+    else if (args.command === "upkeep" && args.action === "status") result = await client.request("GET", host + "/upkeep" + (args.options["idle-stop-seconds"] === undefined ? "" : "?idleStopSeconds=" + numberOption(args, "idle-stop-seconds", undefined, 300, 2_592_000)));
+    else if (args.command === "upkeep" && args.action === "inspect") result = await operation("storage-inspect", {});
+    else if (args.command === "upkeep") result = await operation("storage-purge", { inspection: uuid(option(args, "inspection")), entries: args.options.entry });
+    else if (args.action === "list") result = await operation("runtime-list", { platform: option(args, "platform") });
+    else result = await operation(args.action === "install" ? "runtime-install" : "runtime-remove", { platform: option(args, "platform"), identifier: option(args, "identifier"), ...timeout(),
+      // The acknowledgement is sent only when the operator typed it for this request.
+      ...(args.action === "install" && args.options["accept-android-licenses"] === true ? { acceptLicenses: true } : {}) });
   }
   else if (args.command === "image") {
     const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id));

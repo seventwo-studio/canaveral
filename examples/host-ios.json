@@ -6,6 +6,15 @@
   "idb": "/opt/homebrew/bin/idb",
   "idbCompanion": "/opt/homebrew/bin/idb_companion",
   "artifacts": {"development": "/Users/operator/Builds/Development.app"},
+  "pressure": {
+    "gatePlacement": false,
+    "gateRestart": false,
+    "memory": {"darwinEnterLevel": "warning"},
+    "disk": {"enterFreeGiB": 10, "exitFreeGiB": 20},
+    "enterSeconds": 10,
+    "clearSeconds": 60
+  },
+  "upkeep": {"idleStopSeconds": 7200},
   "templates": [{"templateFile": "templates/ios-phone.json"}],
   "leaseClockHelper": "/usr/local/bin/canaveral-mobile-native",
   "leaseSupervisor": "/usr/local/bin/canaveral-mobile-native",

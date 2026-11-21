@@ -100,6 +100,31 @@ status.
 | `warm_pool_disabled` | 409 | The operator has not enabled warm devices on this host | Select an opted-in Android lease host |
 | `warm_target_ineligible` | 409 | The host does not advertise the pinned image for Android leases | Choose a lease image advertised by the host |
 | `warm_target_limit` | 409 | The requested warm targets exceed the host's device bound | Reduce the target count to fit the host limit |
+| `error` | receipt | The native upkeep command ended without a conclusive result | Inspect the host before another mutation |
+| `expired` | receipt | The operation's start window elapsed before dispatch or execution | Submit a new operation if it is still needed |
+| `host_inspection_required` | 409 | A recent successful inspection is required for the requested upkeep change | Inspect the host and resolve any uncertain change first |
+| `host_operation_busy` | 409 | An install, removal or purge already holds this host and platform | Wait for the active operation to end |
+| `host_pressure` | 503 | Eligible hosts report pressure and their operators enabled admission gating | Wait for pressure to clear or choose an eligible host |
+| `host_pressure_unknown` | 503 | An opted-in host has an unreadable or stale pressure sample | Check the host report or wait for a fresh sample |
+| `installer_failed` | receipt | The installer failed and the requested runtime is still unavailable | Inspect the runtime inventory before requesting another install |
+| `interrupted` | receipt | The upkeep command lost authorization before producing a confirmed outcome | Inspect the host and settle the receipt before making another change |
+| `invalid_identifier` | receipt | The host refused an unsupported runtime or image identifier | Select a runtime from the host inventory |
+| `inventory_incomplete` | receipt | The host could not complete its storage ownership inventory | Inspect again before authorizing a purge |
+| `inventory_unavailable` | receipt | The host could not read the runtime inventory from its platform tools | Check the platform tools and run another inventory |
+| `license_acknowledgement_required` | 400, receipt | The requested Android install did not acknowledge the SDK licences | Accept the licences in the install request before submitting it |
+| `license_not_accepted` | receipt | The Android installer reported that its licence check failed | Inspect the SDK licence state before requesting another install |
+| `not_removable` | receipt | The platform tool or inventory did not identify a removable runtime | Inspect the runtime before deciding whether to remove it |
+| `not_verified` | receipt | The host could not verify that installation or removal took effect | Inspect the inventory and settle the original operation first |
+| `orphan_refused` | receipt | The host could not prove the named orphan was eligible for deletion | Inspect the remaining entry and its ownership evidence |
+| `outcome_unknown` | receipt | The host reported no confirmed result before its deadline | Inspect and settle it before making another change |
+| `runtime_in_use` | 409, receipt | A template, lease, device or retained storage still depends on the runtime | Clear the runtime's references before requesting removal |
+| `storage_owner_exists` | 409 | Named storage still has a live owner or lacks proof of removability | Inspect current ownership and submit a new purge only after proof |
+| `tool_unavailable` | receipt | A required platform tool was unavailable or could not start | Check the host's tool configuration before retrying |
+| `unauthorized` | receipt | Host upkeep lost authority before it could finish safely | Inspect the existing receipt before retrying work |
+| `uninstall_failed` | receipt | The uninstaller failed and the runtime remains installed | Inspect the runtime and its users before another removal |
+| `unsupported` | receipt | The host does not support the requested upkeep operation | Choose a host and platform with that capability |
+| `update_fenced` | receipt | A pending host update prevented the runner from starting upkeep | Wait for the update and confirm host readiness before retrying |
+| `upkeep_unsupported` | 409, receipt | The host does not offer runtime or storage upkeep for this platform | Choose a host with the required upkeep capability |
 | `host_draining` | 409 | Admission is closed on the host by a drain, maintenance or an update | Later. A waiting request stays queued until admission reopens |
 | `maintenance_blocked` | 409 | A maintenance drain cannot be resumed; the reply lists the blockers | After resolving the listed resume blockers |
 | `session_disconnected` | 410, client | The session's stream ended; unconfirmed input was not applied on reconnect | Open a new session with a new UUID; do not replay input |

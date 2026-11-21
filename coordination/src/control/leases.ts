@@ -1,4 +1,5 @@
 import { domainAdmissionClosed, hostAdmissionClosed } from "./maintenance.ts";
+import { pressureAdmission } from "./pressure.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Requests } from "../requests.ts";
@@ -351,6 +352,7 @@ export class LegacyLeases implements ControlModule {
         try { this.machines.createMachine(db, request, true); }
         catch (error) {
           if (error instanceof ServiceError && error.message.startsWith("No online accepting host")) throw new ServiceError("No eligible lease-capable host has capacity.", 503, { code: "capacity_unavailable" });
+          if (error instanceof ServiceError && (error.code === "host_pressure" || error.code === "host_pressure_unknown")) throw new ServiceError(error.message, 503, { code: error.code });
           throw error;
         }
       }
@@ -370,6 +372,7 @@ export class LegacyLeases implements ControlModule {
         if (hostAdmissionClosed(db, String(host.id)).closed || this.store.clock() - Number(host.seen) >= 30) return false;
         const health = legacyTable(db, "host_health") ? db.prepare("SELECT report,received FROM host_health WHERE host=?").get(host.id!) : undefined;
         if (health?.report && (this.store.clock() - Number(health.received) >= 120 || !["passed", "warning"].includes(object(JSON.parse(String(health.report))).status as string))) return false;
+        if (pressureAdmission(db, String(host.id), this.store.clock()).blocked) return false;
         return leaseEligible(object(JSON.parse(String(host.offer))), image);
       });
       const isolation = leaseIsolation(image);
