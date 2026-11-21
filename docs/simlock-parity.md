@@ -39,7 +39,8 @@ states its own evidence. Fixture coverage does not establish native acceptance.
 | Live screen for a lease | Live stream for the holder and for operators | Screenshots and bounded recordings only | [#87](https://github.com/seventwo-studio/canaveral/pull/87) |
 | Runtime and capacity upkeep | Install and remove runtimes and images, idle-device cleanup, back-off under memory or disk pressure | Operators installed runtimes by hand; observed load never affected placement | [#84](https://github.com/seventwo-studio/canaveral/pull/84) |
 
-Each pull request records its contract, evidence and open items. The dashboard
+All nine feature pull requests were squash-merged into `main` after required CI
+passed. Each records its contract, evidence and open items. The dashboard
 builds on queue visibility, observability and live views. Portable integration
 tests cover the administrator queue and gateway. Headless Chromium fixtures
 exercise the fleet pages and decode a screen-wall stream at 320px and 1440px.
