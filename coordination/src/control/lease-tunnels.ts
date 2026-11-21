@@ -10,10 +10,16 @@
  * Off unless both the member's host declares `leaseTunnelProtocol: 1` and the application's
  * policy sets `limits.tunnelsPerLease` above zero.
  *
- * A tunnel holds no capacity reservation. It holds one of its lease's tunnel slots and its
- * device port from creation until it has ended and its device mapping is known to be gone:
- * the runner never installed one, the runner reported the removal, or the lease's own cleanup
- * proved the emulator stopped and removed. It never delays that cleanup. */
+ * A tunnel holds no capacity reservation. While it is live it holds one place in its lease's
+ * tunnel allowance. Its device port and one host slot stay held until it has ended and its
+ * device mapping is known to be gone: the runner never installed one, the runner reported the
+ * removal, or the lease's own cleanup proved the emulator stopped and removed. An ended tunnel
+ * whose removal is unproven no longer counts against the allowance, only against a small bound
+ * of its own, so it cannot strand the lease. It never delays the lease's cleanup.
+ *
+ * The broker asks for a tunnel's authority at most every 250 ms per pair, not per relayed
+ * message. That check reads a snapshot without the write lock or transaction hooks; a write
+ * happens only when the tunnel ends. */
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ApplicationSpec } from '../consumers.ts';
@@ -26,18 +32,22 @@ import { requireHostAdmission } from './maintenance.ts';
 import { SESSION_PROTOCOL } from './session-protocol.ts';
 import type { SessionSide } from './session-protocol.ts';
 import { uuid } from './transfers.ts';
-import { TUNNEL_ATTACH_SECONDS, TUNNEL_CONNECTIONS, TUNNEL_IDENTITIES_PER_LEASE, TUNNEL_WINDOW_BYTES, TUNNELS_PER_HOST, TUNNELS_PER_LEASE_MAX, tunnelIntent } from '../tunnel-relay.ts';
+import { TUNNEL_ATTACH_SECONDS, TUNNEL_CONNECTIONS, TUNNEL_END_REASONS, TUNNEL_IDENTITIES_PER_HOUR, TUNNEL_RESIDUE_PER_LEASE, TUNNEL_WINDOW_BYTES, TUNNELS_PER_HOST, TUNNELS_PER_LEASE_MAX, tunnelIntent } from '../tunnel-relay.ts';
 
 export type TunnelCommand =
   | { type: 'tunnels.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
   | { type: 'tunnels.authorized'; sessionId: string; generation: string; ready?: boolean }
   | { type: 'tunnels.disconnect'; sessionId: string; generation: string };
 type Row = { id: string; lease: string; member: string; machine: string; host: string; binding: string; generation: string; credential: string; host_credential: string | null;
-  request: string; state: string; created: number; host_attached: number; consumer_attached: number; mapping_removed: number; ended: number | null };
+  request: string; state: string; created: number; host_attached: number; consumer_attached: number; mapping_removed: number; ended: number | null;
+  /** Why the runner itself ended the tunnel, when it did. */
+  reason: string | null };
 const LIVE = ['pending', 'attaching', 'ready'];
 const LIVE_SQL = "('pending','attaching','ready')";
-/** Over alias `t`: the tunnel still holds its lease slot, its host slot and its device port. */
+/** Over alias `t`: the tunnel still holds its host slot and its device port. */
 const HELD = `(t.state IN ${LIVE_SQL} OR t.mapping_removed=0)`;
+/** Over alias `t`: ended, with a mapping not yet known to be gone. */
+const RESIDUE = `(t.state NOT IN ${LIVE_SQL} AND t.mapping_removed=0)`;
 const refuse = (status: number, code?: string): never => { throw new ServiceError('Lease tunnel request rejected.', status, code ? { code } : {}); };
 function exact(body: Record<string, unknown>, required: string[], optional: string[] = []): void {
   if (required.some(k => !Object.hasOwn(body, k)) || Object.keys(body).some(k => !required.includes(k) && !optional.includes(k))) refuse(400);
@@ -54,13 +64,16 @@ function tunnelHost(m: Record<string, unknown>): boolean {
 
 export class LeaseTunnels implements ControlModule {
   constructor(readonly store: SqliteStore, readonly machines: MachineStore) {
-    store.transaction(db => db.exec(`CREATE TABLE IF NOT EXISTS lease_tunnels (
-      id TEXT PRIMARY KEY,lease TEXT NOT NULL,member TEXT NOT NULL,machine TEXT NOT NULL,host TEXT NOT NULL,binding TEXT NOT NULL,
-      generation TEXT NOT NULL,credential TEXT NOT NULL,host_credential TEXT,request TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,
-      host_attached INTEGER NOT NULL,consumer_attached INTEGER NOT NULL,mapping_removed INTEGER NOT NULL,ended REAL);
-      CREATE INDEX IF NOT EXISTS lease_tunnels_lease ON lease_tunnels(lease,created);
-      CREATE INDEX IF NOT EXISTS lease_tunnels_host ON lease_tunnels(host,state);
-      UPDATE lease_tunnels SET state='disconnected',ended=COALESCE(ended,created) WHERE state IN ${LIVE_SQL};`));
+    store.transaction(db => {
+      db.exec(`CREATE TABLE IF NOT EXISTS lease_tunnels (
+        id TEXT PRIMARY KEY,lease TEXT NOT NULL,member TEXT NOT NULL,machine TEXT NOT NULL,host TEXT NOT NULL,binding TEXT NOT NULL,
+        generation TEXT NOT NULL,credential TEXT NOT NULL,host_credential TEXT,request TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,
+        host_attached INTEGER NOT NULL,consumer_attached INTEGER NOT NULL,mapping_removed INTEGER NOT NULL,ended REAL,reason TEXT);
+        CREATE INDEX IF NOT EXISTS lease_tunnels_lease ON lease_tunnels(lease,created);
+        CREATE INDEX IF NOT EXISTS lease_tunnels_host ON lease_tunnels(host,state);`);
+      if (!(db.prepare('PRAGMA table_info(lease_tunnels)').all() as { name: string }[]).some(column => column.name === 'reason')) db.exec('ALTER TABLE lease_tunnels ADD COLUMN reason TEXT');
+      db.exec(`UPDATE lease_tunnels SET state='disconnected',ended=COALESCE(ended,created) WHERE state IN ${LIVE_SQL}`);
+    });
     registerMachineHooks(store, { heartbeatResponse: (db, host) => {
       this.refresh(db);
       // Never truncated: admission keeps a host at or below this many held tunnels.
@@ -76,7 +89,7 @@ export class LeaseTunnels implements ControlModule {
     const lease = db.prepare('SELECT expires FROM leases WHERE id=?').get(r.lease);
     return { id: r.id, leaseId: r.lease, member: r.member, ...object(JSON.parse(r.request)), generation: r.generation, capability: 'tunnel' as const, protocol: SESSION_PROTOCOL, state: r.state,
       createdAt: utc(r.created), attachBefore: utc(r.created + TUNNEL_ATTACH_SECONDS), authorizationDeadline: utc(Number(lease?.expires ?? r.created)),
-      mappingRemoved: r.mapping_removed === 1, limits: { connections: TUNNEL_CONNECTIONS, windowBytes: TUNNEL_WINDOW_BYTES } };
+      mappingRemoved: r.mapping_removed === 1, ...(r.reason ? { endReason: r.reason } : {}), limits: { connections: TUNNEL_CONNECTIONS, windowBytes: TUNNEL_WINDOW_BYTES } };
   }
   /** Why a live tunnel may no longer be used, or undefined while it is still authorized. A tunnel
    * follows its lease: the key that opened it, a ready unexpired lease, an active application, a
@@ -107,18 +120,27 @@ export class LeaseTunnels implements ControlModule {
     db.prepare(`UPDATE lease_tunnels SET mapping_removed=1 WHERE mapping_removed=0 AND state NOT IN ${LIVE_SQL} AND (host_attached=0${legacyTable(db, 'lease_cleanup_members') ?
       " OR EXISTS (SELECT 1 FROM lease_cleanup_members c WHERE c.machine=lease_tunnels.machine AND c.state='complete')" : ''})`).run();
   }
-  /** Broker authority. The broker asks once per relayed message and every 250 ms, so this checks
-   * one row and writes only when that tunnel ends. */
+  /** Broker commands. The authority check runs up to four times a second for every open tunnel,
+   * so it reads one row from a snapshot and takes the write lock only to record that the tunnel
+   * ended. Expiry is computed here from the lease's own deadline, not left to a refresh hook. */
   command(command: TunnelCommand): unknown {
+    if (command.type === 'tunnels.authorized') {
+      const verdict = this.store.read(db => {
+        const r = this.row(db, command.sessionId);
+        if (r.generation !== uuid(command.generation)) return refuse(403);
+        const live = LIVE.includes(r.state), end = live ? this.lapsed(db, r, this.store.clock()) : undefined;
+        return { row: r, end, authorized: live && !end && (!command.ready || r.state === 'ready') };
+      });
+      if (verdict.end) this.store.transaction(db => this.finish(db, verdict.row, verdict.end!));
+      return { authorized: verdict.authorized };
+    }
     return this.store.transaction(db => {
       const r = this.row(db, command.sessionId);
       if (r.generation !== uuid(command.generation)) return refuse(403);
       if (command.type === 'tunnels.disconnect') { this.finish(db, r, 'disconnected'); return { disconnected: true }; }
       const live = LIVE.includes(r.state), end = live ? this.lapsed(db, r, this.store.clock()) : undefined;
       if (end) this.finish(db, r, end);
-      const current = live && !end;
-      if (command.type === 'tunnels.authorized') return { authorized: current && (!command.ready || r.state === 'ready') };
-      if (!current) return refuse(410);
+      if (!live || end) return refuse(410);
       if (command.side === 'host') {
         if (uuid(command.ownerId) !== r.host) return refuse(403);
         this.machines.authenticateHost(r.host, command.token);
@@ -145,7 +167,8 @@ export class LeaseTunnels implements ControlModule {
       if (!legacyTable(db, 'leases') || !db.prepare('SELECT 1 FROM leases WHERE id=?').get(leaseId)) return undefined;
       this.refresh(db);
       const owner = legacySessionLease(db, leaseId, req.token);
-      if (p.length === 4 && req.method === 'GET') return { body: { tunnels: (db.prepare('SELECT * FROM lease_tunnels WHERE lease=? ORDER BY created,id').all(owner.id) as unknown as Row[]).map(r => this.view(db, r)) } };
+      // The newest 256 identities, oldest first.
+      if (p.length === 4 && req.method === 'GET') return { body: { tunnels: (db.prepare('SELECT * FROM lease_tunnels WHERE lease=? ORDER BY created DESC,id DESC LIMIT 256').all(owner.id) as unknown as Row[]).reverse().map(r => this.view(db, r)) } };
       if (p.length !== 4) {
         const r = db.prepare('SELECT * FROM lease_tunnels WHERE id=?').get(uuid(p[4])) as unknown as Row | undefined;
         if (!r || r.lease !== owner.id) return refuse(404);
@@ -169,29 +192,39 @@ export class LeaseTunnels implements ControlModule {
       if (!tunnelHost(m)) return refuse(409, 'capability_unsupported');
       if (owner.state !== 'ready' || !legacyMachineReady(db, m, now)) return refuse(409, 'member_not_ready');
       requireHostAdmission(db, String(m.host));
-      const count = (where: string, value: string) => Number(db.prepare(`SELECT COUNT(*) AS n FROM lease_tunnels t WHERE ${where}`).get(value)!.n);
-      if (count(`t.lease=? AND ${HELD}`, owner.id) >= allowed || count('t.lease=?', owner.id) >= TUNNEL_IDENTITIES_PER_LEASE) return refuse(429, 'tunnel_limit');
+      const count = (where: string, ...values: (string | number)[]) => Number(db.prepare(`SELECT COUNT(*) AS n FROM lease_tunnels t WHERE ${where}`).get(...values)!.n);
+      // The allowance counts live tunnels only. An ended tunnel whose removal is unproven keeps its
+      // device port, but is bounded separately so it cannot use up the lease's allowance for good.
+      if (count(`t.lease=? AND t.state IN ${LIVE_SQL}`, owner.id) >= allowed) return refuse(429, 'tunnel_limit');
+      if (count(`t.lease=? AND ${RESIDUE}`, owner.id) >= TUNNEL_RESIDUE_PER_LEASE) return refuse(429, 'tunnel_residue_limit');
+      // A rolling hour, so a lease that lost its tunnels many times is delayed, never stranded.
+      if (count('t.lease=? AND t.created>?', owner.id, now - 3600) >= TUNNEL_IDENTITIES_PER_HOUR) return refuse(429, 'tunnel_identity_limit');
       if (count(`t.host=? AND ${HELD}`, String(m.host)) >= TUNNELS_PER_HOST) return refuse(429, 'tunnel_host_limit');
       // One mapping per device port and direction. An ended tunnel keeps its port until its mapping is known gone.
       for (const held of db.prepare(`SELECT request FROM lease_tunnels t WHERE t.machine=? AND ${HELD}`).all(String(m.id))) {
         const other = object(JSON.parse(String(held.request)));
         if (other.direction === intent.direction && other.devicePort === intent.devicePort) return refuse(409, 'tunnel_port_busy');
       }
-      db.prepare(`INSERT INTO lease_tunnels (id,lease,member,machine,host,binding,generation,credential,host_credential,request,state,created,host_attached,consumer_attached,mapping_removed,ended)
-        VALUES (?,?,?,?,?,?,?,?,NULL,?,'pending',?,0,0,0,NULL)`).run(id, owner.id, member, String(m.id), String(m.host), binding(m), randomUUID(), owner.credential!, request, now);
+      db.prepare(`INSERT INTO lease_tunnels (id,lease,member,machine,host,binding,generation,credential,host_credential,request,state,created,host_attached,consumer_attached,mapping_removed,ended,reason)
+        VALUES (?,?,?,?,?,?,?,?,NULL,?,'pending',?,0,0,0,NULL,NULL)`).run(id, owner.id, member, String(m.id), String(m.host), binding(m), randomUUID(), owner.credential!, request, now);
       return { status: 201, body: this.view(db, this.row(db, id)) };
     });
   }
-  /** The runner's positive receipt that it removed the device mapping, or never installed one.
-   * Current host credentials may repeat it after a rotation; it never revives a tunnel. */
+  /** The runner's receipt for a tunnel it attached: why it ended the tunnel itself (`reason`),
+   * and its positive proof that it removed the device mapping or never installed one
+   * (`mappingRemoved: true`). Only the tunnel's own host may send it, with its current
+   * credential; it may be repeated, the first reason is kept, and it never revives a tunnel. */
   private receipt(db: DatabaseSync, req: ControlRequest) {
-    const p = req.parts;
-    exact(req.body, ['generation', 'mappingRemoved']);
+    const p = req.parts, body = req.body;
+    exact(body, ['generation'], ['mappingRemoved', 'reason']);
+    const removed = Object.hasOwn(body, 'mappingRemoved'), reason = Object.hasOwn(body, 'reason') ? body.reason : undefined;
+    if (!removed && reason === undefined || removed && body.mappingRemoved !== true || reason !== undefined && !(TUNNEL_END_REASONS as readonly unknown[]).includes(reason)) return refuse(400);
     const host = uuid(p[2]), r = this.row(db, p[4]!);
     this.machines.authenticateHost(host, req.token);
-    if (r.host !== host || r.generation !== uuid(req.body.generation) || !r.host_attached || req.body.mappingRemoved !== true) return refuse(403);
+    if (r.host !== host || r.generation !== uuid(body.generation) || !r.host_attached) return refuse(403);
     this.finish(db, r, 'disconnected');
-    db.prepare('UPDATE lease_tunnels SET mapping_removed=1 WHERE id=?').run(r.id);
+    if (reason !== undefined) db.prepare('UPDATE lease_tunnels SET reason=COALESCE(reason,?) WHERE id=?').run(String(reason), r.id);
+    if (removed) db.prepare('UPDATE lease_tunnels SET mapping_removed=1 WHERE id=?').run(r.id);
     return { body: this.view(db, this.row(db, r.id)) };
   }
 }

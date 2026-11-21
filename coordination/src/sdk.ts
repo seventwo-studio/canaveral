@@ -69,6 +69,8 @@ const WORKER_MESSAGES: Record<string, string> = {
   session_incomplete: 'Access ended without confirmed completion. Inspect before retrying.',
   upload_publication_uncertain: 'Upload publication may have occurred. Inspect the destination before retrying.',
   tunnel_mapping_failed: 'The device port mapping could not be created; the device port may be in use. Inspect the tunnel before opening another.',
+  tunnel_mapping_lost: 'The device port mapping disappeared, for example because the adb server or the device transport restarted. The tunnel ended; open a new one.',
+  tunnel_open_rate: "Connections kept arriving faster than the tunnel's open rate. The tunnel ended; open a new one once the client behaves.",
 };
 export function checked<T>(value: T, requestId: string): T {
   if (record(value) && value.type === 'error') {

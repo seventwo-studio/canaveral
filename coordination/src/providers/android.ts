@@ -406,6 +406,10 @@ export class AndroidProvider extends MobileProvider {
       if (probe.outcome !== "isolated") return waiting("Waiting for a conclusive guest network isolation check.");
       saveJson(receipt, { version: 1, bootId: launch.bootId, target: GUEST_HOST_ALIAS, ports: probe.ports, isolated: true });
     }
+    // A host that does not declare lease tunnels behaves exactly as before them: no mapping is
+    // listed or judged. (Known gap, older than tunnels: there, a reverse mapping created by other
+    // adb tooling is not detected.)
+    if (this.config.leaseTunnelProtocol !== 1) return { state: "running", accessReady: true };
     // The probe above covers the guest's network path only. A reverse mapping gives the guest a
     // path through its adb daemon instead, so the mappings themselves are checked on every
     // reconcile, before readiness and for as long as the lease is ready.

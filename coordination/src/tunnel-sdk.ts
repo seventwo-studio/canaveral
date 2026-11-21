@@ -23,8 +23,10 @@ export interface Tunnel {
   generation: string; capability: 'tunnel'; protocol: 'canaveral-session-v1';
   /** `pending`, `attaching` and `ready` are live; `closed`, `expired`, `revoked` and `disconnected` are final. */
   state: string; createdAt: string; attachBefore: string; authorizationDeadline: string;
-  /** The device mapping is known to be gone; the tunnel no longer holds its slot or device port. */
+  /** The device mapping is known to be gone; the tunnel no longer holds its device port. */
   mappingRemoved: boolean;
+  /** Set when the runner itself ended the tunnel: `mapping_failed`, `mapping_lost` or `open_rate`. */
+  endReason?: string;
   limits: { connections: number; windowBytes: number };
 }
 /** Where a reverse tunnel's connections go on the holder's machine. Default host: 127.0.0.1. */
@@ -35,8 +37,9 @@ export interface TunnelIdentity { id: string; member: string; devicePort: number
 export type TunnelRequest = (TunnelIdentity & { direction: 'reverse'; target: TunnelTarget }) | (TunnelIdentity & { direction: 'forward'; listen?: TunnelListen });
 export type TunnelBinding = { target: TunnelTarget } | { listen?: TunnelListen };
 export interface TunnelOpenOptions { timeoutMs?: number; signal?: AbortSignal }
-/** Why an open tunnel ended. `state` is the controller's final state when it could still be read. */
-export interface TunnelClosed { reason: TunnelEnd['reason']; code?: string; state?: string }
+/** Why an open tunnel ended. `state` and `endReason` are the controller's record when it could
+ * still be read: `endReason` names what the runner found (`mapping_lost`, `open_rate`). */
+export interface TunnelClosed { reason: TunnelEnd['reason']; code?: string; state?: string; endReason?: string }
 
 const STATES = ['pending', 'attaching', 'ready', 'closed', 'expired', 'revoked', 'disconnected'];
 function port(value: unknown, minimum: number, label: string): number {
@@ -168,10 +171,10 @@ export class LeaseTunnelClient {
       const closed = ended.then(async end => {
         options.signal?.removeEventListener('abort', abort);
         if (server) await new Promise<void>(resolve => { server!.close(() => resolve()); });
-        let state: string | undefined;
-        try { state = (await this.inspect(current.id)).state; } catch { /* A rotated key or lost controller leaves the reason as reported. */ }
+        let saved: Tunnel | undefined;
+        try { saved = await this.inspect(current.id); } catch { /* A rotated key or lost controller leaves the reason as reported. */ }
         // A close this holder asked for is reported as such, whichever side's socket ended first.
-        return { ...(requested ? { reason: 'closed' as const } : end), ...(state === undefined ? {} : { state }) };
+        return { ...(requested ? { reason: 'closed' as const } : end), ...(saved ? { state: saved.state } : {}), ...(saved?.endReason ? { endReason: saved.endReason } : {}) };
       });
       if (options.signal?.aborted) abort();
       return new LeaseTunnel(current, local, relay, closed, close);

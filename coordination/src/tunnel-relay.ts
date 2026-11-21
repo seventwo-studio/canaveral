@@ -19,8 +19,12 @@ export type TunnelDirection = "reverse" | "forward";
 export const TUNNELS_PER_LEASE_MAX = 8;
 /** Tunnels one host holds at once, across all of its leases. */
 export const TUNNELS_PER_HOST = 64;
-/** Tunnel identities one lease may ever create; identities are tombstones and are not reused. */
-export const TUNNEL_IDENTITIES_PER_LEASE = 256;
+/** Tunnel identities one lease may create in any hour. Identities are tombstones and are never
+ * reused, so this bounds their growth without stranding a long lease for good. */
+export const TUNNEL_IDENTITIES_PER_HOUR = 256;
+/** Ended tunnels of one lease whose mapping removal is not yet proven. They keep their device
+ * port and a host slot, but not a place in the lease's tunnel allowance. */
+export const TUNNEL_RESIDUE_PER_LEASE = 8;
 /** Concurrent connections on one tunnel. A further connection is closed at once. */
 export const TUNNEL_CONNECTIONS = 32;
 /** Unacknowledged bytes per connection and direction. */
@@ -37,6 +41,22 @@ export const TUNNEL_ATTACH_SECONDS = 30;
 /** The guest's adb daemon conventionally listens here; it is never a tunnel endpoint. */
 export const TUNNEL_RESERVED_DEVICE_PORT = 5555;
 const STREAM_MAX = 0xffff_ffff;
+/** New connections a tunnel admits: a burst, then a steady rate. A further one is closed at once. */
+export const TUNNEL_OPEN_BURST = 64;
+export const TUNNEL_OPENS_PER_SECOND = 16;
+/** Connection attempts a tunnel tolerates, admitted or not. A tunnel that keeps being asked faster
+ * than this ends, so a flood stops costing the runner and the shared adb server anything. */
+export const TUNNEL_ATTEMPT_BURST = 512;
+export const TUNNEL_ATTEMPTS_PER_SECOND = 64;
+/** The controller re-checks a tunnel's authority at most this often, and between two checks
+ * relays at most this much per direction. */
+export const TUNNEL_AUTHORITY_MS = 250;
+export const TUNNEL_RELAY_BYTES = 2 * 1_048_576;
+export const TUNNEL_RELAY_MESSAGES = 256;
+export const TUNNEL_RELAY_OPENS = 32;
+/** Why the runner itself ended a tunnel, as recorded on the controller. */
+export const TUNNEL_END_REASONS = ["mapping_failed", "mapping_lost", "open_rate"] as const;
+export type TunnelEndReason = typeof TUNNEL_END_REASONS[number];
 export const TUNNEL_RESET_REASONS = ["connect_failed", "limit", "idle", "closed"] as const;
 export type TunnelResetReason = typeof TUNNEL_RESET_REASONS[number];
 
@@ -71,12 +91,20 @@ export interface TunnelRelayOptions {
   connectMs?: number;
   /** Checked every 250 ms; false ends the tunnel. */
   authorized?: () => boolean;
-  /** Called about once a second while the tunnel runs; a rejection ends the tunnel. */
+  /** Called about once a second while the tunnel runs; a rejection ends the tunnel. A string
+   * `code` on the rejection is kept as the end's code. */
   alive?: () => Promise<void>;
+  /** Called once when this peer itself ends the tunnel for a reason the other side cannot see
+   * (`flood`, or `unauthorized` with a code). Relaying has stopped; the channel closes when the
+   * call settles or after two seconds. */
+  ending?: (end: TunnelEnd) => Promise<void>;
+  openBurst?: number; opensPerSecond?: number; attemptBurst?: number; attemptsPerSecond?: number;
 }
 export interface TunnelStats { opened: number; active: number; refused: number; bytesToPeer: number; bytesFromPeer: number }
-/** Why a tunnel ended. `closed` is this peer's own close; `error` carries the peer's worker code. */
-export interface TunnelEnd { reason: "closed" | "disconnected" | "protocol" | "unauthorized" | "error"; code?: string }
+/** Why a tunnel ended. `closed` is this peer's own close; `error` carries the peer's worker code;
+ * `flood` means connection attempts kept exceeding the tunnel's open rate. */
+export interface TunnelEnd { reason: "closed" | "disconnected" | "protocol" | "unauthorized" | "error" | "flood"; code?: string }
+interface Bucket { tokens: number; at: number; burst: number; rate: number }
 
 interface Stream {
   id: number; socket: Socket | undefined; accepted: boolean; closed: boolean;
@@ -115,7 +143,17 @@ export class TunnelRelay {
   private end: TunnelEnd | undefined;
   private ticks = 0;
   private checking = false;
+  private readonly opens: Bucket;
+  private readonly attempts: Bucket;
+  private reported: Promise<void> = Promise.resolve();
   constructor(readonly channel: TunnelChannel, readonly options: TunnelRelayOptions) {
+    const bucket = (burst: number | undefined, rate: number | undefined, maxBurst: number, maxRate: number): Bucket => {
+      const value = { tokens: burst ?? maxBurst, at: performance.now(), burst: burst ?? maxBurst, rate: rate ?? maxRate };
+      if (!Number.isSafeInteger(value.burst) || value.burst < 1 || value.burst > maxBurst || !Number.isFinite(value.rate) || value.rate <= 0 || value.rate > maxRate) throw new TypeError("Invalid tunnel relay options.");
+      return value;
+    };
+    this.opens = bucket(options.openBurst, options.opensPerSecond, TUNNEL_OPEN_BURST, TUNNEL_OPENS_PER_SECOND);
+    this.attempts = bucket(options.attemptBurst, options.attemptsPerSecond, TUNNEL_ATTEMPT_BURST, TUNNEL_ATTEMPTS_PER_SECOND);
     this.connections = options.connections ?? TUNNEL_CONNECTIONS; this.window = options.windowBytes ?? TUNNEL_WINDOW_BYTES;
     this.connectMs = options.connectMs ?? TUNNEL_CONNECT_MS; this.idleMs = options.idleSeconds * 1000;
     if (!Number.isSafeInteger(this.connections) || this.connections < 1 || this.connections > TUNNEL_CONNECTIONS || !Number.isSafeInteger(this.window) || this.window < 1024 || this.window > TUNNEL_WINDOW_BYTES ||
@@ -125,11 +163,28 @@ export class TunnelRelay {
   /** Ends the tunnel from this peer. Every relayed connection is closed. */
   close(): void { this.fail({ reason: "closed" }); }
 
+  /** Whether one more connection may open. Every attempt costs an attempt token, admitted or
+   * not, so the work a flood can cause is bounded; only an admitted one costs an open token. */
+  private admit(): "ok" | "refuse" | "flood" {
+    const take = (bucket: Bucket): boolean => {
+      const now = performance.now();
+      bucket.tokens = Math.min(bucket.burst, bucket.tokens + (now - bucket.at) / 1000 * bucket.rate); bucket.at = now;
+      if (bucket.tokens < 1) return false;
+      bucket.tokens -= 1; return true;
+    };
+    if (!take(this.attempts)) return "flood";
+    if (this.streams.size >= this.connections || this.highest >= STREAM_MAX) return "refuse";
+    return take(this.opens) ? "ok" : "refuse";
+  }
+
   /** Hands in one accepted local connection (`listen` role). It is closed at once when the
-   * tunnel is not running yet, has ended, or already carries its maximum of connections. */
+   * tunnel is not running yet, has ended, already carries its maximum of connections, or has
+   * used its open rate. */
   accept(socket: Socket): void {
     socket.on("error", () => {});
-    if (this.options.role !== "listen" || !this.started || this.end || this.streams.size >= this.connections || this.highest >= STREAM_MAX) { this.stats.refused++; socket.destroy(); return; }
+    if (this.options.role !== "listen" || !this.started || this.end) { this.stats.refused++; socket.destroy(); return; }
+    const verdict = this.admit();
+    if (verdict !== "ok") { this.stats.refused++; socket.destroy(); if (verdict === "flood") this.fail({ reason: "flood" }); return; }
     const stream = this.add(++this.highest);
     this.attach(stream, socket);
     this.control({ type: "open", stream: stream.id });
@@ -149,6 +204,7 @@ export class TunnelRelay {
       }
     } finally { clearInterval(timer); this.fail({ reason: "disconnected" }); }
     await this.queue.catch(() => {});
+    await this.reported;
     return this.end!;
   }
 
@@ -156,7 +212,12 @@ export class TunnelRelay {
     if (this.end) return;
     this.end = end;
     for (const stream of [...this.streams.values()]) this.drop(stream);
-    this.channel.close();
+    const ending = this.options.ending;
+    if (!ending || !(end.reason === "flood" || end.reason === "unauthorized" && end.code !== undefined)) { this.channel.close(); return; }
+    // This peer decided the end itself: let its owner say why before the channel closes.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    this.reported = Promise.race([Promise.resolve().then(() => ending(end)), new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); })])
+      .catch(() => {}).finally(() => { if (timer) clearTimeout(timer); this.channel.close(); });
   }
   private tick(): void {
     if (this.end) return;
@@ -169,7 +230,10 @@ export class TunnelRelay {
     }
     if (++this.ticks % 4 || this.checking || !this.options.alive) return;
     this.checking = true;
-    void this.options.alive().catch(() => this.fail({ reason: "unauthorized" })).finally(() => { this.checking = false; });
+    void this.options.alive().catch((error: unknown) => {
+      const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+      this.fail({ reason: "unauthorized", ...(typeof code === "string" && /^tunnel_[a-z_]{1,40}$/.test(code) ? { code } : {}) });
+    }).finally(() => { this.checking = false; });
   }
   private add(id: number): Stream {
     const now = performance.now();
@@ -268,7 +332,10 @@ export class TunnelRelay {
   private opened(id: number): void {
     if (this.options.role !== "connect" || id <= this.highest) throw new ProtocolError("open");
     this.highest = id;
-    if (this.streams.size >= this.connections) { this.stats.refused++; this.control({ type: "reset", stream: id, reason: "limit" }); return; }
+    // A refused open is answered without dialing: opening and resetting in a loop costs no connection.
+    const verdict = this.admit();
+    if (verdict === "flood") { this.stats.refused++; this.fail({ reason: "flood" }); return; }
+    if (verdict !== "ok") { this.stats.refused++; this.control({ type: "reset", stream: id, reason: "limit" }); return; }
     const stream = this.add(id);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const dial = this.options.connect!();

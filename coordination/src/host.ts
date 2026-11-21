@@ -38,7 +38,8 @@ import { createInferenceExecutor } from "./inference-runtime.ts";
 import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
-import { TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
+import { TUNNEL_END_REASONS, TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
+import type { TunnelEndReason } from './tunnel-relay.ts';
 import { TunnelMappingError, tunnelStorageProblem } from './providers/android-tunnels.ts';
 import type { TunnelEndpoint, TunnelSpec } from './providers/android-tunnels.ts';
 import { WORKER_MESSAGES } from './control/session-protocol.ts';
@@ -212,6 +213,12 @@ export function hostOffer(config: RecordValue): RecordValue {
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
   for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === "android")) throw new ServiceError("Lease images must name offered Android templates.", 400);
+  // An account-owned emulator launches without the lease isolation arguments, so it can reach this
+  // host's adb server and, through it, the device port of another lease's tunnel. A host that
+  // declares tunnels therefore offers Android templates for leases only, and refuses to start.
+  if (leases.leaseTunnelProtocol === 1 && templates.some(t => t.os === "android" && !((leases.leaseImages ?? []) as RecordValue[]).some(entry => entry.id === t.id && entry.revision === t.revision && entry.arch === t.arch))) {
+    throw new ServiceError("A host that declares lease tunnels may offer only leased Android templates; move account-owned Android devices to another host.", 400);
+  }
   Object.assign(offer, leases);
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
@@ -666,6 +673,10 @@ export class HostRunner {
       if (present(join(folder, "deletion.json"))) throw new ServiceError("Durable deletion intent prevents reconciliation.", 409);
       let current = machine, image = originalImage;
       let leaseAuthorization: (() => LeaseAuthorization) | undefined, refused = false;
+      // A host that declares lease tunnels runs no account-owned emulator, whatever template it
+      // was created from: only leased guests are fenced from the host's adb server.
+      const unfenced = !machine.lease && machine.desired === "running" && runtime.kind === "android" && this.offer.leaseTunnelProtocol === 1;
+      if (unfenced) current = { ...machine, desired: "stopped" };
       if (machine.lease) {
         // Default portable clock never authorizes leased starts; preserve and stop
         // pre-existing assignments while their independent native fence runs.
@@ -684,7 +695,8 @@ export class HostRunner {
       // Stopping bypasses credentials, source preparation and guest connectivity.
       if (current.desired === "stopped") {
         const stopped = await runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
-        return refused ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail: "This host does not offer leased execution for this runtime and template." } : stopped;
+        return refused || unfenced ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state,
+          detail: refused ? "This host does not offer leased execution for this runtime and template." : "This host declares lease tunnels and runs only leased, network-isolated Android emulators." } : stopped;
       }
       if (context && !context.authorized()) throw new ServiceError("Assignment authorization ended.", 410);
       if (image.source && !image.image && !image.catalogueImageId) throw new ServiceError("Prepare and verify the configured base image before runtime creation.", 409);
@@ -965,7 +977,7 @@ export class HostRunner {
     // A device mapping is removed only under the same assignment that installed it.
     const assignment = assignmentFingerprint(machine), lease = object(machine.lease ?? {}).id;
     const held = () => { const current = this.assignments.find(m => m.id === machineId); return !!current && assignmentFingerprint(current) === assignment && object(current.lease ?? {}).id === lease && this.machineAuthorized(machineId); };
-    let channel: SessionConnection | undefined, endpoint: TunnelEndpoint | undefined, mappingRemoved = true;
+    let channel: SessionConnection | undefined, endpoint: TunnelEndpoint | undefined, mappingRemoved = true, reason: TunnelEndReason | undefined;
     try {
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/tunnels/${id}/${generation}`, identity.credential,
         { authorized: live, ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
@@ -976,9 +988,18 @@ export class HostRunner {
       // side is ever told a destination: this endpoint is the tunnel's only one.
       const relay = new TunnelRelay({ sendControl: value => connection.sendControl(value), sendBytes: value => connection.sendBytes(value), receive: () => connection.receive(30), close: () => connection.close() },
         { role: intent.direction === 'reverse' ? 'listen' : 'connect', idleSeconds: intent.idleSeconds, authorized: live, alive: () => endpoint!.alive(),
-          ...(intent.direction === 'forward' ? { connect: () => endpoint!.connect() } : {}) });
+          ...(intent.direction === 'forward' ? { connect: () => endpoint!.connect() } : {}),
+          // This runner ended the tunnel on its own evidence. Send the terminal frame before
+          // reporting the reason, since that report can revoke broker authority.
+          ending: async end => {
+            const cause: TunnelEndReason | undefined = end.reason === 'flood' ? 'open_rate' : end.code === 'tunnel_mapping_lost' ? 'mapping_lost' : undefined;
+            if (!cause) return;
+            reason = cause;
+            const code = cause === 'open_rate' ? 'tunnel_open_rate' : 'tunnel_mapping_lost';
+            try { await connection.sendControl({ type: 'error', code, message: WORKER_MESSAGES[code]!, outcome: 'unknown' }); } catch { /* The receipt will name the cause. */ }
+          } });
       try { endpoint = await runtime.openTunnel(machine, image, folder, { id, direction: intent.direction, devicePort: intent.devicePort }, live, socket => relay.accept(socket)); }
-      catch (error) { if (error instanceof TunnelMappingError) mappingRemoved = error.mappingRemoved; throw error; }
+      catch (error) { if (error instanceof TunnelMappingError) { mappingRemoved = error.mappingRemoved; reason = 'mapping_failed'; } throw error; }
       // Sent only once the mapping is installed and verified: the holder's open completes on it.
       await connection.sendControl({ type: 'tunnel', direction: intent.direction, devicePort: intent.devicePort });
       await relay.run();
@@ -989,8 +1010,8 @@ export class HostRunner {
       channel?.close();
       if (endpoint) { try { mappingRemoved = (await bounded(endpoint.close(held), 30_000)).mappingRemoved; } catch { mappingRemoved = false; } }
       this.tunnelMachines.delete(id);
-      saveRecord(path, { ...journal, state: 'finished', mappingRemoved });
-      if (mappingRemoved) await this.tunnelReceipt(id, generation);
+      saveRecord(path, { ...journal, state: 'finished', mappingRemoved, ...(reason ? { reason } : {}) });
+      if (mappingRemoved || reason) await this.tunnelReceipt(id, generation, { ...(mappingRemoved ? { mappingRemoved: true } : {}), ...(reason ? { reason } : {}) });
     }
   }
   /** Repeats a saved removal receipt, or confirms a removal that was unproven when the tunnel
@@ -1006,13 +1027,15 @@ export class HostRunner {
       catch { return; }
       saveRecord(path, { ...saved, state: 'finished', mappingRemoved: true });
     }
-    await this.tunnelReceipt(id, generation);
+    const reason = (TUNNEL_END_REASONS as readonly unknown[]).includes(saved.reason) ? saved.reason as TunnelEndReason : undefined;
+    await this.tunnelReceipt(id, generation, { mappingRemoved: true, ...(reason ? { reason } : {}) });
   }
-  private async tunnelReceipt(id: string, generation: string): Promise<void> {
+  /** Tells the controller why this runner ended a tunnel, and that its mapping is positively gone. */
+  private async tunnelReceipt(id: string, generation: string, receipt: { mappingRemoved?: true; reason?: TunnelEndReason }): Promise<void> {
     const identity = this.identity;
     if (!identity) return;
-    try { await this.transport.request('POST', `/v1/hosts/${identity.id}/tunnels/${id}/finish`, { generation, mappingRemoved: true }, identity.credential, this.stopController.signal); }
-    catch { this.log('Tunnel mapping receipt was not acknowledged; it is repeated while the tunnel stays delivered.'); }
+    try { await this.transport.request('POST', `/v1/hosts/${identity.id}/tunnels/${id}/finish`, { generation, ...receipt }, identity.credential, this.stopController.signal); }
+    catch { this.log('Tunnel receipt was not acknowledged; the removal receipt is repeated while the tunnel stays delivered.'); }
   }
   /** Lease cleanup: ends this machine's tunnels before the stop proof is evaluated. Host-side
    * endpoints close without device access, and a tunnel never delays cleanup beyond this bound. */

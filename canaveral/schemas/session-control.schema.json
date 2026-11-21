@@ -133,7 +133,9 @@
             "capability_unsupported",
             "session_incomplete",
             "upload_publication_uncertain",
-            "tunnel_mapping_failed"
+            "tunnel_mapping_failed",
+            "tunnel_mapping_lost",
+            "tunnel_open_rate"
           ]
         },
         "message": {

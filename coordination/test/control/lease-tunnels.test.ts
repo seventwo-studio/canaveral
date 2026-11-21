@@ -16,22 +16,39 @@ import { AndroidProvider, LEASE_ISOLATION_ARGUMENTS } from "../../src/providers/
 import { parseMappings, tunnelStorageProblem } from "../../src/providers/android-tunnels.ts";
 import { mobileNativeHelper, nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
 import type { CommandResult, MobileTransport, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
-import { validateOffer } from "../../src/control/machines.ts";
+import { MachineStore, validateOffer } from "../../src/control/machines.ts";
+import { LeaseTunnels } from "../../src/control/lease-tunnels.ts";
+import { initializeLeases } from "../../src/control/leases.ts";
+import { createSessionUpgradeHandler, SessionConnection as PeerConnection } from "../../src/control/sessions.ts";
+import { legacyDigest } from "../../src/control/templates.ts";
+import { ConsumerIdentities } from "../../src/consumers.ts";
+import { ServiceError } from "../../src/errors.ts";
+import { SqliteStore } from "../../src/sqlite.ts";
 import { loadHost } from "../../src/control/templates.ts";
 import { fileURLToPath } from "node:url";
 import { validateRelayMessage } from "../../src/control/session-protocol.ts";
 import { consumerApiSchema, sessionProtocolSchema } from "../../src/contracts.ts";
 import { main } from "../../src/cli.ts";
-import { LeaseClient, LeaseTunnelClient } from "../../src/sdk.ts";
+import { LeaseClient, LeaseTunnelClient, SessionConnection } from "../../src/sdk.ts";
 import type { LeaseTunnel } from "../../src/sdk.ts";
-import { TUNNEL_CONNECTIONS, TUNNEL_WINDOW_BYTES, TunnelRelay, tunnelIntent } from "../../src/tunnel-relay.ts";
-import type { TunnelChannel } from "../../src/tunnel-relay.ts";
+import { TUNNEL_AUTHORITY_MS, TUNNEL_CONNECTIONS, TUNNEL_IDENTITIES_PER_HOUR, TUNNEL_OPEN_BURST, TUNNEL_OPENS_PER_SECOND, TUNNEL_RELAY_BYTES, TUNNEL_RELAY_OPENS, TUNNEL_RESIDUE_PER_LEASE, TUNNEL_WINDOW_BYTES, TunnelRelay, tunnelIntent } from "../../src/tunnel-relay.ts";
+import type { TunnelChannel, TunnelEnd } from "../../src/tunnel-relay.ts";
 
-/** Disposable lease-tunnel fixtures. A real loopback controller, a real HostRunner with the native
- * lease clock and the real `lease-supervise` helper, and the real SDK relay bytes between a
- * stand-in device and local servers. adb is a stand-in that keeps a live mapping registry and
- * really connects mapped ports to the runner's Unix sockets. No SDK, emulator or device is used,
- * so nothing here establishes native acceptance. */
+/** Disposable lease-tunnel fixtures, in two groups.
+ *
+ * Component tests need nothing but Node and always run: the relay, the broker with a stand-in
+ * control client, the controller module on a temporary database, and the packaged contracts.
+ *
+ * Integration tests use a real loopback controller, a real HostRunner with the native lease
+ * clock and the real `lease-supervise` helper, and the real SDK relaying bytes between a stand-in
+ * device and local servers. They need the built `canaveral-mobile-native` helper and are skipped
+ * without it. CI's "TypeScript controller, SDK and guest services" job builds that helper before
+ * `npm test`, so they run there; the first test below fails in CI if the helper is missing, so a
+ * broken build path cannot turn them into silent skips.
+ *
+ * adb is a stand-in that keeps a live mapping registry and really connects mapped ports to the
+ * runner's Unix sockets. No SDK, emulator or device is used, so nothing here establishes native
+ * acceptance. */
 const helper = mobileNativeHelper({});
 const unix = ["darwin", "linux"].includes(process.platform);
 const skip = !unix || !existsSync(helper) ? "requires the built canaveral-mobile-native helper" : false;
@@ -59,11 +76,17 @@ interface Emulator { name: string; port: number; pid: number; grandchild: number
  * listen on a device port, and device ports an app already bound. */
 interface Device {
   reverse: Map<number, string>;
-  forward: Map<string, { port: number; server: Server; sockets: Set<Socket> }>;
+  forward: Map<string, { port: number; server: Server; sockets: Set<Socket>; accepted: number }>;
   services: Map<number, number>;
   busy: Set<number>;
 }
-interface Fixture { tunnels?: boolean; guest?: "isolated" | "leaky"; removeFails?: boolean }
+interface Fixture {
+  tunnels?: boolean; guest?: "isolated" | "leaky"; removeFails?: boolean;
+  /** Raw lines appended to `forward --list`, which is server-wide: other devices, or odd output. */
+  forwardNoise?: string;
+  /** Host heartbeat interval in seconds; the default keeps the fixtures fast. */
+  poll?: number;
+}
 function sdk(root: string): { sdk: string; registry: string } {
   const sdkRoot = join(root, "sdk"), registry = join(root, "emulators");
   for (const dir of ["platform-tools", "emulator", "cmdline-tools/latest/bin", ...systemImage.split(";").reduce<string[]>((paths, part) => [...paths, join(paths.at(-1) ?? "", part)], [])]) mkdirSync(join(sdkRoot, dir), { recursive: true });
@@ -128,6 +151,9 @@ function transport(paths: { sdk: string; registry: string }, counters: Map<strin
       if (!emulator) return failed;
       const state = device(emulator.name), key = `${emulator.name}:${args.join(" ")}`;
       counters.set(key, (counters.get(key) ?? 0) + 1);
+      // A host that does not declare tunnels must never ask; there the stand-in refuses, as the
+      // lease fixture on main does, so readiness cannot depend on these queries.
+      if (!fixture.tunnels && args[1] === "--list") return failed;
       if (args[0] === "reverse") {
         if (args[1] === "--list") return ok([...state.reverse].map(([port, spec]) => `host-7 tcp:${port} ${spec}`).join("\n"));
         const port = Number(String(args[2]).replace(/^tcp:/, ""));
@@ -140,21 +166,22 @@ function transport(paths: { sdk: string; registry: string }, counters: Map<strin
         return failed;
       }
       if (args[0] === "forward") {
-        if (args[1] === "--list") return ok(live.flatMap(e => [...(devices.get(e.name)?.forward ?? [])].map(([local, entry]) => `emulator-${e.port} ${local} tcp:${entry.port}`)).join("\n"));
+        if (args[1] === "--list") return ok([...live.flatMap(e => [...(devices.get(e.name)?.forward ?? [])].map(([local, entry]) => `emulator-${e.port} ${local} tcp:${entry.port}`)), ...(fixture.forwardNoise ? [fixture.forwardNoise] : [])].join("\n"));
         if (args[1] === "--no-rebind") {
           const local = args[2]!, port = Number(String(args[3]).replace(/^tcp:/, ""));
           if (state.forward.has(local)) return failed;
           const sockets = new Set<Socket>();
           // The adb server listens on the host endpoint and opens one stream to the device port.
-          const server = createServer({ allowHalfOpen: true }, socket => {
-            sockets.add(socket); socket.once("close", () => sockets.delete(socket)); socket.on("error", () => {});
+          const entry = { port, sockets, accepted: 0, server: undefined as unknown as Server };
+          const server = entry.server = createServer({ allowHalfOpen: true }, socket => {
+            entry.accepted++; sockets.add(socket); socket.once("close", () => sockets.delete(socket)); socket.on("error", () => {});
             const service = state.services.get(port);
             if (service === undefined) { socket.destroy(); return; }
             const upstream = connect({ host: "127.0.0.1", port: service, allowHalfOpen: true });
             upstream.on("error", () => socket.destroy()); pipe(socket, upstream);
           });
           await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(local.replace(/^localfilesystem:/, ""), () => resolve()); });
-          state.forward.set(local, { port, server, sockets }); return ok(String(port));
+          state.forward.set(local, entry); return ok(String(port));
         }
         if (args[1] === "--remove") {
           const entry = state.forward.get(args[2]!);
@@ -185,7 +212,7 @@ function transport(paths: { sdk: string; registry: string }, counters: Map<strin
 }
 
 interface Harness {
-  url: string; admin: string; root: string; image: RecordValue; registry: string; counters: Map<string, number>; devices: Map<string, Device>; fixture: Fixture;
+  url: string; admin: string; enrollment: string; root: string; image: RecordValue; registry: string; counters: Map<string, number>; devices: Map<string, Device>; fixture: Fixture;
   runner(): HostRunner; restartRunner(): Promise<void>; stopController(): Promise<void>; startController(): Promise<void>;
   api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any }>;
   application(tunnelsPerLease?: number): Promise<string>;
@@ -209,7 +236,7 @@ async function harness(t: TestContext, capacity = 1, fixture: Fixture = { tunnel
   await start();
   const url = `http://127.0.0.1:${port}`;
   const config: HostConfig = { url, stateDir: join(root, "r"), enrollmentToken: enrollment, name: "android-tunnel-host", provider: "android", storage: join(root, "d"),
-    androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity, memoryMiB: 2048 * capacity, diskGiB: 8 * capacity }, pollIntervalSeconds: .25, concurrency: 4,
+    androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity, memoryMiB: 2048 * capacity, diskGiB: 8 * capacity }, pollIntervalSeconds: fixture.poll ?? .25, concurrency: 4,
     leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }], ...(fixture.tunnels ? { leaseTunnelProtocol: 1 } : {}) };
   const launch = async () => {
     runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, devices, fixture) }, state) });
@@ -229,7 +256,7 @@ async function harness(t: TestContext, capacity = 1, fixture: Fixture = { tunnel
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: response.status, body: await response.json() as any };
   };
-  return { url, admin, root, image, registry: paths.registry, counters, devices, fixture, api,
+  return { url, admin, enrollment, root, image, registry: paths.registry, counters, devices, fixture, api,
     runner: () => runner!,
     async restartRunner() { await runner!.close(); await launch(); },
     async stopController() { await controller!.close(); },
@@ -251,7 +278,7 @@ async function acquire(h: Harness, app: string, ttlSeconds: number): Promise<Lea
   assert.equal((await h.api("POST", "/v1/requests", { id, kind: "lease", intent: { templateId: h.image.id, templateRevision: "1", arch, ttlSeconds } }, app)).status, 201);
   await until(async () => (await h.api("GET", `/v1/requests/${id}`, undefined, app)).body.state === "admitted", "admission");
   let lease: any;
-  await until(async () => { lease = (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body; return lease.state === "ready"; }, "a booted, checked emulator", 30000);
+  await until(async () => { lease = (await h.api("GET", `/v1/leases/${id}`, undefined, app)).body; return lease.state === "ready"; }, "a booted, checked emulator", 30000 + 8000 * (h.fixture.poll ?? 0));
   const key = (await h.api("POST", `/v1/leases/${id}/credential`, {}, app)).body.credential as string;
   return { id, key, machineId: lease.members[0].machineId };
 }
@@ -361,10 +388,23 @@ async function exchange(socket: Socket, kilobytes = 768): Promise<void> {
   // Half-close travels end to end in both directions.
   socket.end(); await reader.finished();
 }
+/** The lease holder's side of a tunnel driven by hand, without the SDK's relay and its own limits. */
+async function rawPeer(h: Harness, lease: Lease, tunnel: { id: string; generation: string }) {
+  const connection = await SessionConnection.connect(client(h, lease).tunnels.transport, `/v1/leases/${lease.id}/tunnels/${tunnel.id}/${tunnel.generation}`, tunnel.id);
+  const messages: (Record<string, unknown> | Buffer)[] = [], state = { ended: false };
+  void (async () => { try { for (;;) { const next = await connection.receive(1000); if (next !== null) messages.push(next); } } catch { state.ended = true; } })();
+  return { connection, state, controls: (type: string) => messages.filter((message): message is Record<string, unknown> => !Buffer.isBuffer(message) && message.type === type) };
+}
 const mappingsOf = (h: Harness, machineId: string) => ({ reverse: [...(h.device(machineId)?.reverse ?? [])], forward: [...(h.device(machineId)?.forward ?? [])].map(([local, entry]) => [local, entry.port]) });
 async function refused(work: Promise<unknown>, status: number, code: string): Promise<void> {
   await assert.rejects(work, (error: any) => { assert.equal(error.code, code, error.message); if (status) assert.equal(error.status, status); return true; });
 }
+
+test("CI runs the integration tests: the native lease helper is built there", () => {
+  // Locally the integration tests below are skipped without the helper. In CI that would hide
+  // them, so a missing helper is a failure there.
+  if (process.env.CI) assert.ok(unix && existsSync(helper), "build canaveral-mobile-native and run script/prepare_native.mjs before npm test");
+});
 
 test("tunnels are an explicit, validated declaration on the host, the offer and the application policy", () => {
   const image = { id: "phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, device: { systemImage, profile: "pixel_8" } };
@@ -380,6 +420,13 @@ test("tunnels are an explicit, validated declaration on the host, the offer and 
     assert.throws(() => hostOffer({ ...base, ...lease, leaseTunnelProtocol: 1, storage: "/var/lib/canaveral devices" }), /without spaces/);
   }
   assert.throws(() => hostOffer({ ...base, leaseTunnelProtocol: 1 }), /require lease execution/);
+  // An account-owned emulator is not fenced from the host's adb server, through which a tunnelled
+  // device port is reachable. A host that declares tunnels offers Android for leases only.
+  const plain = { ...image, id: "plain-phone" };
+  if (unix) {
+    assert.throws(() => hostOffer({ ...base, ...lease, leaseTunnelProtocol: 1, templates: [image, plain] }), /only leased Android templates/);
+    assert.equal(hostOffer({ ...base, ...lease, templates: [image, plain] }).leaseTunnelProtocol, undefined, "without the declaration the same host is unchanged");
+  }
   // The packaged example is a valid lease host that declares tunnels.
   const examples = [new URL("../../../examples/", import.meta.url), new URL("../../../../examples/", import.meta.url)].map(url => fileURLToPath(url)).find(directory => existsSync(join(directory, "host-android-leases.json")))!;
   const example = loadHost(JSON.parse(readFileSync(join(examples, "host-android-leases.json"), "utf8")), examples);
@@ -393,12 +440,19 @@ test("tunnels are an explicit, validated declaration on the host, the offer and 
   assert.equal(validateOffer(offer).leaseTunnelProtocol, undefined);
   assert.throws(() => validateOffer({ name: "h", provider: "android", capacity: base.capacity, templates: [image], leaseTunnelProtocol: 1 }), /require lease execution/);
   assert.throws(() => validateOffer({ ...offer, leaseTunnelProtocol: true }), /require lease execution/);
+  assert.throws(() => validateOffer({ ...offer, leaseTunnelProtocol: 1, templates: [image, plain] }), /only leased Android templates/);
+  assert.equal(validateOffer({ ...offer, templates: [image, plain] }).templates.length, 2);
   // Request shape: a reverse tunnel listens on an unprivileged device port; adb's own port is never mapped.
   assert.deepEqual(tunnelIntent("reverse", 8081, undefined), { direction: "reverse", devicePort: 8081, idleSeconds: 600 });
   for (const [direction, port, idle] of [["reverse", 80, undefined], ["reverse", 5555, undefined], ["forward", 5555, undefined], ["forward", 0, undefined], ["forward", 65536, undefined], ["socks", 8081, undefined], ["reverse", 8081, 9], ["reverse", 8081, 3601], ["reverse", 8081.5, undefined]] as const)
     assert.equal(tunnelIntent(direction, port, idle), undefined, `${direction} ${port} ${idle}`);
   assert.deepEqual(parseMappings("host-7 tcp:8081 localfilesystem:/a/b.sock\n\nemulator-5554 localfilesystem:/a/c.sock tcp:9000\n"), [{ owner: "host-7", local: "tcp:8081", remote: "localfilesystem:/a/b.sock" }, { owner: "emulator-5554", local: "localfilesystem:/a/c.sock", remote: "tcp:9000" }]);
   assert.equal(parseMappings("unexpected output with more fields than three"), undefined);
+  // `forward --list` is server-wide: only this device's lines are judged, and another device's line is
+  // skipped before it is parsed, whatever it contains.
+  assert.deepEqual(parseMappings("emulator-5556 tcp:1 tcp:2\nemulator-9999 a line with far too many fields to be a mapping\nemulator-5554 localfilesystem:/a/c.sock tcp:9000\n", "emulator-5554"),
+    [{ owner: "emulator-5554", local: "localfilesystem:/a/c.sock", remote: "tcp:9000" }]);
+  assert.equal(parseMappings("emulator-5554 an unreadable line of this very device\n", "emulator-5554"), undefined);
 });
 
 test("the relay carries stream numbers only: no control names a destination, and each side may send only its own controls", () => {
@@ -468,6 +522,257 @@ test("the relay ends the tunnel on a flow-control or stream violation and refuse
   const [rogue, honest] = joined(), relay = new TunnelRelay(honest, { role: "listen", idleSeconds: 60 }), ended = relay.run();
   await rogue.sendControl({ type: "open", stream: 1 });
   assert.equal((await ended).reason, "protocol");
+});
+
+test("the relay's own checks end a tunnel within their bounds and say why; opens are rate-bounded and a flood ends the tunnel", { timeout: 60000 }, async t => {
+  const target = await listening(serve); t.after(() => target.close());
+  let dials = 0;
+  const dial = () => new Promise<Socket>((resolve, reject) => { dials++; const socket = connect({ host: "127.0.0.1", port: target.port, allowHalfOpen: true }); socket.once("error", reject); socket.once("connect", () => resolve(socket)); });
+  // Authorization is polled every 250 ms: a lapse ends the tunnel within that interval.
+  {
+    const [left] = joined(); let allowed = true;
+    const relay = new TunnelRelay(left, { role: "listen", idleSeconds: 60, authorized: () => allowed }), ended = relay.run();
+    await sleep(300);
+    const lapsed = performance.now(); allowed = false;
+    assert.deepEqual(await ended, { reason: "unauthorized" });
+    assert.ok(performance.now() - lapsed < 400, `ended ${performance.now() - lapsed} ms after authorization lapsed`);
+  }
+  // The device check runs once a second. Its rejection ends the tunnel, and the owner reports the
+  // cause before the channel closes, so the other side and the controller can learn it.
+  {
+    const [left] = joined(), order: string[] = []; let lost = false;
+    const close = left.close.bind(left); left.close = () => { order.push("channel closed"); close(); };
+    const relay = new TunnelRelay(left, { role: "listen", idleSeconds: 60, alive: async () => { if (lost) throw Object.assign(new Error("gone"), { code: "tunnel_mapping_lost" }); },
+      ending: async end => { await sleep(20); order.push(`reported ${end.code}`); } }), ended = relay.run();
+    await sleep(100);
+    const since = performance.now(); lost = true;
+    assert.deepEqual(await ended, { reason: "unauthorized", code: "tunnel_mapping_lost" });
+    assert.deepEqual(order, ["reported tunnel_mapping_lost", "channel closed"]);
+    assert.ok(performance.now() - since < 1400, `ended ${performance.now() - since} ms after the mapping was lost`);
+  }
+  // Connecting side: opens beyond the rate are answered without dialing, so opening and resetting
+  // in a loop costs no connection.
+  {
+    const [rogue, honest] = joined(); dials = 0;
+    const relay = new TunnelRelay(honest, { role: "connect", idleSeconds: 60, openBurst: 3, opensPerSecond: 1, connect: dial }), ended = relay.run();
+    for (let stream = 1; stream <= 10; stream++) { await rogue.sendControl({ type: "open", stream }); await rogue.sendControl({ type: "reset", stream, reason: "closed" }); }
+    const refusedStreams: unknown[] = [];
+    for (let i = 0; i < 200 && refusedStreams.length < 7; i++) { const message = await rogue.receive(); if (message && !(message instanceof Uint8Array) && message.type === "reset" && message.reason === "limit") refusedStreams.push(message.stream); }
+    assert.deepEqual(refusedStreams, [4, 5, 6, 7, 8, 9, 10]);
+    assert.deepEqual([dials, relay.stats.opened, relay.stats.refused], [3, 3, 7]);
+    relay.close(); await ended;
+  }
+  // Listening side: connections beyond the rate are closed without opening a stream, and a client
+  // that keeps connecting faster than the tolerated rate ends the tunnel instead of costing work forever.
+  {
+    const [left] = joined(), reported: TunnelEnd[] = [];
+    const relay = new TunnelRelay(left, { role: "listen", idleSeconds: 60, openBurst: 2, opensPerSecond: 1, attemptBurst: 12, attemptsPerSecond: 2, ending: async end => { reported.push(end); } }), ended = relay.run();
+    const front = await listening(socket => relay.accept(socket)); t.after(() => front.close());
+    for (let i = 0; i < 40 && !relay.ended; i++) { const socket = connect({ host: "127.0.0.1", port: front.port }); socket.on("error", () => {}); await sleep(10); }
+    assert.deepEqual(await ended, { reason: "flood" });
+    assert.deepEqual(reported, [{ reason: "flood" }]);
+    assert.ok(relay.stats.opened <= 3 && relay.stats.refused >= 10, JSON.stringify(relay.stats));
+  }
+  assert.throws(() => new TunnelRelay(joined()[0], { role: "listen", idleSeconds: 60, openBurst: TUNNEL_OPEN_BURST + 1 }), /Invalid tunnel relay options/);
+});
+
+/** A real broker for the tunnel family with a stand-in control client, so each test decides what
+ * the controller answers and can count how often it is asked. */
+async function brokerFixture(t: TestContext, direction: "reverse" | "forward") {
+  const id = randomUUID(), generation = randomUUID(), token = randomBytes(32).toString("base64url");
+  const state = { authorized: true, busy: false, checks: 0, disconnected: 0 };
+  const broker = createSessionUpgradeHandler({ request: async (command: { type: string }) => {
+    if (command.type === "tunnels.attach") return { id, generation, capability: "tunnel", direction };
+    if (command.type === "tunnels.disconnect") { state.disconnected++; return { disconnected: true }; }
+    state.checks++;
+    if (state.busy) throw new ServiceError("Controller service is busy.", 429, { retryable: false });
+    return { authorized: state.authorized };
+  } } as Parameters<typeof createSessionUpgradeHandler>[0], { tunnel: true });
+  const server = createHttpServer(); server.on("upgrade", (request, socket, head) => { void broker.handle(request, socket, head); });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", () => resolve()));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const consumer = await PeerConnection.connect(origin, `/v1/leases/${randomUUID()}/tunnels/${id}/${generation}`, token), host = await PeerConnection.connect(origin, `/v1/hosts/${randomUUID()}/tunnels/${id}/${generation}`, token);
+  t.after(async () => { consumer.close(); host.close(); broker.close(); await new Promise<void>(resolve => { server.close(() => resolve()); }); });
+  for (const peer of [consumer, host]) assert.deepEqual(await peer.receive(5), { type: "ready", sessionId: id, generation, capability: "tunnel" });
+  return { state, consumer, host };
+}
+
+test("the broker relays a stream open only from the side of a tunnel that listens", { timeout: 30000 }, async t => {
+  // Reverse: the device side (the runner) listens. Forward: the lease holder does.
+  for (const [direction, listening] of [["reverse", "host"], ["forward", "consumer"]] as const) {
+    const f = await brokerFixture(t, direction), listener = f[listening], other = listening === "host" ? f.consumer : f.host;
+    await listener.sendControl({ type: "open", stream: 1 });
+    assert.deepEqual(await other.receive(5), { type: "open", stream: 1 });
+    await other.sendControl({ type: "accept", stream: 1 });
+    assert.deepEqual(await listener.receive(5), { type: "accept", stream: 1 });
+    // The other side tries to start a stream itself: on a reverse tunnel that would be the holder
+    // reaching into the device, on a forward tunnel the device initiating toward the holder.
+    await other.sendControl({ type: "open", stream: 2 });
+    // The pair ends and the open is never delivered. Were it relayed, this read would return it.
+    await assert.rejects(listener.receive(5), (error: unknown) => error instanceof ServiceError, `${direction}: the open must not reach the listening side`);
+    assert.ok(f.state.disconnected >= 1);
+  }
+});
+
+test("the broker checks a tunnel's authority on an interval, waits out a busy controller, and bounds what passes between checks and after authority ends", { timeout: 60000 }, async t => {
+  const f = await brokerFixture(t, "reverse");
+  const frame = (bytes: number) => Buffer.concat([Buffer.from([0, 0, 0, 1]), Buffer.alloc(bytes)]);
+  // Hundreds of messages cost a handful of authority checks, not one each.
+  let started = performance.now(), asked = f.state.checks, received = 0;
+  const messages = 400, reading = (async () => { while (received < messages) if (await f.consumer.receive(10) instanceof Uint8Array) received++; })();
+  for (let i = 0; i < messages; i++) await f.host.sendBytes(frame(512));
+  await reading;
+  let elapsed = performance.now() - started;
+  assert.ok(f.state.checks - asked <= Math.ceil(elapsed / 200) + 2, `${f.state.checks - asked} checks for ${messages} messages in ${elapsed} ms`);
+  // Between two checks one direction relays at most its byte budget; more waits for the next check.
+  const large = frame(65532), total = 3 * TUNNEL_RELAY_BYTES;
+  started = performance.now(); let bytes = 0;
+  const draining = (async () => { while (bytes < total) { const message = await f.consumer.receive(10); if (message instanceof Uint8Array) bytes += message.byteLength; } })();
+  for (let sent = 0; sent < total; sent += large.length) await f.host.sendBytes(large);
+  await draining;
+  elapsed = performance.now() - started;
+  assert.ok(elapsed >= 2 * TUNNEL_AUTHORITY_MS - 100, `three budgets of data passed in ${elapsed} ms`);
+  // A busy controller is backpressure: nothing is relayed without a fresh check, and nothing ends.
+  f.state.busy = true;
+  await sleep(TUNNEL_AUTHORITY_MS + 150);
+  await f.host.sendControl({ type: "open", stream: 7 });
+  assert.equal(await f.consumer.receive(1), null, "nothing is relayed while the controller cannot confirm the tunnel's authority");
+  f.state.busy = false;
+  assert.deepEqual(await f.consumer.receive(5), { type: "open", stream: 7 });
+  assert.equal(f.state.disconnected, 0, "a busy controller did not end the pair");
+  // When the controller says the authority ended, both peers are closed within one interval, and
+  // no more than one interval's budget was relayed after the controller's state changed.
+  let after = 0, flipped = 0, closed = 0;
+  const sink = (async () => { try { for (;;) { const message = await f.consumer.receive(10); if (flipped && message instanceof Uint8Array) after += message.byteLength; } } catch { closed = performance.now(); } })();
+  const source = (async () => { try { for (;;) await f.host.sendBytes(large); } catch { /* the pair ended */ } })();
+  await sleep(600);
+  flipped = performance.now(); f.state.authorized = false;
+  await Promise.all([sink, source]);
+  assert.ok(closed - flipped < TUNNEL_AUTHORITY_MS + 300, `the pair closed ${closed - flipped} ms after its authority ended`);
+  assert.ok(after <= TUNNEL_RELAY_BYTES + large.length, `${after} bytes passed after the controller's state changed`);
+  await assert.rejects(f.host.receive(1));
+});
+
+/** The controller module on a temporary database with an injected clock: no runner, no adb. */
+function controllerFixture(t: TestContext, tunnelsPerLease = 2) {
+  const directory = mkdtempSync(join(tmpdir(), "lease-tunnels-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const key = () => randomBytes(32).toString("base64url"), clock = { now: 1_800_000_000 };
+  const store = new SqliteStore(join(directory, "state.sqlite"), () => clock.now), options = { controllerId: randomUUID(), adminToken: key() };
+  const machines = new MachineStore(store, options);
+  store.transaction(db => initializeLeases(db));
+  const applications = new ConsumerIdentities(store), tunnels = new LeaseTunnels(store, machines);
+  const image = { id: "lease-phone", revision: "1", arch: "arm64", os: "android", mode: "device", device: { systemImage: "system-images;android-35;google_apis_playstore;arm64-v8a", profile: "pixel_8" }, minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 } };
+  const offer = { name: "host", provider: "android", capacity: { cpu: 8, memoryMiB: 8192, diskGiB: 64 }, leaseProtocol: 1, leaseTunnelProtocol: 1, templates: [image], leaseImages: [{ id: image.id, revision: image.revision, arch: image.arch, runtime: "android" }] };
+  const application = applications.create({ id: randomUUID(), name: "tunnel fixture", templates: [], limits: { activeLeases: 10, resources: { cpu: 10, memoryMiB: 32000, diskGiB: 100 }, tunnelsPerLease } });
+  const addHost = (declared = offer) => { const host = { id: randomUUID(), token: key() }; store.transaction(db => { db.prepare("INSERT INTO hosts VALUES (?,?,?,?,1)").run(host.id, legacyDigest(host.token), JSON.stringify(declared), clock.now); }); return host; };
+  const addLease = (host: { id: string }) => {
+    const lease = { id: randomUUID(), token: key(), machine: randomUUID() };
+    store.transaction(db => {
+      db.prepare("INSERT INTO machines (id,request,host,template,desired,observed,detail,updated,preparation_state,prepared_at,owner,access_ready) VALUES (?,?,?,?,'running','running','',?,'ready',?,NULL,1)")
+        .run(lease.machine, JSON.stringify({ id: lease.machine, resources: image.minimum }), host.id, JSON.stringify(image), clock.now, clock.now);
+      db.prepare("INSERT INTO leases VALUES (?,?,?,'ready',1,?,?,?,?,'notRequested')").run(lease.id, application.id, "{}", clock.now, clock.now + 100_000, clock.now + 60, legacyDigest(lease.token));
+      db.prepare("INSERT INTO lease_members VALUES (?,'primary',?)").run(lease.id, lease.machine);
+    });
+    return lease;
+  };
+  const call = (method: string, path: string, token: string, body: Record<string, unknown> = {}) => tunnels.handle({ method, path, parts: path.split("/").filter(Boolean), query: new URLSearchParams(), token, body,
+    principal: () => { throw new Error("lease routes never resolve an account principal"); } }) as { status?: number; body: any };
+  const open = (lease: { id: string; token: string }, devicePort: number, direction = "reverse") => call("POST", `/v1/leases/${lease.id}/tunnels`, lease.token, { id: randomUUID(), member: "primary", direction, devicePort });
+  const attach = (tunnel: { id: string; generation: string }, side: "host" | "consumer", ownerId: string, token: string) => tunnels.command({ type: "tunnels.attach", sessionId: tunnel.id, generation: tunnel.generation, side, ownerId, token });
+  const refused = (work: () => unknown, status: number, code?: string) => assert.throws(work, (error: unknown) => error instanceof ServiceError && error.status === status && (code === undefined || error.code === code), `expected ${status} ${code ?? ""}`);
+  const touch = () => store.transaction(db => { db.prepare("UPDATE hosts SET seen=?").run(clock.now); });
+  return { store, clock, tunnels, application, addHost, addLease, call, open, attach, refused, touch };
+}
+
+test("the tunnel allowance counts open tunnels; an unproven removal keeps only its port; identities are bounded per hour, not for good", { timeout: 60000 }, t => {
+  const f = controllerFixture(t), host = f.addHost(), lease = f.addLease(host);
+  const close = (tunnel: { id: string }) => f.call("POST", `/v1/leases/${lease.id}/tunnels/${tunnel.id}/close`, lease.token).body;
+  // Ends a tunnel after its runner attached and without a removal receipt: an unproven removal.
+  const residue = (devicePort: number) => { const tunnel = f.open(lease, devicePort).body; f.attach(tunnel, "host", host.id, host.token); return close(tunnel); };
+  const a = f.open(lease, 8081); assert.equal(a.status, 201);
+  const b = f.open(lease, 8082).body;
+  f.refused(() => f.open(lease, 8083), 429, "tunnel_limit");
+  // A tunnel the runner never attached leaves nothing behind: closing it frees everything at once.
+  assert.deepEqual([close(b).state, close(b).mappingRemoved], ["closed", true]);
+  // One the runner attached keeps its device port until the removal is proven, but no place in the allowance.
+  f.attach(a.body, "host", host.id, host.token);
+  assert.deepEqual([close(a.body).state, close(a.body).mappingRemoved], ["closed", false]);
+  f.refused(() => f.open(lease, 8081), 409, "tunnel_port_busy");
+  const c = f.open(lease, 8083).body, d = f.open(lease, 8084).body;
+  f.refused(() => f.open(lease, 8085), 429, "tunnel_limit");
+  close(c); close(d);
+  // Unproven removals have their own bound, so a device that never confirms cannot be used to pile them up.
+  for (let port = 8100; port < 8100 + TUNNEL_RESIDUE_PER_LEASE - 1; port++) assert.equal(residue(port).mappingRemoved, false);
+  f.refused(() => f.open(lease, 8200), 429, "tunnel_residue_limit");
+  // The runner's receipt releases one, and the lease can open tunnels again, on that port too.
+  const proven = f.call("POST", `/v1/hosts/${host.id}/tunnels/${a.body.id}/finish`, host.token, { generation: a.body.generation, mappingRemoved: true }).body;
+  assert.deepEqual([proven.state, proven.mappingRemoved], ["closed", true]);
+  assert.equal(f.open(lease, 8081).status, 201);
+  // Another lease is not affected by this one's residue or allowance.
+  const neighbour = f.addLease(host);
+  assert.equal(f.open(neighbour, 8081).status, 201);
+  // Identities: 256 in any hour. Past that the lease waits; it is not stranded for good.
+  const busy = f.addLease(host);
+  for (let i = 0; i < TUNNEL_IDENTITIES_PER_HOUR; i++) { const tunnel = f.open(busy, 9000 + (i % 2)).body; f.call("POST", `/v1/leases/${busy.id}/tunnels/${tunnel.id}/close`, busy.token); }
+  f.refused(() => f.open(busy, 9000), 429, "tunnel_identity_limit");
+  assert.equal(f.call("GET", `/v1/leases/${busy.id}/tunnels`, busy.token).body.tunnels.length, 256);
+  f.clock.now += 3601; f.touch();
+  assert.equal(f.open(busy, 9000).status, 201);
+});
+
+test("only the tunnel's own host attaches and reports, only its lease's current key attaches as holder, and the interval check takes no write lock", { timeout: 30000 }, t => {
+  const f = controllerFixture(t), host = f.addHost(), other = f.addHost(), lease = f.addLease(host), neighbour = f.addLease(other);
+  const tunnel = f.open(lease, 8081).body, finish = (hostId: string, token: string, body: Record<string, unknown>) => f.call("POST", `/v1/hosts/${hostId}/tunnels/${tunnel.id}/finish`, token, body);
+  // Another enrolled host with a valid credential of its own, a runner without this lease, gets nowhere.
+  f.refused(() => f.attach(tunnel, "host", other.id, other.token), 403);
+  f.refused(() => f.attach(tunnel, "host", host.id, other.token), 401);
+  f.refused(() => f.attach(tunnel, "host", host.id, lease.token), 401);
+  f.refused(() => f.attach(tunnel, "host", other.id, lease.token), 403);
+  f.refused(() => finish(other.id, other.token, { generation: tunnel.generation, mappingRemoved: true }), 403);
+  f.refused(() => finish(host.id, other.token, { generation: tunnel.generation, mappingRemoved: true }), 401);
+  f.refused(() => finish(host.id, lease.token, { generation: tunnel.generation, mappingRemoved: true }), 401);
+  // The tunnel's own host cannot report before it attached, nor for another generation.
+  f.refused(() => finish(host.id, host.token, { generation: tunnel.generation, mappingRemoved: true }), 403);
+  // Nor can another lease's key, the application key or a host key attach as the holder.
+  f.refused(() => f.attach(tunnel, "consumer", lease.id, neighbour.token), 403);
+  f.refused(() => f.attach(tunnel, "consumer", neighbour.id, neighbour.token), 403);
+  f.refused(() => f.attach(tunnel, "consumer", lease.id, f.application.credential), 403);
+  f.refused(() => f.attach(tunnel, "consumer", lease.id, host.token), 403);
+  assert.equal(f.call("GET", `/v1/leases/${lease.id}/tunnels/${tunnel.id}`, lease.token).body.state, "pending", "refused callers changed nothing");
+  assert.deepEqual(f.attach(tunnel, "host", host.id, host.token), { id: tunnel.id, generation: tunnel.generation, capability: "tunnel", direction: "reverse" });
+  f.attach(tunnel, "consumer", lease.id, lease.token);
+  f.refused(() => f.attach(tunnel, "host", host.id, host.token), 409);
+  f.refused(() => finish(host.id, host.token, { generation: randomUUID(), mappingRemoved: true }), 403);
+  // The broker's interval check: asked many times, it runs no transaction hook and takes no write lock.
+  let transactions = 0;
+  f.store.addTransactionHook(() => { transactions++; });
+  const authorized = () => f.tunnels.command({ type: "tunnels.authorized", sessionId: tunnel.id, generation: tunnel.generation, ready: true }) as { authorized: boolean };
+  for (let i = 0; i < 100; i++) assert.equal(authorized().authorized, true);
+  assert.equal(transactions, 0);
+  f.refused(() => f.tunnels.command({ type: "tunnels.authorized", sessionId: tunnel.id, generation: randomUUID() }), 403);
+  // What the runner found is recorded once and never revives the tunnel. A receipt must say something.
+  for (const body of [{ generation: tunnel.generation }, { generation: tunnel.generation, mappingRemoved: false }, { generation: tunnel.generation, reason: "because" }, { generation: tunnel.generation, mappingRemoved: true, extra: 1 }]) f.refused(() => finish(host.id, host.token, body), 400);
+  const lost = finish(host.id, host.token, { generation: tunnel.generation, reason: "mapping_lost" }).body;
+  assert.deepEqual([lost.state, lost.endReason, lost.mappingRemoved], ["disconnected", "mapping_lost", false]);
+  assert.equal(authorized().authorized, false);
+  const settled = finish(host.id, host.token, { generation: tunnel.generation, mappingRemoved: true, reason: "open_rate" }).body;
+  assert.deepEqual([settled.state, settled.endReason, settled.mappingRemoved], ["disconnected", "mapping_lost", true]);
+  // Expiry is decided by the check itself, from the lease's own deadline, and written exactly once.
+  const second = f.open(lease, 8082).body;
+  f.attach(second, "host", host.id, host.token); f.attach(second, "consumer", lease.id, lease.token);
+  const check = () => (f.tunnels.command({ type: "tunnels.authorized", sessionId: second.id, generation: second.generation, ready: true }) as { authorized: boolean }).authorized;
+  assert.equal(check(), true);
+  f.store.transaction(db => { db.prepare("UPDATE leases SET expires=? WHERE id=?").run(f.clock.now + 5, lease.id); });
+  f.clock.now += 6; f.touch(); transactions = 0;
+  assert.deepEqual([check(), check(), transactions], [false, false, 1]);
+  assert.equal(f.call("GET", `/v1/leases/${lease.id}/tunnels/${second.id}`, lease.token).body.state, "expired");
+  // A rotated key ends the old key's tunnel.
+  const third = f.open(neighbour, 8081).body;
+  f.attach(third, "host", other.id, other.token); f.attach(third, "consumer", neighbour.id, neighbour.token);
+  const rotated = randomBytes(32).toString("base64url");
+  f.store.transaction(db => { db.prepare("UPDATE leases SET credential=? WHERE id=?").run(legacyDigest(rotated), neighbour.id); });
+  assert.deepEqual(f.tunnels.command({ type: "tunnels.authorized", sessionId: third.id, generation: third.generation, ready: true }), { authorized: false });
+  assert.equal(f.call("GET", `/v1/leases/${neighbour.id}/tunnels/${third.id}`, rotated).body.state, "revoked");
 });
 
 test("an uncertain open is reported as unknown and never retried by the SDK", { timeout: 20000 }, async t => {
@@ -573,8 +878,11 @@ test("a lease key tunnels in both directions through the controller; other crede
   assert.equal(dirname(dirname(String(forwarded[0]![0]).replace(/^localfilesystem:/, ""))), h.storage(a.machineId));
   const dial = (port: number) => new Promise<Socket>((resolve, reject) => { const socket = connect({ host: "127.0.0.1", port, allowHalfOpen: true }); socket.once("error", reject); socket.once("connect", () => resolve(socket)); });
   await exchange(await dial(forward.local.port));
-  // The device never initiates on a forward tunnel, and a device port without an app is refused.
-  await assert.rejects(deviceConnect(h, a.machineId, 9000), /connection refused/);
+  // A forward tunnel creates no listener on the device: adb still holds only the reverse tunnel's
+  // mapping. That neither peer can start a stream from the device side of a forward tunnel is
+  // asserted where it is enforced, against the broker and the relay (component tests above).
+  assert.deepEqual(mappingsOf(h, a.machineId).reverse.map(([port]) => port), [8081]);
+  assert.equal(h.calls(a.machineId, "reverse --no-rebind"), 1);
   // The lease holds its limit of two tunnels; a third is refused before anything is installed.
   const over = await h.api("POST", `/v1/leases/${a.id}/tunnels`, { id: randomUUID(), member: "primary", direction: "forward", devicePort: 9001 }, a.key);
   assert.deepEqual([over.status, over.body.code], [429, "tunnel_limit"]);
@@ -637,6 +945,9 @@ test("a host that does not declare tunnels refuses them, and the policy limit is
   assert.deepEqual([denied.status, denied.body.code], [409, "capability_unsupported"]);
   await refused(lease.tunnels.open({ id: randomUUID(), member: "primary", direction: "forward", devicePort: 9000 }), 409, "capability_unsupported");
   assert.equal(h.calls(a.machineId, "reverse --no-rebind") + h.calls(a.machineId, "forward --no-rebind"), 0);
+  // Without the declaration the host behaves exactly as before tunnels existed: readiness never lists
+  // or judges adb mappings. (This stand-in refuses those queries on such a host, and the lease became ready.)
+  assert.equal(h.calls(a.machineId, "reverse --list") + h.calls(a.machineId, "forward --list"), 0);
   // Even a controller that asked would be refused by the runner's own gate.
   const provider = h.runner().runtimes.get("android") as unknown as AndroidProvider;
   assert.throws(() => provider.openTunnel({ id: a.machineId, lease: { id: a.id } }, h.image, "", { id: randomUUID(), direction: "reverse", devicePort: 8081 }, () => true, () => {}), /does not offer lease tunnels/);
@@ -659,6 +970,9 @@ test("a host that does not declare tunnels refuses them, and the policy limit is
 
 test("connections are bounded, a stalled endpoint applies backpressure, idle connections end, and a mapping no tunnel created fences the lease", { skip, timeout: 240000 }, async t => {
   const h = await harness(t), app = await h.application(4);
+  // `adb forward --list` covers every device of the adb server. A line of another device that is
+  // not even a mapping must not affect this lease, here or anywhere below.
+  h.fixture.forwardNoise = "emulator-9998 this line belongs to another device and is not three fields\nemulator-9999 tcp:7000 tcp:7001";
   const a = await acquire(h, app, 300), lease = client(h, a);
   const echo = await listening(serve); t.after(() => echo.close());
   const tunnel = await lease.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
@@ -724,6 +1038,54 @@ test("connections are bounded, a stalled endpoint applies backpressure, idle con
   const fresh = new Reader(await deviceConnect(h, a.machineId, 8083));
   fresh.socket.write("ECHO fresh\n"); assert.equal(await fresh.line(), "echo fresh"); fresh.socket.destroy();
 
+  // A mapping can vanish while its tunnel is open, for example when the adb server or the device
+  // transport restarts. The runner notices, ends that tunnel and records why; the lease and its
+  // other tunnels are unaffected.
+  const vanishing = await lease.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8085, target: { port: echo.port } });
+  const through = new Reader(await deviceConnect(h, a.machineId, 8085));
+  through.socket.write("ECHO there\n"); assert.equal(await through.line(), "echo there");
+  let dropped = Date.now();
+  h.device(a.machineId)!.reverse.delete(8085);
+  let gone = await vanishing.closed;
+  assert.deepEqual([gone.endReason, gone.state], ["mapping_lost", "disconnected"]);
+  assert.ok(Date.now() - dropped < 6000, `the lost reverse mapping was noticed after ${Date.now() - dropped} ms`);
+  await through.finished();
+  await deviceListen(t, h, a.machineId, 9002, serve);
+  const forwarded = await lease.tunnels.open({ id: randomUUID(), member: "primary", direction: "forward", devicePort: 9002 });
+  dropped = Date.now();
+  for (const [local, entry] of [...h.device(a.machineId)!.forward]) if (entry.port === 9002) { for (const socket of entry.sockets) socket.destroy(); entry.server.close(); h.device(a.machineId)!.forward.delete(local); }
+  gone = await forwarded.closed;
+  assert.deepEqual([gone.endReason, gone.state], ["mapping_lost", "disconnected"]);
+  assert.ok(Date.now() - dropped < 6000, `the lost forward mapping was noticed after ${Date.now() - dropped} ms`);
+  for (const ended of [vanishing, forwarded]) await until(async () => (await lease.tunnels.inspect(ended.id)).mappingRemoved === true, "the lost tunnel's settlement");
+  assert.deepEqual([(await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state, (await lease.tunnels.inspect(quiet.id)).state], ["ready", "ready"]);
+
+  // The runner's own limits as the connecting side of a forward tunnel, reached by a holder peer
+  // that ignores the SDK's limits. An app on the device accepts and holds every connection.
+  const holding = await listening(socket => { socket.on("error", () => {}); socket.on("end", () => socket.end()); socket.resume(); }); t.after(() => holding.close());
+  h.device(a.machineId)!.services.set(9003, holding.port);
+  const manual = (await lease.tunnels.create({ id: randomUUID(), member: "primary", direction: "forward", devicePort: 9003 })).tunnel;
+  const raw = await rawPeer(h, a, manual);
+  await until(() => raw.controls("tunnel").length === 1, "the installed forward mapping", 20000);
+  const dialed = () => [...h.device(a.machineId)!.forward.values()].find(entry => entry.port === 9003)!.accepted;
+  for (let stream = 1; stream <= TUNNEL_CONNECTIONS + 1; stream++) await raw.connection.sendControl({ type: "open", stream });
+  await until(() => raw.controls("accept").length === TUNNEL_CONNECTIONS && raw.controls("reset").length === 1, "the runner's connection limit as connector");
+  assert.deepEqual(raw.controls("reset")[0], { type: "reset", stream: TUNNEL_CONNECTIONS + 1, reason: "limit" });
+  assert.equal(dialed(), TUNNEL_CONNECTIONS, "the stream beyond the limit was never dialed");
+  // Opening and resetting in a loop: the controller lets only so many opens through per interval,
+  // and the runner answers the ones beyond its open rate without dialing the device.
+  for (let stream = 1; stream <= TUNNEL_CONNECTIONS; stream++) await raw.connection.sendControl({ type: "reset", stream, reason: "closed" });
+  await until(() => holding.sockets.size === 0, "the reset connections");
+  const flood = 200, first = TUNNEL_CONNECTIONS + 2, before = dialed(), flooding = Date.now();
+  for (let stream = first; stream < first + flood; stream++) { await raw.connection.sendControl({ type: "open", stream }); await raw.connection.sendControl({ type: "reset", stream, reason: "closed" }); }
+  const limited = () => raw.controls("reset").filter(control => control.reason === "limit" && Number(control.stream) >= first).length;
+  await until(() => limited() + dialed() - before === flood, "a refusal or a dial for every open", 30000);
+  const seconds = (Date.now() - flooding) / 1000, admitted = dialed() - before;
+  assert.ok(admitted <= TUNNEL_OPEN_BURST + TUNNEL_OPENS_PER_SECOND * (seconds + 3) && admitted < flood, `${admitted} of ${flood} opens were dialed in ${seconds} s`);
+  assert.ok(seconds * 1000 >= (flood / TUNNEL_RELAY_OPENS - 2) * TUNNEL_AUTHORITY_MS, `the controller relayed ${flood} opens in ${seconds} s`);
+  assert.deepEqual([raw.state.ended, (await lease.tunnels.inspect(manual.id)).state], [false, "ready"], "a bounded burst does not end the tunnel");
+  await lease.tunnels.close(manual.id); await until(() => raw.state.ended, "the closed tunnel's relay");
+
   // A reverse mapping that no tunnel created (another tool ran `adb reverse` against the leased device)
   // would give the guest a path to the host. The audit fences the lease; the open tunnel ends with it.
   const canary = await listening(socket => socket.destroy()); t.after(() => canary.close());
@@ -742,7 +1104,7 @@ test("connections are bounded, a stalled endpoint applies backpressure, idle con
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
 });
 
-test("a tunnel ends with its lease: key rotation, release, supervisor loss and expiry each close it at once", { skip, timeout: 240000 }, async t => {
+test("a tunnel ends with its lease: key rotation and release within a second, supervisor loss within two, expiry with the lease", { skip, timeout: 240000 }, async t => {
   const h = await harness(t, 2), app = await h.application(2);
   const echo = await listening(serve); t.after(() => echo.close());
   const open = async (l: Lease, key = l.key): Promise<{ tunnel: LeaseTunnel; reader: Reader }> => {
@@ -751,23 +1113,28 @@ test("a tunnel ends with its lease: key rotation, release, supervisor loss and e
     reader.socket.write("ECHO up\n"); assert.equal(await reader.line(), "echo up");
     return { tunnel, reader };
   };
-  /** The time from `cause` until the holder's tunnel and the device's connection have both ended.
-   * The contract's bound is about a second (a 250 ms broker monitor and a one-second device check).
-   * This fixture runs the controller, the runner and every emulator's reconcile loop on one event
-   * loop, so it asserts seconds, far below any lease deadline, and not the native figure. */
-  const ends = async (active: { tunnel: LeaseTunnel; reader: Reader }, cause: () => Promise<unknown> | unknown, bound: number): Promise<void> => {
-    const started = Date.now(); await cause();
-    const end = await Promise.race([active.tunnel.closed, sleep(30000).then(() => undefined)]);
+  /** Times the device's connection from the moment the cause took effect until it is closed, and
+   * asserts the documented bound: one second for an end the controller can see (a 250 ms check
+   * interval), two for one only the device shows (a one-second check). These are measured on a
+   * single event loop shared by the controller, the runner and the reconcile loop of every
+   * emulator; what makes each mechanism fire is asserted separately, in the component tests and
+   * in the runner's-own-evidence test below. */
+  const ends = async (active: { tunnel: LeaseTunnel; reader: Reader }, cause: () => Promise<unknown> | unknown, bound: number, label: string): Promise<void> => {
+    await cause();
+    const started = Date.now();
+    await active.reader.finished(15000);
+    const elapsed = Date.now() - started;
+    t.diagnostic(`${label}: the device's connection closed after ${elapsed} ms`);
+    const end = await Promise.race([active.tunnel.closed, sleep(15000).then(() => undefined)]);
     assert.ok(end, "the tunnel ended"); assert.notEqual(end.reason, "closed");
-    await active.reader.finished(5000);
-    assert.ok(Date.now() - started < bound, `teardown took ${Date.now() - started} ms`);
+    assert.ok(elapsed < bound, `${label}: the device's connection stayed open for ${elapsed} ms`);
   };
   const [rotated, released] = await Promise.all([acquire(h, app, 300), acquire(h, app, 300)]);
 
   // Key rotation: the old key's tunnel ends at once; the lease and device stay, so the runner removes and proves the mapping.
   const first = await open(rotated);
   let key = "";
-  await ends(first, async () => { key = (await h.api("POST", `/v1/leases/${rotated.id}/credential`, {}, app)).body.credential; }, 6000);
+  await ends(first, async () => { key = (await h.api("POST", `/v1/leases/${rotated.id}/credential`, {}, app)).body.credential; }, 1000, "key rotation");
   const holder = client(h, { id: rotated.id, key });
   await until(async () => { const saved = await holder.tunnels.inspect(first.tunnel.id); return saved.state === "revoked" && saved.mappingRemoved; }, "the rotated tunnel's removal receipt");
   assert.deepEqual(mappingsOf(h, rotated.machineId), { reverse: [], forward: [] });
@@ -778,7 +1145,7 @@ test("a tunnel ends with its lease: key rotation, release, supervisor loss and e
 
   // Release: the tunnel ends with the lease, and the lease's cleanup settles its mapping.
   const releasing = await open(released);
-  await ends(releasing, () => h.api("POST", `/v1/leases/${released.id}/release`, { id: randomUUID() }, released.key), 6000);
+  await ends(releasing, () => h.api("POST", `/v1/leases/${released.id}/release`, { id: randomUUID() }, released.key), 1000, "release");
   assert.equal((await client(h, released).tunnels.inspect(releasing.tunnel.id)).state, "revoked");
   await cleaned(h, app, released.id);
   await until(async () => (await client(h, released).tunnels.inspect(releasing.tunnel.id)).mappingRemoved === true, "settlement by lease cleanup");
@@ -787,7 +1154,7 @@ test("a tunnel ends with its lease: key rotation, release, supervisor loss and e
   // Supervisor loss: nothing enforces the deadline any more, so the tunnel ends with device access.
   const orphaned = await acquire(h, app, 300);
   const lost = await open(orphaned), group = JSON.parse(readFileSync(join(h.storage(orphaned.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
-  await ends(lost, () => process.kill(group.supervisorPid, "SIGKILL"), 8000);
+  await ends(lost, () => process.kill(group.supervisorPid, "SIGKILL"), 2000, "supervisor loss");
   await until(async () => (await h.api("GET", `/v1/leases/${orphaned.id}`, undefined, app)).body.state === "failed", "the failed lease", 15000);
   await until(async () => (await h.api("GET", `/v1/leases/${orphaned.id}`, undefined, app)).body.cleanup.state === "blocked", "blocked cleanup");
   // The emulator survives unsupervised, so its stop is unproven and the tunnel's mapping is not claimed removed.
@@ -876,9 +1243,23 @@ test("a replayed open after a lost reply attaches the one tunnel; runner and con
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/tunnels`, { id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8086 }, a.key)).body.code, "tunnel_port_busy");
   // The leftover mapping names a removed socket: the device reaches nothing through it.
   await assert.rejects(deviceConnect(h, a.machineId, 8086));
+  // It does not use up the lease's allowance: another port opens while the removal is unproven.
+  const beside = await lease.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8087, target: { port: echo.port } });
+  await talk(8087, "beside");
+  // The runner keeps retrying. Once the device removes it, the runner reports it and the port is free again.
+  h.fixture.removeFails = false;
+  await until(async () => (await lease.tunnels.inspect(stuck.id)).mappingRemoved === true, "the retried removal's receipt", 30000);
+  assert.deepEqual(mappingsOf(h, a.machineId).reverse.map(([port]) => port), [8087]);
+  const reopened = await lease.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8086, target: { port: echo.port } });
+  await talk(8086, "reopened");
+  // A second unproven removal is settled by the lease's own cleanup instead.
+  h.fixture.removeFails = true;
+  await reopened.close(); await beside.close();
+  await sleep(2500);
+  assert.deepEqual((await lease.tunnels.list()).filter(item => !item.mappingRemoved).map(item => item.devicePort).sort(), [8086, 8087]);
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, a.key)).status, 200);
   await cleaned(h, app, a.id);
-  await until(async () => (await lease.tunnels.inspect(stuck.id)).mappingRemoved === true, "settlement by lease cleanup");
+  await until(async () => (await lease.tunnels.list()).every(item => item.mappingRemoved), "settlement by lease cleanup");
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
 });
 
@@ -899,4 +1280,63 @@ test("the isolation probe still fences a leaky guest on a host that offers tunne
   assert.equal(h.calls(machineId, "reverse --no-rebind") + h.calls(machineId, "forward --no-rebind"), 0, "no mapping was ever installed");
   await cleaned(h, app, id);
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+});
+
+test("the runner ends a tunnel on its own evidence before the controller can know, and no other host can attach to or report for a tunnel", { skip, timeout: 240000 }, async t => {
+  // Heartbeats five seconds apart, as on a default host: whatever happens within a second or two of
+  // a heartbeat was decided by the runner alone.
+  const h = await harness(t, 2, { tunnels: true, poll: 5 }), app = await h.application(2);
+  const echo = await listening(serve); t.after(() => echo.close());
+  const [fenced, orphaned] = await Promise.all([acquire(h, app, 300), acquire(h, app, 300)]);
+  const heartbeat = async () => { const last = h.runner().lastContact; await until(() => h.runner().lastContact !== last, "the next heartbeat", 15000); };
+  const leaseState = async (lease: Lease) => (await h.api("GET", `/v1/leases/${lease.id}`, undefined, app)).body.state as string;
+  // Another enrolled host with a valid credential of its own: a runner without this lease.
+  const other = { id: randomUUID(), credential: randomBytes(32).toString("base64url") }, hostId = h.runner().identity!.id;
+  assert.equal((await h.api("POST", "/v1/hosts/enroll", { ...other, orchestrator: h.url, offer: { ...h.runner().offer, name: "another-android-host" } }, h.enrollment)).status, 200);
+  // A new tunnel waits for its own host's next heartbeat. Until then nobody else can take the host's place.
+  await heartbeat();
+  const holder = client(h, fenced), pending = (await holder.tunnels.create({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081 })).tunnel;
+  for (const [host, credential] of [[other.id, other.credential], [hostId, other.credential], [hostId, fenced.key], [other.id, fenced.key], [hostId, app]] as const) {
+    await assert.rejects(PeerConnection.connect(h.url, `/v1/hosts/${host}/tunnels/${pending.id}/${pending.generation}`, credential), `${host === hostId ? "the tunnel's host id" : "another host"} with a foreign credential`);
+    assert.ok([401, 403].includes((await h.api("POST", `/v1/hosts/${host}/tunnels/${pending.id}/finish`, { generation: pending.generation, mappingRemoved: true }, credential)).status));
+  }
+  const untouched = await holder.tunnels.inspect(pending.id);
+  assert.deepEqual([untouched.state, untouched.mappingRemoved], ["pending", false]);
+  assert.equal(h.calls(fenced.machineId, "reverse --no-rebind"), 0);
+  // Its own host attaches at the next heartbeat, and the tunnel works.
+  const first = await holder.tunnels.connect(pending, { target: { port: echo.port } });
+  const firstReader = new Reader(await deviceConnect(h, fenced.machineId, 8081));
+  firstReader.socket.write("ECHO up\n"); assert.equal(await firstReader.line(), "echo up");
+  const second = await client(h, orphaned).tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
+  const secondReader = new Reader(await deviceConnect(h, orphaned.machineId, 8081));
+  secondReader.socket.write("ECHO up\n"); assert.equal(await secondReader.line(), "echo up");
+
+  // The runner's lease guard fences the lease locally, as it does at its own deadline or without
+  // controller contact. The controller hears of it only with the next heartbeat, seconds away.
+  await heartbeat();
+  let since = Date.now();
+  h.runner().guard.records.get(fenced.machineId)!.fenced = true;
+  await firstReader.finished(10000);
+  let elapsed = Date.now() - since;
+  t.diagnostic(`local fence: the device's connection closed after ${elapsed} ms`);
+  assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
+  assert.notEqual((await first.closed).reason, "closed");
+  assert.equal(await leaseState(fenced), "ready", "the controller had not been told yet");
+
+  // The supervisor dies. The runner's once-a-second device check sees the free lock and ends the tunnel.
+  await heartbeat();
+  const group = JSON.parse(readFileSync(join(h.storage(orphaned.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
+  since = Date.now();
+  process.kill(group.supervisorPid, "SIGKILL");
+  await secondReader.finished(10000);
+  elapsed = Date.now() - since;
+  t.diagnostic(`supervisor loss: the device's connection closed after ${elapsed} ms`);
+  assert.ok(elapsed < 2000, `the runner's own device check took ${elapsed} ms`);
+  assert.notEqual((await second.closed).reason, "closed");
+  assert.equal(await leaseState(orphaned), "ready", "the controller had not been told yet");
+  // Both leases then fail through the ordinary path, and nothing of the tunnels survives cleanup.
+  await until(async () => await leaseState(fenced) !== "ready" && await leaseState(orphaned) !== "ready", "the leases' own failure", 30000);
+  process.kill(-group.childPid, "SIGKILL");
+  await cleaned(h, app, fenced.id); await cleaned(h, app, orphaned.id);
+  for (const [lease, tunnel] of [[fenced, first], [orphaned, second]] as const) await until(async () => (await client(h, lease).tunnels.inspect(tunnel.id)).mappingRemoved === true, "settlement by lease cleanup", 30000);
 });

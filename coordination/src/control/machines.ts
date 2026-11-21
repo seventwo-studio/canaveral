@@ -112,6 +112,10 @@ export function validateOffer(value: unknown): Json {
   // Lease port tunnels are a separate, explicit declaration on top of lease execution.
   if ("leaseTunnelProtocol" in input) {
     if (input.leaseTunnelProtocol !== 1 || result.leaseProtocol !== 1) failure("Lease tunnels require lease execution protocol 1 and tunnel protocol 1.");
+    // An account-owned emulator launches without the lease isolation arguments and can reach the
+    // host's adb server, and through it a leased device's tunnelled port. A host that declares
+    // tunnels therefore offers Android templates for leases only.
+    if (result.templates.some((image: Json) => image.os === "android" && !result.leaseImages.some((entry: Json) => equal([entry.id, entry.revision, entry.arch], [image.id, image.revision, image.arch])))) failure("A host that declares lease tunnels may offer only leased Android templates.");
     result.leaseTunnelProtocol = 1;
   }
   if ("inference" in input) {
@@ -443,6 +447,8 @@ export class MachineStore implements ControlModule {
       const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
       for (const image of advertised.templates) {
         if (leased && !machineLeaseEligible(advertised, image)) continue;
+        // No account-owned emulator runs beside tunnelled leases (see validateOffer).
+        if (!leased && advertised.leaseTunnelProtocol === 1 && image.os === "android") continue;
         if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
         const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
         if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });

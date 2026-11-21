@@ -1344,7 +1344,7 @@
             }
           }
         },
-        "description": "Requires the current lease key, a ready Android member, a host that declares leaseTunnelProtocol 1 and an application policy with limits.tunnelsPerLease above zero. Application, operator and other lease credentials are refused with 401. Persist the request UUID: a replay returns the saved tunnel in its current state and never opens a second one; a changed body is 409. Refusal codes: tunnels_not_permitted (403), capability_unsupported, member_not_ready and tunnel_port_busy (409), lease_ended (410), tunnel_limit and tunnel_host_limit (429). The body names a device port and a direction only; the holder-side target or listener never reaches the controller. The mapping is installed only after both peers attach.",
+        "description": "Requires the current lease key, a ready Android member, a host that declares leaseTunnelProtocol 1 and an application policy with limits.tunnelsPerLease above zero. Application, operator and other lease credentials are refused with 401. Persist the request UUID: a replay returns the saved tunnel in its current state and never opens a second one; a changed body is 409. Refusal codes: tunnels_not_permitted (403), capability_unsupported, member_not_ready and tunnel_port_busy (409), lease_ended (410), tunnel_limit, tunnel_host_limit, tunnel_residue_limit and tunnel_identity_limit (429). The body names a device port and a direction only; the holder-side target or listener never reaches the controller. The mapping is installed only after both peers attach.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3341,7 +3341,11 @@
           },
           "mappingRemoved": {
             "type": "boolean",
-            "description": "True once the device mapping is known to be gone: the runner never installed one, reported its removal, or the lease's cleanup proved the emulator stopped and removed. Until then an ended tunnel keeps its lease slot and device port."
+            "description": "True once the device mapping is known to be gone: the runner never installed one, reported its removal, or the lease's cleanup proved the emulator stopped and removed. Until then an ended tunnel keeps its host slot and device port."
+          },
+          "endReason": {
+            "type": "string",
+            "enum": ["mapping_failed", "mapping_lost", "open_rate"]
           },
           "limits": {
             "type": "object",

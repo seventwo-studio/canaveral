@@ -30,10 +30,14 @@ const REFUSALS: Record<string, string> = {
   capability_unsupported: "The lease's host does not offer lease tunnels (leaseTunnelProtocol), or the member is not an Android emulator.",
   member_not_ready: "The lease's device is not ready.",
   lease_ended: "The lease has ended.",
-  tunnel_limit: "The lease already holds its maximum number of tunnels.",
+  tunnel_limit: "The lease already holds its maximum number of open tunnels.",
+  tunnel_residue_limit: "Too many ended tunnels of this lease still have an unconfirmed device mapping; wait for the runner to remove them.",
+  tunnel_identity_limit: "The lease opened its maximum number of tunnels for this hour; try again later.",
   tunnel_host_limit: "The device host already holds its maximum number of tunnels.",
   tunnel_port_busy: "Another tunnel of this lease holds that device port, or its mapping is not yet confirmed removed.",
   tunnel_mapping_failed: "The device port mapping could not be created; the device port may be in use.",
+  tunnel_mapping_lost: "The device port mapping disappeared (the adb server or the device transport restarted).",
+  tunnel_open_rate: "Connections kept arriving faster than the tunnel's open rate.",
   tunnel_ended: "This tunnel UUID was already used. Open a new tunnel with a new --request-id.",
   tunnel_listen_failed: "The local listener could not be bound.",
   unauthenticated: "The lease key was refused. Only the lease's current key opens a tunnel.",
@@ -73,7 +77,10 @@ export async function runTunnel(args: CliArguments, io: TunnelCliIO, signal: Abo
   io.stdout(JSON.stringify({ tunnel: tunnel.id, leaseId, member, direction, devicePort, [direction === "reverse" ? "target" : "listening"]: `${tunnel.local.host.includes(":") ? `[${tunnel.local.host}]` : tunnel.local.host}:${tunnel.local.port}`, state: "open" }) + "\n");
   const end = await tunnel.closed;
   if (end.reason === "closed") { io.stdout(JSON.stringify({ tunnel: tunnel.id, state: end.state ?? "closed", connections: tunnel.stats.opened }) + "\n"); return 0; }
-  const reasons: Record<string, string> = { expired: "the lease or its attach window expired", revoked: "the lease ended or its key was rotated", closed: "the tunnel was closed", disconnected: "the device, its host or the relay disconnected" };
-  io.stderr(`canaveral: Tunnel ended: ${end.state ? reasons[end.state] ?? end.state : end.code ? REFUSALS[end.code] ?? end.reason : end.reason}. Nothing is retried; open a new tunnel with a new UUID if the lease is still ready.\n`);
+  const reasons: Record<string, string> = { expired: "the lease or its attach window expired", revoked: "the lease ended or its key was rotated", closed: "the tunnel was closed", disconnected: "the device was not ready, or the device, its host or the relay disconnected",
+    mapping_lost: "the device port mapping disappeared (the adb server or the device transport restarted)", open_rate: "connections kept arriving faster than the tunnel's open rate", mapping_failed: "the device port mapping could not be created" };
+  // What the runner found comes first; otherwise the controller's final state.
+  const cause = end.endReason ? reasons[end.endReason] ?? end.endReason : end.code && REFUSALS[end.code] ? REFUSALS[end.code]! : end.state ? reasons[end.state] ?? end.state : end.reason;
+  io.stderr(`canaveral: Tunnel ended: ${cause.replace(/\.$/, "")}. Nothing is retried; open a new tunnel with a new UUID once the lease's device is ready.\n`);
   return 1;
 }

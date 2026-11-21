@@ -180,8 +180,6 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
         }
         return ok(lines.join("\n") + "\ncanaveral-isolation-done\n");
       }
-      // Readiness audits the device's adb port mappings on every reconcile; these devices hold none.
-      if (["reverse --list", "forward --list"].includes(args.join(" "))) return ok("");
       if (args[0] === "shell" || args[0] === "logcat") return ok("ok");
       return { stdout: "", exitCode: 1 };
     },

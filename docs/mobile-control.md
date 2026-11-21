@@ -794,9 +794,9 @@ Runner or controller loss during a lease recording is not covered.
 
 **Accepted decision, 21 November 2026: dev-loop networking is tunnels only.** A lease gets
 explicit port tunnels, carried over the device's own control channel and relayed through
-the controller to the lease holder. The leased guest keeps no network of its own and no
-internet access, so every guarantee above is unchanged: the isolation launch arguments,
-the readiness probe, the debuggable-image refusal and supervisor fencing. Public egress
+the controller to the lease holder. The leased guest keeps no route through the host network. Its access through a
+reverse tunnel depends on the service the holder exposes. The isolation launch arguments,
+the readiness probe, the debuggable-image refusal and supervisor fencing still apply. Public egress
 through an allowlisting proxy was considered and rejected for now, because it changes the
 isolation guarantee and is a larger design. A design that needed the guest to reach the
 host's network stack would be the wrong design.
@@ -853,6 +853,12 @@ Tunnels are off unless both of these are set.
 - **Application.** The policy sets `limits.tunnelsPerLease` to 1–8. It defaults to 0, so
   existing immutable policies allow no tunnels ([applications](applications.md)).
 
+A tunnel host serves leased Android devices exclusively. The runner refuses tunnel
+configuration with existing account-owned Android assignments, and controller
+placement excludes account-owned Android devices on a host that advertises tunnels.
+This matters because local clients on the host and unfenced emulators can reach the
+shared adb server. Mixed hosts need a runner-private adb server, which remains open.
+
 #### Routes
 
 Only the lease's current key reaches these routes. The application key, another lease's
@@ -883,8 +889,9 @@ host or the controller dropped) are final.
 durably. Repeating the same body returns the saved tunnel in its current state (200);
 a different body is 409. The runner journals each tunnel before it attaches and installs
 at most one mapping per identity, also across a restart. A tunnel identity is attached
-once: after it ends, open a new tunnel with a new UUID. A lease may create at most 256
-tunnel identities.
+once: after it ends, open a new tunnel with a new UUID. A lease may create at most 256 identities per rolling hour. Its list returns up to
+the newest 256. The optional `endReason` names a mapping failure, missing mapping
+or sustained connection flood.
 
 Refusals carry a stable `code`:
 
@@ -895,7 +902,9 @@ Refusals carry a stable `code`:
 | 409 | `member_not_ready` | The lease or its device is not ready |
 | 409 | `tunnel_port_busy` | A tunnel of this lease holds that device port and direction, or its mapping is not yet known removed |
 | 410 | `lease_ended` | The lease has ended |
-| 429 | `tunnel_limit` | The lease holds its `tunnelsPerLease`, or used its 256 identities |
+| 429 | `tunnel_limit` | The lease holds its `tunnelsPerLease` live tunnels |
+| 429 | `tunnel_identity_limit` | The lease used its 256 identities in the past hour |
+| 429 | `tunnel_residue_limit` | Eight ended tunnels still have unproven mapping removal |
 | 429 | `tunnel_host_limit` | The host holds 64 tunnels |
 
 #### Relay and limits
@@ -917,6 +926,8 @@ attached; the runner then sends `{type:"tunnel", direction, devicePort}`, and th
 | Tunnels per lease | `limits.tunnelsPerLease`, at most 8 | 429 `tunnel_limit` |
 | Tunnels per host | 64 | 429 `tunnel_host_limit` |
 | Connections per tunnel | 32 | A further connection is closed at once |
+| New connections | Burst of 64, then 16 per second | Extra opens are refused |
+| Connection attempts | Burst of 512, then 64 per second | A sustained flood ends the tunnel |
 | Buffered bytes | 256 KiB unacknowledged per connection and direction | The sender stops; backpressure reaches the writing socket |
 | Idle time | `idleSeconds` without a byte in either direction | That connection is reset; the tunnel stays open |
 | Connect time | 10 seconds to reach the endpoint | That connection is reset |
@@ -938,9 +949,11 @@ supervisor loss each end it within about a second, as they end a lease recording
 bound follows from the checks below. Fixtures confirm teardown within seconds on a shared
 event loop; the native timing is not measured.
 
-- The broker checks the tunnel's authority on every relayed message and every 250 ms: the
-  key that opened it, a ready unexpired lease, an active application, a checked ready
-  device on the same assignment, and a host that still declares tunnels.
+- The broker checks tunnel authority up to four times a second using the lease key,
+  application, lease, assignment and host state. Per direction and check interval it
+  forwards at most 2 MiB, 256 messages and 32 opens. A revocation can therefore leave
+  at most one interval and its relay budget in flight. A busy controller pauses relay
+  once the current budget expires.
 - The runner evaluates fresh controller contact, its lease guard and its own tunnel gate
   once per lease at most every 250 ms, and each relay polls that result every 250 ms. It
   is not evaluated per frame, because each evaluation samples the native clock through a
@@ -962,7 +975,9 @@ the mapping and unlinks its socket. `mappingRemoved` in the receipt is positive 
 - The **lease's own cleanup** proved the emulator's process group gone and its storage
   removed. A reverse mapping cannot outlive the emulator.
 
-Until then an ended tunnel keeps its lease slot and its device port (`tunnel_port_busy`).
+Until then an ended tunnel keeps its host slot and device port (`tunnel_port_busy`).
+The runner checks for missing mappings while a tunnel is open. Dedicated tunnel hosts
+also audit unexpected mappings during readiness.
 A mapping whose removal is unproven is inert: its socket is closed and unlinked, and the
 socket name is derived from the tunnel's UUID and never reused, so the device port leads
 nowhere. The runner retries the removal on its next mapping audit and reports it. After a
@@ -1018,8 +1033,8 @@ the command exits non-zero and names the reason.
   only a few hundred KiB/s with two. The controller's per-message check was not the
   limit. Moving the relay off the runner's main loop is the likely remedy if a real
   bundle download is too slow.
-- **No internet egress**, by the decision above. An app that needs a backend other than a
-  holder-side server cannot reach it.
+- A reverse tunnel can expose a holder-side proxy. That proxy determines which
+  destinations the guest can reach through the tunnel.
 - **TCP only**, and one port per tunnel. No UDP, no port ranges, no `localabstract` or
   JDWP targets.
 - **Android emulators only.** iOS simulator leases are a separate change; the relay,

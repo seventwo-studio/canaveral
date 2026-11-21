@@ -30,6 +30,7 @@ import { GuestChunkShells } from "../guest/chunk-shells.ts";
 import { connect as connectGuestDisplay } from "../guest/display.ts";
 import type { DisplayConnection } from "../guest/display.ts";
 import { jsonBytes } from "./transfers.ts";
+import { TUNNEL_AUTHORITY_MS, TUNNEL_RELAY_BYTES, TUNNEL_RELAY_MESSAGES, TUNNEL_RELAY_OPENS } from "../tunnel-relay.ts";
 import type { ByteReader, VerifiedDownload } from "./transfers.ts";
 export * from "./session-protocol.ts";
 
@@ -297,7 +298,20 @@ interface Pair {
   view: { id: string; generation: string; capability: RelayCapability; direction?: string }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
   /** Video: the host's finish was relayed, so the consumer may acknowledge it. */
   finished?: boolean;
+  /** Tunnel pairs only. */
+  gate?: TunnelGate;
 }
+/** Authority and relay budget of one tunnel pair. A tunnel moves far more messages than any other
+ * session family, and a controller round trip for each one would let a single lease starve the
+ * control worker that HTTP requests, host heartbeats and every other session share. A tunnel's
+ * authority is therefore checked on an interval and not per message. Nothing is relayed unless a
+ * check succeeded within the last TUNNEL_AUTHORITY_MS, and between two checks each direction
+ * relays at most a fixed budget of bytes, messages and stream opens. So once the controller's
+ * state says a tunnel's authority ended, at most that interval and that budget can still pass.
+ * Every other family keeps its per-message check. */
+interface TunnelGate { checked: number; checking?: Promise<boolean> | undefined; ready: boolean; used: Record<SessionSide, { bytes: number; messages: number; opens: number }> }
+const unusedBudget = (): TunnelGate["used"] => ({ host: { bytes: 0, messages: 0, opens: 0 }, consumer: { bytes: 0, messages: 0, opens: 0 } });
+const pause = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, Math.max(1, ms)); });
 /** Peer liveness: ping every `intervalMs`; drop a peer from which no frame arrived for
  * `timeoutMs`. Any received frame counts, so a pong queued behind media still in socket
  * buffers does not drop a peer whose stream is merely slow to drain. Only tests shorten
@@ -461,12 +475,52 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
   // transient failures, ends a pair.
   const failures = new WeakMap<Pair, number>();
   const transient = (error: unknown) => !(error instanceof ServiceError) || error.status === 429 || error.status >= 500;
+  /** One authority check per tunnel pair at a time, shared by the monitor and both relay
+   * directions. A success starts a new interval and a new relay budget. */
+  const attempt = (pair: Pair): Promise<boolean> => {
+    const gate = pair.gate!;
+    if (!gate.checking) {
+      const run = authorized(pair, gate.ready).then(ok => { if (ok) { gate.checked = performance.now(); gate.used = unusedBudget(); } return ok; });
+      gate.checking = run;
+      void run.catch(() => {}).finally(() => { if (gate.checking === run) gate.checking = undefined; });
+    }
+    return gate.checking;
+  };
+  /** Admits one tunnel message to the relay, or waits. A used-up budget and a busy or briefly
+   * unavailable controller are both backpressure: this direction stops reading its peer until
+   * the next successful check. Only a definite refusal, or about 10 s without an answer, throws
+   * and thereby ends the pair. */
+  const admit = async (pair: Pair, side: SessionSide, bytes: number, open: boolean): Promise<void> => {
+    const gate = pair.gate!;
+    for (let failed = 0; ; ) {
+      if (pair.closed) throw new ServiceError("Session peer ended.", 410);
+      const age = performance.now() - gate.checked;
+      if (age >= TUNNEL_AUTHORITY_MS) {
+        let allowed: boolean;
+        try { allowed = await attempt(pair); }
+        catch (error) {
+          if (!transient(error) || ++failed >= MONITOR_TRANSIENT_LIMIT) throw error;
+          await pause(TUNNEL_AUTHORITY_MS); continue;
+        }
+        if (!allowed) throw new ServiceError("Session authorization ended.", 410);
+        failed = 0; continue;
+      }
+      const used = gate.used[side];
+      if (used.bytes + bytes <= TUNNEL_RELAY_BYTES && used.messages < TUNNEL_RELAY_MESSAGES && (!open || used.opens < TUNNEL_RELAY_OPENS)) {
+        used.bytes += bytes; used.messages++; if (open) used.opens++;
+        return;
+      }
+      await pause(TUNNEL_AUTHORITY_MS - age);
+    }
+  };
   const timer = setInterval(() => {
     if (monitoring) return; monitoring = true;
     const queue = [...pairs.values()];
     const work = async () => {
       for (let pair = queue.shift(); pair; pair = queue.shift()) {
-        try { if (await authorized(pair)) failures.delete(pair); else disconnect(pair); }
+        // A tunnel pair checked moments ago, by this monitor or by its own relay, is not asked again:
+        // at most about five checks a second per tunnel, however much it carries.
+        try { if (pair.gate ? performance.now() - pair.gate.checked < TUNNEL_AUTHORITY_MS - 50 || await attempt(pair) : await authorized(pair)) failures.delete(pair); else disconnect(pair); }
         catch (error) {
           const count = (failures.get(pair) ?? 0) + 1;
           if (!transient(error) || count >= MONITOR_TRANSIENT_LIMIT) disconnect(pair); else failures.set(pair, count);
@@ -493,7 +547,7 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
         if (!pair) {
           let start!: () => void;
           const started = new Promise<void>(resolve => { start = resolve; });
-          pair = { view, peers: {}, started, start, closed: false }; pairs.set(identity, pair);
+          pair = { view, peers: {}, started, start, closed: false, ...(family === 'tunnel' ? { gate: { checked: 0, ready: false, used: unusedBudget() } } : {}) }; pairs.set(identity, pair);
         }
         if (pair.closed || pair.peers[command.side]) throw new ServiceError("Session peer cannot be replaced.", 409);
         peer = new SocketPeer(socket, true, heartbeat); pair.peers[command.side] = peer;
@@ -508,6 +562,7 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
         (peer as SocketPeer & { accepted?: boolean }).accepted = true;
         if (Object.values(pair.peers).length === 2 && Object.values(pair.peers).every(p => (p as SocketPeer & { accepted?: boolean }).accepted)) {
           if (!await authorized(pair, true)) throw new ServiceError("Session authorization ended.", 410);
+          if (pair.gate) { pair.gate.ready = true; pair.gate.checked = performance.now(); pair.gate.used = unusedBudget(); }
           const ready = Buffer.from(JSON.stringify({ type: "ready", sessionId: view.id, generation: view.generation, capability: view.capability }));
           await Promise.all(Object.values(pair.peers).map(p => p.send(ready))); pair.start();
         }
@@ -521,7 +576,9 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
           // Only the listening side of a tunnel opens streams: the runner for a reverse tunnel (the
           // device connected), the lease holder for a forward tunnel. The other side never initiates.
           if (view.capability === "tunnel" && !(relayed instanceof Uint8Array) && relayed.type === "open" && (view.direction === "reverse") !== (command.side === "host")) throw new ServiceError("Tunnel streams open only from the listening side.", 409);
-          if (!await authorized(pair, true) || pair.closed) throw new ServiceError("Session authorization ended.", 410);
+          if (pair.gate) await admit(pair, command.side, message.data.byteLength, !(relayed instanceof Uint8Array) && relayed.type === "open");
+          else if (!await authorized(pair, true)) throw new ServiceError("Session authorization ended.", 410);
+          if (pair.closed) throw new ServiceError("Session authorization ended.", 410);
           const other = pair.peers[command.side === "host" ? "consumer" : "host"];
           if (!other) throw new ServiceError("Session peer ended.", 410);
           // Set before relaying, so an acknowledgement can never race the flag.
