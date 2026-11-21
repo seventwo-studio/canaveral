@@ -1,4 +1,4 @@
-//! Independent deadline owner for one leased Android emulator.
+//! Independent deadline owner for one leased Android emulator or iOS simulator.
 //!
 //! The host publishes `lease-authorization.json` with an absolute deadline on this
 //! boot's continuous clock. This process owns the emulator's dedicated process
@@ -10,6 +10,14 @@
 //! The supervisor holds an exclusive `flock` on `lease-supervisor.lock` for its whole
 //! life, so the host can prove it is gone without trusting a PID. It exits with
 //! `REFUSED` only when it spawned nothing; every path after spawn stops the group first.
+//!
+//! A leased iOS simulator adds a second owned thing. The supervised child is then the
+//! lease's own device-control companion, in its process group as above. The simulator
+//! itself is booted and shut down through `simctl --set <device set>`: CoreSimulator
+//! starts it through launchd, so it is never this process's child. Its stop proof is
+//! the absence of the device set's process tree (see `simulator_tree`), recorded as
+//! `treeAbsent` beside `groupAbsent`. Native acceptance of that proof is open.
+use crate::simulator_tree::{inventory, Tree};
 use serde_json::{json, Value};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
@@ -29,6 +37,19 @@ const SUPERVISOR: &str = "lease-supervisor.json";
 const FENCED: &str = "lease-fenced.json";
 const STOPPED: &str = "lease-stopped.json";
 const LOCK: &str = "lease-supervisor.lock";
+/// Simulator tree members recorded while their parents were alive.
+const TREE: &str = "lease-tree.json";
+/// The private device set is always this directory of the assignment's storage.
+const DEVICE_SET: &str = "device-set";
+/// How long `simctl boot` and `simctl shutdown` may run before their group is killed.
+const BOOT_LIMIT: Duration = Duration::from_secs(120);
+const SHUTDOWN_LIMIT: Duration = Duration::from_secs(30);
+/// After `simctl shutdown` returns, surviving tree members get this long before SIGKILL.
+const TREE_GRACE: Duration = Duration::from_secs(5);
+/// A booted simulator whose tree never appears within this window is treated as gone.
+const START_WINDOW: Duration = Duration::from_secs(30);
+/// The tree is sampled on every this many 100 ms supervision ticks.
+const SAMPLE_TICKS: u32 = 20;
 /// Exit status that proves no emulator was spawned. Any other status is not that proof.
 pub const REFUSED: i32 = 75;
 /// The emulator log keeps at most this many bytes per launch.
@@ -315,6 +336,209 @@ impl Group {
     }
 }
 
+/// One leased iOS simulator in the lease's private device set. It is never a child of
+/// this process: `simctl` asks CoreSimulator to boot and shut it down, and the process
+/// table is the only evidence that it is gone.
+pub struct Simulator {
+    tool: Vec<String>,
+    set: String,
+    udid: String,
+    environment: Vec<(String, String)>,
+    cwd: PathBuf,
+    log: Option<File>,
+    tree: Tree,
+}
+
+/// What the simulator stop established. `absent` is false only when more members were
+/// alive at once than the tree could record; the visible tree is gone either way.
+struct TreeStop {
+    absent: bool,
+    forced: bool,
+    shutdown: Option<i32>,
+}
+
+impl Simulator {
+    /// Validated before anything is spawned. The device set is always the storage's own
+    /// `device-set` directory, so this process can never act on another device set.
+    fn parse(value: &Value, dir: &Path, environment: &[(String, String)]) -> Result<Self> {
+        let tool = value["tool"].as_array().ok_or("Missing simulator tool")?;
+        let tool = tool
+            .iter()
+            .map(|part| part.as_str().map(str::to_owned).ok_or("Invalid tool"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if tool.is_empty()
+            || tool.len() > 4
+            || !Path::new(&tool[0]).is_absolute()
+            || tool
+                .iter()
+                .any(|part| part.is_empty() || part.contains('\0') || part.len() > 4096)
+        {
+            return Err("Invalid simulator tool".into());
+        }
+        let set = value["deviceSet"].as_str().ok_or("Missing device set")?;
+        let expected = dir.join(DEVICE_SET);
+        if private_directory(set)? != expected {
+            return Err("The device set must be this assignment's own".into());
+        }
+        let udid = value["udid"].as_str().ok_or("Missing simulator identity")?;
+        uuid(&json!({ "id": udid.to_ascii_lowercase() }), "id")?;
+        let log = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(dir.join("simulator.log"))
+            .ok()
+            .filter(|file| file.metadata().is_ok_and(|meta| meta.is_file()));
+        Ok(Simulator {
+            tool,
+            set: set.to_owned(),
+            udid: udid.to_owned(),
+            environment: environment.to_vec(),
+            cwd: dir.to_owned(),
+            log,
+            tree: Tree::new(set),
+        })
+    }
+    /// Runs `simctl --set <set> <verb> <udid>` in its own process group and waits for it,
+    /// calling `check` while it waits. A stop reason or the time limit kills that group.
+    fn tool(
+        &self,
+        verb: &str,
+        limit: Duration,
+        mut check: impl FnMut() -> Option<&'static str>,
+    ) -> std::result::Result<i32, &'static str> {
+        let mut command = Command::new(&self.tool[0]);
+        command
+            .args(&self.tool[1..])
+            .args(["--set", &self.set, verb, &self.udid])
+            .env_clear()
+            .envs(self.environment.iter().map(|(k, v)| (k, v)))
+            .current_dir(&self.cwd)
+            .stdin(Stdio::null())
+            .process_group(0);
+        let outputs = self
+            .log
+            .as_ref()
+            .and_then(|log| Some((log.try_clone().ok()?, log.try_clone().ok()?)));
+        match outputs {
+            Some((out, error)) => command.stdout(out).stderr(error),
+            None => command.stdout(Stdio::null()).stderr(Stdio::null()),
+        };
+        let Ok(mut child) = command.spawn() else {
+            return Err("tool");
+        };
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Ok(status.code().unwrap_or(-1));
+            }
+            let reason = check().or_else(|| (Instant::now() >= deadline).then_some("tool"));
+            if let Some(reason) = reason {
+                // The leader is still our unreaped child, so its group ID cannot be reused.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                return Err(reason);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    /// Nothing may already name this device set before the first boot.
+    fn idle(&self) -> bool {
+        inventory().is_ok_and(|processes| self.tree.alive(&processes, None).is_empty())
+    }
+    /// Records the tree's current members. `None` means the inventory was unavailable;
+    /// `Err` means the record could not be saved, which ends the lease.
+    fn sample(
+        &mut self,
+        dir: &Path,
+        identity: &Value,
+        excluded: Option<i32>,
+    ) -> std::result::Result<Option<bool>, ()> {
+        let Ok(processes) = inventory() else {
+            return Ok(None);
+        };
+        let (present, changed) = self.tree.observe(&processes, excluded);
+        if changed {
+            let members: Vec<Value> = self
+                .tree
+                .seen
+                .iter()
+                .map(|(pid, started)| json!([pid, started]))
+                .collect();
+            let record = json!({"version": 1, "machineId": identity["machineId"], "leaseId": identity["leaseId"],
+                "bootId": identity["bootId"], "members": members, "truncated": self.tree.truncated});
+            save(dir, TREE, &record).map_err(|_| ())?;
+        }
+        Ok(Some(present))
+    }
+    /// Infallible: it returns only after an inventory shows no member of this device set's
+    /// tree. `simctl shutdown` is the graceful path. Members that outlive it are killed after
+    /// re-reading their identity (PID and start time) in the same inventory; without a pidfd
+    /// that is the narrowest window available. Nothing outside the tree is ever signalled.
+    fn stop(&mut self, dir: &Path, identity: &Value) -> TreeStop {
+        // A last look while launchd_sim still parents its tree. The supervised child's
+        // group is already gone, so nothing is excluded from here on.
+        let _ = self.sample(dir, identity, None);
+        let shutdown = self.tool("shutdown", SHUTDOWN_LIMIT, || None).ok();
+        let since = Instant::now();
+        let mut forced = false;
+        loop {
+            if let Ok(processes) = inventory() {
+                let alive = self.tree.alive(&processes, None);
+                if alive.is_empty() {
+                    break;
+                }
+                if since.elapsed() >= TREE_GRACE {
+                    forced = true;
+                    for pid in alive {
+                        unsafe { libc::kill(pid, libc::SIGKILL) };
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        TreeStop {
+            absent: !self.tree.truncated,
+            forced,
+            shutdown,
+        }
+    }
+}
+
+/// Whether anything of a leased simulator's device set still runs, for a host whose
+/// supervisor is gone. `absent` is the only positive answer: no process names the device
+/// set, none descends from one that does, and no recorded member is still alive.
+pub fn simulator_status(path: &str, set: &str) -> Result<&'static str> {
+    let dir = PathBuf::from(path);
+    if !dir.is_absolute() || Path::new(set) != dir.join(DEVICE_SET) {
+        return Err("The device set must be this assignment's own".into());
+    }
+    let mut tree = Tree::new(set);
+    if let Some(record) = read_bounded(&dir, TREE)? {
+        if record["version"] != 1 {
+            return Err("Unsupported tree record".into());
+        }
+        if record["truncated"] != false {
+            return Ok("unknown");
+        }
+        for member in record["members"].as_array().ok_or("Invalid tree record")? {
+            let pid = member[0]
+                .as_i64()
+                .filter(|pid| *pid > 1 && *pid <= i32::MAX as i64)
+                .ok_or("Invalid tree member")?;
+            let started = member[1].as_str().ok_or("Invalid tree member")?;
+            tree.seen.insert(pid as i32, started.to_owned());
+        }
+    }
+    let processes = inventory()?;
+    Ok(if tree.alive(&processes, None).is_empty() {
+        "absent"
+    } else {
+        "present"
+    })
+}
+
 /// Everything validated before anything is spawned. Holding it holds the lifetime lock.
 pub struct Prepared {
     dir: PathBuf,
@@ -324,6 +548,7 @@ pub struct Prepared {
     command: Command,
     log: File,
     started: f64,
+    simulator: Option<Simulator>,
     _lock: File,
 }
 
@@ -348,7 +573,7 @@ pub fn prepare(path: &str, request: &Value, elapsed: fn() -> Result<f64>) -> Res
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    for name in [SUPERVISOR, FENCED, STOPPED] {
+    for name in [SUPERVISOR, FENCED, STOPPED, TREE] {
         if std::fs::symlink_metadata(dir.join(name)).is_ok() {
             return Err("A supervised launch already used this assignment".into());
         }
@@ -383,23 +608,34 @@ pub fn prepare(path: &str, request: &Value, elapsed: fn() -> Result<f64>) -> Res
         command.arg(arg);
     }
     command.env_clear();
+    let mut environment = Vec::with_capacity(env.len());
     for (key, value) in env {
         let value = value.as_str().ok_or("Invalid environment")?;
         if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
             return Err("Invalid environment".into());
         }
         command.env(key, value);
+        environment.push((key.to_owned(), value.to_owned()));
     }
     command
         .current_dir(cwd)
         .stdin(Stdio::null())
         .process_group(0);
+    let simulator = match request.get("simulator") {
+        Some(value) => Some(Simulator::parse(value, &dir, &environment)?),
+        None => None,
+    };
+    // The supervised child is the emulator, or a leased simulator's control companion.
     let log = OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(dir.join("emulator.log"))?;
+        .open(dir.join(if simulator.is_some() {
+            "companion.log"
+        } else {
+            "emulator.log"
+        }))?;
     if !log.metadata()?.is_file() {
         return Err("Emulator log must be regular".into());
     }
@@ -411,6 +647,7 @@ pub fn prepare(path: &str, request: &Value, elapsed: fn() -> Result<f64>) -> Res
         command,
         log,
         started,
+        simulator,
         _lock: lock,
     })
 }
@@ -448,13 +685,18 @@ pub fn run(prepared: Prepared, elapsed: fn() -> Result<f64>, announce: impl FnOn
         dir,
         identity,
         session,
-        mut current,
+        current,
         mut command,
         log,
         started,
+        mut simulator,
         _lock,
     } = prepared;
     if TERMINATE.load(Ordering::SeqCst) {
+        return REFUSED;
+    }
+    // A device set that already has processes was not left by this launch: refuse it.
+    if simulator.as_ref().is_some_and(|sim| !sim.idle()) {
         return REFUSED;
     }
     let Ok((reader, writer)) = io::pipe() else {
@@ -478,19 +720,41 @@ pub fn run(prepared: Prepared, elapsed: fn() -> Result<f64>, announce: impl FnOn
         child,
         pgid: pid as i32,
     };
-    let record = json!({
+    let mut record = json!({
         "version": 1, "machineId": identity["machineId"], "leaseId": identity["leaseId"],
         "bootId": identity["bootId"], "bootSessionID": session,
         "supervisorPid": std::process::id(), "childPid": pid, "startedAt": started,
     });
+    if let Some(sim) = &simulator {
+        record["simulator"] = json!({"deviceSet": sim.set, "udid": sim.udid});
+    }
+    let mut state = Watch {
+        dir: &dir,
+        identity: &identity,
+        session: &session,
+        current,
+        elapsed,
+    };
     let reason = match save(&dir, SUPERVISOR, &record) {
         Ok(()) => {
             announce(&json!({"supervisorPid": std::process::id(), "childPid": pid}));
-            watch(&dir, &identity, &session, &mut current, &group, elapsed)
+            // The simulator boots only after the record exists, so a host that lost this
+            // process always finds the device set it has to prove stopped.
+            let booted = match &simulator {
+                Some(sim) => match sim.tool("boot", BOOT_LIMIT, || state.check(&group)) {
+                    Ok(0) => None,
+                    Ok(_) | Err("tool") => Some("boot"),
+                    Err(reason) => Some(reason),
+                },
+                None => None,
+            };
+            booted.unwrap_or_else(|| watch(&mut state, &group, simulator.as_mut()))
         }
         Err(_) => "record",
     };
-    if reason != "exited" {
+    // An emulator that exited on its own needs no fence. A simulator is still shut down
+    // below, which takes time, so its fence is always published first.
+    if reason != "exited" || simulator.is_some() {
         // A failed sticky marker must never prevent stopping the group.
         let _ = save(
             &dir,
@@ -500,9 +764,17 @@ pub fn run(prepared: Prepared, elapsed: fn() -> Result<f64>, announce: impl FnOn
         );
     }
     let status = group.stop(Duration::from_secs(5));
-    let receipt = json!({"version": 1, "machineId": identity["machineId"], "leaseId": identity["leaseId"],
+    let mut receipt = json!({"version": 1, "machineId": identity["machineId"], "leaseId": identity["leaseId"],
         "bootId": identity["bootId"], "bootSessionID": session, "reason": reason,
         "supervisorPid": std::process::id(), "childPid": pid, "groupAbsent": true, "exitStatus": status});
+    if let Some(sim) = simulator.as_mut() {
+        // Never exits while a member of the device set's tree may survive.
+        let stopped = sim.stop(&dir, &identity);
+        receipt["simulator"] = json!({"deviceSet": sim.set, "udid": sim.udid});
+        receipt["treeAbsent"] = json!(stopped.absent);
+        receipt["treeForced"] = json!(stopped.forced);
+        receipt["shutdownStatus"] = json!(stopped.shutdown);
+    }
     // The lifetime lock is released only after the receipt, when `_lock` drops.
     if save(&dir, STOPPED, &receipt).is_ok() {
         0
@@ -554,38 +826,69 @@ pub fn supervise(path: &str, elapsed: fn() -> Result<f64>) -> i32 {
     })
 }
 
-fn watch(
-    dir: &Path,
-    identity: &Value,
-    session: &str,
-    current: &mut Authorization,
-    group: &Group,
+/// The authorization this process enforces, re-read on every supervision tick.
+struct Watch<'a> {
+    dir: &'a Path,
+    identity: &'a Value,
+    session: &'a str,
+    current: Authorization,
     elapsed: fn() -> Result<f64>,
-) -> &'static str {
-    loop {
-        std::thread::sleep(Duration::from_millis(100));
+}
+
+impl Watch<'_> {
+    /// One tick: the reason to stop now, if any.
+    fn check(&mut self, group: &Group) -> Option<&'static str> {
         match group.exited() {
-            Ok(true) => return "exited",
+            Ok(true) => return Some("exited"),
             Ok(false) => {}
-            Err(_) => return "process",
+            Err(_) => return Some("process"),
         }
         if TERMINATE.load(Ordering::SeqCst) {
-            return "signal";
+            return Some("signal");
         }
-        let Ok(now) = elapsed() else { return "clock" };
-        let next = match read_bounded(dir, AUTHORIZATION) {
-            Ok(Some(value)) => match authorization(&value, identity, session) {
-                Ok(next) => next,
-                Err(_) => return "authorization",
-            },
-            _ => return "authorization",
+        let Ok(now) = (self.elapsed)() else {
+            return Some("clock");
         };
-        *current = advance(current, &next, now);
-        if current.fenced {
-            return "fenced";
+        let next = match read_bounded(self.dir, AUTHORIZATION) {
+            Ok(Some(value)) => match authorization(&value, self.identity, self.session) {
+                Ok(next) => next,
+                Err(_) => return Some("authorization"),
+            },
+            _ => return Some("authorization"),
+        };
+        self.current = advance(&self.current, &next, now);
+        if self.current.fenced {
+            return Some("fenced");
         }
-        if now >= current.deadline {
-            return "expired";
+        if now >= self.current.deadline {
+            return Some("expired");
+        }
+        None
+    }
+}
+
+fn watch(state: &mut Watch, group: &Group, mut simulator: Option<&mut Simulator>) -> &'static str {
+    let (booted, mut ticks, mut seen) = (Instant::now(), 0u32, false);
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(reason) = state.check(group) {
+            return reason;
+        }
+        let Some(sim) = simulator.as_deref_mut() else {
+            continue;
+        };
+        // Sampling the tree needs a process inventory, so it runs less often than the
+        // deadline check. The deadline never waits for it.
+        ticks = ticks.wrapping_add(1);
+        if ticks % SAMPLE_TICKS != 1 {
+            continue;
+        }
+        match sim.sample(state.dir, state.identity, Some(group.pgid)) {
+            Ok(Some(true)) => seen = true,
+            // The simulator stopped by itself, or never appeared after its boot.
+            Ok(Some(false)) if seen || booted.elapsed() >= START_WINDOW => return "exited",
+            Ok(_) => {}
+            Err(()) => return "record",
         }
     }
 }
@@ -757,6 +1060,282 @@ mod tests {
         // Even with the lock free, a used assignment is never launched again.
         request(&dir, 5000.0, false);
         assert!(prepare(&path, &launch, clock).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // A stand-in `simctl`. `boot` leaves an orphaned root whose command line names the
+    // device set, with one child that names nothing: the shape of a booted simulator's
+    // `launchd_sim` and a runtime daemon. Neither is a child of the supervisor.
+    const UDID: &str = "5A0E2F31-5B7C-4D8E-9F01-23456789ABCD";
+    const GRACEFUL: &str = r#"pid=$(cat "$set/$udid.pid"); kill -TERM "$pid" 2>/dev/null; while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done"#;
+    fn simulated(name: &str, shutdown: &str) -> (PathBuf, Value) {
+        let dir = storage(name);
+        let set = dir.join(DEVICE_SET);
+        std::fs::create_dir_all(set.join(UDID).join("data")).unwrap();
+        std::fs::set_permissions(&set, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let tool = dir.join("simctl");
+        let script = format!(
+            r#"#!/bin/sh
+set="$2"; verb="$3"; udid="$4"
+case "$verb" in
+  boot)
+    /bin/sh -c 'trap "kill \$child; exit 0" TERM; sleep 300 & child=$!; echo $child > "$0.child"; wait' "$set/$udid/data/launchd_bootstrap.plist" >/dev/null 2>&1 &
+    echo $! > "$set/$udid.pid" ;;
+  shutdown) {shutdown} ;;
+  *) exit 2 ;;
+esac
+"#
+        );
+        std::fs::write(&tool, script).unwrap();
+        std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let mut launch = request(&dir, 5000.0, false);
+        launch["simulator"] = json!({"tool": [tool.to_str().unwrap()], "deviceSet": set.to_str().unwrap(), "udid": UDID});
+        (dir, launch)
+    }
+    fn number(path: PathBuf) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(value) = text.trim().parse() {
+                    return value;
+                }
+            }
+            assert!(Instant::now() < deadline, "missing {path:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    fn process_alive(pid: i32) -> bool {
+        inventory()
+            .unwrap()
+            .iter()
+            .any(|p| p.pid == pid && !p.zombie)
+    }
+    /// Boots under the real supervisor loop and returns the stand-in root and its child.
+    fn booted(
+        dir: &Path,
+        launch: &Value,
+        announced: std::sync::mpsc::Sender<i64>,
+    ) -> (std::thread::JoinHandle<i32>, i32, i32) {
+        let prepared = prepare(dir.to_str().unwrap(), launch, clock).unwrap();
+        let worker = std::thread::spawn(move || {
+            run(prepared, clock, |line| {
+                let _ = announced.send(line["childPid"].as_i64().unwrap());
+            })
+        });
+        let set = dir.join(DEVICE_SET);
+        let root = number(set.join(format!("{UDID}.pid")));
+        let child = number(
+            set.join(UDID)
+                .join("data")
+                .join("launchd_bootstrap.plist.child"),
+        );
+        // The first sample records both members while the root still parents its child.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !read_bounded(dir, TREE).is_ok_and(|tree| {
+            tree.is_some_and(|tree| tree["members"].as_array().is_some_and(|m| m.len() == 2))
+        }) {
+            assert!(Instant::now() < deadline, "the tree was never recorded");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        (worker, root, child)
+    }
+
+    #[test]
+    fn a_leased_simulator_is_booted_then_shut_down_and_its_tree_proven_gone() {
+        let (dir, launch) = simulated("simulator", GRACEFUL);
+        let path = dir.to_str().unwrap().to_owned();
+        let set = dir.join(DEVICE_SET).to_str().unwrap().to_owned();
+        assert_eq!(simulator_status(&path, &set).unwrap(), "absent");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (worker, root, child) = booted(&dir, &launch, sender);
+        let companion = receiver.recv().unwrap() as i32;
+        assert!(process_alive(root) && process_alive(child) && group_alive(companion));
+        let record = read_bounded(&dir, SUPERVISOR).unwrap().unwrap();
+        assert_eq!(record["simulator"]["udid"], UDID);
+        assert_eq!(record["childPid"], companion);
+        assert_eq!(simulator_status(&path, &set).unwrap(), "present");
+        assert_eq!(status(&path).unwrap(), "held");
+        // The fence: the companion's group and the simulator's tree both stop.
+        request(&dir, 5000.0, true);
+        assert_eq!(worker.join().unwrap(), 0);
+        let stopped = read_bounded(&dir, STOPPED).unwrap().unwrap();
+        assert_eq!(stopped["reason"], "fenced");
+        assert_eq!(stopped["groupAbsent"], true);
+        assert_eq!(stopped["treeAbsent"], true);
+        assert_eq!(stopped["treeForced"], false);
+        assert_eq!(stopped["shutdownStatus"], 0);
+        assert_eq!(stopped["simulator"]["deviceSet"], set.as_str());
+        assert!(!process_alive(root) && !process_alive(child) && !group_alive(companion));
+        assert_eq!(status(&path).unwrap(), "free");
+        assert_eq!(simulator_status(&path, &set).unwrap(), "absent");
+        // A used assignment is never booted again.
+        request(&dir, 5000.0, false);
+        assert!(prepare(&path, &launch, clock).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_tree_member_that_outlives_the_simulator_is_still_found_and_stopped() {
+        // The shutdown kills only the root: its child is reparented and names nothing.
+        let (dir, launch) = simulated("orphan", r#"kill -KILL "$(cat "$set/$udid.pid")""#);
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let (worker, root, child) = booted(&dir, &launch, sender);
+        request(&dir, 5000.0, true);
+        assert_eq!(worker.join().unwrap(), 0);
+        let stopped = read_bounded(&dir, STOPPED).unwrap().unwrap();
+        assert_eq!(stopped["treeAbsent"], true);
+        assert_eq!(stopped["treeForced"], true);
+        assert!(!process_alive(root) && !process_alive(child));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_shutdown_command_never_leaves_the_tree_running() {
+        let (dir, launch) = simulated("stuck", "exit 1");
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let (worker, root, child) = booted(&dir, &launch, sender);
+        request(&dir, 5000.0, true);
+        assert_eq!(worker.join().unwrap(), 0);
+        let stopped = read_bounded(&dir, STOPPED).unwrap().unwrap();
+        assert_eq!(stopped["shutdownStatus"], 1);
+        assert_eq!(stopped["treeForced"], true);
+        assert_eq!(stopped["treeAbsent"], true);
+        assert!(!process_alive(root) && !process_alive(child));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_simulator_that_stops_by_itself_ends_the_lease_with_a_receipt() {
+        let (dir, launch) = simulated("gone", GRACEFUL);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (worker, root, _child) = booted(&dir, &launch, sender);
+        let companion = receiver.recv().unwrap() as i32;
+        unsafe { libc::kill(root, libc::SIGTERM) };
+        assert_eq!(worker.join().unwrap(), 0);
+        let stopped = read_bounded(&dir, STOPPED).unwrap().unwrap();
+        assert_eq!(stopped["reason"], "exited");
+        assert_eq!(stopped["treeAbsent"], true);
+        // Access ends while the shutdown is still being proven.
+        assert_eq!(
+            read_bounded(&dir, FENCED).unwrap().unwrap()["reason"],
+            "exited"
+        );
+        assert!(!group_alive(companion));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_boot_still_ends_in_the_stop_and_its_receipt() {
+        let (dir, mut launch) = simulated("boot", GRACEFUL);
+        // `false` ignores its arguments and fails: nothing boots.
+        launch["simulator"]["tool"] = json!(["/usr/bin/false"]);
+        let path = dir.to_str().unwrap().to_owned();
+        let prepared = prepare(&path, &launch, clock).unwrap();
+        let mut spawned = None;
+        assert_eq!(
+            run(prepared, clock, |line| spawned = line["childPid"].as_i64()),
+            0
+        );
+        let stopped = read_bounded(&dir, STOPPED).unwrap().unwrap();
+        assert_eq!(stopped["reason"], "boot");
+        assert_eq!(stopped["treeAbsent"], true);
+        assert!(!group_alive(
+            spawned.expect("the companion was spawned") as i32
+        ));
+        assert_eq!(status(&path).unwrap(), "free");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_foreign_or_occupied_device_set_is_refused_before_anything_spawns() {
+        let (dir, launch) = simulated("refuse", GRACEFUL);
+        let path = dir.to_str().unwrap().to_owned();
+        // Another directory, however private, is not this assignment's device set.
+        let other = dir.join("other-set");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::set_permissions(&other, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        for (key, value) in [
+            ("deviceSet", json!(other.to_str().unwrap())),
+            ("deviceSet", json!(std::env::temp_dir().to_str().unwrap())),
+            ("udid", json!("not-a-device")),
+            ("tool", json!(["simctl"])),
+            ("tool", json!([])),
+        ] {
+            let mut changed = launch.clone();
+            changed["simulator"][key] = value;
+            assert!(prepare(&path, &changed, clock).is_err(), "{key}");
+        }
+        // A device set that already has a process was not left by this launch.
+        let set = dir.join(DEVICE_SET);
+        // It waits on its own input, so it has no child and keeps its command line.
+        let mut occupant = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "read line; :",
+                set.join(UDID).join("data").to_str().unwrap(),
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while simulator_status(&path, set.to_str().unwrap()).unwrap() != "present" {
+            assert!(Instant::now() < deadline, "the occupant never appeared");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let prepared = prepare(&path, &launch, clock).unwrap();
+        assert_eq!(run(prepared, clock, |_| {}), REFUSED);
+        assert!(!dir.join(SUPERVISOR).exists() && !dir.join(STOPPED).exists());
+        assert_eq!(
+            simulator_status(&path, set.to_str().unwrap()).unwrap(),
+            "present"
+        );
+        occupant.kill().unwrap();
+        occupant.wait().unwrap();
+        assert_eq!(
+            simulator_status(&path, set.to_str().unwrap()).unwrap(),
+            "absent"
+        );
+        assert!(simulator_status(&path, other.to_str().unwrap()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_lost_supervisors_recorded_members_keep_the_tree_present_until_they_are_gone() {
+        let (dir, _launch) = simulated("lost", GRACEFUL);
+        let path = dir.to_str().unwrap().to_owned();
+        let set = dir.join(DEVICE_SET).to_str().unwrap().to_owned();
+        // A member that names nothing: only the record left by the supervisor finds it.
+        let mut member = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = member.id() as i32;
+        let started = inventory()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.pid == pid)
+            .unwrap()
+            .started;
+        let record = |members: Value, truncated: bool| {
+            save(
+                &dir,
+                TREE,
+                &json!({"version": 1, "members": members, "truncated": truncated}),
+            )
+            .unwrap()
+        };
+        record(json!([[pid, started]]), false);
+        assert_eq!(simulator_status(&path, &set).unwrap(), "present");
+        // The same PID with another start time is another process.
+        record(json!([[pid, "Thu Jan 1 00:00:00 1970"]]), false);
+        assert_eq!(simulator_status(&path, &set).unwrap(), "absent");
+        // A record that lost members can never prove absence.
+        record(json!([]), true);
+        assert_eq!(simulator_status(&path, &set).unwrap(), "unknown");
+        record(json!([[pid, started]]), false);
+        member.kill().unwrap();
+        member.wait().unwrap();
+        assert_eq!(simulator_status(&path, &set).unwrap(), "absent");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
