@@ -48,11 +48,15 @@ export interface LeaseSupervisorTransport {
   status(helper: string, storage: string): Promise<LeaseSupervisorStatus>;
   /** Every visible process command line, for proving that a launch left nothing running. */
   commandLines(): Promise<string[]>;
-  /** One read-only process inventory against a leased simulator's private device set. Only
-   * `absent` is proof: no process names the device set, descends from one that does, or was
-   * recorded as a member by the supervisor and is still alive. Never signals anything. */
-  simulatorTree(helper: string, storage: string, deviceSet: string): Promise<"absent" | "present" | "unknown">;
+  /** One bounded, read-only process inventory against a leased simulator's own device. `tree`
+   * is `absent` when no member of its tree is present (its own launchd_sim, an executable
+   * started from inside the device, a member the supervisor recorded, or a descendant of
+   * those), `present` when one is, and `unknown` when the record lost members. `observed`
+   * says whether the device's launchd_sim was ever seen: an absent tree that was never
+   * observed is no evidence that a booted simulator stopped. Never signals anything. */
+  simulatorTree(helper: string, storage: string, deviceSet: string, udid: string): Promise<SimulatorTree>;
 }
+export interface SimulatorTree { tree: "absent" | "present" | "unknown"; observed: boolean }
 export interface MobileTransport {
   run(argv: readonly string[], options: RunOptions): Promise<CommandResult>;
   spawn?(argv: readonly string[], options: RunOptions & { log: string }): Promise<NativeChild>;

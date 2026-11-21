@@ -194,14 +194,15 @@ export const nativeLeaseSupervisor: LeaseSupervisorTransport = {
       return { version: 1, bootSessionID: value.bootSessionID, continuous: value.continuous, supervisor: value.supervisor as "held" | "free" | "absent" };
     } catch { throw new ServiceError("Native lease supervisor status is unavailable.", 409, { outcome: "unknown" }); }
   },
-  async simulatorTree(helper, storage, deviceSet) {
+  async simulatorTree(helper, storage, deviceSet, udid) {
     if (!path.isAbsolute(helper) || !path.isAbsolute(storage) || !path.isAbsolute(deviceSet)) throw new ServiceError("Lease supervisor paths must be absolute.", 400);
-    const result = spawnSync(helper, ["lease-simulator-status", storage, deviceSet], { env: {}, shell: false, encoding: "utf8", timeout: 15000, maxBuffer: 1024, windowsHide: true });
+    // The helper bounds its own inventory at ten seconds; this is only the outer limit.
+    const result = spawnSync(helper, ["lease-simulator-status", storage, deviceSet, udid], { env: {}, shell: false, encoding: "utf8", timeout: 15000, maxBuffer: 1024, windowsHide: true });
     try {
       if (result.error || result.status !== 0) throw new Error();
       const value = object(JSON.parse(result.stdout));
-      if (value.version !== 1 || !["absent", "present", "unknown"].includes(String(value.tree))) throw new Error();
-      return value.tree as "absent" | "present" | "unknown";
+      if (value.version !== 1 || !["absent", "present", "unknown"].includes(String(value.tree)) || typeof value.observed !== "boolean") throw new Error();
+      return { tree: value.tree as "absent" | "present" | "unknown", observed: value.observed };
     } catch { throw new ServiceError("Leased simulator process inventory is unavailable.", 409, { outcome: "unknown" }); }
   },
   async commandLines() {

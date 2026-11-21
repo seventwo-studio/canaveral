@@ -715,10 +715,12 @@ mod unix {
             );
             return Ok(());
         }
-        if mode == "lease-simulator-status" && args.len() == 3 {
-            // Read-only: one process inventory against a leased simulator's device set.
-            let tree = crate::lease_supervisor::simulator_status(&args[1], &args[2])?;
-            println!("{}", json!({"version": 1, "tree": tree}));
+        if mode == "lease-simulator-status" && args.len() == 4 {
+            // Read-only: one bounded process inventory against a leased simulator's own device.
+            println!(
+                "{}",
+                crate::lease_supervisor::simulator_status(&args[1], &args[2], &args[3])?
+            );
             return Ok(());
         }
         let mut server = Server::default();

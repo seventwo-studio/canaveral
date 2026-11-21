@@ -9,6 +9,7 @@ import { startController } from "../../src/main.ts";
 import { HostRunner, hostOffer } from "../../src/host.ts";
 import type { HostConfig } from "../../src/host.ts";
 import { IosProvider, IOS_LEASE_ISOLATION } from "../../src/providers/ios.ts";
+import { leasedApps, parsePlist, redactHost, tail } from "../../src/providers/ios-apps.ts";
 import { mobileNativeHelper, nativeContainerFiles, nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
 import type { CommandResult, LeaseSupervisorTransport, MobileTransport, RecordValue, RunOptions } from "../../src/providers/mobile.ts";
 import { normalizeOperatorTemplate } from "../../src/control/templates.ts";
@@ -43,35 +44,61 @@ interface Paths { registry: string; companions: string; xcrun: string; companion
 function tools(root: string): Paths {
   const registry = join(root, "simulators"), companions = join(root, "companions");
   mkdirSync(registry); mkdirSync(companions);
-  // The stand-in launchd_sim names its device's bootstrap path, as the real one does, keeps one
-  // child that names nothing and records both. SIGTERM is a clean shutdown.
-  const launchd = join(root, "fake-launchd-sim.mjs");
-  writeFileSync(launchd, `import { spawn } from "node:child_process"; import { readFileSync, renameSync, writeFileSync } from "node:fs";
-const file = process.argv[3], child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  // The stand-in launchd_sim is named and argued like the real one: `launchd_sim <device
+  // directory>/data/var/run/launchd_bootstrap.plist`. It keeps one child that names nothing and
+  // records both. SIGTERM is a clean shutdown. `quiet_sim` is the same simulator with processes
+  // that do not name their device, for the case where that premise does not hold.
+  const launchd = join(root, "launchd_sim"), quiet = join(root, "quiet_sim"), late = join(root, "late-boot.cjs");
+  const standIn = (argument: number) => `const { spawn } = require("node:child_process"), { readFileSync, renameSync, writeFileSync } = require("node:fs");
+const file = process.argv[${argument}], child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
 // Published by rename: the stand-in simctl and the fixture read this record while it changes.
 writeFileSync(file + ".tmp", JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), pid: process.pid, child: child.pid, bootedAt: Date.now() + 300 }));
 renameSync(file + ".tmp", file);
 process.on("SIGTERM", () => { child.kill("SIGKILL"); process.exit(0); });
-setInterval(() => {}, 1000);\n`);
-  // The supervisor runs this as \`xcrun simctl --set <set> boot|shutdown <udid>\`. Only a device of
-  // exactly that set is touched. \`boot\` detaches the stand-in launchd_sim into its own session.
+setInterval(() => {}, 1000);\n`;
+  writeFileSync(launchd, standIn(3)); writeFileSync(quiet, standIn(2));
+  // CoreSimulator keeps booting after its client is gone. This plays that part: started detached
+  // by the stand-in `simctl boot`, it starts the simulator some seconds later, whatever became
+  // of the client. Its own arguments name neither launchd_sim nor the device directory.
+  writeFileSync(late, `const { spawn } = require("node:child_process"), { readFileSync } = require("node:fs");
+const file = process.argv[2], device = JSON.parse(readFileSync(file, "utf8"));
+setTimeout(() => spawn(process.execPath, [${JSON.stringify(launchd)}, device.set + "/" + device.udid + "/data/var/run/launchd_bootstrap.plist", file], { detached: true, stdio: "ignore" }).unref(), Number(process.argv[3]));\n`);
+  // The supervisor runs this as \`xcrun simctl --set <set> list|boot|shutdown ...\`. Only a device of
+  // exactly that set is listed or touched. Like CoreSimulator, it reports a device whose
+  // launchd_sim is gone as shut down, and it cannot shut down a device that is not booted.
   const simctl = join(root, "fake-simctl.mjs");
-  writeFileSync(simctl, `import { spawn } from "node:child_process"; import { existsSync, readFileSync } from "node:fs";
-const [tool, flag, set, verb, udid] = process.argv.slice(2), file = ${JSON.stringify(registry)} + "/" + udid + ".json";
-if (tool !== "simctl" || flag !== "--set" || !existsSync(file)) process.exit(64);
-const read = () => JSON.parse(readFileSync(file, "utf8")), gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };
+  writeFileSync(simctl, `import { spawn } from "node:child_process"; import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+const [tool, flag, set, verb, ...rest] = process.argv.slice(2), registry = ${JSON.stringify(registry)}, root = ${JSON.stringify(root)};
+if (tool !== "simctl" || flag !== "--set") process.exit(64);
+const gone = pid => { try { process.kill(pid, 0); return false; } catch { return true; } };
 const wait = async done => { for (let i = 0; i < 200 && !done(); i++) await new Promise(r => setTimeout(r, 25)); return done(); };
+if (verb === "list" && rest.join(" ") === "devices --json") {
+  const devices = {};
+  for (const name of readdirSync(registry).filter(name => name.endsWith(".json"))) {
+    const d = JSON.parse(readFileSync(registry + "/" + name, "utf8"));
+    if (d.set === set) (devices[d.runtime] ??= []).push({ udid: d.udid, name: d.name, state: typeof d.pid === "number" && !gone(d.pid) ? "Booted" : "Shutdown", isAvailable: true, deviceTypeIdentifier: d.deviceType });
+  }
+  process.stdout.write(JSON.stringify({ devices })); process.exit(0);
+}
+const udid = rest[0], file = registry + "/" + udid + ".json";
+if (!existsSync(file)) process.exit(64);
+const read = () => JSON.parse(readFileSync(file, "utf8"));
 if (read().set !== set) process.exit(65);
 if (verb === "boot") {
-  if (existsSync(${JSON.stringify(join(root, "boot-fails"))})) process.exit(1);
-  spawn(process.execPath, [${JSON.stringify(launchd)}, set + "/" + udid + "/data/var/run/launchd_bootstrap.plist", file], { detached: true, stdio: "ignore" }).unref();
+  if (existsSync(root + "/boot-fails")) process.exit(1);
+  if (existsSync(root + "/boot-slow")) {
+    spawn(process.execPath, [${JSON.stringify(late)}, file, "4000"], { detached: true, stdio: "ignore" }).unref();
+    writeFileSync(root + "/boot-requested", String(Date.now()));
+    await new Promise(r => setTimeout(r, 600000));
+  }
+  const program = existsSync(root + "/unnamed-tree") ? [${JSON.stringify(quiet)}, file] : [${JSON.stringify(launchd)}, set + "/" + udid + "/data/var/run/launchd_bootstrap.plist", file];
+  spawn(process.execPath, program, { detached: true, stdio: "ignore" }).unref();
   process.exit(await wait(() => typeof read().pid === "number") ? 0 : 1);
 }
 if (verb === "shutdown") {
-  if (existsSync(${JSON.stringify(join(root, "shutdown-fails"))})) process.exit(1);
   const pid = read().pid;
-  if (typeof pid === "number" && !gone(pid)) { process.kill(pid, "SIGTERM"); process.exit(await wait(() => gone(pid)) ? 0 : 1); }
-  process.exit(0);
+  if (existsSync(root + "/shutdown-fails") || typeof pid !== "number" || gone(pid)) process.exit(1);
+  process.kill(pid, "SIGTERM"); process.exit(await wait(() => gone(pid)) ? 0 : 1);
 }
 process.exit(64);\n`);
   const xcrun = join(root, "xcrun");
@@ -92,6 +119,40 @@ function simulators(registry: string): Simulator[] {
   return readdirSync(registry).filter(name => name.endsWith(".json")).map(name => JSON.parse(readFileSync(join(registry, name), "utf8")) as Simulator);
 }
 const booted = (s: Simulator): boolean => typeof s.pid === "number" && alive(s.pid);
+/** What `simctl listapps` prints: an old-style property list in which every app carries absolute
+ * host paths (the device set, the device identity, the runtime's location). */
+function listapps(device: Simulator): string {
+  const data = join(device.set, device.udid, "data"), runtime = "/Library/Developer/CoreSimulator/Volumes/iOS_27/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS%2027.0.simruntime/Contents/Resources/RuntimeRoot";
+  const user = device.apps.map(app => `    "${app}" =     {
+        ApplicationType = User;
+        Bundle = "file://${data}/Containers/Bundle/Application/5E0C/Trial.app/";
+        CFBundleDisplayName = "Trial \\"Beta\\"";
+        CFBundleExecutable = Trial;
+        CFBundleIdentifier = "${app}";
+        CFBundleName = Trial;
+        CFBundleVersion = 42;
+        DataContainer = "file://${data}/Containers/Data/Application/${app}/";
+        GroupContainers =         {
+            "group.${app}" = "file://${data}/Containers/Shared/AppGroup/7A1D/";
+        };
+        Path = "${data}/Containers/Bundle/Application/5E0C/Trial.app";
+        SBAppTags =         (
+        );
+    };`);
+  return `{\n${user.join("\n")}\n    "com.apple.Preferences" =     {
+        ApplicationType = System;
+        Bundle = "file://${runtime}/Applications/Preferences.app/";
+        CFBundleDisplayName = Settings;
+        CFBundleExecutable = Preferences;
+        CFBundleIdentifier = "com.apple.Preferences";
+        CFBundleName = Settings;
+        CFBundleVersion = "1.0";
+        Path = "${runtime}/Applications/Preferences.app";
+        SBAppTags =         (
+            hidden
+        );
+    };\n}`;
+}
 function save(registry: string, s: Simulator): void {
   const file = join(registry, s.udid + ".json");
   writeFileSync(file + ".tmp", JSON.stringify(s)); renameSync(file + ".tmp", file);
@@ -150,8 +211,9 @@ function transport(paths: Paths, calls: string[][], options: HarnessOptions): Mo
       if (verb === "delete") { if (booted(device)) return failed; rmSync(join(paths.registry, udid + ".json")); if (scoped) rmSync(join(set, udid), { recursive: true, force: true }); return ok(""); }
       if (!booted(device)) return failed;
       if (verb === "bootstatus") return Date.now() >= (device.bootedAt ?? Infinity) ? ok("Device already booted, nothing to do.") : failed;
-      if (verb === "listapps") return ok(`{\n${device.apps.map(app => `    "${app}" = { CFBundleIdentifier = "${app}"; };`).join("\n")}\n    "com.apple.Preferences" = { ApplicationType = System; };\n}`);
-      if (verb === "spawn") return ok(args[2] === "launchctl" ? "com.apple.SpringBoard = { state = running }" : "2026-11-21 10:00:00.000 Df fixture[1:1] launched");
+      if (verb === "listapps") return ok(listapps(device));
+      if (verb === "spawn") return ok(args[2] === "launchctl" ? "com.apple.SpringBoard = { state = running }"
+        : Array.from({ length: 1500 }, (_, i) => `2026-11-21 10:00:${String(i % 60).padStart(2, "0")}.000 Df Trial[4242:1a2b] line ${i} opened ${join(set, udid, "data", "Documents", "store.sqlite")} on device ${udid.toLowerCase()}`).join("\n"));
       if (verb === "io") { writeFileSync(args.at(-1)!, PNG); return ok(""); }
       if (verb === "install") { const bundle = readFileSync(join(args[2]!, "Info.plist"), "utf8"); save(paths.registry, { ...device, apps: [...device.apps, /<string>([^<]+)<\/string>/.exec(bundle)![1]!] }); return ok(""); }
       if (verb === "uninstall") { save(paths.registry, { ...device, apps: device.apps.filter(app => app !== args[2]) }); return ok(""); }
@@ -187,7 +249,7 @@ async function harness(t: TestContext, capacity = 1, options: HarnessOptions = {
   let runner: HostRunner | undefined, provider: IosProvider | undefined;
   const launch = async () => {
     // The lease gate judges macOS; a portable fixture injects the platform in code only.
-    runner = new HostRunner(config, { platform: "darwin", providerFactory: (settings, state) => (provider = new IosProvider({ ...settings, hostPlatform: "darwin", hostArch: arch, transport: transport(paths, calls, options) }, state)) });
+    runner = new HostRunner(config, { platform: "darwin", providerFactory: (settings, state) => (provider = new IosProvider({ ...settings, transport: transport(paths, calls, options) }, state, { platform: "darwin" })) });
     await runner.start();
   };
   await launch();
@@ -266,7 +328,7 @@ function watchReceipt(t: TestContext, file: string): () => any {
   return () => value;
 }
 async function cleaned(h: Harness, app: string, lease: string): Promise<void> {
-  await until(async () => (await h.api("GET", `/v1/leases/${lease}`, undefined, app)).body.cleanup?.state === "complete", "positive cleanup", 40000);
+  await until(async () => (await h.api("GET", `/v1/leases/${lease}`, undefined, app)).body.cleanup?.state === "complete", "positive cleanup", 90000);
 }
 /** No command ever reached the account's default device set, and its simulator is untouched. */
 function defaultSetUntouched(h: Harness): void {
@@ -425,9 +487,18 @@ test("two agents share a one-simulator host: allowlist, shared-host class, queue
   assert.equal(replay.created, false); assert.equal(replay.operation.state, "succeeded");
   await sleep(500); assert.equal(h.calls.filter(argv => argv[4] === "install").length, 1, "a replayed install never runs again");
   // App lifecycle, logs and app-container files, with no shell.
-  assert.match((await operate(h, a, "apps")).result.output, /test\.canaveral\.trial/);
-  for (const [action, args] of [["launch", { app: "test.canaveral.trial" }], ["open-url", { url: "trial://screen/2" }], ["terminate", { app: "test.canaveral.trial" }], ["logs", {}]] as const)
+  // The app inventory names apps; it carries none of the host paths the raw listing holds.
+  const inventory = (await operate(h, a, "apps")).result;
+  assert.deepEqual(inventory.apps, [{ bundleId: "com.apple.Preferences", name: "Settings", version: "1.0", type: "System" }, { bundleId: "test.canaveral.trial", name: 'Trial "Beta"', version: "42", type: "User" }]);
+  assert.equal(inventory.output, "com.apple.Preferences\ntest.canaveral.trial");
+  for (const [action, args] of [["launch", { app: "test.canaveral.trial" }], ["open-url", { url: "trial://screen/2" }], ["terminate", { app: "test.canaveral.trial" }]] as const)
     assert.equal((await operate(h, a, action, args)).state, "succeeded", action);
+  // Logs are bounded, and the host's layout and the device identity are replaced in them.
+  const logs = (await operate(h, a, "logs")).result;
+  assert.equal(logs.truncated, true); assert.equal(logs.output.split("\n").length, 1000);
+  assert.match(logs.output, /line 1499 opened <device>\/data\/Documents\/store\.sqlite on device <udid>$/);
+  for (const exposed of [inventory, logs]) for (const secret of [h.root, device.udid, device.udid.toLowerCase(), "file://", "/Library/Developer"])
+    assert.ok(!JSON.stringify(exposed).includes(secret), `a lease result exposes ${secret}`);
   assert.equal((await operate(h, a, "push", { path: "Documents.txt", app: "test.canaveral.trial", data: Buffer.from("lease data").toString("base64") })).state, "succeeded");
   assert.equal(Buffer.from((await operate(h, a, "pull", { path: "Documents.txt", app: "test.canaveral.trial" })).result.data, "base64").toString(), "lease data");
   assert.deepEqual((await operate(h, a, "list-files", { path: ".", app: "test.canaveral.trial" })).result.entries, [{ name: "Documents.txt", kind: "file" }]);
@@ -470,6 +541,8 @@ test("two agents share a one-simulator host: allowlist, shared-host class, queue
   await until(() => !booted(device) && !alive(device.child!) && !groupAlive(record.childPid), "supervised stop");
   await until(() => receipt() !== undefined, "stop receipt"); const stopped = receipt();
   assert.deepEqual([stopped.reason, stopped.groupAbsent, stopped.treeAbsent, stopped.treeForced, stopped.shutdownStatus], ["fenced", true, true, false, 0]);
+  // The receipt rests on positive evidence: CoreSimulator's own state, an observed tree, a settling period.
+  assert.deepEqual([stopped.deviceState, stopped.treeObserved, stopped.bootStatus], ["Shutdown", true, 0]); assert.ok(stopped.settledSeconds >= 5);
   assert.deepEqual(stopped.simulator, { deviceSet: set, udid: device.udid });
   // Cleanup deletes the simulator through CoreSimulator, then removes the storage and credentials.
   await cleaned(h, app, a.id);
@@ -500,7 +573,7 @@ test("two agents share a one-simulator host: allowlist, shared-host class, queue
   // Expiry stops the simulator and removes it on the same proof.
   await until(() => !booted(other) && !alive(other.child!) && !groupAlive(otherRecord.childPid), "expiry stops the simulator");
   await until(() => expiry() !== undefined, "expiry stop receipt");
-  assert.deepEqual([expiry().groupAbsent, expiry().treeAbsent, expiry().simulator.udid], [true, true, other.udid]);
+  assert.deepEqual([expiry().groupAbsent, expiry().treeAbsent, expiry().deviceState, expiry().simulator.udid], [true, true, "Shutdown", other.udid]);
   await cleaned(h, app, b.id);
   assert.equal(existsSync(h.storage(second.machineId)), false); assert.equal(h.simulator(second.machineId), undefined);
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
@@ -589,9 +662,9 @@ test("supervisor loss ends device access at once, fails the lease and holds the 
 test("an administrative release stops the simulator, and cleanup stays blocked while stop proof is unavailable, even after the supervisor's own receipt", { skip, timeout: 120000 }, async t => {
   // The host's own process inventory is unavailable for a while: the receipt alone removes nothing.
   let inventory: "ok" | "failing" | "unknown" = "ok";
-  const leases: LeaseSupervisorTransport = { ...nativeLeaseSupervisor, async simulatorTree(helperPath, storage, set) {
+  const leases: LeaseSupervisorTransport = { ...nativeLeaseSupervisor, async simulatorTree(helperPath, storage, set, udid) {
     if (inventory === "failing") throw new Error("process inventory unavailable");
-    return inventory === "unknown" ? "unknown" : nativeLeaseSupervisor.simulatorTree(helperPath, storage, set);
+    return inventory === "unknown" ? { tree: "unknown", observed: true } : nativeLeaseSupervisor.simulatorTree(helperPath, storage, set, udid);
   } };
   const h = await harness(t, 1, { leases }), app = await h.application();
   const a = await acquire(h, app, 120), device = h.simulator(a.machineId)!, storage = h.storage(a.machineId);
@@ -638,6 +711,140 @@ test("a simulator that cannot boot, and a device set that gains a foreign simula
   assert.ok(simulators(h.paths.registry).some(s => s.name === "intruder") && existsSync(h.storage(a.machineId)), "nothing was deleted");
   rmSync(join(h.paths.registry, simulators(h.paths.registry).find(s => s.name === "intruder")!.udid + ".json"));
   await cleaned(h, app, a.id);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+  defaultSetUntouched(h);
+});
+
+test("the provider itself refuses leased execution without the declaration, and its macOS check is not configurable", { timeout: 30000 }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "ios-provider-gate-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const image = normalizeOperatorTemplate({ id: "lease-iphone", revision: "1", os: "ios", arch, mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: DEVICE });
+  const machine: RecordValue = { id: randomUUID(), templateId: image.id, template: image, desired: "running", resources: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, lease: { id: randomUUID(), state: "ready" } };
+  const declared = { id: image.id, revision: "1", arch, runtime: "ios", isolation: IOS_LEASE_ISOLATION }, calls: string[] = [];
+  // Every native boundary is recorded: a refusal must come before any of them is used.
+  const leases = new Proxy({}, { get: (_target, name) => async () => { calls.push(`leases.${String(name)}`); throw new Error("no supervisor in this fixture"); } }) as LeaseSupervisorTransport;
+  const provider = (settings: RecordValue, platform: NodeJS.Platform = "darwin") => new IosProvider({ storage: join(root, randomUUID()), leaseSupervisor: "/opt/canaveral-mobile-native", idbCompanion: "/opt/idb_companion", ...settings,
+    transport: { run: async (argv: readonly string[]) => { calls.push(argv.join(" ")); return { stdout: "", exitCode: 1 }; }, leases } }, root, { platform });
+  const refused = (error: any) => error.status === 409 && error.code === "capability_unsupported" && /shared-host isolation class/.test(error.message);
+  const download = { size: 2048, read: async () => Buffer.alloc(0), verify: async () => true, close: async () => {} };
+  const entryPoints = (p: IosProvider): Promise<unknown>[] => [
+    p.ready(machine, image), p.control(machine, image, root, { id: randomUUID(), action: "screenshot", arguments: {} }), p.displayDensity(machine, image),
+    p.installArtifact(machine, image, root, download, "0".repeat(64)), p.streamUpload(machine, image, root, "a.txt", "a.b", { read: async () => Buffer.alloc(0) }, 0, () => true),
+    p.streamDownload(machine, image, root, "a.txt", "a.b"), p.reconcile(machine, image, root),
+    p.operate(machine, image, root, { id: randomUUID(), action: "tap", arguments: { x: 1, y: 1 }, expiresAt: Date.now() / 1000 + 60 }),
+  ];
+  // No selector, one without the declaration, another class, another revision, template or runtime.
+  for (const leaseImages of [undefined, [], [{ ...declared, isolation: undefined }], [{ id: image.id, revision: "1", arch, runtime: "ios" }], [{ ...declared, isolation: "isolated" }],
+    [{ ...declared, revision: "2" }], [{ ...declared, id: "other" }], [{ ...declared, runtime: "android" }]]) {
+    for (const attempt of entryPoints(provider({ leaseImages }))) await assert.rejects(attempt, refused);
+  }
+  // The declaration alone is not enough off macOS, and no configuration key changes the platform.
+  for (const settings of [{ leaseImages: [declared] }, { leaseImages: [declared], hostPlatform: "darwin" }, { leaseImages: [declared], platform: "darwin" }])
+    for (const attempt of entryPoints(provider(settings, "linux"))) await assert.rejects(attempt, refused);
+  await assert.rejects(provider({ leaseImages: [declared], hostPlatform: "darwin", templates: [image], hostArch: arch }, "linux").check(), /require native macOS/);
+  assert.deepEqual(calls, [], "every refusal came before any native command or supervisor call");
+  // With the declaration on macOS the gate opens: the same call now reaches the lease's own access check.
+  const open = provider({ leaseImages: [declared], hostPlatform: "linux" });
+  await assert.rejects(open.ready(machine, image), (error: any) => error.status === 410 && /fenced/.test(error.message));
+  // Stopping needs only the supervisor helper, so withdrawing the declaration never strands a running lease.
+  assert.deepEqual(await provider({ leaseImages: [] }).reconcile({ ...machine, desired: "stopped" }, image, root), { state: "stopped", leaseFenced: true });
+  // An account-owned simulator is not subject to the lease gate at all.
+  provider({}).executionAllowed({ ...machine, lease: undefined });
+});
+
+test("a lease holder's app inventory and log text carry identifiers, never this host's paths or the device identity", () => {
+  const set = "/Users/operator/Canaveral/ios/4ebe5b05-d3af-5a60-9c08-a71e3f0c2b11/device-set", udid = "FCBCD7DC-7F60-420A-9E30-652BCA35386A";
+  const listing = listapps({ udid, name: "cvm-x", set, ...DEVICE, apps: ["test.canaveral.trial"] });
+  assert.ok(listing.includes(set) && listing.includes(udid), "the raw listing does carry host paths");
+  const apps = leasedApps(listing);
+  assert.deepEqual(apps, [{ bundleId: "com.apple.Preferences", name: "Settings", version: "1.0", type: "System" }, { bundleId: "test.canaveral.trial", name: 'Trial "Beta"', version: "42", type: "User" }]);
+  assert.ok(!JSON.stringify(apps).includes("/"));
+  // A listing that cannot be read fails the action; raw text is never passed through instead.
+  for (const malformed of ["", "{", "plain", "( a, b )", "{ a = ; }", '{ "a" = { CFBundleIdentifier = "a" } }', '{ "a" = "unterminated; }', "{ a = b; } trailing", "{".repeat(64)])
+    assert.throws(() => leasedApps(malformed), /could not be read/, malformed);
+  // A path where a name is expected is dropped, and an entry without a usable identifier is skipped.
+  assert.deepEqual(leasedApps('{ "a.b" = { CFBundleName = "/Users/operator/x"; CFBundleVersion = 7; }; "../evil" = { CFBundleIdentifier = "/etc/passwd"; }; }'), [{ bundleId: "a.b", version: "7" }]);
+  // The reader keeps no prototype on what it builds, so a key such as __proto__ is only data.
+  const parsed = parsePlist('/* c */ { a = ( x, "y\\"z", <0a1b> ); "k k" = { n = "\\U00e9\\101"; }; __proto__ = { polluted = yes; }; } // end');
+  assert.equal(JSON.stringify(parsed), '{"a":["x","y\\"z","<0a1b>"],"k k":{"n":"éA"},"__proto__":{"polluted":"yes"}}');
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+  // Redaction replaces the longest location first, also in its /private form, and the identity in any case.
+  const device = join(set, udid), locations = [[device, "<device>"], [set, "<device-set>"], ["/Users/operator/Canaveral/ios", "<storage>"], ["/Users/operator", "<home>"], ["/", "<root>"]] as const;
+  assert.equal(redactHost(`open ${device}/data/a.db, /private${set}/x, /Users/operator/Canaveral/ios/other, /Users/operator/Desktop, id ${udid.toLowerCase()} /etc`, locations, udid),
+    "open <device>/data/a.db, <device-set>/x, <storage>/other, <home>/Desktop, id <udid> /etc");
+  assert.equal(redactHost("nothing to hide", locations, ""), "nothing to hide");
+  assert.deepEqual(tail("a\nb\nc\nd", 2, 100), { output: "c\nd", truncated: true });
+  assert.deepEqual(tail("a\nb", 5, 100), { output: "a\nb", truncated: false });
+  assert.deepEqual(tail("aaaa\nbbbb\ncc", 5, 7), { output: "bbbb\ncc", truncated: true });
+  // Whole lines only, counted in bytes: a last line over the bound yields nothing.
+  assert.deepEqual(tail("aaaa\nbbbbbbbbbb", 5, 7), { output: "", truncated: true });
+  assert.deepEqual(tail("aaaa\néééé", 5, 7), { output: "", truncated: true });
+});
+
+test("a lease released while its simulator is still booting: the boot completes late, the supervisor shuts it down, and nothing is removed before", { skip, timeout: 180000 }, async t => {
+  const h = await harness(t), app = await h.application();
+  // The supervisor's `simctl boot` blocks, and CoreSimulator's stand-in starts the simulator four seconds later.
+  writeFileSync(join(h.root, "boot-slow"), "");
+  const lease = await acquire(h, app, 120, false);
+  await until(() => existsSync(join(h.root, "boot-requested")), "the boot request");
+  const machineId = (await h.api("GET", `/v1/leases/${lease.id}`, undefined, app)).body.members[0].machineId as string, storage = h.storage(machineId);
+  const receipt = watchReceipt(t, join(storage, "lease-stopped.json")), group = supervised(h, machineId);
+  // Release during the boot. The supervisor is fenced and kills its own simctl client, which stops nothing in CoreSimulator.
+  assert.equal((await h.api("POST", `/v1/leases/${lease.id}/release`, { id: randomUUID() }, app)).status, 200);
+  await until(() => existsSync(join(storage, "lease-fenced.json")), "the fence");
+  // The simulator appears afterwards. Until then the process table was empty and the device reported Shutdown.
+  await until(() => typeof h.simulator(machineId)?.pid === "number", "the late simulator", 20000);
+  const late = h.simulator(machineId)!;
+  assert.equal(receipt(), undefined, "no stop receipt was written while the boot could still complete");
+  assert.ok(alive(group.supervisorPid) && existsSync(storage), "the supervisor still held its lock and nothing was removed");
+  assert.ok(!h.calls.some(argv => argv.includes("delete")));
+  // The same supervisor shuts the late simulator down and only then proves the stop.
+  await until(() => receipt() !== undefined, "the stop receipt", 60000);
+  assert.deepEqual([receipt().reason, receipt().treeObserved, receipt().treeAbsent, receipt().deviceState, receipt().shutdownStatus, receipt().bootStatus], ["fenced", true, true, "Shutdown", 0, null]);
+  assert.ok(!alive(late.pid!) && !alive(late.child!));
+  await cleaned(h, app, lease.id);
+  assert.equal(existsSync(storage), false);
+  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+  defaultSetUntouched(h);
+});
+
+test("a simulator whose processes do not name their device is reported unproven, not stopped: cleanup stays blocked", { skip, timeout: 180000 }, async t => {
+  const h = await harness(t), app = await h.application();
+  // The stop proof rests on launchd_sim naming its device directory. Here it does not.
+  writeFileSync(join(h.root, "unnamed-tree"), "");
+  const a = await acquire(h, app, 120), device = h.simulator(a.machineId)!, storage = h.storage(a.machineId);
+  const receipt = watchReceipt(t, join(storage, "lease-stopped.json"));
+  assert.ok(booted(device), "CoreSimulator booted it and the lease was usable");
+  assert.equal((await client(h, a).release({ id: randomUUID() })).lease.state, "released");
+  await until(() => receipt() !== undefined, "the supervisor's receipt", 60000);
+  // The shutdown ran and CoreSimulator reports Shutdown, but no tree was ever observed to be gone.
+  assert.deepEqual([receipt().deviceState, receipt().shutdownStatus, receipt().treeObserved, receipt().treeAbsent], ["Shutdown", 0, false, false]);
+  assert.ok(!booted(device));
+  const blocked = async () => { const lease = (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body; return lease.cleanup.state === "blocked" && lease.members[0].cleanup.reason === "execution_pending"; };
+  await until(blocked, "blocked cleanup");
+  await sleep(8000);
+  assert.ok(await blocked(), "neither the receipt nor the runner's own checks turn an unobserved tree into proof");
+  assert.ok(existsSync(storage) && h.simulator(a.machineId) && !h.calls.some(argv => argv.includes("delete")), "nothing was removed");
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 8 });
+});
+
+test("runner loss: the native supervisor shuts the simulator down at its deadline with no runner; a restarted runner proves cleanup", { skip, timeout: 180000 }, async t => {
+  const h = await harness(t), app = await h.application();
+  const a = await acquire(h, app, 15), group = supervised(h, a.machineId), device = h.simulator(a.machineId)!, storage = h.storage(a.machineId);
+  const receipt = watchReceipt(t, join(storage, "lease-stopped.json"));
+  await h.stopRunner();
+  assert.ok(booted(device) && alive(group.supervisorPid) && groupAlive(group.childPid), "the simulator, its companion and its supervisor outlive the runner");
+  // Nothing renews the lease and no runner is left: the supervisor alone enforces the deadline.
+  await until(() => !booted(device) && !alive(device.child!) && !groupAlive(group.childPid), "the native deadline stop without a runner", 40000);
+  await until(() => receipt() !== undefined && !alive(group.supervisorPid), "the stop receipt", 40000);
+  assert.deepEqual([receipt().reason, receipt().treeAbsent, receipt().treeObserved, receipt().deviceState], ["expired", true, true, "Shutdown"]);
+  // While the runner is gone the controller keeps the reservation and nothing is removed.
+  await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease");
+  assert.deepEqual(await h.reserved(), { cpu: 2, memoryMiB: 2048, diskGiB: 8 });
+  assert.ok(existsSync(storage) && h.simulator(a.machineId));
+  await h.restartRunner();
+  await cleaned(h, app, a.id);
+  assert.equal(existsSync(storage), false);
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
   defaultSetUntouched(h);
 });

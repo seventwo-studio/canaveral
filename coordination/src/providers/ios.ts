@@ -1,6 +1,7 @@
 /** Xcode simulator lifecycle and idb control, always bound to one owned UDID. */
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -9,6 +10,7 @@ import { assignmentFingerprint, noLinks, present, StateLock } from "../runtime-p
 import type { LeaseAuthorization } from "../runtime-process.ts";
 import { MobileProvider, MAX_OUTPUT, SUPERVISOR_REFUSED, SupervisorLaunchError, atomicUpload, authorized, canonical, confined, containerParts, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, readJson, readRegular, saveJson, text, unsupported, uuid } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, LeaseSupervisorStatus, NativePipe, RecordValue, RunOptions, SupervisedChild } from "./mobile.ts";
+import { leasedApps, redactHost, tail } from "./ios-apps.ts";
 import { fenceLeaseAuthorization, publishLeaseAuthorization, requireLeaseAccess } from "./lease-supervision.ts";
 import { materializeIosApp } from "./ios-artifact.ts";
 import { openIosVideo } from "./ios-video.ts";
@@ -21,6 +23,20 @@ import type { IosVideoOptions } from "./ios-video.ts";
 export const IOS_LEASE_ISOLATION = "shared-host";
 /** macOS limits a Unix socket path to 104 bytes, terminator included. */
 const COMPANION_SOCKET_BYTES = 100;
+/** Without the supervisor's own receipt, the runner accepts a stop only after the device
+ * stayed shut down and its tree stayed absent this long, over at least this many checks. */
+const STOP_SETTLE_SECONDS = 5, STOP_SETTLE_SAMPLES = 3;
+/** An unproven stop is re-examined at most this often; each check lists the device set
+ * and takes a process inventory. */
+const STOP_RECHECK_MS = 1000;
+/** A lease's `logs` action returns at most this much of the simulator's last minute. */
+const LEASE_LOG_LINES = 1000, LEASE_LOG_BYTES = 524288;
+/** How far a leased simulator's stop is established. `held`: its supervisor is alive and
+ * owns the deadline. `proven`: positive evidence that the device is shut down and stays
+ * shut down. `ended`: the supervisor ended with its own receipt, but that receipt carries
+ * no proof or the runner has not confirmed it. `lost`: the supervisor is gone without a
+ * receipt and the runner's own evidence is incomplete. */
+type StopState = "held" | "proven" | "ended" | "lost";
 /** A leased simulator's private device set and the socket of its own control companion. */
 interface LeaseScope { set: string; companion: string }
 const inside = (child: string, parent: string): boolean => child.startsWith(parent + path.sep);
@@ -32,6 +48,13 @@ export class IosProvider extends MobileProvider {
    * device set and every idb call its own companion, so a leased command can never reach
    * the account's default device set or another lease's simulator. */
   private readonly scope = new AsyncLocalStorage<LeaseScope>();
+  /** The operating system this provider judges. A fixture injects it through the constructor;
+   * no configuration key or environment variable can change it. */
+  private readonly platform: NodeJS.Platform;
+  constructor(config: RecordValue, state: string, options: { platform?: NodeJS.Platform } = {}) {
+    super(config, state);
+    this.platform = options.platform ?? process.platform;
+  }
   async simctl(args: readonly string[], options: Partial<RunOptions> = {}): Promise<string> {
     const scope = this.scope.getStore();
     return this.runText([String(this.config.xcrun ?? "xcrun"), "simctl", ...(scope ? ["--set", scope.set] : []), ...args], options);
@@ -59,7 +82,7 @@ export class IosProvider extends MobileProvider {
     return result;
   }
   async check(): Promise<unknown> {
-    if ((this.config.hostPlatform ?? process.platform) !== "darwin") throw new ServiceError("iOS simulators require native macOS with Xcode.");
+    if (this.platform !== "darwin") throw new ServiceError("iOS simulators require native macOS with Xcode.");
     const images = this.checkTemplates("ios");
     if (!this.transport?.executableAvailable) unsupported("iOS executable preflight adapter is not configured.");
     for (const executable of [String(this.config.idb ?? "idb"), "idb_companion"]) if (!await this.transport.executableAvailable(executable)) throw new ServiceError("Install idb and idb_companion before offering iOS devices.");
@@ -77,7 +100,7 @@ export class IosProvider extends MobileProvider {
       // The installed helper must be one that inventories a simulator's process tree. An older
       // helper would start the companion without booting anything and could never prove a stop.
       let inventory: string;
-      try { inventory = await this.transport.leases!.simulatorTree(helper, probe, scope.set); } catch { inventory = "unavailable"; }
+      try { inventory = (await this.transport.leases!.simulatorTree(helper, probe, scope.set, "00000000-0000-0000-0000-000000000000")).tree; } catch { inventory = "unavailable"; }
       if (inventory !== "absent") throw new ServiceError("The configured lease supervisor cannot inventory a simulator's process tree; install the matching canaveral-mobile-native.");
     }
     return { ready: true, nativeAcceptance: false, resourceLimits: "scheduling-reservations-only", ...(leased ? { leaseIsolation: IOS_LEASE_ISOLATION } : {}) };
@@ -326,7 +349,20 @@ export class IosProvider extends MobileProvider {
     });
   }
   override async control(machine: RecordValue, image: RecordValue, folder: string, input: DeviceRequest): Promise<RecordValue> {
-    return this.within(machine, image, () => this.controlDevice(machine, image, folder, input));
+    return this.within(machine, image, async () => {
+      const result = await this.controlDevice(machine, image, folder, input), scope = this.scope.getStore();
+      // A lease holder reads device output without this host's layout or the device identity.
+      if (scope && typeof result.output === "string") result.output = this.redact(result.output, scope);
+      return result;
+    });
+  }
+  /** Replaces this host's own locations and the device identity in text a lease holder reads:
+   * the device, device set, lease storage, storage root, runner state and the account's home.
+   * It cannot remove what an app or the system itself wrote into a log line. */
+  private redact(value: string, scope: LeaseScope): string {
+    const storage = path.dirname(scope.set), udid = String(readJson(path.join(storage, "simulator.json"))?.udid ?? "");
+    return redactHost(value, [[path.join(scope.set, udid), "<device>"], [scope.set, "<device-set>"], [storage, "<lease>"],
+      [text(this.config.storage, "storage"), "<storage>"], [this.state, "<state>"], [os.homedir(), "<home>"]], udid);
   }
   private async controlDevice(machine: RecordValue, image: RecordValue, folder: string, input: DeviceRequest): Promise<RecordValue> {
     const request = operationRequest(input), args = request.arguments, action = request.action;
@@ -363,14 +399,24 @@ export class IosProvider extends MobileProvider {
     else if (action === "hierarchy") argv = ["ui", "describe-all", "--json"];
     else if (action === "rotate") argv = ["ui", "rotate", String(args.orientation)];
     else if (action === "permission") return { output: await this.simctl(["privacy", id, String(args.state), String(args.permission), String(args.app)]) };
-    else if (action === "apps") return { output: await this.simctl(["listapps", id]) };
+    else if (action === "apps") {
+      const listing = await this.simctl(["listapps", id]);
+      // The raw listing carries absolute host paths for every app; a lease gets identifiers only.
+      if (!this.scope.getStore()) return { output: listing };
+      const apps = leasedApps(listing);
+      return { output: apps.map(app => app.bundleId).join("\n"), apps };
+    }
     else if (action === "install") return { output: await this.simctl(["install", id, this.artifact(args.artifact)]) };
     else if (["launch", "terminate", "uninstall"].includes(action)) {
       if ((args.app as string).includes("/")) throw new ServiceError("iOS operations require an app bundle ID.", 400);
       return { output: await this.simctl([action, id, args.app as string]) };
     } else if (action === "open-url") return { output: await this.simctl(["openurl", id, args.url as string]) };
     else if (action === "location") return { output: await this.simctl(["location", id, "set", `${args.latitude},${args.longitude}`]) };
-    else if (action === "logs") return { output: await this.simctl(["spawn", id, "log", "show", "--last", "1m", "--style", "compact"]) };
+    else if (action === "logs") {
+      const log = await this.simctl(["spawn", id, "log", "show", "--last", "1m", "--style", "compact"]), scope = this.scope.getStore();
+      // Redacted before it is bounded, so the bound is on what the lease holder receives.
+      return scope ? tail(this.redact(log, scope), LEASE_LOG_LINES, LEASE_LOG_BYTES) : { output: log };
+    }
     else return unsupported("iOS supports app, file and UI actions; shell/accessibility require a supported shared adapter.");
     return { output: await this.idb(id, argv) };
   }
@@ -402,7 +448,9 @@ export class IosProvider extends MobileProvider {
   // default device set is ever read, changed or deleted for a lease. The native lease
   // supervisor boots the simulator, owns the lease's control companion and enforces the
   // published boot-bound deadline when this runner or the controller is lost. Supervisor
-  // liveness is the kernel-held lifetime lock on its storage, never a PID.
+  // liveness is the kernel-held lifetime lock on its storage, never a PID. A stop counts
+  // only on positive evidence: CoreSimulator reporting the device shut down, and none of
+  // its process tree present, both held across a settling period.
   //
   // Isolation class: shared-host. Nothing here fences simulated code from the Mac host.
   // Native acceptance is open: no leased simulator has been booted on real CoreSimulator.
@@ -433,7 +481,7 @@ export class IosProvider extends MobileProvider {
     if (machine.lease == null) return;
     this.leaseHelper();
     const template = object(machine.template), id = machine.templateId ?? template.id;
-    if ((this.config.hostPlatform ?? process.platform) !== "darwin" || !this.leaseSelectors().some(entry => entry.isolation === IOS_LEASE_ISOLATION && entry.id === id && entry.revision === template.revision && entry.arch === template.arch))
+    if (this.platform !== "darwin" || !this.leaseSelectors().some(entry => entry.isolation === IOS_LEASE_ISOLATION && entry.id === id && entry.revision === template.revision && entry.arch === template.arch))
       unsupported("This host has not declared the shared-host isolation class for leases of this iOS template; leased execution is refused.");
   }
   private leaseScope(storage: string): LeaseScope { return { set: path.join(storage, "device-set"), companion: path.join(storage, "idb.sock") }; }
@@ -489,40 +537,101 @@ export class IosProvider extends MobileProvider {
     if (device.state !== "Shutdown") throw new ServiceError("A new leased simulator must be shut down before its supervised boot.");
     return String(device.udid);
   }
-  /** Positive stop proof only. Either the supervisor's own receipt (its companion's process
-   * group and the device set's process tree were both gone), or, when the supervisor is gone
-   * without one, an absent companion group, or a launch that left no supervisor at all. Each
-   * is confirmed by a fresh inventory showing that nothing of the device set runs: even the
-   * supervisor's refusal status is not enough alone, because it also refuses a device set
-   * that already has processes. A held lifetime lock, an unreadable inventory or a tree
-   * record that lost members stays unknown. */
-  async leaseStopped(machine: RecordValue, storage: string): Promise<boolean> {
+  /** CoreSimulator's own state for the lease's simulator in its own device set: `Shutdown`,
+   * `Booted` and so on, `absent` when the set no longer lists it, or undefined when
+   * CoreSimulator did not answer. Only `Shutdown` and `absent` count as shut down. */
+  private async leasedState(scope: LeaseScope, udid: string): Promise<string | undefined> {
+    try {
+      const found = (await this.scope.run(scope, () => this.inventory())).filter(({ device }) => typeof device.udid === "string" && uuid(device.udid) === uuid(udid));
+      if (!found.length) return "absent";
+      return found.length === 1 && typeof found[0]!.device.state === "string" ? found[0]!.device.state : undefined;
+    } catch { return undefined; }
+  }
+  /** Counts consecutive positive checks on the host's continuous clock. Any negative check
+   * removes the record, so the settling period always starts again from the first one. */
+  private settled(storage: string, status: LeaseSupervisorStatus): boolean {
+    const file = path.join(storage, "lease-stop-observation.json"), previous = readJson(file);
+    if (!previous || previous.bootSessionID !== status.bootSessionID || typeof previous.since !== "number" || !Number.isSafeInteger(previous.samples) || status.continuous < previous.since) {
+      saveJson(file, { version: 1, bootSessionID: status.bootSessionID, since: status.continuous, samples: 1 });
+      return false;
+    }
+    const samples = Number(previous.samples) + 1;
+    saveJson(file, { ...previous, samples });
+    return status.continuous - previous.since >= STOP_SETTLE_SECONDS && samples >= STOP_SETTLE_SAMPLES;
+  }
+  /** Positive evidence that the leased simulator is shut down and stays shut down. Never
+   * absence of evidence: an unanswered question is a negative answer here.
+   *
+   * With the supervisor's receipt: that receipt must itself state the proof (companion group
+   * absent, tree absent, CoreSimulator reporting the device shut down across the supervisor's
+   * settling period), and a fresh check must agree: CoreSimulator still reports the device
+   * `Shutdown` or gone, and the process table still shows none of its tree.
+   *
+   * Without it (the supervisor was lost): the companion must be positively absent, the tree
+   * must have been observed while it ran unless no boot was ever issued, and the device must
+   * stay shut down with its tree absent across the runner's own settling period. */
+  private async stopEvidence(storage: string, launch: RecordValue, record: RecordValue | undefined, receipt: RecordValue | undefined, status: LeaseSupervisorStatus): Promise<boolean> {
+    const leases = this.transport!.leases!, helper = this.leaseHelper(), scope = this.leaseScope(storage), udid = String(launch.udid ?? "");
+    const observation = path.join(storage, "lease-stop-observation.json");
+    try {
+      const attested = !!receipt && receipt.groupAbsent === true && receipt.treeAbsent === true && ["Shutdown", "absent"].includes(String(receipt.deviceState));
+      if (!attested) {
+        // The companion is only observed, never signalled. A launch without a supervisor record
+        // may still have left a supervisor or a companion behind: both name this lease's storage.
+        const gone = record ? await this.transport?.processAbsent?.(record.childPid as number) === true && await leases.groupAbsent(record.childPid as number)
+          : !(await leases.commandLines()).some(line => line.includes(`lease-supervise ${storage}`) || line.includes(scope.companion));
+        if (!gone) { fs.rmSync(observation, { force: true }); return false; }
+      }
+      const tree = await leases.simulatorTree(helper, storage, scope.set, udid), state = await this.leasedState(scope, udid);
+      const quiet = tree.tree === "absent" && (state === "Shutdown" || state === "absent");
+      if (attested) return quiet;
+      // The device's launchd_sim seen once, by the supervisor or by this runner after it was
+      // lost, shows that this simulator's tree is visible in the process table. It is kept,
+      // so a simulator that booted late and was then shut down by hand can still be proven.
+      const seen = path.join(storage, "lease-tree-observed.json");
+      if (tree.observed && !fs.existsSync(seen)) saveJson(seen, { version: 1, bootId: launch.bootId });
+      // The boot is issued only after the supervisor record exists, so without one nothing booted.
+      if (!quiet || record && !fs.existsSync(seen)) { fs.rmSync(observation, { force: true }); return false; }
+      return this.settled(storage, status);
+    } catch { fs.rmSync(observation, { force: true }); return false; }
+  }
+  private readonly stopChecks = new Map<string, { at: number; state: "ended" | "lost" }>();
+  private async stopState(machine: RecordValue, storage: string): Promise<StopState> {
     const { machineId, leaseId } = this.leaseIdentity(machine), leases = this.transport?.leases;
     const launchPath = path.join(storage, "launch.json"), launch = readJson(launchPath), record = readJson(path.join(storage, "lease-supervisor.json"));
     if (!launch) {
       // Nothing was ever handed to a supervisor, and only a supervisor boots a leased simulator.
-      // Once a device set exists, an inventory still has to show that nothing runs from it.
-      const created = this.leaseScope(storage).set;
-      return !record && (!fs.existsSync(created) || !!leases && await leases.simulatorTree(this.leaseHelper(), storage, created) === "absent");
+      // Once a device set exists, CoreSimulator must still report everything in it shut down.
+      const scope = this.leaseScope(storage);
+      if (record) return "lost";
+      if (!fs.existsSync(scope.set)) return "proven";
+      try { return (await this.scope.run(scope, () => this.inventory())).every(({ device }) => device.state === "Shutdown") ? "proven" : "lost"; } catch { return "lost"; }
     }
     if (launch.supervised !== true || launch.machineId !== machineId || launch.leaseId !== leaseId) throw new ServiceError("Leased launch identity is contradictory; inspect it.", 409);
-    if (!leases) return false;
-    if (launch.stopProven === true) return true;
-    const helper = this.leaseHelper(), set = this.leaseScope(storage).set;
-    if ((await leases.status(helper, storage)).supervisor === "held") return false;
-    const receipt = readJson(path.join(storage, "lease-stopped.json"));
-    const stopped = !!receipt && receipt.machineId === machineId && receipt.leaseId === leaseId && receipt.bootId === launch.bootId && receipt.groupAbsent === true && receipt.treeAbsent === true;
+    if (!leases) return "lost";
+    if (launch.stopProven === true) return "proven";
+    const status = await leases.status(this.leaseHelper(), storage);
+    if (status.supervisor === "held") return "held";
+    const found = readJson(path.join(storage, "lease-stopped.json"));
+    const receipt = found && found.machineId === machineId && found.leaseId === leaseId && found.bootId === launch.bootId ? found : undefined;
     if (record) {
       const pid = record.childPid, supervisor = record.supervisorPid;
       if (record.machineId !== machineId || record.leaseId !== leaseId || record.bootId !== launch.bootId || !Number.isSafeInteger(pid) || !Number.isSafeInteger(supervisor) ||
-        launch.supervisorPid !== undefined && launch.supervisorPid !== supervisor || stopped && (receipt.childPid !== pid || receipt.supervisorPid !== supervisor)) throw new ServiceError("Lease supervisor record belongs to another launch.", 409);
-      // Gone without a receipt: the companion's group is only observed, never signalled.
-      if (!stopped && !(await this.transport?.processAbsent?.(pid as number) === true && await leases.groupAbsent(pid as number))) return false;
-    } else if (!stopped && (await leases.commandLines()).some(line => line.includes(`lease-supervise ${storage}`))) return false;
-    if (await leases.simulatorTree(helper, storage, set) !== "absent") return false;
+        launch.supervisorPid !== undefined && launch.supervisorPid !== supervisor || receipt && (receipt.childPid !== pid || receipt.supervisorPid !== supervisor)) throw new ServiceError("Lease supervisor record belongs to another launch.", 409);
+    }
+    const outcome = receipt ? "ended" : "lost", checked = this.stopChecks.get(machineId);
+    if (checked && checked.state === outcome && performance.now() - checked.at < STOP_RECHECK_MS) return outcome;
+    if (!await this.stopEvidence(storage, launch, record, receipt, status)) { this.stopChecks.set(machineId, { at: performance.now(), state: outcome }); return outcome; }
+    this.stopChecks.delete(machineId);
     // Single-use storage: nothing boots this simulator again, so the proof is recorded once.
     saveJson(launchPath, { ...launch, stopProven: true });
-    return true;
+    return "proven";
+  }
+  /** Positive stop proof only; see stopEvidence. A held lifetime lock, a receipt that states
+   * no proof, a device CoreSimulator does not report as shut down, an unreadable inventory,
+   * a tree that was never observed or a tree record that lost members all stay unproven. */
+  async leaseStopped(machine: RecordValue, storage: string): Promise<boolean> {
+    return await this.stopState(machine, storage) === "proven";
   }
   private async reconcileLeased(machine: RecordValue, image: RecordValue, storage: string, authorization: (() => LeaseAuthorization) | undefined): Promise<RecordValue> {
     const launchPath = path.join(storage, "launch.json"), launch = readJson(launchPath), stopping = machine.desired === "stopped";
@@ -554,11 +663,18 @@ export class IosProvider extends MobileProvider {
       saveJson(launchPath, { ...identity, pid: integer(child.pid, "companion pid", 2, 2 ** 31 - 1), supervisorPid: integer(child.supervisorPid, "supervisor pid", 2, 2 ** 31 - 1) });
       return { state: "starting", accessReady: false, detail: "Leased simulator is booting under its native deadline supervisor." };
     }
-    if (await this.leaseStopped(machine, storage)) {
+    const stop = await this.stopState(machine, storage);
+    if (stop === "proven") {
       this.supervisors.delete(uuid(machine.id));
       return stopping ? { state: "stopped", leaseFenced: true } : { state: "error", detail: "The leased simulator stopped; a lease is never relaunched." };
     }
-    if ((await this.supervisorStatus(storage)).supervisor !== "held") {
+    if (stop === "ended") {
+      // The supervisor ended with its receipt, which already fences access. The proof is not
+      // confirmed (or the receipt states none), so nothing is removed yet.
+      const detail = "The leased simulator's supervisor ended; its stop is not proven yet, so cleanup waits. A lease is never relaunched.";
+      return stopping ? { state: "stopping", leaseFenced: true, detail } : { state: "error", leaseFenced: true, detail };
+    }
+    if (stop === "lost") {
       // Gone without a stop receipt (killed, crashed or never recorded): nothing enforces the
       // deadline any more. Fence access now and fail the lease; cleanup waits for stop proof.
       this.fenceLease(storage);
