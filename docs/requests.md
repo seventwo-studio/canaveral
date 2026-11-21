@@ -2,7 +2,10 @@
 
 Applications opt into `/v1/requests` when capacity may be full. `lease` requests for
 Android templates queue leased emulators on supervised Android hosts; see
-[Android emulator leases](mobile-control.md#android-emulator-leases). Direct lease
+[Android emulator leases](mobile-control.md#android-emulator-leases). `lease` requests for
+iOS templates queue leased simulators the same way on macOS hosts that declare the
+`shared-host` isolation class; see
+[iOS simulator leases](mobile-control.md#ios-simulator-leases). Direct lease
 acquisition is unchanged: it still returns 503 `capacity_unavailable`, or 503
 `host_pressure` when the hosts that fit refuse placement under memory or disk pressure,
 which only a host whose operator opted in does. LeaseState

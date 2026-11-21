@@ -1,6 +1,7 @@
 import { GuestHelperAccess } from "./control/sessions.ts";
 import { appArtifactSource } from './app-artifact-source.ts';
 import { markNotStaged } from './providers/mobile.ts';
+import { IOS_LEASE_ISOLATION } from './providers/ios.ts';
 import { serveMobileVideo } from './mobile-video.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
@@ -72,6 +73,9 @@ export interface GuestAccess {
 }
 export interface HostDependencies {
   transport?: HostTransport; clock?: ExecutionClock;
+  /** The operating system the lease gate judges. Fixtures inject it in code; no configuration
+   * key or environment variable can change it. */
+  platform?: NodeJS.Platform;
   providerFactory?: (config: RecordValue, state: string) => NativeProvider | Promise<NativeProvider>;
   guest?: GuestAccess;
   inference?: HostTaskAdapter; images?: HostImageAdapter; sessions?: HostTaskAdapter;
@@ -189,26 +193,45 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-/** Only supervised Android emulators have independent native deadline enforcement and owned
- * cleanup. Every other runtime keeps refusing lease declarations, whatever the configuration. */
-export function leaseOffer(config: RecordValue): RecordValue {
+/** Only supervised Android emulators and, by explicit operator opt-in, supervised iOS simulators
+ * have independent native deadline enforcement and owned cleanup. Every other runtime keeps
+ * refusing lease declarations, whatever the configuration.
+ *
+ * iOS (owner decision, 21 November 2026): a simulator app is an ordinary process of the Mac
+ * host's user, so a leased simulator is not fenced from the host. A host therefore advertises
+ * an iOS lease image only when that selector itself declares `isolation: "shared-host"`, on
+ * macOS, with the native supervisor and the lease's control companion configured. There is no
+ * default for the declaration and nothing outside this configuration can supply it. */
+export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
   if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
-  const refuse = (): never => { throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400); };
+  const refuse = (detail = "before native fencing and owned cleanup acceptance"): never => { throw new ServiceError(`This runner cannot advertise lease execution ${detail}.`, 400); };
   if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
   const provider = String(config.provider);
-  let android: unknown;
-  try { android = provider === "android" ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config).android : undefined; } catch { refuse(); }
+  const runtime = (kind: "android" | "ios"): RecordValue | undefined => {
+    try { const settings = provider === kind ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config)[kind] : undefined; return settings === undefined ? undefined : object(settings); }
+    catch { return refuse(); }
+  };
   const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
-  if (!android || !absolute(config.leaseClockHelper) || !absolute(object(android).leaseSupervisor) || !["darwin", "linux"].includes(process.platform)) refuse();
+  if (!absolute(config.leaseClockHelper)) refuse();
   const leaseImages = (config.leaseImages as unknown[]).map(value => {
-    const entry = object(value);
-    if (Object.keys(entry).sort().join() !== "arch,id,revision,runtime" || entry.runtime !== "android") refuse();
-    return { id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch"), runtime: "android" };
+    const entry = object(value), fields = Object.keys(entry).sort().join();
+    const identity = () => ({ id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch") });
+    if (entry.runtime === "android") {
+      if (fields !== "arch,id,revision,runtime" || !absolute(runtime("android")?.leaseSupervisor) || !["darwin", "linux"].includes(platform)) refuse();
+      return { ...identity(), runtime: "android" };
+    }
+    if (entry.runtime === "ios") {
+      const ios = runtime("ios");
+      if (fields !== "arch,id,isolation,revision,runtime" || entry.isolation !== IOS_LEASE_ISOLATION) refuse("for an iOS simulator without the explicit shared-host isolation declaration on its lease image");
+      if (!ios || !absolute(ios.leaseSupervisor) || !absolute(ios.idbCompanion) || ios.xcrun !== undefined && !absolute(ios.xcrun) || platform !== "darwin") refuse("for iOS simulators without macOS, the native lease supervisor and an absolute idbCompanion");
+      return { ...identity(), runtime: "ios", isolation: IOS_LEASE_ISOLATION };
+    }
+    return refuse();
   });
   return { leaseProtocol: 1, leaseImages };
 }
-export function hostOffer(config: RecordValue): RecordValue {
-  const leases = leaseOffer(config);
+export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+  const leases = leaseOffer(config, platform);
   const provider = text(config.provider, "provider");
   if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
@@ -223,7 +246,7 @@ export function hostOffer(config: RecordValue): RecordValue {
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
-  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === "android")) throw new ServiceError("Lease images must name offered Android templates.", 400);
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === entry.runtime)) throw new ServiceError(`Lease images must name offered ${entry.runtime === "ios" ? "iOS" : "Android"} templates.`, 400);
   Object.assign(offer, leases);
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
@@ -347,14 +370,14 @@ export class HostRunner {
   private updateAssignments = new Map<string, RecordValue>();
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     // Validate trust before writing identity, even with an injected transport.
-    const transport = hostTransport(config);
-    leaseOffer(config);
+    const transport = hostTransport(config), platform = dependencies.platform ?? process.platform;
+    leaseOffer(config, platform);
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir); privateDirectory(this.state);
     this.library = new ImageLibrary(this.state);
     this.config.templates = [...recordsWithoutIds(config.templates), ...this.library.definitions()];
-    this.offer = hostOffer(this.config);
+    this.offer = hostOffer(this.config, platform);
     this.imageAdapter = dependencies.images ?? {
       execute: (task, context) => this.imageWork(task, context),
       importImage: (metadata, source, size, authorized) => this.importImage(metadata, source, size, authorized),
@@ -670,7 +693,7 @@ export class HostRunner {
     if (this.updateAdmissionBlocked && machine.desired !== "stopped") throw new ServiceError("Host update admission is fenced.", 409);
     const { runtime, image: originalImage, folder } = this.context(machine), id = identifier(machine.id);
     if (machine.leaseCleanup) {
-      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android"].includes(runtime.kind) && !!runtime.stopForCleanup;
+      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android", "ios"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
           this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
@@ -704,7 +727,7 @@ export class HostRunner {
         // Default portable clock never authorizes leased starts; preserve and stop
         // pre-existing assignments while their independent native fence runs.
         // The host enforces its own lease gate rather than trusting the controller: an assignment
-        // outside its advertised Android lease images is never started, and is stopped if running.
+        // outside its advertised Android or iOS lease images is never started, and is stopped if running.
         refused = machine.desired === "running" && !this.leaseEligible(machine);
         if (!this.guard.allowed(id) || refused) current = { ...machine, desired: "stopped", leaseFenced: true };
         if (current.desired === "running") {
@@ -780,13 +803,16 @@ export class HostRunner {
       return result;
     });
   }
-  /** Leased execution runs only on the Android runtime, for a template this host advertised in leaseImages. */
+  /** Leased execution runs only on the Android or iOS runtime, for a template this host advertised
+   * in leaseImages. An iOS entry counts only with its explicit shared-host isolation declaration. */
   leaseEligible(machine: RecordValue): boolean {
     if (this.offer.leaseProtocol !== 1 || !Array.isArray(this.offer.leaseImages)) return false;
     let context: { runtime: Runtime; image: RecordValue };
     try { context = this.context(machine); } catch { return false; }
     const { runtime, image } = context;
-    return runtime.kind === "android" && image.os === "android" && (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === "android" && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch);
+    if (!["android", "ios"].includes(runtime.kind) || image.os !== runtime.kind) return false;
+    return (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === runtime.kind && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch &&
+      (runtime.kind === "ios" ? entry.isolation === IOS_LEASE_ISOLATION : !("isolation" in entry)));
   }
   private machineAuthorized(id: string): boolean {
     const current = this.assignments.find(m => m.id === id);

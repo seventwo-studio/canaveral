@@ -4,10 +4,11 @@ import * as path from "node:path";
 import { createServer } from "node:net";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
-import { assignmentFingerprint, StateLock, noLinks, present } from "../runtime-process.ts";
+import { assignmentFingerprint, noLinks, present } from "../runtime-process.ts";
 import type { LeaseAuthorization } from "../runtime-process.ts";
 import { MobileProvider, SUPERVISOR_REFUSED, SupervisorLaunchError, authorized, canonical, copyUpload, markNotStaged, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, LeaseSupervisorStatus, NativeChild, NativePipe, RecordValue, RunOptions, SupervisedChild } from "./mobile.ts";
+import { fenceLeaseAuthorization, publishLeaseAuthorization, requireLeaseAccess } from "./lease-supervision.ts";
 import { openAndroidVideo } from './android-video.ts';
 import { androidOrphan, purgeOrphan, runtimeOperation, storageDevices, strayDevices } from "./mobile-runtimes.ts";
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./mobile-runtimes.ts";
@@ -257,12 +258,7 @@ export class AndroidProvider extends MobileProvider {
   private supervisorStatus(storage: string): Promise<LeaseSupervisorStatus> { return this.transport!.leases!.status(this.leaseHelper(), storage); }
   /** Device access needs a live supervisor and a current, unfenced authorization on this boot's clock. */
   private async leaseAccess(launch: RecordValue | undefined, storage: string): Promise<void> {
-    const fenced = (): never => { throw new ServiceError("Leased Android execution is fenced.", 410); };
-    if (launch?.supervised !== true || ["lease-fenced.json", "lease-stopped.json"].some(name => fs.existsSync(path.join(storage, name)))) fenced();
-    const status = await this.supervisorStatus(storage), allowed = readJson(path.join(storage, "lease-authorization.json"));
-    // A supervisor that is gone, however it ended, no longer enforces the deadline.
-    if (status.supervisor !== "held" || !allowed || allowed.fenced !== false || allowed.bootSessionID !== status.bootSessionID ||
-      typeof allowed.deadline !== "number" || !(status.continuous < allowed.deadline)) fenced();
+    return requireLeaseAccess(this.transport!.leases!, this.leaseHelper(), launch, storage, "Android");
   }
   /** Positive stop proof only: a matching stopped receipt, a launch proven never to have
    * spawned, or a gone supervisor with its emulator and process group positively absent.
@@ -293,31 +289,10 @@ export class AndroidProvider extends MobileProvider {
   }
   /** Publishes the host's current lease authorization as an absolute native deadline. */
   async publishLease(machine: RecordValue, storage: string, authorization: () => LeaseAuthorization, stopping: boolean): Promise<RecordValue> {
-    const helper = this.leaseHelper(), { machineId, leaseId } = this.leaseIdentity(machine);
-    const launch = readJson(path.join(storage, "launch.json"));
-    if (!launch || launch.supervised !== true || launch.machineId !== machineId || launch.leaseId !== leaseId) throw new ServiceError("Lease authorization needs its supervised launch identity.", 409);
-    const lock = new StateLock(path.join(storage, "lease-authorization.sqlite"));
-    try {
-      const started = performance.now(), allowed = authorization(), sample = await this.transport!.leases!.clock(helper), delay = (performance.now() - started) / 1000;
-      if (allowed.leaseID !== leaseId || !Number.isSafeInteger(allowed.revision) || allowed.revision < 1 || !Number.isFinite(allowed.remainingSeconds) || allowed.remainingSeconds < 0) throw new ServiceError("Lease authorization identity differs.", 409);
-      const value: RecordValue = { version: 1, machineId, leaseId, bootId: uuid(launch.bootId), bootSessionID: uuid(sample.bootSessionID), revision: allowed.revision,
-        deadline: Math.max(0, sample.continuous + allowed.remainingSeconds - delay - .25), fenced: stopping || allowed.fenced };
-      const file = path.join(storage, "lease-authorization.json"), previous = readJson(file);
-      if (previous) {
-        if (previous.machineId !== machineId || previous.leaseId !== leaseId || previous.bootId !== value.bootId || previous.bootSessionID !== value.bootSessionID || typeof previous.deadline !== "number" || typeof previous.fenced !== "boolean" || !Number.isSafeInteger(previous.revision)) throw new ServiceError("Lease authorization belongs to another launch or boot.", 409);
-        if (allowed.revision < Number(previous.revision)) throw new ServiceError("Lease authorization revision cannot move backwards.", 409);
-        value.fenced = value.fenced || previous.fenced;
-        if (allowed.revision === previous.revision) value.deadline = Math.min(Number(value.deadline), previous.deadline);
-      }
-      saveJson(file, value); return value;
-    } finally { lock.close(); }
+    return publishLeaseAuthorization(this.transport!.leases!, this.leaseHelper(), storage, this.leaseIdentity(machine), authorization, stopping);
   }
   /** Fences an existing authorization without needing the host's lease clock. */
-  private fenceLease(storage: string): void {
-    const lock = new StateLock(path.join(storage, "lease-authorization.sqlite"));
-    try { const file = path.join(storage, "lease-authorization.json"), previous = readJson(file); if (previous && previous.fenced !== true) saveJson(file, { ...previous, fenced: true }); }
-    finally { lock.close(); }
-  }
+  private fenceLease(storage: string): void { fenceLeaseAuthorization(storage); }
   private async reconcileLeased(machine: RecordValue, image: RecordValue, storage: string, authorization: (() => LeaseAuthorization) | undefined): Promise<RecordValue> {
     const launchPath = path.join(storage, "launch.json"), launch = readJson(launchPath), stopping = machine.desired === "stopped";
     if (!launch) {
