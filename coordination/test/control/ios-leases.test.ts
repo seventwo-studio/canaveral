@@ -214,6 +214,7 @@ function transport(paths: Paths, calls: string[][], options: HarnessOptions): Mo
       if (verb === "listapps") return ok(listapps(device));
       if (verb === "spawn") return ok(args[2] === "launchctl" ? "com.apple.SpringBoard = { state = running }"
         : Array.from({ length: 1500 }, (_, i) => `2026-11-21 10:00:${String(i % 60).padStart(2, "0")}.000 Df Trial[4242:1a2b] line ${i} opened ${join(set, udid, "data", "Documents", "store.sqlite")} on device ${udid.toLowerCase()}`).join("\n"));
+      if (verb === "location" && args[2] === "set" && args.length === 4) return ok("");
       if (verb === "io") { writeFileSync(args.at(-1)!, PNG); return ok(""); }
       if (verb === "install") { const bundle = readFileSync(join(args[2]!, "Info.plist"), "utf8"); save(paths.registry, { ...device, apps: [...device.apps, /<string>([^<]+)<\/string>/.exec(bundle)![1]!] }); return ok(""); }
       if (verb === "uninstall") { save(paths.registry, { ...device, apps: device.apps.filter(app => app !== args[2]) }); return ok(""); }
@@ -505,8 +506,12 @@ test("two agents share a one-simulator host: allowlist, shared-host class, queue
   assert.equal(readFileSync(join(set, device.udid, "data", "Containers", "Data", "Application", "test.canaveral.trial", "Documents.txt"), "utf8"), "lease data");
   assert.equal((await operate(h, a, "uninstall", { app: "test.canaveral.trial" })).state, "succeeded");
   assert.deepEqual(h.simulator(a.machineId)!.apps, []);
-  // iOS has no shell, the host-artifact install and device settings stay administrative, and recording stays refused.
-  for (const [action, args] of [["shell", { argv: ["id"] }], ["shell-open", { session: randomUUID() }], ["install", { artifact: "development" }], ["permission", { app: "a.b", permission: "photos", state: "grant" }], ["location", { latitude: 1, longitude: 2 }]] as const) {
+  // The input capability permits orientation and location on this leased device.
+  assert.equal((await operate(h, a, "rotate", { orientation: "LANDSCAPE_LEFT" })).state, "succeeded");
+  assert.equal((await operate(h, a, "location", { latitude: 1, longitude: 2 })).state, "succeeded");
+  assert.ok(h.calls.some(argv => argv.slice(2).join(" ") === `--set ${set} location ${device.udid} set 1,2`));
+  // Shell, host-artifact installation, permission changes and recording remain refused.
+  for (const [action, args] of [["shell", { argv: ["id"] }], ["shell-open", { session: randomUUID() }], ["install", { artifact: "development" }], ["permission", { app: "a.b", permission: "photos", state: "grant" }]] as const) {
     const refused = await refusedStatus(h, a.id, a.key, action, args);
     assert.deepEqual([refused.status, refused.body.code], [409, "capability_unsupported"], action);
   }
