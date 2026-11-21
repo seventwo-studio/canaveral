@@ -234,6 +234,42 @@ const browserItem = new RegExp(`^/api/v1/hosts/${UUID}/browsers/${UUID}$`);
 const videoAttachment = new RegExp(`^/api/v1/machines/(${UUID})/video-sessions/(${UUID})/(${UUID})$`);
 const SESSION_PROTOCOL = "canaveral-session-v1";
 
+/** Read routes whose filters travel in the query string. Every other route refuses a query outright.
+ *
+ * Each route names every parameter it accepts, how often it may repeat and the exact shape of its value. The
+ * gateway rebuilds the upstream query from the pairs that passed, so the browser's string is never forwarded
+ * verbatim and a parameter the controller gains later is not reachable until it is named here. No shape below
+ * can hold a credential: account, operator, application and lease secrets are 43 or more URL-safe characters,
+ * and none of these values is that long without the dashes, colons or dot a UUID, instant or kind requires.
+ * The controller refuses credential-named parameters as well. */
+const INSTANT = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/, IDENTITY = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const QUERY_ROUTES: Readonly<Record<string, Readonly<Record<string, readonly [shape: RegExp, repeats: number]>>>> = {
+  "/api/v1/admin/events": {
+    after: [/^(?:0|[1-9][0-9]{0,15})$/, 1], tail: [/^(?:0|[1-9][0-9]{0,2})$/, 1], limit: [/^[1-9][0-9]{0,2}$/, 1], since: [INSTANT, 1],
+    // One kind or family per parameter, as many as the controller accepts in one read.
+    kind: [/^[a-z]{1,24}\.(?:\*|[a-z_]{1,40})$/, 32],
+    application: [IDENTITY, 1], lease: [IDENTITY, 1], request: [IDENTITY, 1], host: [IDENTITY, 1], machine: [IDENTITY, 1],
+  },
+  "/api/v1/admin/usage": { from: [INSTANT, 1], to: [INSTANT, 1], groupBy: [/^(?:application|template|platform|host)$/, 1], format: [/^(?:json|csv)$/, 1], application: [IDENTITY, 1] },
+};
+/** Splits a request target into its route and the validated query to forward. A query on any other route, on a
+ * method other than GET, or with a parameter, repetition or value outside its route's list is refused. */
+function requestQuery(target: string, method: string): { route: string; query: URLSearchParams } {
+  const split = target.indexOf("?"), query = new URLSearchParams();
+  if (split === -1) return { route: target, query };
+  const route = target.slice(0, split), accepted = method === "GET" && Object.hasOwn(QUERY_ROUTES, route) ? QUERY_ROUTES[route] : undefined;
+  if (!accepted) throw new DashboardError("Use a dashboard path without a query.", 400);
+  if (target.length > 4096) throw new DashboardError("Query exceeds the endpoint's size limit.", 400);
+  const seen = new Map<string, number>();
+  for (const [name, value] of new URLSearchParams(target.slice(split + 1))) {
+    const rule = Object.hasOwn(accepted, name) ? accepted[name] : undefined, count = (seen.get(name) ?? 0) + 1;
+    seen.set(name, count);
+    if (!rule || count > rule[1] || !rule[0].test(value)) throw new DashboardError("Unsupported query parameter or value.", 400);
+    query.append(name, value);
+  }
+  return { route, query };
+}
+
 function attachmentName(path: string): string {
   return `attachment; filename*=UTF-8''${encodeURIComponent(posix.basename(path)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 }
@@ -245,6 +281,9 @@ function routeAllowed(method: string, route: string): boolean {
   if (browserCollection.test(route)) return method === "POST";
   if (browserItem.test(route)) return method === "GET" || method === "DELETE";
   if (method === "GET" && (route === "/api/v1/admin/model-jobs" || /^\/api\/v1\/admin\/(?:system|configuration)(?:\/pages\/(?:0|[1-9][0-9]{0,6}))?$/.test(route))) return true;
+  // Administrator observability reads for the Queue, Activity and Usage pages: four exact paths. The event stream,
+  // alert destinations and deliveries and the diagnosis stay API and CLI only.
+  if (method === "GET" && ["/api/v1/admin/queue", "/api/v1/admin/events", "/api/v1/admin/events/kinds", "/api/v1/admin/usage"].includes(route)) return true;
   if (method === "POST" && new RegExp(`^/api/v1/admin/(?:leases/${UUID}/release|sessions/${UUID}/close|applications/${UUID}/revoke|(?:requests|jobs)/${UUID}/cancel)$`).test(route)) return true;
   if (method === "GET" && (route === "/api/v1/consumers" || new RegExp(`^/api/v1/(?:runner-enrollments|resource-domains)/${UUID}$`).test(route))) return true;
   if (method === "POST" && (["runners/credential", "runners/revoke", "consumers", "runner-enrollments", "model-catalog", "resource-domains", "model-grants", "model-grants/revoke", "model-runner-approvals", "model-runner-approvals/revoke", "linux-lease-images", "linux-lease-grants", "linux-lease-grants/revoke", "linux-lease-runner-approvals", "linux-lease-runner-approvals/revoke"].some(path => route === `/api/v1/${path}`) || new RegExp(`^/api/v1/(?:consumers/${UUID}/(?:credential|revoke)|runner-enrollments/${UUID}/revoke|updates/artifacts/[a-f0-9]{64})$`).test(route))) return true;
@@ -316,6 +355,42 @@ export function createDashboardServer(config: DashboardConfig): Server {
       function fail(): void { reject(new DashboardError(mutating ? "Orchestrator response was not confirmed. Inspect the existing request before another mutation." : "Orchestrator response was not confirmed.", 503, { retryable: !mutating, ...(mutating ? { outcome: "unknown" } : {}) })); }
       request.setTimeout(20_000, () => { request.destroy(); fail(); });
       request.on("error", fail); request.end(data);
+    });
+  }
+
+  /** One read whose success body is text in a single named media type, relayed as bytes: the usage CSV. It has the
+   * same origin, deadline, size bound and redirect refusal as `upstream`. A refusal is the controller's JSON
+   * envelope and becomes the same error a JSON read would give. */
+  async function upstreamText(path: string, token: string, mediaType: string): Promise<Buffer> {
+    return await new Promise((resolve, reject) => {
+      const fail = () => reject(new DashboardError("Orchestrator response was not confirmed.", 503, { retryable: true }));
+      const request = (origin.protocol === "https:" ? httpsRequest : httpRequest)(new URL(path, origin), {
+        method: "GET", ...(ca === undefined ? {} : { ca }), headers: { Authorization: `Bearer ${token}` },
+      }, response => {
+        const chunks: Buffer[] = []; let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 8 * 1048576) { response.destroy(); reject(new DashboardError("Orchestrator response exceeds its control-message limit.", 502, { retryable: false })); }
+          else chunks.push(chunk);
+        });
+        response.on("error", fail);
+        response.on("end", () => {
+          const status = response.statusCode ?? 502, data = Buffer.concat(chunks);
+          if (status >= 400) {
+            let body: Record<string, unknown> = {};
+            try { body = decodeJson(data); } catch { /* A refusal without an envelope keeps the generic message. */ }
+            reject(new DashboardError(typeof body.error === "string" ? body.error : "Orchestrator request failed.", status, {
+              ...(typeof body.code === "string" ? { code: body.code } : {}), retryable: typeof body.retryable === "boolean" ? body.retryable : status === 503 }));
+            return;
+          }
+          if (status !== 200 || response.headers["content-type"]?.split(";", 1)[0]?.trim() !== mediaType) {
+            reject(new DashboardError("Orchestrator returned an unexpected response.", 502, { code: "response_invalid", retryable: false })); return;
+          }
+          resolve(data);
+        });
+      });
+      request.setTimeout(20_000, () => { request.destroy(); fail(); });
+      request.on("error", fail); request.end();
     });
   }
 
@@ -395,9 +470,11 @@ export function createDashboardServer(config: DashboardConfig): Server {
         await gateway.serve(request, response);
         return;
       }
-      const route = request.url ?? "";
+      const target = request.url ?? "";
+      if (!target.startsWith("/") || target.startsWith("//") || /[#\\]/.test(target)) throw new DashboardError("Use a dashboard path without a query.", 400);
+      // Only the listed read routes take a query; `route` never contains one and `query` holds validated pairs only.
+      const { route, query } = requestQuery(target, method);
       const handoff = gateway && method === "POST" && /^\/api\/v1\/previews\/([a-zA-Z0-9_-]{1,128})\/open$/.exec(route);
-      if (!route.startsWith("/") || route.startsWith("//") || /[?#\\]/.test(route)) throw new DashboardError("Use a dashboard path without a query.", 400);
       if (!upgrade && method === "GET") {
         const asset = assets.get(route);
         if (asset) { respond(config.reloadAssets ? readFileSync(join(assetDirectory, asset.name)) : asset.data, 200, asset.kind); return; }
@@ -686,7 +763,14 @@ export function createDashboardServer(config: DashboardConfig): Server {
         const result = await upstream(method, path, token, undefined, true);
         respond(result.body, result.status); return;
       }
-      const result = await upstream(method, path, token, value);
+      const forwarded = query.size ? `${path}?${query.toString()}` : path;
+      if (route === "/api/v1/admin/usage" && query.get("format") === "csv") {
+        // The same CSV the route and the CLI produce, as a download. The controller neutralises formula cells.
+        const data = await upstreamText(forwarded, token, "text/csv");
+        response.setHeader("Content-Disposition", "attachment; filename=\"canaveral-usage.csv\"");
+        respond(data, 200, "text/csv; charset=utf-8"); return;
+      }
+      const result = await upstream(method, forwarded, token, value);
       if (route === "/api/v1/connection-setups") result.body.controllerUrl = origin.origin;
       if (["/api/v1/auth/login", "/api/v1/auth/setup", "/api/v1/auth/claim"].includes(route)) {
         let sessionToken: string;

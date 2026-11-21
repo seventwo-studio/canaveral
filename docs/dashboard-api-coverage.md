@@ -96,22 +96,46 @@ building or testing these screens.
 ## Administrator observability routes
 
 These routes use the same administrator authority and authenticate before any
-lookup. They have no dashboard screen and the gateway does not forward them; use the
-API or the CLI. Reads never change controller state. Each recovery receipt above is
-also recorded as an `admin.intervention` event.
+lookup. Reads never change controller state. Each recovery receipt above is also
+recorded as an `admin.intervention` event. The **Gateway** column says whether the
+dashboard gateway forwards the route; the others are API and CLI only.
 
-| Method and path | Request | Effect |
-| --- | --- | --- |
-| `GET /v1/admin/events` | `after`, `tail`, `since`, `kind`, `limit`, subject filters | The durable [event log](events.md), oldest first |
-| `GET /v1/admin/events/kinds` | none | The event kind catalogue |
-| `GET /v1/admin/events/stream` | `after` or `Last-Event-ID`, `kind`, subject filters | Live follow as server-sent events |
-| `GET /v1/admin/usage` | `from`, `to`, `groupBy`, `format`, `application` | [Usage](usage.md) as JSON or CSV |
-| `GET /v1/admin/alerts/destinations` | none | [Alert](alerts.md) destinations without their URL path or secret |
-| `POST /v1/admin/alerts/destinations` | `{id, name, type, url, secret?, kinds?}` | Add a destination; idempotent by UUID |
-| `POST /v1/admin/alerts/destinations/{id}/remove` | `{}` | Remove it, erase its URL and secret, cancel unsent deliveries |
-| `POST /v1/admin/alerts/destinations/{id}/test` | `{id: requestUUID}` | One recorded test delivery, never retried |
-| `GET /v1/admin/alerts/deliveries` | `destination`, `state`, `limit` | Recent alert deliveries and their outcomes |
-| `GET /v1/admin/diagnosis` | none | Read-only findings for [`canaveral doctor`](doctor.md) |
+| Method and path | Request | Effect | Gateway |
+| --- | --- | --- | --- |
+| `GET /v1/admin/events` | `after`, `tail`, `since`, `kind`, `limit`, subject filters | The durable [event log](events.md), oldest first | Forwarded |
+| `GET /v1/admin/events/kinds` | none | The event kind catalogue | Forwarded |
+| `GET /v1/admin/events/stream` | `after` or `Last-Event-ID`, `kind`, subject filters | Live follow as server-sent events | No |
+| `GET /v1/admin/usage` | `from`, `to`, `groupBy`, `format`, `application` | [Usage](usage.md) as JSON or CSV | Forwarded |
+| `GET /v1/admin/alerts/destinations` | none | [Alert](alerts.md) destinations without their URL path or secret | No |
+| `POST /v1/admin/alerts/destinations` | `{id, name, type, url, secret?, kinds?}` | Add a destination; idempotent by UUID | No |
+| `POST /v1/admin/alerts/destinations/{id}/remove` | `{}` | Remove it, erase its URL and secret, cancel unsent deliveries | No |
+| `POST /v1/admin/alerts/destinations/{id}/test` | `{id: requestUUID}` | One recorded test delivery, never retried | No |
+| `GET /v1/admin/alerts/deliveries` | `destination`, `state`, `limit` | Recent alert deliveries and their outcomes | No |
+| `GET /v1/admin/diagnosis` | none | Read-only findings for [`canaveral doctor`](doctor.md) | No |
+
+### Queries through the gateway
+
+The gateway refuses a query string on every route except two reads:
+`GET /api/v1/admin/events` and `GET /api/v1/admin/usage`. For those it accepts only
+the parameters in the table above, each at most once (`kind` up to 32 times, one
+kind or family per parameter), and only values of the expected shape: a sequence
+number, a count of up to three digits, a UTC instant such as
+`2026-11-21T09:14:03.512Z`, a lowercase UUID, a kind such as `lease.*` or
+`host.offline`, and the listed `groupBy` and `format` words. Anything else
+returns 400 before the controller is asked. The gateway rebuilds the upstream query
+from the pairs that passed; it never forwards the browser's string. None of these
+shapes can hold a credential, and the controller also refuses credential-named
+parameters. A query on a mutation, including the administrator cancel, is refused.
+
+`GET /api/v1/admin/usage` with `format=csv` relays the controller's CSV as an
+attachment named `canaveral-usage.csv`, bounded like every control message (8 MiB).
+A refusal stays a JSON error.
+
+`GET /api/v1/admin/queue` and `GET /api/v1/admin/events/kinds` take no query. The
+gateway sends the caller's own session as the bearer credential, so the controller
+decides administrator authority on every read: an ordinary account receives 403,
+and a read after sign-out or revocation receives 401. Nothing is cached or stored
+by the gateway or in browser storage.
 
 These endpoints require existing administrator authority: an operator credential
 or an active account with administrator scope. They authenticate before resource

@@ -488,3 +488,100 @@ test("preview routes require a live account and explicit application configurati
     assert.ok(f.calls.every(c => c.path === "/v1/auth/session"));
   } finally { await f.close(); }
 });
+
+test("observability reads forward exactly their validated filters; every other query and route is refused", async t => {
+  const seen: { method: string; path: string; token: string; origin: string | undefined; cookie: string | undefined }[] = [];
+  const state = { csv: "text/csv; charset=utf-8", status: 200 };
+  const remote = createServer((request, response) => {
+    seen.push({ method: request.method!, path: request.url!, token: request.headers.authorization?.slice(7) ?? "", origin: request.headers.origin, cookie: request.headers.cookie });
+    if (request.headers.authorization !== `Bearer ${session}`) { response.writeHead(401, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "Credential rejected.", code: "unauthenticated" })); return; }
+    if (state.status !== 200) { response.writeHead(state.status, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "Credential scope does not permit this action.", code: "forbidden", retryable: false })); return; }
+    if (new URL(request.url!, "http://upstream.invalid").searchParams.get("format") === "csv") { response.writeHead(200, { "Content-Type": state.csv }); response.end("group,key\r\napplication,=SUM(A1)\r\n"); return; }
+    response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+  });
+  const upstream = await listen(remote);
+  const dashboard = await startDashboard({ orchestratorUrl: upstream, listen: { host: "127.0.0.1", port: 0 } });
+  t.after(async () => { await dashboard.close(); await close(remote); });
+  const url = `http://127.0.0.1:${dashboard.address.port}`, cookie = { Cookie: `canaveral_session=${session}` };
+  const get = (path: string, headers: Record<string, string> = cookie) => fetch(url, path, { headers });
+  const forwarded = () => { const last = seen.at(-1)!, target = new URL(last.path, "http://upstream.invalid"); return { path: target.pathname, query: [...target.searchParams] }; };
+
+  await t.test("the four read routes reach the controller with the session as a bearer credential", async () => {
+    for (const path of ["/api/v1/admin/queue", "/api/v1/admin/events", "/api/v1/admin/events/kinds", "/api/v1/admin/usage"]) {
+      seen.length = 0;
+      assert.equal((await get(path)).status, 200, path);
+      assert.deepEqual(seen.map(call => [call.method, call.path, call.token]), [["GET", path.slice(4), session]]);
+    }
+    assert.ok(seen.every(call => call.origin === undefined && call.cookie === undefined));
+  });
+  await t.test("event and usage filters are rebuilt from validated pairs", async () => {
+    const application = randomUUID(), lease = randomUUID();
+    assert.equal((await get(`/api/v1/admin/events?after=4812&limit=500&kind=lease.*&kind=host.offline&application=${application}&lease=${lease}&since=2026-11-21T09%3A14%3A03.512Z`)).status, 200);
+    assert.deepEqual(forwarded(), { path: "/v1/admin/events", query: [["after", "4812"], ["limit", "500"], ["kind", "lease.*"], ["kind", "host.offline"], ["application", application], ["lease", lease], ["since", "2026-11-21T09:14:03.512Z"]] });
+    assert.equal((await get(`/api/v1/admin/events?tail=100&host=${host}&machine=${machine}&request=${lease}`)).status, 200);
+    assert.deepEqual(forwarded().query, [["tail", "100"], ["host", host], ["machine", machine], ["request", lease]]);
+    assert.equal((await get(`/api/v1/admin/usage?from=2026-11-20T00%3A00%3A00Z&to=2026-11-21T00%3A00%3A00Z&groupBy=host&application=${application}`)).status, 200);
+    assert.deepEqual(forwarded(), { path: "/v1/admin/usage", query: [["from", "2026-11-20T00:00:00Z"], ["to", "2026-11-21T00:00:00Z"], ["groupBy", "host"], ["application", application]] });
+    const kinds = Array.from({ length: 32 }, (_, n) => `kind=lease.${"abcdefghijklmnopqrstuvwxyzabcdef"[n]}`).join("&");
+    assert.equal((await get("/api/v1/admin/events?" + kinds)).status, 200);
+    assert.equal(forwarded().query.length, 32);
+  });
+  await t.test("anything outside a route's list is refused before the controller is asked", async () => {
+    seen.length = 0;
+    const credential = randomBytes(32).toString("base64url"), id = randomUUID();
+    for (const path of [
+      // Unknown and credential-named parameters, and a credential in a known parameter.
+      "/api/v1/admin/events?token=" + credential, "/api/v1/admin/events?access_token=" + credential, "/api/v1/admin/events?credential=" + credential,
+      "/api/v1/admin/events?application=" + credential, "/api/v1/admin/events?lease=" + credential, "/api/v1/admin/usage?application=" + credential,
+      "/api/v1/admin/events?kind=" + credential, "/api/v1/admin/events?follow=1", "/api/v1/admin/usage?own=1",
+      // Repeats, malformed values and separators the controller would split.
+      "/api/v1/admin/events?after=1&after=2", "/api/v1/admin/events?after=-1", "/api/v1/admin/events?after=1e3", "/api/v1/admin/events?limit=0", "/api/v1/admin/events?tail=1000",
+      "/api/v1/admin/events?kind=lease.*,host.*", "/api/v1/admin/events?kind=lease", "/api/v1/admin/events?kind=Lease.Admitted", "/api/v1/admin/events?since=2026-11-21", "/api/v1/admin/events?since=yesterday",
+      "/api/v1/admin/events?application=" + id.toUpperCase(), "/api/v1/admin/events?application=" + id + "&application=" + id, "/api/v1/admin/events?" + Array.from({ length: 33 }, () => "kind=lease.*").join("&"),
+      "/api/v1/admin/usage?groupBy=owner", "/api/v1/admin/usage?format=xml", "/api/v1/admin/usage?from=2026-11-20", "/api/v1/admin/usage?from=2026-11-20T00%3A00%3A00%2B01%3A00", "/api/v1/admin/usage?groupBy=host&groupBy=application",
+      "/api/v1/admin/events?after=1&" + "x".repeat(4096),
+      // A query on a route that takes none, including the other new reads.
+      "/api/v1/admin/queue?application=" + id, "/api/v1/admin/events/kinds?kind=lease.*", "/api/v1/admin/system?page=1", "/api/v1/machines?owner=" + id, "/api/v1/hosts?x", "/?after=1",
+    ]) assert.equal((await get(path)).status, 400, path);
+    // A query never rides on a mutation, including the cancel these pages use.
+    assert.equal((await fetch(url, `/api/v1/admin/requests/${id}/cancel?applicationId=${id}`, { body: { id: randomUUID() }, headers: { ...cookie, Origin: url } })).status, 400);
+    assert.equal((await fetch(url, "/api/v1/admin/events?after=1", { body: {}, headers: { ...cookie, Origin: url } })).status, 400);
+    for (const path of [
+      // The stream, alerts, diagnosis and the application views are not forwarded.
+      "/api/v1/admin/events/stream", "/api/v1/admin/diagnosis", "/api/v1/admin/alerts/destinations", "/api/v1/admin/alerts/deliveries", "/api/v1/events", "/api/v1/events/stream", "/api/v1/usage",
+      "/api/v1/admin/events/", "/api/v1/admin/events/kinds/lease", "/api/v1/admin/usage/csv", "/api/v1/admin/queue/0", "/api/v1/admin/events%3Fafter=1", `/api/v1/requests/${id}`, "/api/v1/requests", `/api/v1/leases/${id}`,
+    ]) assert.equal((await get(path)).status, 404, path);
+    for (const path of ["/api/v1/admin/queue", "/api/v1/admin/events", "/api/v1/admin/events/kinds", "/api/v1/admin/usage"]) {
+      assert.equal((await fetch(url, path, { body: { id: randomUUID() }, headers: { ...cookie, Origin: url } })).status, 404, "POST " + path);
+    }
+    assert.deepEqual(seen, [], "no refused request reached the controller");
+  });
+  await t.test("the usage CSV is relayed as a download and only as CSV", async () => {
+    const csv = await get("/api/v1/admin/usage?groupBy=application&format=csv");
+    assert.equal(csv.status, 200);
+    assert.equal(csv.headers["content-type"], "text/csv; charset=utf-8");
+    assert.equal(csv.headers["content-disposition"], 'attachment; filename="canaveral-usage.csv"');
+    assert.equal(csv.headers["x-content-type-options"], "nosniff"); assert.equal(csv.headers["cache-control"], "no-store");
+    assert.equal(csv.data.toString(), "group,key\r\napplication,=SUM(A1)\r\n");
+    assert.deepEqual(forwarded(), { path: "/v1/admin/usage", query: [["groupBy", "application"], ["format", "csv"]] });
+    state.csv = "text/html";
+    assert.equal((await get("/api/v1/admin/usage?format=csv")).status, 502);
+    state.csv = "text/csv; charset=utf-8";
+  });
+  await t.test("a refusal by the controller is relayed without data, and no credential means no read", async () => {
+    state.status = 403;
+    for (const path of ["/api/v1/admin/queue", "/api/v1/admin/events?tail=10", "/api/v1/admin/events/kinds", "/api/v1/admin/usage", "/api/v1/admin/usage?format=csv"]) {
+      const reply = await get(path);
+      assert.equal(reply.status, 403, path);
+      assert.deepEqual(reply.json(), { error: "Credential scope does not permit this action.", code: "forbidden", retryable: false });
+    }
+    state.status = 200; seen.length = 0;
+    assert.equal((await get("/api/v1/admin/queue", {})).status, 401);
+    assert.deepEqual(seen, []);
+    const rejected = await get("/api/v1/admin/events?tail=10", { Cookie: `canaveral_session=${operator}` });
+    assert.equal(rejected.status, 401);
+    assert.match(String(rejected.headers["set-cookie"]), /Max-Age=0/);
+    // A bearer credential and a session cookie together are refused, as on every route.
+    assert.equal((await get("/api/v1/admin/usage", { ...cookie, Authorization: `Bearer ${session}` })).status, 400);
+  });
+});
