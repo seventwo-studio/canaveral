@@ -4,6 +4,8 @@ mod lease_supervisor;
 #[cfg(unix)]
 mod owned_process;
 #[cfg(unix)]
+mod simulator_tree;
+#[cfg(unix)]
 mod unix {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde_json::{json, Value};
@@ -710,6 +712,14 @@ mod unix {
             println!(
                 "{}",
                 json!({"version": 1, "bootSessionID": session, "continuous": elapsed()?, "supervisor": supervisor})
+            );
+            return Ok(());
+        }
+        if mode == "lease-simulator-status" && args.len() == 4 {
+            // Read-only: one bounded process inventory against a leased simulator's own device.
+            println!(
+                "{}",
+                crate::lease_supervisor::simulator_status(&args[1], &args[2], &args[3])?
             );
             return Ok(());
         }

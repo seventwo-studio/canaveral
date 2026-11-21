@@ -10,6 +10,8 @@ import {
   privateInput, privateOutput, promptPassword, record, removeSameFile, uuid,
 } from "./account-cli.ts";
 import type { AccountContext, CliArguments, RequestClient } from "./account-cli.ts";
+import { handleObservability, OBSERVABILITY_COMMANDS } from "./observability-cli.ts";
+import type { ObservabilityIO } from "./observability-cli.ts";
 
 const HELP = `Canaveral machine and inference orchestration
 Usage: canaveral [--url ORIGIN] [--token-file FILE] [--allow-http] COMMAND [options]
@@ -28,6 +30,16 @@ hosts | machines | templates | models | jobs | images | image-tasks
 machine ID | job ID | cancel-job ID | start ID | stop ID | drain ID | accept ID
 maintenance begin HOST [--id UUID] [--reason TEXT]
 maintenance status HOST | maintenance resume HOST DRAIN_ID [--request-id UUID]
+runtimes show HOST                       Mobile runtimes and system images with their users
+runtimes list HOST --platform android|ios [--request-id UUID]
+runtimes install HOST --platform P --identifier ID --request-id UUID
+         [--accept-android-licenses] [--timeout-seconds N]
+runtimes remove HOST --platform P --identifier ID --request-id UUID
+upkeep status HOST [--idle-stop-seconds N]  Dry run: idle stops and orphan removals, with reasons
+upkeep inspect HOST [--request-id UUID]  Ask the host to inspect its storage for orphans
+upkeep purge HOST --inspection UUID --entry NAME [--entry NAME] --request-id UUID
+host-operation ID [--resolve-file FILE]  Read a runtime or storage operation receipt, or record
+                                         an administrator's decision on one that ended unknown
 create NAME --template ID --request-id UUID [--cpu N --memory-mib N --disk-gib N]
 generate --model ID --prompt-file FILE --request-id UUID [--max-tokens N]
 device ID ACTION --request-id UUID [--arguments-file FILE]
@@ -37,7 +49,27 @@ operation ID [--output FILE | --resolve-file FILE] | template validate|prepare F
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
 tunnel LEASE reverse --device-port N [--target HOST:PORT]    Device port to this machine
 tunnel LEASE forward --device-port N [--listen [HOST:]PORT]  This machine to a device port
+requests [list|show ID|submit --request-file FILE|cancel ID]   Durable waiting requests (application key)
+lease hold --template ID [--revision R --arch A --ttl S --name N --priority N --wait S]
+           [--request-id UUID --source-file FILE --lease-key-file FILE --bind-pid PID | --detach]
+                                         Lease a device, print one JSON grant line, renew, release on exit
+lease ID device ACTION [--request-id UUID --arguments-file FILE] | lease ID device --request-file FILE
+lease ID operation OPERATION | lease ID install FILE.apk [--request-id UUID --install-id UUID]
+                                         Lease-key commands: --lease-key-file FILE [--wait S --output FILE]
+mcp                                      MCP server over stdio for coding agents (application key)
+instructions [--skill]                   Print the rules for coding agents
+setup [--agent claude|codex|all] [--project [--directory DIR]] [--force]
+                                         Write the agent skill files (user scope unless --project);
+                                         print the MCP registration
 image capture --request-file FILE | image-task ID
+events [--after SEQ | --tail N] [--kind KIND]... [--since TIME] [--limit N] [--follow] [--own] [--text]
+                                         Durable event log; --follow streams, --own reads as an application
+usage [--last 24h | --from TIME --to TIME] [--group-by application|template|platform|host]
+      [--format text|json|csv] [--own]   Requests, waits, leases and device-seconds over a range
+alerts list | deliveries | remove ID | test ID [--request-id UUID]
+alerts add --request-id UUID --name NAME --type slack|webhook --url-file FILE
+           [--secret-file FILE] [--kind KIND]...
+doctor [--json]                          Read-only diagnosis; exits 1 when it has findings
 updates [options] COMMAND                Manage signed runtime releases and rollouts
 install [options]                        Verify a fresh Unix installation; generate service config
 
@@ -51,6 +83,14 @@ the lease ends; --token-file is the lease key file written by "lease ID credenti
 Options: --member NAME (primary) --request-id UUID --idle-seconds N (10-3600, default 600)
 --ca-file FILE. Targets and listeners default to 127.0.0.1 and the device port. A tunnel
 needs a host that declares leaseTunnelProtocol and an application with tunnelsPerLease.
+events and usage filters: --application ID --lease ID --request ID --host ID --machine ID
+(events), --application ID (usage). KIND is an event kind or a family such as lease.*.
+Alert webhook URLs and signing secrets are read from private 0600 files, never arguments.
+lease hold releases on exit, SIGINT, SIGTERM, parent exit or exit of the --bind-pid
+process; --detach prints the grant and returns without holding. mcp, lease hold and
+the lease-key commands need HTTPS or a loopback IP URL, and accept --ca-file FILE.
+The lease key comes from --lease-key-file or CANAVERAL_LEASE_KEY_FILE. An operation
+reported as unknown may have happened and is never sent again; inspect before acting.
 Local Linux: --linux-image FILE --apple-runner FILE --guest-helper-manifest FILE
 (or CANAVERAL_GUEST_BUNDLE) requires an installed, runnable TypeScript guest bundle.
 Local macOS: --macos-image DIR --macos-restore-image FILE.ipsw --apple-runner FILE
@@ -58,6 +98,14 @@ uses an operator-prepared disk (disk.raw, auxiliary.bin, hardware-model.bin).
 Retained legacy identities require explicit offline consolidation; no state is adopted.
 Native host adapters and local desktop preparation require installed, explicitly
 configured runtimes. Missing support fails closed; local never downloads runtimes.
+Runtime installs and removals happen only through an explicit runtimes command; a
+lease or machine creation never downloads. An Android install must pass
+--accept-android-licenses. A change that ends unknown is never replayed: run
+runtimes list (or upkeep inspect) before another change, or record a decision with
+host-operation ID --resolve-file when the host can no longer be inspected. upkeep
+status changes nothing; orphan storage is removed only by upkeep purge of inspected
+entries. hosts shows each host's memory and disk pressure beside its health; pressure
+refuses placement only on a host whose own file opts in (pressure.gatePlacement).
 `;
 type Schema = { flags?: string[]; values?: string[]; required?: string[]; positional?: number; actions?: string[]; defaultAction?: string };
 const schemas: Record<string, Schema> = {
@@ -83,16 +131,28 @@ const schemas: Record<string, Schema> = {
   template: { actions: ["validate", "prepare"], positional: 1, values: ["cache"] },
   start: { positional: 1 }, stop: { positional: 1 }, drain: { positional: 1 }, accept: { positional: 1 },
   maintenance: { actions: ["begin", "status", "resume"] },
+  runtimes: { actions: ["show", "list", "install", "remove"] }, upkeep: { actions: ["status", "inspect", "purge"] }, "host-operation": { positional: 1, values: ["resolve-file"] },
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
+  requests: { actions: ["list", "show", "submit", "cancel"], defaultAction: "list" },
+  mcp: { values: ["ca-file"] }, instructions: { flags: ["skill"] }, setup: { flags: ["force", "project"], values: ["agent", "directory"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
   tunnel: { positional: 2, values: ["device-port", "target", "listen", "member", "request-id", "idle-seconds", "ca-file"], required: ["device-port"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
+  events: { flags: ["follow", "own", "text"], values: ["after", "tail", "kind", "since", "limit", "application", "lease", "request", "host", "machine"] },
+  usage: { flags: ["own"], values: ["from", "to", "last", "group-by", "format", "application"] },
+  alerts: { actions: ["list", "add", "remove", "test", "deliveries"], defaultAction: "list" },
+  doctor: { flags: ["json"] },
 };
 const subSchemas: Record<string, Schema> = {
   "maintenance:begin": { positional: 1, values: ["id", "reason"] },
   "maintenance:status": { positional: 1 },
   "maintenance:resume": { positional: 2, values: ["request-id"] },
+  "runtimes:show": { positional: 1 }, "runtimes:list": { positional: 1, values: ["platform", "request-id"], required: ["platform"] },
+  "runtimes:install": { positional: 1, flags: ["accept-android-licenses"], values: ["platform", "identifier", "timeout-seconds", "request-id"], required: ["platform", "identifier", "request-id"] },
+  "runtimes:remove": { positional: 1, values: ["platform", "identifier", "timeout-seconds", "request-id"], required: ["platform", "identifier", "request-id"] },
+  "upkeep:status": { positional: 1, values: ["idle-stop-seconds"] }, "upkeep:inspect": { positional: 1, values: ["request-id"] },
+  "upkeep:purge": { positional: 1, values: ["inspection", "entry", "request-id"], required: ["inspection", "entry", "request-id"] },
   "users:list": {}, "users:create": { values: ["username", "role", "request-id"], required: ["username", "request-id"] },
   "users:update": { positional: 1, values: ["role", "status"] },
   "users:invite": { positional: 1, values: ["dashboard-url", "output-file"], required: ["dashboard-url", "output-file"] },
@@ -101,8 +161,16 @@ const subSchemas: Record<string, Schema> = {
   "tokens:list": {}, "tokens:create": { values: ["name", "scope", "expires-in", "request-id", "output-file"], required: ["name", "scope", "request-id", "output-file"] },
   "tokens:revoke": { positional: 1 },
   "leases:acquire": { values: ["request-file"], required: ["request-file"] }, "leases:templates": {}, "leases:list": { values: ["after"] },
+  "requests:list": { values: ["after"] }, "requests:show": { positional: 1 }, "requests:cancel": { positional: 1 },
+  "requests:submit": { values: ["request-file"], required: ["request-file"] },
+  "lease:hold": { flags: ["detach"], values: ["template", "revision", "arch", "ttl", "name", "priority", "wait", "request-id", "source-file", "lease-key-file", "bind-pid", "ca-file"], required: ["template"] },
+  "lease:device": { positional: 2, values: ["lease-key-file", "request-id", "arguments-file", "request-file", "member", "wait", "output", "ca-file"] },
+  "lease:operation": { positional: 2, values: ["lease-key-file", "wait", "output", "ca-file"] },
+  "lease:install": { positional: 2, flags: ["keep-upload"], values: ["lease-key-file", "request-id", "install-id", "member", "wait", "ca-file"] },
   "apps:list": {}, "apps:create": { values: ["request-file", "output-file"], required: ["request-file", "output-file"] },
   "apps:credential": { positional: 1, values: ["output-file"], required: ["output-file"] }, "apps:revoke": { positional: 1 },
+  "alerts:list": {}, "alerts:deliveries": { values: ["destination", "state"] }, "alerts:remove": { positional: 1 }, "alerts:test": { positional: 1, values: ["request-id"] },
+  "alerts:add": { values: ["request-id", "name", "type", "url-file", "secret-file", "kind"], required: ["request-id", "name", "type", "url-file"] },
 };
 
 /** Strict, command-specific parsing. Global flags retain their original before-command position. */
@@ -126,18 +194,25 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
     else action = initial.defaultAction ?? "";
     if (!initial.actions.includes(action)) throw new CliError(`Supply a valid ${command} action: ${initial.actions.join(", ")}.`);
   }
+  if (command === "lease") {
+    // `lease hold` names no lease; the lease-key actions follow the lease UUID. Other lease actions keep their trailing position.
+    if (tail[0] === "hold") { action = "hold"; tail = tail.slice(1); }
+    else if (tail[0] && !tail[0].startsWith("-") && ["device", "operation", "install"].includes(tail[1] ?? "")) { action = tail[1]!; tail = [tail[0], ...tail.slice(2)]; }
+  }
   const schema = subSchemas[`${command}:${action}`] ?? initial;
   const options: NonNullable<ParseArgsConfig["options"]> = {};
   for (const name of schema.flags ?? []) options[name] = { type: "boolean" };
-  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" ? { multiple: true } : {}) };
+  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" || name === "entry" || name === "kind" ? { multiple: true } : {}) };
   const result = parseArgs({ args: tail, options, allowPositionals: true, strict: true });
-  if (command === "lease" && result.positionals.length === 2) {
+  if (command === "lease" && !action && result.positionals.length === 2) {
     action = result.positionals.pop()!;
     if (!["renew", "release", "credential"].includes(action)) throw new CliError("Lease action must be renew, release or credential.");
   }
-  if (result.positionals.length !== (schema.positional ?? 0)) throw new CliError(`Invalid arguments for ${command}${action ? " " + action : ""}.`);
+  // A saved request file already names the device action.
+  const expected = command === "lease" && action === "device" && result.values["request-file"] !== undefined ? 1 : schema.positional ?? 0;
+  if (result.positionals.length !== expected) throw new CliError(`Invalid arguments for ${command}${action ? " " + action : ""}.`);
   for (const key of schema.required ?? []) if (!result.values[key]) throw new CliError(`Supply --${key}.`);
-  for (const [key, choices] of Object.entries({ role: ["admin", "user"], status: ["active", "pending", "disabled"], arch: ["amd64", "arm64"] })) {
+  for (const [key, choices] of Object.entries({ role: ["admin", "user"], status: ["active", "pending", "disabled"], arch: ["amd64", "arm64"], platform: ["android", "ios"] })) {
     const value = result.values[key]; if (typeof value === "string" && !choices.includes(value)) throw new CliError(`Invalid --${key}.`);
   }
   if (Array.isArray(result.values.scope) && result.values.scope.some(scope => typeof scope !== "string" || !["machines:read", "machines:write", "machines:access", "admin"].includes(scope))) throw new CliError("Invalid --scope.");
@@ -236,6 +311,10 @@ export interface CliIO {
   output: typeof privateOutput;
   runtime: CliRuntime;
   signal?: AbortSignal;
+  /** Connection probe used by `doctor`; portable tests replace it. */
+  probe?: ObservabilityIO["probe"];
+  /** Pauses of `events --follow`; portable tests shorten them. */
+  followTiming?: ObservabilityIO["followTiming"];
 }
 function signals(external?: AbortSignal): { signal: AbortSignal; dispose(): void } {
   if (external) return { signal: external, dispose() {} };
@@ -428,6 +507,29 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
       result = await client.request("POST", `${path}/${drain}/resume`, { requestId });
     }
   }
+  else if (args.command === "host-operation" && args.options["resolve-file"]) {
+    // {id, decision, reason}: the mutation UUID, "inspected" or "abandoned", and why.
+    const body = await jsonFile(option(args, "resolve-file")); body.id = uuid(String(body.id));
+    result = await client.request("POST", `/v1/host-operations/${uuid(positional(args))}/resolve`, body);
+  } else if (args.command === "host-operation") result = await client.request("GET", `/v1/host-operations/${uuid(positional(args))}`);
+  else if (args.command === "runtimes" || args.command === "upkeep") {
+    const host = `/v1/hosts/${uuid(positional(args))}`;
+    // A read may take a generated UUID; a change must name one the operator has saved.
+    const operation = (kind: string, values: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const id = args.options["request-id"] === undefined ? randomUUID() : uuid(option(args, "request-id"));
+      if (args.options["request-id"] === undefined) io.stderr(`Operation UUID ${id}\n`);
+      return client.request("POST", host + "/operations", { id, kind, arguments: values });
+    };
+    const timeout = (): Record<string, number> => args.options["timeout-seconds"] === undefined ? {} : { timeoutSeconds: numberOption(args, "timeout-seconds", undefined, 60, 14_400) };
+    if (args.command === "runtimes" && args.action === "show") result = await client.request("GET", host + "/runtimes");
+    else if (args.command === "upkeep" && args.action === "status") result = await client.request("GET", host + "/upkeep" + (args.options["idle-stop-seconds"] === undefined ? "" : "?idleStopSeconds=" + numberOption(args, "idle-stop-seconds", undefined, 300, 2_592_000)));
+    else if (args.command === "upkeep" && args.action === "inspect") result = await operation("storage-inspect", {});
+    else if (args.command === "upkeep") result = await operation("storage-purge", { inspection: uuid(option(args, "inspection")), entries: args.options.entry });
+    else if (args.action === "list") result = await operation("runtime-list", { platform: option(args, "platform") });
+    else result = await operation(args.action === "install" ? "runtime-install" : "runtime-remove", { platform: option(args, "platform"), identifier: option(args, "identifier"), ...timeout(),
+      // The acknowledgement is sent only when the operator typed it for this request.
+      ...(args.action === "install" && args.options["accept-android-licenses"] === true ? { acceptLicenses: true } : {}) });
+  }
   else if (args.command === "image") {
     const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id));
     result = await client.request("POST", "/v1/images/captures", body);
@@ -435,6 +537,13 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
     if (args.action === "templates") result = await client.request("GET", "/v1/environments/templates");
     else if (args.action === "acquire") { const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id)); result = await client.request("POST", "/v1/leases", body); }
     else result = await client.request("GET", "/v1/leases" + (args.options.after ? "?after=" + encodeURIComponent(option(args, "after")) : ""));
+  }
+  else if (args.command === "requests") {
+    if (args.action === "submit") { const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id)); result = await client.request("POST", "/v1/requests", body); }
+    else if (args.action === "show") result = await client.request("GET", `/v1/requests/${uuid(positional(args))}`);
+    // Withdraws waiting intent, or releases the lease of an admitted request. Safe to repeat.
+    else if (args.action === "cancel") result = await client.request("POST", `/v1/requests/${uuid(positional(args))}/cancel`, {});
+    else result = await client.request("GET", "/v1/requests" + (args.options.after ? "?after=" + uuid(option(args, "after")) : ""));
   }
   else if (args.command === "lease") {
     const route = `/v1/leases/${uuid(positional(args))}`;
@@ -518,6 +627,11 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       const value = await jsonFile(positional(args)); const result = await io.runtime.template(value);
       if (args.action === "prepare") { if (!value.source) throw new CliError("This template has no base image source to cache."); result.image = await io.runtime.prepareImage(record(value.source), option(args, "cache", "./state/images")); }
       io.stdout(JSON.stringify(result, null, 2) + "\n"); return 0;
+    }
+    if (OBSERVABILITY_COMMANDS.includes(args.command)) return await handleObservability(args, { stdout: io.stdout, stderr: io.stderr, client: io.client, ...(io.signal ? { signal: io.signal } : {}), ...(io.probe ? { probe: io.probe } : {}), ...(io.followTiming ? { followTiming: io.followTiming } : {}) });
+    if (["mcp", "instructions", "setup"].includes(args.command) || (args.command === "lease" && ["hold", "device", "operation", "install"].includes(args.action))) {
+      const { agentCommand } = await import("./agent-cli.ts");
+      return await agentCommand(args, io, { jsonFile, number: numberOption });
     }
     const account: AccountContext = { client: token => io.client(args.url, token, args.allowHttp), password: io.password, output: io.output, print: value => io.stdout(JSON.stringify(value, null, 2) + "\n") };
     if (!await handleAccount(args, account)) await handleRemote(args, io);

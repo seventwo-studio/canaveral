@@ -7,11 +7,17 @@ a paired WebSocket relay. Terminal cleanup coordination, the owned Apple cleanup
 worker and provider-independent unstarted-assignment cleanup have fixture coverage.
 Full provider deadline enforcement, paired environments and live consumer acceptance
 remain open. [Durable consumer operations](consumer-operations.md) have controller/runner
-fixture coverage. Ordinary runners do not advertise lease execution protocol 1. The only
-exception is a supervised Android emulator host with the native lease clock and lease
-supervisor ([Android emulator leases](mobile-control.md#android-emulator-leases)); every
+fixture coverage. Ordinary runners do not advertise lease execution protocol 1. There are
+two exceptions, both with the native lease clock and lease supervisor: a supervised Android
+emulator host ([Android emulator leases](mobile-control.md#android-emulator-leases)), and,
+since 21 November 2026, a macOS host whose iOS lease images each declare the `shared-host`
+isolation class ([iOS simulator leases](mobile-control.md#ios-simulator-leases)). Every
 other runtime still refuses the declaration. Fixture hosts explicitly opt into that
 protocol for lifecycle tests.
+
+Leases do not all isolate equally. An iOS simulator lease is not isolated from the Mac host
+that runs it and is for trusted code only. The catalogue entry, the lease and its member
+carry `isolation: "shared-host"` for it; a template without a declared class has no such field.
 
 ## Ownership and compatibility
 
@@ -39,7 +45,9 @@ rule. Operators retain recovery access through a separate boundary.
 ## Lifecycle
 
 `state` is consumer lifecycle, `runtimeState` is observed execution, and `cleanup`
-is reclamation. These must remain separate. A stale host produces unknown runtime
+is reclamation. These must remain separate. Each transition below is recorded in
+the [event log](events.md) by the transaction that makes it; an application can read
+its own with `GET /v1/events`. A stale host produces unknown runtime
 state without extending the lease or freeing reservations.
 
 | Current state | Trigger | Result |
@@ -124,13 +132,21 @@ Acquisition example (UUIDs are caller-generated):
 Return 201 for new admission, 200 for an identical retry. Example response shape:
 
 ```json
-{"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
+{"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","name":"checkout-flow","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
 ```
+
+`name` is the label the caller gave at acquisition, returned so people and agents
+can tell their leases apart in lists. It is for display only: it selects nothing,
+authorizes nothing and need not be unique. On the generic host path an omitted name
+defaults to `lease-<uuid>`; a Linux workspace lease acquired without one reports
+`null`. The label stays readable after the lease ends. Both the application key
+and the lease's own key see it, as they see the rest of the lease view.
 
 Capabilities describe the pinned template contract, not current readiness. Each
 member exposes its own capabilities and file scopes; pair readiness requires both
 members and pairing. Never infer a device shell from host process access. iOS
-initially exposes app-container files and discrete visuals/input, without shell.
+exposes app-container files, app lifecycle and logs (under `files`) and discrete
+visuals/input, without shell.
 Headless templates expose no display capability. PTY, command, hierarchy,
 screenshots, live display and input are distinct capabilities. Advertise formats,
 coordinate units, file roots, transfer limits and session concurrency limits.
@@ -253,7 +269,10 @@ acceptance. Other provider stop paths and access locks still need bounded
 cancellation/priority, and native running-VM expiry requires live acceptance.
 Automatic Apple cleanup now uses the owned deletion and credential-erasure path
 below. Android emulator leases use the native lease supervisor's group-exit proof
-before the same owned removal and erasure; other provider cleanup remains unimplemented. The
+before the same owned removal and erasure. iOS simulator leases use the same supervisor,
+whose proof is CoreSimulator reporting the lease's own simulator shut down together with the
+absence of that simulator's process tree, both held across a settling period; that proof has
+no native acceptance. Other provider cleanup remains unimplemented. The
 runner explicitly rejects configuration that attempts to advertise protocol 1
 for any other runtime until those gates are complete. It must not be enabled just to make admission pass.
 
@@ -261,7 +280,8 @@ Controller eligibility now also requires explicit image revision, architecture
 and runtime selectors; a host-wide protocol flag alone grants no execution.
 Withdrawal closes affected sessions without claiming cleanup or freeing their
 reservations. Ordinary runners also reject selector configuration until native
-acceptance is complete; supervised Android hosts accept only Android selectors. See the [eligibility contract](lease-eligibility.md).
+acceptance is complete; supervised Android hosts accept Android selectors, and macOS hosts
+accept iOS selectors only with their explicit `shared-host` declaration. See the [eligibility contract](lease-eligibility.md).
 
 ### Owned lease cleanup
 

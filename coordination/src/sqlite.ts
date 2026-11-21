@@ -8,6 +8,7 @@ export class SqliteStore {
   private active: DatabaseSync | undefined;
   private savepoint = 0;
   private readonly hooks = new Set<(db: DatabaseSync, now: number) => void>();
+  private readonly commitHooks = new Set<(db: DatabaseSync, now: number) => void>();
   constructor(path: string, readonly clock: () => number = () => Date.now() / 1000) {
     this.path = resolve(path);
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
@@ -21,6 +22,13 @@ export class SqliteStore {
   addTransactionHook(hook: (db: DatabaseSync, now: number) => void): () => void {
     this.hooks.add(hook);
     return () => { this.hooks.delete(hook); };
+  }
+
+  /** Commit hooks run once, after the outer operation and before COMMIT, with the clock at commit.
+   * They see everything the transaction wrote; a hook that throws rolls the whole transaction back. */
+  addCommitHook(hook: (db: DatabaseSync, now: number) => void): () => void {
+    this.commitHooks.add(hook);
+    return () => { this.commitHooks.delete(hook); };
   }
 
   transaction<T>(operation: (db: DatabaseSync) => T): T {
@@ -49,6 +57,7 @@ export class SqliteStore {
       for (const hook of this.hooks) hook(db, now);
       const result = operation(db);
       this.synchronous(result);
+      for (const hook of this.commitHooks) hook(db, this.clock());
       db.exec("COMMIT");
       began = false;
       return result;

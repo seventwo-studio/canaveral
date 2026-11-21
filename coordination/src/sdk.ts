@@ -362,23 +362,26 @@ export class LeaseClient {
   /** Port tunnels between this lease's device and the holder's machine: `open`, `create`,
    * `connect`, `inspect`, `list` and `close`. Off unless the host and the application allow them. */
   get tunnels(): LeaseTunnelClient { return this.#tunnels; }
-  /** MP4 recording of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `record`. */
+  /** MP4 recording of this lease's own Android emulator: `create`, `connect`, `inspect`, `close`
+   * and `record`. An iOS simulator lease refuses recording with `capability_unsupported`. */
   get video(): LeaseVideoClient { return this.#video; }
   async #artifactCall(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string): Promise<AppArtifactMetadata> {
     const { status, json } = await this.transport.call(method, path, body, [200, 201], method === 'POST', method === 'POST' ? id : undefined);
     try { const value = appArtifactMetadata(json); if (value.id !== id || value.leaseId !== this.id) throw new Error('identity'); return value; }
     catch { throw new ConsumerProtocolError('Invalid app upload receipt.', 'response_invalid', status, { requestId: id, ...(method === 'POST' ? { outcome: 'unknown' as const } : {}) }); }
   }
-  /** Uploads one APK for `member` in verified 512 KiB chunks, resuming confirmed chunks of the
-   * same caller UUID. It does not install; follow with `installApp`. Any app size up to 2 GiB. */
-  uploadApp(request: { id: string; member: string; file: string; format?: 'apk' }): Promise<AppArtifactMetadata> {
-    const id = identifier(request.id);
-    if (Object.keys(request).some(k => !['id','member','file','format'].includes(k)) || (request.format ?? 'apk') !== 'apk' || typeof request.file !== 'string') throw new ConsumerConfigurationError('Invalid lease app upload.');
+  /** Uploads one app build for `member` in verified 512 KiB chunks, resuming confirmed chunks of
+   * the same caller UUID. `format` is `apk` (the default) for an Android member, or `ios-app-tar`
+   * for an iOS member: an iOS Simulator `.app` as an uncompressed POSIX ustar archive. It does not
+   * install; follow with `installApp`. Any app size up to 2 GiB. */
+  uploadApp(request: { id: string; member: string; file: string; format?: 'apk' | 'ios-app-tar' }): Promise<AppArtifactMetadata> {
+    const id = identifier(request.id), format = request.format ?? 'apk';
+    if (Object.keys(request).some(k => !['id','member','file','format'].includes(k)) || !['apk', 'ios-app-tar'].includes(format) || typeof request.file !== 'string') throw new ConsumerConfigurationError('Invalid lease app upload.');
     return uploadAppArtifactFile({ request: async (method, path, body) => {
       const { json } = await this.transport.call(method as 'GET' | 'POST', path, body, [200, 201], method === 'POST', id);
       if (!record(json)) throw new ConsumerProtocolError('Invalid app upload receipt.', 'response_invalid', 200, { requestId: id, outcome: 'unknown' });
       return json;
-    } }, { lease: { leaseId: this.id, member: request.member }, id, format: 'apk', file: request.file });
+    } }, { lease: { leaseId: this.id, member: request.member }, id, format, file: request.file });
   }
   appArtifact(artifactId: string): Promise<AppArtifactMetadata> { const id = identifier(artifactId); return this.#artifactCall('GET', `/v1/leases/${this.id}/app-artifacts/${id}`, undefined, id); }
   /** Releases the upload's bytes and host scratch once every install attempt of it is clean. */
