@@ -5,11 +5,10 @@ A **warm pool** keeps devices of the leased kinds booted and checked, so a lease
 without waiting for a boot. A **baseline** is a saved, prepared device state that every
 device of one lease image starts from.
 
-Evidence is portable fixtures only: a real controller, `HostRunner`, lease supervisor and
-SDK, with stand-in emulator, adb, avdmanager and qemu-img processes. No real emulator has
-been kept warm, adopted, captured or booted from a copy. Native acceptance is open; see
-[limits and open native questions](#limits-and-open-native-questions). iOS simulators are
-not covered; see [follow-ups](#follow-ups).
+The [native trial](../coordination/native-acceptance/mobile-parity.md) verified immediate warm adoption on one Mac.
+The baseline-backed emulator booted, but the prepared setting was absent in the clone.
+See [limits and open native questions](#limits-and-open-native-questions) and
+[iOS follow-ups](#follow-ups).
 
 Every guarantee of an Android lease is unchanged. A device serves one lease and is then
 destroyed. Its deadline is enforced by the native supervisor, independently of the runner
@@ -416,14 +415,16 @@ processes. They cover:
 
 ## Limits and open native questions
 
-None of the following has been run on a real emulator:
+The first [native trial](../coordination/native-acceptance/mobile-parity.md#android-baseline-state) found the prepared
+setting absent in a clone that booted. Open checks include:
 
-- Whether a real emulator boots correctly from copied user data, with or without the
-  `qemu-img rebase`; which AVD files a given emulator version needs; and how file-based
-  encryption keys, the SIM and modem state and Google Play services behave on a copy.
+- Where the prepared state was lost, whether a copied AVD needs `qemu-img rebase`
+  on other emulator versions, and how encryption keys, modem state and Google Play
+  services behave on a copy.
 - Whether an idle emulator stays healthy, booted and isolated for its whole maximum age,
   and what it costs in CPU and memory while idle.
-- How long an adoption takes. The fixture shows only that no boot happens.
+- The range of adoption times under load. The native trial's immediate
+  adoptions took about 1.6–2.2 seconds from admission to ready.
 - Whether `source.properties` and `build.prop` identify every in-place system image
   change. A system image without them is treated as unchanged.
 - Sparse copies and copy-on-write clones of multi-gigabyte images on the host's real

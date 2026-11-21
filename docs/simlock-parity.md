@@ -66,10 +66,9 @@ runs. Public HTTPS egress through an
 allowlisting proxy was considered and left out, because it changes that guarantee
 and is a larger design.
 
-**Device-side work is fixture-only for now.** `AGENTS.md` requires operator
-authorization for native runs. Each device-side pull request lists native
-acceptance as open. Native trials follow later, one pull request at a time, after
-the code has been reviewed.
+**Native trials require operator authorization.** The implementation first
+shipped with portable fixture evidence. The authorized [mobile parity trial](../coordination/native-acceptance/mobile-parity.md)
+records the native checks against the merged revision and the paths still open.
 
 **Physical phones and proxy sign-in are out of scope.** Enrolling and leasing real
 iOS and Android hardware, and trusting a signed identity from a sign-in proxy for
@@ -105,11 +104,9 @@ correction. Each is recorded in the pull request that carries it.
 
 ## Acceptance still open
 
-Native trials require operator authorization. The device-side pull requests record the
-assumptions each trial must check, including CoreSimulator process ownership and
-stop proof, Android baseline restoration, adb tunnel mappings, native screen
-capture and runtime installation and removal. Leased screens remain visible to
-their lease holders. The dashboard screen wall covers account-owned devices.
+See the [mobile parity trial](../coordination/native-acceptance/mobile-parity.md) for native results and remaining
+checks. Leased screens remain visible to their lease holders. The dashboard
+screen wall covers account-owned devices.
 
 ## Known differences that are not gaps
 

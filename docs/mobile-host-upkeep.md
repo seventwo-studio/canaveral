@@ -1,14 +1,14 @@
 # Mobile host upkeep
 
-Implemented 21 November 2026, with portable fixture evidence only. This page is the
-contract for three operator-facing parts of running Android and iOS hosts:
+Implemented 21 November 2026 for three operator-facing parts of running Android and iOS hosts:
 
 - [runtime and system-image management](#runtimes-and-system-images): list, install and remove;
 - [idle upkeep](#idle-stop) and [orphan storage](#orphan-storage): stop idle devices, report and purge storage left behind;
 - [memory and disk pressure](#memory-and-disk-pressure): hosts report it, and a host whose operator opts in takes no new work while under it.
 
-No real `sdkmanager`, Xcode, runtime download, emulator or simulator has run this
-code. See [verification and limits](#verification-and-limits).
+An authorized [native trial](../coordination/native-acceptance/mobile-parity.md#android-runtime-inventory) verified the
+Android runtime inventory against the installed SDK on one Mac. See
+[verification and limits](#verification-and-limits) for the remaining checks.
 
 ## Host operations
 
@@ -534,7 +534,7 @@ cover:
 
 Open, and not established by those tests:
 
-- **No native run.** The `sdkmanager`, `xcodebuild -downloadPlatform` and
+- **Native install and removal.** The `sdkmanager`, `xcodebuild -downloadPlatform` and
   `simctl runtime` command lines follow the upstream documents below and one read of
   `simctl` help and JSON shapes on Xcode 27.2. Whether they install, verify and remove
   a real runtime, how long that takes, what they print as progress and how licence

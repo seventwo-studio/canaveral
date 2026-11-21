@@ -22,20 +22,21 @@ leases are now enabled; see [Android emulator leases](#android-emulator-leases).
 19 November 2026 a lease key can also install large builds and record MP4 of its own
 emulator ([lease recording and large installs](#lease-recording-and-large-installs)).
 Since 21 November 2026 a host can keep Android emulators warm for leases and start them
-from a saved device baseline ([warm devices and baselines](#warm-devices-and-baselines));
-both are fixture-covered only.
+from a saved device baseline ([warm devices and baselines](#warm-devices-and-baselines)).
+The [native trial](../coordination/native-acceptance/mobile-parity.md) verified warm adoption and boot from a baseline,
+with prepared state retention still open.
 
 Since 21 November 2026 iOS simulators can be leased too, as an operator opt-in under a
 declared `shared-host` isolation class for trusted code; see
-[iOS simulator leases](#ios-simulator-leases). That path is fixture-covered only.
+[iOS simulator leases](#ios-simulator-leases). A native trial verified the normal release path.
 
 Since 21 November 2026 a lease key can also open explicit port tunnels between its emulator
 and the holder's own machine, for example to a Metro bundler
 ([lease port tunnels](#lease-port-tunnels)); the guest still has no network of its own.
 
 Since 21 November 2026 a lease key, and the owner of an account-owned device, can
-also watch a device live ([live screen](#live-screen)); that path has fixture
-coverage only.
+also watch a device live ([live screen](#live-screen)). A native Android lease
+stream decoded in FFmpeg.
 
 ## Current implementation
 
@@ -1088,12 +1089,10 @@ the command exits non-zero and names the reason.
 
 #### Limits and open questions
 
-- **Native acceptance is open for all of it.** Only fixtures with a stand-in adb have run.
-  Whether a given emulator and platform-tools release honours a `localfilesystem:`
-  endpoint for `adb reverse`, the exact `--list` output, the error when a device port is
-  already bound, and the adb daemon's behaviour for many concurrent streams can only be
-  settled by a native run. If a release does not honour a Unix-socket reverse target, this
-  design needs a loopback TCP endpoint with its own access control; none is implemented.
+- A [native trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels)
+  verified a request and response in each direction and mapping removal on close
+  with emulator 37.2.13 and platform-tools 37.0.1. Other tool versions,
+  port collisions and concurrent native streams remain open.
 - **Throughput is not measured natively.** The runner relays on its main event loop, which
   its reconcile loop also uses for synchronous file writes and helper calls, about ten
   times a second per leased emulator. In the single-process fixture on the development Mac
@@ -1265,19 +1264,21 @@ The native trials of 19 November 2026 ([record](../coordination/native-acceptanc
 ran the two-agent, one-emulator case on the Mac Studio with a real API 36 emulator
 and APK. The second run added the guest-to-host probe from a lease shell, supervisor
 loss mid-lease and the leftover-helper check. Host and controller loss, renewal,
-restart and supervisor failures during launch are fixture-covered only. Port tunnels and
-the mapping check have not run natively at all. The
-supervised emulator's resource usage is not attributed by the
+restart and supervisor failures during launch are fixture-covered only. The
+[mobile parity trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels)
+verified native tunnel data transfer and mapping removal in both directions. It also
+observed fencing on an unmanaged mapping. The supervised emulator's resource usage
+is not attributed by the
 [runtime ownership](android-runtime-ownership.md) sampler, because its launch has
 no recorded process birth time.
 
 ## Live screen
 
-Added 21 November 2026, fixture-covered only. A live view streams a running device's
-screen as H.264 in fragmented MP4 until the viewer leaves or its authority ends. It
-reuses the [native video pipeline](#native-video-sessions) and the session broker:
-there is no second capture path and no new transport. No native run has measured
-its frame rate, latency or decoder compatibility; see [open questions](#open-native-questions-for-live-views).
+Added 21 November 2026. A live view streams a running device's screen as H.264 in
+fragmented MP4 until the viewer leaves or its authority ends. It reuses the
+[native video pipeline](#native-video-sessions) and the session broker. The first
+[native Android lease trial](../coordination/native-acceptance/mobile-parity.md#android-live-view) verified SDK delivery
+and FFmpeg decoding. See [open questions](#open-native-questions-for-live-views).
 
 Terms used below:
 
@@ -1567,18 +1568,19 @@ session, exactly as it relays the recording attachment; see
 
 ### Open native questions for live views
 
-No device, emulator, simulator, adb, idb or FFmpeg ran for this work. Open:
+The native trial covered one Android lease and one viewer. Open:
 
 - Frame rate and end-to-end latency of a live view, and the delay before a
   joining viewer's first picture.
 - Whether a browser's Media Source Extensions accept a native device's segments,
   and a new initialization segment at each epoch. The dashboard's screen wall has
   shown Chromium accepting both for segments cut from an FFmpeg fixture recording
-  made with the runner's encoder arguments. No native stream and no other browser
-  has been tried.
+  made with the runner's encoder arguments. Native browser playback and
+  other browsers remain open.
 - Key frame detection relies on the sample flags FFmpeg writes into each fragment
   (`trun`, `tfhd`, `trex`). The dashboard's verifier read the same flags from
-  natively recorded files; the runner's parser has only seen fixture fragments.
+  natively recorded files. The runner's parser delivered decodable fragments
+  from one native Android lease stream.
 - The picture's pause at an epoch rollover, and when a recording takes over and
   hands back.
 - The first picture on a static Android screen, where the encoder may not finish
@@ -1630,8 +1632,9 @@ the way it leases an Android emulator: a `kind: "lease"` [request](requests.md),
 was created for the lease, a deadline enforced without the runner or the controller, and
 removal only on proof.
 
-This path is covered by portable fixtures only. No leased simulator has been created, booted
-or deleted on real CoreSimulator; see [native acceptance is open](#native-acceptance-is-open).
+A [native trial](../coordination/native-acceptance/mobile-parity.md#ios-simulator-lease) verified a private simulator's
+normal lease lifecycle. See [native acceptance is open](#native-acceptance-is-open) for
+the failure and recovery cases that remain open.
 
 ### Decision: shared-host isolation by operator opt-in
 
@@ -2072,15 +2075,12 @@ its limit with its pipe still open, and a signal refused for a PID with another 
 
 ### Native acceptance is open
 
-Nothing in this section has run against real CoreSimulator, Xcode or idb. The repository's
-policy required operator authorization for native runs, and none was given for this work. The
-flags used were read from `simctl` and `idb_companion` help text and from the idb 1.7.8 client
-source, not from a run. The [unexecuted trial plan](../coordination/native-acceptance/ios-lease-simulators.md)
-turns the list below into checks. Each of these needs a native trial before an iOS lease is relied on:
+The [first native trial](../coordination/native-acceptance/mobile-parity.md#ios-simulator-lease) passed on
+Xcode 27.2 and idb companion 1.7.8. The [trial plan](../coordination/native-acceptance/ios-lease-simulators.md)
+covers these remaining checks:
 
-- creating, booting, shutting down and deleting a simulator in a private device set under the
-  host's service account, including long or space-containing storage paths and whether
-  CoreSimulator leaves files outside the device set (for example under `/private/tmp`);
+- operation with long or space-containing storage paths, and whether CoreSimulator leaves
+  files outside the device set (for example under `/private/tmp`);
 - whether `launchd_sim` is named and argued as assumed and installed apps run from inside the
   device directory, which the tree identification depends on, and how fast a real tree
   changes between samples;
@@ -2090,9 +2090,8 @@ turns the list below into checks. Each of these needs a native trial before an i
   only after the tree is gone;
 - whether stopping and killing `launchd_sim` and its tree leaves CoreSimulator reporting the
   device `Shutdown`. If it keeps reporting `Booted`, the supervisor never finishes;
-- `idb_companion` started before the boot with `--device-set-path` and `--grpc-domain-sock`,
-  and `idb --companion <socket>` for `describe`, `ui` input and `ui describe-all`;
-- the readiness probes on a fresh device, and how long a first boot takes;
+- simulator input, hierarchy and app lifecycle through the lease key;
+- readiness timing on other runtimes and device types;
 - that restarting the host under launchd leaves the detached supervisors running;
 - several leased simulators booted at once, and their real CPU, memory and disk use, which
   nothing attributes or limits;
