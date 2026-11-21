@@ -1,18 +1,42 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { object, ServiceError } from "../errors.ts";
 import { createIdentityHandler, limitServer } from "../http.ts";
 import type { IdentityClient } from "../identity-client.ts";
-import type { ControlClient, HttpCommand } from "./client.ts";
+import type { ControlClient, HttpCommand, RequestRead } from "./client.ts";
 
-type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
+type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests" | "readRequests">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
 export type ControllerHandler = (request: IncomingMessage, response: ServerResponse) => void;
 export type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;
 const MAX_BODY = 1_048_576;
 const MAX_HEARTBEAT = 8 * MAX_BODY;
 const CREDENTIAL_QUERY = new Set(["token", "authorization", "secret", "claim", "access_token", "credential", "password", "api_key"]);
+/** Longest hold of `GET /v1/requests/{id}?wait=N`. */
+export const MAX_REQUEST_WAIT_SECONDS = 15;
+/** Reads held at once across the controller, and by one application credential. A held read costs a connection
+ * and a share of one batched re-read a second. The per-credential bound keeps one application from taking every
+ * slot. A read beyond either bound is refused with 429 `request_wait_limit` rather than answered early, so a
+ * client that loops on held reads is told to pause instead of spinning. */
+export const MAX_REQUEST_WAITERS = 32;
+export const MAX_REQUEST_WAITERS_PER_CREDENTIAL = 4;
+const REQUEST_WAIT_TICK_MS = 1000;
+/** A held read returns when anything a waiting client acts on changes. */
+function waitSignature(value: unknown): string {
+  const view = object(value);
+  return JSON.stringify([view.state, view.position ?? null, view.reason ?? null]);
+}
+interface Waiter {
+  token: string; id: string; owner: string; signature: string;
+  /** The newest view any re-read returned; answered when the wait ends without a change. */
+  last: unknown;
+  settle(outcome: { view: unknown } | { error: ServiceError }): void;
+}
+function refusal(reply: RequestRead | undefined): ServiceError | undefined {
+  if (!reply) return new ServiceError("Controller storage or service unavailable.", 503, { retryable: false });
+  return "error" in reply ? new ServiceError(reply.error.message, reply.error.status, { code: reply.error.code, retryable: reply.error.retryable }) : undefined;
+}
 
 export function countHeader(request: IncomingMessage, name: string): number {
   let count = 0;
@@ -76,12 +100,12 @@ export async function readBody(request: IncomingMessage, path: string, maximumBo
   catch { throw new ServiceError("Malformed request.", 400); }
 }
 
-export function respond(response: ServerResponse, value: unknown, status = 200): void {
+export function respond(response: ServerResponse, value: unknown, status = 200, retryAfterSeconds = 60): void {
   if (response.destroyed) return;
   const encoded = Buffer.from(JSON.stringify(value));
   response.writeHead(status, {
     "Content-Type": "application/json", "Content-Length": encoded.length, "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff", "Connection": "close", ...(status === 429 ? { "Retry-After": "60" } : {}),
+    "X-Content-Type-Options": "nosniff", "Connection": "close", ...(status === 429 ? { "Retry-After": String(retryAfterSeconds) } : {}),
   });
   response.end(encoded);
 }
@@ -101,8 +125,48 @@ export function createControllerHandler(control: Requester, identities: Identity
   const bodies = new WeakMap<IncomingMessage, Record<string, unknown>>();
   const identity = createIdentityHandler(identities, request => bodies.get(request));
   let inFlight = 0;
+  // Held reads of waiting requests. They sit outside the 64 in-flight requests they would otherwise exhaust.
+  const waiters = new Set<Waiter>(), owners = new Map<string, number>(), read = control.readRequests?.bind(control);
+  let ticker: NodeJS.Timeout | undefined, batch: Promise<void> | undefined;
+  const leave = (waiter: Waiter) => {
+    if (!waiters.delete(waiter)) return;
+    const left = owners.get(waiter.owner)! - 1;
+    if (left > 0) owners.set(waiter.owner, left); else owners.delete(waiter.owner);
+    if (!waiters.size) { clearInterval(ticker); ticker = undefined; }
+  };
+  /** One read for every waiter, in one control command and one transaction, so the cost of looking does not grow
+   * with the number of waiters. Callers share a batch that is still in flight: a slow worker is asked once.
+   * Each read verifies its credential again, so revoking an application ends its holds with the ordinary refusal. */
+  const refresh = (): Promise<void> => batch ??= (async () => {
+    const current = [...waiters];
+    if (!current.length || !read) return;
+    try {
+      const replies = await read(current.map(({ token, id }) => ({ token, id })));
+      current.forEach((waiter, index) => {
+        if (!waiters.has(waiter)) return;
+        const reply = replies[index], error = refusal(reply);
+        if (error) waiter.settle({ error });
+        else if (waitSignature((reply as { view: unknown }).view) !== waiter.signature) waiter.settle({ view: (reply as { view: unknown }).view });
+        else waiter.last = (reply as { view: unknown }).view;
+      });
+    } catch { /* A busy or failed batch changes nothing: every waiter keeps its last view until its own limit. */ }
+  })().finally(() => { batch = undefined; });
+  /** Holds one read until the request's state, position or reason changes, the limit passes or the client leaves. */
+  const hold = (response: ServerResponse, token: string, id: string, owner: string, first: unknown, limit: number): Promise<unknown> => new Promise((resolve, reject) => {
+    const waiter: Waiter = { token, id, owner, signature: waitSignature(first), last: first, settle(outcome) {
+      clearTimeout(timer); response.off("close", gone); leave(waiter);
+      if ("error" in outcome) reject(outcome.error); else resolve(outcome.view);
+    } };
+    // A client that left frees its slot at once; nothing is written to its closed response.
+    const gone = () => waiter.settle({ view: waiter.last });
+    // At the limit, look once more (sharing any batch already in flight) and answer with the newest view.
+    const timer = setTimeout(() => { void refresh().then(() => { if (waiters.has(waiter)) waiter.settle({ view: waiter.last }); }); }, Math.max(0, limit - performance.now()));
+    response.once("close", gone);
+    waiters.add(waiter); owners.set(owner, (owners.get(owner) ?? 0) + 1);
+    if (!ticker) { ticker = setInterval(() => { void refresh(); }, REQUEST_WAIT_TICK_MS); ticker.unref(); }
+  });
   return (request, response) => {
-    const requestId = randomUUID();
+    const requestId = randomUUID(), arrived = performance.now();
     if (inFlight >= 64) {
       const result = envelope(new ServiceError("Controller service is busy.", 429, { retryable: false }), requestId, false);
       respond(response, result.body, result.status); request.resume(); return;
@@ -135,6 +199,35 @@ export function createControllerHandler(control: Requester, identities: Identity
       const body = request.method === "POST" ? await readBody(request, target.path) : {};
       if (response.destroyed) return;
       bodies.set(request, body);
+      // `wait` belongs to this front end: the control worker answers within its own deadline and never holds a read.
+      const held = request.method === "GET" && target.query.has("wait") && read ? /^\/v1\/requests\/([^/]+)$/.exec(target.path) : null;
+      if (held && read) {
+        const values = target.query.getAll("wait");
+        if (target.query.size !== 1 || !/^[1-9][0-9]?$/.test(values[0]!) || Number(values[0]) > MAX_REQUEST_WAIT_SECONDS) {
+          throw new ServiceError(`wait must be the only parameter: a whole number of seconds from 1 to ${MAX_REQUEST_WAIT_SECONDS}.`, 400);
+        }
+        const seconds = Number(values[0]), id = held[1]!;
+        // The first look verifies the credential and ownership. Like every later one it runs no admission pass,
+        // so clients that re-ask together after a change do not each drive passes on the single control worker.
+        const reply = (await read([{ token: target.token, id }]))[0], refused = refusal(reply);
+        if (response.destroyed) return;
+        if (refused) throw refused;
+        let view = (reply as { view: unknown }).view;
+        if (object(view).state === "waiting") {
+          const owner = createHash("sha256").update(target.token).digest("base64url");
+          if (waiters.size >= MAX_REQUEST_WAITERS || (owners.get(owner) ?? 0) >= MAX_REQUEST_WAITERS_PER_CREDENTIAL) {
+            const busy = envelope(new ServiceError("Too many held request reads. Read without wait, or ask again after Retry-After.", 429, { code: "request_wait_limit", retryable: true }), requestId, false);
+            respond(response, busy.body, busy.status, seconds); return;
+          }
+          release();
+          // The server's 20-second idle limit (limitServer) would destroy a connection that is only waiting. Give this
+          // one the wait plus that same allowance, and count the wait from arrival so latency does not extend it.
+          request.socket.setTimeout((seconds + 20) * 1000);
+          view = await hold(response, target.token, id, owner, view, arrived + seconds * 1000);
+          if (response.destroyed) return;
+        }
+        respond(response, view); return;
+      }
       const command: HttpCommand = { type: "http", method: request.method, path: target.path, query: target.query.toString(), token: target.token, body };
       dispatched = true;
       const result = await control.request(command);
