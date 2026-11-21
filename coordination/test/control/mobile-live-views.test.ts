@@ -169,9 +169,9 @@ test("views are bounded per device and per credential, and a create-and-close lo
 test("a recording in progress does not refuse a live view, a running live capture does not refuse a recording, and an unclean ended session refuses both", t => {
   const f = fixture(t, 2), machine = f.ids[0]!, before = f.reserved();
   const record = (target = machine) => object(f.video.handle(f.req("POST", `/v1/machines/${target}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 30, bitRate: 4_000_000 }))!.body) as { id: string; generation: string; state: string };
-  // A view beside a recording: each holds its own slot and reservation.
+  // A view beside a recording shares the device's capture reservation.
   const recording = record(), view = f.create();
-  assert.deepEqual(f.reserved(), { ...before, cpu: before.cpu + 2, memoryMiB: before.memoryMiB + 512 });
+  assert.deepEqual(f.reserved(), { ...before, cpu: before.cpu + 1, memoryMiB: before.memoryMiB + 256 });
   assert.throws(() => record(), refused(409), "still one recording per device");
   // The recording's host attaches and the recording is then closed without cleanup proof.
   f.video.command({ type: "video-sessions.attach", sessionId: recording.id, generation: recording.generation, side: "host", ownerId: f.host, token: f.hostToken });

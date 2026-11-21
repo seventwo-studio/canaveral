@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { dropEventTriggers, EVENT_KINDS, installEventTriggers, pruneEvents, recordEvent, ROUTINE_KINDS } from "../../src/events.ts";
+import { dropEventTriggers, EVENT_KINDS, EVENT_SCAN_WINDOW, installEventTriggers, listEvents, parseEventQuery, pruneEvents, recordEvent, ROUTINE_KINDS } from "../../src/events.ts";
 import { ServiceError } from "../../src/errors.ts";
 import { failure } from "./leases-fixture.test.ts";
 import { observabilityFixture } from "./observability-fixture.test.ts";
@@ -146,6 +146,58 @@ test("cursor, tail, kind and subject filters page the log and refuse unknown kin
     await assert.rejects(f.admin("/v1/admin/events?" + query), failure(400), query);
   }
   await assert.rejects(f.admin("/v1/admin/events?kind=lease.unheard"), failure(400, "event_kind_unknown"));
+});
+
+test("a read does bounded work: indexed shapes cost their page, any other filter examines one stretch of the log", async t => {
+  const f = observabilityFixture(t);
+  assert.equal(EVENT_SCAN_WINDOW, 20_000);
+  // The same read with a small window, so the log needs only a few hundred rows to span several of them.
+  const WINDOW = 200;
+  const read = (target: string, scope: "admin" | "application" = "admin") => f.store.transaction(db => {
+    const query = parseEventQuery(new URL(target, "http://fixture.invalid").searchParams);
+    if (scope === "application") query.application = f.app.id;
+    return listEvents(db, query, scope, WINDOW);
+  });
+  const early = await f.request("POST", "/v1/leases", f.acquire());
+  // A long run of unrelated events between two leases, more than two scan windows.
+  f.store.transaction(db => { for (let n = 0; n < 2 * WINDOW + 50; n++) recordEvent(db, "host.online", { subject: String(n) }); });
+  f.advance(100); f.beat();
+  const late = await f.request("POST", "/v1/leases", f.acquire());
+  const head = read("?tail=1").cursor;
+  assert.ok(head > 2 * WINDOW + 50);
+  const leases = (page: { events: Array<{ leaseId?: string }> }) => page.events.map(event => event.leaseId);
+  // A family filter walks the primary key one window at a time and says where to continue.
+  const first = read("?kind=lease.*&after=0");
+  assert.deepEqual([leases(first), first.more, first.cursor], [[early.id], true, WINDOW]);
+  const second = read(`?kind=lease.*&after=${first.cursor}`);
+  assert.deepEqual([leases(second), second.more, second.cursor], [[], true, 2 * WINDOW], "an empty page with more to read, not the end of the log");
+  const third = read(`?kind=lease.*&after=${second.cursor}`);
+  assert.deepEqual([leases(third), third.more, third.cursor], [[late.id], false, head]);
+  // The same holds for a subject filter and for several kinds; a filtered tail looks at the newest window only.
+  assert.deepEqual([leases(read(`?lease=${late.id}&kind=lease.admitted`)), read(`?lease=${late.id}`).more], [[], true]);
+  assert.deepEqual(leases(read("?tail=10&kind=lease.*")), [late.id]);
+  assert.deepEqual(leases(read("?tail=10&kind=lease.admitted,lease.ready")), [late.id]);
+  // One exact kind, or an application alone, follows its index: the whole answer in one request.
+  const exact = read("?kind=lease.admitted");
+  assert.deepEqual([leases(exact), exact.more, exact.cursor], [[early.id, late.id], false, head]);
+  assert.deepEqual(leases(read("?tail=10&kind=lease.admitted")), [early.id, late.id]);
+  const own = read("?limit=500", "application");
+  assert.deepEqual([own.more, own.events.filter(event => event.kind === "lease.admitted").map(event => event.leaseId)], [false, [early.id, late.id]]);
+  // A time bound starts the read at the right place, however far into the log that is.
+  const since = read(`?kind=lease.*&since=${new Date((f.now() - 50) * 1000).toISOString()}`);
+  assert.deepEqual([leases(since), since.more], [[late.id], false]);
+  // Through the route the window is the real one: this small log fits in it, so the first page is the whole answer.
+  const route = await f.admin("/v1/admin/events?kind=lease.*&after=0");
+  assert.deepEqual([leases(route), route.more, route.cursor], [[early.id, late.id], false, head]);
+  f.store.transaction(db => {
+    const plan = (sql: string, ...values: Array<string | number>) => db.prepare("EXPLAIN QUERY PLAN " + sql).all(...values).map(row => String(row.detail)).join("; ");
+    // The three statement shapes the read uses: none sorts, and the filtered one never leaves the primary key.
+    const kind = plan("SELECT * FROM events WHERE seq>? AND seq<=? AND kind=? ORDER BY seq LIMIT ?", 0, 9, "lease.admitted", 1);
+    const application = plan("SELECT * FROM events WHERE seq>? AND seq<=? AND application=? ORDER BY seq DESC LIMIT ?", 0, 9, f.app.id, 1);
+    const filtered = plan("SELECT * FROM events NOT INDEXED WHERE seq>? AND seq<=? AND ((kind>=? AND kind<?)) ORDER BY seq DESC LIMIT ?", 0, 9, "lease.", "lease/", 1);
+    assert.match(kind, /USING INDEX events_kind/); assert.match(application, /USING INDEX events_application/); assert.match(filtered, /USING INTEGER PRIMARY KEY/);
+    for (const text of [kind, application, filtered]) assert.doesNotMatch(text, /TEMP B-TREE|SCAN events(?! USING)/);
+  });
 });
 
 test("retention bounds the log by age, by a schema row cap and by a separate routine tier", async t => {

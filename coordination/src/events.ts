@@ -139,16 +139,22 @@ export type EventProjection = (db: DatabaseSync, events: Array<EventRow & { at: 
  * outbox) in the same transaction. A projection failure must never abort the state change that
  * produced the event, so it is rolled back alone and the events are still stamped. */
 export function projectEvents(db: DatabaseSync, now: number, projections: readonly EventProjection[] = []): number {
-  const rows = db.prepare("SELECT * FROM events WHERE at IS NULL ORDER BY seq LIMIT 10000").all() as unknown as EventRow[];
-  if (!rows.length) return 0;
-  db.prepare("UPDATE events SET at=? WHERE at IS NULL AND seq<=?").run(now, rows.at(-1)!.seq);
-  const stamped = rows.map(row => ({ ...row, at: now }));
-  for (const projection of projections) {
-    db.exec("SAVEPOINT canaveral_event_projection");
-    try { projection(db, stamped, now); db.exec("RELEASE SAVEPOINT canaveral_event_projection"); }
-    catch { db.exec("ROLLBACK TO SAVEPOINT canaveral_event_projection"); db.exec("RELEASE SAVEPOINT canaveral_event_projection"); }
+  let total = 0;
+  // A projection may itself record an event (an alert that was dropped). A few passes stamp those in the
+  // same commit; the bound keeps a projection that always records from looping.
+  for (let pass = 0; pass < 3; pass++) {
+    const rows = db.prepare("SELECT * FROM events WHERE at IS NULL ORDER BY seq LIMIT 10000").all() as unknown as EventRow[];
+    if (!rows.length) break;
+    db.prepare("UPDATE events SET at=? WHERE at IS NULL AND seq<=?").run(now, rows.at(-1)!.seq);
+    const stamped = rows.map(row => ({ ...row, at: now }));
+    for (const projection of projections) {
+      db.exec("SAVEPOINT canaveral_event_projection");
+      try { projection(db, stamped, now); db.exec("RELEASE SAVEPOINT canaveral_event_projection"); }
+      catch { db.exec("ROLLBACK TO SAVEPOINT canaveral_event_projection"); db.exec("RELEASE SAVEPOINT canaveral_event_projection"); }
+    }
+    total += rows.length;
   }
-  return rows.length;
+  return total;
 }
 export function eventView(row: EventRow, scope: "admin" | "application" = "admin"): EventView {
   let data: Record<string, unknown> = {};
@@ -168,7 +174,8 @@ export interface EventQuery {
   after?: number; tail?: number; since?: number; kinds: string[]; limit: number;
   application?: string; lease?: string; request?: string; host?: string; machine?: string;
 }
-/** `cursor` is the position to pass as `after` next: the last event of a full page, otherwise the head of the log.
+/** `cursor` is the position to pass as `after` next: the last event of a full page, otherwise as far as the read examined
+ * (the head of the log, or the end of its scan window when `more` is true).
  * `truncated` reports that retention removed events after the supplied cursor; they may or may not have matched the filter. */
 export interface EventPage { events: EventView[]; cursor: number; more: boolean; truncated: boolean; oldestSequence?: number | null; latestSequence?: number }
 export const EVENT_PAGE_LIMIT = 500;
@@ -211,9 +218,28 @@ export function parseEventQuery(query: URLSearchParams, allowed: readonly string
   return result;
 }
 
-/** Ascending by sequence. `after` is exclusive; `tail` returns the newest matching events. */
-export function listEvents(db: DatabaseSync, query: EventQuery, scope: "admin" | "application" = "admin"): EventPage {
-  const where: string[] = ["at IS NOT NULL"], args: Array<string | number> = [];
+/** Sequences one filtered read examines. A request never walks more of the log than this. */
+export const EVENT_SCAN_WINDOW = 20_000;
+/** First sequence at or after a time. Events are stamped in commit order, so time does not decrease with
+ * sequence while the controller clock moves forward; about twenty primary-key lookups find the boundary. */
+function firstSequenceSince(db: DatabaseSync, since: number, oldest: number, latest: number): number {
+  const next = db.prepare("SELECT seq,at FROM events WHERE seq>=? AND seq<=? ORDER BY seq LIMIT 1");
+  let low = oldest, high = latest + 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2), row = next.get(middle, latest) as { seq: number; at: number } | undefined;
+    if (!row || row.at >= since) high = middle; else low = row.seq + 1;
+  }
+  return low;
+}
+/** Ascending by sequence. `after` is exclusive; `tail` returns the newest matching events.
+ *
+ * Reads run in the control worker's single transaction, so each one does bounded work. A read by
+ * application alone, or by one exact kind alone, follows an index in sequence order and costs its page.
+ * Any other filter walks the primary key over at most EVENT_SCAN_WINDOW sequences: a page can then come
+ * back short, or empty, with `more: true` and a cursor at the end of the window, and the caller continues
+ * from there. `tail` with such a filter looks at the newest window only. */
+export function listEvents(db: DatabaseSync, query: EventQuery, scope: "admin" | "application" = "admin", window = EVENT_SCAN_WINDOW): EventPage {
+  const where: string[] = [], args: Array<string | number> = [];
   if (query.kinds.length) {
     where.push("(" + query.kinds.map(kind => kind.endsWith(".*") ? "(kind>=? AND kind<?)" : "kind=?").join(" OR ") + ")");
     for (const kind of query.kinds) {
@@ -221,7 +247,8 @@ export function listEvents(db: DatabaseSync, query: EventQuery, scope: "admin" |
       else args.push(kind);
     }
   }
-  for (const key of ["application", "lease", "request", "host", "machine"] as const) if (query[key] !== undefined) { where.push(`${key}=?`); args.push(query[key]); }
+  const subjects = (["application", "lease", "request", "host", "machine"] as const).filter(key => query[key] !== undefined);
+  for (const key of subjects) { where.push(`${key}=?`); args.push(query[key]!); }
   if (query.since !== undefined) { where.push("at>=?"); args.push(query.since); }
   const bounds = db.prepare("SELECT min(seq) AS oldest FROM events WHERE at IS NOT NULL").get() as { oldest: number | null };
   // AUTOINCREMENT never reuses a sequence, so the high-water mark survives pruning of the newest row.
@@ -230,19 +257,24 @@ export function listEvents(db: DatabaseSync, query: EventQuery, scope: "admin" |
   const unstamped = (db.prepare("SELECT min(seq) AS seq FROM events WHERE at IS NULL").get() as { seq: number | null }).seq;
   const latest = unstamped === null ? written : Math.min(written, unstamped - 1);
   const range = scope === "admin" ? { oldestSequence: bounds.oldest, latestSequence: latest } : {};
+  // (application, seq) and (kind, seq) give sequence order directly; SQLite chooses them for these two shapes.
+  const indexed = (subjects.length === 1 && subjects[0] === "application" && !query.kinds.length) || (!subjects.length && query.kinds.length === 1 && !query.kinds[0]!.endsWith(".*"));
+  const source = indexed ? "events" : "events NOT INDEXED", filter = where.length ? " AND " + where.join(" AND ") : "";
+  const floor = query.since === undefined || bounds.oldest === null ? 0 : firstSequenceSince(db, query.since, bounds.oldest, latest) - 1;
   if (query.tail !== undefined) {
-    const rows = (db.prepare(`SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY seq DESC LIMIT ?`).all(...args, query.tail) as unknown as EventRow[]).reverse();
+    const lower = indexed ? floor : Math.max(floor, latest - window);
+    const rows = (db.prepare(`SELECT * FROM ${source} WHERE seq>? AND seq<=?${filter} ORDER BY seq DESC LIMIT ?`).all(lower, latest, ...args, query.tail) as unknown as EventRow[]).reverse();
     return { events: rows.map(row => eventView(row, scope)), cursor: latest, more: false, truncated: false, ...range };
   }
-  const after = query.after ?? 0;
-  const rows = db.prepare(`SELECT * FROM events WHERE seq>? AND seq<=? AND ${where.join(" AND ")} ORDER BY seq LIMIT ?`).all(after, latest, ...args, query.limit + 1) as unknown as EventRow[];
-  const more = rows.length > query.limit, page = rows.slice(0, query.limit);
+  const after = Math.max(query.after ?? 0, floor), reach = indexed ? latest : Math.min(latest, after + window);
+  const rows = db.prepare(`SELECT * FROM ${source} WHERE seq>? AND seq<=?${filter} ORDER BY seq LIMIT ?`).all(after, reach, ...args, query.limit + 1) as unknown as EventRow[];
+  const full = rows.length > query.limit, page = rows.slice(0, query.limit);
   return {
     events: page.map(row => eventView(row, scope)),
-    // Everything up to the head was examined once the last page is read, so the cursor moves there: a
-    // follower with a narrow filter stays at the head instead of rescanning, and is not told it fell behind.
-    cursor: more ? page.at(-1)!.seq : Math.max(after, latest), more,
-    truncated: query.after !== undefined && bounds.oldest !== null && after + 1 < bounds.oldest, ...range,
+    // Everything up to `reach` was examined once a short page is read, so the cursor moves there: a follower
+    // with a narrow filter stays at the head instead of rescanning, and is not told it fell behind.
+    cursor: full ? page.at(-1)!.seq : Math.max(query.after ?? 0, reach), more: full || reach < latest,
+    truncated: query.after !== undefined && bounds.oldest !== null && query.after + 1 < bounds.oldest, ...range,
   };
 }
 

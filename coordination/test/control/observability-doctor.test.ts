@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { main } from "../../src/cli.ts";
 import { diagnose, FINDING_CODES } from "../../src/control/diagnosis.ts";
+import { Observability } from "../../src/control/observability.ts";
 import type { Finding } from "../../src/control/diagnosis.ts";
 import { probeController } from "../../src/observability-cli.ts";
 import { observabilitySettings } from "../../src/observability.ts";
@@ -60,6 +61,20 @@ test("the observer records liveness, pressure and long waits as transitions, eac
   assert.equal(f.observability.observe(), 1, "the condition row is removed");
   f.store.transaction(db => assert.equal(db.prepare("SELECT count(*) AS n FROM event_conditions WHERE kind='request.waiting_long'").get()!.n, 0));
   assert.equal((await f.events("kind=request.waiting_long")).length, 1);
+
+  // With nothing to do, a round opens no transaction at all: every timer probes on a read-only connection first.
+  let transactions = 0;
+  f.store.addTransactionHook(() => { transactions++; });
+  f.beat(); transactions = 0;
+  for (let round = 0; round < 3; round++) { f.advance(5); await f.observability.tick(); }
+  assert.equal(f.observability.maintain(true), false, "nothing is past its retention");
+  assert.equal(transactions, 0);
+  // Work that is due is done: a silent host, and events past their age.
+  f.advance(31); await f.observability.tick();
+  assert.equal(transactions, 1); assert.equal((await f.events("kind=host.offline")).length, 3);
+  f.advance(31 * 86400); transactions = 0;
+  assert.equal(f.observability.maintain(true), true); assert.equal(transactions, 1);
+  assert.equal(f.observability.maintain(true), false);
 });
 
 test("a diagnosis names each problem with a stable code and a next step, and changes nothing", async t => {
@@ -145,7 +160,8 @@ test("a diagnosis names each problem with a stable code and a next step, and cha
   for (const finding of final.findings) { assert.ok(Object.hasOwn(FINDING_CODES, finding.code), finding.code); assert.ok(finding.nextStep.length > 20 && finding.summary.length > 10); }
   assert.equal(final.checked.waitingRequests, 1); assert.equal(final.checked.alertDestinations, 1);
 
-  // Read-only: the same findings come from a connection that cannot write, and the database file is byte-identical afterwards.
+  // The diagnosis adds no write: the same findings come from a connection that cannot write. This fixture is
+  // quiescent and uses the operator credential, so nothing else writes either and the file stays byte-identical.
   const digest = () => createHash("sha256").update(readFileSync(f.store.path)).digest("hex"), before = digest();
   const db = new DatabaseSync(f.store.path, { readOnly: true });
   try {
@@ -155,6 +171,53 @@ test("a diagnosis names each problem with a stable code and a next step, and cha
   assert.deepEqual((await diagnosis()).findings, final.findings);
   assert.equal(digest(), before);
   await assert.rejects(f.admin("/v1/admin/diagnosis?verbose=1"), (error: any) => error.status === 400);
+});
+
+test("just after a restart a host the controller has not heard from yet is not called offline", async t => {
+  const f = observabilityFixture(t);
+  const report = () => f.beat({ health: health("passed", [], f.now()) });
+  const diagnosis = async (observability: Observability) => (await observability.handle({ method: "GET", path: "/v1/admin/diagnosis", parts: ["v1", "admin", "diagnosis"], query: new URLSearchParams(), body: {}, token: f.options.adminToken,
+    principal: () => ({ kind: "operator", user: null, scopes: ["admin"] }) }))!.body as { findings: Finding[] };
+  report();
+  assert.deepEqual((await diagnosis(f.observability)).findings, []);
+  // The controller was down for five minutes. Every host's last heartbeat is older than the freshness window.
+  f.advance(300);
+  const restarted = new Observability(f.store, f.options, f.apps);
+  f.advance(5);
+  let found = (await diagnosis(restarted)).findings;
+  assert.deepEqual(found.map(finding => [finding.code, finding.severity]), [["controller_recently_started", "notice"]]);
+  assert.deepEqual(found[0]!.details, { startedSecondsAgo: 5, hostsNotYetHeard: 1 }); assert.match(found[0]!.nextStep, /again in 40 seconds/);
+  // A host that has reported since the start is judged normally, inside the grace too.
+  report();
+  assert.deepEqual((await diagnosis(restarted)).findings, []);
+  f.advance(31);
+  assert.deepEqual(codes((await diagnosis(restarted)).findings), ["host_offline"], "it reported after the start and then fell silent");
+  // A host that never comes back is offline once the grace has passed, exactly when the observer says so.
+  const again = new Observability(f.store, f.options, f.apps);
+  f.advance(44);
+  assert.deepEqual(codes((await diagnosis(again)).findings), ["controller_recently_started"]); assert.equal(again.observe(), 0);
+  f.advance(1);
+  assert.deepEqual(codes((await diagnosis(again)).findings), ["host_offline"]); assert.equal(again.observe(), 1);
+});
+
+test("a finding this version does not know is still shown and still fails the run", async t => {
+  const tokens = mkdtempSync(join(tmpdir(), "canaveral-doctor-unknown-")); t.after(() => rmSync(tokens, { recursive: true, force: true }));
+  const tokenFile = join(tokens, "token"); writeFileSync(tokenFile, key() + "\n", { mode: 0o600 });
+  // A newer controller reports a condition this command has no description for, and one malformed entry.
+  const newer = { generatedAt: "2026-11-21T09:00:00.000Z", omitted: 0, checked: { hosts: 1, activeLeases: 0, waitingRequests: 0, updateJobs: 0, alertDestinations: 0 },
+    findings: [{ code: "quorum_degraded", severity: "error", subject: { type: "controller", id: "c" }, summary: "A condition from the future.", nextStep: "Follow the newer runbook." }, { code: 7, severity: "catastrophic" }] };
+  const run = async (args: string[]) => {
+    let stdout = "";
+    const status = await main(["--url", "http://127.0.0.1:1", "--token-file", tokenFile, "doctor", ...args], { stdout: text => { stdout += text; }, stderr: () => {},
+      probe: async () => ({ reachable: true }), client: () => ({ request: async () => newer }) as never });
+    return { status, stdout };
+  };
+  const json = await run(["--json"]), report = JSON.parse(json.stdout) as { ok: boolean; findings: Finding[] };
+  assert.deepEqual([json.status, report.ok, report.findings.map(finding => [finding.code, finding.severity])], [1, false, [["quorum_degraded", "error"], ["unknown_finding", "warning"]]]);
+  assert.equal(report.findings[0]!.summary, "A condition from the future.");
+  const text = await run([]);
+  assert.equal(text.status, 1);
+  assert.match(text.stdout, /2 findings:\n\[error\] quorum_degraded \(not known to this version\): A condition from the future\.\n {4}next: Follow the newer runbook\.\n\[warning\] unknown_finding \(not known to this version\): The controller reported a finding this version cannot describe\./);
 });
 
 test("canaveral doctor checks the connection and credential, prints findings and exits non-zero when it has any", { timeout: 90_000 }, async t => {

@@ -115,11 +115,18 @@ Request views carry `position`, the request's place in the controller's attempt 
 
 `listEvents`, `followEvents` and `usage` read the application's own
 [event history](events.md) and [usage](usage.md) with the application key.
-`listEvents` returns one page and its `cursor`. `followEvents` is an async
-iterator over one server-sent event stream: it ends when the controller ends the
-stream, throws a transport error when the connection fails and never reconnects.
-Resume with `after` set to the last `sequence` received. Stop iterating or abort
-its `signal` to close it. `usage` returns the JSON report; request CSV from the
+`listEvents` returns one page and its `cursor`; a filtered page can be short or
+empty with `more: true`, in which case read again from `cursor`. `followEvents` is
+an async iterator over one server-sent event stream and never reconnects. It
+returns `{reason, cursor}` for an ordinary end (`stream_lifetime`,
+`controller_closing` or `aborted`), throws a service error when the credential is
+no longer accepted (`unauthenticated`, `forbidden`) or the controller reports
+`unavailable`, and throws a transport error when the connection stops without an
+end message. If retention removed history after `after`, it calls `onTruncated`
+and continues, or throws `events_truncated` when no handler was given. `onCursor`
+reports the position of a quiet stream. Resume with `after` set to the returned
+cursor or the last `sequence` received. Stop iterating or abort its `signal` to
+close it. `usage` returns the JSON report; request CSV from the
 route directly. A lease key cannot call these methods. Fixture coverage only.
 
 Linux lease acquisition and renewal require integer `ttlSeconds >= 30`, bounded

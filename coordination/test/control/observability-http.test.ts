@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readdirSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
 import test from "node:test";
 import { ConsumerClient, ConsumerServiceError } from "../../src/consumer-client.ts";
 import { consumerApiSchema } from "../../src/contracts.ts";
@@ -121,7 +123,14 @@ test("a restart keeps the log, continues the sequence and resumes a follower fro
   const f = await controllerFixture(t), app = await f.application();
   const lease = await f.acquire(app.credential);
   const before = await f.events(), cursor = before.at(-1)!.sequence as number;
+  // A follower is told why its stream ends before the sockets are dropped.
+  const follower = f.follow("/v1/admin/events/stream");
+  assert.equal(await follower.opened, 200);
+  await eventually(() => follower.messages.filter(message => message.event === "open"), opens => opens.length === 1);
   await f.restart();
+  const end = follower.messages.find(message => message.event === "end");
+  assert.ok(end, "an end message arrived before the connection closed");
+  assert.deepEqual(JSON.parse(end.data), { code: "controller_closing", cursor });
   await f.ready(lease);
   const after = await f.events();
   assert.deepEqual(after.slice(0, before.length), before, "history survives the restart unchanged");
@@ -134,6 +143,20 @@ test("a restart keeps the log, continues the sequence and resumes a follower fro
   await eventually(() => resumed.data(), events => events.length === fresh.length);
   assert.deepEqual(resumed.data(), fresh);
   resumed.close();
+});
+
+test("an idle controller's timers never open a write connection", { timeout: 60_000 }, async t => {
+  const f = await controllerFixture(t);
+  // A write connection would recreate the database file. Remove it and let several timer rounds pass, including
+  // the one a second after start. A fixture that removes its directory before it closes its controller depends
+  // on this: a file that reappears during the removal fails it with ENOTEMPTY.
+  unlinkSync(f.config.statePath);
+  await sleep(2600);
+  assert.deepEqual(readdirSync(dirname(f.config.statePath)).filter(name => name.startsWith("controller.sqlite")), []);
+  // Nothing is left running after close either.
+  await f.close();
+  await sleep(1200);
+  assert.deepEqual(readdirSync(dirname(f.config.statePath)).filter(name => name.startsWith("controller.sqlite")), []);
 });
 
 test("administrator routes need administrator authority and the consumer SDK reads only its application", { timeout: 60_000 }, async t => {

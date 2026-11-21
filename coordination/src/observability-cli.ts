@@ -21,11 +21,17 @@ export interface ObservabilityIO {
   signal?: AbortSignal;
   /** Connection probe for `doctor`; replaceable in portable tests. */
   probe?: (url: string, allowHttp: boolean) => Promise<Probe>;
+  /** Pauses of `events --follow` before it follows again; portable tests shorten them. */
+  followTiming?: { reconnectMs?: number; retryMs?: number };
 }
 export interface Probe { reachable: boolean; code?: string; tls?: { protocol: string; expiresAt: string } }
 /** A follower needs the transport itself; the JSON request client alone cannot hold a stream open. */
 export interface StreamingClient extends RequestClient { stream(path: string, signal: AbortSignal): Promise<AsyncIterable<ServerSentEvent>> }
 
+/** Pause before following again after an ordinary stream end, and after a failed attempt; retries allowed in a row. */
+const FOLLOW_RECONNECT_MS = 100, FOLLOW_RETRY_MS = 2000, FOLLOW_RETRIES = 5;
+/** Requests one `events` listing may make to fill its page from a filtered read. */
+const LIST_REQUESTS = 50;
 function list(args: CliArguments, name: string): string[] {
   const value = args.options[name];
   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
@@ -65,42 +71,63 @@ async function events(args: CliArguments, io: ObservabilityIO): Promise<number> 
   }
   const client = io.client(args.url, await credential(args), args.allowHttp), base = own ? "/v1/events" : "/v1/admin/events";
   if (!follow) {
-    const page = await client.request("GET", base + (query.size ? "?" + query.toString() : ""));
-    for (const event of Array.isArray(page.events) ? page.events : []) io.stdout(eventLine(metadata(event), text));
-    io.stderr(`cursor=${String(page.cursor)}${page.more === true ? " more=true" : ""}${page.truncated === true ? " truncated=true (retention removed events after the supplied cursor)" : ""}\n`);
+    // A filtered read examines a bounded stretch of the log per request and may return a short page with
+    // more to read. Keep reading until the requested number of events is printed or the log is exhausted.
+    const wanted = args.options.limit === undefined ? 100 : Number(query.get("limit")), paged = args.options.tail === undefined;
+    let printed = 0, page: Record<string, unknown> = {}, truncated = false;
+    for (let request = 0; request < LIST_REQUESTS; request++) {
+      if (paged) query.set("limit", String(wanted - printed));
+      page = await client.request("GET", base + (query.size ? "?" + query.toString() : ""));
+      const events = Array.isArray(page.events) ? page.events : [];
+      for (const event of events) io.stdout(eventLine(metadata(event), text));
+      printed += events.length; truncated ||= page.truncated === true;
+      if (!paged || page.more !== true || printed >= wanted || typeof page.cursor !== "number") break;
+      query.set("after", String(page.cursor));
+    }
+    io.stderr(`cursor=${String(page.cursor)}${page.more === true ? " more=true" : ""}${truncated ? " truncated=true (retention removed events after the supplied cursor)" : ""}\n`);
     return 0;
   }
   if (typeof (client as Partial<StreamingClient>).stream !== "function") throw new CliError("This client cannot follow an event stream.", 503);
   const controller = new AbortController(), stop = () => controller.abort();
   if (io.signal) { if (io.signal.aborted) stop(); else io.signal.addEventListener("abort", stop, { once: true }); }
   else { process.once("SIGINT", stop); process.once("SIGTERM", stop); }
+  // The resume position is whatever the controller last reported: an event's sequence, or the cursor in
+  // an `open`, `cursor` or `end` message. Without one yet, a new stream starts at the head again; it is
+  // never restarted from zero, which would print retained history as if it were live.
   let cursor: string | undefined = query.get("after") ?? undefined, failures = 0;
+  const position = (data: Record<string, unknown>): void => { if (typeof data.cursor === "number" && Number.isSafeInteger(data.cursor) && data.cursor >= 0) cursor = String(data.cursor); };
+  const pause = (ms: number) => new Promise<void>(done => { const timer = setTimeout(done, ms); controller.signal.addEventListener("abort", () => { clearTimeout(timer); done(); }, { once: true }); });
   try {
     while (!controller.signal.aborted) {
       const target = new URLSearchParams(query);
       if (cursor !== undefined) target.set("after", cursor);
-      let ended: string | undefined;
+      // A stream that stops without an `end` message was cut off.
+      let ended = "connection_lost";
       try {
         const stream = await (client as StreamingClient).stream(base + "/stream" + (target.size ? "?" + target.toString() : ""), controller.signal);
         for await (const message of stream) {
-          if (message.event === "end") { ended = String(record(JSON.parse(message.data) as unknown).code ?? "ended"); break; }
+          // Any message shows that the stream was established; only consecutive failures to get one count.
+          failures = 0;
+          if (message.event === "open" || message.event === "cursor") { position(record(JSON.parse(message.data) as unknown)); continue; }
+          if (message.event === "end") { const data = record(JSON.parse(message.data) as unknown); position(data); ended = typeof data.code === "string" ? data.code : "ended"; break; }
           if (message.event === "truncated") { io.stderr("truncated=true (retention removed events after the supplied cursor)\n"); continue; }
           if (message.event !== undefined) continue;
           const event = record(JSON.parse(message.data) as unknown);
-          io.stdout(eventLine(metadata(event), text)); cursor = String(event.sequence); failures = 0;
+          io.stdout(eventLine(metadata(event), text)); cursor = String(event.sequence);
         }
       } catch (error) {
         if (controller.signal.aborted) break;
-        // A definite refusal is final; a dropped connection is resumed from the last event printed.
+        // A definite refusal is final; a dropped connection is resumed from the last position reported.
         if (error instanceof CliError && error.status >= 400 && error.status < 500) throw error;
-        ended = "connection_lost";
       }
       if (controller.signal.aborted) break;
-      // The controller bounds a stream's lifetime and a restart drops it; anything else ends the follow.
-      if (ended !== undefined && !["stream_lifetime", "connection_lost", "unavailable"].includes(ended)) { io.stderr(`stream ended: ${ended.replace(/[^a-z0-9_]/g, "").slice(0, 64)}\n`); return 1; }
-      if (cursor === undefined) cursor = "0";
-      if (++failures > 5) throw new CliError("The event stream could not be resumed. Continue with --after " + cursor + ".", 503);
-      await new Promise<void>(done => { const timer = setTimeout(done, 2000); controller.signal.addEventListener("abort", () => { clearTimeout(timer); done(); }, { once: true }); });
+      // The controller ends every stream at its lifetime and when it closes. That is how a long follow
+      // normally continues, not a failure, so it reconnects at once and without a limit.
+      if (ended === "stream_lifetime") { await pause(io.followTiming?.reconnectMs ?? FOLLOW_RECONNECT_MS); continue; }
+      // A closing or unavailable controller, or a lost connection, is retried a few times.
+      if (!["controller_closing", "connection_lost", "unavailable"].includes(ended)) { io.stderr(`stream ended: ${ended.replace(/[^a-z0-9_]/g, "").slice(0, 64)}\n`); return 1; }
+      if (++failures > FOLLOW_RETRIES) throw new CliError(`The event stream could not be resumed.${cursor === undefined ? "" : " Continue with --after " + cursor + "."}`, 503);
+      await pause(io.followTiming?.retryMs ?? FOLLOW_RETRY_MS);
     }
   } finally {
     if (io.signal) io.signal.removeEventListener("abort", stop); else { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
@@ -233,14 +260,21 @@ async function doctor(args: CliArguments, io: ObservabilityIO): Promise<number> 
       }
     }
   }
-  const all = [...findings, ...(diagnosis?.findings ?? [])].filter(item => Object.hasOwn(FINDING_CODES, item.code));
+  // Every finding counts, including one whose code this version does not know: a newer controller may
+  // report something this command has no description for, and that must never read as a clean result.
+  const all = [...findings, ...(diagnosis?.findings ?? []).filter(item => item !== null && typeof item === "object").map(item => ({
+    ...item, code: typeof item.code === "string" ? item.code.replace(/[^a-z0-9_]/g, "").slice(0, 64) || "unknown_finding" : "unknown_finding",
+    severity: ["error", "warning", "notice"].includes(item.severity) ? item.severity : "warning" as Severity,
+    summary: typeof item.summary === "string" ? item.summary : "The controller reported a finding this version cannot describe.",
+    nextStep: typeof item.nextStep === "string" ? item.nextStep : "Upgrade this command, or read the finding with --json.",
+  }))];
   if (args.options.json === true) io.stdout(JSON.stringify({ controller, ok: all.length === 0, checks, findings: all, ...(diagnosis ? { checked: diagnosis.checked, omitted: diagnosis.omitted, generatedAt: diagnosis.generatedAt } : {}) }, null, 2) + "\n");
   else {
     io.stdout(`Canaveral doctor: ${controller}\n`);
     for (const check of checks) io.stdout(`${check.ok ? "ok  " : "FAIL"} ${check.check}: ${check.detail}\n`);
     if (diagnosis) io.stdout(`examined ${diagnosis.checked.hosts} hosts, ${diagnosis.checked.activeLeases} active leases, ${diagnosis.checked.waitingRequests} waiting requests, ${diagnosis.checked.updateJobs} update jobs, ${diagnosis.checked.alertDestinations} alert destinations\n`);
     io.stdout(all.length ? `${all.length} finding${all.length === 1 ? "" : "s"}${diagnosis?.omitted ? ` (${diagnosis.omitted} more omitted)` : ""}:\n` : "No findings.\n");
-    for (const item of all) io.stdout(`[${item.severity}] ${item.code}: ${item.summary}\n    next: ${item.nextStep}\n`);
+    for (const item of all) io.stdout(`[${item.severity}] ${item.code}${Object.hasOwn(FINDING_CODES, item.code) ? "" : " (not known to this version)"}: ${item.summary}\n    next: ${item.nextStep}\n`);
   }
   return all.length ? 1 : 0;
 }

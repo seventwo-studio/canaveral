@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { IosProvider } from "../../src/providers/ios.ts";
+import { captureNotRunning } from "../../src/providers/mobile.ts";
 import type { NativePipe, RunOptions } from "../../src/providers/mobile.ts";
 
 const options = { fps: 30, durationSeconds: 10, bitRate: 4_000_000 };
@@ -101,4 +102,25 @@ test("iOS duration shutdown drains bounded native output so idb can acknowledge 
   f.pipe.read = async maximum => { assert.equal(maximum, 65536); drained++; acknowledge(); return Buffer.alloc(65536); };
   t.mock.timers.tick(options.durationSeconds * 1000);
   assert.deepEqual(await source.read(65536, 1000), Buffer.alloc(0)); assert.ok(drained >= 1); assert.equal(await source.wait(1000), 0);
+});
+
+test("an iOS capture refused before idb is spawned, or stopped with proof right after, is marked as running nothing", async t => {
+  // Authorization that ended before or during the preflight: nothing was spawned.
+  for (const allowedChecks of [0, 1]) {
+    const f = fixture(t); let checks = 0;
+    const error = await f.provider.openVideo({}, {}, f.root, options, () => checks++ < allowedChecks).then(() => undefined, (caught: unknown) => caught);
+    assert.ok(error instanceof Error); assert.equal(captureNotRunning(error), true); assert.equal(f.opened, 0);
+  }
+  const invalid = fixture(t), refused = await invalid.provider.openVideo({}, {}, invalid.root, { ...options, fps: 29 }, invalid.check).then(() => undefined, (caught: unknown) => caught);
+  assert.equal(captureNotRunning(refused), true); assert.equal(invalid.opened, 0);
+  // Refused right after the spawn (the simulator's identity changed) and stopped with proof.
+  const changed = fixture(t); let calls = 0;
+  changed.provider.ready = async () => ++calls === 1 ? changed.id : randomUUID();
+  const stopped = await changed.provider.openVideo({}, {}, changed.root, options, changed.check).then(() => undefined, (caught: unknown) => caught);
+  assert.equal(changed.opened, 1); assert.equal(changed.closes, 1); assert.equal(captureNotRunning(stopped), true);
+  // The same refusal when the stop cannot be proven: the stop's own failure, unmarked.
+  const wedged = fixture(t); let observed = 0;
+  wedged.provider.ready = async () => ++observed === 1 ? wedged.id : randomUUID(); wedged.failWait();
+  const unproven = await wedged.provider.openVideo({}, {}, wedged.root, options, wedged.check).then(() => undefined, (caught: unknown) => caught);
+  assert.ok(unproven instanceof Error); assert.equal(wedged.opened, 1); assert.equal(captureNotRunning(unproven), false);
 });

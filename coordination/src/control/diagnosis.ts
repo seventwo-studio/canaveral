@@ -29,6 +29,7 @@ export const FINDING_CODES: Record<string, string> = {
   credential_rejected: "The controller rejected the credential.",
   credential_not_administrator: "The credential lacks administrator authority.",
   diagnosis_unavailable: "The controller did not return a diagnosis.",
+  controller_recently_started: "The controller started moments ago and has not heard from every host yet.",
   host_offline: "A host has not reported within the freshness window.",
   host_draining: "A host is set to refuse new placements.",
   host_maintenance: "A host has an active maintenance drain.",
@@ -47,6 +48,14 @@ export const FINDING_CODES: Record<string, string> = {
   alert_delivery_failing: "Alerts to a destination are failing.",
 };
 const HOST_FRESH_SECONDS = 30, CHECK_FRESH_SECONDS = 120, RECENT_SECONDS = 86400, CLEANUP_PATIENCE_SECONDS = 900, PER_CATEGORY = 50;
+/** After a restart every host looks silent until it reports again; the observer waits the same time. */
+export const LIVENESS_GRACE_SECONDS = 45;
+/** Operation receipts are never pruned. Partial indexes keep the diagnosis from reading all of them to
+ * find the few with an unknown outcome. Call once those tables exist. */
+export function diagnosisIndexes(db: DatabaseSync): void {
+  if (table(db, "device_operations")) db.exec("CREATE INDEX IF NOT EXISTS device_operations_unknown ON device_operations(updated) WHERE state='unknown'");
+  if (table(db, "linux_operations")) db.exec("CREATE INDEX IF NOT EXISTS linux_operations_unknown ON linux_operations(updated) WHERE state='unknown'");
+}
 const table = (db: DatabaseSync, name: string): boolean => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 const age = (seconds: number): string => seconds < 120 ? `${Math.round(seconds)}s` : seconds < 7200 ? `${Math.round(seconds / 60)}m` : `${Math.round(seconds / 3600)}h`;
 function json(value: unknown): Record<string, unknown> {
@@ -54,7 +63,9 @@ function json(value: unknown): Record<string, unknown> {
 }
 const label = (value: unknown): string => typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 100) : "";
 
-export function diagnose(db: DatabaseSync, now: number, settings: ObservabilitySettings): Diagnosis {
+/** `started` is when this controller process began observing. Until LIVENESS_GRACE_SECONDS have passed, a host
+ * that has not reported since then is not called offline: its silence may only be the controller's own downtime. */
+export function diagnose(db: DatabaseSync, now: number, settings: ObservabilitySettings, started = Number.NEGATIVE_INFINITY): Diagnosis {
   const findings: Finding[] = []; let omitted = 0;
   const bounded = <T>(rows: T[], add: (row: T) => void): void => { for (const row of rows.slice(0, PER_CATEGORY)) add(row); omitted += Math.max(0, rows.length - PER_CATEGORY); };
   const checked = { hosts: 0, activeLeases: 0, waitingRequests: 0, updateJobs: 0, alertDestinations: 0 };
@@ -63,9 +74,12 @@ export function diagnose(db: DatabaseSync, now: number, settings: ObservabilityS
     const retired = table(db, "retired_runners") ? new Set(db.prepare("SELECT id FROM retired_runners").all().map(row => String(row.id))) : new Set<string>();
     const hosts = db.prepare("SELECT id,offer,seen,enabled FROM hosts ORDER BY id").all().filter(row => !retired.has(String(row.id)));
     checked.hosts = hosts.length;
+    const settling = now - started < LIVENESS_GRACE_SECONDS;
+    let unheard = 0;
     for (const host of hosts) {
       const id = String(host.id), name = label(json(host.offer).name), subject = { type: "host", id }, named = name ? `Host ${name}` : `Host ${id}`;
       const silent = now - Number(host.seen);
+      if (silent >= HOST_FRESH_SECONDS && settling && Number(host.seen) < started) { unheard++; continue; }
       if (silent >= HOST_FRESH_SECONDS) {
         findings.push({ code: "host_offline", severity: "error", subject, summary: `${named} has not reported for ${age(silent)}.`,
           nextStep: "Check the host service and its route to the controller. Its placements stay pinned and reservations stay held until it reports again.",
@@ -93,8 +107,11 @@ export function diagnose(db: DatabaseSync, now: number, settings: ObservabilityS
         nextStep: "Checks older than 120 seconds block new placements. Request a check run; restart the host service if results do not refresh.",
         details: { checkedSecondsAgo: Math.round(stale) } });
     }
+    if (unheard) findings.push({ code: "controller_recently_started", severity: "notice", subject: { type: "controller", id: "controller" },
+      summary: `The controller started ${age(now - started)} ago and ${unheard} host${unheard === 1 ? " has" : "s have"} not reported since; ${unheard === 1 ? "its" : "their"} state is not judged yet.`,
+      nextStep: `Run doctor again in ${Math.max(1, Math.ceil(LIVENESS_GRACE_SECONDS - (now - started)))} seconds. A host that is still silent then is reported as offline.`,
+      details: { startedSecondsAgo: Math.round(now - started), hostsNotYetHeard: unheard } });
   }
-
   if (table(db, "leases")) checked.activeLeases += Number(db.prepare("SELECT count(*) AS n FROM leases WHERE state IN ('provisioning','ready')").get()!.n);
   if (table(db, "linux_leases")) checked.activeLeases += Number(db.prepare("SELECT count(*) AS n FROM linux_leases WHERE state IN ('provisioning','ready')").get()!.n);
   if (table(db, "lease_cleanup_members")) bounded(db.prepare("SELECT lease,machine,reason,attempts,next_retry FROM lease_cleanup_members WHERE state='blocked' ORDER BY updated,lease").all(), row => {

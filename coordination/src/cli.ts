@@ -249,6 +249,8 @@ export interface CliIO {
   signal?: AbortSignal;
   /** Connection probe used by `doctor`; portable tests replace it. */
   probe?: ObservabilityIO["probe"];
+  /** Pauses of `events --follow`; portable tests shorten them. */
+  followTiming?: ObservabilityIO["followTiming"];
 }
 function signals(external?: AbortSignal): { signal: AbortSignal; dispose(): void } {
   if (external) return { signal: external, dispose() {} };
@@ -527,7 +529,7 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       if (args.action === "prepare") { if (!value.source) throw new CliError("This template has no base image source to cache."); result.image = await io.runtime.prepareImage(record(value.source), option(args, "cache", "./state/images")); }
       io.stdout(JSON.stringify(result, null, 2) + "\n"); return 0;
     }
-    if (OBSERVABILITY_COMMANDS.includes(args.command)) return await handleObservability(args, { stdout: io.stdout, stderr: io.stderr, client: io.client, ...(io.signal ? { signal: io.signal } : {}), ...(io.probe ? { probe: io.probe } : {}) });
+    if (OBSERVABILITY_COMMANDS.includes(args.command)) return await handleObservability(args, { stdout: io.stdout, stderr: io.stderr, client: io.client, ...(io.signal ? { signal: io.signal } : {}), ...(io.probe ? { probe: io.probe } : {}), ...(io.followTiming ? { followTiming: io.followTiming } : {}) });
     const account: AccountContext = { client: token => io.client(args.url, token, args.allowHttp), password: io.password, output: io.output, print: value => io.stdout(JSON.stringify(value, null, 2) + "\n") };
     if (!await handleAccount(args, account)) await handleRemote(args, io);
     return 0;

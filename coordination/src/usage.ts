@@ -18,6 +18,9 @@ import type { EventProjection } from "./events.ts";
  */
 export const DEFAULT_USAGE_RETENTION_SECONDS = 400 * 86400;
 export const USAGE_MAX_RANGE_SECONDS = 400 * 86400;
+/** Requests plus leases one report may read. A report runs inside the control worker's single transaction,
+ * so a range that holds more is refused instead of stalling every other request. */
+export const USAGE_MAX_ROWS = 200_000;
 export type UsageGroup = "application" | "template" | "platform" | "host";
 export interface UsageQuery { from: number; to: number; groupBy: UsageGroup; application?: string }
 export interface Distribution { p50: number | null; p95: number | null; samples: number }
@@ -45,8 +48,21 @@ export function usageSchema(db: DatabaseSync, now: number): void {
       cleanup_blocked INTEGER NOT NULL DEFAULT 0, cleaned REAL);
     CREATE INDEX IF NOT EXISTS usage_leases_admitted ON usage_leases(admitted);
     CREATE INDEX IF NOT EXISTS usage_leases_ended ON usage_leases(ended);
+    CREATE INDEX IF NOT EXISTS usage_leases_uncleaned ON usage_leases(ended) WHERE cleaned IS NULL AND ended IS NOT NULL;
     CREATE TABLE IF NOT EXISTS usage_state (id INTEGER PRIMARY KEY CHECK(id=1), started REAL NOT NULL);`);
-  db.prepare("INSERT OR IGNORE INTO usage_state VALUES (1,?)").run(now);
+  // The longest hold ever recorded. It lets a report find leases carried into its range by looking back
+  // only that far, instead of at every lease admitted before it. It never decreases, so it stays an upper bound.
+  if (!(db.prepare("PRAGMA table_info(usage_state)").all() as Array<{ name: string }>).some(column => column.name === "max_hold")) {
+    db.exec("ALTER TABLE usage_state ADD COLUMN max_hold REAL NOT NULL DEFAULT 0");
+    db.exec("UPDATE usage_state SET max_hold=coalesce((SELECT max(ended-admitted) FROM usage_leases WHERE ended IS NOT NULL),0)");
+  }
+  db.prepare("INSERT OR IGNORE INTO usage_state (id,started) VALUES (1,?)").run(now);
+}
+/** Indexes on the request ledger that reports read by time. The requests table belongs to another module
+ * and is never pruned, so without them every report would scan all of it. Call once that table exists. */
+export function usageIndexes(db: DatabaseSync): void {
+  if (tableExists(db, "requests")) db.exec(`CREATE INDEX IF NOT EXISTS requests_created ON requests(created);
+    CREATE INDEX IF NOT EXISTS requests_application_created ON requests(application,created);`);
 }
 /** Leases that were already active when the ledger was first installed keep their exact admission time. */
 export function backfillActiveLeases(db: DatabaseSync): void {
@@ -73,6 +89,7 @@ export const usageProjection: EventProjection = (db, events) => {
     } else if (event.kind === "lease.ready") db.prepare("UPDATE usage_leases SET ready=? WHERE lease=? AND ready IS NULL").run(event.at, event.lease);
     else if (["lease.released", "lease.expired", "lease.failed"].includes(event.kind)) {
       db.prepare("UPDATE usage_leases SET ended=?,outcome=?,reason=? WHERE lease=? AND ended IS NULL").run(event.at, event.kind.slice(6), text(data.reason), event.lease);
+      db.prepare("UPDATE usage_state SET max_hold=max(max_hold,coalesce((SELECT ended-admitted FROM usage_leases WHERE lease=?),0)) WHERE id=1").run(event.lease);
     } else if (event.kind === "lease.cleanup_blocked") db.prepare("UPDATE usage_leases SET cleanup_blocked=cleanup_blocked+1 WHERE lease=?").run(event.lease);
     else if (event.kind === "lease.cleanup_proven") db.prepare("UPDATE usage_leases SET cleaned=? WHERE lease=? AND cleaned IS NULL").run(event.at, event.lease);
   }
@@ -117,7 +134,7 @@ class Accumulator {
   }
 }
 
-export function usageReport(db: DatabaseSync, query: UsageQuery, now: number, retentionSeconds = DEFAULT_USAGE_RETENTION_SECONDS): UsageReport {
+export function usageReport(db: DatabaseSync, query: UsageQuery, now: number, retentionSeconds = DEFAULT_USAGE_RETENTION_SECONDS, maxRows = USAGE_MAX_ROWS): UsageReport {
   const groups = new Map<string, Accumulator>(), total = new Accumulator();
   const group = (key: string) => { let found = groups.get(key); if (!found) { found = new Accumulator(); groups.set(key, found); } return found; };
   const withRequests = query.groupBy !== "host";
@@ -131,6 +148,25 @@ export function usageReport(db: DatabaseSync, query: UsageQuery, now: number, re
     }
     return platforms.get(key)!;
   };
+  // Count through the indexes first, stopping just past the limit, so an oversized range costs no more than the limit.
+  const tooLarge = () => new ServiceError("This range holds too many requests and leases for one report; ask for a shorter range.", 400, { code: "usage_range_too_large" });
+  const scoped = query.application ? " AND application=?" : "", scope = query.application ? [query.application] : [];
+  let budget = maxRows;
+  const within = (sql: string, ...parameters: Array<string | number>): void => {
+    budget -= Number(db.prepare(`SELECT count(*) AS n FROM (${sql} LIMIT ?)`).get(...parameters, budget + 1)!.n);
+    if (budget < 0) throw tooLarge();
+  };
+  // A lease counts in the range when it was admitted in it, or was admitted earlier and was still held when
+  // the range began. An ended lease can only have been carried in if it was admitted within the longest hold
+  // ever recorded before the range, so each of the three reads is a bounded walk of an index on `admitted`.
+  const longest = tableExists(db, "usage_state") ? Number(db.prepare("SELECT max_hold FROM usage_state WHERE id=1").get()?.max_hold ?? 0) : 0;
+  const leaseReads: Array<[string, Array<string | number>]> = tableExists(db, "usage_leases") ? [
+    [`SELECT * FROM usage_leases WHERE admitted>=? AND admitted<?${scoped}`, [query.from, query.to, ...scope]],
+    [`SELECT * FROM usage_leases WHERE admitted>=? AND admitted<? AND ended>?${scoped}`, [query.from - longest, query.from, query.from, ...scope]],
+    [`SELECT * FROM usage_leases WHERE ended IS NULL AND admitted<?${scoped}`, [query.from, ...scope]],
+  ] : [];
+  if (withRequests && tableExists(db, "requests")) within(`SELECT 1 FROM requests WHERE created>=? AND created<?${scoped}`, query.from, query.to, ...scope);
+  for (const [sql, parameters] of leaseReads) within(sql.replace("SELECT *", "SELECT 1"), ...parameters);
   if (withRequests && tableExists(db, "requests")) {
     const rows = db.prepare(`SELECT application,kind,state,created,admitted_at,
         CASE WHEN json_valid(intent) THEN json_extract(intent,'$.templateId') END AS template,CASE WHEN json_valid(intent) THEN json_extract(intent,'$.templateRevision') END AS revision,
@@ -147,10 +183,8 @@ export function usageReport(db: DatabaseSync, query: UsageQuery, now: number, re
       }
     }
   }
-  if (tableExists(db, "usage_leases")) {
-    const rows = db.prepare(`SELECT * FROM usage_leases WHERE admitted<? AND (admitted>=? OR ended IS NULL OR ended>?)${query.application ? " AND application=?" : ""}`)
-      .all(query.to, query.from, query.from, ...(query.application ? [query.application] : [])) as unknown as LedgerRow[];
-    for (const l of rows) {
+  for (const [sql, parameters] of leaseReads) {
+    for (const l of db.prepare(sql).all(...parameters) as unknown as LedgerRow[]) {
       const key = query.groupBy === "application" ? l.application : query.groupBy === "template" ? template(l.template, l.revision, l.arch)
         : query.groupBy === "platform" ? l.platform ?? "unknown" : l.host ?? (l.domain ? `domain:${l.domain}` : "unassigned");
       const overlap = Math.max(0, Math.min(l.ended ?? now, query.to, now) - Math.max(l.admitted, query.from));

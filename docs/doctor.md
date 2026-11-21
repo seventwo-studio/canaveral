@@ -21,10 +21,23 @@ the `severity` field to decide what should fail a script.
    trust store. It sends no credential.
 2. One `GET /v1/admin/diagnosis` with the credential file.
 
-Both are reads. `doctor` never sends a POST. The controller computes the diagnosis
-on a separate read-only SQLite connection, so it cannot write, take the write lock
-or advance a lifecycle, whatever it finds. Checking the credential uses the same
-path as any other read route.
+Both are reads. `doctor` never sends a POST, and the diagnosis itself is computed on
+a separate read-only SQLite connection, so nothing it finds can make it write.
+
+That is not the same as the request leaving the database untouched. Like every
+request the controller serves, this one passes through the controller's ordinary
+machinery:
+
+- Checking an account session or a personal token is a normal controller
+  transaction. Every such transaction first runs the lease lifecycle refresh, which
+  may record that a lease expired or became ready. The operator credential is
+  compared in memory and opens no transaction.
+- After any handled request the controller looks at the request queue, as its
+  one-second timer also does. If requests are waiting, that pass may admit one.
+
+Both would have happened at the next request or timer regardless. `doctor` adds no
+mutation of its own, but do not read it as a guarantee that the database file is
+byte-identical afterwards on a controller with work in progress.
 
 A diagnosis reads the ledgers as they are. It does not contact hosts, repeat an
 operation or decide an uncertain outcome. A finding about a host says what the host
@@ -67,6 +80,7 @@ controller state.
 | `credential_rejected` | error | The controller answered 401 | Sign in again or use a current credential |
 | `credential_not_administrator` | error | The controller answered 403 | Use an operator credential or an administrator scope |
 | `diagnosis_unavailable` | error | The controller did not return a diagnosis | Check the controller version and its storage |
+| `controller_recently_started` | notice | The controller started under 45 seconds ago and some hosts have not reported since | Run `doctor` again after the stated time |
 | `host_offline` | error | No heartbeat for 30 seconds or more | Check the host service and its route; reservations stay held |
 | `host_draining` | notice | The host refuses new placements | `canaveral accept HOST` when it should take work again |
 | `host_maintenance` | notice | A maintenance drain is active | `canaveral maintenance status HOST`, then resume |
@@ -84,6 +98,16 @@ controller state.
 | `update_job_active` | notice | A job is in progress | Wait; the host admits no new work meanwhile |
 | `alert_delivery_failing` | warning | Alerts to a destination failed in the last 24 hours | `canaveral alerts test ID`, then check the receiver |
 
+For 45 seconds after a controller start, a host that has not reported since that
+start is not called offline: its silence may only be the controller's own downtime.
+Those hosts are counted in one `controller_recently_started` notice instead, and a
+host that has already reported is judged normally. The event observer waits the
+same time.
+
+A finding whose code this version of the CLI does not know is still printed, marked
+as unknown to this version, and still counts toward the exit status. A newer
+controller can therefore never make an older `doctor` report a clean result.
+
 An offline host is reported as offline only; what it last said about its checks is
 not repeated. An uncertain install stops being a finding when an operator resolves
 it or when its leased emulator's cleanup is proven.
@@ -98,4 +122,7 @@ Stable [error codes](error-codes.md) returned by routes are a separate catalogue
   certificate authority is reported as untrusted.
 - Findings describe ledger state. They do not establish that a runtime stopped, that
   storage was removed or that a host is healthy.
+- The diagnosis runs on the control worker and reads operation receipts through
+  partial indexes the controller adds at startup. Its cost has not been measured on
+  a production database.
 - The route is not forwarded by the dashboard gateway.

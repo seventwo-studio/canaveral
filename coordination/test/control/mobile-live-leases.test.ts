@@ -257,8 +257,8 @@ test("a recording takes the device's one native capture and feeds the live viewe
   await until(() => media(viewer.got).length >= 4, "live segments");
   const out = sink(), recording = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 3, ...VIDEO }, out, { timeoutMs: 30000 });
   await until(() => h.media.started.get(name)!.length === 2, "the recording's own capture");
-  // The live capture and the recording each hold a reservation; only one recorder runs.
-  assert.deepEqual(await h.reserved(), { cpu: 4, memoryMiB: 2560, diskGiB: 8 });
+  // The live view and the recording share the capture reservation.
+  assert.deepEqual(await h.reserved(), { cpu: 3, memoryMiB: 2304, diskGiB: 8 });
   assert.equal(h.media.started.get(name)!.filter(recorder => recorder.running).length, 1);
   const finish = await recording, recorded = Buffer.concat(out.chunks);
   // The recording is exactly what it would have been alone: verified bytes, digest and cleanup.
@@ -270,7 +270,7 @@ test("a recording takes the device's one native capture and feeds the live viewe
   assert.ok(during.length >= 3, "the viewer watched the recording's stream");
   for (const segment of during) assert.ok(recorded.includes(segment.data), "a viewer segment is a fragment of the recording");
   assert.equal(h.media.started.get(name)!.length, 3); assert.equal(h.media.peak, 1);
-  await until(async () => (await h.reserved()).cpu === 3, "the recording's reservation released");
+  await until(async () => (await h.reserved()).cpu === 3, "the live capture retained its reservation after recording");
   // The other order: a viewer joins a recording already in progress.
   viewer.stream.close(); await viewer.got.done;
   await until(async () => (await h.reserved()).cpu === 2, "the live capture's reservation released");

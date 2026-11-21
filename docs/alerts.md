@@ -45,7 +45,7 @@ All routes require administrator authority.
 
 | Method and path | Request | Effect |
 | --- | --- | --- |
-| `GET /v1/admin/alerts/destinations` | none | Destinations with delivery counts and the last attempt |
+| `GET /v1/admin/alerts/destinations` | none | Destinations with pending, delivered, failed and dropped counts and the last attempt |
 | `POST /v1/admin/alerts/destinations` | `{id, name, type, url, secret?, kinds?}` | 201 new, 200 exact replay |
 | `POST /v1/admin/alerts/destinations/{id}/remove` | `{}` | Remove; cancels unsent deliveries |
 | `POST /v1/admin/alerts/destinations/{id}/test` | `{id: requestUUID}` | One immediate delivery of kind `alert.test` |
@@ -98,7 +98,24 @@ To keep a flapping condition from flooding a channel, a destination receives at
 most one alert per kind and subject in five minutes. Every transition is still in
 the event log.
 
-Settled deliveries are kept for seven days, and at most 2000 of them.
+### Bounds
+
+The outbox is bounded, and destinations do not wait for each other.
+
+- A destination holds at most 100 unsent deliveries. When another alert arrives for
+  a full destination, its oldest unsent delivery makes room. That delivery is kept
+  as a `failed` row with outcome `dropped`, the destination's `deliveries.dropped`
+  count shows it, and the first drop in five minutes is also recorded as an
+  `alert.delivery_failed` event. The newest alerts are the ones kept.
+- Each destination is claimed and sent on its own, at most four deliveries at a
+  time. A destination with a send still in flight is skipped, and the controller
+  does not wait for a send before its next round. A receiver that never answers
+  therefore delays only its own alerts: a healthy destination keeps its one-second
+  cadence beside it.
+- Settled deliveries, including dropped ones, are kept for seven days and at most
+  2000 of them.
+
+With eight destinations the outbox never holds more than 800 unsent deliveries.
 
 ## The webhook request
 

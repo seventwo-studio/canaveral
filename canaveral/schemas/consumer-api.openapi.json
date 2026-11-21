@@ -1895,7 +1895,7 @@
             "ApplicationBearer": []
           }
         ],
-        "description": "This application's own events, oldest first: its leases, waiting requests, leased machines, operation outcomes and lease video sessions. Filtered to the authenticated application; host identity is never included. See docs/events.md. The SDK never polls.",
+        "description": "This application's own events, oldest first: its leases, waiting requests, leased machines, operation outcomes and lease video sessions. Filtered to the authenticated application; host identity is never included. A read with a kind or subject filter examines a bounded stretch of the log, so its page can be short or empty with more: true; read again from cursor. See docs/events.md. The SDK never polls.",
         "parameters": [
           {
             "name": "after",
@@ -2043,7 +2043,7 @@
             "ApplicationBearer": []
           }
         ],
-        "description": "Live follow of this application's own events as server-sent events. Each event is one unnamed message whose id is its sequence and whose data is an Event. Resume with after or the Last-Event-ID header; without either the stream starts after the newest matching event. Named messages: truncated (retention removed history after the cursor) and end ({code, cursor}). A stream lasts at most one hour and ends when the credential stops being valid. Refusals before the stream begins are ordinary JSON errors. See docs/events.md. The SDK never reconnects.",
+        "description": "Live follow of this application's own events as server-sent events. Each event is one unnamed message whose id is its sequence and whose data is an Event. Named messages: open ({cursor}, always first), cursor ({cursor}, after ten quiet seconds), truncated ({after}, retention removed history after the resume cursor) and end ({code, cursor}). open, cursor and end carry the stream position as their id, so a client that reconnects with its last id resumes without loss or repetition. The Last-Event-ID header is the resume cursor and wins over after; without either the stream starts after the newest matching event. End codes: stream_lifetime after one hour, controller_closing, unauthenticated or forbidden when the credential stops being valid, unavailable. At most 4 streams per credential; a refused request is 429 event_stream_limit. Refusals before the stream begins are ordinary JSON errors. See docs/events.md. The SDK never reconnects.",
         "parameters": [
           {
             "name": "after",
@@ -2058,7 +2058,7 @@
           {
             "name": "Last-Event-ID",
             "in": "header",
-            "description": "Resume cursor when after is absent.",
+            "description": "Resume cursor. Wins over after when both are present.",
             "schema": {
               "type": "string",
               "pattern": "^(?:0|[1-9][0-9]{0,15})$"
@@ -2172,7 +2172,7 @@
             "ApplicationBearer": []
           }
         ],
-        "description": "This application's own usage over a UTC range: request outcomes and wait time, lease counts, time to ready, hold time and device-seconds. Derived from controller ledgers, not measured utilisation. See docs/usage.md.",
+        "description": "This application's own usage over a UTC range: request outcomes and wait time, lease counts, time to ready, hold time and device-seconds. Derived from controller ledgers, not measured utilisation. A range holding more than 200000 requests and leases is refused with 400 usage_range_too_large. See docs/usage.md.",
         "parameters": [
           {
             "name": "from",
@@ -5058,11 +5058,11 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991,
-            "description": "Pass as after to continue."
+            "description": "Pass as after to continue: the last event of a full page, otherwise as far as the read examined."
           },
           "more": {
             "type": "boolean",
-            "description": "Another page is available now."
+            "description": "More can be read now from cursor. A filtered page can be short or empty while this is true."
           },
           "truncated": {
             "type": "boolean",

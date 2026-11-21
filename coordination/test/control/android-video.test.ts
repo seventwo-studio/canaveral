@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { openAndroidVideo, parseRecorderHeader, recorderCommand, recorderStopCommand } from '../../src/providers/android-video.ts';
 import type { AndroidVideoOptions } from '../../src/providers/android-video.ts';
 import type { AndroidProvider } from '../../src/providers/android.ts';
+import { captureNotRunning } from '../../src/providers/mobile.ts';
 import type { NativePipe, RecordValue } from '../../src/providers/mobile.ts';
 import { ServiceError } from '../../src/errors.ts';
 import { spawn, spawnSync } from 'node:child_process';
@@ -224,4 +225,29 @@ test('Android recorder stop command identifies, signals and confirms a real proc
     await exited;
     assert.match(run(recorderStopCommand(recorder)), /^canaveral-recorder (absent|replaced)$/);
   } finally { child.kill('SIGKILL'); }
+});
+
+test('an Android capture refused before its recorder is spawned is marked as running nothing; a failure after the spawn is not', async () => {
+  // Authorization that has ended, a device that is not ready or not owned, a missing boot identity
+  // and invalid options are all found before anything is spawned.
+  for (const prepare of [(f: ReturnType<typeof fixture>) => f.revoke(), (f: ReturnType<typeof fixture>) => f.notBooted(), (f: ReturnType<typeof fixture>) => f.setForeign(), (f: ReturnType<typeof fixture>) => f.noEpoch()]) {
+    const f = fixture(); prepare(f);
+    const error = await f.owned().then(() => undefined, (caught: unknown) => caught);
+    assert.ok(error instanceof Error); assert.equal(captureNotRunning(error), true); assert.equal(f.captures, 0);
+  }
+  const invalid = fixture(), refused = await invalid.owned({ ...invalid.options, fps: 60 }).then(() => undefined, (caught: unknown) => caught);
+  assert.equal(captureNotRunning(refused), true); assert.equal(invalid.captures, 0);
+  // Authorization that ends between two preflight steps, as when a viewer leaves while its
+  // capture is still being opened.
+  const leaving = fixture(); let checks = 0;
+  const left = await openAndroidVideo(leaving.provider, leaving.machine, leaving.image, '/fixture', leaving.options, () => checks++ < 1).then(() => undefined, (caught: unknown) => caught);
+  assert.ok(left instanceof Error); assert.equal(captureNotRunning(left), true); assert.equal(leaving.captures, 0);
+  assert.ok(leaving.calls.includes('boot'), 'the refusal came after the first preflight step');
+  // Once the recorder is spawned the source is returned so its owner can prove cleanup; a later
+  // failure says nothing about what still runs.
+  const spawned = fixture(), pipe = await spawned.owned();
+  assert.equal(spawned.captures, 1); spawned.revoke();
+  const later = await pipe.read(65536, 1000).then(() => undefined, (caught: unknown) => caught);
+  assert.ok(later instanceof Error); assert.equal(captureNotRunning(later), false);
+  assert.equal(captureNotRunning(undefined), false); assert.equal(captureNotRunning(new Error('unmarked')), false);
 });

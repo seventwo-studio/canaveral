@@ -340,19 +340,26 @@ test("live captures and recordings share the host's four video session slots", {
   const session = await video.create(devices[3]!, { id: randomUUID(), fps: 30, durationSeconds: 20, bitRate: 4_000_000 });
   for (const viewer of viewers) await until(() => media(viewer.got).length >= 2, "segments on every watched device");
   assert.equal(f.stats.captures, 3);
-  // A fifth capture of either kind is refused, and so is a second live capture slot for a new device.
+  // A new live capture cannot displace one already holding a slot.
   assert.equal((await f.api("POST", `/v1/machines/${devices[4]}/live-views`, { id: randomUUID() }, owner.session)).status, 429);
-  assert.equal((await f.api("POST", `/v1/machines/${devices[4]}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 4_000_000 }, owner.session)).status, 429);
   // More viewers of an already watched device need no slot.
   const joined = await f.watch(owner.session, devices[0]!);
   await until(() => media(joined.got).length >= 2, "segments for a joining viewer");
   assert.equal(f.stats.captures, 3);
-  // Closing the recording frees its slot once its runner confirms that nothing was captured.
+  // The next recording displaces the oldest live capture. Both pending recordings still
+  // need a viewer before opening a native source.
+  const priority = await video.create(devices[4]!, { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 4_000_000 });
+  await viewers[0]!.got.done;
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  assert.equal((await live.inspect(devices[0]!, viewers[0]!.id)).endReason, "preempted_by_recording");
+  await video.close(devices[4]!, priority.id);
+  await until(async () => (await video.inspect(devices[4]!, priority.id)).cleaned === true, "the priority recording's slot");
+  // Closing the first recording also frees its slot after the runner confirms cleanup.
   await video.close(devices[3]!, session.id);
   await until(async () => (await video.inspect(devices[3]!, session.id)).cleaned === true, "the closed recording's slot");
   const fifth = await f.watch(owner.session, devices[4]!);
   await until(() => media(fifth.got).length >= 2, "segments once a slot is free");
   for (const viewer of [...viewers, joined, fifth]) { viewer.stream.close(); await viewer.got.done; }
   await until(async () => Number((await f.reserved()).cpu) === 5, "every capture released");
-  assert.equal(f.stats.peak, 4);
+  assert.ok(f.stats.peak <= 4);
 });

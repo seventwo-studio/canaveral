@@ -7,7 +7,10 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { CliError } from "../../src/account-cli.ts";
+import type { RequestClient } from "../../src/account-cli.ts";
 import { main, parseCli } from "../../src/cli.ts";
+import type { ServerSentEvent } from "../../src/sse.ts";
 import { controllerFixture, eventually } from "./observability-controller.test.ts";
 
 /** Disposable loopback controller only: this proves no native host or runtime acceptance. */
@@ -72,17 +75,27 @@ test("canaveral events, usage and alerts drive the controller with private files
   assert.deepEqual(streamed.slice(0, -1).map(line => JSON.parse(line).kind), ["lease.released"]);
   assert.equal(streamed.at(-1), `cursor=${JSON.parse(streamed[0]!).sequence}`);
 
+  // Without --after a follow against the real controller starts at the head: nothing already in the log is printed.
+  const fresh = new AbortController(); let live = "";
+  const watching = main(["--url", f.url(), "--token-file", adminFile, "events", "--follow", "--kind", "lease.*"], { stdout: text => { live += text; }, stderr: () => {}, signal: fresh.signal });
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const later = await f.acquire(app.credential);
+  await eventually(() => live, text => text.includes(later.id));
+  fresh.abort();
+  assert.equal(await watching, 0);
+  assert.deepEqual(live.trim().split("\n").map(line => [JSON.parse(line).kind, JSON.parse(line).leaseId]), [["lease.admitted", later.id]]);
+
   // usage: the same report as text, JSON and CSV.
   run = await cli(adminFile, ["usage", "--format", "json", "--last", "1h"]);
   const report = JSON.parse(run.stdout);
-  assert.equal(report.groupBy, "application"); assert.equal(report.totals.leases.admitted, 2); assert.equal(report.totals.leases.released, 1);
+  assert.equal(report.groupBy, "application"); assert.equal(report.totals.leases.admitted, 3); assert.equal(report.totals.leases.released, 1);
   assert.deepEqual(report.rows.map((row: any) => row.key).sort(), [app.id, other.id].sort());
   run = await cli(adminFile, ["usage", "--format", "csv", "--group-by", "host"]);
   assert.deepEqual(run.stdout.split("\r\n").slice(0, 2).map(line => line.split(",").slice(0, 3).join(",")), ["group,key,label", `host,${f.host},disposable fixture`]);
   run = await cli(adminFile, ["usage", "--group-by", "platform"]);
   assert.match(run.stdout, /^Usage \S+ to \S+ by platform\nplatform +requests .*device-s\nlinux .*\ntotal .*\nRequest records are not pruned\. Lease figures come from the usage ledger, kept 400 days after a lease ends and started \S+\.\n$/);
   run = await cli(appFile, ["usage", "--own", "--format", "json"]);
-  assert.equal(JSON.parse(run.stdout).applicationId, app.id); assert.equal(JSON.parse(run.stdout).totals.leases.admitted, 1);
+  assert.equal(JSON.parse(run.stdout).applicationId, app.id); assert.equal(JSON.parse(run.stdout).totals.leases.admitted, 2);
   assert.equal((await cli(adminFile, ["usage", "--application", other.id, "--format", "json"])).lines.length > 0, true);
 
   // alerts: the URL and signing secret come from private files; a readable-by-others file is refused before any request.
@@ -116,6 +129,73 @@ test("canaveral events, usage and alerts drive the controller with private files
   assert.deepEqual(JSON.parse((await cli(adminFile, ["alerts", "list"])).stdout).destinations, []);
   assert.equal((await cli(adminFile, ["alerts", "test", destination])).status, 1);
   assert.equal((await cli(appFile, ["alerts", "list"])).status, 1);
+});
+
+/** A scripted streaming client: each call to `stream` plays the next script and records the path it was asked for. */
+function scriptedStreams(scripts: Array<(signal: AbortSignal) => AsyncGenerator<ServerSentEvent> | Error>) {
+  const paths: string[] = [];
+  const client = {
+    async request(): Promise<Record<string, unknown>> { throw new CliError("not scripted", 500); },
+    async stream(path: string, signal: AbortSignal): Promise<AsyncIterable<ServerSentEvent>> {
+      paths.push(path);
+      const script = scripts[paths.length - 1];
+      if (!script) return (async function* () { await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true })); })();
+      const played = script(signal);
+      if (played instanceof Error) throw played;
+      return played;
+    },
+  };
+  return { paths, client: client as unknown as RequestClient };
+}
+const message = (event: string | undefined, data: Record<string, unknown>, id?: number): ServerSentEvent => ({ ...(event ? { event } : {}), ...(id === undefined ? {} : { id: String(id) }), data: JSON.stringify(data) });
+const event = (sequence: number) => message(undefined, { sequence, at: "2026-11-21T09:00:00.000Z", kind: "lease.ready", data: {} }, sequence);
+async function* play(...messages: ServerSentEvent[]) { yield* messages; }
+
+test("events --follow starts at the head, resumes from the position the controller reported and survives quiet stream ends", async t => {
+  const tokens = mkdtempSync(join(tmpdir(), "canaveral-follow-")); t.after(() => rmSync(tokens, { recursive: true, force: true }));
+  const tokenFile = join(tokens, "token"); writeFileSync(tokenFile, "x".repeat(43) + "\n", { mode: 0o600 });
+  const follow = async (scripts: Parameters<typeof scriptedStreams>[0], args: string[] = [], until?: (output: { stdout: string; paths: string[] }) => boolean) => {
+    const scripted = scriptedStreams(scripts), abort = new AbortController(), output = { stdout: "", stderr: "" };
+    const running = main(["--url", "http://127.0.0.1:1", "--token-file", tokenFile, "events", "--follow", ...args], { stdout: text => { output.stdout += text; }, stderr: text => { output.stderr += text; },
+      client: () => scripted.client, signal: abort.signal, followTiming: { reconnectMs: 5, retryMs: 20 } });
+    if (until) { await eventually(() => ({ stdout: output.stdout, paths: scripted.paths }), until); abort.abort(); }
+    return { status: await running, ...output, paths: scripted.paths, sequences: output.stdout.trim().split("\n").filter(Boolean).map(line => JSON.parse(line).sequence as number) };
+  };
+  const lifetime = (cursor: number) => message("end", { code: "stream_lifetime", cursor }, cursor);
+  // No --after: the first stream starts at the head. It ends without any event, at its lifetime.
+  const quiet = await follow([
+    () => play(message("open", { cursor: 40 }, 40), message("cursor", { cursor: 44 }, 44), lifetime(44)),
+    () => play(message("open", { cursor: 44 }, 44), event(45), message("cursor", { cursor: 50 }, 50), lifetime(50)),
+    // Seven more ordinary ends in a row: following again is not a failure and has no limit.
+    ...Array.from({ length: 7 }, () => () => play(message("open", { cursor: 50 }, 50), lifetime(50))),
+  ], ["--kind", "lease.*"], output => output.paths.length === 10);
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.deepEqual(quiet.sequences, [45], "only the new event is printed; retained history is never replayed");
+  assert.equal(quiet.paths[0], "/v1/admin/events/stream?kind=lease.*");
+  assert.equal(quiet.paths[1], "/v1/admin/events/stream?kind=lease.*&after=44", "the quiet stream's end cursor is the resume position");
+  assert.deepEqual([...new Set(quiet.paths.slice(2))], ["/v1/admin/events/stream?kind=lease.*&after=50"]);
+  assert.ok(quiet.paths.every(path => !/after=0\b/.test(path)));
+  assert.equal(quiet.stderr, "cursor=50\n");
+  // A stream cut before it reported any position is followed from the head again, not from zero.
+  const cut = await follow([() => new CliError("Controller response was not confirmed.", 503), () => play(message("open", { cursor: 7 }, 7), event(8))], [], output => output.stdout.includes('"sequence":8'));
+  assert.deepEqual([cut.status, cut.sequences, cut.paths.slice(0, 2)], [0, [8], ["/v1/admin/events/stream", "/v1/admin/events/stream"]]);
+  // A lost connection resumes from the last event; a closing controller from its end cursor.
+  const lost = await follow([() => play(message("open", { cursor: 10 }, 10), event(11)), () => play(message("open", { cursor: 11 }, 11), message("end", { code: "controller_closing", cursor: 13 }, 13)), () => play(message("open", { cursor: 13 }, 13), event(14))],
+    ["--after", "10"], output => output.stdout.includes('"sequence":14'));
+  assert.deepEqual([lost.status, lost.sequences], [0, [11, 14]]);
+  assert.deepEqual(lost.paths.slice(0, 3), ["/v1/admin/events/stream?after=10", "/v1/admin/events/stream?after=11", "/v1/admin/events/stream?after=13"]);
+  // Only consecutive attempts that yield nothing count; five retries, then the command says where to continue.
+  const failing = await follow([() => play(message("open", { cursor: 3 }, 3), event(4)), ...Array.from({ length: 6 }, () => () => new CliError("Controller response was not confirmed.", 503))]);
+  assert.equal(failing.status, 1); assert.equal(failing.paths.length, 6, "the stream that worked, then five retries");
+  assert.deepEqual([...new Set(failing.paths.slice(1))], ["/v1/admin/events/stream?after=4"]);
+  assert.match(failing.stderr, /The event stream could not be resumed\. Continue with --after 4\./);
+  // A credential that stopped being accepted ends the follow; a definite refusal is not retried.
+  const revoked = await follow([() => play(message("open", { cursor: 3 }, 3), message("end", { code: "unauthenticated", cursor: 3 }, 3))]);
+  assert.deepEqual([revoked.status, revoked.stderr, revoked.paths.length], [1, "stream ended: unauthenticated\n", 1]);
+  const refused = await follow([() => new CliError("Controller request failed (HTTP 429, event_stream_limit). Inspect state before retrying.", 429)]);
+  assert.deepEqual([refused.status, refused.paths.length], [1, 1]); assert.match(refused.stderr, /event_stream_limit/);
+  const truncated = await follow([() => play(message("open", { cursor: 2 }, 2), message("truncated", { after: 2 }), event(90))], ["--after", "2"], output => output.stdout.includes('"sequence":90'));
+  assert.match(truncated.stderr, /^truncated=true \(retention removed events after the supplied cursor\)\ncursor=90\n$/);
 });
 
 test("the command line documents and strictly parses the observability commands", async () => {

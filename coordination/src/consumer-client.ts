@@ -79,6 +79,15 @@ export interface ControllerEvent {
 export interface EventPage { events: ControllerEvent[]; cursor: number; more: boolean; truncated: boolean }
 export interface EventFilter { kinds?: string[]; leaseId?: string; requestId?: string }
 export interface EventListOptions extends EventFilter { after?: number; tail?: number; since?: string; limit?: number }
+export interface EventFollowOptions extends EventFilter {
+  after?: number; signal?: AbortSignal;
+  /** Called when retention removed history after `after`. Supplying it accepts the gap; without it the stream throws. */
+  onTruncated?: (gap: { after: number }) => void;
+  /** Called when the stream reports how far it has read without an event, so a quiet follower can save a fresh cursor. */
+  onCursor?: (cursor: number) => void;
+}
+/** An ordinary end of a followed stream. Continue with `after: cursor`. */
+export interface EventStreamEnd { reason: "stream_lifetime" | "controller_closing" | "aborted"; cursor: number | undefined }
 export interface UsageDistribution { p50: number | null; p95: number | null; samples: number }
 export interface UsageRow {
   key: string; label?: string;
@@ -643,30 +652,63 @@ export class ConsumerClient extends LeaseOperations {
     if (o.after !== undefined && o.tail !== undefined) throw new ConsumerConfigurationError("Use either after or tail.", "invalid_request");
     return (await parsed(this.#transport, "GET", "/v1/events" + eventQuery(o), undefined, [200], false, undefined, eventPage)).value;
   }
-  /** Follows this application's events live over one server-sent event stream. Without `after` it starts with
-   * the next event. The iterator ends when the controller ends the stream (at most an hour, or when the credential
-   * is revoked) and throws on a connection failure. It never reconnects: resume with `after` set to the last
-   * `sequence` received. Abort the signal, or stop iterating, to close it. */
-  async *followEvents(options: EventFilter & { after?: number; signal?: AbortSignal } = {}): AsyncGenerator<ControllerEvent, void, void> {
-    const o = exact(options, ["after", "kinds", "leaseId", "requestId", "signal"], "Event options") as EventFilter & { after?: number; signal?: AbortSignal };
-    const { signal, ...filter } = o;
-    const response = await this.#transport.stream("/v1/events/stream" + eventQuery(filter), signal);
+  /** Follows this application's events live over one server-sent event stream. Without `after` it starts
+   * with the next event. It never reconnects.
+   *
+   * How it ends is always visible:
+   * - It returns an `EventStreamEnd` when the controller ends the stream in the ordinary way
+   *   (`stream_lifetime` after an hour, `controller_closing`) or when the caller aborts. A `for await` loop
+   *   simply finishes; follow again with `after` set to the returned `cursor` or the last `sequence` seen.
+   * - It throws `ConsumerServiceError` when the stream ends because the credential is no longer accepted
+   *   (`unauthenticated`, `forbidden`) or the controller reports `unavailable`.
+   * - It throws `ConsumerTransportError` when the connection drops without an end message.
+   * - When retention has removed history after `after`, it calls `onTruncated` and continues. Without that
+   *   handler it throws `events_truncated`, so a consumer is never left unaware that it may have missed events.
+   * Stop iterating, or abort the signal, to close the stream. */
+  async *followEvents(options: EventFollowOptions = {}): AsyncGenerator<ControllerEvent, EventStreamEnd, void> {
+    const o = exact(options, ["after", "kinds", "leaseId", "requestId", "signal", "onTruncated", "onCursor"], "Event options") as EventFollowOptions;
+    const { signal, onTruncated, onCursor, ...filter } = o;
+    for (const handler of [onTruncated, onCursor]) if (handler !== undefined && typeof handler !== "function") throw new ConsumerConfigurationError("Event handlers must be functions.", "invalid_request");
+    let cursor: number | undefined = filter.after, response: IncomingMessage;
+    // An abort is the caller's own decision at any point, including while the stream is still being opened.
+    try { response = await this.#transport.stream("/v1/events/stream" + eventQuery(filter), signal); }
+    catch (error) { if (signal?.aborted) return { reason: "aborted", cursor }; throw error; }
     const stop = () => response.destroy();
     signal?.addEventListener("abort", stop, { once: true });
+    const position = (data: unknown): void => { if (isRecord(data) && Number.isSafeInteger(data["cursor"]) && Number(data["cursor"]) >= 0) cursor = data["cursor"] as number; };
+    const invalid = () => new ConsumerProtocolError("The event stream sent a message outside the consumer contract.", "response_invalid", 200, {});
     try {
       for await (const message of serverSentEvents(response)) {
-        if (message.event === "end") return;
+        let data: unknown;
+        try { data = JSON.parse(message.data); } catch { throw invalid(); }
+        if (message.event === "open" || message.event === "cursor") { position(data); if (cursor !== undefined) onCursor?.(cursor); continue; }
+        if (message.event === "truncated") {
+          if (!onTruncated) throw new ConsumerServiceError("Retention removed events after this cursor; some history may have been missed. Pass onTruncated to continue from what remains.", "events_truncated", 410, { retryable: false });
+          onTruncated({ after: filter.after ?? 0 });
+          continue;
+        }
+        if (message.event === "end") {
+          position(data);
+          const reason = isRecord(data) ? data["code"] : undefined;
+          if (reason === "stream_lifetime" || reason === "controller_closing") return { reason, cursor };
+          if (reason === "unauthenticated") throw new ConsumerServiceError("The credential is no longer accepted; the event stream ended.", "unauthenticated", 401, { retryable: false });
+          if (reason === "forbidden") throw new ConsumerServiceError("The credential may no longer read these events; the event stream ended.", "forbidden", 403, { retryable: false });
+          throw new ConsumerServiceError("The controller ended the event stream; resume from the last sequence received.", "unavailable", 503, { retryable: true });
+        }
         if (message.event !== undefined) continue;
         let event: ControllerEvent;
-        try { event = controllerEvent(JSON.parse(message.data)); }
-        catch { throw new ConsumerProtocolError("The event stream sent an event outside the consumer contract.", "response_invalid", 200, {}); }
+        try { event = controllerEvent(data); } catch { throw invalid(); }
+        cursor = event.sequence;
         yield event;
       }
     } catch (error) {
       if (error instanceof ConsumerError) throw error;
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { reason: "aborted", cursor };
       throw new ConsumerTransportError("The event stream was interrupted; resume from the last sequence received.", "connection_failed", {});
     } finally { signal?.removeEventListener("abort", stop); response.destroy(); }
+    if (signal?.aborted) return { reason: "aborted", cursor };
+    // The response ended without an end message: the connection was cut, not closed by the controller.
+    throw new ConsumerTransportError("The event stream ended without a closing message; resume from the last sequence received.", "connection_failed", {});
   }
   /** This application's own usage over a UTC range (default: the last 24 hours), grouped by application, template or platform. */
   async usage(options: { from?: string; to?: string; groupBy?: "application" | "template" | "platform" } = {}): Promise<UsageReport> {

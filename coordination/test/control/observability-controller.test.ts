@@ -76,5 +76,6 @@ export async function controllerFixture(t: TestContext, observability: Controlle
     return { opened, messages, data, close: () => request.destroy(), status: () => status };
   }
   return { config, directory, admin, enrollment, host, hostToken, offer, url, raw, call, beat, application, acquire, ready, events, sql, follow,
-    async restart() { await controller!.close(); controller = undefined; controller = await startController(config); } };
+    async restart() { await controller!.close(); controller = undefined; controller = await startController(config); },
+    async close() { await controller?.close(); controller = undefined; } };
 }

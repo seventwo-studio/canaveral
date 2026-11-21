@@ -102,6 +102,7 @@ export async function startController(config: ControllerConfig) {
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let displayBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let liveBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  let streams: { close?(): void } | undefined;
   const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async (hostId, intent, adminToken) =>
     await control!.request({ type: "browsers.launch", hostId, intent, ...(adminToken === undefined ? {} : { adminToken }) }),
   async token => { await control!.request({ type: "browsers.authorize", token }); },
@@ -115,6 +116,7 @@ export async function startController(config: ControllerConfig) {
       ...(config.observability === undefined ? {} : { observability: config.observability }) });
     await control.ready;
     const handleController = createControllerHandler(control, client);
+    streams = handleController;
     const handler: typeof handleController = (req, res) => {
       if (browsers?.matches(req)) { void browsers.handle(req, res); return; }
       handleController(req, res);
@@ -143,6 +145,7 @@ export async function startController(config: ControllerConfig) {
     videoBroker?.close();
     displayBroker?.close();
     liveBroker?.close();
+    streams?.close?.();
     server?.close();
     await Promise.allSettled([client.close(), control?.close()]);
     throw error;
@@ -157,6 +160,8 @@ export async function startController(config: ControllerConfig) {
     async close(): Promise<void> {
       closing ??= (async () => {
         reloader?.close();
+        // Followers are told the controller is closing before their sockets are dropped; this also stops the stream timer.
+        streams?.close?.();
         broker?.close();
         videoBroker?.close();
         displayBroker?.close();

@@ -216,6 +216,15 @@ export function markNotStaged(error: unknown): unknown {
   if (typeof error === "object" && error !== null) notStaged.add(error);
   return error;
 }
+const notRunningCaptures = new WeakSet<object>();
+/** Marks a video capture failure after which provably no native capture of this attempt runs:
+ * it was refused before anything was spawned, or what was spawned was stopped with proof. Such
+ * an attempt needs no cleanup. An unmarked failure says nothing either way and stays unknown. */
+export function markCaptureNotRunning(error: unknown): unknown {
+  if (typeof error === "object" && error !== null) notRunningCaptures.add(error);
+  return error;
+}
+export function captureNotRunning(error: unknown): boolean { return typeof error === "object" && error !== null && notRunningCaptures.has(error); }
 export async function writeAll(pipe: Pick<NativePipe, "write">, bytes: Uint8Array, check: Authorized): Promise<void> {
   let offset = 0;
   while (offset < bytes.length) {

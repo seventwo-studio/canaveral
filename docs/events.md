@@ -130,32 +130,67 @@ Query parameters of the list routes:
 
 An unknown kind or family returns 400 `event_kind_unknown`. The response is
 `{events, cursor, more, truncated}`. Pass `cursor` as the next `after`. `more` says
-that another page is ready now. On a full page `cursor` is the last event returned;
-otherwise it is the head of the log, so a reader with a narrow filter does not scan
-the same range again. `truncated` means retention removed events after the supplied
-cursor. Those events may not have matched the filter. Administrator responses add
-`oldestSequence` and `latestSequence`.
+that there is more to read now. On a full page `cursor` is the last event returned;
+otherwise it is as far as the read examined, so a reader with a narrow filter does
+not scan the same range again. `truncated` means retention removed events after the
+supplied cursor. Those events may not have matched the filter. Administrator
+responses add `oldestSequence` and `latestSequence`.
+
+Every read does bounded work, because it runs inside the controller's single write
+transaction:
+
+- A read by application alone (every unfiltered application read) or by one exact
+  kind alone follows an index in sequence order and costs its page.
+- Any other read, such as a family, several kinds or a subject filter, examines at
+  most 20,000 sequences of the log. Its page can come back short, or empty, with
+  `more: true` and `cursor` at the end of that stretch. Read again from `cursor`.
+- `tail` with such a filter looks at the newest 20,000 sequences only.
+
+`since` finds its starting point by sequence and assumes that the controller clock
+has not moved backwards.
 
 ### Live follow
 
 The stream routes take `after`, `kind` and the subject filters of their scope. The
-resume cursor is `after`, or the `Last-Event-ID` header when `after` is absent.
-Without either, the stream starts after the newest matching event. Each event is one
-unnamed SSE message whose `id` is its sequence and whose `data` is the event JSON, so
-a client that reconnects with its last id neither loses nor repeats an event while
-that cursor is still retained.
+resume cursor is the `Last-Event-ID` header, or `after` when the header is absent.
+The header wins because a standard SSE client reconnects to the same URL and sends
+the last id it saw, which is newer than an `after` still in that URL. Without
+either, the stream starts after the newest matching event.
 
-Named messages carry stream state: `truncated` when retention removed history after
-the cursor, and `end` with `{code, cursor}` when the controller closes the stream.
-`end` codes are `stream_lifetime` after one hour, `unauthenticated` or `forbidden`
-when the credential stopped being valid, and `unavailable`. A comment line keeps an
-idle connection open every ten seconds.
+| Message | `id` | `data` | Sent |
+| --- | --- | --- | --- |
+| unnamed | The event's sequence | The event | For every matching event |
+| `open` | The position the stream starts after | `{cursor}` | First, always |
+| `cursor` | How far the stream has read | `{cursor}` | After ten seconds without another message |
+| `truncated` | none | `{after}` | When retention removed history after the resume cursor |
+| `end` | How far the stream has read | `{code, cursor}` | When the controller closes the stream |
+
+Every message that moves the position carries it as its `id`. A client that
+reconnects with the last id it received therefore neither loses nor repeats an
+event while that position is still retained. This also holds for a stream on which
+no event arrived: `open`, `cursor` and `end` tell it where it stands.
+
+`end` codes are `stream_lifetime` after one hour, `controller_closing` when the
+controller shuts down, `unauthenticated` or `forbidden` when the credential stopped
+being valid, and `unavailable`. A stream that stops without `end` was cut off.
 
 A stream is authorised by reading the list route with the follower's credential on
-every round, at least every 15 seconds, so revocation ends it. At most 32 streams
-are open at once; further requests get 429 `event_stream_limit`. Streams never hold
-a transaction or a request slot. Controller routes refuse browser origins, so a
-browser reaches a stream only through a gateway that relays it.
+every round, at least every 15 seconds, so revocation ends it. When the controller
+is momentarily too busy to answer, the round is skipped and the stream stays open.
+
+Streams are bounded, and a refused request gets 429 `event_stream_limit`:
+
+| Bound | Limit |
+| --- | --- |
+| Open streams in total | 32 |
+| Open streams per credential | 4 |
+| Open application streams in total | 24, so eight are always left for administrators |
+| Stream requests being authenticated at once | 4 |
+
+The last bound means a burst of stream requests, authenticated or not, cannot fill
+the request slots that ordinary routes use. Open streams together use one of those
+slots at a time and never hold a transaction. Controller routes refuse browser
+origins, so a browser reaches a stream only through a gateway that relays it.
 
 ### What an application sees
 
@@ -260,9 +295,22 @@ for await (const event of client.followEvents({ after: page.cursor })) handle(ev
 ```
 
 `ConsumerClient.listEvents` and `followEvents` read `/v1/events` with the
-application key. `followEvents` is one stream: it ends when the controller ends it
-and throws when the connection fails. It never reconnects; resume with `after` set
-to the last `sequence` received.
+application key. `followEvents` is one stream and never reconnects. How it ends is
+always visible to the caller:
+
+- It returns `{reason, cursor}` for an ordinary end: `stream_lifetime`,
+  `controller_closing`, or `aborted` when the caller's signal fired. A `for await`
+  loop simply finishes. Follow again with `after` set to that cursor or to the last
+  `sequence` received.
+- It throws a service error with code `unauthenticated` or `forbidden` when the
+  credential is no longer accepted, and `unavailable` for any other end.
+- It throws a transport error when the connection stops without an `end` message.
+- When retention removed history after `after`, it calls `onTruncated` and
+  continues. Without that handler it throws `events_truncated`, so a consumer that
+  resumes from an expired cursor cannot miss history without being told.
+
+`onCursor` reports the stream's position while it is quiet, so a follower can save
+a fresh cursor.
 
 ```sh
 canaveral --token-file admin.token events --kind 'lease.*' --tail 20
@@ -271,9 +319,17 @@ canaveral --token-file app.key events --own --lease b7682a27-b32e-472a-8a4d-f54a
 ```
 
 `events` prints one JSON object per line and the resume cursor on standard error.
-`--text` prints a line per event instead. `--follow` streams until interrupted and
-reconnects from its last event when the controller ends a stream at its lifetime or
-restarts. `--own` reads the application view with an application credential.
+`--text` prints a line per event instead. A filtered listing reads on, up to 50
+requests, until it has printed `--limit` events or reached the head of the log.
+`--own` reads the application view with an application credential.
+
+`--follow` streams until interrupted. Without `--after` it starts at the head and
+prints only new events. It resumes from the newest position the controller reported,
+never from the beginning. A stream that ends at its one-hour lifetime is followed
+again at once, without a limit. A closing or unavailable controller, or a lost
+connection, is retried five times, two seconds apart; any message received resets
+that count. Any other end, such as a revoked credential, stops the command with
+exit status 1.
 
 ## Limits
 
@@ -284,6 +340,11 @@ restarts. `--own` reads the application view with an application credential.
 - A refused direct acquisition is throttled and so cannot be counted.
 - Alerts and the usage ledger derive from events. A row written by another tool is
   projected when the controller next reads or writes events, not at once.
+- A filtered read examines 20,000 sequences per request. Finding a rare event in a
+  large log takes several requests, and a filtered `tail` does not look further back
+  than that.
+- At startup the controller scans both lease ledgers once to seed the usage ledger
+  with the leases that are active.
 - The dashboard's Activity page shows the administrator view by reading the list
   route with its cursor; see [the dashboard contract](dashboard.md#queue-activity-and-usage).
   The gateway forwards `/v1/admin/events` and `/v1/admin/events/kinds` only. It

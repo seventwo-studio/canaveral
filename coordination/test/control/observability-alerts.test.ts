@@ -4,7 +4,7 @@ import { once } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
-import { ALERT_BACKOFF_SECONDS, ALERT_COOLDOWN_SECONDS, ALERT_MAX_ATTEMPTS, AlertDelivery, MAX_ALERT_DESTINATIONS } from "../../src/alerts.ts";
+import { ALERT_BACKOFF_SECONDS, ALERT_COOLDOWN_SECONDS, ALERT_MAX_ATTEMPTS, AlertDelivery, MAX_ALERT_DESTINATIONS, MAX_PENDING_PER_DESTINATION } from "../../src/alerts.ts";
 import type { SendResult } from "../../src/alerts.ts";
 import { Observability } from "../../src/control/observability.ts";
 import { ATTENTION_KINDS, recordEvent } from "../../src/events.ts";
@@ -26,7 +26,7 @@ test("destinations are bounded, validated, idempotent and never return their URL
   const created = await f.call("POST", "/v1/admin/alerts/destinations", intent);
   assert.equal(created.status, 201);
   assert.deepEqual(created.body, { id: intent.id, name: "Operations webhook", type: "webhook", endpoint: "https://alerts.example.invalid", signed: true, kinds: ["host.offline", "lease.cleanup_blocked"],
-    createdAt: new Date(1000 * 1000).toISOString(), deliveries: { pending: 0, delivered: 0, failed: 0 } });
+    createdAt: new Date(1000 * 1000).toISOString(), deliveries: { pending: 0, delivered: 0, failed: 0, dropped: 0 } });
   // The same UUID and intent replays; any difference under that UUID conflicts, and nothing leaks either way.
   const replay = await f.call("POST", "/v1/admin/alerts/destinations", intent);
   assert.equal(replay.status, 200); assert.deepEqual(replay.body, created.body);
@@ -121,37 +121,39 @@ test("an alert is queued with its event and signed over the exact body; a rolled
   assert.ok((await deliveries(f)).every(d => d.state === "delivered" && d.attempts === 1 && d.status === 204));
   assert.equal(await f.observability.alerts.deliverDue(), 0); assert.equal(f.sent.length, 4, "a delivered alert is never sent again");
   const view = (await f.admin("/v1/admin/alerts/destinations")).destinations.find((d: any) => d.id === slack.id);
-  assert.deepEqual(view.deliveries, { pending: 0, delivered: 1, failed: 0 }); assert.equal(view.lastAttempt.state, "delivered");
+  assert.deepEqual(view.deliveries, { pending: 0, delivered: 1, failed: 0, dropped: 0 }); assert.equal(view.lastAttempt.state, "delivered");
 });
 
 test("failed deliveries back off, stop after a bounded number of attempts and are reported once", async t => {
   const f = observabilityFixture(t), destination = webhook({ kinds: ["host.offline", "host.checks_failed", "alert.delivery_failed"] });
-  await f.call("POST", "/v1/admin/alerts/destinations", destination);
-  const outcomes: SendResult[] = [];
-  f.respond(() => outcomes.shift() ?? { ok: false, status: 503, outcome: "http_error" });
+  const watcher = webhook({ url: "https://watcher.example.invalid/hook", kinds: ["alert.delivery_failed"] });
+  await f.call("POST", "/v1/admin/alerts/destinations", destination); await f.call("POST", "/v1/admin/alerts/destinations", watcher);
+  const outcomes: SendResult[] = [], watched = () => f.sent.filter(alert => alert.url === watcher.url), tried = () => f.sent.filter(alert => alert.url === destination.url);
+  f.respond(alert => alert.url === watcher.url ? { ok: true, status: 200, outcome: "delivered" } : outcomes.shift() ?? { ok: false, status: 503, outcome: "http_error" });
   raise(f, "host.offline", "host-a");
   assert.equal(await f.observability.alerts.deliverDue(), 1);
-  let [delivery] = await deliveries(f);
+  let [delivery] = await deliveries(f, `?destination=${destination.id}`);
   assert.deepEqual([delivery.state, delivery.attempts, delivery.status, delivery.outcome, delivery.maxAttempts], ["pending", 1, 503, "http_error", ALERT_MAX_ATTEMPTS]);
   assert.equal(Date.parse(delivery.nextAttemptAt) / 1000, f.now() + ALERT_BACKOFF_SECONDS[0]!);
   // Each retry waits for its scheduled time; nothing is sent early.
   for (let attempt = 2; attempt <= ALERT_MAX_ATTEMPTS; attempt++) {
     f.advance(ALERT_BACKOFF_SECONDS[attempt - 2]! - 1); assert.equal(await f.observability.alerts.deliverDue(), 0);
     f.advance(1); assert.equal(await f.observability.alerts.deliverDue(), 1);
-    assert.equal(JSON.parse(f.sent.at(-1)!.body.toString()).attempt, attempt);
+    assert.equal(JSON.parse(tried().at(-1)!.body.toString()).attempt, attempt);
   }
   [delivery] = await deliveries(f, "?state=failed");
   assert.deepEqual([delivery.state, delivery.attempts, delivery.outcome], ["failed", ALERT_MAX_ATTEMPTS, "http_error"]); assert.equal(Object.hasOwn(delivery, "nextAttemptAt"), false);
-  assert.equal(f.sent.length, ALERT_MAX_ATTEMPTS);
-  f.advance(86400); await f.observability.alerts.deliverDue();
-  // The exhausted delivery is recorded as an event and alerted once; that alert's own failure is not reported again.
+  assert.equal(tried().length, ALERT_MAX_ATTEMPTS);
+  // The exhausted delivery is recorded as an event. Another destination that selected that kind hears of it once;
+  // the destination that failed is never alerted about itself, although it selected the kind too.
   const failed = await f.events("kind=alert.delivery_failed");
   assert.deepEqual(failed.map(event => [event.data.kind, event.data.attempts, event.data.outcome]), [["host.offline", ALERT_MAX_ATTEMPTS, "http_error"]]);
   for (let round = 0; round < 8; round++) { f.advance(1000); await f.observability.alerts.deliverDue(); }
   assert.equal((await f.events("kind=alert.delivery_failed")).length, 1);
-  assert.equal(f.sent.length, 2 * ALERT_MAX_ATTEMPTS);
+  assert.equal(tried().length, ALERT_MAX_ATTEMPTS);
+  assert.deepEqual(watched().map(alert => { const body = JSON.parse(alert.body.toString()); return [body.kind, body.event.data.destinationId]; }), [["alert.delivery_failed", destination.id]]);
   // Every stable id is reused across the retries of one delivery, so a receiver can de-duplicate.
-  assert.equal(new Set(f.sent.slice(0, ALERT_MAX_ATTEMPTS).map(alert => alert.headers["X-Canaveral-Delivery"])).size, 1);
+  assert.equal(new Set(tried().map(alert => alert.headers["X-Canaveral-Delivery"])).size, 1);
 
   // A delivery that succeeds on a later attempt stops there; timeouts, refused redirects and connection failures all retry.
   f.sent.length = 0; outcomes.push({ ok: false, outcome: "timeout" }, { ok: false, status: 302, outcome: "redirect_refused" }, { ok: false, outcome: "connection_failed" }, { ok: true, status: 200, outcome: "delivered" });
@@ -159,7 +161,7 @@ test("failed deliveries back off, stop after a bounded number of attempts and ar
   for (const wait of [0, ...ALERT_BACKOFF_SECONDS.slice(0, 3)]) { f.advance(wait); await f.observability.alerts.deliverDue(); }
   const [recovered] = await deliveries(f, "?state=delivered");
   assert.deepEqual([recovered.kind, recovered.attempts, recovered.status], ["host.checks_failed", 4, 200]);
-  f.advance(86400); await f.observability.alerts.deliverDue(); assert.equal(f.sent.length, 4);
+  f.advance(86400); await f.observability.alerts.deliverDue(); assert.equal(tried().length, 4);
 
   // A sender that throws is a failed attempt, never a crashed controller.
   f.respond(() => { throw new Error("socket exploded"); });
@@ -187,6 +189,63 @@ test("a flapping condition alerts once per cooldown, and removal cancels what wa
   await f.call("POST", "/v1/admin/alerts/destinations", webhook({ kinds: ["host.offline"] })); raise(f, "host.offline", "host-y");
   f.advance(8 * 86400); f.observability.maintain(true);
   assert.deepEqual((await deliveries(f)).map(d => d.state), ["pending"]);
+});
+
+test("a destination that never answers is bounded and delays only its own alerts", async t => {
+  const f = observabilityFixture(t);
+  const dead = webhook({ url: "https://dead.example.invalid/hook", kinds: ["host.offline", "alert.delivery_failed"] });
+  const healthy = webhook({ url: "https://healthy.example.invalid/hook", kinds: ["host.offline"] });
+  await f.call("POST", "/v1/admin/alerts/destinations", dead); await f.call("POST", "/v1/admin/alerts/destinations", healthy);
+  // The dead receiver holds every request open; the healthy one answers at once.
+  let held = 0;
+  f.respond(alert => alert.url.startsWith("https://dead.") ? (held++, new Promise<SendResult>(() => {})) : { ok: true, status: 204, outcome: "delivered" });
+  const view = async (id: string) => (await f.admin("/v1/admin/alerts/destinations")).destinations.find((d: any) => d.id === id).deliveries;
+  for (let n = 0; n < 10; n++) raise(f, "host.offline", `host-${n}`);
+  // One round, as the controller's timer starts it: the call is not awaited, and the dead sends never settle.
+  void f.observability.alerts.deliverDue();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(held, 4, "the dead destination has one small batch in flight");
+  assert.deepEqual(await view(healthy.id), { pending: 6, delivered: 4, failed: 0, dropped: 0 });
+  // Later rounds keep serving the healthy destination at full pace and claim nothing more for the dead one.
+  for (let round = 0; round < 3; round++) await f.observability.alerts.deliverDue();
+  assert.deepEqual(await view(healthy.id), { pending: 0, delivered: 10, failed: 0, dropped: 0 });
+  assert.equal(held, 4); assert.deepEqual(await view(dead.id), { pending: 10, delivered: 0, failed: 0, dropped: 0 });
+  assert.equal(f.sent.filter(alert => alert.url.startsWith("https://healthy.")).length, 10);
+
+  // A steady stream of alerts cannot grow the outbox: the oldest unsent alert makes room and is kept as dropped.
+  // The healthy destination is served on the way, as the timer would, and never comes near its own bound.
+  for (let n = 10; n < MAX_PENDING_PER_DESTINATION + 60; n++) { raise(f, "host.offline", `host-${n}`); if (n % 25 === 0) while (await f.observability.alerts.deliverDue()) { /* drain */ } }
+  while (await f.observability.alerts.deliverDue()) { /* drain */ }
+  assert.deepEqual(await view(healthy.id), { pending: 0, delivered: MAX_PENDING_PER_DESTINATION + 60, failed: 0, dropped: 0 });
+  assert.deepEqual(await view(dead.id), { pending: MAX_PENDING_PER_DESTINATION, delivered: 0, failed: 0, dropped: 60 });
+  f.store.transaction(db => {
+    assert.equal(db.prepare("SELECT count(*) AS n FROM alert_deliveries WHERE destination=? AND state='pending'").get(dead.id)!.n, MAX_PENDING_PER_DESTINATION);
+    const kept = db.prepare("SELECT subject FROM alert_deliveries WHERE destination=? AND state='pending' AND kind='host.offline' ORDER BY seq").all(dead.id).map(row => row.subject);
+    assert.deepEqual([kept[0], kept.at(-1)], ["host-60", `host-${MAX_PENDING_PER_DESTINATION + 59}`], "the newest alerts are the ones kept");
+    assert.deepEqual(db.prepare("SELECT DISTINCT state,outcome FROM alert_deliveries WHERE destination=? AND subject IN ('host-0','host-59')").all(dead.id).map(row => ({ ...row })), [{ state: "failed", outcome: "dropped" }]);
+  });
+  // The drop is visible: one event per cooldown window, not one per dropped alert, and it does not alert the dead destination about itself.
+  const drops = await f.events("kind=alert.delivery_failed");
+  assert.deepEqual(drops.map(event => [event.data.destinationId, event.data.outcome, event.data.kind]), [[dead.id, "dropped", "host.offline"]]);
+  assert.deepEqual((await deliveries(f, `?destination=${dead.id}&state=failed&limit=200`)).map(d => d.outcome).filter((outcome, index, all) => all.indexOf(outcome) === index), ["dropped"]);
+  f.advance(ALERT_COOLDOWN_SECONDS + 1);
+  for (let n = 0; n < 5; n++) raise(f, "host.online", `late-${n}`);
+  raise(f, "host.offline", "late-host");
+  assert.equal((await f.events("kind=alert.delivery_failed")).length, 2);
+  f.store.transaction(db => assert.equal(db.prepare("SELECT count(*) AS n FROM alert_deliveries WHERE state='pending'").get()!.n, MAX_PENDING_PER_DESTINATION + 1, "the healthy destination's new alert and a full dead outbox"));
+  while (await f.observability.alerts.deliverDue()) { /* drain */ }
+  // A delivery that was displaced while its send was in flight still records the answer it got.
+  const racing = webhook({ url: "https://slow.example.invalid/hook", kinds: ["host.checks_failed"] });
+  await f.call("POST", "/v1/admin/alerts/destinations", racing);
+  let answer: (result: SendResult) => void = () => {};
+  f.respond(alert => alert.url.startsWith("https://slow.") ? new Promise<SendResult>(resolve => { answer = resolve; }) : new Promise<SendResult>(() => {}));
+  raise(f, "host.checks_failed", "first");
+  const sending = f.observability.alerts.deliverDue();
+  await new Promise(resolve => setImmediate(resolve));
+  for (let n = 0; n < MAX_PENDING_PER_DESTINATION; n++) raise(f, "host.checks_failed", `next-${n}`);
+  assert.equal((await view(racing.id)).dropped, 1);
+  answer({ ok: true, status: 200, outcome: "delivered" }); await sending;
+  assert.deepEqual(await view(racing.id), { pending: MAX_PENDING_PER_DESTINATION, delivered: 1, failed: 0, dropped: 0 });
 });
 
 test("a restart keeps pending alerts, never repeats a delivered one and bounds an interrupted one", async t => {

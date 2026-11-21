@@ -80,7 +80,9 @@ Direct acquisitions that were refused are not counted. They appear as throttled
 | `application` | Administrator route only: restrict to one application |
 
 An invalid range returns 400 `usage_range_invalid`; an unsupported grouping returns
-400 `usage_group_unsupported`. The application route is filtered in SQL to the
+400 `usage_group_unsupported`. A range that holds more than 200,000 requests and
+leases together returns 400 `usage_range_too_large`: ask for a shorter range and
+add the reports up. The application route is filtered in SQL to the
 authenticated application. It never shows another application's figures or host
 identities.
 
@@ -124,6 +126,26 @@ canaveral --token-file app.key usage --own --format json
 `usage` prints a table by default. `--format json` prints the report and `--format
 csv` the same CSV the route returns. `--last` takes hours or days, such as `24h` or
 `7d`. `--own` reads the application view with an application credential.
+
+## Cost of a report
+
+A report is computed inside the controller's single write transaction, so it is
+bounded and indexed rather than free:
+
+- Requests are read through indexes on `requests(created)` and
+  `requests(application, created)`. The controller adds them to the request ledger
+  at startup; that ledger belongs to the waiting-request module and is never
+  pruned, so without them every report would read all of it.
+- Leases are read through indexes on the usage ledger. A lease carried into the
+  range from before it is found by looking back no further than the longest hold
+  the ledger has ever recorded.
+- The rows are counted first, stopping just past the limit, so an oversized range
+  is refused for about the cost of the limit.
+
+What remains: a report at the limit still reads up to 200,000 rows and sorts their
+wait and hold times in memory while other controller requests wait. On the fixture
+machine that is well under a second; it has not been measured on a production
+database. One very long lease raises the look-back for every later report.
 
 ## Limits
 

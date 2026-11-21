@@ -18,6 +18,11 @@ import type { SqliteStore } from "./sqlite.ts";
  * stops between the two re-sends at the scheduled time, so delivery is at least once and never more
  * than `max_attempts` sends. Receivers de-duplicate on the stable delivery `id`.
  *
+ * The outbox is bounded and destinations are independent. A destination holds at most
+ * MAX_PENDING_PER_DESTINATION unsent deliveries; a newer alert displaces the oldest, which is kept as
+ * a `failed` row with outcome `dropped`. Each destination is claimed and sent on its own, and one with
+ * a send in flight is skipped, so a receiver that never answers delays only its own alerts.
+ *
  * The webhook URL and the signing secret are stored as given in the controller's private (0600)
  * SQLite database, like its other controller-held state; they cannot be hashed because the
  * controller must present them. No route returns either value. There is no encryption at rest.
@@ -29,7 +34,9 @@ export const ALERT_BACKOFF_SECONDS = [10, 60, 300, 900];
 export const ALERT_TIMEOUT_MS = 5000;
 /** One alert per destination, kind and subject within this window, so a flapping condition cannot flood a channel. */
 export const ALERT_COOLDOWN_SECONDS = 300;
-const DELIVERY_RETENTION_SECONDS = 7 * 86400, DELIVERY_MAX_ROWS = 2000, CLAIM_BATCH = 8;
+/** Unsent deliveries one destination may hold. With eight destinations the outbox never exceeds 800 pending rows. */
+export const MAX_PENDING_PER_DESTINATION = 100;
+const DELIVERY_RETENTION_SECONDS = 7 * 86400, DELIVERY_MAX_ROWS = 2000, CLAIM_PER_DESTINATION = 4;
 
 export type DestinationType = "slack" | "webhook";
 interface DestinationRow { id: string; name: string; type: DestinationType; url: string; secret: string | null; kinds: string; intent: string; created: number; removed: number | null }
@@ -93,8 +100,9 @@ function destinationView(db: DatabaseSync, row: DestinationRow) {
   const last = db.prepare("SELECT state,updated,status,outcome FROM alert_deliveries WHERE destination=? AND attempts>0 ORDER BY updated DESC,id LIMIT 1").get(row.id);
   let endpoint = "";
   try { endpoint = new URL(row.url).origin; } catch { /* Removed destinations keep no URL. */ }
+  const dropped = Number(db.prepare("SELECT count(*) AS n FROM alert_deliveries WHERE destination=? AND state='failed' AND outcome='dropped'").get(row.id)!.n);
   return { id: row.id, name: row.name, type: row.type, endpoint, signed: row.secret !== null, kinds: JSON.parse(row.kinds) as string[], createdAt: new Date(row.created * 1000).toISOString(),
-    deliveries: { pending: counts.pending ?? 0, delivered: counts.delivered ?? 0, failed: counts.failed ?? 0 },
+    deliveries: { pending: counts.pending ?? 0, delivered: counts.delivered ?? 0, failed: (counts.failed ?? 0) - dropped, dropped },
     ...(last ? { lastAttempt: { state: String(last.state), at: new Date(Number(last.updated) * 1000).toISOString(), ...(last.status === null ? {} : { status: Number(last.status) }), ...(last.outcome === null ? {} : { outcome: String(last.outcome) }) } } : {}) };
 }
 function deliveryView(row: DeliveryRow) {
@@ -159,7 +167,18 @@ export const alertProjection: EventProjection = (db, events, now) => {
   for (const event of events) for (const destination of selected) {
     if (!destination.kinds.has(event.kind)) continue;
     const subject = event.subject ?? "";
+    // A destination is never told about its own failed or dropped deliveries: that could only add to them.
+    if (event.kind === "alert.delivery_failed" && subject === destination.id) continue;
     if (db.prepare("SELECT 1 FROM alert_deliveries WHERE destination=? AND kind=? AND subject=? AND created>? LIMIT 1").get(destination.id, event.kind, subject, now - ALERT_COOLDOWN_SECONDS)) continue;
+    // A destination that is not being drained keeps its newest alerts: the oldest unsent one makes room and
+    // stays on record as dropped. The first drop in a cooldown window is also an event, so it is visible.
+    // Oldest means the earliest event; alerts queued by one commit share a timestamp, so the sequence decides among them.
+    const pending = db.prepare("SELECT id,kind FROM alert_deliveries WHERE destination=? AND state='pending' ORDER BY created,seq,id").all(destination.id);
+    for (const oldest of pending.slice(0, Math.max(0, pending.length - MAX_PENDING_PER_DESTINATION + 1))) {
+      const announced = db.prepare("SELECT 1 FROM alert_deliveries WHERE destination=? AND outcome='dropped' AND updated>? LIMIT 1").get(destination.id, now - ALERT_COOLDOWN_SECONDS);
+      db.prepare("UPDATE alert_deliveries SET state='failed',updated=?,outcome='dropped' WHERE id=?").run(now, String(oldest.id));
+      if (!announced && oldest.kind !== "alert.delivery_failed") recordEvent(db, "alert.delivery_failed", { subject: destination.id, data: { deliveryId: String(oldest.id), destinationId: destination.id, kind: String(oldest.kind), outcome: "dropped" } });
+    }
     db.prepare("INSERT INTO alert_deliveries (id,destination,seq,kind,subject,event,state,attempts,max_attempts,next_attempt,created,updated) VALUES (?,?,?,?,?,?,'pending',0,?,?,?,?)")
       .run(randomUUID(), destination.id, event.seq, event.kind, subject, JSON.stringify(eventView(event as EventRow)), ALERT_MAX_ATTEMPTS, now, now, now);
   }
@@ -206,7 +225,8 @@ export const sendAlert: AlertSender = (target, headers, body, timeoutMs) => new 
 });
 
 export class AlertDelivery {
-  private busy = false;
+  /** Destinations with a send in flight in this process. Nothing more is claimed for them until it settles. */
+  private readonly sending = new Set<string>();
   constructor(readonly store: SqliteStore, readonly controllerId: string, private readonly send: AlertSender = sendAlert) {}
 
   /** Count the attempt and schedule its successor before any I/O, so a crash cannot repeat a send without bound. */
@@ -217,8 +237,11 @@ export class AlertDelivery {
         db.prepare("UPDATE alert_deliveries SET state='failed',updated=?,outcome='interrupted' WHERE id=?").run(now, row.id);
         this.exhausted(db, row, "interrupted");
       }
+      // Each destination gets its own small batch. A global batch ordered by time would let the backlog of
+      // one destination that never answers hold back every other destination's alerts.
       const rows = (only === undefined
-        ? db.prepare("SELECT * FROM alert_deliveries WHERE state='pending' AND attempts<max_attempts AND next_attempt<=? ORDER BY next_attempt,id LIMIT ?").all(now, CLAIM_BATCH)
+        ? db.prepare("SELECT DISTINCT destination FROM alert_deliveries WHERE state='pending' AND attempts<max_attempts AND next_attempt<=?").all(now).filter(row => !this.sending.has(String(row.destination)))
+          .flatMap(row => db.prepare("SELECT * FROM alert_deliveries WHERE destination=? AND state='pending' AND attempts<max_attempts AND next_attempt<=? ORDER BY next_attempt,seq,id LIMIT ?").all(String(row.destination), now, CLAIM_PER_DESTINATION))
         : db.prepare("SELECT * FROM alert_deliveries WHERE id=? AND state='pending' AND attempts<max_attempts").all(only)) as unknown as DeliveryRow[];
       const claimed: Array<{ delivery: DeliveryRow; destination: DestinationRow }> = [];
       for (const row of rows) {
@@ -235,7 +258,9 @@ export class AlertDelivery {
     this.store.transaction(db => {
       const now = this.store.clock(), row = db.prepare("SELECT * FROM alert_deliveries WHERE id=?").get(id) as unknown as DeliveryRow | undefined;
       // A removal, or a newer attempt after this one outlived its schedule, already decided this row.
-      if (!row || row.state !== "pending" || row.attempts !== attempts) return;
+      // One exception: a row displaced while its send was in flight records the answer it actually got.
+      const displaced = row?.state === "failed" && row.outcome === "dropped" && result.ok;
+      if (!row || row.attempts !== attempts || (row.state !== "pending" && !displaced)) return;
       const exhausted = !result.ok && row.attempts >= row.max_attempts;
       db.prepare("UPDATE alert_deliveries SET state=?,updated=?,status=?,outcome=? WHERE id=?").run(result.ok ? "delivered" : exhausted ? "failed" : "pending", now, result.status ?? null, result.outcome, id);
       if (exhausted) this.exhausted(db, row, result.outcome);
@@ -258,15 +283,18 @@ export class AlertDelivery {
   due(db: DatabaseSync, now: number): boolean {
     return !!db.prepare("SELECT 1 FROM alert_deliveries WHERE state='pending' AND next_attempt<=? LIMIT 1").get(now);
   }
-  /** Send what is due. Never called inside a transaction; overlapping calls are refused rather than queued. */
+  /** Send what is due and resolve when those sends have settled. Never called inside a transaction.
+   * Calls may overlap: each claims only destinations that have nothing in flight, so the periodic tick
+   * does not wait for a slow receiver before serving the others. */
   async deliverDue(): Promise<number> {
-    if (this.busy) return 0;
-    this.busy = true;
-    try {
-      const claimed = this.claim(this.store.clock());
-      await Promise.all(claimed.map(item => this.attempt(item)));
-      return claimed.length;
-    } finally { this.busy = false; }
+    const claimed = this.claim(this.store.clock());
+    const batches = new Map<string, typeof claimed>();
+    for (const item of claimed) batches.set(item.destination.id, [...(batches.get(item.destination.id) ?? []), item]);
+    for (const destination of batches.keys()) this.sending.add(destination);
+    await Promise.all([...batches].map(async ([destination, items]) => {
+      try { await Promise.all(items.map(item => this.attempt(item))); } finally { this.sending.delete(destination); }
+    }));
+    return claimed.length;
   }
   /** A single immediate attempt that is recorded like any delivery and never retried. */
   async test(destinationId: string, requestId: string): Promise<ReturnType<typeof deliveryView>> {
@@ -286,6 +314,11 @@ export class AlertDelivery {
     if (fresh) for (const item of this.claim(this.store.clock(), id)) await this.attempt(item);
     return this.store.transaction(db => deliveryView(db.prepare("SELECT * FROM alert_deliveries WHERE id=?").get(id) as unknown as DeliveryRow));
   }
+}
+/** True when pruneDeliveries would remove a row. Pure reads. */
+export function deliveriesPrunable(db: DatabaseSync, now: number): boolean {
+  return !!db.prepare("SELECT 1 FROM alert_deliveries WHERE state!='pending' AND updated<? LIMIT 1").get(now - DELIVERY_RETENTION_SECONDS)
+    || !!db.prepare("SELECT 1 FROM alert_deliveries WHERE state!='pending' ORDER BY created DESC LIMIT 1 OFFSET ?").get(DELIVERY_MAX_ROWS);
 }
 export function pruneDeliveries(db: DatabaseSync, now: number): number {
   let removed = Number(db.prepare("DELETE FROM alert_deliveries WHERE state!='pending' AND updated<?").run(now - DELIVERY_RETENTION_SECONDS).changes);

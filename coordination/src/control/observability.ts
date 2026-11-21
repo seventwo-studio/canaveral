@@ -1,28 +1,29 @@
 import { DatabaseSync } from "node:sqlite";
-import { addDestination, AlertDelivery, listDeliveries, listDestinations, MAX_ALERT_DESTINATIONS, pruneDeliveries, removeDestination } from "../alerts.ts";
+import { addDestination, AlertDelivery, deliveriesPrunable, listDeliveries, listDestinations, MAX_ALERT_DESTINATIONS, pruneDeliveries, removeDestination } from "../alerts.ts";
 import type { AlertSender } from "../alerts.ts";
 import type { ConsumerIdentities } from "../consumers.ts";
 import { identifier } from "../consumers.ts";
 import { ServiceError } from "../errors.ts";
-import { EVENT_KINDS, eventRetention, installEventTriggers, listEvents, parseEventQuery, projectEvents, pruneEvents, recordEvent } from "../events.ts";
+import { EVENT_KINDS, eventRetention, installEventTriggers, listEvents, parseEventQuery, projectEvents, pruneEvents, recordEvent, ROUTINE_KINDS } from "../events.ts";
 import { installObservability, OBSERVABILITY_PROJECTIONS, observabilitySettings } from "../observability.ts";
 import type { ObservabilitySettings } from "../observability.ts";
 import type { SqliteStore } from "../sqlite.ts";
-import { backfillActiveLeases, parseUsageQuery, pruneUsage, usageCsv, usageReport } from "../usage.ts";
+import { backfillActiveLeases, parseUsageQuery, pruneUsage, usageCsv, usageIndexes, usageReport } from "../usage.ts";
 import { requireAdmin } from "./contracts.ts";
 import type { ControlModule, ControlOptions, ControlRequest, ControlResponse } from "./contracts.ts";
-import { diagnose } from "./diagnosis.ts";
+import { diagnose, diagnosisIndexes, LIVENESS_GRACE_SECONDS } from "./diagnosis.ts";
 
 /** Events, usage, alerts and diagnosis routes, plus the observer for conditions no row change expresses.
  *
  * Administrator routes authenticate before any lookup. Application routes accept only the application
  * credential and are filtered to that application's rows in SQL; a lease, host or operator key is refused.
- * The observer and the delivery loop run on a timer outside request handling. Neither holds a transaction
- * across I/O, and both probe on a read-only connection first so an idle controller takes no write lock.
+ * The observer, the delivery loop and retention run on a timer outside request handling. None holds a
+ * transaction across I/O. Each probes on a read-only connection first and opens a write connection only
+ * when the probe found work, so an idle controller takes no write lock and never creates or touches its
+ * database file from a timer. Delivery is started, not awaited, so a slow receiver cannot hold a round up.
+ * The timers live in the control worker and stop when that worker is terminated on close.
  */
 const HOST_FRESH_SECONDS = 30, SAMPLE_FRESH_SECONDS = 60, PRESSURE_HYSTERESIS = 2, MAINTENANCE_INTERVAL_SECONDS = 60, OBSERVE_INTERVAL_SECONDS = 5;
-/** After a restart every host looks silent until its next heartbeat; liveness is judged only once that window passed. */
-const LIVENESS_GRACE_SECONDS = 45;
 const APPLICATION_EVENT_KEYS = ["after", "tail", "since", "kind", "limit", "lease", "request"];
 const table = (db: DatabaseSync, name: string): boolean => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 
@@ -30,7 +31,7 @@ export class Observability implements ControlModule {
   readonly settings: ObservabilitySettings;
   readonly alerts: AlertDelivery;
   private readonly started: number;
-  private lastMaintenance = 0;
+  private lastMaintenance: number;
   private lastObservation = Number.NEGATIVE_INFINITY;
   private ticking = false;
   constructor(readonly store: SqliteStore, readonly options: ControlOptions, readonly applications: ConsumerIdentities, send?: AlertSender) {
@@ -38,12 +39,15 @@ export class Observability implements ControlModule {
     installObservability(store);
     this.alerts = new AlertDelivery(store, options.controllerId, send);
     this.started = store.clock();
+    // The first retention pass is a minute after start, not on the first round.
+    this.lastMaintenance = this.started;
   }
 
   /** Install capture once every module has created and migrated its tables. Returns the installed trigger names. */
   installCapture(): string[] {
     return this.store.transaction(db => {
       const installed = installEventTriggers(db, eventRetention(this.settings));
+      usageIndexes(db); diagnosisIndexes(db);
       backfillActiveLeases(db);
       recordEvent(db, "controller.started", { subject: this.options.controllerId, data: { controllerId: this.options.controllerId, captured: installed.length } });
       return installed;
@@ -120,17 +124,34 @@ export class Observability implements ControlModule {
     return changes;
   }
 
-  /** Bounded retention for the event log, the usage ledger and settled deliveries. */
-  maintain(force = false): void {
+  /** True when a retention pass would remove something. Pure reads, for the read-only probe. */
+  private maintenanceDue(db: DatabaseSync, now: number): boolean {
+    if (!table(db, "events")) return false;
+    const retention = eventRetention(this.settings);
+    const oldest = db.prepare("SELECT at FROM events WHERE at IS NOT NULL ORDER BY seq LIMIT 1").get();
+    if (oldest && Number(oldest.at) < now - retention.maxAgeSeconds) return true;
+    if (ROUTINE_KINDS.some(kind => db.prepare("SELECT 1 FROM events WHERE kind=? ORDER BY seq DESC LIMIT 1 OFFSET ?").get(kind, retention.routineMaxRows))) return true;
+    if (db.prepare("SELECT 1 FROM usage_leases WHERE ended IS NOT NULL AND ended<? LIMIT 1").get(now - this.settings.usageRetentionSeconds)) return true;
+    if (deliveriesPrunable(db, now)) return true;
+    return !!db.prepare("SELECT 1 FROM event_conditions WHERE kind='lease.refused' AND since<? LIMIT 1").get(now - 3600);
+  }
+  /** Bounded retention for the event log, the usage ledger and settled deliveries, at most once a minute
+   * and only when something is past its limit. Returns whether a write transaction was opened. */
+  maintain(force = false): boolean {
     const now = this.store.clock();
-    if (!force && now - this.lastMaintenance < MAINTENANCE_INTERVAL_SECONDS) return;
+    if (!force && now - this.lastMaintenance < MAINTENANCE_INTERVAL_SECONDS) return false;
     this.lastMaintenance = now;
+    const probe = new DatabaseSync(this.store.path, { readOnly: true, timeout: 15000 });
+    let due: boolean;
+    try { due = this.maintenanceDue(probe, now); } finally { probe.close(); }
+    if (!due) return false;
     this.store.transaction(db => {
       pruneEvents(db, now, eventRetention(this.settings));
       pruneUsage(db, now, this.settings.usageRetentionSeconds);
       pruneDeliveries(db, now);
       db.prepare("DELETE FROM event_conditions WHERE kind='lease.refused' AND since<?").run(now - 3600);
     });
+    return true;
   }
   /** One round of observation, delivery and retention. A busy database or a failed round never reaches the worker. */
   async tick(): Promise<void> {
@@ -147,7 +168,8 @@ export class Observability implements ControlModule {
         const probe = new DatabaseSync(this.store.path, { readOnly: true, timeout: 15000 });
         let due: boolean;
         try { due = this.alerts.due(probe, this.store.clock()); } finally { probe.close(); }
-        if (due) await this.alerts.deliverDue();
+        // Not awaited: a receiver that takes its whole timeout must not delay the next round for the others.
+        if (due) void this.alerts.deliverDue().catch(() => { /* Pending deliveries keep their schedule. */ });
       } catch { /* Pending deliveries keep their schedule. */ }
       try { this.maintain(); } catch { /* Retention is retried a minute later. */ }
     } finally { this.ticking = false; }
@@ -186,12 +208,15 @@ export class Observability implements ControlModule {
   }
   private diagnosis(req: ControlRequest): ControlResponse {
     if ([...req.query.keys()].length) throw new ServiceError("Queries are not supported.", 400);
-    this.store.transaction(() => { requireAdmin(req); });
+    // The credential check is the controller's ordinary one. For an account session or token it is a
+    // transaction like any request's, which also runs the lease lifecycle refresh; the operator credential
+    // is compared in memory. The diagnosis below adds no write of its own.
+    requireAdmin(req);
     // A separate read-only connection: the diagnosis itself cannot write, whatever it finds.
     const db = new DatabaseSync(this.store.path, { readOnly: true, timeout: 15000 });
     try {
       db.exec("BEGIN");
-      return { body: diagnose(db, this.store.clock(), this.settings) };
+      return { body: diagnose(db, this.store.clock(), this.settings, this.started) };
     } finally { db.close(); }
   }
   private actor(req: ControlRequest): string {

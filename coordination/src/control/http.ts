@@ -10,7 +10,8 @@ import { createEventStream } from "./event-stream.ts";
 import type { StreamRequester } from "./event-stream.ts";
 
 type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests" | "readRequests">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
-export type ControllerHandler = (request: IncomingMessage, response: ServerResponse) => void;
+/** `close` ends the event streams the handler holds open; plain requests need no teardown. */
+export type ControllerHandler = ((request: IncomingMessage, response: ServerResponse) => void) & { close?(): void };
 export type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;
 const MAX_BODY = 1_048_576;
 const MAX_HEARTBEAT = 8 * MAX_BODY;
@@ -176,9 +177,10 @@ export function createControllerHandler(control: Requester, identities: Identity
     waiters.add(waiter); owners.set(owner, (owners.get(owner) ?? 0) + 1);
     if (!ticker) { ticker = setInterval(() => { void refresh(); }, REQUEST_WAIT_TICK_MS); ticker.unref(); }
   });
-  return (request, response) => {
+  const handler: ControllerHandler = (request, response) => {
     const requestId = randomUUID(), arrived = performance.now();
-    // A follower holds its connection for up to an hour; it has its own bound and never occupies a request slot.
+    // A follower holds its connection for up to an hour, so it never occupies a request slot. The stream
+    // bounds its own open streams and, separately, how many requests may be authenticating at once.
     if (request.method === "GET" && /^\/v1\/(?:admin\/)?events\/stream\/?(?:\?|$)/.test(request.url ?? "")) {
       void (async () => { await streams.handle(request, response, requestTarget(request)); })().catch((error: unknown) => {
         request.resume();
@@ -265,6 +267,8 @@ export function createControllerHandler(control: Requester, identities: Identity
       respond(response, result.body, result.status);
     });
   };
+  handler.close = () => streams.close();
+  return handler;
 }
 
 export function createControllerServer(control: Requester, identities: IdentityClient) {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { Observability } from "../../src/control/observability.ts";
-import { usageCsv } from "../../src/usage.ts";
+import { usageCsv, usageReport } from "../../src/usage.ts";
 import type { UsageReport } from "../../src/usage.ts";
 import { failure, leaseFixture } from "./leases-fixture.test.ts";
 import { observabilityFixture } from "./observability-fixture.test.ts";
@@ -58,6 +58,20 @@ test("lease usage matches a scripted history: counts, time to ready, hold percen
   f.beat({ reports: { [machine]: { state: "stopped", leaseCleanup: { id: cleanup.id, leaseId: first.id, state: "blocked", attempt: 1, reason: "ownership" } } } });
   assert.equal((await f.admin(`/v1/admin/usage?${range(1000, 2000)}`)).totals.leases.cleanupBlocked, 1);
 
+  // The reads are indexed and bounded, because a report runs inside the controller's single write transaction.
+  f.store.transaction(db => {
+    const plan = (sql: string, ...values: Array<string | number>) => db.prepare("EXPLAIN QUERY PLAN " + sql).all(...values).map(row => String(row.detail)).join("; ");
+    assert.match(plan("SELECT 1 FROM requests WHERE created>=? AND created<?", 0, 1), /USING COVERING INDEX requests_created/);
+    assert.match(plan("SELECT 1 FROM requests WHERE created>=? AND created<? AND application=?", 0, 1, f.app.id), /USING COVERING INDEX requests_application_created/);
+    assert.match(plan("SELECT * FROM usage_leases WHERE admitted>=? AND admitted<? AND ended>?", 0, 1, 0), /USING INDEX usage_leases_admitted/);
+    assert.match(plan("SELECT * FROM usage_leases WHERE ended IS NULL AND admitted<?", 1), /USING INDEX usage_leases_ended \(ended=\?\)/, "only the leases still held");
+    // A lease carried into a range is looked for no further back than the longest hold on record.
+    assert.equal(db.prepare("SELECT max_hold FROM usage_state").get()!.max_hold, 300);
+    // A range that holds more rows than one report may read is refused before it is read.
+    const query = { from: 1000, to: 2000, groupBy: "application" as const };
+    assert.equal(usageReport(db, query, 2000, 400 * 86400, 4).totals.leases.admitted, 4);
+    assert.throws(() => usageReport(db, query, 2000, 400 * 86400, 3), failure(400, "usage_range_too_large"));
+  });
   // The ledger keeps an ended lease for the configured period and never drops an active one.
   f.setNow(1400 + 400 * 86400 + 1); f.observability.maintain(true);
   f.store.transaction(db => assert.deepEqual(db.prepare("SELECT lease FROM usage_leases ORDER BY admitted").all().map(row => row.lease), [fourth.id]));
