@@ -3,7 +3,7 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Canaveral consumer lease API",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Implemented controller consumer subset. Independently usable execution; ordinary runners remain gated for consumer lease execution. No administrator, enrollment, model, registry or host API is implied. POST bodies are JSON objects of at most 1 MiB with a single Content-Length. Browser Origin requests are rejected. Remote use requires HTTPS; the embedded server uses HTTP behind operator TLS termination. Credentials are opaque bearer secrets, never URL parameters."
   },
   "paths": {
@@ -1882,6 +1882,406 @@
           },
           "default": {
             "description": "Structured error; unknown work must be inspected before any further action"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "summary": "listEvents",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "description": "This application's own events, oldest first: its leases, waiting requests, leased machines, operation outcomes and lease video sessions. Filtered to the authenticated application; host identity is never included. A read with a kind or subject filter examines a bounded stretch of the log, so its page can be short or empty with more: true; read again from cursor. See docs/events.md. The SDK never polls.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Sequence cursor, exclusive.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "description": "The newest N matching events. Not with after.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "UTC lower bound on the event time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "An event kind, or a family such as lease.*. Repeat or separate with commas; at most 32.",
+            "schema": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z]+\\.(?:[a-z_]+|\\*)$"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "lease",
+            "in": "query",
+            "description": "Only events about this lease.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "request",
+            "in": "query",
+            "description": "Only events about this request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/stream": {
+      "get": {
+        "operationId": "followEvents",
+        "summary": "followEvents",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "description": "Live follow of this application's own events as server-sent events. Each event is one unnamed message whose id is its sequence and whose data is an Event. Named messages: open ({cursor}, always first), cursor ({cursor}, after ten quiet seconds), truncated ({after}, retention removed history after the resume cursor) and end ({code, cursor}). open, cursor and end carry the stream position as their id, so a client that reconnects with its last id resumes without loss or repetition. The Last-Event-ID header is the resume cursor and wins over after; without either the stream starts after the newest matching event. End codes: stream_lifetime after one hour, controller_closing, unauthenticated or forbidden when the credential stops being valid, unavailable. At most 4 streams per credential; a refused request is 429 event_stream_limit. Refusals before the stream begins are ordinary JSON errors. See docs/events.md. The SDK never reconnects.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Sequence cursor, exclusive.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "description": "Resume cursor. Wins over after when both are present.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,15})$"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "An event kind, or a family such as lease.*. Repeat or separate with commas; at most 32.",
+            "schema": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z]+\\.(?:[a-z_]+|\\*)$"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "lease",
+            "in": "query",
+            "description": "Only events about this lease.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "request",
+            "in": "query",
+            "description": "Only events about this request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event stream",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-sent events; each unnamed message carries one Event as JSON."
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "usage",
+        "summary": "usage",
+        "security": [
+          {
+            "ApplicationBearer": []
+          }
+        ],
+        "description": "This application's own usage over a UTC range: request outcomes and wait time, lease counts, time to ready, hold time and device-seconds. Derived from controller ledgers, not measured utilisation. A range holding more than 200000 requests and leases is refused with 400 usage_range_too_large. See docs/usage.md.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Default: 24 hours before to.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Default: now. The range is at most 400 days.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "groupBy",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "application",
+                "template",
+                "platform"
+              ],
+              "default": "application"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "json",
+                "csv"
+              ],
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "description": "One header line, one line per group and a total line; see docs/usage.md."
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -4182,6 +4582,302 @@
           "receipt",
           "updatedAt"
         ]
+      },
+      "Event": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "at",
+          "kind",
+          "data"
+        ],
+        "description": "One entry of the controller's durable event log, as its owning application sees it.",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Monotonic and never reused; the resume cursor."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z]+\\.[a-z_]+$",
+            "description": "See docs/events.md for the catalogue."
+          },
+          "applicationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "data": {
+            "type": "object",
+            "description": "Identifiers, states and bounded reason codes. Never credentials, arguments or results."
+          }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "events",
+          "cursor",
+          "more",
+          "truncated"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Pass as after to continue: the last event of a full page, otherwise as far as the read examined."
+          },
+          "more": {
+            "type": "boolean",
+            "description": "More can be read now from cursor. A filtered page can be short or empty while this is true."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Retention removed history after the supplied cursor."
+          }
+        }
+      },
+      "UsageDistribution": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "p50",
+          "p95",
+          "samples"
+        ],
+        "properties": {
+          "p50": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "samples": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "leases"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "submitted",
+              "admitted",
+              "cancelled",
+              "expired",
+              "rejected",
+              "waiting",
+              "waitSeconds"
+            ],
+            "properties": {
+              "submitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "admitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cancelled": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "expired": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rejected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "waiting": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "waitSeconds": {
+                "$ref": "#/components/schemas/UsageDistribution"
+              }
+            }
+          },
+          "leases": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "admitted",
+              "ready",
+              "released",
+              "expired",
+              "failed",
+              "active",
+              "cleanupBlocked",
+              "deviceSeconds",
+              "timeToReadySeconds",
+              "holdSeconds"
+            ],
+            "properties": {
+              "admitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "ready": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "released": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "expired": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "active": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cleanupBlocked": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "deviceSeconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "timeToReadySeconds": {
+                "$ref": "#/components/schemas/UsageDistribution"
+              },
+              "holdSeconds": {
+                "$ref": "#/components/schemas/UsageDistribution"
+              }
+            }
+          }
+        }
+      },
+      "UsageReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to",
+          "groupBy",
+          "generatedAt",
+          "retention",
+          "rows",
+          "totals"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "groupBy": {
+            "enum": [
+              "application",
+              "template",
+              "platform"
+            ]
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "applicationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retention": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requestRecords",
+              "leaseLedgerSeconds",
+              "leaseLedgerStartedAt"
+            ],
+            "properties": {
+              "requestRecords": {
+                "const": "not pruned"
+              },
+              "leaseLedgerSeconds": {
+                "type": "integer",
+                "minimum": 86400
+              },
+              "leaseLedgerStartedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageRow"
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageRow"
+          }
+        }
       }
     }
   }

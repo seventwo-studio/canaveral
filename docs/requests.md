@@ -38,6 +38,9 @@ UUID becomes the lease or model-job UUID. Do not use it for another direct acqui
 ## States and clocks
 
 `waiting` transitions to `admitted`, `cancelled`, `expired` or `rejected`.
+Each is a `request.*` [event](events.md), and a request that waits past a configured
+threshold raises `request.waiting_long` once. [Usage](usage.md) reports the outcomes
+and the wait from submission to admission.
 Only admission reserves resources. Waiting stores no credential and no placement.
 An admitted response has `target` equal to the lease UUID and `admittedAt`; inspect
 that lease for provisioning, runtime and cleanup. Cancellation after admission

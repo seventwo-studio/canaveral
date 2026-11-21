@@ -16,6 +16,8 @@ import { createSessionUpgradeHandler } from "./control/sessions.ts";
 import { createBrowserGateway, parseBrowserGateway } from "./control/browser-gateway.ts";
 import type { BrowserGatewayConfig } from "./control/browser-gateway.ts";
 import { controllerTLS, controllerTLSReloader } from "./tls-reload.ts";
+import { observabilitySettings } from "./observability.ts";
+import type { ObservabilitySettings } from "./observability.ts";
 
 /** Explicit controller configuration. Nothing is discovered, adopted or defaulted to live state. */
 export interface ControllerConfig {
@@ -24,6 +26,8 @@ export interface ControllerConfig {
   enrollmentTokenFile?: string;
   updatePublicKeys?: Record<string, string>;
   browserGateway?: BrowserGatewayConfig;
+  /** Event, usage and alert bounds; see docs/events.md. Absent values take their defaults. */
+  observability?: Partial<ObservabilitySettings>;
   controllerId: string;
   listen: { host: string; port: number };
   tls?: { certFile: string; keyFile: string };
@@ -59,7 +63,7 @@ export function parseUpdatePublicKeys(value: unknown): Record<string, string> {
 }
 
 export function parseControllerConfig(value: unknown): ControllerConfig {
-  const input = record(value, ["statePath", "adminTokenFile", "controllerId", "listen"], ["tls", "enrollmentTokenFile", "updatePublicKeys", "browserGateway"]);
+  const input = record(value, ["statePath", "adminTokenFile", "controllerId", "listen"], ["tls", "enrollmentTokenFile", "updatePublicKeys", "browserGateway", "observability"]);
   const listen = record(input.listen, ["host", "port"]);
   if (typeof listen.host !== "string" || !isIP(listen.host)) fail("listen.host must be an IP literal");
   if (typeof listen.port !== "number" || !Number.isSafeInteger(listen.port) || listen.port < 0 || listen.port > 65535) fail("listen.port must be 0-65535");
@@ -72,6 +76,10 @@ export function parseControllerConfig(value: unknown): ControllerConfig {
   if (input.enrollmentTokenFile !== undefined) config.enrollmentTokenFile = path(input.enrollmentTokenFile, "enrollmentTokenFile");
   if (input.updatePublicKeys !== undefined) config.updatePublicKeys = parseUpdatePublicKeys(input.updatePublicKeys);
   if (input.browserGateway !== undefined) config.browserGateway = parseBrowserGateway(input.browserGateway);
+  if (input.observability !== undefined) {
+    try { config.observability = observabilitySettings(input.observability); }
+    catch (error) { fail(error instanceof Error ? error.message : "invalid observability settings"); }
+  }
   if (input.tls !== undefined) {
     const tls = record(input.tls, ["certFile", "keyFile"]);
     config.tls = { certFile: path(tls.certFile, "tls.certFile"), keyFile: path(tls.keyFile, "tls.keyFile") };
@@ -93,6 +101,7 @@ export async function startController(config: ControllerConfig) {
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let displayBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  let streams: { close?(): void } | undefined;
   const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async (hostId, intent, adminToken) =>
     await control!.request({ type: "browsers.launch", hostId, intent, ...(adminToken === undefined ? {} : { adminToken }) }),
   async token => { await control!.request({ type: "browsers.authorize", token }); },
@@ -102,9 +111,11 @@ export async function startController(config: ControllerConfig) {
     control = new ControlClient({ path: config.statePath, adminToken, controllerId: config.controllerId,
       ...(enrollmentToken === undefined ? {} : { enrollmentToken }),
       ...(config.updatePublicKeys === undefined ? {} : { updatePublicKeys: config.updatePublicKeys }),
-      ...(config.browserGateway ? { browserHosts: Object.keys(config.browserGateway.workers) } : {}) });
+      ...(config.browserGateway ? { browserHosts: Object.keys(config.browserGateway.workers) } : {}),
+      ...(config.observability === undefined ? {} : { observability: config.observability }) });
     await control.ready;
     const handleController = createControllerHandler(control, client);
+    streams = handleController;
     const handler: typeof handleController = (req, res) => {
       if (browsers?.matches(req)) { void browsers.handle(req, res); return; }
       handleController(req, res);
@@ -130,6 +141,7 @@ export async function startController(config: ControllerConfig) {
     broker?.close();
     videoBroker?.close();
     displayBroker?.close();
+    streams?.close?.();
     server?.close();
     await Promise.allSettled([client.close(), control?.close()]);
     throw error;
@@ -144,6 +156,8 @@ export async function startController(config: ControllerConfig) {
     async close(): Promise<void> {
       closing ??= (async () => {
         reloader?.close();
+        // Followers are told the controller is closing before their sockets are dropped; this also stops the stream timer.
+        streams?.close?.();
         broker?.close();
         videoBroker?.close();
         displayBroker?.close();

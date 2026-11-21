@@ -10,6 +10,8 @@ import {
   privateInput, privateOutput, promptPassword, record, removeSameFile, uuid,
 } from "./account-cli.ts";
 import type { AccountContext, CliArguments, RequestClient } from "./account-cli.ts";
+import { handleObservability, OBSERVABILITY_COMMANDS } from "./observability-cli.ts";
+import type { ObservabilityIO } from "./observability-cli.ts";
 
 const HELP = `Canaveral machine and inference orchestration
 Usage: canaveral [--url ORIGIN] [--token-file FILE] [--allow-http] COMMAND [options]
@@ -48,6 +50,14 @@ setup [--agent claude|codex|all] [--project [--directory DIR]] [--force]
                                          Write the agent skill files (user scope unless --project);
                                          print the MCP registration
 image capture --request-file FILE | image-task ID
+events [--after SEQ | --tail N] [--kind KIND]... [--since TIME] [--limit N] [--follow] [--own] [--text]
+                                         Durable event log; --follow streams, --own reads as an application
+usage [--last 24h | --from TIME --to TIME] [--group-by application|template|platform|host]
+      [--format text|json|csv] [--own]   Requests, waits, leases and device-seconds over a range
+alerts list | deliveries | remove ID | test ID [--request-id UUID]
+alerts add --request-id UUID --name NAME --type slack|webhook --url-file FILE
+           [--secret-file FILE] [--kind KIND]...
+doctor [--json]                          Read-only diagnosis; exits 1 when it has findings
 updates [options] COMMAND                Manage signed runtime releases and rollouts
 install [options]                        Verify a fresh Unix installation; generate service config
 
@@ -56,6 +66,9 @@ serve flags: --bind IP --port PORT --database FILE --admin-token-file FILE
 serve --config FILE accepts the explicit controller configuration used by src/main.ts.
 Account create/mint commands require a stable --request-id. Passwords and issued
 credentials stay in private files. Never retry an uncertain mutation with a new ID.
+events and usage filters: --application ID --lease ID --request ID --host ID --machine ID
+(events), --application ID (usage). KIND is an event kind or a family such as lease.*.
+Alert webhook URLs and signing secrets are read from private 0600 files, never arguments.
 lease hold releases on exit, SIGINT, SIGTERM, parent exit or exit of the --bind-pid
 process; --detach prints the grant and returns without holding. mcp, lease hold and
 the lease-key commands need HTTPS or a loopback IP URL, and accept --ca-file FILE.
@@ -99,6 +112,10 @@ const schemas: Record<string, Schema> = {
   mcp: { values: ["ca-file"] }, instructions: { flags: ["skill"] }, setup: { flags: ["force", "project"], values: ["agent", "directory"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
+  events: { flags: ["follow", "own", "text"], values: ["after", "tail", "kind", "since", "limit", "application", "lease", "request", "host", "machine"] },
+  usage: { flags: ["own"], values: ["from", "to", "last", "group-by", "format", "application"] },
+  alerts: { actions: ["list", "add", "remove", "test", "deliveries"], defaultAction: "list" },
+  doctor: { flags: ["json"] },
 };
 const subSchemas: Record<string, Schema> = {
   "maintenance:begin": { positional: 1, values: ["id", "reason"] },
@@ -120,6 +137,8 @@ const subSchemas: Record<string, Schema> = {
   "lease:install": { positional: 2, flags: ["keep-upload"], values: ["lease-key-file", "request-id", "install-id", "member", "wait", "ca-file"] },
   "apps:list": {}, "apps:create": { values: ["request-file", "output-file"], required: ["request-file", "output-file"] },
   "apps:credential": { positional: 1, values: ["output-file"], required: ["output-file"] }, "apps:revoke": { positional: 1 },
+  "alerts:list": {}, "alerts:deliveries": { values: ["destination", "state"] }, "alerts:remove": { positional: 1 }, "alerts:test": { positional: 1, values: ["request-id"] },
+  "alerts:add": { values: ["request-id", "name", "type", "url-file", "secret-file", "kind"], required: ["request-id", "name", "type", "url-file"] },
 };
 
 /** Strict, command-specific parsing. Global flags retain their original before-command position. */
@@ -151,7 +170,7 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
   const schema = subSchemas[`${command}:${action}`] ?? initial;
   const options: NonNullable<ParseArgsConfig["options"]> = {};
   for (const name of schema.flags ?? []) options[name] = { type: "boolean" };
-  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" ? { multiple: true } : {}) };
+  for (const name of schema.values ?? []) options[name] = { type: "string", ...(name === "scope" || name === "kind" ? { multiple: true } : {}) };
   const result = parseArgs({ args: tail, options, allowPositionals: true, strict: true });
   if (command === "lease" && !action && result.positionals.length === 2) {
     action = result.positionals.pop()!;
@@ -260,6 +279,10 @@ export interface CliIO {
   output: typeof privateOutput;
   runtime: CliRuntime;
   signal?: AbortSignal;
+  /** Connection probe used by `doctor`; portable tests replace it. */
+  probe?: ObservabilityIO["probe"];
+  /** Pauses of `events --follow`; portable tests shorten them. */
+  followTiming?: ObservabilityIO["followTiming"];
 }
 function signals(external?: AbortSignal): { signal: AbortSignal; dispose(): void } {
   if (external) return { signal: external, dispose() {} };
@@ -545,6 +568,7 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       if (args.action === "prepare") { if (!value.source) throw new CliError("This template has no base image source to cache."); result.image = await io.runtime.prepareImage(record(value.source), option(args, "cache", "./state/images")); }
       io.stdout(JSON.stringify(result, null, 2) + "\n"); return 0;
     }
+    if (OBSERVABILITY_COMMANDS.includes(args.command)) return await handleObservability(args, { stdout: io.stdout, stderr: io.stderr, client: io.client, ...(io.signal ? { signal: io.signal } : {}), ...(io.probe ? { probe: io.probe } : {}), ...(io.followTiming ? { followTiming: io.followTiming } : {}) });
     if (["mcp", "instructions", "setup"].includes(args.command) || (args.command === "lease" && ["hold", "device", "operation", "install"].includes(args.action))) {
       const { agentCommand } = await import("./agent-cli.ts");
       return await agentCommand(args, io, { jsonFile, number: numberOption });
