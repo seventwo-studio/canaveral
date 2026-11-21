@@ -97,6 +97,12 @@ wait, a scan cycle spans several passes and a request refused earlier in the cyc
 is next tried in the following cycle, so the guarantee holds per cycle, not per
 pass; see the scan continuation below.
 
+Admission runs before the [warm pool](warm-pool-and-baselines.md#waiting-requests-win)
+refills. A device lease request that capacity refused makes the pool give up the fewest
+warm devices that let it fit, and keeps its eligible hosts from being refilled while it
+waits. An admitted device lease takes over a ready warm device of its own image and size
+when there is one.
+
 A request whose attempt returns 429 or 503 is skipped for the current scan cycle,
 and so are the application's other waiting requests with the same normalized intent
 apart from UUID and name: they would meet the same limit or capacity, so they count
@@ -191,6 +197,9 @@ job state `waitingForResources`). The first job that fits is reserved on the dom
 physical ledger, assigned, and marked `admitted` with `target` equal to its UUID, all
 in the same transaction. Skipped jobs stay eligible; there is no aging. Waiting never
 preempts, shrinks or relocates a held reservation: priority only orders admission.
+The one exception is a [warm pool device](warm-pool-and-baselines.md#waiting-requests-win),
+which serves no consumer: a waiting request that capacity refused takes its capacity,
+after the device is stopped and removed with proof.
 
 `waiting` ends as `admitted`, `cancelled`, `expired` or `rejected`. A model call that
 ends without admission closes its job without execution: cancellation closes it as

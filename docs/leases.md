@@ -21,6 +21,11 @@ environment has two named members and a persisted pairing identity. One assignme
 cannot belong to multiple leases. Existing administrative machines are not adopted
 or expired automatically. Existing `/v1/machines` behavior remains compatible.
 
+One assignment can exist before its lease: a [warm pool device](warm-pool-and-baselines.md).
+It is created by the pool, owned by nobody and not an administrative machine. A lease
+takes over its machine row and reservation at admission, at most one lease ever does,
+and from then on it is that lease's member in every respect, including cleanup.
+
 The consumer principal has a template allowlist and aggregate CPU, memory, disk
 and active-lease limits. Admission checks these and host capacity in the same
 SQLite transaction as creation. Paired environments reserve all members on a
@@ -114,6 +119,10 @@ Return 201 for new admission, 200 for an identical retry. Example response shape
 ```json
 {"id":"b7682a27-b32e-472a-8a4d-f54a98a6d962","state":"provisioning","runtimeState":"pending","revision":1,"expiresAt":"2026-11-02T13:30:00Z","cleanup":{"state":"notRequested"},"members":[{"name":"primary","state":"pending"}],"capabilities":{"command":true,"pty":false,"files":true,"screenshot":false,"displayStream":false,"input":false}}
 ```
+
+A member may carry `source`: `warm` when its device was taken over from the host's warm
+pool without another boot, `cold` when it was booted for the lease. It is absent while a
+claimed warm device is still being handed over. It says nothing else about the host.
 
 Capabilities describe the pinned template contract, not current readiness. Each
 member exposes its own capabilities and file scopes; pair readiness requires both
@@ -241,7 +250,8 @@ acceptance. Other provider stop paths and access locks still need bounded
 cancellation/priority, and native running-VM expiry requires live acceptance.
 Automatic Apple cleanup now uses the owned deletion and credential-erasure path
 below. Android emulator leases use the native lease supervisor's group-exit proof
-before the same owned removal and erasure; other provider cleanup remains unimplemented. The
+before the same owned removal and erasure, also for a device that was adopted from the
+warm pool or claimed and never adopted; other provider cleanup remains unimplemented. The
 runner explicitly rejects configuration that attempts to advertise protocol 1
 for any other runtime until those gates are complete. It must not be enabled just to make admission pass.
 

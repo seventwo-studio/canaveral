@@ -14,6 +14,7 @@ import { cleanupView, computeReserved, ensureLeaseCleanup, initializeLifecycle, 
 import { createModule as operationModule, initializeConsumerOperations, refreshConsumerOperations } from "./consumer-operations.ts";
 import { applicationArtifactDisk, releaseLeaseArtifacts } from "./install-cleanup.ts";
 import { applicationVideoUsage, settleLeaseVideoSessions } from "./video-cleanup.ts";
+import { WarmPool, claimWarmDevice, memberSource, settleWarmDevices, warmAssignment, warmReport } from "./warm-pool.ts";
 
 export const ACTIVE = ["provisioning", "ready"];
 export interface LegacyLeaseRow {
@@ -133,9 +134,12 @@ export function legacyLeaseAssignment<T extends { id: string }>(db: DatabaseSync
 }
 export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: number) {
   const members = db.prepare("SELECT m.*,h.seen,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
-    const cleanup = leaseCleanup(db, String(m.id));
+    const cleanup = leaseCleanup(db, String(m.id)), source = memberSource(db, String(m.id));
     return { name: String(m.member_name), machineId: String(m.id), state: now - Number(m.seen) < 30 ? String(m.observed) : "unknown",
       ready: ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
+      // Whether this device was taken from the warm pool or booted for the lease. Absent while a
+      // claimed warm device is still being handed over. Nothing about the host is exposed.
+      ...(source ? { source } : {}),
       ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
   });
   return { id: row.id, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
@@ -228,10 +232,12 @@ export class LegacyLeases implements ControlModule {
   readonly machines: MachineStore;
   readonly linux: LinuxLeases;
   readonly requests: Requests;
+  readonly warm: WarmPool;
   private operations: ControlModule;
   constructor(readonly store: SqliteStore, readonly options: ControlOptions) {
     this.applications = new ConsumerIdentities(store);
     this.machines = new MachineStore(store, options);
+    this.warm = new WarmPool(store, this.machines);
     this.linux = new LinuxLeases(store, this.applications, new RunnerEnrollment(store, options.controllerId));
     store.transaction(initializeLeases);
     store.addTransactionHook(refreshLegacyLeases);
@@ -250,20 +256,25 @@ export class LegacyLeases implements ControlModule {
     });
     this.operations = operationModule(store, options);
     registerMachineHooks(store, {
-      reportFields: ["leaseFenced"],
+      reportFields: ["leaseFenced", "warm"],
       beforeTransaction(db) { refreshLegacyLeases(db, store.clock()); },
       beforeHeartbeat(db) { refreshLegacyLeases(db, store.clock()); },
       reportMachine(db, _host, mid, report) {
         if (report.leaseFenced !== undefined && typeof report.leaseFenced !== "boolean") throw new ServiceError("Invalid lease fence receipt.", 400);
+        // A pool device's report counts only for the binding it names: a warm-phase observation
+        // never makes a claimed device ready for its lease.
+        if (!warmReport(db, mid, report, store.clock())) return false;
         if (report.leaseFenced === true) {
           const row = db.prepare("SELECT l.* FROM leases l JOIN lease_members lm ON lm.lease=l.id WHERE lm.machine=?").get(mid) as unknown as LegacyLeaseRow | undefined;
           if (row) endLegacyLease(db, row, "failed", store.clock());
         }
       },
-      afterHeartbeat(db) { refreshLegacyLeases(db, store.clock()); },
-      assignment(db, machine) { return legacyLeaseAssignment(db, machine as { id: string }, store.clock()); },
+      afterHeartbeat(db) { settleWarmDevices(db, store.clock()); refreshLegacyLeases(db, store.clock()); },
+      assignment(db, machine, forHost) { return warmAssignment(db, legacyLeaseAssignment(db, machine as { id: string }, store.clock()), forHost, store.clock()); },
     });
   }
+  /** Timer and post-request entry: admit waiting requests first, then let the warm pool settle and refill. */
+  wake(): boolean { const admitted = this.requests.wake(); return this.warm.wake() && admitted; }
   acquire(token: string, value: unknown): ControlResponse {
     return this.acquireAuthorized(value, db => this.applications.verify(db, token));
   }
@@ -294,14 +305,21 @@ export class LegacyLeases implements ControlModule {
       const count = applicationLeaseUsage(db, app.id).active;
       if (count >= limits.activeLeases) throw new ServiceError("Application active lease limit exceeded.", 429);
       if (db.prepare("SELECT 1 FROM machines WHERE id=?").get(String(request.id))) throw new ServiceError("Lease machine identity already exists.", 409);
-      try { this.machines.createMachine(db, request, true); }
-      catch (error) {
-        if (error instanceof ServiceError && error.message.startsWith("No online accepting host")) throw new ServiceError("No eligible lease-capable host has capacity.", 503, { code: "capacity_unavailable" });
-        throw error;
-      }
       const now = this.store.clock();
+      // A ready warm device of exactly this image and size is taken over: the lease becomes the owner
+      // of that machine and its existing reservation, so nothing is reserved twice or released in
+      // between. Otherwise the lease gets its own machine and a cold boot.
+      const wanted = { ...object(image.defaults ?? image.minimum), ...request.resources } as { cpu: number; memoryMiB: number; diskGiB: number };
+      const warm = claimWarmDevice(db, id, image, wanted, now);
+      if (!warm) {
+        try { this.machines.createMachine(db, request, true); }
+        catch (error) {
+          if (error instanceof ServiceError && error.message.startsWith("No online accepting host")) throw new ServiceError("No eligible lease-capable host has capacity.", 503, { code: "capacity_unavailable" });
+          throw error;
+        }
+      }
       db.prepare("INSERT INTO leases VALUES (?,?,?,'provisioning',1,?,?,?,?, 'notRequested')").run(id, app.id, JSON.stringify(frozen), now, now + ttl, now + limits.provisioningTimeoutSeconds, null);
-      db.prepare("INSERT INTO lease_members VALUES (?,?,?)").run(id, "primary", String(request.id));
+      db.prepare("INSERT INTO lease_members VALUES (?,?,?)").run(id, "primary", warm ?? String(request.id));
       const used = applicationLeaseUsage(db, app.id).resources;
       if (resourceKeys.some(k => used[k] > limits.resources[k])) throw new ServiceError("Application resource limit exceeded.", 429);
       return { status: 201, body: legacyLeaseView(db, leaseRow(db, id)!, now) };

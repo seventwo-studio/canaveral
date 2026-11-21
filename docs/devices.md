@@ -26,8 +26,14 @@ Android CLI interfaces are not used. These interfaces are documented but depreca
 upstream, so retain compatible installed SDK tools for this adapter.
 
 Copy [host-android.json](../examples/host-android.json), set absolute SDK/storage
-paths and choose a profile installed in that SDK. The example image is ARM64;
-on AMD64 set `arch: amd64` and use an `x86_64` system image. Runtime installation
+paths and choose a profile installed in that SDK. The example also enables
+[leased emulators](mobile-control.md#host-configuration) and a
+[warm pool](warm-pool-and-baselines.md#host-opt-in); delete `leaseClockHelper`,
+`leaseSupervisor`, `leaseProtocol`, `leaseImages` and `leaseWarmPool` for a host that
+only runs account-owned devices. The example image is ARM64;
+on AMD64 set `arch: amd64` and use an `x86_64` system image. It names a Google Play
+image because leased emulators must be user builds; an account-owned device can use any
+installed image. Runtime installation
 and downloads happen before enrollment, rather than during device reconciliation.
 The host checks that the required tools and offered system-image directories exist.
 
@@ -185,8 +191,26 @@ release reservations. Stop/start retains the same AVD.
 For iOS, a lost create response leaves `create-started.json`; verify the exact
 assignment's device before restoring its `simulator.json` UDID receipt. Never point
 a receipt at a personal or different assignment's device. Unknown/missing/replaced
-resources require inspection rather than automatic adoption. Deletion, snapshots
+resources require inspection rather than automatic adoption. Running-memory snapshots
 and migration remain outside the existing machine lifecycle.
+
+## Saving a device as a baseline
+
+An administrator can save a stopped Android device's disk state as a named, immutable
+[baseline](warm-pool-and-baselines.md#baselines), which a lease image can then name.
+Prepare the device with the actions above, run `sync` through `shell`, stop it and wait
+for the stopped observation:
+
+```sh
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token baseline save \
+  307cd365-a75d-43a8-aefb-1f23b22b8aa2 --name signed-in --revision 1 \
+  --request-id 5b0d6a0e-93f1-4c8e-a6f5-2f1f0e6d7c11
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token baselines
+```
+
+A leased device, a warm pool device and a running device are refused. The device cannot
+be started or deleted while it is being saved. Fixture coverage only; whether a real
+emulator boots from the copied state is an open native question.
 
 The portable tests exercise real HTTP delivery, credential separation, large
 screenshot receipts, crash/timeout replay protection and fixture SDK ownership/

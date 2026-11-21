@@ -186,6 +186,12 @@ export class LeaseGuard {
     if (!record || object(record.machine.lease).id !== identifier(leaseId) || !this.allowed(id)) throw new ServiceError("Leased execution is unauthorized.", 410);
     if (!record.executionStarted) { record.executionStarted = true; this.save(); }
   }
+  /** A claimed warm pool device already ran under this assignment before its lease existed, so
+   * its cleanup needs stop and removal proof and must never take the never-started path. */
+  markStarted(id: string, leaseId: string): void {
+    const record = this.records.get(identifier(id));
+    if (record && object(record.machine.lease).id === identifier(leaseId) && !record.executionStarted) { record.executionStarted = true; this.save(); }
+  }
   neverStarted(id: string, leaseId: string): boolean { const r = this.records.get(identifier(id)); return !!r && object(r.machine.lease).id === identifier(leaseId) && !r.executionStarted; }
   authorization(id: string, leaseId: string): LeaseAuthorization {
     const record = this.records.get(identifier(id));

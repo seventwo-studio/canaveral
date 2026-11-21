@@ -5,5 +5,10 @@
   "storage": "/var/lib/canaveral/android",
   "androidSDK": "/opt/android-sdk",
   "artifacts": {"development": "/srv/canaveral/apps/development.apk"},
-  "templates": [{"templateFile": "templates/android-phone.json"}]
+  "templates": [{"templateFile": "templates/android-phone.json"}],
+  "leaseClockHelper": "/usr/local/libexec/canaveral-mobile-native",
+  "leaseSupervisor": "/usr/local/libexec/canaveral-mobile-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{"id": "android-phone", "revision": "1", "arch": "arm64", "runtime": "android"}],
+  "leaseWarmPool": {"maxDevices": 1, "maxAgeSeconds": 3600}
 }

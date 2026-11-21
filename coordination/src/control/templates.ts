@@ -92,6 +92,16 @@ export function source(value: unknown): ImageSource {
   } else if (typeof v.path !== "string" || !isAbsolute(v.path)) throw new ServiceError("Local base image paths must be absolute.", 400);
   return { ...v } as unknown as ImageSource;
 }
+export interface BaselineReference { name: string; revision: string; digest: string }
+export const BASELINE_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+export const BASELINE_REVISION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+/** Name, revision and recorded digest of one saved device baseline; nothing host-local. */
+export function baselineReference(value: unknown): BaselineReference {
+  const v = object(value); only(v, ["name", "revision", "digest"]);
+  if (typeof v.name !== "string" || !full(BASELINE_NAME, v.name) || typeof v.revision !== "string" || !full(BASELINE_REVISION, v.revision) ||
+    typeof v.digest !== "string" || !full(/^[a-f0-9]{64}$/, v.digest)) throw new ServiceError("A baseline reference needs a name, a revision and its recorded SHA-256 digest.", 400);
+  return { name: v.name, revision: v.revision, digest: v.digest };
+}
 export interface Template extends Record<string, unknown> {
   id: string; revision: string; os: "linux" | "windows" | "macos" | "android" | "ios";
   arch: "arm64" | "amd64"; mode: "headless" | "desktop" | "device";
@@ -134,6 +144,9 @@ function normalizeDefinition(value: unknown, operatorBundle: boolean): Template 
     result.device = device;
     if (v.source || v.prepare || (v.preparationDriver ?? "none") !== "none") throw new ServiceError("Mobile devices use installed SDK runtimes without VM preparation.", 400);
   }
+  // A prepared device state. It is part of the pinned public definition, so naming another
+  // baseline, revision or digest needs a new template revision. Android only for now.
+  if ("baseline" in v) { if (os !== "android") throw new ServiceError("Device baselines are supported for Android templates only.", 400); result.baseline = baselineReference(v.baseline); }
   if ("prepare" in v || "source" in v) {
     const prepared = (operatorBundle ? operatorRecipe : recipe)(v.prepare, os), base = "source" in v ? source(v.source) : null;
     result.recipeDigest = legacyDigest({ prepare: prepared, source: base ? { sha256: base.sha256, format: base.format } : null });

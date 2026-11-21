@@ -57,6 +57,7 @@ interpreter dependency to the controller, host or SDK; see
 - [terminal sdk](terminal-sdk.md)
 - [tls clients](tls-clients.md)
 - [visual sdk](visual-sdk.md)
+- [warm devices and device baselines](warm-pool-and-baselines.md) (pre-booted Android emulators that a lease takes over, and saved device states that a lease image names; fixture-covered, native acceptance open)
 - [windows guest accessibility](windows-guest-accessibility.md)
 - [windows guest display](windows-guest-display.md)
 - [windows guest files](windows-guest-files.md)

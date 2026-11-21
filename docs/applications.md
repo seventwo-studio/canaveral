@@ -49,6 +49,11 @@ Administrative paths are:
 | `POST /v1/consumers/{id}/credential` | Rotate credential; body `{}`; previous application credential stops working |
 | `POST /v1/consumers/{id}/revoke` | Revoke identity; body `{}`; cannot reactivate by rotation |
 
+A template can pin a [device baseline](warm-pool-and-baselines.md#an-explicit-operator-choice):
+a prepared device state that carries whatever its preparer installed or signed in to.
+Allowlisting such a template is the only way an application reaches that state, and its
+catalogue entry shows the `baseline` name, revision and digest.
+
 The application credential authorizes `GET /v1/environments/templates` and the
 [implemented lease lifecycle subset](leases.md). Catalogue entries include pinned
 capabilities and availability; availability requires an online, healthy host that

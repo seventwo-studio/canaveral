@@ -16,6 +16,7 @@ import { recordPreparation } from "./preparation.ts";
 import { reportImageTasks, assignedImageTasks, acknowledgedImages, validateCatalogueOffer } from "./images.ts";
 import { reportInferenceJobs, assignedInferenceJobs, INFERENCE_HOST_PROVIDERS } from "./inference.ts";
 import { blueprint, initializeBlueprints } from "./blueprints.ts";
+import { baselineUsable, pendingBaselineSave, requireNotPooled } from "./pool-ledger.ts";
 
 import { PhysicalDomains, physicalBudget, physicalMapping } from "../physical-domains.ts";
 
@@ -108,6 +109,13 @@ export function validateOffer(value: unknown): Json {
       if (seen.has(identity) || !image || entry.runtime !== machineImageRuntime(result, image)) failure("Lease image must uniquely match an installed image and its configured runtime.");
       seen.add(identity); return entry;
     }).sort((a: Json, b: Json) => { for (const key of ["id", "revision", "arch", "runtime"]) { if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1; } return 0; });
+  }
+  // A host's own opt-in and bounds for warm devices; meaningful only with lease execution.
+  if ("warmPool" in input) {
+    const pool = object(input.warmPool); fields(pool, ["maxDevices", "maxAgeSeconds"]);
+    if (result.leaseProtocol !== 1) failure("Warm devices require lease execution.");
+    result.warmPool = { maxDevices: integer(pool.maxDevices, "warm device limit", 64), maxAgeSeconds: integer(pool.maxAgeSeconds, "warm maximum age", 86400) };
+    if (result.warmPool.maxAgeSeconds < 60) failure("Invalid warm maximum age.");
   }
   if ("inference" in input) {
     if (!INFERENCE_HOST_PROVIDERS.includes(result.provider)) failure("Embedded inference requires a native Mac or Linux host.");
@@ -410,12 +418,13 @@ export class MachineStore implements ControlModule {
         const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(old.host!);
         return this.machine(db, old, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
       }
-      return this.createMachine(db, request, false, principal.kind === "operator" ? null : principal.user?.id ?? null);
+      // A baseline carries its preparer's data, so only an administrator makes an account-owned device from one.
+      return this.createMachine(db, request, false, principal.kind === "operator" ? null : principal.user?.id ?? null, principal.kind === "operator" || principal.user?.role === "admin");
     });
   }
   /** Transaction-local admission for generic leases. Caller authenticates the lease/application
    * and pins its member row in this same transaction. A lease never acquires user ownership. */
-  createMachine(db: DatabaseSync, value: Json, leased = false, ownerId: string | null = null): Json {
+  createMachine(db: DatabaseSync, value: Json, leased = false, ownerId: string | null = null, baselines = leased): Json {
     if (!db.isTransaction) throw new TypeError("Machine admission requires the caller transaction.");
     const request = validateMachineRequest(value), id = request.id;
     if (leased && ownerId !== null) failure("Leased machines cannot acquire human ownership.", 409);
@@ -438,6 +447,9 @@ export class MachineStore implements ControlModule {
       const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
       for (const image of advertised.templates) {
         if (leased && !machineLeaseEligible(advertised, image)) continue;
+        // A baseline-backed image is placed only where the host stores that exact, unstale baseline.
+        // Leases reach it through their application's allowlist; other callers need administrator authority.
+        if (image.baseline && (!baselines || !baselineUsable(db, String(host.id), image))) continue;
         if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
         const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
         if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
@@ -465,6 +477,8 @@ export class MachineStore implements ControlModule {
       if (state !== "running" && state !== "stopped") failure("Desired state must be running or stopped.");
       if (deletion(db, id)) failure("A machine with a deletion intent cannot change desired state.", 409);
       if (record(db, "lease_members", id)) failure("Lease-owned machines use lease lifecycle actions.", 409);
+      requireNotPooled(db, id);
+      if (state === "running" && pendingBaselineSave(db, id)) failure("Resolve the pending baseline save before restarting this device.", 409);
       if (state === "running" && row.desired !== "running") {
         requireHostAdmission(db, String(row.host));
         if (hasPendingPowerOff(db, id)) failure("Resolve the pending power-off intent before restarting.", 409);

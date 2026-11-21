@@ -6,8 +6,11 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ServiceError, object } from "../errors.ts";
 import { assignmentFingerprint, StateLock, noLinks, present } from "../runtime-process.ts";
 import type { LeaseAuthorization } from "../runtime-process.ts";
+import { baselineReference } from "../control/templates.ts";
+import { BaselineStore } from "./android-baselines.ts";
+import type { BaselineBinding } from "./android-baselines.ts";
 import { MobileProvider, SUPERVISOR_REFUSED, SupervisorLaunchError, authorized, canonical, copyUpload, markNotStaged, decodeData, digest, encoded, integer, locked, operationRequest, privateDirectory, publicationUncertain, readJson, readRegular, saveJson, text, unsupported, uuid, writeAll } from "./mobile.ts";
-import type { Authorized, ByteReader, DeviceRequest, Download, LeaseSupervisorStatus, NativeChild, NativePipe, RecordValue, RunOptions, SupervisedChild } from "./mobile.ts";
+import type { Authorized, ByteReader, DeviceRequest, Download, LeaseSupervisorStatus, NativeChild, NativePipe, RecordValue, RunOptions, SupervisedChild, WarmAuthorization } from "./mobile.ts";
 import { openAndroidVideo } from './android-video.ts';
 import type { AndroidVideoOptions } from './android-video.ts';
 
@@ -110,8 +113,11 @@ export class AndroidProvider extends MobileProvider {
     if (port % 2) throw new ServiceError("Invalid reserved Android console port.");
     const launch = readJson(path.join(storage, "launch.json")), owner = readJson(path.join(storage, "canaveral-owner.json"));
     // A fenced, stopped, lost or expired lease supervisor ends device access, whatever the host still believes.
-    if (machine.lease != null) await this.leaseAccess(launch, storage);
-    if (!launch || launch.version !== 2 || launch.machineId !== uuid(machine.id) || launch.fingerprint !== owner?.fingerprint || launch.leaseId !== (machine.lease ? object(machine.lease).id ?? null : null) || canonical(launch.argv) !== canonical(this.launchArguments(machine, port))) throw new ServiceError("Android launch binding is incomplete or contradictory; refusing device adoption.");
+    if (machine.lease != null || machine.warm != null) await this.leaseAccess(launch, storage);
+    // A warm device answers only to its own hold until a lease has adopted it; a claimed but
+    // unadopted device (launch still without a lease) is refused under the lease.
+    const hold = machine.lease == null && machine.warm != null ? object(machine.warm).id : undefined;
+    if (!launch || launch.version !== 2 || launch.machineId !== uuid(machine.id) || launch.fingerprint !== owner?.fingerprint || launch.leaseId !== (machine.lease ? object(machine.lease).id ?? null : null) || launch.warmId !== hold || canonical(launch.argv) !== canonical(this.launchArguments(machine, port))) throw new ServiceError("Android launch binding is incomplete or contradictory; refusing device adoption.");
     const serial = "emulator-" + port;
     await authorized(check); const devices = await this.devices(); await authorized(check);
     const state = devices[serial];
@@ -131,7 +137,8 @@ export class AndroidProvider extends MobileProvider {
   launchArguments(machine: RecordValue, port: number): string[] {
     const resources = object(machine.resources);
     return [this.tool("emulator"), "-avd", this.name(machine), "-port", String(port), "-cores", String(integer(resources.cpu, "cpu", 1, 1024)), "-memory", String(integer(resources.memoryMiB, "memory", 1, 2 ** 30)), "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim",
-      ...(machine.lease != null ? LEASE_ISOLATION_ARGUMENTS : [])];
+      // A warm device may become a lease's device without another boot, so it is isolated from its first one.
+      ...(machine.lease != null || machine.warm != null ? LEASE_ISOLATION_ARGUMENTS : [])];
   }
   async maintenanceStorage(machine: RecordValue, image: RecordValue): Promise<"present" | "absent" | "unknown" | "notMaterialized"> {
     const storage = this.maintenanceDirectory(machine, image);
@@ -156,6 +163,9 @@ export class AndroidProvider extends MobileProvider {
     const saved = readJson(receipt), fingerprint = digest(this.binding(machine, image));
     if (!saved) {
       if (fs.existsSync(avd) || fs.existsSync(path.join(avds, this.name(machine) + ".ini")) || readJson(path.join(storage, "avd-create-started.json"))) throw new ServiceError("Partial or foreign AVD exists; inspect before provisioning again.");
+      // A missing, stale, mismatched or corrupt baseline is refused before anything is created, so
+      // the refusal leaves no partial device behind.
+      if (image.baseline != null) await this.baselineStore().check(baselineReference(image.baseline), this.baselineBinding(machine, image));
       saveJson(path.join(storage, "avd-create-started.json"), { name: this.name(machine), fingerprint });
       const device = object(image.device);
       await this.run([this.tool("avdmanager"), "create", "avd", "--name", this.name(machine), "--package", text(device.systemImage, "system image"), "--device", text(device.profile, "profile"), "--path", avd], { input: Buffer.from("no\n"), timeoutMs: 120000 });
@@ -163,20 +173,33 @@ export class AndroidProvider extends MobileProvider {
       const configPath = path.join(avd, "config.ini"), config = readRegular(configPath, 1048576);
       const fd = fs.openSync(configPath, fs.constants.O_APPEND | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
       try { if (!fs.fstatSync(fd).isFile()) throw new ServiceError("AVD configuration must be regular."); fs.writeSync(fd, Buffer.concat([Buffer.from(config.length && config.at(-1) === 10 ? "" : "\n"), Buffer.from(`disk.dataPartition.size=${integer(object(machine.resources).diskGiB, "disk", 1, 2 ** 30)}G\n`)])); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      // A baseline-backed template gives every device its own copy of the saved state before first boot.
+      if (image.baseline != null) saveJson(path.join(storage, "baseline-clone.json"), await this.cloneBaseline(machine, image, avd));
       saveJson(receipt, { name: this.name(machine), fingerprint });
     } else if (saved.name !== this.name(machine) || saved.fingerprint !== fingerprint) throw new ServiceError("AVD creation receipt belongs to another assignment.");
     if (!fs.lstatSync(avd).isDirectory() || fs.lstatSync(avd).isSymbolicLink()) throw new ServiceError("Owned AVD data is missing; it was not recreated.");
     return avd;
   }
-  async reconcile(machine: RecordValue, supplied: RecordValue, _folder: string): Promise<RecordValue> {
+  async reconcile(machine: RecordValue, supplied: RecordValue, folder: string): Promise<RecordValue> {
     this.executionAllowed(machine);
-    // The host passes the lease authorization beside the pinned template; it is never part of the binding.
-    const { _leaseAuthorization: lease, ...image } = supplied;
+    // The host passes the lease and warm authorizations beside the pinned template; they are never part of the binding.
+    const { _leaseAuthorization: lease, _warmAuthorization: warm, ...image } = supplied;
+    // An interrupted removal of a failed warm device finishes before its storage is recreated.
+    if (machine.warm != null && machine.lease != null) this.resumeDiscard(machine, folder);
     const storage = this.storage(machine, image);
+    const report = await this.reconcileLocked(machine, image, storage, folder, typeof lease === "function" ? lease as () => LeaseAuthorization : undefined, typeof warm === "function" ? warm as () => WarmAuthorization : undefined);
+    if (machine.warm == null) return report;
+    // Every report of a pool device says which binding it describes, so the controller never takes a
+    // warm-phase observation for the adopted device, and learns whether the lease got the warm device.
+    const { lease: leaseId, hold } = this.owners(machine), launched = readJson(path.join(storage, "launch.json"));
+    const origin = leaseId && launched?.leaseId === leaseId ? launched.adoptedFrom === hold ? "warm" : "cold" : undefined;
+    return { ...report, warm: { id: hold, ...(leaseId ? { lease: leaseId } : {}), ...(origin ? { origin } : {}) } };
+  }
+  private reconcileLocked(machine: RecordValue, image: RecordValue, storage: string, folder: string, lease: (() => LeaseAuthorization) | undefined, warm: (() => WarmAuthorization) | undefined): Promise<RecordValue> {
     return locked(path.join(storage, "assignment.lock"), async () => {
       if (machine.desired !== "running" && machine.desired !== "stopped") throw new ServiceError("Invalid desired mobile state.", 400);
       if (machine.desired === "stopped") await this.closeShells(machine);
-      if (machine.lease != null) return this.reconcileLeased(machine, image, storage, typeof lease === "function" ? lease as () => LeaseAuthorization : undefined);
+      if (machine.lease != null || machine.warm != null) return this.reconcileSupervised(machine, image, storage, folder, lease, warm);
       const endpoint = await this.endpoint(machine, storage), launchPath = path.join(storage, "launch.json"), stopPath = path.join(storage, "stop.json");
       if (endpoint) {
         if (machine.desired === "stopped") {
@@ -231,25 +254,36 @@ export class AndroidProvider extends MobileProvider {
     });
   }
 
-  // Leased emulators. The native lease supervisor owns the emulator's process group and
-  // enforces the published boot-bound deadline even when this runner or the controller
-  // is lost. Its stopped receipt, or positively absent processes, is the only stop proof.
-  // Supervisor liveness is the kernel-held lifetime lock on its storage, never a PID.
+  // Supervised emulators: leased devices and warm pool devices. The native lease supervisor owns
+  // the emulator's process group and enforces the published boot-bound deadline even when this
+  // runner or the controller is lost. Its stopped receipt, or positively absent processes, is the
+  // only stop proof. Supervisor liveness is the kernel-held lifetime lock on its storage, never a PID.
+  //
+  // A warm device belongs to a warm hold, not to a lease: it has no consumer and one fixed deadline.
+  // At most one lease adopts it. Adoption replaces the authorization with the lease's identity and
+  // deadline; the supervisor's rewritten record is the commit point. A warm device that is proven
+  // stopped before that point was never handed out: it is removed and the lease cold boots a fresh
+  // device under the same assignment. Implementation limit: adoption and the fallback are covered by
+  // process fixtures only; no real emulator has been adopted.
   readonly supervisors = new Map<string, SupervisedChild>();
   private leaseHelper(): string {
     const helper = this.config.leaseSupervisor;
-    if (typeof helper !== "string" || !path.isAbsolute(helper) || !this.transport?.leases) unsupported("Leased Android execution requires the configured native lease supervisor.");
+    if (typeof helper !== "string" || !path.isAbsolute(helper) || !this.transport?.leases) unsupported("Supervised Android execution requires the configured native lease supervisor.");
     return helper;
   }
-  override executionAllowed(machine: RecordValue): void { if (machine.lease != null) this.leaseHelper(); }
+  override executionAllowed(machine: RecordValue): void { if (machine.lease != null || machine.warm != null) this.leaseHelper(); }
   private leaseStorage(machine: RecordValue): string { return path.join(text(this.config.storage, "storage"), uuid(machine.id)); }
+  /** The lease and the warm hold this assignment names; either may be absent. */
+  private owners(machine: RecordValue): { machineId: string; lease: string | null; hold: string | null } {
+    return { machineId: uuid(machine.id), lease: machine.lease == null ? null : uuid(object(machine.lease).id), hold: machine.warm == null ? null : uuid(object(machine.warm).id) };
+  }
   private leaseIdentity(machine: RecordValue): { machineId: string; leaseId: string } {
     return { machineId: uuid(machine.id), leaseId: uuid(object(machine.lease).id) };
   }
   private supervisorStatus(storage: string): Promise<LeaseSupervisorStatus> { return this.transport!.leases!.status(this.leaseHelper(), storage); }
   /** Device access needs a live supervisor and a current, unfenced authorization on this boot's clock. */
   private async leaseAccess(launch: RecordValue | undefined, storage: string): Promise<void> {
-    const fenced = (): never => { throw new ServiceError("Leased Android execution is fenced.", 410); };
+    const fenced = (): never => { throw new ServiceError("Supervised Android execution is fenced.", 410); };
     if (launch?.supervised !== true || ["lease-fenced.json", "lease-stopped.json"].some(name => fs.existsSync(path.join(storage, name)))) fenced();
     const status = await this.supervisorStatus(storage), allowed = readJson(path.join(storage, "lease-authorization.json"));
     // A supervisor that is gone, however it ended, no longer enforces the deadline.
@@ -258,12 +292,18 @@ export class AndroidProvider extends MobileProvider {
   }
   /** Positive stop proof only: a matching stopped receipt, a launch proven never to have
    * spawned, or a gone supervisor with its emulator and process group positively absent.
-   * Anything else stays unknown. */
+   * Anything else stays unknown. The launch belongs to this assignment's lease, or to its own
+   * warm hold: before adoption, or when a claimed device ends before the supervisor adopted it. */
   async leaseStopped(machine: RecordValue, storage: string): Promise<boolean> {
-    const { machineId, leaseId } = this.leaseIdentity(machine), leases = this.transport?.leases;
+    const { machineId, lease, hold } = this.owners(machine), leases = this.transport?.leases;
     const launchPath = path.join(storage, "launch.json"), launch = readJson(launchPath), record = readJson(path.join(storage, "lease-supervisor.json"));
     if (!launch) return !record;
-    if (launch.supervised !== true || launch.machineId !== machineId || launch.leaseId !== leaseId) throw new ServiceError("Leased launch identity is contradictory; inspect it.", 409);
+    const launchLease = launch.leaseId ?? null, launchHold = launch.warmId ?? null;
+    if (launch.supervised !== true || launch.machineId !== machineId || !(launchLease !== null ? launchLease === lease : launchHold !== null && launchHold === hold)) throw new ServiceError("Supervised launch identity is contradictory; inspect it.", 409);
+    // A supervisor record or stop receipt of this launch names its lease, its warm hold, or (in the
+    // window before the launch record is rewritten) the claiming lease that adopted that hold.
+    const owned = (value: RecordValue): boolean => launchLease !== null ? value.leaseId === launchLease && value.warmId === undefined
+      : value.warmId === launchHold && value.leaseId === undefined || lease !== null && value.leaseId === lease && value.adoptedFrom === launchHold;
     if (!leases) return false;
     if (!record && (launch.supervisorExit === SUPERVISOR_REFUSED || launch.nothingRunning === true)) return true;
     if ((await this.supervisorStatus(storage)).supervisor === "held") return false;
@@ -277,10 +317,10 @@ export class AndroidProvider extends MobileProvider {
       return true;
     }
     const pid = record.childPid, supervisor = record.supervisorPid;
-    if (record.machineId !== machineId || record.leaseId !== leaseId || record.bootId !== launch.bootId || !Number.isSafeInteger(pid) || !Number.isSafeInteger(supervisor) ||
+    if (record.machineId !== machineId || !owned(record) || record.bootId !== launch.bootId || !Number.isSafeInteger(pid) || !Number.isSafeInteger(supervisor) ||
       launch.supervisorPid !== undefined && launch.supervisorPid !== supervisor) throw new ServiceError("Lease supervisor record belongs to another launch.", 409);
     const stopped = readJson(path.join(storage, "lease-stopped.json"));
-    if (stopped && stopped.machineId === machineId && stopped.leaseId === leaseId && stopped.bootId === launch.bootId && stopped.childPid === pid && stopped.supervisorPid === supervisor && stopped.groupAbsent === true) return true;
+    if (stopped && stopped.machineId === machineId && owned(stopped) && stopped.bootId === launch.bootId && stopped.childPid === pid && stopped.supervisorPid === supervisor && stopped.groupAbsent === true) return true;
     return await this.transport?.processAbsent?.(pid as number) === true && await leases.groupAbsent(pid as number);
   }
   /** Publishes the host's current lease authorization as an absolute native deadline. */
@@ -304,31 +344,86 @@ export class AndroidProvider extends MobileProvider {
       saveJson(file, value); return value;
     } finally { lock.close(); }
   }
+  /** Publishes a warm hold's one fixed deadline. A hold is never renewed: a later call can only
+   * shorten or fence it. */
+  private async publishWarm(machine: RecordValue, storage: string, authorization: () => WarmAuthorization): Promise<RecordValue> {
+    const helper = this.leaseHelper(), { machineId, hold } = this.owners(machine), launch = readJson(path.join(storage, "launch.json"));
+    if (!hold || !launch || launch.supervised !== true || launch.machineId !== machineId || launch.warmId !== hold || (launch.leaseId ?? null) !== null) throw new ServiceError("Warm authorization needs its supervised launch identity.", 409);
+    const lock = new StateLock(path.join(storage, "lease-authorization.sqlite"));
+    try {
+      const started = performance.now(), allowed = authorization(), sample = await this.transport!.leases!.clock(helper), delay = (performance.now() - started) / 1000;
+      if (allowed.holdID !== hold || !Number.isFinite(allowed.remainingSeconds) || allowed.remainingSeconds < 0) throw new ServiceError("Warm authorization identity differs.", 409);
+      const value: RecordValue = { version: 1, machineId, warmId: hold, bootId: uuid(launch.bootId), bootSessionID: uuid(sample.bootSessionID), revision: 1,
+        deadline: Math.max(0, sample.continuous + allowed.remainingSeconds - delay - .25), fenced: false };
+      const file = path.join(storage, "lease-authorization.json"), previous = readJson(file);
+      if (previous) {
+        if (previous.machineId !== machineId || previous.warmId !== hold || previous.leaseId !== undefined || previous.bootId !== value.bootId || previous.bootSessionID !== value.bootSessionID || typeof previous.deadline !== "number" || typeof previous.fenced !== "boolean") throw new ServiceError("Warm authorization belongs to another launch or boot.", 409);
+        value.fenced = previous.fenced; value.deadline = Math.min(Number(value.deadline), previous.deadline);
+      }
+      saveJson(file, value); return value;
+    } finally { lock.close(); }
+  }
+  /** Replaces a current warm hold's authorization with the adopting lease's identity and deadline.
+   * After this write the device is either adopted by exactly this lease or stopped by its supervisor;
+   * it never returns to the pool. Refused when the hold is fenced, expired or from another boot. */
+  private async publishAdoption(machine: RecordValue, storage: string, launch: RecordValue, authorization: () => LeaseAuthorization): Promise<void> {
+    const helper = this.leaseHelper(), { machineId, lease, hold } = this.owners(machine);
+    if (!lease || !hold || launch.machineId !== machineId || launch.warmId !== hold || (launch.leaseId ?? null) !== null) throw new ServiceError("Adoption needs a warm launch of this assignment.", 409);
+    const lock = new StateLock(path.join(storage, "lease-authorization.sqlite"));
+    try {
+      const started = performance.now(), allowed = authorization(), sample = await this.transport!.leases!.clock(helper), delay = (performance.now() - started) / 1000;
+      if (allowed.leaseID !== lease || !Number.isSafeInteger(allowed.revision) || allowed.revision < 1 || !Number.isFinite(allowed.remainingSeconds) || allowed.fenced || allowed.remainingSeconds <= 1) throw new ServiceError("Lease authorization ended before adoption.", 410);
+      const file = path.join(storage, "lease-authorization.json"), previous = readJson(file);
+      if (!previous || previous.machineId !== machineId || previous.bootId !== launch.bootId || previous.bootSessionID !== sample.bootSessionID || typeof previous.deadline !== "number") throw new ServiceError("The warm hold's authorization belongs to another launch or boot.", 409);
+      const value: RecordValue = { version: 1, machineId, leaseId: lease, adoptedFrom: hold, bootId: uuid(launch.bootId), bootSessionID: uuid(sample.bootSessionID), revision: allowed.revision,
+        deadline: Math.max(0, sample.continuous + allowed.remainingSeconds - delay - .25), fenced: false };
+      if (previous.leaseId === lease && previous.adoptedFrom === hold) {
+        // Already published for this lease (a resumed attempt): the same claim, never a longer one.
+        if (previous.fenced !== false) throw new ServiceError("The adoption authorization is fenced.", 410);
+        if (allowed.revision <= Number(previous.revision)) return;
+      } else if (previous.warmId !== hold || previous.leaseId !== undefined || previous.fenced !== false || !(sample.continuous < previous.deadline)) {
+        throw new ServiceError("The warm hold ended before adoption.", 410);
+      }
+      saveJson(file, value);
+    } finally { lock.close(); }
+  }
   /** Fences an existing authorization without needing the host's lease clock. */
   private fenceLease(storage: string): void {
     const lock = new StateLock(path.join(storage, "lease-authorization.sqlite"));
     try { const file = path.join(storage, "lease-authorization.json"), previous = readJson(file); if (previous && previous.fenced !== true) saveJson(file, { ...previous, fenced: true }); }
     finally { lock.close(); }
   }
-  private async reconcileLeased(machine: RecordValue, image: RecordValue, storage: string, authorization: (() => LeaseAuthorization) | undefined): Promise<RecordValue> {
+  private async reconcileSupervised(machine: RecordValue, image: RecordValue, storage: string, folder: string, authorization: (() => LeaseAuthorization) | undefined, warm: (() => WarmAuthorization) | undefined): Promise<RecordValue> {
     const launchPath = path.join(storage, "launch.json"), launch = readJson(launchPath), stopping = machine.desired === "stopped";
+    const { machineId, lease, hold } = this.owners(machine), fenced = lease ? { leaseFenced: true } : {};
     if (!launch) {
       if (readJson(path.join(storage, "lease-supervisor.json"))) return { state: "unknown", detail: "Lease supervisor record has no launch intent; inspect before recovery." };
       if (readJson(path.join(storage, "endpoint.json"))) return { state: "unknown", detail: "Reserved endpoint has no launch receipt; inspect before recovery." };
-      if (stopping) return { state: "stopped", leaseFenced: true };
-      if (!authorization) unsupported("Leased Android launch requires the host's lease authorization.");
-      const allowed = authorization();
-      if (allowed.fenced || allowed.remainingSeconds <= 1) throw new ServiceError("Lease authorization ended before launch.", 410);
+      if (stopping) return { state: "stopped", ...fenced };
+      if (lease) {
+        if (!authorization) unsupported("Leased Android launch requires the host's lease authorization.");
+        const allowed = authorization();
+        if (allowed.fenced || allowed.remainingSeconds <= 1) throw new ServiceError("Lease authorization ended before launch.", 410);
+      } else {
+        if (!warm) unsupported("Warm Android launch requires the host's warm hold.");
+        // A hold that is nearly over is not worth a boot; the controller replaces it.
+        if (warm().remainingSeconds <= 5) throw new ServiceError("The warm hold ended before launch.", 410);
+      }
       if (!this.transport?.portPairAvailable) unsupported("Native emulator port reservation is not configured.");
       const helper = this.leaseHelper();
-      await this.provision(machine, image, storage);
+      try { await this.provision(machine, image, storage); }
+      catch (error) {
+        // A refused baseline is a definite outcome: no device exists, and the lease or warm boot fails with the reason.
+        if (error instanceof ServiceError && error.code.startsWith("baseline_")) return { state: "error", detail: error.message };
+        throw error;
+      }
       return this.withPort(storage, async port => {
-        const argv = this.launchArguments(machine, port), { machineId, leaseId } = this.leaseIdentity(machine);
-        const identity = { version: 2, bootId: randomUUID(), machineId, leaseId, fingerprint: digest(this.binding(machine, image)), argv, startedAt: this.now(), supervised: true };
+        const argv = this.launchArguments(machine, port), owner = lease ? { leaseId: lease } : { leaseId: null, warmId: hold };
+        const identity = { version: 2, bootId: randomUUID(), machineId, ...owner, fingerprint: digest(this.binding(machine, image)), argv, startedAt: this.now(), supervised: true };
         saveJson(launchPath, identity);
-        await this.publishLease(machine, storage, authorization, false);
+        if (lease) await this.publishLease(machine, storage, authorization!, false); else await this.publishWarm(machine, storage, warm!);
         let child: SupervisedChild;
-        try { child = await this.transport!.leases!.supervise(helper, storage, { version: 1, machineId, leaseId, bootId: identity.bootId, executable: argv[0], args: argv.slice(1), env: this.environment(), cwd: storage }); }
+        try { child = await this.transport!.leases!.supervise(helper, storage, { version: 1, machineId, ...(lease ? { leaseId: lease } : { warmId: hold }), bootId: identity.bootId, executable: argv[0], args: argv.slice(1), env: this.environment(), cwd: storage }); }
         catch (error) {
           // Only the supervisor's dedicated refusal status proves nothing was spawned. Any other
           // failure is recovered later from the lifetime lock and a process inventory.
@@ -338,29 +433,107 @@ export class AndroidProvider extends MobileProvider {
         }
         this.supervisors.set(machineId, child);
         saveJson(launchPath, { ...identity, pid: integer(child.pid, "emulator pid", 2, 2 ** 31 - 1), supervisorPid: integer(child.supervisorPid, "supervisor pid", 2, 2 ** 31 - 1) });
-        return { state: "starting", accessReady: false, detail: "Leased emulator launched under its native deadline supervisor." };
+        return { state: "starting", accessReady: false, detail: lease ? "Leased emulator launched under its native deadline supervisor." : "Warm emulator launched under its native deadline supervisor." };
       });
     }
+    // A warm device this lease has claimed but its supervisor has not adopted yet.
+    const unadopted = lease !== null && (launch.leaseId ?? null) === null;
     if (await this.leaseStopped(machine, storage)) {
-      this.supervisors.delete(uuid(machine.id));
-      return stopping ? { state: "stopped", leaseFenced: true } : { state: "error", detail: "The leased emulator stopped; a lease is never relaunched." };
+      this.supervisors.delete(machineId);
+      if (stopping) return { state: "stopped", ...fenced };
+      // Proven stopped before adoption: it was never handed out. Remove it and cold boot for this lease.
+      if (unadopted) return this.discardWarm(machine, image, storage, folder);
+      const refused = readJson(path.join(storage, "readiness-refused.json"));
+      return { state: "error", detail: refused && refused.bootId === launch.bootId && typeof refused.detail === "string" ? refused.detail : lease ? "The leased emulator stopped; a lease is never relaunched." : "The warm device stopped; it is replaced, never relaunched." };
     }
     if ((await this.supervisorStatus(storage)).supervisor !== "held") {
       // Gone without a stop receipt (killed, crashed or never recorded): nothing enforces the
-      // deadline any more. Fence access now and fail the lease; cleanup waits for stop proof.
+      // deadline any more. Fence access now and fail; cleanup waits for stop proof.
       this.fenceLease(storage);
       const detail = "The lease supervisor is gone without a stop receipt. Device access is fenced; cleanup waits until the emulator's process group is proven absent.";
-      return stopping ? { state: "stopping", leaseFenced: true, detail } : { state: "error", leaseFenced: true, detail };
+      return stopping ? { state: "stopping", ...fenced, detail } : { state: "error", ...fenced, detail };
     }
     if (stopping) {
-      if (authorization) await this.publishLease(machine, storage, authorization, true); else this.fenceLease(storage);
-      return { state: "stopping", leaseFenced: true, detail: "Lease fenced; the native supervisor's process-group exit proof is pending." };
+      if (authorization && lease && !unadopted) await this.publishLease(machine, storage, authorization, true); else this.fenceLease(storage);
+      return { state: "stopping", ...fenced, detail: "Fenced; the native supervisor's process-group exit proof is pending." };
     }
-    if (!authorization) unsupported("Leased Android execution requires the host's lease authorization.");
-    // The fence worker republishes on every revision change; reconciliation only fills a gap.
-    const allowed = authorization(), previous = readJson(path.join(storage, "lease-authorization.json"));
-    if (!previous || previous.revision !== allowed.revision || allowed.fenced && previous.fenced !== true) await this.publishLease(machine, storage, () => allowed, false);
+    if (unadopted) return this.adopt(machine, storage, launch, authorization);
+    if (lease) {
+      if (!authorization) unsupported("Leased Android execution requires the host's lease authorization.");
+      // The fence worker republishes on every revision change; reconciliation only fills a gap.
+      const allowed = authorization(), previous = readJson(path.join(storage, "lease-authorization.json"));
+      if (!previous || previous.revision !== allowed.revision || allowed.fenced && previous.fenced !== true) await this.publishLease(machine, storage, () => allowed, false);
+    }
     return this.leasedReadiness(machine, storage, launch);
+  }
+  /** Hands a current warm device to the lease that claimed it. The supervisor's record naming this
+   * lease and the adopted hold is the commit point; only after it are the local records rebound.
+   * Readiness is then checked again under the lease, for the same boot. */
+  private async adopt(machine: RecordValue, storage: string, launch: RecordValue, authorization: (() => LeaseAuthorization) | undefined): Promise<RecordValue> {
+    const { machineId, lease, hold } = this.owners(machine), waiting = (detail: string): RecordValue => ({ state: "starting", accessReady: false, detail });
+    if (!authorization) unsupported("Warm adoption requires the host's lease authorization.");
+    const journalPath = path.join(storage, "lease-adoption.json"), journal = readJson(journalPath), binding = { version: 1, machineId, leaseId: lease, warmId: hold, bootId: launch.bootId };
+    if (journal && (journal.machineId !== machineId || journal.leaseId !== lease || journal.warmId !== hold || journal.bootId !== launch.bootId)) throw new ServiceError("The warm adoption journal belongs to another lease or launch; the device is not handed out.", 409);
+    const adopted = (): boolean => { const record = readJson(path.join(storage, "lease-supervisor.json")); return !!record && record.machineId === machineId && record.leaseId === lease && record.adoptedFrom === hold && record.bootId === launch.bootId; };
+    if (!adopted()) {
+      // A fenced device is on its way down; its stop proof, then a fresh device, follows.
+      if (fs.existsSync(path.join(storage, "lease-fenced.json"))) return waiting("The warm device is being stopped; a fresh device follows once its stop is proven.");
+      const allowed = authorization();
+      if (allowed.fenced || allowed.remainingSeconds <= 1) throw new ServiceError("Lease authorization ended before adoption.", 410);
+      if (!journal) saveJson(journalPath, { ...binding, state: "publishing" });
+      await this.publishAdoption(machine, storage, launch, () => allowed);
+      // The supervisor reads the authorization every 100 ms.
+      for (let attempt = 0; attempt < 30 && !adopted(); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+      if (!adopted()) return waiting("Waiting for the native supervisor to adopt the warm device for this lease.");
+    }
+    const { warmId: _hold, ...rest } = launch;
+    saveJson(path.join(storage, "launch.json"), { ...rest, leaseId: lease, adoptedFrom: hold });
+    saveJson(journalPath, { ...binding, state: "complete" });
+    return this.leasedReadiness(machine, storage, readJson(path.join(storage, "launch.json"))!);
+  }
+  private pathIdentity(file: string): string | null {
+    const stat = fs.lstatSync(file, { bigint: true, throwIfNoEntry: false });
+    return stat ? stat.dev + "/" + stat.ino : null;
+  }
+  /** Removes a warm device that was proven stopped before any lease adopted it, so the lease that
+   * claimed it can cold boot in fresh storage under the same assignment. The journal lives outside
+   * the storage it removes, so an interrupted removal resumes before anything is recreated. */
+  private async discardWarm(machine: RecordValue, image: RecordValue, storage: string, folder: string): Promise<RecordValue> {
+    const { machineId, lease, hold } = this.owners(machine), journalPath = path.join(folder, "warm-discard.json");
+    if (!readJson(journalPath)) {
+      const ini = path.join(this.environment().ANDROID_AVD_HOME!, this.name(machine) + ".ini");
+      privateDirectory(folder);
+      saveJson(journalPath, { version: 1, id: randomUUID(), machineId, leaseId: lease, warmId: hold, storageIdentity: this.pathIdentity(storage), iniIdentity: this.pathIdentity(ini), state: "removing" });
+    }
+    this.resumeDiscard(machine, folder);
+    // The assignment keeps owned storage, and the caller still holds this assignment's lock file.
+    fs.closeSync(fs.openSync(path.join(this.storage(machine, image), "assignment.lock"), "wx", 0o600));
+    return { state: "starting", accessReady: false, detail: "The warm device stopped before adoption. It was removed with proof; a fresh device boots for this lease." };
+  }
+  /** Finishes a journaled warm-device removal. Returns true once nothing of the device remains. */
+  private resumeDiscard(machine: RecordValue, folder: string): boolean {
+    const journalPath = path.join(folder, "warm-discard.json"), journal = readJson(journalPath);
+    if (!journal) return false;
+    const { machineId, lease, hold } = this.owners(machine);
+    if (journal.machineId !== machineId || journal.warmId !== hold || journal.leaseId !== lease || typeof journal.storageIdentity !== "string" || !["removing", "complete"].includes(String(journal.state))) throw new ServiceError("The warm discard journal belongs to another assignment.", 409);
+    if (journal.state === "complete") return true;
+    const root = text(this.config.storage, "storage"), storage = path.join(root, machineId), quarantine = path.join(root, `.removing-${machineId}-${uuid(journal.id)}`);
+    const avds = this.environment().ANDROID_AVD_HOME!, ini = path.join(avds, this.name(machine) + ".ini");
+    const remaining = this.pathIdentity(storage), staged = this.pathIdentity(quarantine), registration = this.pathIdentity(ini);
+    if (remaining && (remaining !== journal.storageIdentity || staged) || staged && staged !== journal.storageIdentity || registration && registration !== journal.iniIdentity) throw new ServiceError("Warm device storage or registration changed during removal.", 409);
+    if (remaining) fs.renameSync(storage, quarantine);
+    if (registration) fs.unlinkSync(ini);
+    if (this.pathIdentity(quarantine)) fs.rmSync(quarantine, { recursive: true });
+    for (const dir of [avds, root]) { if (!fs.existsSync(dir)) continue; const fd = fs.openSync(dir, fs.constants.O_RDONLY); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+    saveJson(journalPath, { ...journal, state: "complete" });
+    this.supervisors.delete(machineId);
+    return true;
+  }
+  /** Before lease cleanup of a claimed pool device: finish an interrupted removal of its failed warm
+   * device, and keep the invariant that a started assignment has owned storage for cleanup to remove. */
+  async settleClaim(machine: RecordValue, image: RecordValue, folder: string): Promise<void> {
+    this.executionAllowed(machine);
+    if (this.resumeDiscard(machine, folder) && !fs.existsSync(this.leaseStorage(machine))) this.storage(machine, image);
   }
   /** Ready means booted, owned, serving package management and network-isolated from the host. */
   private async leasedReadiness(machine: RecordValue, storage: string, launch: RecordValue): Promise<RecordValue> {
@@ -373,25 +546,26 @@ export class AndroidProvider extends MobileProvider {
       if (!(await this.adb(serial, ["shell", "pm", "path", "android"])).startsWith("package:")) return waiting("Waiting for the package manager.");
       // A debuggable (userdebug or eng) guest can get root and act as adbd toward the shared host adb
       // server without using the network; leased images must be user builds.
-      if (await this.adb(serial, ["shell", "getprop", "ro.debuggable"]) !== "0") {
-        this.fenceLease(storage);
-        return { state: "error", leaseFenced: true, detail: "Leased Android images must be user builds (ro.debuggable=0); the lease was fenced before use." };
-      }
+      if (await this.adb(serial, ["shell", "getprop", "ro.debuggable"]) !== "0") return this.refuseDevice(storage, launch, "Leased Android images must be user builds (ro.debuggable=0); the device was fenced before use.");
     } catch { return waiting("Waiting for the booted emulator to answer readiness checks."); }
     const receipt = path.join(storage, "lease-isolation.json");
     if (readJson(receipt)?.bootId !== launch.bootId) {
       const port = integer(readJson(path.join(storage, "endpoint.json"))?.port, "emulator console port", 5554, 5680);
       let probe: { outcome: "isolated" | "reachable" | "inconclusive"; ports: number[] };
       try { probe = await this.isolationProbe(serial, port); } catch { return waiting("Waiting for the guest network isolation check."); }
-      if (probe.outcome === "reachable") {
-        // Fail closed: a guest that reaches the host is never handed to a lease holder.
-        this.fenceLease(storage);
-        return { state: "error", leaseFenced: true, detail: "The leased guest reached a host loopback service; the lease was fenced before use." };
-      }
+      // Fail closed: a guest that reaches the host is never handed to a lease holder.
+      if (probe.outcome === "reachable") return this.refuseDevice(storage, launch, "The guest reached a host loopback service; the device was fenced before use.");
       if (probe.outcome !== "isolated") return waiting("Waiting for a conclusive guest network isolation check.");
       saveJson(receipt, { version: 1, bootId: launch.bootId, target: GUEST_HOST_ALIAS, ports: probe.ports, isolated: true });
     }
     return { state: "running", accessReady: true };
+  }
+  /** Fences a device that failed a readiness check and keeps the reason with its launch, so later
+   * reports of the stopped device still say why it was never handed out. */
+  private refuseDevice(storage: string, launch: RecordValue, detail: string): RecordValue {
+    this.fenceLease(storage);
+    saveJson(path.join(storage, "readiness-refused.json"), { version: 1, bootId: launch.bootId, detail });
+    return { state: "error", leaseFenced: true, detail };
   }
   /** Ports the guest must not reach on the host: the default adb server, this emulator's
    * console and adb ports, the controller, operator-declared services and a fresh canary. */
@@ -429,6 +603,13 @@ export class AndroidProvider extends MobileProvider {
     // A launch whose supervisor has not written its record yet is still starting (or the runner crashed
     // around it); its recovery belongs to cleanup, never to this fence poll, which could race the launch.
     if (!readJson(path.join(storage, "lease-supervisor.json")) && launch.supervisorExit === undefined && launch.nothingRunning !== true) return null;
+    if ((launch.leaseId ?? null) === null) {
+      // A claimed warm device that is not adopted yet: adoption, or its removal and the lease's cold
+      // boot, belongs to reconciliation. The fence worker only ends it when the lease itself has ended.
+      if (machine.desired !== "stopped" && !authorization().fenced) return null;
+      this.fenceLease(storage);
+      return { state: "stopping", leaseFenced: true, detail: "Lease fenced; the native supervisor's process-group exit proof is pending." };
+    }
     if (await this.leaseStopped(machine, storage)) return { state: "stopped", leaseFenced: true };
     const allowed = authorization(), previous = readJson(path.join(storage, "lease-authorization.json")), stopping = machine.desired === "stopped" || allowed.fenced;
     if (!previous || previous.revision !== allowed.revision || stopping && previous.fenced !== true) await this.publishLease(machine, storage, () => allowed, stopping);
@@ -468,9 +649,22 @@ export class AndroidProvider extends MobileProvider {
     privateDirectory(root);
     privateDirectory(avds);
     let journal = readJson(receipt);
+    // A warm device the host never materialized (retired before its first reconcile) has nothing to remove.
+    const unmaterialized = machine.warm != null && !lease && !identity(storage) && !identity(ini) && !identity(quarantine);
+    if (unmaterialized && (!journal || journal.id === request && journal.machineId === id && journal.fingerprint === fingerprint && journal.storageIdentity === null)) {
+      if (!journal) saveJson(receipt, { id: request, machineId: id, fingerprint, storageIdentity: null, iniIdentity: null, state: "complete" });
+      return { id: request, machineId: id, state: "complete" };
+    }
     if (!journal) {
       if (identity(quarantine)) throw new ServiceError("Android removal quarantine is already occupied.");
       if (lease) { this.executionAllowed(machine); if (!await this.leaseStopped(machine, storage)) throw new ServiceError("Leased emulator stop is unconfirmed.", 409, { code: "execution_pending" }); }
+      else if (machine.warm != null) {
+        // A warm device is given up by fencing its hold; only the supervisor's stop proof allows removal.
+        this.executionAllowed(machine);
+        if (identity(storage)) this.fenceLease(storage);
+        if (!await this.leaseStopped(machine, storage)) throw new ServiceError("Warm emulator stop is unconfirmed.", 409, { code: "execution_pending" });
+        this.supervisors.delete(id);
+      }
       else if ((await this.reconcile(machine, image, folder)).state !== "stopped") throw new ServiceError("Android emulator stop is unconfirmed.");
       const name = this.name(machine), created = readJson(path.join(storage, "avd-created.json"));
       const started = readJson(path.join(storage, "avd-create-started.json"));
@@ -502,6 +696,50 @@ export class AndroidProvider extends MobileProvider {
     if (journal.state !== "complete") saveJson(receipt, { ...journal, state: "complete" });
     return { id: request, machineId: id, state: "complete" };
   }
+  private store: BaselineStore | undefined;
+  /** One store per provider, so a baseline's full digest check is not repeated for every clone. */
+  baselineStore(): BaselineStore {
+    const storage = text(this.config.storage, "storage"), sdk = text(this.config.androidSDK, "androidSDK");
+    return this.store ??= new BaselineStore(storage, sdk);
+  }
+  private baselineBinding(machine: RecordValue, image: RecordValue): BaselineBinding {
+    return { arch: String(image.arch), device: object(image.device) as Record<string, string>, diskGiB: integer(object(machine.resources).diskGiB, "disk", 1, 2 ** 30) };
+  }
+  /** Copies the pinned baseline into a fresh AVD, then points each copied qcow2 overlay at its own
+   * copied base image. An overlay records its backing file by path, and the saved one still names the
+   * device it was captured from. Implementation limit: whether the emulator needs this, and whether
+   * a device boots correctly from copied user data, is unverified on a real emulator. */
+  private async cloneBaseline(machine: RecordValue, image: RecordValue, avd: string): Promise<RecordValue> {
+    const cloned = await this.baselineStore().clone(baselineReference(image.baseline), this.baselineBinding(machine, image), avd);
+    const files = cloned.files as string[], tool = path.join(text(this.config.androidSDK, "androidSDK"), "emulator", "qemu-img"), relocated: string[] = [];
+    if (fs.existsSync(tool)) for (const overlay of files.filter(name => name.endsWith(".qcow2") && files.includes(name.slice(0, -6)))) {
+      await this.run([tool, "rebase", "-u", "-f", "qcow2", "-F", "raw", "-b", path.join(avd, overlay.slice(0, -6)), path.join(avd, overlay)], { timeoutMs: 60000 });
+      relocated.push(overlay);
+    }
+    return { name: cloned.name, revision: cloned.revision, digest: cloned.digest, files: files.length, bytes: cloned.bytes, reflinked: cloned.reflinked, relocated };
+  }
+  /** Saves the disk state of a stopped, account-owned device as a new immutable baseline. A leased
+   * or warm device is never captured, and neither is one with any sign of a running emulator. */
+  async saveBaseline(machine: RecordValue, image: RecordValue, _folder: string, request: { id: string; name: string; revision: string }, authorized: () => boolean): Promise<RecordValue> {
+    if (machine.lease != null || machine.warm != null) throw new ServiceError("A leased or warm device is never captured.", 409, { code: "baseline_source_unsupported" });
+    const running = (): never => { throw new ServiceError("Stop the device and wait for its emulator to exit before saving a baseline.", 409, { code: "baseline_source_running" }); };
+    if (machine.desired !== "stopped") running();
+    const storage = this.storage(machine, image);
+    return locked(path.join(storage, "assignment.lock"), async () => {
+      // A stopped unleased device has no launch, endpoint, stop or supervisor record left.
+      if (["launch.json", "endpoint.json", "stop.json", "lease-supervisor.json", "lease-authorization.json"].some(name => fs.existsSync(path.join(storage, name)))) running();
+      if (this.processes.has(uuid(machine.id))) running();
+      const inventory = this.transport?.leases;
+      if (inventory && (await inventory.commandLines()).some(line => line.includes(`-avd ${this.name(machine)}`))) running();
+      const created = readJson(path.join(storage, "avd-created.json")), avd = path.join(storage, "device.avd");
+      const stat = fs.lstatSync(avd, { throwIfNoEntry: false });
+      if (!created || created.name !== this.name(machine) || created.fingerprint !== digest(this.binding(machine, image)) || !stat?.isDirectory() || fs.realpathSync(avd) !== avd) throw new ServiceError("The device has no owned AVD to capture.", 409, { code: "baseline_source_unsupported" });
+      if (!authorized()) throw new ServiceError("Baseline work lost its authorization.", 410);
+      return { ...await this.baselineStore().save(request, { avd, machineId: uuid(machine.id), ...this.baselineBinding(machine, image) }, authorized) };
+    });
+  }
+  removeBaseline(request: { id: string; name: string; revision: string }): RecordValue { return this.baselineStore().remove(request); }
+  baselineInventory(): RecordValue[] { return this.baselineStore().list().map(entry => ({ ...entry })); }
   async processStopped(machine: RecordValue, storage: string): Promise<boolean> {
     const child = this.processes.get(uuid(machine.id));
     if (child) return child.stopped();

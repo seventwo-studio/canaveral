@@ -104,6 +104,11 @@ The dashboard separates host limits, reservations and observed usage:
   an older stopped observation cannot release compute while that intent is open.
   Leased CPU, memory and disk remain reserved until matching storage and credential
   cleanup completes; a stopped lease report alone releases none of them.
+  A [warm pool device](warm-pool-and-baselines.md#one-ledger) is a machine row like any
+  other and is reserved from its creation. A lease that takes it over keeps that same
+  reservation; a device the pool gives up keeps it until the host proves the stop and the
+  removal. A stored [device baseline](warm-pool-and-baselines.md#what-is-stored) charges
+  its host's disk, and a save in progress holds twice the device's data size plus 2 GiB.
 - **Observed usage:** host-wide CPU busy percentage, total/available memory and
   total/free storage on the configured storage filesystem, collected with
   [psutil](https://psutil.io/). Other applications are included; the first CPU
@@ -313,6 +318,8 @@ Account sessions or the operator credential authorize these administrative paths
 | `POST /v1/connection-setups/{id}/revoke` | Revoke enrollment credential; existing host identity survives |
 | `POST /v1/hosts/{id}/checks` | Request an outbound environment check refresh |
 | `GET /v1/hosts/{id}/resources` | Host capacity, limits, reservations, observed sample history and machine allocations |
+| `GET /v1/warm-pool`, `GET`/`POST /v1/hosts/{id}/warm-pool` | [Warm device](warm-pool-and-baselines.md#api-and-cli) targets, headroom and state; administrators only |
+| `POST /v1/machines/{id}/baselines`, `GET /v1/baselines`, `POST /v1/baselines/{id}/remove` | Save, list and remove [device baselines](warm-pool-and-baselines.md#api-and-cli-1); administrators only |
 
 `POST /v1/hosts/{id}/limits` saves `{limits: {cpu, memoryMiB, diskGiB}}` and
 returns `{hostId, limits}`. Values are positive integers up to 1,048,576. A save
@@ -445,7 +452,7 @@ These are controller fixture guarantees, not native execution acceptance.
 Use an administrator credential. Record the host ID and a UUID for the drain.
 
 1. Run `canaveral maintenance begin HOST --id UUID --reason TEXT`. The reason is optional. The CLI generates and prints a UUID if omitted. Retry an interrupted request with the same UUID, host and reason.
-2. Watch `canaveral maintenance status HOST`. Admission closes for new work. Existing work finishes. Stop persistent machines explicitly, release leases and wait for receipts. Check the action beside each blocker in the dashboard. Upgrade an old agent using a managed update during the drain.
+2. Watch `canaveral maintenance status HOST`. Admission closes for new work. Existing work finishes. The warm pool gives up the host's warm devices and does not refill it while admission is closed. Stop persistent machines explicitly, release leases and wait for receipts. Check the action beside each blocker in the dashboard. Upgrade an old agent using a managed update during the drain.
 3. Read the current verdict immediately before power off or reboot. Safe to power off covers Canaveral-managed workloads on this direct host. Unsupported proof requires independent verification and keeps the verdict unsafe. A KubeVirt pool cannot establish safety for physical nodes.
 4. Bring the same host back with its identity and storage intact. Wait for a fresh runner confirmation and a complete inventory. Investigate missing storage, unexpected resources and uncertain operations before resuming.
 5. When readyToResume is true, run `canaveral maintenance resume HOST DRAIN_ID --request-id UUID` with a new request UUID. Reuse it on retries. Check the phase is resumed and inspect remaining admission owners. To cancel maintenance on the same boot, reconcile and resume in the same way.

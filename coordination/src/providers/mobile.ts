@@ -35,6 +35,8 @@ export class SupervisorLaunchError extends ServiceError {
   constructor(readonly supervisorExit?: number) { super("Leased emulator launch is unconfirmed; inspect its supervisor records before recovery.", 409, { outcome: "unknown" }); }
 }
 export interface LeaseClockSample { version: number; bootSessionID: string; continuous: number }
+/** A warm hold's remaining lifetime on the host's clock. A hold has one fixed deadline and is never renewed. */
+export interface WarmAuthorization { holdID: string; remainingSeconds: number }
 /** One native sample: the clock, plus whether a live supervisor holds the storage's lifetime lock. */
 export interface LeaseSupervisorStatus extends LeaseClockSample { supervisor: "held" | "free" | "absent" }
 export interface LeaseSupervisorTransport {
@@ -258,9 +260,14 @@ export class MobileProvider {
   name(machine: RecordValue): string { return "cvm-" + uuid(machine.id); }
   binding(machine: RecordValue, image?: RecordValue): RecordValue {
     const template = object(machine.template), resources = object(machine.resources);
-    const lease = machine.lease == null ? null : object(machine.lease);
+    // A warm pool device is created before any lease exists and may later be adopted by exactly one.
+    // Its storage is bound to its warm hold for its whole life; the lease binding lives in the launch
+    // record, the adoption journal and the native supervisor's records.
+    const hold = machine.warm == null ? null : uuid(object(machine.warm).id);
+    const lease = machine.lease == null || hold ? null : object(machine.lease);
     return { version: 1, id: uuid(machine.id), template, resources, image: image ?? template,
       hostId: machine.hostId ?? null, ownerUserId: machine.ownerUserId ?? machine.ownerId ?? machine.userId ?? null,
+      ...(hold ? { warm: { id: hold } } : {}),
       lease: lease ? Object.fromEntries(["id", "consumerId", "userId", "requestId", "resourceDomainId", "hostId"].map(k => [k, lease[k] ?? null])) : null,
       runtime: { kind: this.kind, state: this.state, storage: this.config.storage, androidSDK: this.config.androidSDK ?? null, xcrun: this.config.xcrun ?? null } };
   }
@@ -336,7 +343,7 @@ export class MobileProvider {
   }
   async control(_machine: RecordValue, _image: RecordValue, _folder: string, _request: DeviceRequest): Promise<RecordValue> { return unsupported("Mobile action requires a platform provider."); }
   executionAllowed(machine: RecordValue): void {
-    if (machine.lease != null) unsupported("Native mobile lease fencing and cleanup acceptance are outstanding; consumer execution is disabled.");
+    if (machine.lease != null || machine.warm != null) unsupported("Native mobile lease fencing and cleanup acceptance are outstanding; consumer execution is disabled.");
   }
   async displayDensity(_machine: RecordValue, _image: RecordValue): Promise<number> { return 1; }
   async operate(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, check: Authorized = () => true, handler?: (request: DeviceRequest) => Promise<RecordValue>): Promise<OperationReport> {

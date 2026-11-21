@@ -30,6 +30,15 @@ export interface Lease {
   cleanup: { state: "notRequested" | "pending" | "running" | "blocked" | "complete" };
   members: Array<Record<string, unknown>>; capabilities: Partial<Capabilities>;
 }
+/** How a member's device was obtained: taken over from the host's warm pool without another boot,
+ * or booted for this lease. Both pass the same readiness, isolation and image checks. */
+export type MemberSource = "warm" | "cold";
+/** The named member's source. Undefined while a claimed warm device is still being handed over,
+ * and on controllers that do not report it. */
+export function memberSource(lease: Lease, member = "primary"): MemberSource | undefined {
+  const source = lease.members.find(entry => entry["name"] === member)?.["source"];
+  return source === "warm" || source === "cold" ? source : undefined;
+}
 export interface LeasePage { leases: Lease[]; nextCursor: string | null }
 export interface Mutation { id: string; state: LeaseState; revision: number; expiresAt: string }
 export interface MutationResult { mutation: Mutation; lease: Lease }
@@ -382,6 +391,7 @@ function lease(value: unknown): Lease {
     || typeof value["createdAt"] !== "string" || typeof value["expiresAt"] !== "string"
     || !isRecord(value["cleanup"]) || !CLEANUP_STATES.includes(value["cleanup"]["state"] as string)
     || !Array.isArray(value["members"]) || !value["members"].every(isRecord) || !isRecord(value["capabilities"])
+    || !value["members"].every(member => member["source"] === undefined || member["source"] === "warm" || member["source"] === "cold")
     || !Object.values(value["capabilities"]).every(v => typeof v === "boolean")) {
     throw new TypeError("lease");
   }
