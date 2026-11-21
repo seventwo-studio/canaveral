@@ -1,3 +1,4 @@
+import { requireHostAdmission } from "./maintenance.ts";
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { ServiceError, object } from "../errors.ts";
@@ -227,6 +228,7 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
         return { body: receipt(old) };
       }
       const row = machine(db, mid, principal);
+      requireHostAdmission(db, row.host);
       platformArguments(object(JSON.parse(row.template)), request);
       if (request.action === 'install-uploaded') validateUploadedArtifact(db, mid, request.arguments.artifact);
       if (request.action === 'inspect-install') validateInspectionTarget(db, mid, request.arguments);

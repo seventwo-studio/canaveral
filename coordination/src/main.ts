@@ -93,13 +93,10 @@ export async function startController(config: ControllerConfig) {
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let displayBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
-  const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async hostId => {
-    const response = await control?.request({ type: "http", method: "GET", path: "/v1/hosts", query: "", token: adminToken, body: {} });
-    const inventory = response?.body as { hosts: { id: string; platform: string | null; placementReady: boolean }[] } | undefined;
-    return inventory?.hosts.some(host => host.id === hostId && host.platform === "macos" && host.placementReady) === true;
-  }, async token => {
-    await control!.request({ type: "browsers.authorize", token });
-  }) : undefined;
+  const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async (hostId, intent, adminToken) =>
+    await control!.request({ type: "browsers.launch", hostId, intent, ...(adminToken === undefined ? {} : { adminToken }) }),
+  async token => { await control!.request({ type: "browsers.authorize", token }); },
+  async (hostId, id, state) => { await control!.request({ type: "browsers.receipt", hostId, id, state }); }) : undefined;
   try {
     await client.ready;
     control = new ControlClient({ path: config.statePath, adminToken, controllerId: config.controllerId,

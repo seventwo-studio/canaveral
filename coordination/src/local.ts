@@ -1,5 +1,5 @@
 /** Isolated local orchestration and authorization-fenced attached-host connectors. */
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CliError, expandPath, HOST_CONFIG_BYTES, option, privateInput, privateOutput, record, removeSameFile, uuid } from "./account-cli.ts";
@@ -186,6 +186,7 @@ export async function runLocal(args: CliArguments, io: CliIO, signal: AbortSigna
       services.push(host); attachedHosts.push(host as LocalAttachedHost);
     }
     const store = new SqliteStore(join(root, "controller.sqlite3"));
+    store.transaction(db => { initializeAttachedSessions(db); db.exec("DELETE FROM attached_sessions"); });
     const connectors = createLocalConnectors({ store, signal, hosts: () => attachedHosts, machine: id => store.transaction(db => {
       const row = db.prepare("SELECT * FROM machines WHERE id=?").get(uuid(id));
       if (!row) return undefined;
@@ -208,9 +209,12 @@ export async function runLocal(args: CliArguments, io: CliIO, signal: AbortSigna
 
 import { ServiceError } from "./errors.ts";
 import { SqliteStore } from "./sqlite.ts";
+import type { DatabaseSync } from "node:sqlite";
+import { requireHostAdmission } from "./control/maintenance.ts";
 import { assignmentAccess, contactFresh, StateLock } from "./runtime-process.ts";
 import { ImageLibrary, ImagesController, specification } from "./control/images.ts";
 import { enabledRuntimes, legacyDigest, loadHost, normalizeOperatorTemplate as normalizeTemplate, runtimeFor } from "./control/templates.ts";
+import { DashboardError } from "./dashboard.ts";
 import type { DashboardConnectors, DownloadSource, StreamAttachment } from "./dashboard.ts";
 import type { ByteReader } from "./control/transfers.ts";
 import type { DisplayConnection, BootEpoch } from "./guest/display.ts";
@@ -244,7 +248,9 @@ export interface LocalAttachedHost extends CliService {
   accessBackend?(machine: Json): LocalAccess | LocalRuntime;
   context(machine: Json): { runtime: LocalRuntime; image: Json; folder: string };
   refreshImages?(): void;
-  importImage?(metadata: Json, source: ByteReader, size: number, authorized: Check): Promise<Json>;
+  /** Host-side maintenance fence and update-idle accounting for local admission. */
+  beginLocalWork?(committed?: boolean): () => void;
+  importImage?(metadata: Json, source: ByteReader, size: number, authorized: Check, committed?: boolean): Promise<Json>;
   imageImportSettings?(metadata: Json): Promise<{ metadata: Json; prepare?: Json; memoryStep?: number }> | { metadata: Json; prepare?: Json; memoryStep?: number };
 }
 export interface LocalConnectorOptions {
@@ -268,7 +274,39 @@ async function holdAssignment(machine: Json, folder: string): Promise<() => Prom
   let closed = false;
   return async () => { if (!closed) { closed = true; release(); } await holding; };
 }
+function initializeAttachedSessions(db: DatabaseSync): void {
+  db.exec("CREATE TABLE IF NOT EXISTS attached_sessions (id TEXT PRIMARY KEY,host TEXT NOT NULL); CREATE INDEX IF NOT EXISTS attached_sessions_host ON attached_sessions(host)");
+}
 export function createLocalConnectors(options: LocalConnectorOptions): DashboardConnectors {
+  options.store.transaction(initializeAttachedSessions);
+  function admission<T>(operate: () => T): T {
+    try { return operate(); }
+    catch (error) {
+      if (error instanceof ServiceError && error.code === "host_draining") {
+        throw new DashboardError("Host admission is closed.", 409, { code: error.code });
+      }
+      throw error;
+    }
+  }
+  function admit(context: AttachedContext): () => void {
+    const id = randomUUID(), host = String(context.machine.hostId);
+    admission(() => options.store.transaction(db => {
+      requireHostAdmission(db, host);
+      db.prepare("INSERT INTO attached_sessions VALUES (?,?)").run(id, host);
+    }));
+    const forget = () => { options.store.transaction(db => db.prepare("DELETE FROM attached_sessions WHERE id=?").run(id)); };
+    let local: (() => void) | undefined;
+    try { local = admission(() => context.host.beginLocalWork?.()); } catch (error) { forget(); throw error; }
+    const close = () => { try { forget(); } finally { local?.(); } };
+    try {
+      if (context.machine.lease) context.host.guard.beginExecution(String(context.machine.id), uuid(String(record(context.machine.lease).id)));
+    } catch (error) { close(); throw error; }
+    return close;
+  }
+  async function withSession<T>(context: AttachedContext, execute: () => Promise<T>): Promise<T> {
+    const close = admit(context);
+    try { return await execute(); } finally { close(); }
+  }
   const libraries = new Map<LocalAttachedHost, ImageLibrary>();
   const images = new ImagesController(options.store);
   const library = (host: LocalAttachedHost) => { let current = libraries.get(host); if (!current) { current = new ImageLibrary(host.state); libraries.set(host, current); } return current; };
@@ -279,7 +317,6 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
     if (!machine || !host || !liveHost(host) || machine.desired !== "running" || (!established && machine.observed !== "running")) throw new ServiceError("Environment is not running on an attached, connected host.", 409);
     // HostRunner.context also verifies its immutable local template against the controller assignment.
     if (!host.guard.allowed(id)) throw new ServiceError("Lease execution is fenced.", 410);
-    if (machine.lease) host.guard.beginExecution(id, uuid(String(record(machine.lease).id)));
     return { host, machine, ...host.context(machine) };
   }
   function still(context: AttachedContext): boolean {
@@ -317,7 +354,8 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
         let allowed = await request.authorized();
         const check = () => allowed && still(context);
         const guardedReader: ByteReader = { async read(n) { allowed = await request.authorized(); if (!check()) throw new ServiceError("Upload authorization ended.", 401); const data = await request.reader.read(n); allowed = await request.authorized(); if (!check()) throw new ServiceError("Upload authorization ended during read.", 401); return data; } };
-        return assignmentAccess(context.machine, context.folder, () => access.streamUpload!(context.machine, context.image, context.folder, request.path, request.app, guardedReader, request.size, check));
+        return withSession(context, () => assignmentAccess(context.machine, context.folder,
+          () => access.streamUpload!(context.machine, context.image, context.folder, request.path, request.app, guardedReader, request.size, check)));
       },
     },
     download: {
@@ -325,38 +363,42 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
       async open(id, path, app): Promise<DownloadSource> {
         const context = attached(id), access = backend(context);
         if (!access.streamDownload) throw new ServiceError("This provider has no streaming download connection.", 409);
-        const check = () => still(context), release = await holdAssignment(context.machine, context.folder);
+        const check = () => still(context), close = admit(context);
+        let release: (() => Promise<void>) | undefined;
         try {
+          const held = release = await holdAssignment(context.machine, context.folder);
           const source = await access.streamDownload(context.machine, context.image, context.folder, path, app, check);
           return { size: source.size,
             async read(n) { if (!check()) throw new ServiceError("Download authorization ended.", 410); const data = await source.read(n); if (!check()) throw new ServiceError("Download authorization ended during read.", 410); return data; },
             async verify() { if (!check() || await source.verify() === false || !check()) throw new ServiceError("Download source identity changed or authorization ended.", 409); },
-            async close() { try { await source.close(); } finally { await release(); } },
+            async close() { try { await source.close(); } finally { try { await held(); } finally { close(); } } },
           };
-        } catch (error) { await release(); throw error; }
+        } catch (error) { try { await release?.(); } finally { close(); } throw error; }
       },
     },
     async accessibility(id) {
       const context = attached(id), check = () => still(context), access = backend(context);
       const { inspectProvider } = await import("./accessibility-sdk.ts");
       if (!access.control) throw new ServiceError("This provider has no accessibility connection.", 409);
-      return assignmentAccess(context.machine, context.folder, async () => {
+      return withSession(context, () => assignmentAccess(context.machine, context.folder, async () => {
         const result = await inspectProvider({ control: (m, i, _f, r) => control(context, { id: randomUUID(), ...r }, check) }, context.machine, context.image, context.folder, false, context.host.clock.suspendAware ? () => context.host.clock.now() : undefined);
         if (!check()) throw new ServiceError("Accessibility authorization ended during inspection.", 410);
         return result;
-      });
+      }));
     },
     desktop: {
       check(id) { try { const context = attached(id, true); return context.image.mode !== "headless" && (typeof backend(context).desktop === "function" || ["android", "ios"].includes(String(context.image.os))); } catch { return false; } },
       async attach(request) {
         // Socket liveness also fences input: a closed viewer's buffered events are never applied.
         const context = attached(request.machineId), check = () => !request.signal.aborted && !request.socket.destroyed && still(context);
-        const release = await holdAssignment(context.machine, context.folder);
-        try {
-          const factory = () => displayFactory(context, check);
-          if (options.attachDisplay) await options.attachDisplay(request, factory, context, check);
-          else await attachLocalDisplay(request, factory, context, check);
-        } finally { await release(); }
+        return withSession(context, async () => {
+          const release = await holdAssignment(context.machine, context.folder);
+          try {
+            const factory = () => displayFactory(context, check);
+            if (options.attachDisplay) await options.attachDisplay(request, factory, context, check);
+            else await attachLocalDisplay(request, factory, context, check);
+          } finally { await release(); }
+        });
       },
     },
     shell: {
@@ -364,11 +406,13 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
       async attach(request) {
         const context = attached(request.machineId, true), check = () => !request.signal.aborted && still(context);
         const action = (operation: Json) => control(context, operation, check);
-        const release = await holdAssignment(context.machine, context.folder);
-        try {
-          if (options.attachShell) await options.attachShell(request, action, check);
-          else { const { attachShell } = await import("./guest/server.ts"); await attachShell(request, action, check); }
-        } finally { await release(); }
+        return withSession(context, async () => {
+          const release = await holdAssignment(context.machine, context.folder);
+          try {
+            if (options.attachShell) await options.attachShell(request, action, check);
+            else { const { attachShell } = await import("./guest/server.ts"); await attachShell(request, action, check); }
+          } finally { await release(); }
+        });
       },
     },
     imageImport: {
@@ -380,11 +424,28 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
         const settings = host.importImage ? { metadata: spec } : host.imageImportSettings ? await host.imageImportSettings(spec) : await importSettings(host, spec);
         let allowed = await request.authorized();
         const check = () => allowed && liveHost(host);
+        if (!check()) throw new ServiceError("Image import authorization ended.", 403);
         const guarded: ByteReader = { async read(n) { allowed = await request.authorized(); if (!check()) throw new ServiceError("Image import authorization ended.", 403); const data = await request.reader.read(n); allowed = await request.authorized(); if (!check()) throw new ServiceError("Image import authorization ended during read.", 403); return data; } };
+        const { task, replayOnly, created } = admission(() => images.admitImageImport(request.hostId, settings.metadata, request.size));
+        if (replayOnly) {
+          // During a drain, a replay can verify the body and return its committed
+          // receipt without opening a new staging file or touching host storage.
+          if (task.state !== "succeeded") throw new DashboardError("Inspect the existing image import task.", 409, { code: "host_draining" });
+          const result = record(task.result), digest = createHash("sha256");
+          for (let remaining = request.size; remaining > 0;) {
+            const chunk = await guarded.read(Math.min(remaining, 1048576));
+            if (!chunk.length || chunk.length > remaining) throw new DashboardError("Image upload was interrupted.", 400);
+            remaining -= chunk.length;
+            digest.update(chunk);
+          }
+          if (digest.digest("hex") !== result.sha256) throw new DashboardError("Image request differs from its committed artifact.", 409);
+          return result;
+        }
         const current = library(host);
-        images.reserveImageImport(request.hostId, settings.metadata, request.size);
+        // The controller has already committed this work, even if the host has since received a maintenance fence.
+        const done = host.importImage ? undefined : host.beginLocalWork?.(true);
         try {
-          const result = host.importImage ? await host.importImage(settings.metadata, guarded, request.size, check) : await current.importStream(settings.metadata, guarded, request.size, check, { ...("prepare" in settings && settings.prepare ? { prepare: settings.prepare } : {}), ...("memoryStep" in settings && settings.memoryStep ? { memoryStep: settings.memoryStep } : {}) });
+          const result = host.importImage ? await host.importImage(settings.metadata, guarded, request.size, check, true) : await current.importStream(settings.metadata, guarded, request.size, check, { ...("prepare" in settings && settings.prepare ? { prepare: settings.prepare } : {}), ...("memoryStep" in settings && settings.memoryStep ? { memoryStep: settings.memoryStep } : {}) });
           allowed = await request.authorized();
           if (!check()) throw new ServiceError("Image import publication authorization ended; inspect its task.", 409, { outcome: "unknown", retryable: false });
           images.finishImageImport(String(result.id), request.hostId, result);
@@ -393,9 +454,11 @@ export function createLocalConnectors(options: LocalConnectorOptions): Dashboard
           return result;
         } catch (error) {
           const published = current.publicRecords().some(record => record.id === spec.id);
-          if (error instanceof ServiceError && [400, 403].includes(error.status) && !published) images.finishImageImport(spec.id, request.hostId, undefined, true);
+          if (error instanceof ServiceError && (error.status === 400 || (error.status === 403 && created)) && !published) {
+            images.finishImageImport(spec.id, request.hostId, undefined, true);
+          }
           throw error;
-        }
+        } finally { done?.(); }
       },
     },
   };

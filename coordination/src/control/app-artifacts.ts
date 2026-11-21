@@ -1,3 +1,4 @@
+import { requireHostAdmission } from "./maintenance.ts";
 /** Machine-scoped CI build delivery. Payloads stay in bounded, private SQLite chunks.
  * The same upload, verification, install and cleanup rules serve the administrative routes
  * here and the lease-key routes in lease-app-artifacts.ts; an upload belongs to exactly one. */
@@ -71,6 +72,8 @@ export function reserveArtifact(db: DatabaseSync, machines: MachineStore, m: Rec
   if (format !== (template.os === 'android' ? 'apk' : template.os === 'ios' ? 'ios-app-tar' : null) || typeof sha !== 'string' || !/^[a-f0-9]{64}$/.test(sha)) return fail();
   const old = db.prepare('SELECT * FROM app_artifacts WHERE id=?').get(id) as unknown as Artifact | undefined;
   if (old) { replay(old); current(db, old); if (old.machine !== m.id || old.lease !== lease || old.format !== format || old.bytes !== size || old.sha256 !== sha) return fail(409); return { replayed: old }; }
+  // Maintenance closes new administrative uploads; a lease upload is part of its admitted lease.
+  if (lease === null) requireHostAdmission(db, String(m.host));
   const used = Number(db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM app_artifacts WHERE state!='deleted'").get()!.n);
   if (used + size > STORAGE_BYTES || Number(db.prepare("SELECT COUNT(*) AS n FROM app_artifacts WHERE state!='deleted'").get()!.n) >= 128) return fail(429);
   const reserved = scratchGiB(size);

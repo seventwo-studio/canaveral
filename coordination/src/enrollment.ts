@@ -26,6 +26,19 @@ function proof(value: unknown, domain: string): string {
 function equal(a: string, b: string): boolean { return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex")); }
 function denied(): never { throw new ServiceError("Runner credential or enrollment rejected.", 401); }
 
+function latestBinding(db: DatabaseSync, binding: Binding): RunnerRow | undefined {
+  return db.prepare("SELECT * FROM runner_bindings WHERE controller=? AND runner=? ORDER BY generation DESC LIMIT 1")
+    .get(binding.controllerId, binding.runnerId) as unknown as RunnerRow | undefined;
+}
+function matchesBinding(row: RunnerRow, binding: Binding): boolean {
+  return row.generation === binding.generation && row.incarnation === binding.incarnationId;
+}
+/** Authority for a normalized binding from the controller's assignment ledger. */
+export function hasCurrentRunnerBinding(db: DatabaseSync, binding: Binding): boolean {
+  const row = latestBinding(db, binding);
+  return !!row && !row.revoked && matchesBinding(row, binding);
+}
+
 /** Additive identity state only. Never adopts a legacy host or changes reservations. */
 export class RunnerEnrollment {
   readonly controllerId: string;
@@ -46,12 +59,8 @@ export class RunnerEnrollment {
     if (result.controllerId !== this.controllerId) throw new ServiceError("Wrong controller identity.", 403);
     return result;
   }
-  private latest(db: DatabaseSync, b: Binding): RunnerRow | undefined {
-    return db.prepare("SELECT * FROM runner_bindings WHERE controller=? AND runner=? ORDER BY generation DESC LIMIT 1").get(b.controllerId, b.runnerId) as unknown as RunnerRow | undefined;
-  }
-  private matches(row: RunnerRow, b: Binding): boolean { return row.generation === b.generation && row.incarnation === b.incarnationId; }
   private approval(db: DatabaseSync, b: Binding): void {
-    const row = this.latest(db, b);
+    const row = latestBinding(db, b);
     if (row && (!row.revoked || b.generation <= row.generation || b.incarnationId === row.incarnation)) throw new ServiceError("Reenrollment requires revocation, a newer generation and a fresh incarnation.", 409);
     if (db.prepare("SELECT 1 FROM runner_bindings WHERE controller=? AND runner=? AND incarnation=?").get(b.controllerId, b.runnerId, b.incarnationId)) throw new ServiceError("Incarnation already exists.", 409);
     // Retained Python identities require a separate, explicit migration; never adopt them.
@@ -102,8 +111,8 @@ export class RunnerEnrollment {
       if (r.controller !== b.controllerId || r.runner !== b.runnerId || r.generation !== b.generation || r.incarnation !== b.incarnationId) denied();
       this.rejectEnrollmentSecret(db, input.credential);
       if (r.consumed) {
-        const row = this.latest(db, b);
-        if (!row || row.revoked || !this.matches(row, b) || row.revision !== 1 || !equal(r.consumed, credential) || !equal(row.credential, credential)) denied();
+        const row = latestBinding(db, b);
+        if (!row || row.revoked || !matchesBinding(row, b) || row.revision !== 1 || !equal(r.consumed, credential) || !equal(row.credential, credential)) denied();
       } else {
         if (r.expires <= this.store.clock()) denied();
         this.approval(db, b);
@@ -120,21 +129,21 @@ export class RunnerEnrollment {
   /** Runner proof inside the caller's transaction, so workload effects cannot outlive revocation. */
   verify(db: DatabaseSync, token: string, value: unknown): Binding & { credentialRevision: number } {
     const b = this.binding(fields(value, bindingFields)), credential = proof(token, "runner");
-    const row = this.latest(db, b);
-    if (!row || row.revoked || !this.matches(row, b) || !equal(row.credential, credential)) denied();
+    const row = latestBinding(db, b);
+    if (!row || row.revoked || !matchesBinding(row, b) || !equal(row.credential, credential)) denied();
     return { ...b, credentialRevision: row.revision };
   }
   /** The normalized binding only if it is the latest unrevoked binding with this exact generation and incarnation. */
   current(db: DatabaseSync, value: unknown): Binding | undefined {
-    const b = this.binding(fields(value, bindingFields)), row = this.latest(db, b);
-    return row && !row.revoked && this.matches(row, b) ? b : undefined;
+    const b = this.binding(fields(value, bindingFields));
+    return hasCurrentRunnerBinding(db, b) ? b : undefined;
   }
   manage(value: unknown, revoke: boolean): unknown {
     const input = fields(value, [...bindingFields, ...(revoke ? [] : ["credentialRevision", "credential"])]), b = this.binding(input);
     const revision = revoke ? 0 : positive(input.credentialRevision), credential = revoke ? "" : hash(input.credential, "runner");
     return this.store.transaction(db => {
-      const row = this.latest(db, b);
-      if (!row || !this.matches(row, b)) throw new ServiceError("Unknown or stale runner binding.", 409);
+      const row = latestBinding(db, b);
+      if (!row || !matchesBinding(row, b)) throw new ServiceError("Unknown or stale runner binding.", 409);
       if (revoke) {
         db.prepare("UPDATE runner_bindings SET revoked=1 WHERE controller=? AND runner=? AND generation=?").run(b.controllerId, b.runnerId, b.generation);
         return { ...b, revoked: true };

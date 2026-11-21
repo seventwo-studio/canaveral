@@ -127,6 +127,20 @@ function iosFixture(t: { after(fn: () => void): void }) {
   return { ...f, calls, udid, device, provider, setInventory: (v: RecordValue[]) => { inventory = v; }, loseCreate: () => { loseCreate = true; } };
 }
 
+test("mobile maintenance distinguishes stopped uncreated devices from uncertain creation", async t => {
+  const android = androidFixture(t), ios = iosFixture(t);
+  for (const [f, intent] of [[android, "avd-create-started.json"], [ios, "create-started.json"]] as const) {
+    f.machine.desired = "stopped";
+    assert.equal((await f.provider.reconcile(f.machine, f.image, f.root)).state, "stopped");
+    assert.equal(await f.provider.maintenanceStorage(f.machine, f.image), "notMaterialized");
+    const storage = f.provider.storage(f.machine, f.image);
+    saveJson(path.join(storage, intent), {});
+    assert.equal(await f.provider.maintenanceStorage(f.machine, f.image), "unknown");
+    fs.rmSync(storage, { recursive: true });
+    assert.equal(await f.provider.maintenanceStorage(f.machine, f.image), "absent");
+  }
+});
+
 test("iOS create, boot, control and shutdown always target the same saved UDID", async t => {
   const f = iosFixture(t); assert.equal((await f.provider.reconcile(f.machine, f.image, f.root)).state, "running");
   assert.ok(f.calls.some(c => c.argv.slice(-2).join(" ") === "boot " + f.udid));

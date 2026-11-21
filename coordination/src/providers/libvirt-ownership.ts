@@ -162,14 +162,14 @@ const kinds=new Set(["libvirt-execution","libvirt-binding","libvirt-authorizatio
 export class SupervisorJournal {
   private readonly directory:number; private readonly birth:Inode; private db:DatabaseSync|undefined; private closed=false;
   readonly folder:string; readonly prefix:string;
-  constructor(folder:string,prefix="libvirt-execution",options:{fixture?:boolean}={}) {
+  constructor(folder:string,prefix="libvirt-execution",options:{fixture?:boolean;existingOnly?:boolean}={}) {
     if(!kinds.has(prefix)) refuse("Invalid supervisor journal kind."); if(process.platform!=="linux"&&!options.fixture) refuse("Pinned libvirt journals require Linux.");
     this.folder=absolute(folder); this.prefix=prefix; noSymlinks(folder); const before=fs.lstatSync(folder); owned(before,true); if(!before.isDirectory()) refuse("Private supervisor directory required.");
     this.birth=inode(before); this.directory=openDirectory(folder);
     try {
       this.check(); const lock=this.path(`${prefix}.ts-lock.sqlite`);
-      try{fs.closeSync(fs.openSync(lock,"wx",0o600));}catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;}
-      regular(fs.lstatSync(lock)); this.db=new DatabaseSync(lock,{timeout:0}); this.db.exec("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE"); this.check();
+      if(!options.existingOnly)try{fs.closeSync(fs.openSync(lock,"wx",0o600));}catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;}
+      regular(fs.lstatSync(lock)); this.db=new DatabaseSync(lock,{timeout:0,readOnly:options.existingOnly??false}); this.db.exec(options.existingOnly?"BEGIN EXCLUSIVE":"PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE"); this.check();
     }catch(error){this.db?.close();fs.closeSync(this.directory);throw error;}
   }
   path(name:string):string { if(!/^[a-z0-9][a-z0-9.-]*$/.test(name)) refuse("Invalid journal path."); return join(process.platform==="linux"?`/proc/self/fd/${this.directory}`:this.folder,name); }

@@ -2,16 +2,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkHost, HostRunner, hostOffer, hostTransport, startHost } from "../../src/host.ts";
 import type { HostConfig, HostDependencies, HostTransport } from "../../src/host.ts";
 import { normalizeTemplate } from "../../src/control/templates.ts";
 import { validateOffer } from "../../src/control/machines.ts";
-import { readRecord, saveRecord, StateLock } from "../../src/runtime-process.ts";
+import { assignmentFingerprint, readRecord, saveRecord, StateLock } from "../../src/runtime-process.ts";
 import type { ExecutionClock, RecordValue } from "../../src/runtime-process.ts";
 import { ServiceError } from "../../src/errors.ts";
+import { AndroidProvider } from "../../src/providers/android.ts";
+import { IosProvider } from "../../src/providers/ios.ts";
+import { digest } from "../../src/providers/mobile.ts";
+import { beginCreation, creationAnnotations, KubevirtProvider, manifest, rememberCreation } from "../../src/providers/kubevirt.ts";
 const token = "a".repeat(43);
 function setup(t: { after(fn: () => void | Promise<void>): void }): { config: HostConfig; image: RecordValue; clock: ExecutionClock & { mono: number; wallTime: number } } {
   const state = realpathSync(mkdtempSync(join(tmpdir(), "canaveral-host-runner-"))); t.after(() => rmSync(state, { recursive: true, force: true }));
@@ -24,6 +28,307 @@ function machine(image: RecordValue): RecordValue { return { id: randomUUID(), t
 function fakeTransport(reply: () => RecordValue = () => ({ machines: [] })): HostTransport { return { request: async (_method, path) => path.endsWith("heartbeat") ? reply() : {} }; }
 const providerFactory: NonNullable<HostDependencies["providerFactory"]> = () => ({ kind: "libvirt", check: async () => ({}), reconcile: async m => ({ state: m.desired }) });
 async function drain(): Promise<void> { await new Promise(r => setTimeout(r, 20)); }
+
+function maintenanceReplies() {
+  const drainId = randomUUID();
+  let response: RecordValue = { machines: [] }, challenge = 0, lastChallenge: string | undefined;
+  let request: RecordValue = {};
+  const transport: HostTransport = { request: async (_method, path, body) => {
+    if (!path.endsWith("heartbeat")) return {};
+    request = body.maintenance as RecordValue;
+    assert.equal(request.version, 1);
+    if (request.proof) assert.equal((request.proof as RecordValue).challenge, lastChallenge, "proof must answer only the preceding response");
+    lastChallenge = (response.maintenance as RecordValue | undefined)?.challenge as string | undefined;
+    return response;
+  } };
+  return {
+    transport, set: (body: RecordValue) => { response = body; }, get request() { return request; },
+    draining: () => ({ version: 1, phase: "draining", drainId, challenge: (++challenge).toString(16).padStart(64, "0") }),
+    resumed: { version: 1, phase: "resumed", drainId }, open: { version: 1, phase: "open", drainId: null },
+  };
+}
+const drainingError = (error: unknown) => error instanceof ServiceError && error.code === "host_draining";
+
+test("maintenance fences local access independently of updates and survives older replies", async t => {
+  const { config, image, clock } = setup(t), m = machine(image), fixture = maintenanceReplies();
+  let controls = 0;
+  const runner = new HostRunner(config, { clock, transport: fixture.transport, providerFactory, guest: { control: async () => ({ controls: ++controls }) } });
+  t.after(() => runner.close());
+  const operation = { action: "health", arguments: {} };
+  await runner.initializeProviders(); await runner.connect();
+  fixture.set({ machines: [m] }); await runner.poll();
+  assert.deepEqual(fixture.request, { version: 1 });
+  await runner.accessControl(String(m.id), operation);
+  fixture.set({ machines: [m], maintenance: fixture.draining(), deviceOperations: [{}] });
+  clock.mono++; await assert.rejects(runner.poll()); assert.equal(runner.lastContact, 10);
+  await runner.accessControl(String(m.id), operation);
+  fixture.set({ machines: [m], maintenance: fixture.draining() }); await runner.poll();
+  assert.equal(runner.updateAdmissionFenced, false);
+  runner.fenceUpdateAdmission(); runner.resumeUpdateAdmission();
+  const folder = runner.context(m).folder;
+  await assert.rejects(runner.accessControl(String(m.id), operation), drainingError);
+  await assert.rejects(runner.guestAccess.control(m, image, folder, operation), drainingError);
+  await assert.rejects(runner.guestAccess.streamUpload!(m, image, folder, "/", undefined, { read: () => Buffer.alloc(0) }, 0, () => true), drainingError);
+  await assert.rejects(runner.guestAccess.streamDownload!(m, image, folder, "/"), drainingError);
+  await assert.rejects(runner.guestAccess.desktop!(m, image, folder), drainingError);
+  await assert.rejects(runner.importImage({}, { read: () => Buffer.alloc(0) }, 0, () => true), drainingError);
+  assert.throws(() => runner.beginLocalWork(), drainingError);
+  fixture.set({ machines: [m], maintenance: { ...fixture.open, version: 2 } }); clock.mono++;
+  await assert.rejects(runner.poll()); assert.equal(runner.lastContact, 11);
+  fixture.set({ machines: [m] }); await runner.poll(); await runner.poll();
+  assert.deepEqual(fixture.request, { version: 1 });
+  await assert.rejects(runner.accessControl(String(m.id), operation), drainingError);
+  runner.fenceUpdateAdmission();
+  fixture.set({ machines: [m], maintenance: fixture.resumed }); await runner.poll();
+  assert.equal(runner.updateAdmissionFenced, true);
+  await assert.rejects(runner.accessControl(String(m.id), operation), /update admission/);
+  runner.resumeUpdateAdmission();
+  await runner.accessControl(String(m.id), operation);
+  fixture.set({ machines: [m], maintenance: fixture.draining() }); await runner.poll();
+  fixture.set({ machines: [m], maintenance: fixture.open }); await runner.poll();
+  await runner.accessControl(String(m.id), operation);
+  assert.equal(controls, 4);
+});
+
+test("a committed image import remains accounted for during maintenance", async t => {
+  const { config, clock } = setup(t), fixture = maintenanceReplies();
+  const runner = new HostRunner(config, { clock, transport: fixture.transport, providerFactory });
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect();
+  fixture.set({ machines: [], maintenance: fixture.draining() }); await runner.poll();
+  assert.equal((await runner.updateIdle()).idle, true);
+  const metadata = { id: randomUUID(), name: "fixture import", os: "linux", arch: process.arch === "arm64" ? "arm64" : "amd64",
+    mode: "headless", mediaType: "disk", format: "raw", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 } };
+  let release!: () => void, started!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; }), reading = new Promise<void>(resolve => { started = resolve; });
+  const work = runner.importImage(metadata, { async read(n) { started(); await hold; return Buffer.alloc(n); } }, 512, () => true, true);
+  try {
+    await Promise.race([reading, work]);
+    assert.equal((await runner.updateIdle()).idle, false);
+  } finally { release(); }
+  assert.equal((await work).id, metadata.id);
+  assert.equal((await runner.updateIdle()).idle, true);
+});
+
+test("maintenance preserves active and queued controller work including delivered machine starts", async t => {
+  const { config, image, clock } = setup(t), m = machine(image), fixture = maintenanceReplies();
+  const first = { id: randomUUID() }, second = { id: randomUUID() }, imageTask = { id: randomUUID() };
+  const device = { id: randomUUID(), machineId: m.id, action: "health", arguments: {}, expiresAt: 1100 };
+  let release!: () => void, started!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; }), running = new Promise<void>(resolve => { started = resolve; });
+  const ran = new Set<string>(); let aborted = false;
+  const runner = new HostRunner(config, {
+    clock, transport: fixture.transport,
+    providerFactory: () => ({ kind: "libvirt", check: async () => ({}), reconcile: async current => { ran.add(String(current.id)); return { state: "running" }; }, operate: async () => { ran.add(device.id); return { state: "succeeded" }; } }),
+    inference: { execute: async (task, context) => {
+      if (task.id === first.id) { context.signal.addEventListener("abort", () => { aborted = true; }); started(); await hold; assert.ok(context.authorized()); }
+      ran.add(String(task.id)); return { state: "succeeded", stopped: true };
+    } },
+    images: { execute: async () => { ran.add(imageTask.id); return { state: "succeeded" }; } },
+  });
+  t.after(async () => { release(); await runner.close(); });
+  await runner.initializeProviders(); await runner.connect(); await runner.checkEnvironment();
+  fixture.set({ machines: [], inferenceJobs: [first] }); await runner.poll(); await runner.step(); await running;
+  fixture.set({ machines: [m], deviceOperations: [device], inferenceJobs: [first, second], imageTasks: [imageTask], maintenance: fixture.draining() });
+  await runner.poll(); await runner.step(); await drain(); assert.equal(aborted, false);
+  release();
+  for (let i = 0; i < 3; i++) { await runner.step(); await drain(); }
+  assert.deepEqual(ran, new Set([first.id, second.id, imageTask.id, device.id, String(m.id)]));
+  assert.equal(aborted, false);
+});
+
+async function inventoryProof(runner: HostRunner, fixture: ReturnType<typeof maintenanceReplies>, machines: RecordValue[]): Promise<RecordValue> {
+  for (let i = 0; i < 50; i++) {
+    fixture.set({ machines, maintenance: fixture.draining() });
+    await runner.poll();
+    if (fixture.request.proof) return fixture.request.proof as RecordValue;
+    await drain();
+  }
+  assert.fail("Maintenance proof never became ready");
+}
+
+test("maintenance proof cannot stall heartbeats, replay a superseded probe, or send a failed probe", async t => {
+  const { config, image, clock } = setup(t), m: RecordValue = { ...machine(image), desired: "stopped" }, fixture = maintenanceReplies();
+  let release!: () => void, started!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; }), running = new Promise<void>(resolve => { started = resolve; });
+  let probes = 0, fail = true, onFailed!: () => void;
+  const failed = new Promise<void>(resolve => { onFailed = resolve; });
+  const provider = { kind: "libvirt", check: async () => ({}), reconcile: async () => assert.fail("Inspection must not reconcile"),
+    maintenanceStorage: async () => "present" as const,
+    updateStopped: async () => { assert.deepEqual(runner.assignments, [m]); if (++probes === 1) { started(); await hold; } if (fail) throw new Error("inspection failure"); return true; } };
+  const runner = new HostRunner(config, { clock, transport: fixture.transport, providerFactory: () => provider, log: onFailed });
+  t.after(async () => { release(); await runner.close(); });
+  saveRecord(join(config.stateDir, "machines", String(m.id), "assignment.json"), { fingerprint: assignmentFingerprint(m) });
+  await runner.initializeProviders(); await runner.connect();
+  fixture.set({ machines: [m], maintenance: fixture.draining() });
+  await runner.poll(); assert.deepEqual(fixture.request, { version: 1 }); await running;
+  fixture.set({ machines: [m], maintenance: fixture.draining() });
+  await runner.poll(); assert.deepEqual(fixture.request, { version: 1 });
+  release(); await failed;
+  fixture.set({ machines: [m], maintenance: fixture.draining() });
+  await runner.poll(); assert.deepEqual(fixture.request, { version: 1 });
+  fail = false;
+  const proof = await inventoryProof(runner, fixture, [m]);
+  assert.equal(proof.idle, true); assert.equal(proof.workloadsStopped, true);
+});
+
+test("maintenance inventories stopped backing storage after runner restart and reports missing and unsafe paths", async t => {
+  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
+  const stopped = (): RecordValue => ({ ...machine(image), desired: "stopped", observed: "stopped" });
+  const stored = stopped(), missing = stopped(), linked = stopped(), uncreated = stopped(), machines = [stored, missing, linked, uncreated];
+  const deletion = { id: randomUUID() }, retired: RecordValue = { ...stopped(), deletion };
+  let reconciles = 0;
+  const runtime = { kind: "apple", config, check: async () => ({}), reconcile: async () => { reconciles++; return { state: "stopped" }; }, updateStopped: async () => true };
+  const stateDir = config.stateDir, storage = String(config.storage);
+  const disk = (m: RecordValue) => join(storage, String(m.id), String(m.id).toUpperCase(), "disk.img");
+  const dependencies = { clock, transport: fixture.transport, providerFactory: () => runtime };
+  const first = new HostRunner(config, dependencies);
+  await first.initializeProviders(); await first.connect();
+  for (const m of machines) {
+    saveRecord(join(stateDir, "machines", String(m.id), "assignment.json"), { fingerprint: assignmentFingerprint(m) });
+    saveRecord(join(storage, String(m.id), "canaveral-owner.json"), { fingerprint: assignmentFingerprint(m) });
+    if (m === uncreated) continue;
+    mkdirSync(join(storage, String(m.id), String(m.id).toUpperCase()));
+    writeFileSync(disk(m), "persistent fixture disk", { mode: 0o600 });
+  }
+  const retiredFolder = join(stateDir, "machines", String(retired.id));
+  saveRecord(join(retiredFolder, "assignment.json"), { fingerprint: assignmentFingerprint(retired) });
+  saveRecord(join(retiredFolder, "deletion.json"), { id: deletion.id, machineId: retired.id, fingerprint: assignmentFingerprint(retired), state: "complete" });
+  fixture.set({ machines: [...machines, retired], maintenance: fixture.draining() }); await first.poll(); await first.close();
+  assert.equal((readRecord(join(stateDir, "update-assignments.json")).machines as unknown[]).length, 5);
+  const restarted = { ...config }; delete restarted.enrollmentToken;
+  const runner = new HostRunner(restarted, dependencies);
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect(); await runner.step();
+  assert.deepEqual(runner.identity, first.identity);
+  assert.deepEqual(runner.assignments, []); assert.equal(reconciles, 0);
+  const expected = (storage: string) => machines.map(m => ({ id: m.id, storage, stopProof: "native" }));
+  let proof = await inventoryProof(runner, fixture, machines);
+  assert.deepEqual(proof.inventory, { complete: true, unexpected: [], assignments: expected("present").map(a => a.id === uncreated.id ? { ...a, storage: "notMaterialized" } : a) });
+  const orphan = stopped();
+  saveRecord(join(storage, String(orphan.id), "canaveral-owner.json"), { fingerprint: assignmentFingerprint(orphan) });
+  mkdirSync(join(storage, String(orphan.id), String(orphan.id).toUpperCase()));
+  writeFileSync(disk(orphan), "orphaned fixture disk", { mode: 0o600 });
+  fixture.set({ machines, maintenance: fixture.draining() }); await runner.poll();
+  proof = await inventoryProof(runner, fixture, machines);
+  assert.deepEqual((proof.inventory as RecordValue).unexpected, [orphan.id]);
+  assert.equal(proof.idle, false);
+  rmSync(join(storage, String(orphan.id)), { recursive: true });
+  rmSync(disk(missing)); rmSync(disk(linked)); symlinkSync(disk(stored), disk(linked));
+  const unexpected = randomUUID();
+  mkdirSync(join(stateDir, "machines", unexpected)); writeFileSync(join(stateDir, "machines", "unrelated-file"), "");
+  // Changing the challenge drops the previously collected sample.
+  fixture.set({ machines, maintenance: fixture.draining() }); await runner.poll();
+  proof = await inventoryProof(runner, fixture, machines);
+  assert.deepEqual(proof.inventory, { complete: true, unexpected: [unexpected], assignments: expected("present").map((a, i) => ({ ...a, storage: ["present", "absent", "unknown", "notMaterialized"][i] })) });
+  assert.equal(proof.idle, false); assert.equal(reconciles, 0);
+});
+
+test("a runner journal does not prove KubeVirt backing storage", async t => {
+  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
+  const m: RecordValue = { ...machine(image), desired: "stopped", observed: "stopped" };
+  saveRecord(join(config.stateDir, "machines", String(m.id), "assignment.json"), { fingerprint: assignmentFingerprint(m) });
+  const runner = new HostRunner({ ...config, provider: "kubevirt" }, { clock, transport: fixture.transport,
+    providerFactory: () => ({ kind: "kubevirt", check: async () => ({}), reconcile: async () => assert.fail("Inspection must not reconcile") }) });
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect();
+  const proof = await inventoryProof(runner, fixture, [m]);
+  assert.deepEqual(proof.inventory, { complete: true, unexpected: [], assignments: [{ id: m.id, storage: "unsupported", stopProof: "unsupported" }] });
+});
+
+test("KubeVirt maintenance probes the assigned PVC read-only and distinguishes absence from failure", async t => {
+  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
+  const m = { ...machine(image), desired: "stopped", observed: "stopped" } as RecordValue;
+  const folder = join(config.stateDir, "machines", String(m.id)), namespace = "guests", name = `cvm-${m.id}`;
+  saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(m) });
+  const creation = beginCreation(m, namespace, folder), vm = manifest(m, { ...image, pvc: "base" }, namespace);
+  Object.assign(vm.metadata as RecordValue, { uid: randomUUID(), annotations: creationAnnotations(creation) });
+  rememberCreation(m, namespace, folder, vm);
+  const provider = new KubevirtProvider({ namespace }, config.stateDir);
+  let observed = "present";
+  const commands: string[][] = [];
+  provider.kubectl = async (args, options) => {
+    commands.push(args);
+    assert.equal(options?.timeoutMs, 5000);
+    if (args[1] === "virtualmachine") return JSON.stringify(vm);
+    if (observed === "absent") return ""; // kubectl --ignore-not-found on a named object
+    if (observed === "unknown") throw new Error("Forbidden");
+    return JSON.stringify({ apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: { namespace, name, uid: randomUUID() }, status: { phase: "Bound" } });
+  };
+  provider.reconcile = async () => assert.fail("Inspection must not reconcile");
+  const runner = new HostRunner({ ...config, provider: "kubevirt" }, { clock, transport: fixture.transport, providerFactory: () => provider });
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect();
+  for (observed of ["present", "absent", "unknown"]) {
+    commands.length = 0;
+    const proof = await inventoryProof(runner, fixture, [m]);
+    assert.deepEqual((proof.inventory as RecordValue).assignments, [{ id: m.id, storage: observed, stopProof: "unsupported" }]);
+    assert.ok(commands.some(args => args.join(" ") === `get pvc ${name} --ignore-not-found -o json`));
+    assert.ok(commands.every(args => args[0] === "get" && args[2] === name));
+  }
+  observed = "present";
+  Object.assign(vm.metadata as RecordValue, { uid: randomUUID() });
+  fixture.set({ machines: [m], maintenance: fixture.draining() }); await runner.poll();
+  const foreign = await inventoryProof(runner, fixture, [m]);
+  assert.deepEqual((foreign.inventory as RecordValue).assignments, [{ id: m.id, storage: "unknown", stopProof: "unsupported" }]);
+});
+
+test("maintenance reports unexplained removal quarantines in Apple and libvirt storage", async t => {
+  for (const kind of ["apple", "libvirt"]) await t.test(kind, async t => {
+    const { config, image, clock } = setup(t), fixture = maintenanceReplies(), storage = String(config.storage);
+    const deletion = { id: randomUUID(), state: "complete" }, cleanup = { id: randomUUID(), state: "blocked" };
+    const removed = { ...machine(image), desired: "stopped", deletion } as RecordValue;
+    const cleaning = { ...machine(image), desired: "stopped", leaseCleanup: cleanup } as RecordValue;
+    const quarantine = (machineId: unknown, requestId: string) => `.removing-${machineId}-${requestId}`;
+    const leftover = quarantine(removed.id, deletion.id), active = quarantine(cleaning.id, cleanup.id);
+    const wrongRequest = quarantine(cleaning.id, randomUUID()), orphan = quarantine(randomUUID(), randomUUID());
+    for (const name of [leftover, active, wrongRequest, orphan]) mkdirSync(join(storage, name), { recursive: true });
+    const runtime = { kind, config, check: async () => ({}), reconcile: async () => assert.fail("Inspection must not reconcile") };
+    const runner = new HostRunner(config, { clock, transport: fixture.transport, providerFactory: () => runtime });
+    t.after(() => runner.close());
+    await runner.initializeProviders(); await runner.connect();
+    let proof = await inventoryProof(runner, fixture, [removed, cleaning]);
+    assert.deepEqual((proof.inventory as RecordValue).unexpected, [leftover, wrongRequest, orphan].sort());
+    fixture.set({ machines: [{ ...removed, deletion: { ...deletion, state: "running" } }], maintenance: fixture.draining() });
+    await runner.poll();
+    proof = await inventoryProof(runner, fixture, [{ ...removed, deletion: { ...deletion, state: "running" } }]);
+    assert.deepEqual((proof.inventory as RecordValue).unexpected, [active, wrongRequest, orphan].sort());
+  });
+});
+
+test("maintenance accounts for mobile removal quarantine and verifies completed mobile deletion journals", async t => {
+  for (const kind of ["android", "ios"]) await t.test(kind, async t => {
+    const { config, image, clock } = setup(t), fixture = maintenanceReplies();
+    const mobile = { id: image.id, revision: "1", os: kind, mode: "device", arch: "arm64", minimum: image.minimum,
+      device: kind === "android" ? { systemImage: "system-images;android-35;google_apis;arm64-v8a", profile: "pixel_8" } :
+        { runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-17" } };
+    const deletion = { id: randomUUID(), state: "queued" };
+    const m = { ...machine(mobile), desired: "stopped", observed: "stopped", deletion } as RecordValue;
+    const runtime = new (kind === "android" ? AndroidProvider : IosProvider)({ storage: config.storage }, config.stateDir);
+    const runner = new HostRunner({ ...config, provider: kind, templates: [mobile] }, { clock, transport: fixture.transport, providerFactory: () => runtime });
+    t.after(() => runner.close());
+    await runner.initializeProviders(); await runner.connect();
+    const folder = join(config.stateDir, "machines", String(m.id)), receipt = join(folder, "deletion.json");
+    saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(m) });
+    if (kind === "android") {
+      const quarantine = join(String(config.storage), `.removing-${m.id}-${deletion.id}`);
+      mkdirSync(quarantine, { recursive: true });
+      const active = await inventoryProof(runner, fixture, [m]);
+      assert.deepEqual((active.inventory as RecordValue).unexpected, []);
+      rmSync(quarantine, { recursive: true });
+    } else {
+      fixture.set({ machines: [m], maintenance: fixture.draining() }); await runner.poll();
+    }
+    const complete = { id: deletion.id, machineId: m.id, state: "complete", fingerprint: "wrong" };
+    saveRecord(receipt, complete);
+    const wrong = await inventoryProof(runner, fixture, []);
+    assert.deepEqual((wrong.inventory as RecordValue).unexpected, [m.id]);
+    saveRecord(receipt, { ...complete, fingerprint: digest(runtime.binding(m, { ...mobile, ...normalizeTemplate(mobile) })) });
+    fixture.set({ machines: [], maintenance: fixture.draining() }); await runner.poll();
+    const retired = await inventoryProof(runner, fixture, []);
+    assert.deepEqual(retired.inventory, { complete: true, unexpected: [], assignments: [] });
+  });
+});
 
 test("a failed runtime sweep does not stop Linux scheduling and remains a shutdown failure", async t => {
   const {config,image,clock} = setup(t), running = machine(image), stopped = {...machine(image),desired:"stopped"};

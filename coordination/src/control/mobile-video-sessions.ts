@@ -1,3 +1,4 @@
+import { requireHostAdmission } from "./maintenance.ts";
 /** Native-video admission. Owners and administrators record a machine through
  * `/v1/machines/{machine}/video-sessions`; a lease's current key records its own leased
  * emulator through `/v1/leases/{lease}/video-sessions`. Both share one session table,
@@ -162,6 +163,7 @@ export class MobileVideoSessions implements ControlModule {
       const id = uuid(req.body.id), request = videoRequest(req.body), hash = tokenHash(req.token);
       const old = db.prepare('SELECT * FROM mobile_video_sessions WHERE id=?').get(id) as unknown as Row | undefined;
       if (old) { if (old.machine !== m.id || old.binding !== binding(m) || old.credential !== hash || old.request !== request) return fail(409); return { body: present(db, old) }; }
+      requireHostAdmission(db, String(m.host));
       if (!['android','ios'].includes(String(object(JSON.parse(String(m.template))).os)) || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id as string)) return fail(409);
       this.admit(db, m);

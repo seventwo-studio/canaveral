@@ -26,6 +26,8 @@ logout | account password | users [list|create|update|invite|reset-password|revo
 tokens [list|create|revoke] | admin create|setup-link|recover
 hosts | machines | templates | models | jobs | images | image-tasks
 machine ID | job ID | cancel-job ID | start ID | stop ID | drain ID | accept ID
+maintenance begin HOST [--id UUID] [--reason TEXT]
+maintenance status HOST | maintenance resume HOST DRAIN_ID [--request-id UUID]
 create NAME --template ID --request-id UUID [--cpu N --memory-mib N --disk-gib N]
 generate --model ID --prompt-file FILE --request-id UUID [--max-tokens N]
 device ID ACTION --request-id UUID [--arguments-file FILE]
@@ -73,12 +75,16 @@ const schemas: Record<string, Schema> = {
   'app-artifact': { positional: 1, flags: ['delete'] },
   template: { actions: ["validate", "prepare"], positional: 1, values: ["cache"] },
   start: { positional: 1 }, stop: { positional: 1 }, drain: { positional: 1 }, accept: { positional: 1 },
+  maintenance: { actions: ["begin", "status", "resume"] },
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
 };
 const subSchemas: Record<string, Schema> = {
+  "maintenance:begin": { positional: 1, values: ["id", "reason"] },
+  "maintenance:status": { positional: 1 },
+  "maintenance:resume": { positional: 2, values: ["request-id"] },
   "users:list": {}, "users:create": { values: ["username", "role", "request-id"], required: ["username", "request-id"] },
   "users:update": { positional: 1, values: ["role", "status"] },
   "users:invite": { positional: 1, values: ["dashboard-url", "output-file"], required: ["dashboard-url", "output-file"] },
@@ -397,6 +403,23 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
     }
   } else if (["start", "stop"].includes(args.command)) result = await client.request("POST", `/v1/machines/${uuid(positional(args))}/desired`, { state: args.command === "start" ? "running" : "stopped" });
   else if (["drain", "accept"].includes(args.command)) result = await client.request("POST", `/v1/hosts/${uuid(positional(args))}/accepting`, { enabled: args.command === "accept" });
+  else if (args.command === "maintenance") {
+    const path = `/v1/hosts/${uuid(positional(args))}/maintenance`;
+    if (args.action === "status") {
+      const status = await client.request("GET", path, undefined, true);
+      io.stdout(JSON.stringify(status === null ? null : metadata(status), null, 2) + "\n");
+      return;
+    }
+    if (args.action === "begin") {
+      const id = args.options.id === undefined ? randomUUID() : uuid(option(args, "id"));
+      if (args.options.id === undefined) io.stderr(`Maintenance UUID ${id}\n`);
+      result = await client.request("POST", path, { id, ...(args.options.reason === undefined ? {} : { reason: args.options.reason }) });
+    } else {
+      const drain = uuid(positional(args, 1)), requestId = args.options["request-id"] === undefined ? randomUUID() : uuid(option(args, "request-id"));
+      if (args.options["request-id"] === undefined) io.stderr(`Resume request UUID ${requestId}\n`);
+      result = await client.request("POST", `${path}/${drain}/resume`, { requestId });
+    }
+  }
   else if (args.command === "image") {
     const body = await jsonFile(option(args, "request-file")); body.id = uuid(String(body.id));
     result = await client.request("POST", "/v1/images/captures", body);

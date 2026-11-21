@@ -1,3 +1,4 @@
+import { requireDomainAdmission, requireHostAdmission } from "./maintenance.ts";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -128,6 +129,7 @@ export class AccessSessions implements SessionModule {
     if (!["provisioning", "ready"].includes(String(l.state)) || now >= Number(l.expires)) throw new ServiceError("Lease has ended.", 410);
     const m = this.legacyMachine(db, leaseId, v.member);
     if (!m) throw new ServiceError("Unknown environment member.", 404);
+    requireHostAdmission(db, String(m.host));
     const image = JSON.parse(String(m.template)) as Record<string, unknown>;
     if (!capabilities(image)[CAPABILITIES[v.capability]]) throw new ServiceError("Requested session capability is unsupported.", 409, { code: "capability_unsupported" });
     if (l.state !== "ready" || m.desired !== "running" || !leaseEligible(JSON.parse(String(m.host_offer)), image) || !legacyMachineReady(db, m, now))
@@ -208,6 +210,7 @@ export class AccessSessions implements SessionModule {
       if (!["provisioning", "ready"].includes(l.state) || now >= l.expires) throw new ServiceError("Lease has ended.", 410);
       if (v.member !== "primary") throw new ServiceError("Unknown environment member.", 404);
       if (!(JSON.parse(l.capabilities) as string[]).includes(CAPABILITIES[v.capability as SessionCapability])) throw new ServiceError("Requested session capability is unsupported.", 409, { code: "capability_unsupported" });
+      requireDomainAdmission(db, l.domain);
       const a = this.assignment(db, lease);
       if (!this.eligible(db, l, a, v.capability as SessionCapability)) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });
       db.prepare("INSERT INTO control_access_sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,0,0,'linux')")

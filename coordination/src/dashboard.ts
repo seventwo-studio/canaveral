@@ -18,10 +18,11 @@ export class DashboardError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly outcome: "unknown" | undefined;
-  constructor(message: string, status: number, options: { code?: string; retryable?: boolean; outcome?: "unknown" } = {}) {
+  readonly blockedStatus: Record<string, unknown> | undefined;
+  constructor(message: string, status: number, options: { code?: string; retryable?: boolean; outcome?: "unknown"; blockedStatus?: Record<string, unknown> } = {}) {
     super(message); this.status = status;
     this.code = options.code ?? ({ 400: "invalid_request", 401: "unauthenticated", 403: "forbidden", 404: "not_found", 409: "conflict", 413: "payload_too_large", 429: "limit_exceeded", 503: "unavailable" } as Record<number, string>)[status] ?? "request_failed";
-    this.retryable = options.retryable ?? false; this.outcome = options.outcome;
+    this.retryable = options.retryable ?? false; this.outcome = options.outcome; this.blockedStatus = options.blockedStatus;
   }
 }
 function secret(value: unknown): string {
@@ -36,6 +37,8 @@ function object(value: unknown): Record<string, unknown> {
 const shutdownStreams = new WeakMap<Server, () => void>();
 const SESSION_SECONDS = 30 * 24 * 60 * 60;
 const UUID = "[a-f0-9-]{36}";
+const maintenanceStatusPath = new RegExp(`^/v1/hosts/${UUID}/maintenance$`);
+const maintenanceResumePath = new RegExp(`^/v1/hosts/${UUID}/maintenance/${UUID}/resume$`);
 type Awaitable<T> = T | Promise<T>;
 export type Authorization = () => Promise<boolean>;
 export interface DownloadSource {
@@ -118,8 +121,13 @@ function contentLength(request: IncomingMessage, minimum = 0, maximum = Number.M
   if (!Number.isSafeInteger(size) || size < minimum || size > maximum) throw new DashboardError("Request body exceeds the endpoint's size limit.", 413);
   return size;
 }
-function decodeJson(data: Uint8Array): Record<string, unknown> {
-  try { return object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data))); }
+function decodeJson(data: Uint8Array): Record<string, unknown>;
+function decodeJson(data: Uint8Array, nullable: boolean): Record<string, unknown> | null;
+function decodeJson(data: Uint8Array, nullable = false): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
+    return nullable && value === null ? null : object(value);
+  }
   catch { throw new DashboardError("Expected a valid JSON object.", 400); }
 }
 function unknownOutcome(message: string): DashboardError {
@@ -246,10 +254,10 @@ function routeAllowed(method: string, route: string): boolean {
   if (method === "POST" && (route === "/api/v1/updates/releases" || route === "/api/v1/updates/rollouts" || new RegExp(`^/api/v1/updates/rollouts/${UUID}/cancel$`).test(route))) return true;
   if (method === "GET") return ["/api/v1/auth/status", "/api/v1/auth/session", "/api/v1/auth/tokens", "/api/v1/users", "/api/v1/admin/tokens",
     "/api/v1/hosts", "/api/v1/machines", "/api/v1/templates", "/api/v1/blueprints", "/api/v1/connection-setups", "/api/v1/images", "/api/v1/image-library", "/api/v1/image-tasks", "/api/v1/image-registry"].includes(route) ||
-    new RegExp(`^/api/v1/(?:image-tasks/${UUID}|hosts/${UUID}/resources|operations/${UUID}|machines/${UUID}(?:/(?:accessibility|desktop|files/download/[A-Za-z0-9_-]+|shells/${UUID}/stream))?)$`).test(route);
+    new RegExp(`^/api/v1/(?:image-tasks/${UUID}|hosts/${UUID}/(?:resources|maintenance)|operations/${UUID}|machines/${UUID}(?:/(?:accessibility|desktop|files/download/[A-Za-z0-9_-]+|shells/${UUID}/stream))?)$`).test(route);
   if (method === "POST") return ["/api/v1/auth/login", "/api/v1/auth/setup", "/api/v1/auth/claim", "/api/v1/auth/claim/info", "/api/v1/auth/logout",
     "/api/v1/auth/password", "/api/v1/auth/tokens", "/api/v1/users", "/api/v1/machines", "/api/v1/blueprints", "/api/v1/connection-setups", "/api/v1/images/captures", "/api/v1/image-registry/imports"].includes(route) ||
-    new RegExp(`^/api/v1/(?:(?:auth|admin)/tokens/${UUID}/revoke|users/${UUID}/(?:update|invite|reset-password|revoke-invite)|machines/${UUID}/(?:desired|operations|power-off|delete|authorize|files/upload)|hosts/${UUID}/(?:accepting|checks|limits|images/import)|connection-setups/${UUID}/revoke)$`).test(route);
+    new RegExp(`^/api/v1/(?:(?:auth|admin)/tokens/${UUID}/revoke|users/${UUID}/(?:update|invite|reset-password|revoke-invite)|machines/${UUID}/(?:desired|operations|power-off|delete|authorize|files/upload)|hosts/${UUID}/(?:accepting|checks|limits|images/import|maintenance|maintenance/${UUID}/resume)|connection-setups/${UUID}/revoke)$`).test(route);
   return false;
 }
 
@@ -271,7 +279,10 @@ export function createDashboardServer(config: DashboardConfig): Server {
   const intervalMs = config.reauthorizeMs ?? 1000;
   if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 1000) throw new DashboardError("Reauthorization interval must be 1–1000 ms.", 400);
 
-  async function upstream(method: string, path: string, token: string, value?: Record<string, unknown>): Promise<{ body: Record<string, unknown>; status: number }> {
+  type UpstreamReply<T> = { body: T; status: number };
+  function upstream(method: string, path: string, token: string, value?: Record<string, unknown>): Promise<UpstreamReply<Record<string, unknown>>>;
+  function upstream(method: "GET", path: string, token: string, value: undefined, nullable: true): Promise<UpstreamReply<Record<string, unknown> | null>>;
+  async function upstream(method: string, path: string, token: string, value?: Record<string, unknown>, nullable = false): Promise<UpstreamReply<Record<string, unknown> | null>> {
     const mutating = method !== "GET";
     const data = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
     return await new Promise((resolve, reject) => {
@@ -289,13 +300,15 @@ export function createDashboardServer(config: DashboardConfig): Server {
         response.on("end", () => {
           const status = response.statusCode ?? 502;
           if (status >= 300 && status < 400) { reject(new DashboardError("Orchestrator redirects are not followed.", 502, { retryable: false, ...(mutating ? { outcome: "unknown" } : {}) })); return; }
-          let body: Record<string, unknown>;
-          try { body = decodeJson(Buffer.concat(chunks)); }
+          let body: Record<string, unknown> | null;
+          try { body = decodeJson(Buffer.concat(chunks), nullable && status < 300); }
           catch { reject(new DashboardError("Orchestrator returned an invalid JSON response. Inspect state before another mutation.", 502, { code: "response_invalid", retryable: false, ...(mutating ? { outcome: "unknown" } : {}) })); return; }
-          if (status >= 400) { reject(new DashboardError(typeof body.error === "string" ? body.error : typeof body.message === "string" ? body.message : "Orchestrator request failed.", status, {
+          if (body && status >= 400) { reject(new DashboardError(typeof body.error === "string" ? body.error : typeof body.message === "string" ? body.message : "Orchestrator request failed.", status, {
             ...(typeof body.code === "string" ? { code: body.code } : {}),
             retryable: typeof body.retryable === "boolean" ? body.retryable : !mutating && status === 503,
             ...(body.outcome === "unknown" ? { outcome: "unknown" } : {}),
+            ...(status === 409 && method === "POST" && maintenanceResumePath.test(path) && body.code === "maintenance_blocked" &&
+              body.status && typeof body.status === "object" && !Array.isArray(body.status) ? { blockedStatus: body.status as Record<string, unknown> } : {}),
           })); return; }
           resolve({ body, status });
         });
@@ -669,6 +682,10 @@ export function createDashboardServer(config: DashboardConfig): Server {
       }
       if (route === "/api/v1/auth/logout") setCookie("", true);
       const path = browserCollection.test(route) || browserItem.test(route) ? route.replace("/api/v1/", "/v1/admin/") : route.slice(4);
+      if (method === "GET" && maintenanceStatusPath.test(path)) {
+        const result = await upstream(method, path, token, undefined, true);
+        respond(result.body, result.status); return;
+      }
       const result = await upstream(method, path, token, value);
       if (route === "/api/v1/connection-setups") result.body.controllerUrl = origin.origin;
       if (["/api/v1/auth/login", "/api/v1/auth/setup", "/api/v1/auth/claim"].includes(route)) {
@@ -690,7 +707,8 @@ export function createDashboardServer(config: DashboardConfig): Server {
       const failure = error instanceof DashboardError ? error : new DashboardError("Dashboard service or attached provider unavailable.", 503, { retryable: false, ...(method === "POST" ? { outcome: "unknown" } : {}) });
       if (failure.status === 401) setCookie("", true);
       if (!upgrade && !streamed) await discardBody(request, body);
-      respond({ error: failure.message, code: failure.code, retryable: failure.retryable, ...(failure.outcome ? { outcome: failure.outcome } : {}) }, failure.status);
+      respond({ error: failure.message, code: failure.code, retryable: failure.retryable, ...(failure.outcome ? { outcome: failure.outcome } : {}),
+        ...(failure.blockedStatus ? { status: failure.blockedStatus } : {}) }, failure.status);
     } finally { if (!upgrade) request.resume(); else upgrade.release(); }
   }
   const server = createServer((request, response) => {

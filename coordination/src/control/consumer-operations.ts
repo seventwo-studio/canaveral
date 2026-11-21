@@ -1,3 +1,4 @@
+import { requireHostAdmission } from "./maintenance.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { object, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
@@ -80,6 +81,7 @@ export function createModule(store: SqliteStore, _options: ControlOptions): Cont
       if (!ACTIVE.includes(lease.state)) throw new ServiceError("Lease has ended.", 410);
       const machine = db.prepare("SELECT m.*,h.seen,h.enabled,h.offer AS host_offer FROM machines m JOIN hosts h ON h.id=m.host JOIN lease_members lm ON lm.machine=m.id WHERE lm.lease=? AND lm.name=?").get(lease.id, input.member);
       if (!machine) throw new ServiceError("Unknown environment member.", 404);
+      requireHostAdmission(db, String(machine.host));
       const image = object(JSON.parse(String(machine.template))), cap = actionCapabilities[request.action];
       if (!cap || !capabilities(image)[cap as keyof ReturnType<typeof capabilities>]) throw new ServiceError("Requested operation capability is unsupported.", 409, { code: "capability_unsupported" });
       if (lease.state !== "ready" || !legacyMachineReady(db, machine, store.clock())) throw new ServiceError("Environment member is not ready for access.", 409, { code: "member_not_ready" });

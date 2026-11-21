@@ -17,10 +17,12 @@ export interface HttpCommand {
 }
 export interface HostAuthenticateCommand { type: "hosts.authenticate"; hostId: string; token: string }
 interface BrowserAuthorizeCommand { type: "browsers.authorize"; token: string }
-export type ControlCommand = BrowserAuthorizeCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
+type BrowserLaunchCommand = { type: "browsers.launch"; hostId: string; intent: Record<string, unknown>; adminToken?: string };
+type BrowserReceiptCommand = { type: "browsers.receipt"; hostId: string; id: string; state: "active" | "closed" };
+export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
-  return command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
+  return command.type === "browsers.launch" || command.type === "browsers.receipt" || command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
     command.type === 'display-sessions.attach' || command.type === 'display-sessions.disconnect';
 }
 export type ControlReply =
@@ -106,7 +108,8 @@ export class ControlClient extends EventEmitter {
   }
 
   request(command: { type: "requests.wake" }): Promise<unknown>;
-  request(command: BrowserAuthorizeCommand): Promise<unknown>;
+  request(command: BrowserAuthorizeCommand | BrowserReceiptCommand): Promise<unknown>;
+  request(command: BrowserLaunchCommand): Promise<boolean | "inspect">;
   request(command: HttpCommand): Promise<ControlResponse | undefined>;
   request(command: SessionCommand): Promise<unknown>;
   request(command: HostAuthenticateCommand): Promise<unknown>;

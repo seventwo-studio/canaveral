@@ -7,7 +7,7 @@ import { CapacityLedger } from "../capacity.ts";
 import { identifier } from "../consumers.ts";
 import type { Resources } from "../consumers.ts";
 import { object, ServiceError } from "../errors.ts";
-import { updateDraining } from "../updates/drain.ts";
+import { hostAdmissionClosed, requireHostAdmission } from "./maintenance.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import { owns, requireAdmin, requireScope } from "./contracts.ts";
 import type { ControlModule, ControlOptions, ControlRequest } from "./contracts.ts";
@@ -206,18 +206,22 @@ export class ImagesController {
     return host;
   }
   reserveImageImport(hostId: string, value: unknown, size: number): Json {
+    return this.admitImageImport(hostId, value, size).task;
+  }
+  admitImageImport(hostId: string, value: unknown, size: number): { task: Json; replayOnly: boolean; created: boolean } {
     hostId = identifier(hostId); const metadata = specification(value), request = { kind: "import", metadata, bytes: bytes(size) };
     return this.store.transaction(db => {
       const old = taskRow(db, metadata.id);
       if (old) {
         if (old.host !== hostId || !same(JSON.parse(old.request), request)) throw new ServiceError("Image task ID belongs to another specification.");
         if (old.state === "failed") throw new ServiceError("This import failed. Create a new import ID after inspecting its result.");
-        return taskView(old);
+        return { task: taskView(old), replayOnly: old.state !== "running" && hostAdmissionClosed(db, hostId).closed, created: false };
       }
+      requireHostAdmission(db, hostId);
       this.online(db, hostId); const disk = Math.ceil(size / GiB);
       if (disk > this.ledger.remaining(db, hostId).diskGiB) throw new ServiceError("Image exceeds available host storage.");
       db.prepare("INSERT INTO image_tasks VALUES (?,?,NULL,?,'running',NULL,?,?,?)").run(metadata.id, hostId, JSON.stringify(request), this.store.clock(), this.store.clock(), disk);
-      return taskView(taskRow(db, metadata.id)!);
+      return { task: taskView(taskRow(db, metadata.id)!), replayOnly: false, created: true };
     });
   }
   finishImageImport(taskId: string, hostId: string, result?: unknown, failed = false): Json {
@@ -243,7 +247,7 @@ export class ImagesController {
       }
       if (old) { if (!same(JSON.parse(old.request), intent)) throw new ServiceError("Capture ID belongs to another specification."); return taskView(old); }
       const machine = db.prepare("SELECT * FROM machines WHERE id=?").get(machineId)!;
-      if (updateDraining(db, String(machine.host))) throw new ServiceError("Host is draining for a runtime update.", 409);
+      requireHostAdmission(db, String(machine.host));
       this.online(db, String(machine.host));
       if (db.prepare("SELECT 1 FROM machine_deletions WHERE machine=?").get(machineId)) throw new ServiceError("A source with a deletion intent cannot be captured.");
       if (db.prepare("SELECT 1 FROM machine_power_offs WHERE machine=? AND state!='succeeded'").get(machineId)) throw new ServiceError("Resolve the source power-off intent before capture.");
@@ -273,6 +277,7 @@ export class ImagesController {
         if (old.host !== hostId || !same(previous, intent)) throw new ServiceError("Image task ID belongs to another request.");
         return taskView(old);
       }
+      requireHostAdmission(db, hostId);
       const offer = object(JSON.parse(String(this.online(db, hostId).offer)));
       if (offer.provider === "kubevirt") throw new ServiceError("Registry imports require a direct host.");
       if (entry.os === "macos" && !["macos", "apple"].includes(String(offer.provider))) throw new ServiceError("macOS restore images require a Mac host.");

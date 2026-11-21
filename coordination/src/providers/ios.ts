@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { StateLock } from "../runtime-process.ts";
 import { ServiceError, object } from "../errors.ts";
+import { noLinks, present, StateLock } from "../runtime-process.ts";
 import { MobileProvider, MAX_OUTPUT, atomicUpload, authorized, confined, containerParts, decodeData, digest, encoded, locked, operationRequest, readJson, readRegular, saveJson, text, unsupported, uuid } from "./mobile.ts";
 import type { Authorized, ByteReader, DeviceRequest, Download, NativePipe, RecordValue, RunOptions } from "./mobile.ts";
 import { materializeIosApp } from "./ios-artifact.ts";
@@ -51,6 +51,21 @@ export class IosProvider extends MobileProvider {
     if (device.name !== this.name(machine) || runtime !== definition.runtime || device.deviceTypeIdentifier !== definition.deviceType || device.isAvailable !== true) throw new ServiceError("Simulator identity/runtime differs from its assignment; refusing control.");
     return { ...device, udid: id };
   }
+  async maintenanceStorage(machine: RecordValue, image: RecordValue): Promise<"present" | "absent" | "unknown" | "notMaterialized"> {
+    const storage = this.maintenanceDirectory(machine, image);
+    if (!storage) return "absent";
+    noLinks(path.join(storage, "simulator.json"));
+    const device = await this.owned(machine, image, storage);
+    if (!device) {
+      return present(path.join(storage, "create-started.json")) || (await this.inventory()).some(({ device }) => device.name === this.name(machine))
+        ? "unknown" : "notMaterialized";
+    }
+    if (typeof device.dataPath !== "string" || !path.isAbsolute(device.dataPath)) return "unknown";
+    noLinks(device.dataPath);
+    if (!present(device.dataPath)) return "absent";
+    const stat = fs.lstatSync(device.dataPath);
+    return stat.isDirectory() && (!process.getuid || stat.uid === process.getuid()) ? "present" : "unknown";
+  }
   async removeOwnedStorage(machine: RecordValue, image: RecordValue, folder: string, requestId: string): Promise<RecordValue> {
     this.executionAllowed(machine);
     const lock = new StateLock(path.join(folder, "simulator-removal.sqlite"));
@@ -58,7 +73,7 @@ export class IosProvider extends MobileProvider {
     finally { lock.close(); }
   }
   private async removeSimulator(machine: RecordValue, image: RecordValue, folder: string, requestId: string): Promise<RecordValue> {
-    const machineId = uuid(machine.id), id = uuid(requestId), fingerprint = digest(this.binding(machine, image));
+    const machineId = uuid(machine.id), id = uuid(requestId), fingerprint = this.deletionFingerprint(machine, image);
     const root = text(this.config.storage, "storage"), storage = path.join(root, machineId);
     if (!path.isAbsolute(root) || path.resolve(folder) === storage || path.resolve(folder).startsWith(storage + path.sep))
       throw new ServiceError("Simulator storage overlaps host state or is not absolute.");

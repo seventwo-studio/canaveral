@@ -60,6 +60,7 @@ export interface HostUsage extends ResourceSample {
   cluster?: NamespaceObservation;
 }
 export interface Host extends CatalogueHost {
+  maintenance?: import("./maintenance").MaintenanceSummary | null;
   enabled: boolean;
   placementReady?: boolean;
   overcommitted?: boolean;

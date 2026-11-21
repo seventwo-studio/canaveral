@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { ServiceError, object, secret } from "../errors.ts";
 import { SqliteStore } from "../sqlite.ts";
-import { updateDraining } from "../updates/drain.ts";
+import { HostMaintenance, hostAdmissionClosed, requireHostAdmission } from "./maintenance.ts";
 import { comparePlacementScore, placementScore } from '../placement.ts';
 import type { PlacementScore } from '../placement.ts';
 import { owns, requireAdmin, requireScope } from "./contracts.ts";
@@ -206,12 +206,13 @@ export interface MachineHooks {
   reportMachine?(db: DatabaseSync, hostId: string, machineId: string, report: Json): boolean | void;
   afterHeartbeat?(db: DatabaseSync, hostId: string, body: Json): void;
   assignment?(db: DatabaseSync, machine: Json, forHost: boolean): Json;
-  heartbeatResponse?(db: DatabaseSync, hostId: string): Json;
+  heartbeatResponse?(db: DatabaseSync, hostId: string, body: Json): Json;
   /** SQL SELECT returning cpu, memoryMiB, diskGiB; one positional host parameter.
    * Required for mapped hosts; use a stable id across restarts. */
   additionalReservationsSql?: { id: string; query: string };
   additionalReservations?(db: DatabaseSync, hostId: string): Partial<Resources>;
 }
+const maintenance = new WeakMap<SqliteStore, HostMaintenance>();
 const registeredHooks = new WeakMap<SqliteStore, MachineHooks[]>();
 export function registerMachineHooks(store: SqliteStore, hooks: MachineHooks): void {
   if (hooks.additionalReservations) store.transaction(db => {
@@ -226,13 +227,16 @@ export interface MachineStoreOptions { leaseSeconds?: number; hooks?: MachineHoo
 
 export class MachineStore implements ControlModule {
   readonly leaseSeconds: number;
+  private readonly maintenance: HostMaintenance;
   constructor(readonly store: SqliteStore, readonly options: ControlOptions, settings: MachineStoreOptions = {}) {
     this.leaseSeconds = settings.leaseSeconds ?? 30;
     if (options.enrollmentToken !== undefined && secureEqual(options.adminToken, options.enrollmentToken)) failure("Admin and enrollment credentials must be different.");
     for (const hook of settings.hooks ?? []) registerMachineHooks(store, hook);
     store.transaction(db => { initializeMachines(db); initializeLifecycle(db); initializeInfrastructure(db); PhysicalDomains.schema(db); });
+    this.maintenance = maintenance.get(store) ?? new HostMaintenance(store, options.browserHosts);
+    maintenance.set(store, this.maintenance);
   }
-  private get hooks(): MachineHooks[] { return registeredHooks.get(this.store) ?? []; }
+  private get hooks(): MachineHooks[] { return [...(registeredHooks.get(this.store) ?? []), this.maintenance.hooks]; }
   private transaction<T>(operation: (db: DatabaseSync) => T): T {
     return this.store.transaction(db => { for (const hook of this.hooks) hook.beforeTransaction?.(db); return operation(db); });
   }
@@ -302,7 +306,7 @@ export class MachineStore implements ControlModule {
       return { id };
     });
   }
-  private healthReady(db: DatabaseSync, id: string): boolean { return !updateDraining(db, id) && healthReady(db, id, this.store.clock()); }
+  private healthReady(db: DatabaseSync, id: string): boolean { return !hostAdmissionClosed(db, id).closed && healthReady(db, id, this.store.clock()); }
   used(db: DatabaseSync, hostId: string, exclude?: string): Resources {
     const physical = physicalBudget(db, { hostId }, exclude);
     if (physical) return physical.reserved;
@@ -350,12 +354,12 @@ export class MachineStore implements ControlModule {
     for (const hook of this.hooks) result = hook.assignment?.(db, result, forHost) ?? result;
     return result;
   }
-  hosts(req: ControlRequest): Json[] {
+  hosts(req: Pick<ControlRequest, "principal">): Json[] {
     return this.transaction(db => {
       requireAdmin(req);
       return db.prepare("SELECT * FROM hosts ORDER BY id").all().filter(row => !(table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(row.id!))).map(row => {
-        const offer = persistedOffer(row.offer);
-        if (!offer) return { id: row.id, online: false, enabled: Boolean(row.enabled), lastSeen: row.seen, placementReady: false, invalidOffer: true, templates: [], reserved: this.used(db, String(row.id)), capacity: { cpu: 0, memoryMiB: 0, diskGiB: 0 }, available: { cpu: 0, memoryMiB: 0, diskGiB: 0 } };
+        const offer = persistedOffer(row.offer), maintenance = this.maintenance.summary(db, String(row.id));
+        if (!offer) return { id: row.id, maintenance, online: false, enabled: Boolean(row.enabled), lastSeen: row.seen, placementReady: false, invalidOffer: true, templates: [], reserved: this.used(db, String(row.id)), capacity: { cpu: 0, memoryMiB: 0, diskGiB: 0 }, available: { cpu: 0, memoryMiB: 0, diskGiB: 0 } };
         const online = this.store.clock() - Number(row.seen) < this.leaseSeconds;
         const health = table(db, "host_health") ? db.prepare("SELECT * FROM host_health WHERE host=?").get(row.id!) : undefined;
         const sample = table(db, "resource_samples") ? db.prepare("SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 1").get(row.id!) : undefined;
@@ -363,7 +367,7 @@ export class MachineStore implements ControlModule {
         const system = report?.environment?.system;
         const platforms: Record<string, string> = { Darwin: "macos", Linux: "linux", Windows: "windows", apple: "macos", ios: "macos", hyperv: "windows", libvirt: "linux", macos: "macos", linux: "linux", windows: "windows" };
         const reserved = this.used(db, String(row.id)), limits = this.limits(db, row), physical = physicalBudget(db, { hostId: String(row.id) });
-        return { ...offer, id: row.id, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, ...(physical ? { physicalDomainId: physical.domainId, effectiveCapacity: physical.capacity } : {}), kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
+        return { ...offer, id: row.id, maintenance, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, ...(physical ? { physicalDomainId: physical.domainId, effectiveCapacity: physical.capacity } : {}), kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
           platform: platforms[system] ?? platforms[offer.provider] ?? null, runtimes: [
             ...(offer.runtimes ?? (offer.provider === "kubevirt" ? [] : [offer.provider])),
             ...(offer.inference || (physical && table(db, "model_runner_approvals")
@@ -423,6 +427,7 @@ export class MachineStore implements ControlModule {
       return this.machine(db, old, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
     }
     if (leased && request.blueprintId) failure("Application leases require their approved image policy, not a machine blueprint.", 400);
+    if (request.hostId) requireHostAdmission(db, request.hostId);
     const preset = request.blueprintId ? blueprint(db, request.blueprintId, request.blueprintRevision) : null;
     const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
     for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
@@ -461,6 +466,7 @@ export class MachineStore implements ControlModule {
       if (deletion(db, id)) failure("A machine with a deletion intent cannot change desired state.", 409);
       if (record(db, "lease_members", id)) failure("Lease-owned machines use lease lifecycle actions.", 409);
       if (state === "running" && row.desired !== "running") {
+        requireHostAdmission(db, String(row.host));
         if (hasPendingPowerOff(db, id)) failure("Resolve the pending power-off intent before restarting.", 409);
         if (table(db, "image_tasks") && db.prepare("SELECT 1 FROM image_tasks WHERE machine=? AND state IN ('queued','running','unknown')").get(id)) failure("Resolve the pending image capture before restarting this machine.", 409);
         const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(row.host!);
@@ -529,12 +535,14 @@ export class MachineStore implements ControlModule {
       const machines = db.prepare("SELECT * FROM machines WHERE host=?").all(id).filter(row => !isDeleted(db, String(row.id))).map(row => this.machine(db, row, true, true));
       if (table(db, "image_tasks")) extra = { ...extra, imageTasks: assignedImageTasks(db, id, row => this.machine(db, row as MachineRow, true, true)), imageAcknowledged: acknowledgedImages(db, id) };
       if (table(db, "inference_jobs")) extra.inferenceJobs = assignedInferenceJobs(db, id, this.store.clock());
-      for (const hook of this.hooks) extra = { ...extra, ...hook.heartbeatResponse?.(db, id) };
+      for (const hook of this.hooks) extra = { ...extra, ...hook.heartbeatResponse?.(db, id, value) };
       return { checksRequestedAt: 0, inferenceJobs: [], deviceOperations: [], accessSessions: [], imageTasks: [], imageAcknowledged: {}, ...extra, machines };
     });
   }
   handle(req: ControlRequest) {
     const { method, parts, body, token } = req;
+    const maintenance = this.maintenance.handle(req, operation => this.transaction(operation));
+    if (maintenance) return maintenance;
     if (method === "POST" && req.path === "/v1/hosts/enroll") return { body: this.enroll(body, token) };
     if (parts.length === 4 && parts[0] === "v1" && parts[1] === "hosts" && method === "POST") {
       if (parts[3] === "physical-domain") return { body: this.transaction(db => {

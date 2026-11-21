@@ -196,7 +196,7 @@ export class Requests {
         } catch (error) {
           // The savepoint already rolled this attempt back. An unexpected failure stays waiting with a
           // visible reason and is not retried until the next round, so it cannot stall other requests.
-          const temporary = !(error instanceof ServiceError) || error.status === 429 || error.status === 503;
+          const temporary = !(error instanceof ServiceError) || error.status === 429 || error.status === 503 || error.code === "host_draining";
           db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(temporary ? "waiting" : "rejected",error instanceof ServiceError ? error.code : "admission_error",row.application,row.id);
           // A capacity or quota refusal applies to the group's other requests for the rest of this pass, so a large
           // unservable backlog costs one attempt per group and cannot hide servable work behind it. This relies on

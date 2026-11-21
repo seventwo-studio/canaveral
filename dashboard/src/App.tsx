@@ -953,6 +953,8 @@ export function App() {
               <Notice error>{actionError}</Notice>
               {resourceHost ? (
                 <InfrastructureDetails
+                  busy={busy}
+                  mutate={mutate}
                   key={resourceHost.id}
                   host={resourceHost}
                   machines={inventory.machines.filter(

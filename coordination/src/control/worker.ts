@@ -5,7 +5,7 @@ import { identifier } from "../consumers.ts";
 import { ServiceError, secret } from "../errors.ts";
 import { SqliteStore } from "../sqlite.ts";
 import { createModule as accountsModule } from "./account-routes.ts";
-import { createModule as machinesModule, MachineStore } from "./machines.ts";
+import { MachineStore } from "./machines.ts";
 import { createModule as lifecycleModule } from "./lifecycle.ts";
 import { createModule as devicesModule } from "./devices.ts";
 import { createAppArtifactsModule } from './app-artifacts.ts';
@@ -20,6 +20,7 @@ import { createModule as sessionsModule } from "./sessions.ts";
 import { AdminSystem } from "./admin-system.ts";
 import { LegacyLeases } from "./leases.ts";
 import { createModule as updatesModule } from "./updates.ts";
+import { requireHostAdmission, hostAdmissionClosed } from "./maintenance.ts";
 import { requireAdmin } from "./contracts.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
 import { mutatesControlCommand } from "./client.ts";
@@ -40,8 +41,7 @@ const accounts = new Accounts(store);
 // Imports are required. A missing or broken module prevents startup.
 const sessions = sessionsModule(store, options);
 const accountRoutes = accountsModule(store, options);
-const machines = machinesModule(store, options);
-if (!(machines instanceof MachineStore)) throw new Error("Controller host authentication is unavailable.");
+const machines = new MachineStore(store, options);
 const authenticateHost = machines.authenticateHost.bind(machines);
 const modules = [accountRoutes, machines, blueprintsModule(store), ...[lifecycleModule, devicesModule, imagesModule,
   infrastructureModule, inferenceModule].map(create => create(store, options))];
@@ -58,6 +58,8 @@ const leases = new LegacyLeases(store, options);
 modules.push(leases);
 modules.push(new AdminSystem(leases));
 modules.push(updatesModule(store, options));
+if (options.browserHosts?.length) store.transaction(db => db.exec(`
+  CREATE TABLE IF NOT EXISTS browser_launches (host TEXT NOT NULL,id TEXT NOT NULL,intent TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(host,id))`));
 
 function principal(token: string): Principal {
   try {
@@ -78,6 +80,37 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
     requireAdmin({ principal: () => principal(command.token) });
     return true;
   }
+  if (command.type === "browsers.launch") {
+    return store.transaction(db => {
+      if (command.adminToken !== undefined) requireAdmin({ principal: () => principal(command.adminToken!) });
+      const hostId = identifier(command.hostId);
+      if (!options.browserHosts?.includes(hostId)) return false;
+      const { intent } = command, id = identifier(intent.id);
+      const keys = Object.keys(intent).sort().join(",");
+      const ports = intent.localPorts === undefined ? [] : intent.localPorts;
+      if (!["engine,id,ttlSeconds", "engine,id,localPorts,ttlSeconds"].includes(keys) ||
+          !["chromium", "firefox", "webkit"].includes(String(intent.engine)) || typeof intent.ttlSeconds !== "number" ||
+          !Number.isInteger(intent.ttlSeconds) || intent.ttlSeconds < 30 || intent.ttlSeconds > 3600 ||
+          !Array.isArray(ports) || ports.length > 32 || ports.some(p => !Number.isInteger(p) || p < 1 || p > 65535)) {
+        throw new ServiceError("Invalid browser intent.", 400);
+      }
+      const spec = JSON.stringify([intent.engine, intent.ttlSeconds, [...new Set<number>(ports)].sort((a,b) => a-b)]);
+      const previous = db.prepare("SELECT intent,state FROM browser_launches WHERE host=? AND id=?").get(hostId, id);
+      if (previous && previous.intent !== spec) throw new ServiceError("Browser UUID belongs to a different intent.", 409);
+      // A worker may forget its UUIDs on restart. A fenced retry can inspect the
+      // committed launch, but forwarding another POST might start a new browser.
+      if (previous && hostAdmissionClosed(db, hostId).closed) return "inspect";
+      requireHostAdmission(db, hostId);
+      const hosts = machines.hosts({ principal: () => ({ kind: "operator", user: null, scopes: ["admin"] }) });
+      if (!hosts.some(host => host.id === hostId && host.platform === "macos" && host.placementReady)) return false;
+      db.prepare(`INSERT INTO browser_launches VALUES (?,?,?,'launching')
+        ON CONFLICT(host,id) DO UPDATE SET state='launching' WHERE state='closed'`).run(hostId, id, spec);
+      return true;
+    });
+  }
+  if (command.type === "browsers.receipt") return store.transaction(db => {
+    db.prepare("UPDATE browser_launches SET state=? WHERE host=? AND id=? AND state!='closed'").run(command.state, command.hostId, command.id);
+  });
   if (command.type === "requests.wake") return { ok: leases.requests.wake() };
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);
