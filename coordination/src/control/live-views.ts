@@ -32,6 +32,7 @@ import { legacyMachineReady, leaseScopedMember, legacySessionLease } from './lea
 import type { MobileVideoSessions, VideoSessionRow } from './mobile-video-sessions.ts';
 import { uuid } from './transfers.ts';
 import type { SessionSide } from './session-protocol.ts';
+import { requireNotPooled } from './pool-ledger.ts';
 
 export type LiveViewCommand =
   | { type: 'live-views.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
@@ -277,6 +278,7 @@ export class MobileLiveViews implements ControlModule {
     if (old) { if (old.machine !== m.id || old.lease || old.credential !== hash || old.ttl !== ttl) return fail(409); return { body: view(old) }; }
     // A leased device is visible to its lease holder only, through the lease route.
     if (this.leased(db, String(m.id))) return fail(409);
+    requireNotPooled(db, String(m.id));
     if (!['android', 'ios'].includes(String(object(JSON.parse(String(m.template))).os))) return fail(409, 'capability_unsupported');
     if (m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
     return { status: 201, body: view(this.admit(db, id, m, hash, ttl, null)) };

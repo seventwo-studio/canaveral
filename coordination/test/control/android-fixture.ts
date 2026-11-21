@@ -1,7 +1,8 @@
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawn as spawnProcess } from "node:child_process";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +16,16 @@ import { FragmentEncoder } from "./live-fixture.ts";
 
 /** Disposable Android lease fixtures. A real loopback controller, a real HostRunner with the
  * native continuous lease clock and the real `lease-supervise` helper own stand-in emulator
- * processes (each with a grandchild in its group). adb and avdmanager are fakes. No SDK,
- * emulator or pre-existing device is touched. */
+ * processes (each with a grandchild in its group). adb, avdmanager and qemu-img are fakes. No SDK,
+ * emulator or pre-existing device is touched.
+ *
+ * The stand-in emulator keeps "disk state" in its AVD directory the way a real one does: a base
+ * data image, an overlay that holds what was written to the device, and per-launch files. The
+ * overlay has a real qcow2 header that records its backing file by absolute path, as the
+ * emulator's own overlays do, and the stand-in qemu-img rewrites that record on a rebase. That is
+ * enough to prove what a baseline captures, what a clone starts from and which backing path a
+ * clone records. It says nothing about whether a real emulator boots from copied user data: the
+ * stand-in never opens the backing file. */
 export const helper = mobileNativeHelper({});
 export const unix = ["darwin", "linux"].includes(process.platform);
 export const skip = !unix || !existsSync(helper) ? "requires the built canaveral-mobile-native helper" : false;
@@ -31,19 +40,51 @@ export async function until(check: () => boolean | Promise<boolean>, label: stri
   assert.fail(`Timed out waiting for ${label}`);
 }
 
-export interface Emulator { name: string; port: number; pid: number; grandchild: number; bootedAt: number }
-function sdk(root: string): { sdk: string; registry: string; events: string } {
+export interface Emulator { name: string; port: number; pid: number; grandchild: number; bootedAt: number; data: string; backing: string }
+/** The stand-in overlay: a qcow2 header that names its backing file, then whatever was written to the device. */
+export const OVERLAY_HEADER = 2048;
+export function overlayHeader(backing: string): Buffer {
+  const header = Buffer.alloc(OVERLAY_HEADER), name = Buffer.from(backing);
+  header.writeUInt32BE(0x514649fb, 0); header.writeUInt32BE(3, 4); header.writeBigUInt64BE(104n, 8); header.writeUInt32BE(name.length, 16); name.copy(header, 104);
+  return header;
+}
+/** What `qemu-img rebase -u -b` does to the header: only the recorded backing path changes. */
+export function rebaseOverlay(file: string, backing: string): void { writeFileSync(file, Buffer.concat([overlayHeader(backing), readFileSync(file).subarray(OVERLAY_HEADER)])); }
+export function sdk(root: string): { sdk: string; registry: string; events: string } {
   const sdkRoot = join(root, "sdk"), registry = join(root, "emulators"), events = join(root, "events");
   for (const dir of ["platform-tools", "emulator", "cmdline-tools/latest/bin", ...systemImage.split(";").reduce<string[]>((paths, part) => [...paths, join(paths.at(-1) ?? "", part)], [])]) mkdirSync(join(sdkRoot, dir), { recursive: true });
   mkdirSync(registry); mkdirSync(events);
-  for (const tool of ["platform-tools/adb", "cmdline-tools/latest/bin/avdmanager"]) writeFileSync(join(sdkRoot, tool), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  for (const tool of ["platform-tools/adb", "cmdline-tools/latest/bin/avdmanager", "emulator/qemu-img"]) writeFileSync(join(sdkRoot, tool), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  // The installed system image's package and build metadata: what a baseline is bound to.
+  const imageDirectory = join(sdkRoot, ...systemImage.split(";"));
+  writeFileSync(join(imageDirectory, "source.properties"), "Pkg.Desc=Fixture system image\nPkg.Revision=9\n");
+  writeFileSync(join(imageDirectory, "build.prop"), "ro.build.fingerprint=fixture/35/9\n");
   // The stand-in emulator registers its console port, keeps a grandchild in its own process
   // group and boots after a short delay. Only the lease supervisor ever signals it.
   const script = join(root, "fake-emulator.mjs");
-  writeFileSync(script, `import { spawn } from "node:child_process"; import { writeFileSync } from "node:fs";
+  writeFileSync(script, `import { spawn } from "node:child_process"; import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2), name = args[args.indexOf("-avd") + 1], port = Number(args[args.indexOf("-port") + 1]);
 const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-writeFileSync(${JSON.stringify(registry)} + "/" + port + ".json", JSON.stringify({ name, port, pid: process.pid, grandchild: grandchild.pid, bootedAt: Date.now() + 300 }));
+// Disk state: the base image is created once; everything written to the device lands in the overlay,
+// a qcow2 file whose header records the base image as its backing file by absolute path.
+// A launch without the SDK environment (a stand-in supervisor that starts it bare) has none.
+let data = "", backing = "";
+if (process.env.ANDROID_AVD_HOME) {
+  const avd = /^path=(.*)$/m.exec(readFileSync(process.env.ANDROID_AVD_HOME + "/" + name + ".ini", "utf8"))[1], overlay = avd + "/userdata-qemu.img.qcow2";
+  if (!existsSync(avd + "/userdata-qemu.img")) writeFileSync(avd + "/userdata-qemu.img", "factory\\n");
+  if (!existsSync(overlay)) {
+    const header = Buffer.alloc(${OVERLAY_HEADER}), base = Buffer.from(avd + "/userdata-qemu.img");
+    header.writeUInt32BE(0x514649fb, 0); header.writeUInt32BE(3, 4); header.writeBigUInt64BE(104n, 8); header.writeUInt32BE(base.length, 16); base.copy(header, 104);
+    writeFileSync(overlay, header);
+  }
+  const image = readFileSync(overlay);
+  data = image.subarray(${OVERLAY_HEADER}).toString("utf8"); backing = image.subarray(104, 104 + image.readUInt32BE(16)).toString("utf8");
+  appendFileSync(overlay, "boot:" + name + "\\n");
+  // Per-launch files that belong to no baseline.
+  writeFileSync(avd + "/hardware-qemu.ini", "avd.name=" + name + "\\n"); writeFileSync(avd + "/multiinstance.lock", String(process.pid));
+  mkdirSync(avd + "/snapshots/default_boot", { recursive: true }); writeFileSync(avd + "/snapshots/default_boot/ram.bin", "ram of " + name);
+}
+writeFileSync(${JSON.stringify(registry)} + "/" + port + ".json", JSON.stringify({ name, port, pid: process.pid, grandchild: grandchild.pid, bootedAt: Date.now() + 300, data, backing }));
 process.on("SIGTERM", () => { grandchild.kill("SIGTERM"); process.exit(0); });
 setInterval(() => {}, 1000);\n`);
   writeFileSync(join(sdkRoot, "emulator/emulator"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`, { mode: 0o755 });
@@ -54,7 +95,7 @@ export function emulators(registry: string): Emulator[] {
 }
 /** A guest's view of 10.0.2.2: an isolated guest is refused everywhere; a leaky one really
  * connects to the host loopback port, as an unrestricted emulator would. */
-function reach(port: number): Promise<boolean> {
+export function reach(port: number): Promise<boolean> {
   return new Promise(resolve => {
     const socket = connect({ host: "127.0.0.1", port }, () => { socket.destroy(); resolve(true); });
     socket.setTimeout(1000, () => { socket.destroy(); resolve(false); });
@@ -93,10 +134,9 @@ export class FakePipe implements NativePipe {
 }
 /** Guest and host media state observed by the fakes, per emulator name. */
 export interface Media { recorders: Map<string, { running: boolean; started: number }>; installs: Map<string, Buffer[]>; commits: number; encoders: number; encodersOpen: number;
-  /** Every guest recorder started, per emulator, and the most that ever ran on one emulator at once. */
   started: Map<string, { running: boolean; started: number }[]>; peak: number }
 /** Fake adb/avdmanager. Every device answer comes from the live stand-in process registry. */
-function transport(paths: { sdk: string; registry: string; events: string }, counters: Map<string, number>, fixture: HarnessOptions = {}, media?: Media): MobileTransport {
+export function transport(paths: { sdk: string; registry: string; events: string; devices: string }, counters: Map<string, number>, fixture: HarnessOptions = {}, media?: Media): MobileTransport {
   const ok = (stdout: string | Buffer): CommandResult => ({ stdout, exitCode: 0 });
   return {
     async pipe(argv: readonly string[]): Promise<NativePipe> {
@@ -149,8 +189,17 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
       const tool = argv[0]!;
       if (tool.endsWith("avdmanager")) {
         const avd = argv[argv.indexOf("--path") + 1]!, name = argv[argv.indexOf("--name") + 1]!;
+        // A failing avdmanager leaves a partial AVD behind and no registration.
+        if (fixture.avdmanager === "fail") { mkdirSync(avd, { recursive: true }); return { stdout: "", exitCode: 1 }; }
         mkdirSync(avd, { recursive: true }); writeFileSync(join(avd, "config.ini"), "hw.lcd.density=420\n");
         writeFileSync(join(options.env.ANDROID_AVD_HOME!, name + ".ini"), "path=" + avd + "\n");
+        return ok("");
+      }
+      if (tool.endsWith("qemu-img")) {
+        fixture.relocations?.push(argv.slice(1));
+        if (fixture.qemuImg === "fail") return { stdout: "", exitCode: 1 };
+        // A tool that reports success without rewriting the recorded backing path.
+        if (fixture.qemuImg !== "noop") rebaseOverlay(argv.at(-1)!, argv[argv.indexOf("-b") + 1]!);
         return ok("");
       }
       if (argv[1] === "start-server") return ok("");
@@ -158,9 +207,14 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
       assert.equal(argv[1], "-s");
       const serial = argv[2]!, args = argv.slice(3), device = emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
       if (!device) return { stdout: "", exitCode: 1 };
+      // A hung emulator is still listed by adb but answers nothing.
+      if (fixture.hung?.has(device.name)) return { stdout: "", exitCode: 1 };
       const key = `${device.name}:${args.join(" ")}`; counters.set(key, (counters.get(key) ?? 0) + 1);
       writeFileSync(join(paths.events, `${Date.now()}-${randomUUID()}.json`), JSON.stringify({ serial, name: device.name, args }));
       if (args.join(" ") === "emu avd name") return ok(device.name + "\nOK");
+      if (args.join(" ") === "emu kill") { process.kill(device.pid, "SIGTERM"); return ok("OK: killing emulator, bye bye"); }
+      // An operator preparing a device: whatever it does ends up in that device's own overlay.
+      if (args[0] === "shell" && args[1]?.startsWith("'prepare' ")) { appendFileSync(join(paths.devices, device.name.slice(4), "device.avd", "userdata-qemu.img.qcow2"), `prepared:${args[1].slice(10).replaceAll("'", "")}\n`); return ok(""); }
       if (args.join(" ") === "shell getprop sys.boot_completed") return ok(Date.now() >= device.bootedAt ? "1" : "");
       if (args.join(" ") === "shell pm path android") return ok("package:/system/framework/framework-res.apk");
       if (args.join(" ") === "shell getprop ro.debuggable") return ok(fixture.guest === "debuggable" ? "1" : "0");
@@ -187,6 +241,15 @@ function transport(paths: { sdk: string; registry: string; events: string }, cou
       if (args.slice(0, 3).join(" ") === "emu geo fix") return ok("OK");
       return { stdout: "", exitCode: 1 };
     },
+    // An account-owned device is launched by the runner itself, unsupervised, as in production.
+    async spawn(argv: readonly string[], options: RunOptions & { log: string }) {
+      const log = openSync(options.log, "a");
+      try {
+        const child = spawnProcess(argv[0]!, argv.slice(1), { env: options.env, stdio: ["ignore", log, log], detached: true });
+        await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+        return { pid: child.pid!, stopped: async () => child.exitCode !== null || child.signalCode !== null };
+      } finally { closeSync(log); }
+    },
     async processAbsent(pid) { return !alive(pid); },
     async portPairAvailable(port) { return !emulators(paths.registry).some(e => e.port === port); },
     leases: fixture.leases ?? nativeLeaseSupervisor,
@@ -196,16 +259,28 @@ export interface HarnessOptions {
   guest?: "isolated" | "leaky" | "debuggable"; leases?: LeaseSupervisorTransport;
   /** Host capacity beyond the emulators, for recording and upload reservations. */
   extra?: { cpu?: number; memoryMiB?: number; diskGiB?: number };
-  encoder?: "ok" | "stuck" | "fragments" | "fragments-stuck"; installStall?: boolean;
-  /** Length of one live capture run on the runner; the native value is 180 seconds. */
-  liveEpochSeconds?: number;
+  encoder?: "ok" | "stuck" | "fragments" | "fragments-stuck";
+  liveEpochSeconds?: number; installStall?: boolean;
+  /** The host's own warm device opt-in and bounds (`leaseWarmPool`). */
+  warmPool?: { maxDevices: number; maxAgeSeconds: number };
+  /** More lease images beside `lease-phone`. */
+  templates?: RecordValue[];
+  /** Every qemu-img invocation, as argv after the tool. */
+  relocations?: string[][];
+  qemuImg?: "ok" | "fail" | "noop"; avdmanager?: "ok" | "fail";
+  /** Emulators (by AVD name) that adb still lists but that answer no command. */
+  hung?: Set<string>;
 }
 
 export interface Harness {
-  url: string; admin: string; root: string; image: RecordValue; registry: string; events: string; counters: Map<string, number>;
+  url: string; admin: string; root: string; image: RecordValue; registry: string; events: string; counters: Map<string, number>; sdk: string; hostId(): string;
+  /** Adds a template to the host's configuration; it takes effect when the runner restarts. */
+  addTemplate(image: RecordValue, leased?: boolean): void;
+  removeTemplate(id: string): void;
+  provider(): AndroidProvider;
   runner(): HostRunner; restartRunner(): Promise<void>; stopRunner(): Promise<void>; stopController(): Promise<void>; startController(): Promise<void>;
   api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any }>;
-  application(resources?: { cpu: number; memoryMiB: number; diskGiB: number }): Promise<string>;
+  application(resources?: { cpu: number; memoryMiB: number; diskGiB: number }, templates?: RecordValue[]): Promise<string>;
   media: Media;
   storage(machineId: string): string;
   reserved(): Promise<RecordValue>;
@@ -214,7 +289,7 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
   const root = realpathSync(mkdtempSync(join(tmpdir(), "android-leases-")));
   const admin = randomBytes(32).toString("base64url"), enrollment = randomBytes(32).toString("base64url");
   writeFileSync(join(root, "admin"), admin, { mode: 0o600 }); writeFileSync(join(root, "enroll"), enrollment, { mode: 0o600 });
-  const paths = sdk(root), counters = new Map<string, number>(), media: Media = { recorders: new Map(), installs: new Map(), commits: 0, encoders: 0, encodersOpen: 0, started: new Map(), peak: 0 };
+  const paths = { ...sdk(root), devices: join(root, "devices") }, counters = new Map<string, number>(), media: Media = { recorders: new Map(), installs: new Map(), commits: 0, encoders: 0, encodersOpen: 0, started: new Map(), peak: 0 };
   const image: RecordValue = { id: "lease-phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, device: { systemImage, profile: "pixel_8" } };
   let controller: Awaited<ReturnType<typeof startController>> | undefined, port = 0, runner: HostRunner | undefined;
   const start = async () => {
@@ -224,11 +299,12 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
   await start();
   const url = `http://127.0.0.1:${port}`;
   const config: HostConfig = { url, stateDir: join(root, "runner"), enrollmentToken: enrollment, name: "android-lease-host", provider: "android", storage: join(root, "devices"),
-    androidSDK: paths.sdk, templates: [image], capacity: { cpu: 2 * capacity + (options.extra?.cpu ?? 0), memoryMiB: 2048 * capacity + (options.extra?.memoryMiB ?? 0), diskGiB: 8 * capacity + (options.extra?.diskGiB ?? 0) },
+    androidSDK: paths.sdk, templates: [image, ...(options.templates ?? [])], capacity: { cpu: 2 * capacity + (options.extra?.cpu ?? 0), memoryMiB: 2048 * capacity + (options.extra?.memoryMiB ?? 0), diskGiB: 8 * capacity + (options.extra?.diskGiB ?? 0) },
     pollIntervalSeconds: .25, concurrency: 4, videoEncoder: ENCODER,
-    leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [{ id: image.id, revision: "1", arch, runtime: "android" }] };
+    leaseClockHelper: helper, leaseSupervisor: helper, leaseProtocol: 1, leaseImages: [image, ...(options.templates ?? [])].map(entry => ({ id: entry.id, revision: entry.revision, arch, runtime: "android" })),
+    ...(options.warmPool ? { leaseWarmPool: options.warmPool } : {}) };
   const launch = async () => {
-    runner = new HostRunner(config, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state),
+    runner = new HostRunner({ ...config, pressure: { enabled: false } }, { providerFactory: (settings, state) => new AndroidProvider({ ...settings, transport: transport(paths, counters, options, media) }, state),
       ...(options.liveEpochSeconds === undefined ? {} : { liveEpochSeconds: options.liveEpochSeconds }) });
     await runner.start();
   };
@@ -239,20 +315,33 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
     for (const file of readdirSync(join(root, "devices")).flatMap(id => { try { return [join(root, "devices", id, "lease-supervisor.json")]; } catch { return []; } }).filter(existsSync)) {
       try { process.kill(Number(JSON.parse(readFileSync(file, "utf8")).supervisorPid), "SIGKILL"); } catch { /* already gone */ }
     }
+    // Stored baselines are read-only on disk; make their directories removable again.
+    const writable = (dir: string): void => { if (!existsSync(dir)) return; chmodSync(dir, 0o700); for (const entry of readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory()) writable(join(dir, entry.name)); };
+    writable(join(root, "devices", "baselines"));
     rmSync(root, { recursive: true, force: true });
   });
   const api = async (method: string, route: string, body?: unknown, token = admin) => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: response.status, body: await response.json() as any };
   };
-  return { url, admin, root, image, registry: paths.registry, events: paths.events, counters, api, media,
+  return { url, admin, root, image, registry: paths.registry, events: paths.events, counters, api, media, sdk: paths.sdk,
+    hostId: () => runner!.identity!.id,
+    addTemplate(extra: RecordValue, leased = true) {
+      (config.templates as RecordValue[]).push(extra);
+      if (leased) (config.leaseImages as RecordValue[]).push({ id: extra.id, revision: extra.revision, arch, runtime: "android" });
+    },
+    removeTemplate(id: string) {
+      config.templates = (config.templates as RecordValue[]).filter(entry => entry.id !== id);
+      config.leaseImages = (config.leaseImages as RecordValue[]).filter(entry => entry.id !== id);
+    },
+    provider: () => runner!.runtimes.get("android") as unknown as AndroidProvider,
     runner: () => runner!,
     async restartRunner() { await runner!.close(); await launch(); },
     async stopRunner() { await runner!.close(); },
     async stopController() { await controller!.close(); },
     async startController() { await start(); },
-    async application(resources = { cpu: 16, memoryMiB: 65536, diskGiB: 256 }) {
-      const created = await api("POST", "/v1/consumers", { id: randomUUID(), name: "agents", templates: [{ id: image.id, revision: "1", arch }],
+    async application(resources = { cpu: 16, memoryMiB: 65536, diskGiB: 256 }, templates: RecordValue[] = [image, ...(options.templates ?? [])]) {
+      const created = await api("POST", "/v1/consumers", { id: randomUUID(), name: "agents", templates: templates.map(entry => ({ id: entry.id, revision: entry.revision, arch })),
         limits: { resources, activeLeases: 4, defaultTTLSeconds: 60, maxTTLSeconds: 600, maxLifetimeSeconds: 600, provisioningTimeoutSeconds: 120 } });
       assert.equal(created.status, 200, JSON.stringify(created.body)); return created.body.credential as string;
     },
@@ -261,8 +350,8 @@ export async function harness(t: TestContext, capacity = 1, options: HarnessOpti
   };
 }
 /** One agent: queue a request, wait for admission and a checked ready device, then mint its scoped key. */
-export async function acquire(h: Harness, app: string, ttlSeconds: number, wait = true): Promise<{ id: string; key: string; machineId: string }> {
-  const id = randomUUID(), body = { id, kind: "lease", intent: { templateId: h.image.id, templateRevision: "1", arch, ttlSeconds } };
+export async function acquire(h: Harness, app: string, ttlSeconds: number, wait = true, templateId = String(h.image.id)): Promise<{ id: string; key: string; machineId: string }> {
+  const id = randomUUID(), body = { id, kind: "lease", intent: { templateId, templateRevision: "1", arch, ttlSeconds } };
   const submitted = await h.api("POST", "/v1/requests", body, app);
   assert.equal(submitted.status, 201, JSON.stringify(submitted.body));
   const replay = await h.api("POST", "/v1/requests", body, app);
@@ -298,3 +387,23 @@ export function supervised(h: Harness, machineId: string): { childPid: number; s
 export async function cleaned(h: Harness, app: string, lease: string): Promise<void> {
   await until(async () => (await h.api("GET", `/v1/leases/${lease}`, undefined, app)).body.cleanup?.state === "complete", "positive cleanup", 30000);
 }
+
+
+/** Warm pool helpers shared by the warm pool test files. */
+export const WARM_SLOT = { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, NOTHING = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
+export const warmTarget = (count: number, templateId = "lease-phone", maxAgeSeconds?: number) => ({ templateId, templateRevision: "1", arch, count, ...(maxAgeSeconds ? { maxAgeSeconds } : {}) });
+export async function poolState(h: Harness): Promise<any> {
+  const reply = await h.api("GET", `/v1/hosts/${h.hostId()}/warm-pool`);
+  assert.equal(reply.status, 200, JSON.stringify(reply.body)); return reply.body;
+}
+export async function configurePool(h: Harness, targets: unknown[], headroom?: RecordValue): Promise<any> {
+  const reply = await h.api("POST", `/v1/hosts/${h.hostId()}/warm-pool`, { targets, ...(headroom ? { headroom } : {}) });
+  assert.equal(reply.status, 200, JSON.stringify(reply.body)); return reply.body;
+}
+/** Waits until `count` warm devices of one image are booted, checked and offered. */
+export async function warmReady(h: Harness, count = 1, templateId = "lease-phone", ms = 40000, except: string[] = []): Promise<any[]> {
+  let devices: any[] = [];
+  await until(async () => { devices = (await poolState(h)).devices.filter((d: any) => d.state === "ready" && d.templateId === templateId && !except.includes(d.machineId)); return devices.length >= count; }, `${count} ready warm device(s)`, ms);
+  return devices;
+}
+export const stored = (h: Harness, machineId: string, name: string): any => JSON.parse(readFileSync(join(h.storage(machineId), name), "utf8"));

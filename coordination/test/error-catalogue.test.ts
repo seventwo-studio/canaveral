@@ -38,6 +38,7 @@ const OTHER_VOCABULARIES: Record<string, string> = {
 };
 /** Every template literal at a code position, with exactly the codes it can produce. */
 const TEMPLATE_CODES: Record<string, string[]> = {
+  "src/agent-session.ts request_${}": ["request_cancelled", "request_rejected"],
   "src/control/transfers.ts ${}_publication_uncertain": ["upload_publication_uncertain", "download_publication_uncertain"],
   "src/control/transfers.ts ${}_temporary_cleanup_failed": ["upload_temporary_cleanup_failed", "download_temporary_cleanup_failed"],
   // InputState without "owned": busy, stale, reset-uncertain.
@@ -46,6 +47,7 @@ const TEMPLATE_CODES: Record<string, string[]> = {
 /** Code positions that are not error codes, or that this scan cannot follow. Each says why, and names
  * the codes it stands for when the value comes from somewhere the scan does not look. */
 const ACKNOWLEDGED: Record<string, { why: string; codes?: string[] }> = {
+  "src/providers/mobile-runtimes.ts outcome.kind": { why: "Non-exit tool outcomes; unstarted is translated to tool_unavailable.", codes: ["timeout", "interrupted", "error"] },
   "src/control/event-stream.ts stream_lifetime": { why: "end-of-stream code of the event stream, documented in docs/events.md" },
   "src/control/event-stream.ts controller_closing": { why: "end-of-stream code of the event stream, documented in docs/events.md" },
   "src/runtime-process.ts child.exitCode": { why: "a process exit status in a helper result, not an error code" },

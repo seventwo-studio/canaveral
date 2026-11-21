@@ -298,3 +298,28 @@ test("local Linux configuration embeds the supplied TypeScript bundle without ge
   assert.equal(config.guestHelperManifest, manifest); assert.ok(config.templates[0]!.prepare.files.some(file => file.path === "/opt/canaveral/server.mjs"));
   assert.ok(JSON.stringify(config).includes("/usr/local/bin/node"));
 }));
+
+test("warm-pool and baseline commands map to their administrator routes", async () => withFixture(async f => {
+  const host = randomUUID(), machine = randomUUID(), baseline = randomUUID(), request = randomUUID();
+  const last = () => { const call = f.calls.at(-1)!; return [call.method, call.path, call.body]; };
+  assert.equal(parseCli(["warm-pool"], {}).action, "list");
+  assert.equal((await f.invoke(["warm-pool"])).status, 0); assert.deepEqual(last(), ["GET", "/v1/warm-pool", undefined]);
+  assert.equal((await f.invoke(["warm-pool", "show", host])).status, 0); assert.deepEqual(last(), ["GET", `/v1/hosts/${host}/warm-pool`, undefined]);
+  // The file is the host's complete set of targets; the command sends it as it is.
+  const targets = { targets: [{ templateId: "android-phone", templateRevision: "1", arch: "arm64", count: 2, maxAgeSeconds: 1800 }], headroom: { cpu: 2, memoryMiB: 2048, diskGiB: 8 } };
+  const file = join(f.root, "targets.json"); await fs.writeFile(file, JSON.stringify(targets));
+  assert.equal((await f.invoke(["warm-pool", "set", host, "--request-file", file])).status, 0); assert.deepEqual(last(), ["POST", `/v1/hosts/${host}/warm-pool`, targets]);
+  assert.equal((await f.invoke(["baselines"])).status, 0); assert.deepEqual(last(), ["GET", "/v1/baselines", undefined]);
+  assert.equal((await f.invoke(["baseline", "show", baseline])).status, 0); assert.deepEqual(last(), ["GET", `/v1/baselines/${baseline}`, undefined]);
+  assert.equal((await f.invoke(["baseline", "save", machine, "--name", "signed-in", "--revision", "2", "--request-id", request])).status, 0);
+  assert.deepEqual(last(), ["POST", `/v1/machines/${machine}/baselines`, { id: request, name: "signed-in", revision: "2" }]);
+  assert.equal((await f.invoke(["baseline", "remove", baseline, "--request-id", request])).status, 0);
+  assert.deepEqual(last(), ["POST", `/v1/baselines/${baseline}/remove`, { id: request }]);
+  // Mutations need their stable request UUID and complete arguments; nothing is sent without them.
+  const sent = f.calls.length;
+  for (const args of [["baseline", "save", machine, "--name", "signed-in", "--revision", "2"], ["baseline", "remove", baseline], ["warm-pool", "set", host], ["baseline", "save", "not-a-uuid", "--name", "a", "--revision", "1", "--request-id", request], ["baseline"]])
+    assert.equal((await f.invoke(args)).status, 1, args.join(" "));
+  assert.equal(f.calls.length, sent);
+  const help = (await f.invoke(["--help"])).stdout;
+  for (const line of ["warm-pool set HOST --request-file FILE", "baseline save MACHINE --name NAME --revision REV --request-id UUID", "baseline remove ID --request-id UUID"]) assert.ok(help.includes(line), line);
+}));

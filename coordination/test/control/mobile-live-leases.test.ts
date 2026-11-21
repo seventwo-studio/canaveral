@@ -5,8 +5,8 @@ import { LeaseClient } from "../../src/sdk.ts";
 import { LeaseLiveClient } from "../../src/video-sdk.ts";
 import type { LiveStream } from "../../src/video-sdk.ts";
 import { LIVE_BIT_RATE } from "../../src/mobile-live.ts";
-import { acquire, alive, cleaned, harness, operate, skip, supervised, until } from "./android-lease-fixture.ts";
-import type { Harness } from "./android-lease-fixture.ts";
+import { acquire, alive, cleaned, harness, operate, skip, supervised, until } from "./android-fixture.ts";
+import type { Harness } from "./android-fixture.ts";
 import { collect, ordered, schemaValid } from "./live-fixture.ts";
 import { consumerApiSchema } from "../../src/contracts.ts";
 

@@ -2,8 +2,13 @@
 
 Applications opt into `/v1/requests` when capacity may be full. `lease` requests for
 Android templates queue leased emulators on supervised Android hosts; see
-[Android emulator leases](mobile-control.md#android-emulator-leases). Direct lease
-acquisition is unchanged: it still returns 503 `capacity_unavailable`. LeaseState
+[Android emulator leases](mobile-control.md#android-emulator-leases). `lease` requests for
+iOS templates queue leased simulators the same way on macOS hosts that declare the
+`shared-host` isolation class; see
+[iOS simulator leases](mobile-control.md#ios-simulator-leases). Direct lease
+acquisition is unchanged: it still returns 503 `capacity_unavailable`, or 503
+`host_pressure` when the hosts that fit refuse placement under memory or disk pressure,
+which only a host whose operator opted in does. LeaseState
 has no waiting value. Application model calls join the same request model as
 [queued model calls](#queued-model-calls): `kind: "model-job"` requests share this
 envelope, replay, waiting cap, priority, deadline and cancellation, and every
@@ -19,6 +24,9 @@ it still fails when no host has capacity.
 | GET /v1/requests | Own requests, at most 100, UUID `after` cursor and `nextCursor` |
 | GET /v1/requests/{id} | Current own request; `?wait=N` holds the reply while it is still waiting ([position and waiting](#position-and-waiting)) |
 | POST /v1/requests/{id}/cancel | Empty object; cancel waiting or release admitted lease |
+
+The CLI maps these to `canaveral requests list|show|submit|cancel`. The
+[agent surfaces](agent-surfaces.md) submit `lease` requests for a caller and wait on them.
 
 Every route requires the application credential. Another application's UUID is
 404, including submission; scoped lease, host and administrator keys cannot act
@@ -99,6 +107,12 @@ claims of model calls) do not update the record. When more than 256 candidates
 wait, a scan cycle spans several passes and a request refused earlier in the cycle
 is next tried in the following cycle, so the guarantee holds per cycle, not per
 pass; see the scan continuation below.
+
+Admission runs before the [warm pool](warm-pool-and-baselines.md#waiting-requests-win)
+refills. A device lease request that capacity refused makes the pool give up the fewest
+warm devices that let it fit, and keeps its eligible hosts from being refilled while it
+waits. An admitted device lease takes over a ready warm device of its own image and size
+when there is one.
 
 A request whose attempt returns 429 or 503 is skipped for the current scan cycle,
 and so are the application's other waiting requests with the same normalized intent
@@ -259,7 +273,13 @@ after a lost response; never invent another UUID to resolve an uncertain outcome
 A waiting cap returns actionable 429 `request_waiting_limit`, with retryability
 and Retry-After. Cancel outstanding intent or wait before submitting more. This
 cap is distinct from admission quota: acquisition 429 and 503 leave intent waiting
-for a later pass. Other acquisition ServiceErrors reject only that request; the
+for a later pass. That includes a host that refuses placement under
+[memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure), which is an
+operator's opt-in per host (`pressure.gatePlacement`): when every host that fits a
+`lease` request is such a host and is pressured, or has no current pressure sample,
+the request stays `waiting` with `reason` `host_pressure` or `host_pressure_unknown`
+instead of `capacity_unavailable`, and is admitted once a host recovers. Waiting
+never stops or shrinks a lease that is already running there. Other acquisition ServiceErrors reject only that request; the
 stable code appears in `reason`. Missing or removed grants are permanent rejection.
 An unexpected failure inside one attempt rolls back only that attempt: the request
 stays `waiting` with reason `admission_error` and is tried again in a later round.
@@ -314,6 +334,9 @@ job state `waitingForResources`). The first job that fits is reserved on the dom
 physical ledger, assigned, and marked `admitted` with `target` equal to its UUID, all
 in the same transaction. Skipped jobs stay eligible; there is no aging. Waiting never
 preempts, shrinks or relocates a held reservation: priority only orders admission.
+The one exception is a [warm pool device](warm-pool-and-baselines.md#waiting-requests-win),
+which serves no consumer: a waiting request that capacity refused takes its capacity,
+after the device is stopped and removed with proof.
 
 `waiting` ends as `admitted`, `cancelled`, `expired` or `rejected`. A model call that
 ends without admission closes its job without execution: cancellation closes it as

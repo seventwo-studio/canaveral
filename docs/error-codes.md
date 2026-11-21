@@ -64,11 +64,81 @@ status.
 | `request_kind_unsupported` | 400 | The request kind is not `lease`, `linux-lease` or `model-job` | No. Use a supported kind |
 | `request_priority_invalid` | 400 | The priority is not an integer within the application's maximum | No. Lower the priority |
 | `request_wait_limit` | 429 | Too many held request reads: 32 across the controller or 4 for one application credential | Yes, after `Retry-After`, or read without `wait` |
+| `internal_error` | client | The agent could not complete the command and returned a generic error | Inspect any recorded outcome before retrying a write |
+| `invalid_arguments` | client | An agent command received unsupported or malformed arguments | Correct the arguments and submit the command again |
+| `lease_ambiguous` | client | The agent holds several leases and the command did not name one | Supply the intended lease UUID |
+| `lease_in_progress` | client | The agent is still acquiring or provisioning the requested lease | Wait for acquisition or readiness before issuing device commands |
+| `lease_key_missing` | client | The agent has no device credential for the lease | Establish a lease session with a current credential |
+| `lease_not_held` | client | The named lease is outside the current agent session | Acquire or select a lease held by this session |
+| `local_file_error` | client | The agent could not read or use the requested local file | Check the path and permissions before retrying |
+| `operation_unknown` | client | The agent cannot confirm whether the device operation completed | Inspect the original receipt before taking another action |
+| `provisioning_timeout` | client | The admitted device did not become ready within the wait | Inspect the lease state and provisioning reason |
+| `release_unconfirmed` | client | The controller still reports the lease active after release | Inspect the lease and its release receipt before retrying |
+| `session_closed` | client | The agent session is closing and refuses new leases | Start another session before requesting a lease |
+| `template_ambiguous` | client | Several allowlisted device templates match the selection | Specify an exact revision and architecture |
+| `template_unknown` | client | No device template available to the application matches | List the available templates and choose a matching one |
+| `wait_deadline` | client | The agent's wait for admission reached its deadline | Inspect the request state and choose a new wait if needed |
+| `request_cancelled` | client | The device request was cancelled before the agent received a lease | Submit a new request if a device is still needed |
+| `request_rejected` | client | The controller rejected the device request without admitting a lease | Read the reported reason and address it before submitting another request |
 | `request_waiting_limit` | 429 | The application has reached its limit of waiting requests | Yes, after cancelling waiting requests or after an admission |
 | `preview_waiting_limit` | 429 | An owner reached the dashboard's limit of waiting previews or builds | Yes, after one starts or is cancelled |
-| `capture_cleanup_pending` | 409 | An earlier capture of the device has no cleanup receipt yet | Retry after the runner confirms cleanup |
-| `capture_cleanup_unproven` | 409 | The earlier capture ended without proven cleanup and blocks a new live view | Resolve the retained capture through the device or lease cleanup policy |
-| `live_view_limit` | 429 | A device, host or credential reached its live-view limit, or the device reached its recent session limit | Retry after existing views end or the recent session window expires |
+| `baseline_clone_failed` | 409 | The host could not finish creating the device from the baseline | Inspect the lease receipt and confirm partial storage was cleaned |
+| `baseline_clone_incomplete` | 409 | A previous baseline copy into the device was interrupted | Let cleanup settle the device before requesting another lease |
+| `baseline_corrupt` | 409 | The stored baseline failed an integrity or manifest check | Replace the baseline with a verified capture |
+| `baseline_exists` | 409 | The baseline name and revision are already present on the host | Choose a new baseline revision or inspect the existing one |
+| `baseline_mismatch` | 409 | The baseline does not match the selected image or data size | Select a baseline with the matching immutable image definition |
+| `baseline_missing` | 409 | The recorded baseline is absent on the selected host | Make the required baseline available before trying again |
+| `baseline_overlay_unsupported` | 409 | The device image overlay cannot be copied independently | Use a supported self-contained image and verify its baseline |
+| `baseline_referenced` | 409, receipt | A template or device still points to the baseline | Clear its references before requesting removal |
+| `baseline_source_changed` | 409 | The source device changed while its baseline was being captured | Confirm the source is stopped and inspect the capture receipt |
+| `baseline_source_leased` | 409 | The source is a leased or warm device and cannot be saved | Choose an eligible stopped administrator-owned device |
+| `baseline_source_not_owned` | 403 | The caller does not own the device eligible for capture | Use an eligible device owned by the current principal |
+| `baseline_source_running` | 409 | The host has not confirmed the source device stopped | Wait until its host reports the device stopped |
+| `baseline_source_unsupported` | 409, receipt | The source device does not support a baseline capture | Choose a stopped Android emulator that supports capture |
+| `baseline_stale` | 409 | The baseline refers to a different installed system image | Capture a new baseline for the installed image |
+| `warm_pool_device` | 409 | An ordinary device action targeted storage owned by the warm pool | Use the pool controls to manage the warm target |
+| `warm_pool_disabled` | 409 | The operator has not enabled warm devices on this host | Select an opted-in Android lease host |
+| `warm_target_ineligible` | 409 | The host does not advertise the pinned image for Android leases | Choose a lease image advertised by the host |
+| `warm_target_limit` | 409 | The requested warm targets exceed the host's device bound | Reduce the target count to fit the host limit |
+| `error` | receipt | The native upkeep command ended without a conclusive result | Inspect the host before another mutation |
+| `expired` | receipt | The operation's start window elapsed before dispatch or execution | Submit a new operation if it is still needed |
+| `host_inspection_required` | 409 | A recent successful inspection is required for the requested upkeep change | Inspect the host and resolve any uncertain change first |
+| `host_operation_busy` | 409 | An install, removal or purge already holds this host and platform | Wait for the active operation to end |
+| `host_pressure` | 503 | Eligible hosts report pressure and their operators enabled admission gating | Wait for pressure to clear or choose an eligible host |
+| `host_pressure_unknown` | 503 | An opted-in host has an unreadable or stale pressure sample | Check the host report or wait for a fresh sample |
+| `installer_failed` | receipt | The installer failed and the requested runtime is still unavailable | Inspect the runtime inventory before requesting another install |
+| `interrupted` | receipt | The upkeep command lost authorization before producing a confirmed outcome | Inspect the host and settle the receipt before making another change |
+| `invalid_identifier` | receipt | The host refused an unsupported runtime or image identifier | Select a runtime from the host inventory |
+| `inventory_incomplete` | receipt | The host could not complete its storage ownership inventory | Inspect again before authorizing a purge |
+| `inventory_unavailable` | receipt | The host could not read the runtime inventory from its platform tools | Check the platform tools and run another inventory |
+| `license_acknowledgement_required` | 400, receipt | The requested Android install did not acknowledge the SDK licences | Accept the licences in the install request before submitting it |
+| `license_not_accepted` | receipt | The Android installer reported that its licence check failed | Inspect the SDK licence state before requesting another install |
+| `not_removable` | receipt | The platform tool or inventory did not identify a removable runtime | Inspect the runtime before deciding whether to remove it |
+| `not_verified` | receipt | The host could not verify that installation or removal took effect | Inspect the inventory and settle the original operation first |
+| `orphan_refused` | receipt | The host could not prove the named orphan was eligible for deletion | Inspect the remaining entry and its ownership evidence |
+| `outcome_unknown` | receipt | The host reported no confirmed result before its deadline | Inspect and settle it before making another change |
+| `runtime_in_use` | 409, receipt | A template, lease, device or retained storage still depends on the runtime | Clear the runtime's references before requesting removal |
+| `storage_owner_exists` | 409 | Named storage still has a live owner or lacks proof of removability | Inspect current ownership and submit a new purge only after proof |
+| `tool_unavailable` | receipt | A required platform tool was unavailable or could not start | Check the host's tool configuration before retrying |
+| `unauthorized` | receipt | Host upkeep lost authority before it could finish safely | Inspect the existing receipt before retrying work |
+| `uninstall_failed` | receipt | The uninstaller failed and the runtime remains installed | Inspect the runtime and its users before another removal |
+| `unsupported` | receipt | The host does not support the requested upkeep operation | Choose a host and platform with that capability |
+| `update_fenced` | receipt | A pending host update prevented the runner from starting upkeep | Wait for the update and confirm host readiness before retrying |
+| `upkeep_unsupported` | 409, receipt | The host does not offer runtime or storage upkeep for this platform | Choose a host with the required upkeep capability |
+| `capture_cleanup_pending` | 409 | A prior live capture or recording has ended and its stop proof is still pending | Wait for the host to report cleanup before requesting another capture |
+| `capture_cleanup_unproven` | 409 | The prior capture's stop proof is missing after the reporting deadline, or its cleanup was abandoned | Resolve the device or lease cleanup before requesting another capture |
+| `live_view_limit` | 429 | A device, host or credential reached its viewer limit, or the device reached its limit for retained view records | Wait for a view to close or a retained record to expire, then retry after `Retry-After` |
+| `tunnel_cancelled` | client | The caller cancelled the tunnel before attaching its peer | Inspect the tunnel receipt if a create request was sent |
+| `tunnel_ended` | 410, client | The tunnel identity already attached or reached a terminal state | Use a new UUID when opening another tunnel |
+| `tunnel_host_limit` | 429 | The host reached its limit for retained lease tunnels | Wait for active tunnels and pending mapping removals to settle |
+| `tunnel_identity_limit` | 429 | The lease reached its rolling hourly tunnel identity limit | Wait for an older identity to leave the rate window |
+| `tunnel_limit` | 429 | The application has no free tunnel slot for this lease | Close an active tunnel or wait for one to end |
+| `tunnel_listen_failed` | client | The local listener could not bind and the tunnel closed | Check the local address and use a new tunnel UUID |
+| `tunnel_mapping_failed` | 409 | The runner could not create the requested device port mapping | Check the device port and inspect the original mapping receipt |
+| `tunnel_mapping_lost` | 410 | The device port mapping disappeared while the tunnel was open | Inspect the ended tunnel and use a new UUID when reopening |
+| `tunnel_port_busy` | 409 | The lease already holds that device port and direction | Wait for removal proof or choose another device port |
+| `tunnel_residue_limit` | 429 | Too many ended tunnels still lack mapping removal proof | Wait for the host to confirm the pending removals |
+| `tunnels_not_permitted` | 403 | The application policy grants no port tunnels to this lease | Use an application with an explicit tunnel allowance |
 | `host_draining` | 409 | Admission is closed on the host by a drain, maintenance or an update | Later. A waiting request stays queued until admission reopens |
 | `maintenance_blocked` | 409 | A maintenance drain cannot be resumed; the reply lists the blockers | After resolving the listed resume blockers |
 | `session_disconnected` | 410, client | The session's stream ended; unconfirmed input was not applied on reconnect | Open a new session with a new UUID; do not replay input |

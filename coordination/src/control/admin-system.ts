@@ -248,7 +248,7 @@ export class AdminSystem implements ControlModule {
     const view = legacyLeaseView(db,row,this.leases.store.clock());
     const members = view.members.map(m => ({machineId:m.machineId,name:m.name,runtimeState:m.state,ready:m.ready,requestedState:String(db.prepare("SELECT desired FROM machines WHERE id=?").get(m.machineId)!.desired),...(m.cleanup ? {cleanup:m.cleanup.state} : {})}));
     const cleanup = db.prepare("SELECT reason,attempts,next_retry FROM lease_cleanup_members WHERE lease=? ORDER BY CASE WHEN state='blocked' THEN 0 ELSE 1 END,machine LIMIT 1").get(String(l.id));
-    return { ...l, ...(view.name === null ? {} : {name:view.name}), members, runtimeState:members.length === 1 ? members[0]!.runtimeState : "unknown", requestedState:members.length === 1 ? members[0]!.requestedState : "unknown", reservationHeld:members.some(m => !isDeleted(db,m.machineId)), ...(cleanup ? { ...(cleanup.reason ? {cleanupReason:String(cleanup.reason)} : {}),cleanupAttempts:Number(cleanup.attempts),cleanupRetryAt:Number(cleanup.next_retry) } : {}) };
+    return { ...l, ...(view.name === null ? {} : {name:view.name}), members, ...(view.isolation ? { isolation:view.isolation } : {}), runtimeState:members.length === 1 ? members[0]!.runtimeState : "unknown", requestedState:members.length === 1 ? members[0]!.requestedState : "unknown", reservationHeld:members.some(m => !isDeleted(db,m.machineId)), ...(cleanup ? { ...(cleanup.reason ? {cleanupReason:String(cleanup.reason)} : {}),cleanupAttempts:Number(cleanup.attempts),cleanupRetryAt:Number(cleanup.next_retry) } : {}) };
   }
   private snapshot(db: DatabaseSync, page:number) {
     const state={more:false},read=this.pageReader(db,page,state);

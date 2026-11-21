@@ -5,7 +5,6 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startController } from "../../src/main.ts";
 import { HostRunner, hostOffer } from "../../src/host.ts";
 import { AndroidProvider, LEASE_ISOLATION_ARGUMENTS } from "../../src/providers/android.ts";
 import { nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
@@ -13,10 +12,9 @@ import { SUPERVISOR_REFUSED, SupervisorLaunchError } from "../../src/providers/m
 import type { LeaseSupervisorTransport, RecordValue } from "../../src/providers/mobile.ts";
 import { normalizeOperatorTemplate } from "../../src/control/templates.ts";
 import { LeaseClient } from "../../src/sdk.ts";
-import { MP4, acquire, alive, arch, cleaned, emulators, groupAlive, harness, helper, operate, ready, skip, supervised, systemImage, unix, until, watchReceipt } from "./android-lease-fixture.ts";
-import type { Harness } from "./android-lease-fixture.ts";
+import { MP4, acquire, alive, arch, cleaned, emulators, groupAlive, harness, helper, operate, ready, skip, supervised, systemImage, unix, until, watchReceipt } from "./android-fixture.ts";
+import type { Harness } from "./android-fixture.ts";
 
-/** Android lease behaviour against the shared disposable harness (android-lease-fixture.ts). */
 test("leases are gated to supervised Android emulators with a native clock", () => {
   const image = { id: "phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, device: { systemImage, profile: "pixel_8" } };
   const base = { name: "h", provider: "android", capacity: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, templates: [image] };

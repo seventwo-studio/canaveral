@@ -14,6 +14,8 @@ The runtime requires Node.js 24 or later and the Rust binaries needed by the sel
 
 [Accounts and scoped personal tokens](docs/accounts-and-tokens.md) govern private machine ownership. Authorization uses the current account role, credential scope and resource owner. Application, lease, enrollment, runner and guest credentials have separate authority. Callers persist mutation UUIDs and exact requests before dispatch; unknown outcomes require inspection or explicit identical replay where supported.
 
+Coding agents and CI jobs lease devices through the [agent surfaces](docs/agent-surfaces.md): `canaveral mcp` (an MCP server over stdio), `canaveral lease hold` (a lease that is held, renewed and released on exit), lease-key device commands, and `canaveral instructions` / `canaveral setup` for agent rules. Only Android emulator leases execute today; these surfaces have fixture coverage and no native acceptance.
+
 For installation boundaries, use the [target matrix](docs/running.md#installation-and-target-boundaries); keep [operator acceptance](docs/runtime-updates.md#operator-acceptance-prepare-only-separate-authorization-required) separate from portable fixtures.
 
 Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). The CLI source is `coordination/src/cli.ts`; the controller modules are in `coordination/src/control`. The [consumer SDK](docs/consumer-sdk.md) and its terminal, visual and accessibility clients are TypeScript. Rust workspace components cover execution ownership, runner identity, model execution, Apple supervision, KubeVirt and the guest wire protocol.

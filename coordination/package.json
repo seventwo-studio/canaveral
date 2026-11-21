@@ -39,6 +39,10 @@
       "types": "./dist/src/video-sdk.d.ts",
       "default": "./dist/src/video-sdk.js"
     },
+    "./tunnel-sdk": {
+      "types": "./dist/src/tunnel-sdk.d.ts",
+      "default": "./dist/src/tunnel-sdk.js"
+    },
     "./browser-sdk": {
       "types": "./dist/src/browser-sdk.d.ts",
       "default": "./dist/src/browser-sdk.js"

@@ -121,7 +121,9 @@ export class Accounts {
       db.exec("ALTER TABLE machines ADD COLUMN owner TEXT");
     }
     const leases = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get();
-    db.prepare(`UPDATE machines SET owner=? WHERE owner IS NULL${leases ? " AND id NOT IN (SELECT machine FROM lease_members)" : ""}`).run(uid);
+    // A warm pool device has no owner by design; it never becomes an account's machine.
+    const pool = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='warm_devices'").get();
+    db.prepare(`UPDATE machines SET owner=? WHERE owner IS NULL${leases ? " AND id NOT IN (SELECT machine FROM lease_members)" : ""}${pool ? " AND id NOT IN (SELECT machine FROM warm_devices)" : ""}`).run(uid);
   }
 
   status(): { setupRequired: boolean } {
