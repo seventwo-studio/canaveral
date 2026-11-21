@@ -623,11 +623,20 @@ member `primary` and resolve to that lease's own machine, host and AVD:
 | Launch, stop, list or remove apps | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | command |
 | Screens | `screenshot` (PNG), `hierarchy` | screenshot, hierarchy |
 | Input | `tap`, `swipe`, `text`, `key` | input |
+| Orientation and simulated position | `rotate` (portrait or landscape), `location` (latitude, longitude) | input |
+| App permissions | `permission` (`grant` or `revoke` one permission of one app) | command |
 | Logs | `logs` (last 200 logcat lines) | command |
 | Record | MP4 video session (see below) | displayStream |
 
-App lifecycle and logs need `command` because the Android shell already grants
-them. They remain unavailable to iOS, which has no shell capability. Operations keep
+App lifecycle, logs and app permissions need `command` because the Android shell
+already grants them. They remain unavailable to iOS, which has no shell capability.
+Since 21 November 2026 a lease key can also rotate its emulator, set its simulated
+position and grant or revoke an app permission. These use the same argument checks,
+fenced provider path and receipts as the administrative actions of the same name,
+and reach only the lease's own emulator. Operator-configured `install` and
+`inspect-install` stay administrative. The three lease-key actions have portable
+fixture coverage against the real controller, runner and lease supervisor with a
+stand-in adb; no native emulator run exercised them through a lease key. Operations keep
 the durable receipt semantics: the same UUID replays its receipt without running
 again; a changed body is 409; an operation in flight when authorization ends is
 `unknown` and is never replayed. Rotating the credential revokes the previous one.

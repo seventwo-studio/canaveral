@@ -1520,6 +1520,16 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 15
+            },
+            "description": "Hold the reply for up to this many seconds while the request is waiting and its state, position and reason are unchanged."
           }
         ]
       }
@@ -2407,6 +2417,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's label from acquisition. Display only; it selects and authorizes nothing."
+          },
           "state": {
             "type": "string",
             "enum": [
@@ -2479,6 +2496,7 @@
         },
         "required": [
           "id",
+          "name",
           "state",
           "runtimeState",
           "revision",
@@ -3683,7 +3701,8 @@
           "createdAt",
           "admittedAt",
           "target",
-          "reason"
+          "reason",
+          "position"
         ],
         "properties": {
           "id": {
@@ -3757,6 +3776,14 @@
               "string",
               "null"
             ]
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "1-based place in the controller's attempt order while a lease or linux-lease request is waiting; null otherwise. An order of attempts, not a promise of admission."
           }
         }
       },

@@ -7,12 +7,24 @@ import { createIdentityHandler, limitServer } from "../http.ts";
 import type { IdentityClient } from "../identity-client.ts";
 import type { ControlClient, HttpCommand } from "./client.ts";
 
-type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
+type Requester = Pick<ControlClient, "authorizeHost"> & Partial<Pick<ControlClient,"wakeRequests" | "inspectRequest">> & { request(command: HttpCommand): Promise<import("./contracts.ts").ControlResponse | undefined> };
 export type ControllerHandler = (request: IncomingMessage, response: ServerResponse) => void;
 export type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;
 const MAX_BODY = 1_048_576;
 const MAX_HEARTBEAT = 8 * MAX_BODY;
 const CREDENTIAL_QUERY = new Set(["token", "authorization", "secret", "claim", "access_token", "credential", "password", "api_key"]);
+/** Longest hold of `GET /v1/requests/{id}?wait=N`. It stays under the 20-second socket idle limit (limitServer),
+ * which would otherwise destroy the connection of a read that is only waiting. */
+export const MAX_REQUEST_WAIT_SECONDS = 15;
+/** Held reads sit outside the 64 in-flight requests they would otherwise exhaust. Beyond this many, a wait
+ * returns the current view at once, which a long-poll client already handles. */
+const MAX_REQUEST_WAITERS = 32;
+const REQUEST_WAIT_POLL_MS = 1000;
+/** A held read returns when anything a waiting client acts on changes. */
+function waitSignature(value: unknown): string {
+  const view = object(value);
+  return JSON.stringify([view.state, view.position ?? null, view.reason ?? null]);
+}
 
 export function countHeader(request: IncomingMessage, name: string): number {
   let count = 0;
@@ -100,7 +112,33 @@ function envelope(error: unknown, requestId: string, mutation: boolean) {
 export function createControllerHandler(control: Requester, identities: IdentityClient): ControllerHandler {
   const bodies = new WeakMap<IncomingMessage, Record<string, unknown>>();
   const identity = createIdentityHandler(identities, request => bodies.get(request));
-  let inFlight = 0;
+  let inFlight = 0, waiters = 0;
+  /** Holds a waiting request's read until its state, position or reason changes, or `seconds` pass. Each re-read
+   * verifies the application credential again, so revocation ends the hold with the ordinary refusal. */
+  const holdRequest = async (response: ServerResponse, token: string, id: string, first: unknown, seconds: number): Promise<unknown> => {
+    const inspect = control.inspectRequest?.bind(control);
+    if (!inspect || waiters >= MAX_REQUEST_WAITERS) return first;
+    waiters++;
+    try {
+      const before = waitSignature(first), deadline = performance.now() + seconds * 1000;
+      let current = first;
+      while (!response.destroyed) {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) break;
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(done, Math.min(REQUEST_WAIT_POLL_MS, remaining));
+          function done() { clearTimeout(timer); response.off("close", done); resolve(); }
+          response.once("close", done);
+        });
+        if (response.destroyed) break;
+        try { current = await inspect(token, id); }
+        // A momentarily full control queue is not a reason to fail a read that is only waiting.
+        catch (error) { if (error instanceof ServiceError && error.status === 429) continue; throw error; }
+        if (waitSignature(current) !== before) break;
+      }
+      return current;
+    } finally { waiters--; }
+  };
   return (request, response) => {
     const requestId = randomUUID();
     if (inFlight >= 64) {
@@ -135,10 +173,25 @@ export function createControllerHandler(control: Requester, identities: Identity
       const body = request.method === "POST" ? await readBody(request, target.path) : {};
       if (response.destroyed) return;
       bodies.set(request, body);
+      // `wait` belongs to this front end: the control worker answers within its own deadline and never holds a read.
+      let wait = 0;
+      const held = request.method === "GET" ? /^\/v1\/requests\/([^/]+)$/.exec(target.path) : null;
+      if (held && target.query.has("wait")) {
+        const values = target.query.getAll("wait");
+        if (values.length !== 1 || !/^[1-9][0-9]?$/.test(values[0]!) || Number(values[0]) > MAX_REQUEST_WAIT_SECONDS) {
+          throw new ServiceError(`wait must be a whole number of seconds from 1 to ${MAX_REQUEST_WAIT_SECONDS}.`, 400);
+        }
+        wait = Number(values[0]); target.query.delete("wait");
+      }
       const command: HttpCommand = { type: "http", method: request.method, path: target.path, query: target.query.toString(), token: target.token, body };
       dispatched = true;
-      const result = await control.request(command);
+      let result = await control.request(command);
       if (response.destroyed) return;
+      if (wait && result !== undefined && (result.status ?? 200) === 200 && object(result.body).state === "waiting") {
+        release();
+        result = { ...result, body: await holdRequest(response, target.token, held![1]!, result.body, wait) };
+        if (response.destroyed) return;
+      }
       if (result === undefined) {
         if (/^\/v1\/(?:auth(?:\/|$)|users(?:\/|$)|admin\/tokens(?:\/|$))/.test(target.path)) throw new ServiceError("Unknown endpoint.", 404);
         // Identity-owned releases, runner receipts and policy changes wake the sole queue owner.

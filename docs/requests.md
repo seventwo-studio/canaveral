@@ -17,7 +17,7 @@ it still fails when no host has capacity.
 | --- | --- |
 | POST /v1/requests | 201 for new intent; 200 for exact normalized replay |
 | GET /v1/requests | Own requests, at most 100, UUID `after` cursor and `nextCursor` |
-| GET /v1/requests/{id} | Current own request |
+| GET /v1/requests/{id} | Current own request; `?wait=N` holds the reply while it is still waiting ([position and waiting](#position-and-waiting)) |
 | POST /v1/requests/{id}/cancel | Empty object; cancel waiting or release admitted lease |
 
 Every route requires the application credential. Another application's UUID is
@@ -117,6 +117,55 @@ across passes. Submission, control mutations (including host
 heartbeat and limits), identity-worker mutation completion (including approvals,
 release and reclamation), startup and a one-second timer trigger passes. SQLite
 serializes all ledger writers even when direct acquisitions use another worker.
+
+## Position and waiting
+
+Every request view carries `position`. While a `lease` or `linux-lease` request is
+`waiting`, it is the request's 1-based place in the order the controller would try
+the queue if every earlier attempt were admitted: applications take turns, least
+recently admitted first, and each turn offers that application's highest-priority,
+oldest request. It is `null` once the request is no longer waiting, once its
+deadline has passed, and for `model-job` requests, which runner claims admit per
+domain without a single order.
+
+Position is an order of attempts, not a promise:
+
+- A request that does not fit when tried is skipped, so a later position can be
+  admitted first. `reason` then carries the stable code of the last refusal, for
+  example `capacity_unavailable`.
+- A refused attempt does not cost its application its turn, so the application's
+  next request is tried in the same pass.
+- Positions move as other requests are admitted, cancelled, expired or submitted
+  with a higher priority. A request can move back as well as forward.
+- The number says how many other waiting requests come first. It reveals nothing
+  about whose they are or what they ask for.
+
+`GET /v1/requests/{id}?wait=N` holds the reply for up to `N` seconds, a whole
+number from 1 to 15. The controller answers as soon as the request's `state`,
+`position` or `reason` changes, and otherwise when the time is up. Either way the
+body is the ordinary current view. A request that is not waiting is answered at
+once. The hold is one bounded read: to keep waiting, call again.
+
+- Other values, a repeated `wait`, and `wait` on any other route return 400.
+- A held read does not run admission. The one-second timer and the existing
+  triggers still own it, so many waiters cost no extra passes.
+- Each re-read checks the application credential again. Revoking the application
+  ends a hold with the ordinary 401.
+- At most 32 reads are held at once across the controller. Beyond that a `wait`
+  is answered immediately with the current view, so a client must accept an early
+  reply that shows no change.
+- Fifteen seconds stays below the controller's 20-second idle limit on a
+  connection. A proxy in front of the controller needs an idle limit above the
+  wait a client asks for.
+
+The SDK exposes the hold as `inspectRequest(id, { waitSeconds })`. It sends one
+request, validates the range, and refuses a wait that does not leave two seconds
+inside the client's own `timeoutMs`. The SDK still never polls or retries.
+
+Position and held reads have portable fixture coverage only: the order is checked
+against real admission passes over mixed applications, priorities and admission
+histories, and the hold against a controller process with its control worker. No
+native lease run exercised them.
 
 Administrators set `limits.maxWaitingRequests` (default 100, maximum 1000) and
 `limits.maxRequestPriority` (default 0, range 0..1000000) when creating an
@@ -278,6 +327,9 @@ const { request } = await client.submitRequest({
 });
 // Later, explicitly inspect; the SDK does not poll.
 const current = await client.inspectRequest(request.id);
+// Or hold one read until something changes, for at most 15 seconds.
+const next = await client.inspectRequest(request.id, { waitSeconds: 15 });
+if (next.state === "waiting") console.log(`position ${next.position}, last refusal ${next.reason}`);
 ```
 
 ### Queued model-call example

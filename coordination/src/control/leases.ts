@@ -138,7 +138,9 @@ export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: numb
       ready: ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
       ...(cleanup ? { cleanup: cleanupView(cleanup) } : {}) };
   });
-  return { id: row.id, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
+  // The caller's label from acquisition (default `lease-<uuid>`). Display only: nothing is selected or authorized by it.
+  const name = object(object(JSON.parse(row.request)).machine).name;
+  return { id: row.id, name: typeof name === "string" ? name : null, state: row.state, runtimeState: members.length === 1 ? members[0]!.state : "unknown", revision: row.revision,
     createdAt: utc(row.created), expiresAt: utc(row.expires), cleanup: { state: row.cleanup }, members,
     capabilities: members.length === 1 ? members[0]!.capabilities : {} };
 }

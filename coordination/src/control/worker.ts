@@ -112,6 +112,8 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
     db.prepare("UPDATE browser_launches SET state=? WHERE host=? AND id=? AND state!='closed'").run(command.state, command.hostId, command.id);
   });
   if (command.type === "requests.wake") return { ok: leases.requests.wake() };
+  // The one-second timer above owns admission; a held long poll only reads, so many waiters cost no write passes.
+  if (command.type === "requests.inspect") return leases.requests.inspect(command.token, command.id);
   if (command.type === "hosts.authenticate") {
     authenticateHost(command.hostId, command.token);
     return { authenticated: true };

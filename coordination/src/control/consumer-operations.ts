@@ -17,6 +17,10 @@ const actionCapabilities: Record<string, string> = {
   tap: "input", swipe: "input", text: "input", key: "input", "list-files": "files", push: "files", pull: "files", shell: "command",
   // App lifecycle and logs are subsets of the device shell, so they need the same capability.
   apps: "command", launch: "command", terminate: "command", uninstall: "command", "open-url": "command", logs: "command",
+  // Orientation and simulated position are device inputs. Granting or revoking an app permission is a subset of the
+  // device shell (`pm grant`), like the app lifecycle above. All three act only on the lease's own member through
+  // the same fenced provider path as every other action here.
+  rotate: "input", location: "input", permission: "command",
   // A lease-key upload of this lease's own member (lease-app-artifacts.ts); see install-cleanup.ts.
   "install-uploaded": "files",
   "shell-open": "pty", "shell-read": "pty", "shell-write": "pty", "shell-close": "pty", "shell-resize": "pty",

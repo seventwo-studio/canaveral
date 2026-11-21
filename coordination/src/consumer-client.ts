@@ -26,6 +26,8 @@ export interface CatalogueImage {
 export interface Catalogue { templates: CatalogueImage[]; limits: Record<string, unknown> }
 export type LeaseState = "provisioning" | "ready" | "failed" | "released" | "expired";
 export interface Lease {
+  /** The label given at acquisition, for display only. Absent from controllers that predate it. */
+  name?: string | null;
   id: string; state: LeaseState; runtimeState: string; revision: number; createdAt: string; expiresAt: string;
   cleanup: { state: "notRequested" | "pending" | "running" | "blocked" | "complete" };
   members: Array<Record<string, unknown>>; capabilities: Partial<Capabilities>;
@@ -49,7 +51,10 @@ export type WaitingRequestInput = { id: string; priority?: number; deadline?: st
   ({ kind: "lease" | "linux-lease"; intent: Omit<AcquireRequest,"id"> } | { kind: "model-job"; intent: ModelJobIntent });
 /** Stored model-call intent as returned in request views: the prompt is replaced by `sha256:<hex>` of its UTF-8 bytes. */
 export interface ModelJobRequestIntent { adapter: ModelJobIntent["adapter"]; model: string; digest: string; promptDigest: string; maxTokens: number }
-export interface WaitingRequest { id: string; kind: "lease" | "linux-lease" | "model-job"; intent: AcquireRequest | ModelJobRequestIntent; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
+export interface WaitingRequest { id: string; kind: "lease" | "linux-lease" | "model-job"; intent: AcquireRequest | ModelJobRequestIntent; resources: Partial<Resources>; priority: number; deadline: string | null; source: Record<string,unknown> | null; state: "waiting" | "admitted" | "cancelled" | "expired" | "rejected"; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null;
+  /** 1-based place in the controller's attempt order while a lease request waits; null once it is no longer waiting
+   * and for model calls. An estimate of order, not a promise of admission. Absent from controllers that predate it. */
+  position?: number | null }
 export interface WaitingRequestPage { requests: WaitingRequest[]; nextCursor: string | null }
 function waitingRequest(value: unknown, id?: string): WaitingRequest {
   if (!isRecord(value) || typeof value["id"] !== "string" || (id !== undefined && !sameId(value["id"],id)) ||
@@ -60,6 +65,7 @@ function waitingRequest(value: unknown, id?: string): WaitingRequest {
       !(value["source"] === null || isRecord(value["source"])) ||
       !(value["admittedAt"] === null || (typeof value["admittedAt"] === "string" && Number.isFinite(Date.parse(value["admittedAt"])))) ||
       !(value["reason"] === null || typeof value["reason"] === "string") ||
+      !(value["position"] === undefined || value["position"] === null || (Number.isSafeInteger(value["position"]) && Number(value["position"]) >= 1 && value["state"] === "waiting")) ||
       (value["state"] === "admitted" && (value["target"] !== value["id"] || value["admittedAt"] === null)) ||
       !(value["target"] === null || value["target"] === value["id"])) throw new TypeError("waiting request");
   return value as unknown as WaitingRequest;
@@ -148,6 +154,8 @@ const REQUEST_LIMIT = 1_048_576;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/i;
 const TOKEN = /^[A-Za-z0-9_-]{43,128}(?![\s\S])/;
 const LEASE_STATES = ["provisioning", "ready", "failed", "released", "expired"];
+/** Longest `inspectRequest` hold the controller accepts; see MAX_REQUEST_WAIT_SECONDS in control/http.ts. */
+const MAX_REQUEST_WAIT_SECONDS = 15;
 const CLEANUP_STATES = ["notRequested", "pending", "running", "blocked", "complete"];
 const CAPABILITIES = ["command", "pty", "files", "screenshot", "displayStream", "input", "hierarchy"];
 const TLS_CODES = /^(CERT_|ERR_TLS_CERT|ERR_SSL|UNABLE_TO_(GET|VERIFY)|DEPTH_ZERO|SELF_SIGNED|HOSTNAME_MISMATCH|ERR_TLS)/;
@@ -189,6 +197,7 @@ export class Transport {
   readonly #base: URL;
   readonly #prefix: string;
   readonly #timeoutMs: number;
+  get timeoutMs(): number { return this.#timeoutMs; }
   readonly #maxResponse: number;
   readonly #ca: string | Buffer | undefined;
   readonly #secure: boolean;
@@ -380,6 +389,7 @@ function lease(value: unknown): Lease {
     || !LEASE_STATES.includes(value["state"] as string)
     || typeof value["runtimeState"] !== "string" || !Number.isSafeInteger(value["revision"]) || Number(value["revision"]) < 1
     || typeof value["createdAt"] !== "string" || typeof value["expiresAt"] !== "string"
+    || !(value["name"] === undefined || value["name"] === null || typeof value["name"] === "string")
     || !isRecord(value["cleanup"]) || !CLEANUP_STATES.includes(value["cleanup"]["state"] as string)
     || !Array.isArray(value["members"]) || !value["members"].every(isRecord) || !isRecord(value["capabilities"])
     || !Object.values(value["capabilities"]).every(v => typeof v === "boolean")) {
@@ -505,9 +515,16 @@ export class ConsumerClient extends LeaseOperations {
     const result = await parsed(this.#transport,"POST","/v1/requests",body,[200,201],true,id,v => waitingRequest(v,id));
     return { created:result.status === 201, request:result.value };
   }
-  async inspectRequest(requestId: string): Promise<WaitingRequest> {
-    const id = uuid(requestId,"requestId");
-    return (await parsed(this.#transport,"GET",`/v1/requests/${id}`,undefined,[200],false,undefined,v => waitingRequest(v,id))).value;
+  /** With `waitSeconds` (1 to 15) the controller holds the reply while the request is still waiting and nothing a
+   * caller acts on has changed (state, position, reason), then returns the current view. It is one bounded read,
+   * not a retry loop: the SDK still never polls, and a caller that wants to keep waiting calls again. */
+  async inspectRequest(requestId: string, options: { waitSeconds?: number } = {}): Promise<WaitingRequest> {
+    const id = uuid(requestId,"requestId"), wait = exact(options,["waitSeconds"],"Inspect options")["waitSeconds"];
+    if (wait !== undefined) {
+      positive(wait,"waitSeconds",MAX_REQUEST_WAIT_SECONDS);
+      if (Number(wait) * 1000 + 2000 > this.#transport.timeoutMs) throw new ConsumerConfigurationError("waitSeconds must leave two seconds within timeoutMs.","invalid_request");
+    }
+    return (await parsed(this.#transport,"GET",`/v1/requests/${id}` + (wait === undefined ? "" : `?wait=${wait}`),undefined,[200],false,undefined,v => waitingRequest(v,id))).value;
   }
   async cancelRequest(requestId: string): Promise<WaitingRequest> {
     const id = uuid(requestId,"requestId");

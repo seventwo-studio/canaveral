@@ -109,3 +109,34 @@ test("queue bound 32, revocation and headless/iOS capability denial", async t =>
   await assert.rejects(ios.submit(ios.command({ action: "shell", arguments: { argv: ["host-must-not-run"] } })), failure(409, "capability_unsupported"));
   assert.equal(((await ios.submit(ios.command({ action: "list-files", arguments: { path: "/", app: "com.example.fixture" } })))!.body as any).state, "queued");
 });
+test("a lease key can rotate, set a position and grant an app permission, each behind its image capability", async t => {
+  const rotate = { action: "rotate", arguments: { orientation: "LANDSCAPE_LEFT" } }, location = { action: "location", arguments: { latitude: 52.37, longitude: 4.9 } };
+  const permission = { action: "permission", arguments: { app: "com.example.fixture", permission: "android.permission.CAMERA", state: "grant" } };
+  const f = await operationFixture(t); f.ready(f.lease);
+  for (const action of [rotate, location, permission]) assert.equal(((await f.submit(f.command(action)))!.body as any).state, "queued");
+  // The host receives exactly the validated intent, one at a time, bound to this lease.
+  let reports: Record<string, unknown> = {};
+  for (const expected of [rotate, location, permission]) {
+    const delivered = f.beat({ deviceReports: reports }).deviceOperations;
+    assert.equal(delivered.length, 1);
+    assert.deepEqual([delivered[0].action, delivered[0].arguments, delivered[0].leaseId], [expected.action, expected.arguments, f.lease.id]);
+    reports = { [delivered[0].id]: { state: "succeeded", result: {} } };
+  }
+  assert.equal(f.beat({ deviceReports: reports }).deviceOperations.length, 0);
+  // The same argument checks as the administrative route apply before anything is queued.
+  await assert.rejects(f.submit(f.command({ action: "rotate", arguments: { orientation: "SIDEWAYS" } })), failure(400));
+  await assert.rejects(f.submit(f.command({ action: "location", arguments: { latitude: 91, longitude: 0 } })), failure(400));
+  await assert.rejects(f.submit(f.command({ action: "permission", arguments: { app: "com.example.fixture", permission: "android.permission.CAMERA", state: "allow" } })), failure(400));
+  // Only this lease's key: the application key and another lease's key are refused.
+  await assert.rejects(f.submit(f.command(rotate), f.app.credential), failure(401));
+  const other = await f.request("POST", "/v1/leases", f.acquire()), foreign = await f.scoped(other.id);
+  await assert.rejects(f.submit(f.command(location), foreign), failure(401));
+  // Operator-configured installs stay administrative: a lease key installs only its own upload.
+  await assert.rejects(f.submit(f.command({ action: "install", arguments: { artifact: "fixture" } })), failure(409, "capability_unsupported"));
+  // Granting a permission is a shell subset, so an image without a shell refuses it; orientation is an input.
+  const ios = await operationFixture(t, "ios"); ios.ready(ios.lease);
+  await assert.rejects(ios.submit(ios.command(permission)), failure(409, "capability_unsupported"));
+  assert.equal(((await ios.submit(ios.command(rotate)))!.body as any).state, "queued");
+  const headless = await operationFixture(t, "linux", "headless"); headless.ready(headless.lease);
+  for (const action of [rotate, location]) await assert.rejects(headless.submit(headless.command(action)), failure(409, "capability_unsupported"));
+});

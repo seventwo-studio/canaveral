@@ -19,7 +19,9 @@ export interface HostAuthenticateCommand { type: "hosts.authenticate"; hostId: s
 interface BrowserAuthorizeCommand { type: "browsers.authorize"; token: string }
 type BrowserLaunchCommand = { type: "browsers.launch"; hostId: string; intent: Record<string, unknown>; adminToken?: string };
 type BrowserReceiptCommand = { type: "browsers.receipt"; hostId: string; id: string; state: "active" | "closed" };
-export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | { type: "requests.wake" };
+/** Read of one waiting request for a held long poll. Unlike the HTTP route it runs no admission pass. */
+export interface RequestInspectCommand { type: "requests.inspect"; token: string; id: string }
+export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | RequestInspectCommand | { type: "requests.wake" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
   return command.type === "browsers.launch" || command.type === "browsers.receipt" || command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
@@ -76,6 +78,7 @@ export class ControlClient extends EventEmitter {
   }
 
   wakeRequests(): Promise<unknown> { return this.request({ type: "requests.wake" }); }
+  inspectRequest(token: string, id: string): Promise<unknown> { return this.request({ type: "requests.inspect", token, id }); }
 
   private unavailable(mutation = false): ServiceError {
     return new ServiceError("Controller response was not confirmed. Inspect state before another mutation.", 503, {
@@ -107,7 +110,7 @@ export class ControlClient extends EventEmitter {
     }));
   }
 
-  request(command: { type: "requests.wake" }): Promise<unknown>;
+  request(command: { type: "requests.wake" } | RequestInspectCommand): Promise<unknown>;
   request(command: BrowserAuthorizeCommand | BrowserReceiptCommand): Promise<unknown>;
   request(command: BrowserLaunchCommand): Promise<boolean | "inspect">;
   request(command: HttpCommand): Promise<ControlResponse | undefined>;

@@ -8,17 +8,38 @@ import { cancelModelJob, insertQueuedModelJob, modelGrantResources, modelJobSche
 export type RequestKind = "lease" | "linux-lease" | "model-job";
 export type RequestState = "waiting" | "admitted" | "cancelled" | "expired" | "rejected";
 interface Row { application: string; id: string; kind: RequestKind; intent: string; resources: string; priority: number; deadline: number | null; source: string | null; state: RequestState; sequence: number; created: number; admitted_at: number | null; target: string | null; reason: string | null }
-export interface RequestView { id: string; kind: RequestKind; intent: Record<string, unknown>; resources: unknown; priority: number; deadline: string | null; source: Record<string, unknown> | null; state: RequestState; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null }
+export interface RequestView { id: string; kind: RequestKind; intent: Record<string, unknown>; resources: unknown; priority: number; deadline: string | null; source: Record<string, unknown> | null; state: RequestState; sequence: number; createdAt: string; admittedAt: string | null; target: string | null; reason: string | null;
+  /** 1-based place in the controller's attempt order while waiting; null otherwise and for model calls. See POSITIONS. */
+  position: number | null }
 const utc = (n: number) => new Date(n * 1000).toISOString();
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k,v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
   return JSON.stringify(value);
 }
-function view(row: Row): RequestView {
+function view(row: Row, position: number | null): RequestView {
   return { id: row.id, kind: row.kind, intent: JSON.parse(row.intent), resources: JSON.parse(row.resources), priority: row.priority,
     deadline: row.deadline === null ? null : utc(row.deadline), source: row.source === null ? null : JSON.parse(row.source), state: row.state,
-    sequence: row.sequence, createdAt: utc(row.created), admittedAt: row.admitted_at === null ? null : utc(row.admitted_at), target: row.target, reason: row.reason };
+    sequence: row.sequence, createdAt: utc(row.created), admittedAt: row.admitted_at === null ? null : utc(row.admitted_at), target: row.target, reason: row.reason,
+    position: row.state === "waiting" ? position : null };
+}
+/** The order in which the admission pass would try the waiting lease kinds if every earlier attempt were admitted.
+ * It mirrors the candidate order in Requests.pass: applications take turns, least recently admitted first (never
+ * admitted before any, then by their best request), and each turn offers that application's highest-priority,
+ * oldest request. `rank` is a request's place within its application and `slot` the application's place in a round.
+ * It is an attempt order, not a promise: a request that does not fit is skipped, so a later position can be admitted
+ * first, and a refused attempt does not cost its application a turn. Requests past their deadline are left out, as
+ * the next pass expires them. Model calls are admitted by runner claims per domain and have no single order.
+ * The count discloses how many other waiting requests come first, never whose they are or what they ask for. */
+const POSITIONS = `WITH w AS (SELECT r.application,r.id,r.priority,r.sequence,coalesce(a.admitted,0) AS turn,
+      ROW_NUMBER() OVER (PARTITION BY r.application ORDER BY r.priority DESC,r.sequence) AS rank
+    FROM requests r LEFT JOIN request_admissions a ON a.application=r.application
+    WHERE r.state='waiting' AND r.kind!='model-job' AND (r.deadline IS NULL OR r.deadline>?)),
+  apps AS (SELECT application,ROW_NUMBER() OVER (ORDER BY turn,priority DESC,sequence) AS slot FROM w WHERE rank=1)
+  SELECT w.application,w.id,ROW_NUMBER() OVER (ORDER BY w.rank,apps.slot) AS position FROM w JOIN apps USING(application)`;
+function positions(db: DatabaseSync, now: number, application: string): Map<string, number> {
+  const rows = db.prepare(`SELECT id,position FROM (${POSITIONS}) WHERE application=?`).all(now, application) as unknown as { id: string; position: number }[];
+  return new Map(rows.map(row => [row.id, Number(row.position)]));
 }
 export function requestSchema(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS requests (
@@ -87,7 +108,7 @@ export class Requests {
       const old = db.prepare("SELECT * FROM requests WHERE application=? AND id=?").get(app.id,id) as unknown as Row | undefined;
       if (old) {
         if (old.kind !== kind || old.intent !== frozen || old.priority !== priority || old.deadline !== deadline || old.source !== source) throw new ServiceError("Request UUID already has a different intent.",409,{code:"request_conflict"});
-        return { created:false,request:view(old) };
+        return { created:false,request:this.view(db,old) };
       }
       if (db.prepare("SELECT 1 FROM requests WHERE id=?").get(id)) throw new ServiceError("Unknown request.",404);
       // A direct /v1/model-jobs submission already owns this UUID; it never becomes queued intent.
@@ -98,7 +119,7 @@ export class Requests {
       db.prepare("UPDATE request_scheduler SET sequence=sequence+1 WHERE id=1").run();
       db.prepare("INSERT INTO requests VALUES(?,?,?,?,?,?,?,?, 'waiting', (SELECT sequence FROM request_scheduler WHERE id=1),?,NULL,NULL,NULL)").run(app.id,id,kind,frozen,resources,priority,deadline,source,this.store.clock());
       if (model) insertQueuedModelJob(db,app.id,id,intent,this.store.clock());
-      return { created:true,request:view(this.row(db,app.id,id)) };
+      return { created:true,request:this.view(db,this.row(db,app.id,id)) };
     });
   }
   private row(db: DatabaseSync, application: string, id: string): Row {
@@ -106,12 +127,17 @@ export class Requests {
     if (!row) throw new ServiceError("Unknown request.",404);
     return row;
   }
-  inspect(token: string,id: string): RequestView { return this.store.transaction(db => view(this.row(db,this.applications.verify(db,token).id,id))); }
+  /** One request's view; only a waiting lease-kind request needs the attempt order computed. */
+  private view(db: DatabaseSync, row: Row): RequestView {
+    return view(row, row.state === "waiting" && row.kind !== "model-job" ? positions(db,this.store.clock(),row.application).get(row.id) ?? null : null);
+  }
+  inspect(token: string,id: string): RequestView { return this.store.transaction(db => this.view(db,this.row(db,this.applications.verify(db,token).id,id))); }
   list(token: string, after?: string): { requests: RequestView[]; nextCursor: string | null } {
     return this.store.transaction(db => {
       const app = this.applications.verify(db,token);
       const rows = db.prepare("SELECT * FROM requests WHERE application=? AND id>? ORDER BY id LIMIT 101").all(app.id,after === undefined ? "" : identifier(after)) as unknown as Row[];
-      return { requests:rows.slice(0,100).map(view),nextCursor:rows.length>100 ? rows[99]!.id : null };
+      const order = rows.some(row => row.state === "waiting" && row.kind !== "model-job") ? positions(db,this.store.clock(),app.id) : new Map<string, number>();
+      return { requests:rows.slice(0,100).map(row => view(row,order.get(row.id) ?? null)),nextCursor:rows.length>100 ? rows[99]!.id : null };
     });
   }
   cancel(token: string,id: string,value: unknown): RequestView {
@@ -125,7 +151,7 @@ export class Requests {
         db.prepare("UPDATE requests SET state=?,reason=? WHERE application=? AND id=?").run(expired ? "expired" : "cancelled",expired ? "deadline" : "consumer_cancelled",row.application,row.id);
       }
       else if (row.state === "admitted") this.release(db,row,token);
-      return view(this.row(db,row.application,row.id));
+      return this.view(db,this.row(db,row.application,row.id));
     });
   }
   /** Rejects an invalid application credential before any admission work is done on its behalf. */
