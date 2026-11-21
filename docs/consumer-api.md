@@ -28,6 +28,8 @@ by the controller modules and provider implementations described in this guide.
 | Attach the consumer WebSocket peer | That lease's current key and session generation |
 | Read or follow the application's own [events](events.md) | Application key |
 | Read the application's own [usage](usage.md) | Application key |
+| Open, inspect or close a [live view](mobile-control.md#live-screen) of a leased Android emulator | That lease's current key |
+| Attach the viewer WebSocket peer of a live view | That lease's current key and view generation |
 
 Credentials are opaque bearer secrets, not OAuth scopes or JWT claims. The
 contract introduces no enrollment or host-approval policy. Administrative,

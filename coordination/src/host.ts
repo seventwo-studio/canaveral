@@ -2,6 +2,9 @@ import { GuestHelperAccess } from "./control/sessions.ts";
 import { appArtifactSource } from './app-artifact-source.ts';
 import { markNotStaged } from './providers/mobile.ts';
 import { serveMobileVideo } from './mobile-video.ts';
+import { LiveCaptureHub } from './live-capture.ts';
+import type { LiveCaptureSource } from './live-capture.ts';
+import { LIVE_FPS } from './mobile-live.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -73,6 +76,8 @@ export interface HostDependencies {
   guest?: GuestAccess;
   inference?: HostTaskAdapter; images?: HostImageAdapter; sessions?: HostTaskAdapter;
   log?: (message: string) => void;
+  /** Test seam: the length of one live capture run; production uses the native 180 seconds. */
+  liveEpochSeconds?: number;
 }
 interface Runtime extends NativeProvider {
   guestHelperBinding?(machine: RecordValue, image: RecordValue, folder: string, authority: OwnedGuestAuthority): Promise<GuestHelperBinding>;
@@ -226,7 +231,25 @@ export class HostRunner {
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], live: [], liveCaptures: [] };
+  /** Live views are attached once per identity; a refused or ended attachment is not retried. */
+  private readonly liveAttempts = new Set<string>();
+  private readonly liveAuthority = new Map<string, { at: number; value: boolean }>();
+  private liveCaptures: LiveCaptureHub | undefined;
+  /** One shared native capture per watched device (live-capture.ts). Its journal lives beside
+   * the recording journals; its cleanup receipt uses the recording's finish route. */
+  private get liveHub(): LiveCaptureHub {
+    const path = (id: string) => join(this.state, 'work', 'live', `${identifier(id)}.json`);
+    return this.liveCaptures ??= new LiveCaptureHub({
+      load: id => present(path(id)) ? readRecord(path(id)) : undefined,
+      save: (id, value) => saveRecord(path(id), value),
+      report: async (job, receipt) => {
+        if (!this.identity) throw unknownOutcome('Host identity is unavailable.');
+        await this.transport.request('POST', `/v1/hosts/${this.identity.id}/video-sessions/${identifier(job.id)}/finish`, { generation: job.generation, ...receipt }, this.identity.credential);
+      },
+      ...(this.dependencies.liveEpochSeconds === undefined ? {} : { epochSeconds: this.dependencies.liveEpochSeconds }),
+    });
+  }
   /** Owner display attachments are attempted once per identity; a refused attach is not retried. */
   private readonly displayAttempts = new Set<string>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; authorized: () => boolean }>();
@@ -572,7 +595,8 @@ export class HostRunner {
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions') };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'),
+      live: records(response.liveViews ?? [], 'live views'), liveCaptures: records(response.liveCaptures ?? [], 'live captures') };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
@@ -845,6 +869,7 @@ export class HostRunner {
     }
     this.outboundSessions?.step((this.queues.sessions ?? []) as unknown as RunnerSessionJob[]);
     this.stepVideo();
+    this.stepLive();
     this.stepDisplay();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
@@ -878,6 +903,104 @@ export class HostRunner {
       const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.leasedCaptureAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
       this.launch(key, allowed, context => this.runVideo(job, path, context));
     }
+  }
+  /** Live views: one outbound broker session per viewer, all fed by the device's one capture. */
+  private stepLive(): void {
+    const identity = this.identity;
+    // Repeat a saved cleanup receipt the controller has not acknowledged. Only receipts repeat;
+    // a capture this process no longer holds is never resumed. A journal that never left
+    // `attaching` belongs to a capture that dispatched nothing native, which is positive cleanup.
+    for (const job of this.queues.liveCaptures ?? []) {
+      const id = identifier(job.id), key = `live-capture:${id}`, generation = identifier(job.generation), path = join(this.state, 'work', 'live', `${id}.json`);
+      if (!identity || this.active.has(key) || !this.fresh() || this.liveCaptures?.active(id) || !present(path)) continue;
+      const saved = readRecord(path);
+      const receipt = saved.cleaned === true || saved.state === 'attaching' ? { cleaned: true } : saved.hostCleaned === true ? { hostCleaned: true } : undefined;
+      if (saved.generation !== generation || saved.machineId !== job.machineId || !receipt) continue;
+      this.launch(key, () => this.fresh(), async () => {
+        await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, ...receipt }, identity.credential, this.stopController.signal);
+      });
+    }
+    const queued = new Set((this.queues.live ?? []).map(job => `${String(job.id)}:${String(job.generation)}`));
+    for (const attempt of this.liveAttempts) if (!queued.has(attempt)) this.liveAttempts.delete(attempt);
+    for (const job of this.queues.live ?? []) {
+      const id = identifier(job.id), machineId = identifier(job.machineId), generation = identifier(job.generation), key = `live:${id}`, attempt = `${id}:${generation}`;
+      if (this.active.has(key) || this.liveAttempts.has(attempt) || !this.fresh() || this.updateAdmissionBlocked) continue;
+      if (!['pending', 'attaching'].includes(String(job.state))) continue;
+      // The same authority as a recording: the assignment, and for a leased emulator its ready
+      // lease and local lease guard. The view must also still be listed by the controller.
+      const allowed = () => this.liveAuthorized(machineId) && this.queues.live!.some(j => j.id === id && j.generation === generation && j.machineId === machineId);
+      if (!allowed()) continue;
+      this.liveAttempts.add(attempt);
+      this.launch(key, allowed, context => this.runLiveView(job, context));
+    }
+  }
+  /** Assignment and lease authority for a device's viewers, evaluated at most once per 250 ms
+   * (the recording path's own check interval) and shared by them. A sample of the native lease
+   * clock is a helper process, and viewers consult their authority for every segment. */
+  private liveAuthorized(machineId: string): boolean {
+    if (this.stopController.signal.aborted) return false;
+    const now = performance.now(), cached = this.liveAuthority.get(machineId);
+    if (cached && now - cached.at < 250) return cached.value;
+    const value = this.machineAuthorized(machineId) && this.leasedCaptureAuthorized(machineId);
+    this.liveAuthority.set(machineId, { at: now, value }); return value;
+  }
+  /** True while `machine` is still the assignment a capture started under: fingerprint and lease
+   * unchanged. The lease's identity, not its whole assignment record: that carries the controller's
+   * clock and revision, which change on every heartbeat and renewal without changing the owner.
+   * A lease without a string id never matches, so a malformed record fails closed. */
+  private assignmentUnchanged(machine: RecordValue): () => boolean {
+    const leaseOf = (m: RecordValue) => { if (m.lease == null) return null; const id = object(m.lease).id; return typeof id === "string" && id ? id : Symbol("unidentified lease"); };
+    const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
+    return () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
+  }
+  private liveSource(machine: RecordValue): LiveCaptureSource | undefined {
+    const { runtime, image, folder } = this.context(machine), encoder = runtime.config?.videoEncoder;
+    // iOS is opt-in per host: idb's stop is unconfirmed on some installations, and there every
+    // ended view would leave a capture that only an administrator can abandon.
+    const offered = image.os === 'android' || image.os === 'ios' && runtime.config?.liveView === true;
+    if (!runtime.openVideo || !runtime.pipe || typeof encoder !== 'string' || !isAbsolute(encoder) || !offered) return undefined;
+    // Stopping an early-ended recorder needs the same assignment that started it, as for recordings.
+    const sameAssignment = this.assignmentUnchanged(machine);
+    return { encoder, guestSource: image.os === 'android',
+      openSource: (options, authorized) => runtime.openVideo!(machine, image, folder, options, authorized, () => this.machineAuthorized(String(machine.id)) && sameAssignment()),
+      openEncoder: argv => runtime.pipe!(argv) };
+  }
+  private async runLiveView(job: RecordValue, context: HostWorkContext): Promise<void> {
+    const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);
+    if (!identity || !machine || !context.authorized()) return;
+    const id = identifier(job.id), generation = identifier(job.generation);
+    let channel: SessionConnection | undefined, handle: ReturnType<LiveCaptureHub['acquire']> | undefined;
+    const authorized = () => !context.signal.aborted && context.authorized();
+    try {
+      const source = this.liveSource(machine);
+      // Journals the capture before this runner attaches for it; native dispatch is journaled again.
+      // A capture that is ending, or was attempted before a restart, is never joined or repeated:
+      // the viewer is told so and opens a new view.
+      try { handle = this.liveHub.acquire({ id: identifier(job.captureId), generation: identifier(job.captureGeneration), machineId: String(machine.id) }, source); }
+      catch { handle = undefined; }
+      channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/live-views/${id}/${generation}`, identity.credential,
+        { authorized, ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      const ready = await channel.receive(30), stream = channel;
+      if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'live') return;
+      if (!source) { await stream.sendControl({ type: 'error', code: 'capability_unsupported', message: 'This host has no live screen capture for this device.', outcome: 'unknown' }); return; }
+      if (!handle) { await stream.sendControl({ type: 'end', reason: 'capture_ended' }); return; }
+      await stream.sendControl({ type: 'live', mediaType: 'video/mp4', codec: 'avc1', fps: LIVE_FPS });
+      // A view feeds the capture only while its own socket and authority hold.
+      const subscription = handle.subscribe(() => authorized() && stream.open);
+      try {
+        while (authorized() && stream.open) {
+          const item = await subscription.next(250);
+          if (!item) continue;
+          if (item.type === 'end') { await stream.sendControl({ type: 'end', reason: item.reason }); break; }
+          await stream.sendControl(item.type === 'init' ? { type: 'init', epoch: item.epoch, bytes: item.data.length }
+            : { type: 'segment', epoch: item.epoch, sequence: item.sequence, keyframe: item.keyframe, bytes: item.data.length });
+          for (let offset = 0; offset < item.data.length; offset += 65536) await stream.sendBytes(item.data.subarray(offset, offset + 65536));
+        }
+      } finally { subscription.close(); }
+    } catch {
+      // A viewer holds no durable intent: a refused attach, a departed viewer or lost authority
+      // ends it. The capture's own journal and receipt are the hub's.
+    } finally { channel?.close(); handle?.release(); }
   }
   /** A leased emulator records only while its lease is ready on this runner and the host offers
    * leased execution for it; the lease guard (machineAuthorized) fences it at the deadline. */
@@ -932,6 +1055,7 @@ export class HostRunner {
     // hostCleaned: this runner's own encoder is confirmed exited (or never started). For a leased
     // emulator that alone may be reported when the guest recorder's stop is unproven.
     let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true;
+    let tap: Awaited<ReturnType<LiveCaptureHub['beginRecording']>> | undefined;
     const leased = machine.lease != null;
     saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
     try {
@@ -946,21 +1070,26 @@ export class HostRunner {
       const options = { fps: 30 as const, durationSeconds: Number(job.durationSeconds), bitRate: Number(job.bitRate) };
       captureStarted = true;
       // Capture ends with the session; stopping an early-cancelled recorder needs only the assignment,
-      // and only the same assignment that started the capture (fingerprint and lease unchanged).
-      // The lease's identity, not its whole assignment record: that carries the controller's clock and
-      // revision, which change on every heartbeat and renewal without changing the owner.
-      // A lease without a string id never matches, so a malformed record fails closed.
-      const leaseOf = (m: RecordValue) => { if (m.lease == null) return null; const id = object(m.lease).id; return typeof id === "string" && id ? id : Symbol("unidentified lease"); };
-      const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
-      const sameAssignment = () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
+      // and only the same assignment that started the capture.
+      const sameAssignment = this.assignmentUnchanged(machine);
+      // One native capture per device: a live view's capture is stopped, and proven stopped,
+      // before this recording starts. If it cannot be proven, nothing is captured here.
+      try { tap = await this.liveHub.beginRecording(String(machine.id)); }
+      catch (error) { captureStarted = false; throw error; }
+      const recording = channel, viewers = tap;
+      // The recording receives exactly its own bytes; live viewers are fed a copy of them.
+      const tee = { receive: (seconds?: number) => recording.receive(seconds), sendControl: (value: RecordValue) => recording.sendControl(value), close: () => recording.close(),
+        sendBytes: async (data: Uint8Array) => { viewers.push(data); await recording.sendBytes(data); } };
       const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
-      await serveMobileVideo(channel, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
+      await serveMobileVideo(tee, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
       cleaned = true;
     } catch {
       if (!captureStarted) cleaned = true;
       try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
     } finally {
       channel?.close();
+      // Live viewers may resume their own capture only after this one is proven stopped.
+      tap?.end(cleaned);
       const hostOnly = !cleaned && leased && hostCleaned;
       saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}) });
       if (cleaned || hostOnly) {
@@ -1040,7 +1169,7 @@ export class HostRunner {
   fenceUpdateAdmission(): void { this.updateAdmissionBlocked = true; }
   resumeUpdateAdmission(): void { this.updateAdmissionBlocked = false; }
   private idleEligible(): boolean {
-    return this.fresh() && !this.closed && this.active.size === 0 && this.updateExternalWork === 0 &&
+    return this.fresh() && !this.closed && this.active.size === 0 && this.updateExternalWork === 0 && (this.liveCaptures?.idle ?? true) &&
       Object.values(this.queues).every(queue => queue.length === 0) &&
       [this.reports, this.deviceReports, this.inferenceReports, this.imageReports, this.sessionReports].every(reports =>
         [...reports.values()].every(r => ["stopped", "succeeded", "failed", "cancelled"].includes(String(r.state)) && (r.stopped === undefined || r.stopped === true) && !["pending", "unknown"].includes(String(r.cleanup))));
@@ -1218,7 +1347,11 @@ export class HostRunner {
   }
   async wait(): Promise<void> { await Promise.all(this.loops); }
   async close(): Promise<void> {
-    if (this.closed) return; this.closed = true; this.stopController.abort();
+    if (this.closed) return; this.closed = true;
+    // Live captures stop first, while this runner still holds the authority to stop and prove
+    // each guest recorder; afterwards a capture could only be left unknown.
+    if (this.liveCaptures) await bounded(this.liveCaptures.close(), 20000).catch(() => this.log("Live capture cleanup was not confirmed; its reservation is retained."));
+    this.stopController.abort();
     for (const work of this.active.values()) work.controller.abort();
     let failed = false;
     const cleanup = async (work: () => Promise<unknown>): Promise<void> => { try { await bounded(work(), 5000); } catch { failed = true; this.log("Host cleanup was not confirmed; inspect retained state."); } };

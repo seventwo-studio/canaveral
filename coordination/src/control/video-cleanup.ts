@@ -46,6 +46,22 @@ export function settleLeaseVideoSessions(db: DatabaseSync): void {
     AND EXISTS (SELECT 1 FROM lease_cleanup_members c WHERE c.machine=mobile_video_sessions.machine AND c.state='complete')`).run();
 }
 
+/** Records positive cleanup for the ended live capture of an owned Android device whose runner
+ * confirmed its own encoder exit, once that device's host reports it stopped. The host reports
+ * `stopped` only after the emulator process has exited, and the guest recorder ran inside that
+ * process. A capture needs a running device, so a later `stopped` is always the exit of the
+ * emulator that held its recorder. Stopping a watched device ends the runner's authority to
+ * signal the recorder; without this rule every such capture would need abandonment.
+ *
+ * Not for iOS, whose capture source is a host process the simulator's stop does not end, and not
+ * for recordings, whose cleanup rules are unchanged. Leased captures settle through the lease. */
+export function settleStoppedLiveCaptures(db: DatabaseSync): void {
+  if (!['mobile_video_sessions', 'machines'].every(name => tableExists(db, name))) return;
+  db.prepare(`UPDATE mobile_video_sessions SET cleaned=1 WHERE cleaned=0 AND kind='live' AND lease IS NULL AND host_cleaned=1
+    AND state NOT IN ('pending','attaching','ready')
+    AND EXISTS (SELECT 1 FROM machines m WHERE m.id=mobile_video_sessions.machine AND m.observed='stopped' AND json_extract(m.template,'$.os')='android')`).run();
+}
+
 /** Each held lease session reserves one CPU and 256 MiB; it counts against its application. */
 export const VIDEO_SESSION_RESERVATION = { cpu: 1, memoryMiB: 256 } as const;
 export function applicationVideoUsage(db: DatabaseSync, applicationId: string): { cpu: number; memoryMiB: number } {

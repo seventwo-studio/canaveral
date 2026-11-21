@@ -101,6 +101,7 @@ export async function startController(config: ControllerConfig) {
   let broker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let videoBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   let displayBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
+  let liveBroker: ReturnType<typeof createSessionUpgradeHandler> | undefined;
   const browsers = config.browserGateway ? createBrowserGateway(config.browserGateway, enrollmentToken ? [adminToken, enrollmentToken] : [adminToken], async (hostId, intent, adminToken) =>
     await control!.request({ type: "browsers.launch", hostId, intent, ...(adminToken === undefined ? {} : { adminToken }) }),
   async token => { await control!.request({ type: "browsers.authorize", token }); },
@@ -124,7 +125,9 @@ export async function startController(config: ControllerConfig) {
     broker = createSessionUpgradeHandler(control);
     videoBroker = createSessionUpgradeHandler(control, { video: true });
     displayBroker = createSessionUpgradeHandler(control, { display: true });
+    liveBroker = createSessionUpgradeHandler(control, { live: true });
     const sessions = createControllerUpgradeHandler((req, socket, head) => req.url?.includes('/video-sessions/') ? videoBroker!.handle(req, socket, head)
+      : req.url?.includes('/live-views/') ? liveBroker!.handle(req, socket, head)
       : req.url?.includes('/display-sessions/') ? displayBroker!.handle(req, socket, head) : broker!.handle(req, socket, head));
     server.on("upgrade", (req, socket, head) => {
       if (browsers?.matches(req)) browsers.upgrade(req, socket, head);
@@ -139,6 +142,7 @@ export async function startController(config: ControllerConfig) {
     broker?.close();
     videoBroker?.close();
     displayBroker?.close();
+    liveBroker?.close();
     server?.close();
     await Promise.allSettled([client.close(), control?.close()]);
     throw error;
@@ -156,6 +160,7 @@ export async function startController(config: ControllerConfig) {
         broker?.close();
         videoBroker?.close();
         displayBroker?.close();
+        liveBroker?.close();
         browsers?.close();
         await new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });
         await Promise.all([client.close(), services.close()]);

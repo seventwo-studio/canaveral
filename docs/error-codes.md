@@ -64,6 +64,7 @@ status.
 | `request_wait_limit` | 429 | Too many held request reads: 32 across the controller or 4 for one application credential | Yes, after `Retry-After`, or read without `wait` |
 | `request_waiting_limit` | 429 | The application has reached its limit of waiting requests | Yes, after cancelling waiting requests or after an admission |
 | `preview_waiting_limit` | 429 | An owner reached the dashboard's limit of waiting previews or builds | Yes, after one starts or is cancelled |
+| `capture_cleanup_pending` | 409 | An earlier recording or live capture of the device ended without confirmed cleanup, so a new live view of it is refused | Yes, later: once the cleanup is confirmed, or after an administrator abandons that session |
 | `host_draining` | 409 | Admission is closed on the host by a drain, maintenance or an update | Later. A waiting request stays queued until admission reopens |
 | `maintenance_blocked` | 409 | A maintenance drain cannot be resumed; the reply lists the blockers | After resolving the listed resume blockers |
 | `session_disconnected` | 410, client | The session's stream ended; unconfirmed input was not applied on reconnect | Open a new session with a new UUID; do not replay input |

@@ -35,6 +35,11 @@ that scoped credential first. Host attachment uses the assigned host credential.
 | GET `/v1/leases/{lease}/sessions/{session}/{generation}` | Consumer WebSocket attachment |
 | GET `/v1/hosts/{host}/sessions/{session}/{generation}` | Outbound runner WebSocket attachment |
 
+Recordings and live views of mobile devices use the same broker and protocol through
+their own session families, `/v1/leases/{lease}/video-sessions` and
+`/v1/leases/{lease}/live-views`, with the same lease-key rule; see
+[remote mobile control](mobile-control.md#live-screen).
+
 WebSockets negotiate `canaveral-session-v1`. Both receive a JSON `type: ready`
 control only after both upgrades succeed and authorization is rechecked. Session
 states are `pending`, `attaching`, `ready`, `closed`, `expired`, `revoked` and

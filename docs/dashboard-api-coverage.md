@@ -50,6 +50,7 @@ store; browser storage is not used.
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
 | Mobile video admission, inspection and closure | Configuration; owner capture in machine details (PNG screenshot, verified MP4 recording) |
+| Live views of account-owned mobile devices | Gateway routes and relay only ([owner live screen](dashboard.md#owner-live-screen)); no page yet. A live capture appears under System as a video session |
 | Managed update releases and rollouts | Configuration |
 | Event log (`/v1/admin/events`, `/v1/admin/events/kinds`) | Activity; filters, scroll-back and live updates by cursor |
 | Live event stream (`/v1/admin/events/stream`) | API and CLI only; not forwarded by the dashboard gateway. Activity reads the list route by cursor instead |
@@ -69,12 +70,14 @@ assignment reports, preparation callbacks, chunk download and binary WebSocket
 framing remain machine protocols. Their effects are represented by inventory,
 readiness, operations, session state, cleanup and host diagnostics.
 
-Two gateway WebSockets relay a controller session protocol under the creator's
+Three gateway WebSockets relay a controller session protocol under the creator's
 own credential: the owner's mobile video attachment,
 `/api/v1/machines/{machine}/video-sessions/{id}/{generation}` (see
-[owner mobile capture](dashboard.md#owner-mobile-capture)), and the desktop viewer,
+[owner mobile capture](dashboard.md#owner-mobile-capture)), the owner's live view,
+`/api/v1/machines/{machine}/live-views/{id}/{generation}` (see
+[owner live screen](dashboard.md#owner-live-screen)), and the desktop viewer,
 `/api/v1/machines/{machine}/desktop`, on a dashboard without an attached local
-display. Both require the session cookie and a matching Origin, recheck machine
+display. All require the session cookie and a matching Origin, recheck machine
 access before the upgrade and every second after it, and relay frames unchanged.
 For the desktop, the gateway first opens an owner display session,
 `POST /v1/machines/{machine}/display-sessions` with `{id}`, and closes it when
@@ -93,7 +96,7 @@ building or testing these screens.
 | `GET /v1/admin/queue` | none | The waiting queue in attempt order with position and last refusal code, and the active leases that hold capacity; see [the administrator queue view](requests.md#administrator-queue-view) |
 | `GET /v1/admin/configuration` | none | Configured models, domains, grants, approvals, runner bindings/enrollments and application artifact metadata |
 | `POST /v1/admin/leases/{id}/release` | `{id: mutationUUID}` | Terminalize the lease using its owning backend's cleanup rules |
-| `POST /v1/admin/sessions/{id}/close` | `{id: mutationUUID}` | Revoke a single access/video session without ending its lease |
+| `POST /v1/admin/sessions/{id}/close` | `{id: mutationUUID}` | Revoke a single access/video session without ending its lease. Closing a live capture ends every live view of its device; an administrator can end a leased device's capture this way but cannot watch it |
 | `POST /v1/admin/applications/{id}/revoke` | `{id: mutationUUID}` | Revoke application authority and refresh subordinate lifecycle state |
 | `GET /v1/admin/model-jobs` | none | Up to 100 application model jobs, open first (oldest first), then recently closed, with queue state and no prompts or results |
 | `POST /v1/admin/requests/{id}/cancel` | `{id: mutationUUID}` | Cancel waiting intent, release its admitted lease or request its admitted model job's stop |
