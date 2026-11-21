@@ -7,6 +7,7 @@ import { unresolvedVideoSession } from "./video-cleanup.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import { owns, requireScope } from "./contracts.ts";
 import type { ControlModule, ControlOptions, ControlRequest, Principal } from "./contracts.ts";
+import { pendingBaselineSave, requireNotPooled } from "./pool-ledger.ts";
 
 /** Controller coordination only. Native stop/removal proofs belong to the runner. */
 export const HOST_LEASE_SECONDS = 30;
@@ -101,6 +102,8 @@ function requestIntent(store: SqliteStore, req: ControlRequest, action: "power-o
     if (old) return { id: old.id, machineId, state: old.state };
     if (deletion(db, machineId)) throw new ServiceError("A deletion intent already exists. Reuse its request ID.", 409);
     if (leaseOwned(db, machineId)) throw new ServiceError("Lease-owned machines use lease cleanup.", 409);
+    requireNotPooled(db, machineId);
+    if (pendingBaselineSave(db, machineId)) throw new ServiceError("Resolve the pending baseline save before changing its source device.", 409);
     const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(machine.host) as { seen: number; offer: string } | undefined;
     if (!host || store.clock() - host.seen >= HOST_LEASE_SECONDS ||
         (action === "delete" && (machine.desired !== "stopped" || machine.observed !== "stopped"))) {

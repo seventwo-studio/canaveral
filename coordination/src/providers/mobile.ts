@@ -26,7 +26,8 @@ export interface NativePipe {
   resize?(rows: number, cols: number): Promise<void>;
 }
 export interface NativeChild { pid: number; processStartedAt?: number; stopped(): Promise<boolean> }
-/** A leased emulator owned by the independent native lease supervisor. */
+/** The supervised child of the independent native lease supervisor: a leased emulator, or a
+ * leased simulator's control companion. */
 export interface SupervisedChild { pid: number; supervisorPid: number; supervisorExited(): Promise<boolean> }
 /** `lease-supervise` exit status that proves it spawned nothing. Any other status is not that proof. */
 export const SUPERVISOR_REFUSED = 75;
@@ -35,10 +36,12 @@ export class SupervisorLaunchError extends ServiceError {
   constructor(readonly supervisorExit?: number) { super("Leased emulator launch is unconfirmed; inspect its supervisor records before recovery.", 409, { outcome: "unknown" }); }
 }
 export interface LeaseClockSample { version: number; bootSessionID: string; continuous: number }
+/** A warm hold's remaining lifetime on the host's clock. A hold has one fixed deadline and is never renewed. */
+export interface WarmAuthorization { holdID: string; remainingSeconds: number }
 /** One native sample: the clock, plus whether a live supervisor holds the storage's lifetime lock. */
 export interface LeaseSupervisorStatus extends LeaseClockSample { supervisor: "held" | "free" | "absent" }
 export interface LeaseSupervisorTransport {
-  /** Starts `lease-supervise` detached; resolves after its launch record names the emulator. */
+  /** Starts `lease-supervise` detached; resolves after its launch record names the supervised child. */
   supervise(helper: string, storage: string, request: RecordValue): Promise<SupervisedChild>;
   clock(helper: string): Promise<LeaseClockSample>;
   /** Positively absent process group only; never signals it. */
@@ -47,7 +50,15 @@ export interface LeaseSupervisorTransport {
   status(helper: string, storage: string): Promise<LeaseSupervisorStatus>;
   /** Every visible process command line, for proving that a launch left nothing running. */
   commandLines(): Promise<string[]>;
+  /** One bounded, read-only process inventory against a leased simulator's own device. `tree`
+   * is `absent` when no member of its tree is present (its own launchd_sim, an executable
+   * started from inside the device, a member the supervisor recorded, or a descendant of
+   * those), `present` when one is, and `unknown` when the record lost members. `observed`
+   * says whether the device's launchd_sim was ever seen: an absent tree that was never
+   * observed is no evidence that a booted simulator stopped. Never signals anything. */
+  simulatorTree(helper: string, storage: string, deviceSet: string, udid: string): Promise<SimulatorTree>;
 }
+export interface SimulatorTree { tree: "absent" | "present" | "unknown"; observed: boolean }
 export interface MobileTransport {
   run(argv: readonly string[], options: RunOptions): Promise<CommandResult>;
   spawn?(argv: readonly string[], options: RunOptions & { log: string }): Promise<NativeChild>;
@@ -267,9 +278,14 @@ export class MobileProvider {
   name(machine: RecordValue): string { return "cvm-" + uuid(machine.id); }
   binding(machine: RecordValue, image?: RecordValue): RecordValue {
     const template = object(machine.template), resources = object(machine.resources);
-    const lease = machine.lease == null ? null : object(machine.lease);
+    // A warm pool device is created before any lease exists and may later be adopted by exactly one.
+    // Its storage is bound to its warm hold for its whole life; the lease binding lives in the launch
+    // record, the adoption journal and the native supervisor's records.
+    const hold = machine.warm == null ? null : uuid(object(machine.warm).id);
+    const lease = machine.lease == null || hold ? null : object(machine.lease);
     return { version: 1, id: uuid(machine.id), template, resources, image: image ?? template,
       hostId: machine.hostId ?? null, ownerUserId: machine.ownerUserId ?? machine.ownerId ?? machine.userId ?? null,
+      ...(hold ? { warm: { id: hold } } : {}),
       lease: lease ? Object.fromEntries(["id", "consumerId", "userId", "requestId", "resourceDomainId", "hostId"].map(k => [k, lease[k] ?? null])) : null,
       runtime: { kind: this.kind, state: this.state, storage: this.config.storage, androidSDK: this.config.androidSDK ?? null, xcrun: this.config.xcrun ?? null } };
   }
@@ -345,7 +361,7 @@ export class MobileProvider {
   }
   async control(_machine: RecordValue, _image: RecordValue, _folder: string, _request: DeviceRequest): Promise<RecordValue> { return unsupported("Mobile action requires a platform provider."); }
   executionAllowed(machine: RecordValue): void {
-    if (machine.lease != null) unsupported("Native mobile lease fencing and cleanup acceptance are outstanding; consumer execution is disabled.");
+    if (machine.lease != null || machine.warm != null) unsupported("Native mobile lease fencing and cleanup acceptance are outstanding; consumer execution is disabled.");
   }
   async displayDensity(_machine: RecordValue, _image: RecordValue): Promise<number> { return 1; }
   async operate(machine: RecordValue, image: RecordValue, folder: string, operation: RecordValue, check: Authorized = () => true, handler?: (request: DeviceRequest) => Promise<RecordValue>): Promise<OperationReport> {

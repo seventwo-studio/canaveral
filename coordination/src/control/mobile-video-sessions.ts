@@ -17,6 +17,7 @@ import { owns, requireScope } from './contracts.ts';
 import type { ControlModule, Principal } from './contracts.ts';
 import { MachineStore, machineDigest, registerMachineHooks } from './machines.ts';
 import { uuid } from './transfers.ts';
+import { requireNotPooled } from './pool-ledger.ts';
 import type { SessionSide } from './session-protocol.ts';
 import { COUNTED_VIDEO_SESSION, HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions, settleStoppedLiveCaptures } from './video-cleanup.ts';
 import { LIVE_HANDOVER_SECONDS } from '../mobile-live.ts';
@@ -186,6 +187,7 @@ export class MobileVideoSessions implements ControlModule {
       requireHostAdmission(db, String(m.host));
       if (!['android','ios'].includes(String(object(JSON.parse(String(m.template))).os)) || m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id as string)) return fail(409);
+      requireNotPooled(db, String(m.id));
       this.insert(db, id, m, hash, request, null, null, this.admit(db, m));
       return { status: 201, body: present(db, row(db, id)) };
     });
@@ -278,7 +280,8 @@ export class MobileVideoSessions implements ControlModule {
       if (old) { if (old.lease !== lease.id) return fail(404); if (old.member !== member || old.credential !== lease.credential || old.request !== request) return fail(409); return { body: present(db, old) }; }
       const { machine } = leaseScopedMember(db, leaseId, req.token, member, 'displayStream', this.store.clock());
       const m = this.target(db, String(machine.id));
-      if (String(object(JSON.parse(String(m.template))).os) !== 'android') return fail(409);
+      // iOS lease recording stays refused: native iOS recording has no accepted stop and cleanup proof.
+      if (String(object(JSON.parse(String(m.template))).os) !== 'android') throw new ServiceError('Lease recording is available for Android emulators only.', 409, { code: 'capability_unsupported' });
       this.insert(db, id, m, lease.credential!, request, lease.id, String(member), this.admit(db, m, lease.consumer));
       return { status: 201, body: present(db, row(db, id)) };
     });

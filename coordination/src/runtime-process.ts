@@ -186,6 +186,12 @@ export class LeaseGuard {
     if (!record || object(record.machine.lease).id !== identifier(leaseId) || !this.allowed(id)) throw new ServiceError("Leased execution is unauthorized.", 410);
     if (!record.executionStarted) { record.executionStarted = true; this.save(); }
   }
+  /** A claimed warm pool device already ran under this assignment before its lease existed, so
+   * its cleanup needs stop and removal proof and must never take the never-started path. */
+  markStarted(id: string, leaseId: string): void {
+    const record = this.records.get(identifier(id));
+    if (record && object(record.machine.lease).id === identifier(leaseId) && !record.executionStarted) { record.executionStarted = true; this.save(); }
+  }
   neverStarted(id: string, leaseId: string): boolean { const r = this.records.get(identifier(id)); return !!r && object(r.machine.lease).id === identifier(leaseId) && !r.executionStarted; }
   authorization(id: string, leaseId: string): LeaseAuthorization {
     const record = this.records.get(identifier(id));
@@ -565,6 +571,8 @@ export interface LeaseCleanupOptions {
   storageOwned?(storage: string): boolean;
 }
 /** External intent survives assignment credential erasure; only positive proofs complete it. */
+/** The blocked-cleanup reasons the controller's lifecycle contract accepts. */
+const CLEANUP_REASONS = new Set(["execution_pending", "operations_pending", "sessions_pending", "ownership", "storage_removal", "credential_erasure", "unsupported", "recovery"]);
 export async function cleanupLease(options: LeaseCleanupOptions): Promise<RecordValue> {
   const { machine, folder, guard } = options, id = identifier(machine.id), lease = object(machine.lease), intent = object(machine.leaseCleanup), request = identifier(intent.id);
   if (identifier(intent.leaseId) !== identifier(lease.id) || !["released", "expired", "failed"].includes(String(lease.state)) || machine.desired !== "stopped") throw new ServiceError("Cleanup requires its terminal pinned lease and stopped intent.", 409);
@@ -644,7 +652,11 @@ export async function cleanupLease(options: LeaseCleanupOptions): Promise<Record
         return report("complete");
       }, { exclusive: true });
     } catch (error) {
-      const reason = error instanceof ServiceError ? error.code === "assignment_busy" ? "operations_pending" : error.code : "recovery";
+      // The controller accepts only its bounded reasons. A missing capability is `unsupported`
+      // and any other provider error is `recovery`, so one blocked cleanup can never make the
+      // whole heartbeat invalid.
+      const code = error instanceof ServiceError ? ({ assignment_busy: "operations_pending", capability_unsupported: "unsupported" } as Record<string, string>)[error.code] ?? error.code : "recovery";
+      const reason = CLEANUP_REASONS.has(code) ? code : "recovery";
       proof.reason = reason; saveRecord(receipt, proof); return report("blocked", reason);
     }
   } finally { lock.close(); }

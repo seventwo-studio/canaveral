@@ -49,6 +49,11 @@ Administrative paths are:
 | `POST /v1/consumers/{id}/credential` | Rotate credential; body `{}`; previous application credential stops working |
 | `POST /v1/consumers/{id}/revoke` | Revoke identity; body `{}`; cannot reactivate by rotation |
 
+A template can pin a [device baseline](warm-pool-and-baselines.md#an-explicit-operator-choice):
+a prepared device state that carries whatever its preparer installed or signed in to.
+Allowlisting such a template is the only way an application reaches that state, and its
+catalogue entry shows the `baseline` name, revision and digest.
+
 The application credential authorizes `GET /v1/environments/templates` and the
 [implemented lease lifecycle subset](leases.md). Catalogue entries include pinned
 capabilities and availability; availability requires an online, healthy host that
@@ -57,11 +62,25 @@ remain unavailable for consumer placement until deadline enforcement and owned
 cleanup are implemented. A catalogue capability is a template contract, not proof
 that a particular machine is ready or that an unimplemented platform adapter works.
 
+An entry with `isolation: "shared-host"` is an iOS simulator template. A lease of it runs as
+ordinary processes of the Mac host's user and is not isolated from that host; allowlist it
+only for applications that run trusted code. See
+[iOS simulator leases](mobile-control.md#ios-simulator-leases).
+
 Revocation invalidates application and subordinate lease authorization. Active
 leases transition to released with cleanup pending on the controller's next
 transaction. Host reservations remain until positive reclamation. Credential
 rotation changes only the application credential; rotate a lease credential at
 `POST /v1/leases/{id}/credential` to invalidate its previous scoped key.
+
+`limits.tunnelsPerLease` is an optional integer from 0 to 8: the number of
+[port tunnels](mobile-control.md#lease-port-tunnels) one lease may hold at once. It
+defaults to 0, so a policy without it, including every policy stored before
+21 November 2026, permits no tunnels. Administrator and catalogue responses return it
+normalized. A tunnel also needs a host that declares `leaseTunnelProtocol`
+([lease eligibility](lease-eligibility.md#lease-tunnel-declaration)). Tunnels reserve no
+capacity and do not count against `resources`. The limit is part of the immutable policy:
+to allow tunnels for an existing application, create a replacement application.
 
 Current policy is immutable. To change an allowlist or limits, create a new
 application and revoke the old identity under an explicit migration plan. An

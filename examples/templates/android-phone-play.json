@@ -1,0 +1,12 @@
+{
+  "id": "android-phone-play",
+  "revision": "1",
+  "os": "android",
+  "arch": "arm64",
+  "mode": "device",
+  "minimum": {"cpu": 2, "memoryMiB": 2048, "diskGiB": 8},
+  "device": {
+    "systemImage": "system-images;android-36;google_apis_playstore;arm64-v8a",
+    "profile": "pixel_8"
+  }
+}

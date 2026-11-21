@@ -2,8 +2,13 @@
 
 Applications opt into `/v1/requests` when capacity may be full. `lease` requests for
 Android templates queue leased emulators on supervised Android hosts; see
-[Android emulator leases](mobile-control.md#android-emulator-leases). Direct lease
-acquisition is unchanged: it still returns 503 `capacity_unavailable`. LeaseState
+[Android emulator leases](mobile-control.md#android-emulator-leases). `lease` requests for
+iOS templates queue leased simulators the same way on macOS hosts that declare the
+`shared-host` isolation class; see
+[iOS simulator leases](mobile-control.md#ios-simulator-leases). Direct lease
+acquisition is unchanged: it still returns 503 `capacity_unavailable`, or 503
+`host_pressure` when the hosts that fit refuse placement under memory or disk pressure,
+which only a host whose operator opted in does. LeaseState
 has no waiting value. Application model calls join the same request model as
 [queued model calls](#queued-model-calls): `kind: "model-job"` requests share this
 envelope, replay, waiting cap, priority, deadline and cancellation, and every
@@ -17,8 +22,11 @@ it still fails when no host has capacity.
 | --- | --- |
 | POST /v1/requests | 201 for new intent; 200 for exact normalized replay |
 | GET /v1/requests | Own requests, at most 100, UUID `after` cursor and `nextCursor` |
-| GET /v1/requests/{id} | Current own request |
+| GET /v1/requests/{id} | Current own request; `?wait=N` holds the reply while it is still waiting ([position and waiting](#position-and-waiting)) |
 | POST /v1/requests/{id}/cancel | Empty object; cancel waiting or release admitted lease |
+
+The CLI maps these to `canaveral requests list|show|submit|cancel`. The
+[agent surfaces](agent-surfaces.md) submit `lease` requests for a caller and wait on them.
 
 Every route requires the application credential. Another application's UUID is
 404, including submission; scoped lease, host and administrator keys cannot act
@@ -35,6 +43,9 @@ UUID becomes the lease or model-job UUID. Do not use it for another direct acqui
 ## States and clocks
 
 `waiting` transitions to `admitted`, `cancelled`, `expired` or `rejected`.
+Each is a `request.*` [event](events.md), and a request that waits past a configured
+threshold raises `request.waiting_long` once. [Usage](usage.md) reports the outcomes
+and the wait from submission to admission.
 Only admission reserves resources. Waiting stores no credential and no placement.
 An admitted response has `target` equal to the lease UUID and `admittedAt`; inspect
 that lease for provisioning, runtime and cleanup. Cancellation after admission
@@ -97,6 +108,12 @@ wait, a scan cycle spans several passes and a request refused earlier in the cyc
 is next tried in the following cycle, so the guarantee holds per cycle, not per
 pass; see the scan continuation below.
 
+Admission runs before the [warm pool](warm-pool-and-baselines.md#waiting-requests-win)
+refills. A device lease request that capacity refused makes the pool give up the fewest
+warm devices that let it fit, and keeps its eligible hosts from being refilled while it
+waits. An admitted device lease takes over a ready warm device of its own image and size
+when there is one.
+
 A request whose attempt returns 429 or 503 is skipped for the current scan cycle,
 and so are the application's other waiting requests with the same normalized intent
 apart from UUID and name: they would meet the same limit or capacity, so they count
@@ -118,6 +135,72 @@ heartbeat and limits), identity-worker mutation completion (including approvals,
 release and reclamation), startup and a one-second timer trigger passes. SQLite
 serializes all ledger writers even when direct acquisitions use another worker.
 
+## Position and waiting
+
+Every request view carries `position`. While a `lease` or `linux-lease` request is
+`waiting`, it is the request's 1-based place in the order the controller would try
+the queue if every earlier attempt were admitted: applications take turns, least
+recently admitted first, and each turn offers that application's highest-priority,
+oldest request. It is `null` once the request is no longer waiting, once its
+deadline has passed, and for `model-job` requests, which runner claims admit per
+domain without a single order.
+
+Position is an order of attempts, not a promise:
+
+- A request that does not fit when tried is skipped, so a later position can be
+  admitted first. `reason` then carries the stable code of the last refusal, for
+  example `capacity_unavailable`.
+- A refused attempt does not cost its application its turn, so the application's
+  next request is tried in the same pass.
+- Position leaves out the pass's transient state, which changes every second.
+  When more than 256 requests wait, a pass resumes behind the requests it already
+  tried in the current scan cycle. When an application has used its 16 refused
+  attempts in a pass, its remaining requests are set aside behind everyone else's.
+  In both cases a pass tries a later position before an earlier one.
+- Positions move as other requests are admitted, cancelled, expired or submitted
+  with a higher priority. A request can move back as well as forward.
+- The number says how many other waiting requests come first. It reveals nothing
+  about whose they are or what they ask for.
+
+`GET /v1/requests/{id}?wait=N` holds the reply for up to `N` seconds, a whole
+number from 1 to 15, counted from the request's arrival. The controller answers as
+soon as it sees the request's `state`, `position` or `reason` change, and otherwise
+when the time is up. Either way the body is the ordinary view. A request that is
+not waiting is answered at once. The hold is one bounded read: to keep waiting,
+call again.
+
+- `wait` must be the only parameter. Other values, a repeated `wait`, another
+  parameter beside it, and `wait` on any other route return 400.
+- A held read never runs admission, including its first look. The one-second timer
+  and the existing triggers still own admission. The controller looks at every held
+  request once a second in one batched read and one transaction, so the cost of
+  looking does not grow with the number of waiters. A change is therefore seen
+  within about a second, and the view returned at the limit is at most about a
+  second old.
+- Every look checks the application credential and ownership again. Revoking the
+  application ends a hold with the ordinary 401.
+- At most 32 reads are held at once across the controller, and at most 4 by one
+  application credential, so one application cannot take every slot. A read beyond
+  either bound is refused with 429 `request_wait_limit`, `retryable: true` and
+  `Retry-After` set to the wait that was asked for. Pause for that long, or read
+  without `wait`; a plain read is never refused for this reason.
+- A held connection gets the wait plus the controller's usual 20-second idle
+  allowance. A proxy in front of the controller needs an idle limit above the wait
+  a client asks for.
+- A client that disconnects frees its slot at once.
+
+The SDK exposes the hold as `inspectRequest(id, { waitSeconds })`. It sends one
+request, validates the range, and refuses a wait that does not leave five seconds
+inside the client's own `timeoutMs`. The SDK still never polls or retries. A
+controller that predates held reads answers 400 to the parameter.
+
+Position and held reads have portable fixture coverage only. The order is checked
+against real admission passes over mixed applications, priorities and admission
+histories. The hold, its limits, a disconnect and revocation are checked against a
+controller process with its control worker, and the batching against a scripted
+control client. No native lease run exercised them, and the hold was not measured
+under a slow or busy control worker.
+
 Administrators set `limits.maxWaitingRequests` (default 100, maximum 1000) and
 `limits.maxRequestPriority` (default 0, range 0..1000000) when creating an
 application. Existing policies use these defaults. Priority may be negative down
@@ -136,7 +219,13 @@ after a lost response; never invent another UUID to resolve an uncertain outcome
 A waiting cap returns actionable 429 `request_waiting_limit`, with retryability
 and Retry-After. Cancel outstanding intent or wait before submitting more. This
 cap is distinct from admission quota: acquisition 429 and 503 leave intent waiting
-for a later pass. Other acquisition ServiceErrors reject only that request; the
+for a later pass. That includes a host that refuses placement under
+[memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure), which is an
+operator's opt-in per host (`pressure.gatePlacement`): when every host that fits a
+`lease` request is such a host and is pressured, or has no current pressure sample,
+the request stays `waiting` with `reason` `host_pressure` or `host_pressure_unknown`
+instead of `capacity_unavailable`, and is admitted once a host recovers. Waiting
+never stops or shrinks a lease that is already running there. Other acquisition ServiceErrors reject only that request; the
 stable code appears in `reason`. Missing or removed grants are permanent rejection.
 An unexpected failure inside one attempt rolls back only that attempt: the request
 stays `waiting` with reason `admission_error` and is tried again in a later round.
@@ -191,6 +280,9 @@ job state `waitingForResources`). The first job that fits is reserved on the dom
 physical ledger, assigned, and marked `admitted` with `target` equal to its UUID, all
 in the same transaction. Skipped jobs stay eligible; there is no aging. Waiting never
 preempts, shrinks or relocates a held reservation: priority only orders admission.
+The one exception is a [warm pool device](warm-pool-and-baselines.md#waiting-requests-win),
+which serves no consumer: a waiting request that capacity refused takes its capacity,
+after the device is stopped and removed with proof.
 
 `waiting` ends as `admitted`, `cancelled`, `expired` or `rejected`. A model call that
 ends without admission closes its job without execution: cancellation closes it as
@@ -278,6 +370,9 @@ const { request } = await client.submitRequest({
 });
 // Later, explicitly inspect; the SDK does not poll.
 const current = await client.inspectRequest(request.id);
+// Or hold one read until something changes, for at most 15 seconds.
+const next = await client.inspectRequest(request.id, { waitSeconds: 15 });
+if (next.state === "waiting") console.log(`position ${next.position}, last refusal ${next.reason}`);
 ```
 
 ### Queued model-call example

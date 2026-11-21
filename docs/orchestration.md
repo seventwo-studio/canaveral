@@ -17,6 +17,15 @@ and ownership; storing a role in an old token is not sufficient authorization.
 
 `coordination/src/sqlite.ts` provides synchronous `BEGIN IMMEDIATE` transactions
 through `node:sqlite`; asynchronous work must not escape a transaction callback.
+Transaction hooks run when an outer transaction begins and commit hooks just before
+it commits. The [event log](events.md) uses a commit hook to stamp and project the
+events that triggers wrote during the transaction, so a module that changes a ledger
+row needs no event code of its own. A new ledger table needs a trigger in
+`coordination/src/events.ts` to appear in the log. Capture triggers read the state
+columns of the ledger tables, and SQLite refuses to drop a column that a trigger
+reads. Adding a column needs nothing. A migration that drops or rewrites a captured
+column must call `dropEventTriggers` first; the control worker reinstalls capture
+after every module has migrated.
 Credential revalidation, owner checks, idempotent intent comparison and durable
 receipt updates belong at the protected effect boundary. Another owner's UUID
 must be hidden before comparing its request. New module tables do not imply a
@@ -40,9 +49,9 @@ The owner initializes separate administrator and enrollment tokens. Enrollment c
 
 Hosts advertise configured capacity and a catalogue of configured templates. The controller separately stores per-host CPU, memory and disk limits, initially set from enrollment capacity and editable through the host overview. Admission uses the smaller of the offered capacity and saved limit for each resource. These values control allocation, not an automatic measurement or hard ceiling on physical resource use. Template ID, revision and architecture identify an immutable contract; the controller rejects conflicting definitions. Retain older revisions on hosts while their VMs exist. Remote creation requests choose catalogue entries; the owner configures recipes, source URLs and image bindings separately through template files. Backend configuration and actual image paths remain local to the agent.
 
-Creation uses a caller-provided UUID as an idempotency key. The controller atomically chooses a fresh, accepting host with the matching template and architecture and enough reserved capacity. Placement minimizes the highest CPU, memory or disk reservation fraction after adding the request, using the smaller of physical capacity and configured limits. Total reservation fractions and then stable host IDs break ties. This ranks reservations rather than measured live utilization; it does not establish fair queueing between applications. Minimum resources and memory granularity come from the template. Explicit host pinning is supported. The same UUID and specification returns the existing placement; a different specification with that UUID is rejected.
+Creation uses a caller-provided UUID as an idempotency key. The controller atomically chooses a fresh, accepting host with the matching template and architecture and enough reserved capacity. Placement minimizes the highest CPU, memory or disk reservation fraction after adding the request, using the smaller of physical capacity and configured limits. Total reservation fractions and then stable host IDs break ties. This ranks reservations rather than measured live utilization; it does not establish fair queueing between applications. Hosts report [memory and disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure), which by default is shown and affects no placement. A host whose operator set `pressure.gatePlacement` is skipped while it is pressured or its pressure sample is stale or unreadable; when only such hosts fit, creation is refused with `host_pressure` or `host_pressure_unknown` instead of the capacity refusal. Minimum resources and memory granularity come from the template. Explicit host pinning is supported. The same UUID and specification returns the existing placement; a different specification with that UUID is rejected.
 
-Compute remains reserved until the requested state is stopped and the host confirms it is stopped. Disks stay reserved while the computer exists. A shutdown request alone does not release resources. Restart checks the original host's current availability and remaining capacity. Draining a host prevents new placement/restarts while continuing to deliver existing assignments; it does not evict VMs.
+Compute remains reserved until the requested state is stopped and the host confirms it is stopped. Disks stay reserved while the computer exists. A shutdown request alone does not release resources. Restart checks the original host's current availability and remaining capacity, and its pressure only where the operator set `pressure.gateRestart`. Draining a host prevents new placement/restarts while continuing to deliver existing assignments; it does not evict VMs. A pressure gate likewise withholds only the new placements or restarts it names.
 
 ## Reconciliation and failures
 
@@ -92,6 +101,14 @@ Administrator account sessions can also authorize inventory and lifecycle paths.
 | `POST /v1/machines/{id}/desired` | Request `running` or `stopped` |
 | `POST /v1/machines/{id}/operations` | Queue a mobile device control action with a stable UUID |
 | `GET /v1/operations/{id}` | Read a durable device action receipt and result |
+| `POST /v1/hosts/{host}/operations` | Queue a mobile [host operation](mobile-host-upkeep.md#host-operations): runtime list, install or remove, storage inspect or purge |
+| `GET /v1/hosts/{host}/operations`, `GET /v1/host-operations/{id}` | List a host's operations; read one receipt |
+| `POST /v1/host-operations/{id}/resolve` | Record an administrator's [decision](mobile-host-upkeep.md#settling-an-unknown-change) on a host operation that ended `unknown` |
+| `GET /v1/hosts/{host}/runtimes`, `GET /v1/hosts/{host}/upkeep` | Runtime inventory with its users; idle-stop and orphan dry run |
+| `GET /v1/admin/events`, `/v1/admin/events/stream` | Read or follow the durable [event log](events.md) |
+| `GET /v1/admin/usage` | [Usage](usage.md) over a time range, JSON or CSV |
+| `GET`/`POST /v1/admin/alerts/destinations` | Manage [alert](alerts.md) destinations |
+| `GET /v1/admin/diagnosis` | Read-only findings for [`canaveral doctor`](doctor.md) |
 
 Creation fields are `id`, `name`, `templateId`, optional resource overrides (`cpu`, `memoryMiB`, `diskGiB`), and optional `templateRevision`/`arch`/`hostId`. Defaults come from the selected template and are pinned on first creation. Choose a revision explicitly when multiple revisions can be placed. The returned machine includes its pinned template definition, host and desired/observed state. A heartbeat sends `offer` plus `reports`, a map from assignment UUID to `state`, optional `detail` and preparation receipt state. A host cannot report another host's assignment. The API never returns host or guest-preparation credential hashes.
 

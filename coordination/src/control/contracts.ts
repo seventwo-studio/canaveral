@@ -16,11 +16,16 @@ export interface ControlRequest {
   /** Resolve current credential status immediately before protected work. */
   principal(): Principal;
 }
-export interface ControlResponse { status?: number; body: unknown }
+/** `body` is JSON unless `contentType` is set, in which case it is text sent as given. */
+export interface ControlResponse { status?: number; body: unknown; contentType?: string }
 export interface ControlModule {
   handle(request: ControlRequest): ControlResponse | undefined | Promise<ControlResponse | undefined>;
 }
-export interface ControlOptions { adminToken: string; enrollmentToken?: string; controllerId: string; updatePublicKeys?: Record<string, string>; browserHosts?: string[] }
+export interface ControlOptions {
+  adminToken: string; enrollmentToken?: string; controllerId: string; updatePublicKeys?: Record<string, string>; browserHosts?: string[];
+  /** Validated by observabilitySettings; absent values take their defaults. */
+  observability?: Partial<import("../observability.ts").ObservabilitySettings>;
+}
 export type ModuleFactory = (store: SqliteStore, options: ControlOptions) => ControlModule;
 
 export function requireScope(request: Pick<ControlRequest, "principal">, action: "read" | "write" | "access" | "admin"): Principal {

@@ -46,6 +46,10 @@
       "types": "./coordination/dist/src/video-sdk.d.ts",
       "default": "./coordination/dist/src/video-sdk.js"
     },
+    "./tunnel-sdk": {
+      "types": "./coordination/dist/src/tunnel-sdk.d.ts",
+      "default": "./coordination/dist/src/tunnel-sdk.js"
+    },
     "./browser-sdk": {
       "types": "./coordination/dist/src/browser-sdk.d.ts",
       "default": "./coordination/dist/src/browser-sdk.js"

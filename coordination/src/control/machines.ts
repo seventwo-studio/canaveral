@@ -13,9 +13,12 @@ import { initializeLifecycle, isDeleted, computeReserved, deletion, hasPendingPo
 import { legacyJson, legacyDigest, normalizeTemplate } from "./templates.ts";
 import { initializeInfrastructure, claimSetup, healthReady, recordInfrastructure, recordHostImages } from "./infrastructure.ts";
 import { recordPreparation } from "./preparation.ts";
+import { initializePressure, pressureAdmission, pressureRefusal, pressureView, recordPressure } from "./pressure.ts";
+import type { PressureCode } from "./pressure.ts";
 import { reportImageTasks, assignedImageTasks, acknowledgedImages, validateCatalogueOffer } from "./images.ts";
 import { reportInferenceJobs, assignedInferenceJobs, INFERENCE_HOST_PROVIDERS } from "./inference.ts";
 import { blueprint, initializeBlueprints } from "./blueprints.ts";
+import { baselineUsable, pendingBaselineSave, requireNotPooled } from "./pool-ledger.ts";
 
 import { PhysicalDomains, physicalBudget, physicalMapping } from "../physical-domains.ts";
 
@@ -70,12 +73,28 @@ export function machineImageRuntime(host: Json, image: Json): string {
   if (!names.includes(name) || !systems[name]?.includes(image.os)) failure("Image operating system is incompatible with its enabled runtime.");
   return name;
 }
+/** The isolation class of an iOS simulator lease. A simulator app is an ordinary process of the
+ * Mac host's user, so the lease is not fenced from its host (owner decision, 21 November 2026). */
+export const SHARED_HOST_ISOLATION = "shared-host";
+/** The exact selector a host must advertise before this image can be leased on it. An iOS
+ * selector carries the explicit shared-host declaration, so one without it never matches;
+ * the controller applies the same gate as the host and has no default for it. */
+export function leaseImageReference(host: Json, image: Json): Json {
+  const runtime = machineImageRuntime(host, image);
+  return { id: image.id, revision: image.revision, arch: image.arch, runtime, ...(runtime === "ios" ? { isolation: SHARED_HOST_ISOLATION } : {}) };
+}
 export function machineLeaseEligible(host: Json, image: Json): boolean {
   if (host.leaseProtocol !== 1 || !Array.isArray(host.templates) || !host.templates.some((offered: Json) => equal(offered, image)) || !Array.isArray(host.leaseImages)) return false;
   try {
-    const reference = { id: image.id, revision: image.revision, arch: image.arch, runtime: machineImageRuntime(host, image) };
+    const reference = leaseImageReference(host, image);
     return host.leaseImages.some((entry: Json) => equal(entry, reference));
   } catch (error) { if (error instanceof ServiceError) return false; throw error; }
+}
+/** The size a request gets from an image, or undefined when it breaks the image's minimum or its
+ * memory step. One rule for admission and for anything that predicts an admission. */
+export function placementSize(image: Json, overrides: Partial<Resources>, preset?: { minimum: Resources; defaults: Resources } | null): Resources | undefined {
+  const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...overrides };
+  return size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key]) ? size : undefined;
 }
 export function validateOffer(value: unknown): Json {
   const input = object(value);
@@ -101,13 +120,31 @@ export function validateOffer(value: unknown): Json {
     if (!Array.isArray(images) || images.length > 100) failure("Lease images must explicitly list at most 100 installed image/runtime identities.");
     const seen = new Set<string>();
     result.leaseImages = (images as unknown[]).map(value => {
-      const entry = object(value); fields(entry, ["id", "revision", "arch", "runtime"]);
+      const entry = object(value); fields(entry, ["id", "revision", "arch", "runtime", "isolation"]);
       for (const key of ["id", "revision", "arch", "runtime"]) text(entry[key], `lease image ${key}`);
+      // Only an iOS selector declares an isolation class, and it must be exactly shared-host.
+      if (entry.runtime === "ios" ? entry.isolation !== SHARED_HOST_ISOLATION : "isolation" in entry) failure("An iOS lease image must declare the shared-host isolation class; no other runtime may declare one.");
       const identity = pythonJson([entry.id, entry.revision, entry.arch]);
       const image = result.templates.find((image: Json) => equal([image.id, image.revision, image.arch], [entry.id, entry.revision, entry.arch]));
       if (seen.has(identity) || !image || entry.runtime !== machineImageRuntime(result, image)) failure("Lease image must uniquely match an installed image and its configured runtime.");
       seen.add(identity); return entry;
     }).sort((a: Json, b: Json) => { for (const key of ["id", "revision", "arch", "runtime"]) { if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1; } return 0; });
+  }
+  // Lease port tunnels are a separate, explicit declaration on top of lease execution.
+  if ("leaseTunnelProtocol" in input) {
+    if (input.leaseTunnelProtocol !== 1 || result.leaseProtocol !== 1) failure("Lease tunnels require lease execution protocol 1 and tunnel protocol 1.");
+    // An account-owned emulator launches without the lease isolation arguments and can reach the
+    // host's adb server, and through it a leased device's tunnelled port. A host that declares
+    // tunnels therefore offers Android templates for leases only.
+    if (result.templates.some((image: Json) => image.os === "android" && !result.leaseImages.some((entry: Json) => equal([entry.id, entry.revision, entry.arch], [image.id, image.revision, image.arch])))) failure("A host that declares lease tunnels may offer only leased Android templates.");
+    result.leaseTunnelProtocol = 1;
+  }
+  // A host's own opt-in and bounds for warm devices; meaningful only with lease execution.
+  if ("warmPool" in input) {
+    const pool = object(input.warmPool); fields(pool, ["maxDevices", "maxAgeSeconds"]);
+    if (result.leaseProtocol !== 1) failure("Warm devices require lease execution.");
+    result.warmPool = { maxDevices: integer(pool.maxDevices, "warm device limit", 64), maxAgeSeconds: integer(pool.maxAgeSeconds, "warm maximum age", 86400) };
+    if (result.warmPool.maxAgeSeconds < 60) failure("Invalid warm maximum age.");
   }
   if ("inference" in input) {
     if (!INFERENCE_HOST_PROVIDERS.includes(result.provider)) failure("Embedded inference requires a native Mac or Linux host.");
@@ -207,6 +244,8 @@ export interface MachineHooks {
   afterHeartbeat?(db: DatabaseSync, hostId: string, body: Json): void;
   assignment?(db: DatabaseSync, machine: Json, forHost: boolean): Json;
   heartbeatResponse?(db: DatabaseSync, hostId: string, body: Json): Json;
+  /** An owner or administrator changed a machine's desired state through the machine API. */
+  desiredChanged?(db: DatabaseSync, machineId: string, state: "running" | "stopped"): void;
   /** SQL SELECT returning cpu, memoryMiB, diskGiB; one positional host parameter.
    * Required for mapped hosts; use a stable id across restarts. */
   additionalReservationsSql?: { id: string; query: string };
@@ -232,7 +271,7 @@ export class MachineStore implements ControlModule {
     this.leaseSeconds = settings.leaseSeconds ?? 30;
     if (options.enrollmentToken !== undefined && secureEqual(options.adminToken, options.enrollmentToken)) failure("Admin and enrollment credentials must be different.");
     for (const hook of settings.hooks ?? []) registerMachineHooks(store, hook);
-    store.transaction(db => { initializeMachines(db); initializeLifecycle(db); initializeInfrastructure(db); PhysicalDomains.schema(db); });
+    store.transaction(db => { initializeMachines(db); initializeLifecycle(db); initializeInfrastructure(db); initializePressure(db); PhysicalDomains.schema(db); });
     this.maintenance = maintenance.get(store) ?? new HostMaintenance(store, options.browserHosts);
     maintenance.set(store, this.maintenance);
   }
@@ -373,7 +412,8 @@ export class MachineStore implements ControlModule {
             ...(offer.inference || (physical && table(db, "model_runner_approvals")
               && db.prepare("SELECT 1 FROM model_runner_approvals WHERE domain=? AND revoked=0").get(physical.domainId)) ? ["inference"] : []),
             ...(offer.provider === "macos" && this.options.browserHosts?.includes(String(row.id)) ? ["browser"] : []),
-          ], placementReady: online && Boolean(row.enabled) && this.healthReady(db, String(row.id)),
+          ], placementReady: online && Boolean(row.enabled) && this.healthReady(db, String(row.id)) && !pressureAdmission(db, String(row.id), this.store.clock()).blocked,
+          pressure: pressureView(db, String(row.id), this.store.clock()),
           usage: sample ? { ...JSON.parse(String(sample.report)), receivedAt: sample.captured, fresh: online && this.store.clock() - Number(sample.captured) < 30 } : null,
           available: this.remainingCapacity(db, String(row.id)), limits, overcommitted: resourceKeys.some(key => reserved[key] > (physical?.capacity[key] ?? Math.min(offer.capacity[key], limits[key]))) };
       });
@@ -387,7 +427,7 @@ export class MachineStore implements ControlModule {
         if (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!)) continue;
         const online = this.store.clock() - Number(host.seen) < this.leaseSeconds;
         const offer = persistedOffer(host.offer); if (!offer) continue;
-        for (const image of offer.templates) result.push({ ...image, hostId: host.id, online, accepting: online && Boolean(host.enabled) && this.healthReady(db, String(host.id)) });
+        for (const image of offer.templates) result.push({ ...image, hostId: host.id, online, accepting: online && Boolean(host.enabled) && this.healthReady(db, String(host.id)) && !pressureAdmission(db, String(host.id), this.store.clock()).blocked });
       }
       return result;
     });
@@ -410,12 +450,13 @@ export class MachineStore implements ControlModule {
         const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(old.host!);
         return this.machine(db, old, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
       }
-      return this.createMachine(db, request, false, principal.kind === "operator" ? null : principal.user?.id ?? null);
+      // A baseline carries its preparer's data, so only an administrator makes an account-owned device from one.
+      return this.createMachine(db, request, false, principal.kind === "operator" ? null : principal.user?.id ?? null, principal.kind === "operator" || principal.user?.role === "admin");
     });
   }
   /** Transaction-local admission for generic leases. Caller authenticates the lease/application
    * and pins its member row in this same transaction. A lease never acquires user ownership. */
-  createMachine(db: DatabaseSync, value: Json, leased = false, ownerId: string | null = null): Json {
+  createMachine(db: DatabaseSync, value: Json, leased = false, ownerId: string | null = null, baselines = leased): Json {
     if (!db.isTransaction) throw new TypeError("Machine admission requires the caller transaction.");
     const request = validateMachineRequest(value), id = request.id;
     if (leased && ownerId !== null) failure("Leased machines cannot acquire human ownership.", 409);
@@ -429,27 +470,54 @@ export class MachineStore implements ControlModule {
     if (leased && request.blueprintId) failure("Application leases require their approved image policy, not a machine blueprint.", 400);
     if (request.hostId) requireHostAdmission(db, request.hostId);
     const preset = request.blueprintId ? blueprint(db, request.blueprintId, request.blueprintRevision) : null;
-    const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
-    for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
-      if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
-      const advertised = persistedOffer(host.offer); if (!advertised) continue;
-      const used = this.used(db, String(host.id)), remaining = this.remainingCapacity(db, String(host.id));
-      const limits = this.limits(db, host);
-      const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
-      for (const image of advertised.templates) {
-        if (leased && !machineLeaseEligible(advertised, image)) continue;
-        if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
-        const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
-        if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
-      }
-    }
+    const candidates = this.placements(db, request, leased, baselines, preset);
     if (!candidates.length) failure("No online accepting host offers this template and enough unreserved capacity.", 409);
     if (!preset && !request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
-    candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
     const selected = candidates[0]!;
 
     db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, ...(preset ? { templateId: selected.image.id, templateRevision: selected.image.revision, arch: selected.image.arch } : {}), resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);
     return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, true);
+  }
+  /** Every host and image that would take this validated request, best first. This is the one
+   * placement rule: host health, admission and eligibility, the image's minimum and memory step, a
+   * usable baseline of the right data size, and unreserved capacity. Admission calls it as it is.
+   * `spare` asks what would be placed if a host had that much more (or less) unreserved capacity,
+   * for predicting an admission; it never changes what admission itself decides. */
+  placements(db: DatabaseSync, request: Json, leased: boolean, baselines: boolean, preset: { image: Json; minimum: Resources; defaults: Resources } | null = null, spare?: (hostId: string) => Resources): { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] {
+    const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
+    // Hosts that would have fitted but whose operator gates placement on pressure, and that are
+    // under memory or disk pressure or have no current sample.
+    const pressured = new Set<PressureCode>();
+    for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
+      if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
+      const advertised = persistedOffer(host.offer); if (!advertised) continue;
+      const reserved = this.used(db, String(host.id)), remaining = { ...this.remainingCapacity(db, String(host.id)) }, extra = spare?.(String(host.id));
+      // A prediction treats the spare capacity as no longer reserved, for the fit and for the score alike.
+      const used = extra ? Object.fromEntries(resourceKeys.map(key => [key, Math.max(0, reserved[key] - extra[key])])) as unknown as Resources : reserved;
+      if (extra) for (const key of resourceKeys) remaining[key] += extra[key];
+      const limits = this.limits(db, host), pressure = pressureAdmission(db, String(host.id), this.store.clock());
+      const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
+      for (const image of advertised.templates) {
+        if (leased && !machineLeaseEligible(advertised, image)) continue;
+        // No account-owned emulator runs beside tunnelled leases (see validateOffer).
+        if (!leased && advertised.leaseTunnelProtocol === 1 && image.os === "android") continue;
+        if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
+        const size = placementSize(image, request.resources, preset);
+        if (!size) continue;
+        // A baseline-backed image is placed only where the host stores that exact, unstale baseline,
+        // saved with the data size this device would get. Leases reach it through their application's
+        // allowlist; other callers need administrator authority.
+        if (image.baseline && (!baselines || !baselineUsable(db, String(host.id), image, size.diskGiB))) continue;
+        if (!resourceKeys.every(key => size[key] <= remaining[key])) continue;
+        if (pressure.blocked) { pressured.add(pressure.code!); continue; }
+        // Admission scores every fitting candidate as before. A prediction on an overcommitted host
+        // can pass the clamped fit and still not be a valid reservation; it is then no candidate.
+        if (!extra) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
+        else try { candidates.push({ score: placementScore(capacity, used, size), host, image, size }); } catch (error) { if (!(error instanceof ServiceError)) throw error; }
+      }
+    }
+    if (!spare && !candidates.length && pressured.size) throw pressureRefusal(pressured, 409);
+    return candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
   }
   enable(id: string, enabled: unknown, req: ControlRequest): Json {
     return this.transaction(db => {
@@ -465,16 +533,22 @@ export class MachineStore implements ControlModule {
       if (state !== "running" && state !== "stopped") failure("Desired state must be running or stopped.");
       if (deletion(db, id)) failure("A machine with a deletion intent cannot change desired state.", 409);
       if (record(db, "lease_members", id)) failure("Lease-owned machines use lease lifecycle actions.", 409);
+      requireNotPooled(db, id);
+      if (state === "running" && pendingBaselineSave(db, id)) failure("Resolve the pending baseline save before restarting this device.", 409);
       if (state === "running" && row.desired !== "running") {
         requireHostAdmission(db, String(row.host));
         if (hasPendingPowerOff(db, id)) failure("Resolve the pending power-off intent before restarting.", 409);
         if (table(db, "image_tasks") && db.prepare("SELECT 1 FROM image_tasks WHERE machine=? AND state IN ('queued','running','unknown')").get(id)) failure("Resolve the pending image capture before restarting this machine.", 409);
         const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(row.host!);
         if (!host || !persistedOffer(host.offer) || !host.enabled || !this.healthReady(db, String(row.host)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds) failure("Assigned host is offline or draining.", 409);
+        // Refused only when this host's operator opted into gating restarts on pressure.
+        const pressure = pressureAdmission(db, String(row.host), this.store.clock(), "restart");
+        if (pressure.blocked) throw pressureRefusal(new Set([pressure.code!]), 409);
         const remaining = this.remainingCapacity(db, String(row.host), id), size = machineResources(JSON.parse(String(row.request)).resources);
         if (!resourceKeys.every(key => size[key] <= remaining[key])) failure("Assigned host has insufficient unreserved capacity to restart.", 409);
       }
       db.prepare("UPDATE machines SET desired=? WHERE id=?").run(String(state), id);
+      for (const hook of this.hooks) hook.desiredChanged?.(db, id, state as "running" | "stopped");
       const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(row.host!);
       return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
     });
@@ -502,6 +576,8 @@ export class MachineStore implements ControlModule {
         if (extension != null && !(typeof extension === "object" && Object.keys(extension).length === 0) && !knownHeartbeatFields.has(field)) failure(`Heartbeat extension ${field} has no registered controller handler.`, 503);
       }
       let extra: Json = { checksRequestedAt: recordInfrastructure(db, id, value, this.store.clock()) };
+      // Recorded before any admission in this transaction reads it.
+      recordPressure(db, id, value.pressure, this.store.clock());
       recordHostImages(db, id, value.installedImages, this.store.clock(), (db, hostId, templates) => validateCatalogueOffer(db, hostId, { templates }));
       if (table(db, "image_tasks") && !this.hooks.some(h => h.heartbeatFields?.includes("imageReports"))) reportImageTasks(db, id, value.imageReports ?? {}, this.store.clock());
       validateCatalogueOffer(db, id, proposed);

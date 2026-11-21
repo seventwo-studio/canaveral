@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { identifier } from "../consumers.ts";
 import { object, ServiceError } from "../errors.ts";
 import { LIVE_HOST_END_REASONS, MAX_LIVE_INIT_BYTES, MAX_LIVE_SEGMENT_BYTES } from "../mobile-live.ts";
+import { TUNNEL_RESET_REASONS, TUNNEL_WINDOW_BYTES } from "../tunnel-relay.ts";
 
 export const SESSION_PROTOCOL = "canaveral-session-v1";
 export const MAX_CONTROL_BYTES = 16_384;
@@ -10,7 +11,7 @@ export const INSPECTION_SCHEMA = "canaveral-accessibility-v1";
 export const MAX_INSPECTION_BYTES = 6 * 1_048_576;
 export const MAX_INSPECTION_NODES = 2_000;
 export type SessionCapability = "pty" | "display" | "upload" | "download" | "accessibility";
-export type RelayCapability = SessionCapability | 'video' | 'live';
+export type RelayCapability = SessionCapability | 'video' | 'live' | 'tunnel';
 export type SessionSide = "host" | "consumer";
 export type SessionMessage = Record<string, unknown> | Uint8Array;
 export interface SessionChannel {
@@ -52,6 +53,8 @@ export function encodeControl(value: unknown): string {
 export function validateRelayMessage(capability: RelayCapability, side: SessionSide, data: Uint8Array, binary: boolean): SessionMessage {
   if (data.byteLength > (binary ? MAX_BINARY_BYTES : MAX_CONTROL_BYTES)) throw new ServiceError("Session message exceeds its budget.", 400);
   if (binary) {
+    // Tunnel bytes flow both ways: a four-byte stream number and at least one payload byte.
+    if (capability === 'tunnel' && data.byteLength < 5) throw new ServiceError("Tunnel data needs a stream number and payload.", 400);
     if ((capability === "pty" && side === "consumer") || (capability === "upload" && side === "host") ||
         ((capability === "download" || capability === "accessibility" || capability === 'video' || capability === 'live') && side === "consumer"))
       throw new ServiceError("Binary payload is not valid in this session direction.", 400);
@@ -97,12 +100,46 @@ export function validateRelayMessage(capability: RelayCapability, side: SessionS
       if (typeof v.code !== 'string' || !Object.hasOwn(WORKER_MESSAGES, v.code) || typeof v.message !== 'string' || v.outcome !== 'unknown') throw new ServiceError('Invalid live worker error.', 400);
     } else throw new ServiceError('Invalid live control.', 400);
   }
+  if (capability === 'tunnel') tunnelControl(value, side);
   return value;
+}
+/** Tunnel controls carry stream numbers only. No control names a destination, so neither peer
+ * can steer the other's endpoint; which side may open streams is checked by the broker. */
+function tunnelControl(value: Record<string, unknown>, side: SessionSide): void {
+  const invalid = (): never => { throw new ServiceError('Invalid tunnel control.', 400); };
+  const stream = (v: Record<string, unknown>): void => { if (!Number.isSafeInteger(v.stream) || Number(v.stream) < 1 || Number(v.stream) > 0xffff_ffff) invalid(); };
+  switch (value.type) {
+    case 'tunnel': {
+      const v = exact(value, ['type', 'direction', 'devicePort']);
+      if (side !== 'host' || !['reverse', 'forward'].includes(v.direction as string) || !Number.isSafeInteger(v.devicePort) || Number(v.devicePort) < 1 || Number(v.devicePort) > 65535) invalid();
+      return;
+    }
+    case 'error': {
+      const v = exact(value, ['type', 'code', 'message', 'outcome']);
+      if (side !== 'host' || typeof v.code !== 'string' || !Object.hasOwn(WORKER_MESSAGES, v.code) || typeof v.message !== 'string' || v.outcome !== 'unknown') invalid();
+      return;
+    }
+    case 'open': case 'accept': case 'end': stream(exact(value, ['type', 'stream'])); return;
+    case 'credit': {
+      const v = exact(value, ['type', 'stream', 'bytes']); stream(v);
+      if (!Number.isSafeInteger(v.bytes) || Number(v.bytes) < 1 || Number(v.bytes) > TUNNEL_WINDOW_BYTES) invalid();
+      return;
+    }
+    case 'reset': {
+      const v = exact(value, ['type', 'stream', 'reason']); stream(v);
+      if (!(TUNNEL_RESET_REASONS as readonly unknown[]).includes(v.reason)) invalid();
+      return;
+    }
+    default: invalid();
+  }
 }
 export const WORKER_MESSAGES: Readonly<Record<string, string>> = {
   capability_unsupported: "This worker does not support the requested access capability. Inspect the session before choosing another environment.",
   session_incomplete: "Access ended without confirmed completion. Inspect before retrying.",
   upload_publication_uncertain: "Upload publication may have occurred. Inspect the destination before retrying.",
+  tunnel_mapping_failed: "The device port mapping could not be created; the device port may be in use. Inspect the tunnel before opening another.",
+  tunnel_mapping_lost: "The device port mapping disappeared, for example because the adb server or the device transport restarted. The tunnel ended; open a new one.",
+  tunnel_open_rate: "Connections kept arriving faster than the tunnel's open rate. The tunnel ended; open a new one once the client behaves.",
 };
 export function workerError(value: unknown, requestId?: string): (ServiceError & { requestId?: string }) | undefined {
   if (!value || typeof value !== "object" || (value as Record<string, unknown>).type !== "error") return undefined;

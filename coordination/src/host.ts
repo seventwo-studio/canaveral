@@ -1,6 +1,8 @@
 import { GuestHelperAccess } from "./control/sessions.ts";
 import { appArtifactSource } from './app-artifact-source.ts';
 import { captureNotRunning, markNotStaged } from './providers/mobile.ts';
+import type { WarmAuthorization } from './providers/mobile.ts';
+import { IOS_LEASE_ISOLATION } from './providers/ios.ts';
 import { serveMobileVideo } from './mobile-video.ts';
 import { LiveCaptureHub, LiveCaptureRefused } from './live-capture.ts';
 import type { LiveCaptureSource } from './live-capture.ts';
@@ -8,12 +10,12 @@ import { LIVE_FPS } from './mobile-live.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createSecureContext } from "node:tls";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setImmediate as yieldWork } from "node:timers/promises";
 import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
@@ -41,6 +43,14 @@ import { createInferenceExecutor } from "./inference-runtime.ts";
 import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
+import { TUNNEL_END_REASONS, TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
+import type { TunnelEndReason } from './tunnel-relay.ts';
+import { TunnelMappingError, tunnelStorageProblem } from './providers/android-tunnels.ts';
+import type { TunnelEndpoint, TunnelSpec } from './providers/android-tunnels.ts';
+import { WORKER_MESSAGES } from './control/session-protocol.ts';
+import { PressureMonitor, pressureConfig, readMemorySignal } from "./pressure.ts";
+import type { PressureGates, PressureReport, PressureSample } from "./pressure.ts";
+import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
@@ -72,12 +82,17 @@ export interface GuestAccess {
 }
 export interface HostDependencies {
   transport?: HostTransport; clock?: ExecutionClock;
+  /** The operating system the lease gate judges. Fixtures inject it in code; no configuration
+   * key or environment variable can change it. */
+  platform?: NodeJS.Platform;
   providerFactory?: (config: RecordValue, state: string) => NativeProvider | Promise<NativeProvider>;
   guest?: GuestAccess;
   inference?: HostTaskAdapter; images?: HostImageAdapter; sessions?: HostTaskAdapter;
   log?: (message: string) => void;
   /** Test seam: the length of one live capture run; production uses the native 180 seconds. */
   liveEpochSeconds?: number;
+  /** One raw memory and disk reading; fixtures script it instead of reading this machine. */
+  pressureSample?: () => Promise<PressureSample> | PressureSample;
 }
 interface Runtime extends NativeProvider {
   guestHelperBinding?(machine: RecordValue, image: RecordValue, folder: string, authority: OwnedGuestAuthority): Promise<GuestHelperBinding>;
@@ -93,10 +108,18 @@ interface Runtime extends NativeProvider {
   inspectInstall?(machine: RecordValue, image: RecordValue, args: RecordValue): Promise<RecordValue>;
   openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean, cleanupAuthorized?: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
   pipe?(argv: readonly string[]): Promise<import('./providers/mobile.ts').NativePipe>;
+  /** Installs one lease tunnel mapping. Throws TunnelMappingError once a mapping may exist; any other error means none was installed. */
+  openTunnel?(machine: RecordValue, image: RecordValue, folder: string, spec: TunnelSpec, authorized: () => boolean, onConnection: (socket: import('node:net').Socket) => void): Promise<TunnelEndpoint>;
+  tunnelMappingAbsent?(machine: RecordValue, image: RecordValue, spec: TunnelSpec, authorized: () => boolean): Promise<boolean>;
+  closeTunnels?(machine: RecordValue): Promise<void>;
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
   ownsStorage?(machine: RecordValue, image: RecordValue, storage: string): boolean;
+  settleClaim?(machine: RecordValue, image: RecordValue, folder: string): Promise<void>;
+  saveBaseline?(machine: RecordValue, image: RecordValue, folder: string, request: { id: string; name: string; revision: string }, authorized: () => boolean): Promise<RecordValue>;
+  removeBaseline?(request: { id: string; name: string; revision: string }): RecordValue;
+  baselineInventory?(): RecordValue[];
   sweep?(active: Set<string>): Promise<unknown>;
   close?(): Promise<unknown>;
   resourceProcesses?(machine: RecordValue, image: RecordValue, folder: string): Promise<unknown[]>;
@@ -106,6 +129,11 @@ interface Runtime extends NativeProvider {
   desktop?: GuestAccess["desktop"];
   closeShells?(machine: RecordValue): Promise<void>;
   resourceReport?(assignments: RecordValue[]): Promise<RecordValue>;
+  /** Mobile runtimes only: operator-requested runtime changes and orphan storage evidence. */
+  runtimeOperation?(kind: string, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport>;
+  orphanEvidence?(name: string): Promise<OrphanEvidence>;
+  purgeOrphan?(name: string, requestId: string, hostId: string | undefined): Promise<{ assignmentFingerprint: string | undefined; removed: OrphanRemoval[] }>;
+  strayDevices?(): Promise<{ name: string; machineId: string; kind: string }[]>;
 }
 interface DurableWork { fingerprint: string; state: string; report?: RecordValue }
 interface MaintenanceFence { drainId: string; challenge: string }
@@ -120,6 +148,26 @@ const NOT_IDLE = { idle: false, workloadsStopped: false };
 const MAX_HOST_MESSAGE = 8 * 1_048_576;
 const TERMINAL = new Set(["succeeded", "failed", "unknown", "cancelled"]);
 const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile", "leaseClockHelper"]);
+export interface IdleStopPolicy { defaultSeconds: number | null; templates: Record<string, number | null> }
+/** Operator idle-stop policy (`upkeep` in the host file): off unless set, for the host and
+ * optionally per template. The controller applies it; this host only advertises it. */
+export function upkeepPolicy(value: unknown, templateIds: readonly string[]): IdleStopPolicy {
+  if (value === undefined) return { defaultSeconds: null, templates: {} };
+  const input = object(value), invalid = (): never => { throw new ServiceError("Invalid upkeep configuration.", 400); };
+  if (Object.keys(input).some(key => key !== "idleStopSeconds" && key !== "templates")) invalid();
+  const seconds = (raw: unknown): number | null => {
+    if (raw === undefined || raw === null || raw === 0) return null;
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 300 || raw > 2_592_000) invalid();
+    return raw as number;
+  };
+  const templates: Record<string, number | null> = {};
+  for (const [id, entry] of Object.entries(object(input.templates ?? {}))) {
+    const settings = object(entry);
+    if (!templateIds.includes(id) || Object.keys(settings).some(key => key !== "idleStopSeconds")) invalid();
+    templates[id] = seconds(settings.idleStopSeconds);
+  }
+  return { defaultSeconds: seconds(input.idleStopSeconds), templates };
+}
 
 /** Bounded JSON HTTP, no redirects or ambient proxy, optional host-scoped trust bundle. */
 export function hostTransport(config: HostConfig): HostTransport {
@@ -164,26 +212,73 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-/** Only supervised Android emulators have independent native deadline enforcement and owned
- * cleanup. Every other runtime keeps refusing lease declarations, whatever the configuration. */
-export function leaseOffer(config: RecordValue): RecordValue {
-  if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
-  const refuse = (): never => { throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400); };
+/** Only supervised Android emulators and, by explicit operator opt-in, supervised iOS simulators
+ * have independent native deadline enforcement and owned cleanup. Every other runtime keeps
+ * refusing lease declarations, whatever the configuration.
+ *
+ * iOS (owner decision, 21 November 2026): a simulator app is an ordinary process of the Mac
+ * host's user, so a leased simulator is not fenced from the host. A host therefore advertises
+ * an iOS lease image only when that selector itself declares `isolation: "shared-host"`, on
+ * macOS, with the native supervisor and the lease's control companion configured. There is no
+ * default for the declaration and nothing outside this configuration can supply it. */
+export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+  if (!("leaseProtocol" in config) && !("leaseImages" in config)) {
+    if ("leaseTunnelProtocol" in config) throw new ServiceError("Lease tunnels require lease execution on this host.", 400);
+    if ("leaseWarmPool" in config) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
+    return {};
+  }
+  const refuse = (detail = "before native fencing and owned cleanup acceptance"): never => { throw new ServiceError(`This runner cannot advertise lease execution ${detail}.`, 400); };
   if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
   const provider = String(config.provider);
-  let android: unknown;
-  try { android = provider === "android" ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config).android : undefined; } catch { refuse(); }
+  const runtime = (kind: "android" | "ios"): RecordValue | undefined => {
+    try { const settings = provider === kind ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config)[kind] : undefined; return settings === undefined ? undefined : object(settings); }
+    catch { return refuse(); }
+  };
   const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
-  if (!android || !absolute(config.leaseClockHelper) || !absolute(object(android).leaseSupervisor) || !["darwin", "linux"].includes(process.platform)) refuse();
+  if (!absolute(config.leaseClockHelper)) refuse();
   const leaseImages = (config.leaseImages as unknown[]).map(value => {
-    const entry = object(value);
-    if (Object.keys(entry).sort().join() !== "arch,id,revision,runtime" || entry.runtime !== "android") refuse();
-    return { id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch"), runtime: "android" };
+    const entry = object(value), fields = Object.keys(entry).sort().join();
+    const identity = () => ({ id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch") });
+    if (entry.runtime === "android") {
+      if (fields !== "arch,id,revision,runtime" || !absolute(runtime("android")?.leaseSupervisor) || !["darwin", "linux"].includes(platform)) refuse();
+      return { ...identity(), runtime: "android" };
+    }
+    if (entry.runtime === "ios") {
+      const ios = runtime("ios");
+      if (fields !== "arch,id,isolation,revision,runtime" || entry.isolation !== IOS_LEASE_ISOLATION) refuse("for an iOS simulator without the explicit shared-host isolation declaration on its lease image");
+      if (!ios || !absolute(ios.leaseSupervisor) || !absolute(ios.idbCompanion) || ios.xcrun !== undefined && !absolute(ios.xcrun) || platform !== "darwin") refuse("for iOS simulators without macOS, the native lease supervisor and an absolute idbCompanion");
+      return { ...identity(), runtime: "ios", isolation: IOS_LEASE_ISOLATION };
+    }
+    return refuse();
   });
-  return { leaseProtocol: 1, leaseImages };
+  const offer: RecordValue = { leaseProtocol: 1, leaseImages };
+  // Lease port tunnels are off unless the operator declares them. Their host-side sockets live in
+  // each lease's private storage, so the storage path must fit a Unix socket address.
+  if (config.leaseTunnelProtocol !== undefined) {
+    if (config.leaseTunnelProtocol !== 1) throw new ServiceError("Unsupported lease tunnel protocol.", 400);
+    const android = runtime("android");
+    if (!android || !leaseImages.some(image => image.runtime === "android")) throw new ServiceError("Lease tunnels require an Android lease image on this host.", 400);
+    const root = typeof android.storage === "string" ? android.storage : typeof config.storage === "string" ? join(config.storage, "android") : undefined;
+    const problem = root === undefined ? "Lease tunnels need a configured Android storage path." : tunnelStorageProblem(root);
+    if (problem) throw new ServiceError(problem, 400);
+    offer.leaseTunnelProtocol = 1;
+  }
+  // Warm devices are an explicit host opt-in with the host's own bounds. The controller's targets
+  // can only be smaller; this runner refuses a warm assignment beyond them whatever it is sent.
+  if ("leaseWarmPool" in config) {
+    if (!leaseImages.some(image => image.runtime === "android")) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
+    const pool = object(config.leaseWarmPool), bound = (key: string, minimum: number, maximum: number): number => {
+      const value = pool[key];
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new ServiceError(`leaseWarmPool.${key} must be an integer from ${minimum} to ${maximum}.`, 400);
+      return value;
+    };
+    if (Object.keys(pool).sort().join() !== "maxAgeSeconds,maxDevices") throw new ServiceError("leaseWarmPool takes exactly maxDevices and maxAgeSeconds.", 400);
+    offer.warmPool = { maxDevices: bound("maxDevices", 1, 64), maxAgeSeconds: bound("maxAgeSeconds", 60, 86400) };
+  }
+  return offer;
 }
-export function hostOffer(config: RecordValue): RecordValue {
-  const leases = leaseOffer(config);
+export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+  const leases = leaseOffer(config, platform);
   const provider = text(config.provider, "provider");
   if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
@@ -198,7 +293,13 @@ export function hostOffer(config: RecordValue): RecordValue {
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
-  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === "android")) throw new ServiceError("Lease images must name offered Android templates.", 400);
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === entry.runtime)) throw new ServiceError(`Lease images must name offered ${entry.runtime === "ios" ? "iOS" : "Android"} templates.`, 400);
+  // An account-owned emulator launches without the lease isolation arguments, so it can reach this
+  // host's adb server and, through it, the device port of another lease's tunnel. A host that
+  // declares tunnels therefore offers Android templates for leases only, and refuses to start.
+  if (leases.leaseTunnelProtocol === 1 && templates.some(t => t.os === "android" && !((leases.leaseImages ?? []) as RecordValue[]).some(entry => entry.id === t.id && entry.revision === t.revision && entry.arch === t.arch))) {
+    throw new ServiceError("A host that declares lease tunnels may offer only leased Android templates; move account-owned Android devices to another host.", 400);
+  }
   Object.assign(offer, leases);
   // An inference adapter must provide its validated public catalogue explicitly;
   // executable paths, model directories and resource guard settings stay private.
@@ -225,13 +326,33 @@ export class HostRunner {
   readonly inferenceReports = new Map<string, RecordValue>();
   readonly imageReports = new Map<string, RecordValue>();
   readonly sessionReports = new Map<string, RecordValue>();
+  readonly baselineReports = new Map<string, RecordValue>();
+  /** Each warm hold's fixed deadline on this runner's clock. It only ever shortens. */
+  private readonly warmHolds = new Map<string, { hold: string; deadline: number }>();
+  /** Public view of the baselines stored on this host, refreshed outside the heartbeat path. */
+  private baselines: RecordValue[] | undefined;
+  readonly hostOperationReports = new Map<string, RecordValue>();
   readonly runtimes = new Map<string, Runtime>();
   readonly transport: HostTransport;
   identity: { id: string; credential: string; orchestrator: string } | undefined;
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], live: [], liveCaptures: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], baselines: [], hostOperations: [], tunnels: [], live: [], liveCaptures: [] };
+  /** Running upkeep operations by lane: one runtime change per platform, one storage operation. */
+  private readonly upkeepLanes = new Map<string, string>();
+  /** Devices that had host-visible work since the last delivered heartbeat, so that work shorter
+   * than one heartbeat still counts as activity. */
+  private readonly recentlyBusy = new Set<string>();
+  readonly idlePolicy: IdleStopPolicy;
+  private pressureMonitor: PressureMonitor | undefined;
+  /** Off unless the operator opted in: by default pressure is reported, never enforced. */
+  private readonly pressureGates: PressureGates;
+  pressureReport: PressureReport | undefined;
+  /** Running lease tunnels by tunnel id, and when an unconfirmed mapping removal is next rechecked. */
+  private readonly tunnelMachines = new Map<string, string>();
+  private readonly tunnelRetry = new Map<string, number>();
+  private readonly tunnelAuthority = new Map<string, { at: number; allowed: boolean }>();
   /** Live views are attached once per identity; a refused or ended attachment is not retried. */
   private readonly liveAttempts = new Set<string>();
   private readonly liveAuthority = new Map<string, { at: number; value: boolean }>();
@@ -330,14 +451,14 @@ export class HostRunner {
   private updateAssignments = new Map<string, RecordValue>();
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     // Validate trust before writing identity, even with an injected transport.
-    const transport = hostTransport(config);
-    leaseOffer(config);
+    const transport = hostTransport(config), platform = dependencies.platform ?? process.platform;
+    leaseOffer(config, platform);
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir); privateDirectory(this.state);
     this.library = new ImageLibrary(this.state);
     this.config.templates = [...recordsWithoutIds(config.templates), ...this.library.definitions()];
-    this.offer = hostOffer(this.config);
+    this.offer = hostOffer(this.config, platform);
     this.imageAdapter = dependencies.images ?? {
       execute: (task, context) => this.imageWork(task, context),
       importImage: (metadata, source, size, authorized) => this.importImage(metadata, source, size, authorized),
@@ -348,6 +469,15 @@ export class HostRunner {
     if (!Number.isFinite(this.pollInterval) || this.pollInterval < .25 || this.pollInterval > 5 || !Number.isSafeInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 32) throw new ServiceError("Invalid host poll interval or concurrency.", 400);
     this.clock = clock;
     this.guard = new LeaseGuard(this.state, this.clock);
+    this.idlePolicy = upkeepPolicy(config.upkeep, (this.config.templates as RecordValue[]).map(template => String(template.id)));
+    const pressure = pressureConfig(config.pressure);
+    this.pressureGates = pressure.gates;
+    if (this.config.provider === "kubevirt" && (pressure.gates.placement || pressure.gates.restart)) throw new ServiceError("A KubeVirt pool reports no host pressure and cannot gate on it.", 400);
+    // A KubeVirt pool runner measures its own pod, not the cluster's nodes, so it reports no pressure.
+    if (this.config.provider !== "kubevirt") {
+      if (pressure.enabled) this.pressureMonitor = new PressureMonitor(pressure.thresholds);
+      else this.pressureReport = { version: 1, state: "disabled", sampledAt: clock.wall() };
+    }
     this.transport = dependencies.transport ?? transport; this.log = dependencies.log ?? (() => {}); this.guest = dependencies.guest;
     this.loadReports();
     const retained = join(this.state, "update-assignments.json");
@@ -357,12 +487,12 @@ export class HostRunner {
     const path = join(this.state, "host-reports.json");
     if (!present(path)) return;
     const saved = readRecord(path, 16 * 1_048_576);
-    for (const [name, target] of [["machines", this.reports], ["device", this.deviceReports], ["inference", this.inferenceReports], ["images", this.imageReports], ["sessions", this.sessionReports]] as const) {
+    for (const [name, target] of [["machines", this.reports], ["device", this.deviceReports], ["inference", this.inferenceReports], ["images", this.imageReports], ["sessions", this.sessionReports], ["baselines", this.baselineReports], ["hostOperations", this.hostOperationReports]] as const) {
       for (const [id, report] of Object.entries(object(saved[name] ?? {}))) target.set(identifier(id), object(report));
     }
   }
   private saveReports(): void {
-    saveRecord(join(this.state, "host-reports.json"), { machines: Object.fromEntries(this.reports), device: Object.fromEntries(this.deviceReports), inference: Object.fromEntries(this.inferenceReports), images: Object.fromEntries(this.imageReports), sessions: Object.fromEntries(this.sessionReports) });
+    saveRecord(join(this.state, "host-reports.json"), { machines: Object.fromEntries(this.reports), device: Object.fromEntries(this.deviceReports), inference: Object.fromEntries(this.inferenceReports), images: Object.fromEntries(this.imageReports), sessions: Object.fromEntries(this.sessionReports), baselines: Object.fromEntries(this.baselineReports), hostOperations: Object.fromEntries(this.hostOperationReports) });
   }
   async connect(): Promise<void> {
     const path = join(this.state, "identity.json"), orchestrator = this.config.url.replace(/\/+$/, "");
@@ -463,6 +593,7 @@ export class HostRunner {
   beginLocalWork(committed = false): () => void {
     if (!committed && this.maintenanceFence) throw new ServiceError("Host maintenance admission is fenced.", 409, { code: "host_draining" });
     this.updateEpoch++; this.updateExternalWork++;
+    for (const machine of this.assignments) if (machine.desired === "running") this.recentlyBusy.add(String(machine.id));
     let done = false;
     return () => { if (!done) { done = true; this.updateExternalWork--; } };
   }
@@ -577,7 +708,7 @@ export class HostRunner {
   }
   async poll(): Promise<void> {
     if (!this.identity) throw new ServiceError("Host is not connected.", 409);
-    const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports);
+    const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports), baselineReports = firstReport(this.baselineReports, true);
     const sent = this.clock.now();
     // Read the current credential on every heartbeat. Rotation delivery may replace
     // identity.json between requests, but cannot change the host/controller binding.
@@ -590,20 +721,25 @@ export class HostRunner {
     // Dispatch can consume a challenge even if its response is lost.
     this.maintenanceChallenge = null;
     this.maintenanceProof = undefined;
-    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}) };
+    const upkeep = this.upkeepReport(), hostOperationReports = upkeep ? Object.fromEntries([...this.hostOperationReports].slice(0, 16)) : {};
+    const reportedBusy = upkeep ? upkeep.busy as string[] : [];
+    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
+      ...(this.pressureReport ? { pressure: this.pressureReport } : {}), ...(upkeep ? { upkeep, hostOperationReports } : {}), ...(this.baselines ? { baselines: this.baselines, baselineReports } : {}) };
     if (proof && Buffer.byteLength(JSON.stringify(body)) > MAX_HOST_MESSAGE) delete body.maintenance.proof;
     const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, body, this.identity.credential, this.stopController.signal);
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'),
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), baselines: records(response.baselineTasks ?? [], "baseline tasks"), hostOperations: records(response.hostOperations ?? [], "host operations"), tunnels: records(response.leaseTunnels ?? [], "lease tunnels") ,
       live: records(response.liveViews ?? [], 'live views'), liveCaptures: records(response.liveCaptures ?? [], 'live captures') };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
+    this.observeWarm(machines, sent);
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
     for (const [id, report] of sentReports) if (!active.has(id)) {
       if (report.leaseCleanup && object(report.leaseCleanup).state === "complete") { const cleanup = object(report.leaseCleanup); this.guard.retire(id, String(cleanup.leaseId), String(cleanup.id)); }
+      if (report.deletion && object(report.deletion).state === "complete") this.forgetWarm(id);
       this.reports.delete(id);
     }
     if (legacyDigest({ machines: this.assignments, queues: this.queues }) !== legacyDigest({ machines, queues })) this.updateEpoch++;
@@ -611,15 +747,115 @@ export class HostRunner {
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
     this.assignments = machines; this.queues = queues; this.lastContact = sent;
+    // Delivered: work that ended before this heartbeat has now been counted as activity.
+    for (const id of reportedBusy) this.recentlyBusy.delete(id);
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
     this.maintenanceChallenge = maintenance ?? null;
-    for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports]] as const) {
+    for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports], ["baselines", this.baselineReports, baselineReports], ["hostOperations", this.hostOperationReports, hostOperationReports]] as const) {
       const ids = new Set(queues[key].map(r => String(r.id)));
       for (const id of Object.keys(sentMap)) if (!ids.has(id)) target.delete(id);
     }
     if (typeof response.checksRequestedAt === "number" && response.checksRequestedAt > this.lastCheckRequest) { this.lastCheckRequest = response.checksRequestedAt; this.checkRequested = true; }
     this.saveReports(); this.cancelUnauthorized();
     this.inspectMaintenance();
+  }
+  /** A warm hold's deadline is fixed when the controller creates the device. On this runner's clock
+   * it is the earliest value ever derived for it, capped by the host's own maximum age. */
+  private observeWarm(machines: RecordValue[], sent: number): void {
+    const limit = Number(object(this.offer.warmPool ?? {}).maxAgeSeconds ?? 0), seen = new Set<string>();
+    for (const machine of machines) {
+      if (!machine.warm) continue;
+      const warm = object(machine.warm), id = String(machine.id), hold = identifier(warm.id), previous = this.warmHolds.get(id);
+      if (![warm.authorizationDeadline, warm.controllerNow].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new ServiceError("Invalid warm hold deadline.", 400);
+      const offered = sent + Math.max(0, Number(warm.authorizationDeadline) - Number(warm.controllerNow));
+      this.warmHolds.set(id, { hold, deadline: previous?.hold === hold ? Math.min(previous.deadline, offered) : Math.min(offered, sent + limit) });
+      seen.add(id);
+    }
+    for (const id of [...this.warmHolds.keys()]) if (!seen.has(id)) this.warmHolds.delete(id);
+  }
+  private warmAuthorization(id: string, hold: string): WarmAuthorization {
+    const held = this.warmHolds.get(id);
+    if (!held || held.hold !== hold) throw new ServiceError("The warm hold is unavailable.", 409);
+    return { holdID: hold, remainingSeconds: Math.max(0, held.deadline - this.clock.now()) };
+  }
+  /** Warm devices run only where this host's operator enabled them, for its advertised lease images,
+   * and never more of them than the host's own limit. */
+  warmEligible(machine: RecordValue): boolean {
+    const pool = this.offer.warmPool ? object(this.offer.warmPool) : undefined;
+    if (!pool || !this.leaseEligible(machine)) return false;
+    const held = this.assignments.filter(m => m.warm && !m.lease && !m.deletion && m.desired === "running").map(m => String(m.id)).sort();
+    return held.indexOf(String(machine.id)) < Number(pool.maxDevices);
+  }
+  /** A retired warm device leaves nothing on this host once the controller has acknowledged its proven removal. */
+  private forgetWarm(id: string): void {
+    const machine = this.updateAssignments.get(id);
+    if (!machine?.warm || machine.lease) return;
+    try {
+      const { folder } = this.context(machine), receipt = join(folder, "deletion.json");
+      if (!present(receipt)) return;
+      const proof = readRecord(receipt);
+      if (proof.state !== "complete" || proof.machineId !== id) return;
+      rmSync(folder, { recursive: true }); this.updateAssignments.delete(id);
+    } catch { this.log("A retired warm device's local journal was kept for inspection."); }
+  }
+  /** A claimed warm device's local assignment record gains its lease exactly once. */
+  private claimAssignment(machine: RecordValue, folder: string): void {
+    const receipt = join(folder, "assignment.json");
+    if (!machine.warm || !machine.lease || !present(receipt)) return;
+    const owner = readRecord(receipt);
+    if (owner.fingerprint === assignmentFingerprint(machine) && owner.warmId === object(machine.warm).id && owner.leaseId === undefined) saveRecord(receipt, { ...owner, leaseId: object(machine.lease).id });
+  }
+  /** A claimed warm device ran before its lease existed. Before that lease's cleanup, its local
+   * records are bound to the lease so the ordinary stop, removal and erasure proofs apply to it. */
+  private async settleClaim(machine: RecordValue, runtime: Runtime, image: RecordValue, folder: string): Promise<void> {
+    const id = identifier(machine.id), receipt = join(dirname(folder), ".lease-cleanup", `${id}.json`);
+    try {
+      this.guard.markStarted(id, String(object(machine.lease).id));
+      // Only before cleanup has removed anything: afterwards the assignment and its storage are gone on purpose.
+      if (!present(folder) || present(receipt) && readRecord(receipt).phase !== "planned") return;
+      await assignmentAccess(machine, folder, async () => { this.claimAssignment(machine, folder); await runtime.settleClaim?.(machine, image, folder); }, { exclusive: true });
+    } catch { this.log("A claimed warm device could not be settled before cleanup; cleanup reports the reason."); }
+  }
+  private refreshBaselines(): void {
+    const runtime = this.runtimes.get("android");
+    if (!runtime?.baselineInventory) return;
+    try { this.baselines = runtime.baselineInventory().slice(0, 100); } catch { this.log("The baseline inventory could not be read; the last one is kept."); }
+  }
+  /** One save or removal at a time. A save holds its device's assignment against reconciliation. */
+  private stepBaselines(): void {
+    if (!this.fresh() || this.updateAdmissionBlocked || [...this.active.keys()].some(key => key.startsWith("baselines:"))) return;
+    const task = (this.queues.baselines ?? []).find(t => !TERMINAL.has(String(this.baselineReports.get(String(t.id))?.state)));
+    if (!task) return;
+    const id = identifier(task.id), source = task.kind === "save" ? identifier(task.machineId) : undefined;
+    if (source && (this.active.has(`machine:${source}`) || this.deviceMachines.has(source))) return;
+    if (source) this.deviceMachines.add(source);
+    this.launch(`baselines:${id}`, () => this.fresh() && this.queues.baselines!.some(t => t.id === id), async context => {
+      try { await this.durableWork("baselines", task, this.baselineReports, c => this.baselineWork(task, c), context); }
+      finally { if (source) this.deviceMachines.delete(source); this.refreshBaselines(); }
+    });
+  }
+  private async baselineWork(task: RecordValue, context: HostWorkContext): Promise<RecordValue> {
+    const runtime = this.runtimes.get("android"), failed = (code: string, detail: string): RecordValue => ({ state: "failed", result: { code, detail } });
+    if (!runtime?.saveBaseline || !runtime.removeBaseline) return failed("capability_unsupported", "This host has no Android baseline store.");
+    const request = { id: identifier(task.baseline), name: String(task.name), revision: String(task.revision) };
+    const names = (template: unknown): boolean => { const baseline = object(template).baseline; return !!baseline && object(baseline).name === request.name && object(baseline).revision === request.revision; };
+    try {
+      if (task.kind === "remove") {
+        // The host refuses on its own account while anything here still names the baseline.
+        if ((this.config.templates as RecordValue[]).some(names) || this.assignments.some(machine => names(machine.template))) return failed("baseline_referenced", "A template or device on this host still names this baseline.");
+        return { state: "succeeded", result: runtime.removeBaseline(request) };
+      }
+      if (task.kind !== "save") return failed("invalid_request", "Unknown baseline task.");
+      // The source is this runner's own current, stopped, unleased assignment; nothing else is captured.
+      const machine = this.assignments.find(m => m.id === task.machineId);
+      if (!machine || machine.lease || machine.warm || machine.deletion || machine.desired !== "stopped" || assignmentFingerprint(machine) !== assignmentFingerprint(object(task.machine))) return failed("baseline_source_unsupported", "The source device is not a stopped, account-owned assignment of this host.");
+      const { image, folder } = this.context(machine);
+      return { state: "succeeded", result: await runtime.saveBaseline(machine, image, folder, request, context.authorized) };
+    } catch (error) {
+      // A baseline refusal precedes publication, and the store has already removed its staging directory.
+      if (error instanceof ServiceError && error.code.startsWith("baseline_")) return failed(error.code, error.message.slice(0, 500));
+      throw error;
+    }
   }
   fresh(): boolean {
     try { return !this.stopController.signal.aborted && contactFresh(this.lastContact, this.clock.now()); }
@@ -638,11 +874,13 @@ export class HostRunner {
   async reconcile(machine: RecordValue, context?: HostWorkContext): Promise<RecordValue> {
     if (this.updateAdmissionBlocked && machine.desired !== "stopped") throw new ServiceError("Host update admission is fenced.", 409);
     const { runtime, image: originalImage, folder } = this.context(machine), id = identifier(machine.id);
+    const hold = machine.warm ? identifier(object(machine.warm).id) : null;
     if (machine.leaseCleanup) {
-      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android"].includes(runtime.kind) && !!runtime.stopForCleanup;
+      if (hold && machine.lease) await this.settleClaim(machine, runtime, originalImage, folder);
+      const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android", "ios"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
-          this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
+          this.outboundSessions?.closeMachine(id); await this.closeMachineTunnels(id, runtime, machine); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
           const active = new Set(this.assignments.filter(m => m.id !== id && this.machineAuthorized(String(m.id))).map(m => String(m.id))); await runtime.sweep?.(active);
         },
         ...(nativeCleanup && runtime.removeOwnedStorage ? {
@@ -655,8 +893,9 @@ export class HostRunner {
     return assignmentAccess(machine, folder, async () => {
       const fingerprint = assignmentFingerprint(machine), receipt = join(folder, "assignment.json");
       privateDirectory(folder);
-      if (present(receipt)) { const owner = readRecord(receipt); if (owner.fingerprint !== fingerprint || (owner.leaseId ?? null) !== (machine.lease ? object(machine.lease).id : null)) throw new ServiceError("Local assignment ownership differs.", 409); }
-      else saveRecord(receipt, { fingerprint, ...(machine.lease ? { leaseId: object(machine.lease).id } : {}) });
+      if (hold && machine.lease) { this.guard.markStarted(id, String(object(machine.lease).id)); this.claimAssignment(machine, folder); }
+      if (present(receipt)) { const owner = readRecord(receipt); if (owner.fingerprint !== fingerprint || (owner.leaseId ?? null) !== (machine.lease ? object(machine.lease).id : null) || (owner.warmId ?? null) !== hold) throw new ServiceError("Local assignment ownership differs.", 409); }
+      else saveRecord(receipt, { fingerprint, ...(hold ? { warmId: hold } : {}), ...(machine.lease ? { leaseId: object(machine.lease).id } : {}) });
       if (machine.deletion) {
         const requestId = identifier(object(machine.deletion).id);
         if (!runtime.removeOwnedStorage) return { state: "unknown", deletion: { id: requestId, state: "blocked" }, detail: "Runtime does not implement verified owned removal." };
@@ -669,11 +908,15 @@ export class HostRunner {
       if (present(join(folder, "deletion.json"))) throw new ServiceError("Durable deletion intent prevents reconciliation.", 409);
       let current = machine, image = originalImage;
       let leaseAuthorization: (() => LeaseAuthorization) | undefined, refused = false;
+      // A host that declares lease tunnels runs no account-owned emulator, whatever template it
+      // was created from: only supervised guests are fenced from the host's adb server.
+      const unfenced = !machine.lease && !hold && machine.desired === "running" && runtime.kind === "android" && this.offer.leaseTunnelProtocol === 1;
+      if (unfenced) current = { ...machine, desired: "stopped" };
       if (machine.lease) {
         // Default portable clock never authorizes leased starts; preserve and stop
         // pre-existing assignments while their independent native fence runs.
         // The host enforces its own lease gate rather than trusting the controller: an assignment
-        // outside its advertised Android lease images is never started, and is stopped if running.
+        // outside its advertised Android or iOS lease images is never started, and is stopped if running.
         refused = machine.desired === "running" && !this.leaseEligible(machine);
         if (!this.guard.allowed(id) || refused) current = { ...machine, desired: "stopped", leaseFenced: true };
         if (current.desired === "running") {
@@ -684,17 +927,30 @@ export class HostRunner {
         }
         leaseAuthorization = () => this.guard.authorization(id, String(object(machine.lease).id));
       }
+      let warmAuthorization: (() => WarmAuthorization) | undefined;
+      if (hold && !machine.lease) {
+        // A warm device is not a lease, but the host gates it the same way: its own opt-in, its
+        // advertised lease images and its own device limit, whatever the controller sends.
+        refused = machine.desired === "running" && !this.warmEligible(machine);
+        if (refused) current = { ...machine, desired: "stopped" };
+        warmAuthorization = () => this.warmAuthorization(id, hold);
+      }
+      const authorizations = { ...(leaseAuthorization ? { _leaseAuthorization: leaseAuthorization } : {}), ...(warmAuthorization ? { _warmAuthorization: warmAuthorization } : {}) };
       // Stopping bypasses credentials, source preparation and guest connectivity.
       if (current.desired === "stopped") {
-        const stopped = await runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
-        return refused ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail: "This host does not offer leased execution for this runtime and template." } : stopped;
+        const stopped = await runtime.reconcile(current, { ...image, ...authorizations }, folder);
+        if (!refused && !unfenced) return stopped;
+        const detail = unfenced ? "This host declares lease tunnels and runs only supervised, network-isolated Android emulators."
+          : hold && !machine.lease ? "This host does not offer warm devices for this runtime and template."
+          : "This host does not offer leased execution for this runtime and template.";
+        return { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail };
       }
       if (context && !context.authorized()) throw new ServiceError("Assignment authorization ended.", 410);
       if (image.source && !image.image && !image.catalogueImageId) throw new ServiceError("Prepare and verify the configured base image before runtime creation.", 409);
       if (image.catalogueImageId) this.library.verifyDefinition(image);
       const backend = this.accessBackend(current);
       if (image.guestAccess && "prepare" in backend && backend.prepare) image = await backend.prepare(current, image, folder);
-      if (leaseAuthorization) image = { ...image, _leaseAuthorization: leaseAuthorization };
+      image = { ...image, ...authorizations };
       const prepared = image.prepare ? object(image.prepare) : undefined;
       let preparation: RecordValue | undefined;
       if (prepared) {
@@ -749,13 +1005,16 @@ export class HostRunner {
       return result;
     });
   }
-  /** Leased execution runs only on the Android runtime, for a template this host advertised in leaseImages. */
+  /** Leased execution runs only on the Android or iOS runtime, for a template this host advertised
+   * in leaseImages. An iOS entry counts only with its explicit shared-host isolation declaration. */
   leaseEligible(machine: RecordValue): boolean {
     if (this.offer.leaseProtocol !== 1 || !Array.isArray(this.offer.leaseImages)) return false;
     let context: { runtime: Runtime; image: RecordValue };
     try { context = this.context(machine); } catch { return false; }
     const { runtime, image } = context;
-    return runtime.kind === "android" && image.os === "android" && (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === "android" && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch);
+    if (!["android", "ios"].includes(runtime.kind) || image.os !== runtime.kind) return false;
+    return (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === runtime.kind && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch &&
+      (runtime.kind === "ios" ? entry.isolation === IOS_LEASE_ISOLATION : !("isolation" in entry)));
   }
   private machineAuthorized(id: string): boolean {
     const current = this.assignments.find(m => m.id === id);
@@ -770,7 +1029,7 @@ export class HostRunner {
   }
   private async durableWork(kind: string, task: RecordValue, target: Map<string, RecordValue>, work: (context: HostWorkContext) => Promise<RecordValue>, context: HostWorkContext): Promise<void> {
     const id = identifier(task.id), path = join(this.state, "work", kind, `${id}.json`);
-    const stable = kind === "device" ? ["id", "machineId", "leaseId", "action", "arguments"] : kind === "inference" ? ["id", "hostId", "request", "definition"] : kind === "images" ? ["id", "kind", "machineId", "name", "metadata", "registryId"] : ["id", "generation", "leaseId", "machineId", "capability"];
+    const stable = kind === "device" ? ["id", "machineId", "leaseId", "action", "arguments"] : kind === "inference" ? ["id", "hostId", "request", "definition"] : kind === "images" ? ["id", "kind", "machineId", "name", "metadata", "registryId"] : kind === "baselines" ? ["id", "kind", "baseline", "name", "revision", "machineId"] : kind === "hostOperations" ? ["id", "kind", "arguments"] : ["id", "generation", "leaseId", "machineId", "capability"];
     const fingerprint = legacyDigest(Object.fromEntries(stable.filter(k => Object.hasOwn(task, k)).map(k => [k, task[k]])));
     if (present(path)) {
       const previous = readRecord(path) as unknown as DurableWork;
@@ -820,6 +1079,8 @@ export class HostRunner {
   }
   async step(): Promise<void> {
     this.cancelUnauthorized();
+    // Before machine reconciliation, so a pending save can take its stopped device's turn.
+    this.stepBaselines();
     const machines = this.guard.assignments(this.assignments);
     const activeIds = new Set(machines.filter(m => this.machineAuthorized(String(m.id))).map(m => String(m.id)));
     try { await this.sweepAccess(activeIds); } catch { this.log("Runtime connection closure is unconfirmed."); }
@@ -850,7 +1111,10 @@ export class HostRunner {
         this.publish(this.reports, id, report);
       });
     }
-    if (!this.fresh() || this.updateAdmissionBlocked) return;
+    if (!this.fresh()) return;
+    // A runner fenced for an update starts nothing, and says so, so the operation fails as never
+    // started instead of holding the update until its deadline and then ending unknown.
+    if (this.updateAdmissionBlocked) { this.declineHostOperations("update_fenced", "This runner is fenced for an update and did not start the operation."); return; }
     for (const task of this.queues.device ?? []) {
       if (slots <= 0) break;
       const id = identifier(task.id), key = `device:${id}`;
@@ -863,7 +1127,7 @@ export class HostRunner {
       slots--;
       const authorized = (): boolean => this.fresh() && this.queues.device!.some(o => o.id === id) && this.machineAuthorized(String(task.machineId)) && this.clock.wall() < Number(task.expiresAt) && (!task.leaseId || this.consumerOperationAuthorized(task));
       this.launch(key, authorized, async context => {
-        const machineId = String(task.machineId); this.deviceMachines.add(machineId);
+        const machineId = String(task.machineId); this.deviceMachines.add(machineId); this.recentlyBusy.add(machineId);
         try { await this.durableWork('device', task, this.deviceReports, c => this.operate(task, c), context); }
         finally { this.deviceMachines.delete(machineId); }
       });
@@ -872,6 +1136,8 @@ export class HostRunner {
     this.stepVideo();
     this.stepLive();
     this.stepDisplay();
+    this.stepTunnels();
+    this.stepHostOperations();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
       const task = this.queues[kind]?.find(t => !TERMINAL.has(String(target.get(String(t.id))?.state)));
@@ -902,6 +1168,7 @@ export class HostRunner {
       }
       if (!['pending','attaching','ready'].includes(String(job.state))) continue;
       const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.leasedCaptureAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
+      this.recentlyBusy.add(machineId);
       this.launch(key, allowed, context => this.runVideo(job, path, context));
     }
   }
@@ -1018,6 +1285,137 @@ export class HostRunner {
       // ends it. The capture's own journal and receipt are the hub's.
     } finally { channel?.close(); handle?.release(); }
   }
+  /** Lease port tunnels. Each delivered tunnel is attempted once: its journal is written before
+   * the broker attach and before any mapping, and a restart never installs it again. A tunnel
+   * whose mapping removal is not yet proven stays delivered until this runner confirms it, or
+   * the controller settles it from the lease's own cleanup. */
+  private stepTunnels(): void {
+    const queued = new Set((this.queues.tunnels ?? []).map(job => String(job.id)));
+    for (const id of this.tunnelRetry.keys()) if (!queued.has(id)) this.tunnelRetry.delete(id);
+    for (const id of this.tunnelAuthority.keys()) if (!this.assignments.some(machine => machine.id === id)) this.tunnelAuthority.delete(id);
+    for (const job of this.queues.tunnels ?? []) {
+      const id = identifier(job.id), key = `tunnel:${id}`, machineId = identifier(job.machineId), generation = identifier(job.generation), leaseId = identifier(job.leaseId);
+      // The caller already required fresh controller contact for this step.
+      if (this.active.has(key) || this.updateAdmissionBlocked || !this.identity) continue;
+      const path = join(this.state, 'work', 'tunnel', `${id}.json`);
+      if (present(path)) {
+        // A pacing timer only, so it needs no native clock sample.
+        if (performance.now() < (this.tunnelRetry.get(id) ?? 0)) continue;
+        const saved = readRecord(path);
+        if (saved.generation !== generation || saved.machineId !== machineId) continue;
+        this.tunnelRetry.set(id, performance.now() + 5000);
+        this.launch(key, () => this.fresh(), context => this.settleTunnel(id, path, saved, context));
+        continue; // Only the mapping-removal receipt repeats; a tunnel is never opened twice.
+      }
+      if (!['pending', 'attaching'].includes(String(job.state))) continue;
+      const allowed = () => !this.closed && this.tunnelAuthorized(machineId, leaseId) &&
+        this.queues.tunnels!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending', 'attaching', 'ready'].includes(String(j.state)));
+      if (!allowed()) continue;
+      this.launch(key, allowed, context => this.runTunnel(job, path, context));
+    }
+  }
+  /** Runner-side authority for every tunnel of one lease: fresh controller contact, the lease
+   * guard's deadline, the assignment, and the host's own tunnel gate. Contact freshness and the
+   * lease guard each sample the native clock, which is a process spawn, and the session channel
+   * asks on every frame it relays. The result is therefore shared per machine and re-evaluated at
+   * most every 250 ms, the same bound as the channel's own watcher. The controller's broker still
+   * checks its authority on every relayed message. */
+  private tunnelAuthorized(machineId: string, leaseId: string): boolean {
+    const cached = this.tunnelAuthority.get(machineId), now = performance.now();
+    if (cached && now - cached.at < 250) return cached.allowed;
+    let allowed = false;
+    try { allowed = this.machineAuthorized(machineId) && this.tunnelOffered(machineId, leaseId); } catch { allowed = false; }
+    this.tunnelAuthority.set(machineId, { at: now, allowed });
+    return allowed;
+  }
+  /** The host's own gate, independent of the controller: tunnels only for a ready lease on an
+   * advertised Android lease image, and only when this host's configuration declares them. */
+  private tunnelOffered(machineId: string, leaseId: string): boolean {
+    const machine = this.assignments.find(m => m.id === machineId);
+    return !!machine?.lease && machine.ready === true && object(machine.lease).id === leaseId && object(machine.lease).state === "ready" &&
+      this.offer.leaseProtocol === 1 && this.offer.leaseTunnelProtocol === 1 && this.leaseEligible(machine);
+  }
+  private async runTunnel(job: RecordValue, path: string, context: HostWorkContext): Promise<void> {
+    const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);
+    if (!identity || !machine || !context.authorized()) return;
+    const id = identifier(job.id), generation = identifier(job.generation), machineId = String(machine.id);
+    const intent = tunnelIntent(job.direction, job.devicePort, job.idleSeconds);
+    const { runtime, image, folder } = this.context(machine);
+    const journal = { generation, machineId, direction: job.direction, devicePort: job.devicePort };
+    saveRecord(path, { ...journal, state: 'started' });
+    this.tunnelMachines.set(id, machineId);
+    const live = () => !context.signal.aborted && context.authorized();
+    // A device mapping is removed only under the same assignment that installed it.
+    const assignment = assignmentFingerprint(machine), lease = object(machine.lease ?? {}).id;
+    const held = () => { const current = this.assignments.find(m => m.id === machineId); return !!current && assignmentFingerprint(current) === assignment && object(current.lease ?? {}).id === lease && this.machineAuthorized(machineId); };
+    let channel: SessionConnection | undefined, endpoint: TunnelEndpoint | undefined, mappingRemoved = true, reason: TunnelEndReason | undefined;
+    try {
+      channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/tunnels/${id}/${generation}`, identity.credential,
+        { authorized: live, ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      const connection = channel, ready = await connection.receive(30);
+      if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'tunnel') throw unknownOutcome('Tunnel peers did not attach.');
+      if (!intent || !runtime.openTunnel) throw new ServiceError('This runtime has no lease tunnel adapter.', 409, { code: 'capability_unsupported' });
+      // The device side listens for a reverse tunnel and connects for a forward tunnel. Neither
+      // side is ever told a destination: this endpoint is the tunnel's only one.
+      const relay = new TunnelRelay({ sendControl: value => connection.sendControl(value), sendBytes: value => connection.sendBytes(value), receive: () => connection.receive(30), close: () => connection.close() },
+        { role: intent.direction === 'reverse' ? 'listen' : 'connect', idleSeconds: intent.idleSeconds, authorized: live, alive: () => endpoint!.alive(),
+          ...(intent.direction === 'forward' ? { connect: () => endpoint!.connect() } : {}),
+          // This runner ended the tunnel on its own evidence. Send the terminal frame before
+          // reporting the reason, since that report can revoke broker authority.
+          ending: async end => {
+            const cause: TunnelEndReason | undefined = end.reason === 'flood' ? 'open_rate' : end.code === 'tunnel_mapping_lost' ? 'mapping_lost' : undefined;
+            if (!cause) return;
+            reason = cause;
+            const code = cause === 'open_rate' ? 'tunnel_open_rate' : 'tunnel_mapping_lost';
+            try { await connection.sendControl({ type: 'error', code, message: WORKER_MESSAGES[code]!, outcome: 'unknown' }); } catch { /* The receipt will name the cause. */ }
+          } });
+      try { endpoint = await runtime.openTunnel(machine, image, folder, { id, direction: intent.direction, devicePort: intent.devicePort }, live, socket => relay.accept(socket)); }
+      catch (error) { if (error instanceof TunnelMappingError) { mappingRemoved = error.mappingRemoved; reason = 'mapping_failed'; } throw error; }
+      // Sent only once the mapping is installed and verified: the holder's open completes on it.
+      await connection.sendControl({ type: 'tunnel', direction: intent.direction, devicePort: intent.devicePort });
+      await relay.run();
+    } catch (error) {
+      const code = error instanceof ServiceError && ['capability_unsupported', 'tunnel_mapping_failed'].includes(error.code) ? error.code : 'session_incomplete';
+      try { await channel?.sendControl({ type: 'error', code, message: WORKER_MESSAGES[code]!, outcome: 'unknown' }); } catch { /* A disconnected holder learns the outcome from the tunnel's receipt. */ }
+    } finally {
+      channel?.close();
+      if (endpoint) { try { mappingRemoved = (await bounded(endpoint.close(held), 30_000)).mappingRemoved; } catch { mappingRemoved = false; } }
+      this.tunnelMachines.delete(id);
+      saveRecord(path, { ...journal, state: 'finished', mappingRemoved, ...(reason ? { reason } : {}) });
+      if (mappingRemoved || reason) await this.tunnelReceipt(id, generation, { ...(mappingRemoved ? { mappingRemoved: true } : {}), ...(reason ? { reason } : {}) });
+    }
+  }
+  /** Repeats a saved removal receipt, or confirms a removal that was unproven when the tunnel
+   * ended (lost device authority, a failed adb call, a runner restart). Read-only on the device. */
+  private async settleTunnel(id: string, path: string, saved: RecordValue, context: HostWorkContext): Promise<void> {
+    const generation = identifier(saved.generation), machineId = identifier(saved.machineId);
+    if (saved.mappingRemoved !== true) {
+      const machine = this.assignments.find(m => m.id === machineId), intent = tunnelIntent(saved.direction, saved.devicePort, undefined);
+      if (!machine || !intent || !this.machineAuthorized(machineId)) return;
+      const { runtime, image } = this.context(machine);
+      if (!runtime.tunnelMappingAbsent) return;
+      try { if (!await runtime.tunnelMappingAbsent(machine, image, { id, direction: intent.direction, devicePort: intent.devicePort }, () => !context.signal.aborted && this.machineAuthorized(machineId))) return; }
+      catch { return; }
+      saveRecord(path, { ...saved, state: 'finished', mappingRemoved: true });
+    }
+    const reason = (TUNNEL_END_REASONS as readonly unknown[]).includes(saved.reason) ? saved.reason as TunnelEndReason : undefined;
+    await this.tunnelReceipt(id, generation, { mappingRemoved: true, ...(reason ? { reason } : {}) });
+  }
+  /** Tells the controller why this runner ended a tunnel, and that its mapping is positively gone. */
+  private async tunnelReceipt(id: string, generation: string, receipt: { mappingRemoved?: true; reason?: TunnelEndReason }): Promise<void> {
+    const identity = this.identity;
+    if (!identity) return;
+    try { await this.transport.request('POST', `/v1/hosts/${identity.id}/tunnels/${id}/finish`, { generation, ...receipt }, identity.credential, this.stopController.signal); }
+    catch { this.log('Tunnel receipt was not acknowledged; the removal receipt is repeated while the tunnel stays delivered.'); }
+  }
+  /** Lease cleanup: ends this machine's tunnels before the stop proof is evaluated. Host-side
+   * endpoints close without device access, and a tunnel never delays cleanup beyond this bound. */
+  private async closeMachineTunnels(machineId: string, runtime: Runtime, machine: RecordValue): Promise<void> {
+    const works = [...this.tunnelMachines].filter(([, owner]) => owner === machineId).map(([tunnel]) => this.active.get(`tunnel:${tunnel}`)).filter(work => work !== undefined);
+    for (const work of works) work.controller.abort();
+    try { await runtime.closeTunnels?.(machine); } catch { this.log('Tunnel endpoint closure needs inspection; cleanup continues from the stop proof.'); }
+    await Promise.race([Promise.allSettled(works.map(work => work.promise)), new Promise(resolvePromise => setTimeout(resolvePromise, 5000).unref())]);
+  }
   /** A leased emulator records only while its lease is ready on this runner and the host offers
    * leased execution for it; the lease guard (machineAuthorized) fences it at the deadline. */
   private leasedCaptureAuthorized(machineId: string): boolean {
@@ -1037,7 +1435,7 @@ export class HostRunner {
       const allowed = () => this.machineAuthorized(machineId) && !this.assignments.find(m => m.id === machineId)?.lease &&
         this.queues.display!.some(j => j.id === id && j.generation === generation && j.machineId === machineId);
       if (!allowed()) continue;
-      this.displayAttempts.add(attempt);
+      this.displayAttempts.add(attempt); this.recentlyBusy.add(machineId);
       this.launch(key, allowed, context => this.runDisplaySession(id, generation, machineId, context));
     }
   }
@@ -1154,6 +1552,7 @@ export class HostRunner {
       catch { checks.push({ id: runtime.kind, label: `${runtime.kind} runtime`, status: "failed", detail: "Runtime diagnostics failed; inspect private configuration." }); }
     }
     if (!this.stopController.signal.aborted) this.health = { status: checks.some(c => c.status === "failed") ? "failed" : "passed", checkedAt: this.clock.wall(), checks };
+    this.refreshBaselines();
   }
   async collectResources(): Promise<void> {
     const cores = cpus(), cpuCount = cores.length, idle = cores.reduce((n, c) => n + c.times.idle, 0), total = cores.reduce((n, c) => n + Object.values(c.times).reduce((a, b) => a + b, 0), 0);
@@ -1193,7 +1592,7 @@ export class HostRunner {
   private idleEligible(): boolean {
     return this.fresh() && !this.closed && this.active.size === 0 && this.updateExternalWork === 0 && (this.liveCaptures?.idle ?? true) &&
       Object.values(this.queues).every(queue => queue.length === 0) &&
-      [this.reports, this.deviceReports, this.inferenceReports, this.imageReports, this.sessionReports].every(reports =>
+      [this.reports, this.deviceReports, this.inferenceReports, this.imageReports, this.sessionReports, this.hostOperationReports].every(reports =>
         [...reports.values()].every(r => ["stopped", "succeeded", "failed", "cancelled"].includes(String(r.state)) && (r.stopped === undefined || r.stopped === true) && !["pending", "unknown"].includes(String(r.cleanup))));
   }
   private retainedAssignments(current: RecordValue[]): Map<string, RecordValue> {
@@ -1260,7 +1659,7 @@ export class HostRunner {
     const assignments: MaintenanceProof["inventory"]["assignments"] = [];
     const knownFolders = new Set<string>(), knownStorage = new Set<string>(), knownQuarantines = new Set<string>();
     const unexpected = new Set<string>(), issues: string[] = [];
-    let complete = true, entries = 0;
+    let complete = true;
     for (const machine of current) {
       if (assignments.length % 32 === 0) await yieldWork();
       if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
@@ -1304,34 +1703,235 @@ export class HostRunner {
         knownFolders.add(resolve(folder)); retained.delete(id);
       } catch { /* Retain assignments with unconfirmed retirement. */ }
     }
+    const scan = await this.scanRoots({ folders: knownFolders, storage: knownStorage, quarantines: knownQuarantines }, () => challenge === this.maintenanceChallenge && this.fresh());
+    if (!scan) return;
+    for (const found of scan.found) unexpected.add(found.name);
+    if (!scan.complete) { complete = false; issues.push("Local journal or provider storage inventory could not be completed."); }
+    const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
+      await this.inspectStopped(retained, true) : NOT_IDLE;
+    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
+  }
+  /** Directory entries under the journal and provider storage roots that no known assignment
+   * explains. Shared by the maintenance proof and the storage inspection; it changes nothing. */
+  private async scanRoots(known: { folders: Set<string>; storage: Set<string>; quarantines: Set<string> }, live: () => boolean):
+    Promise<{ complete: boolean; found: { name: string; path: string; storage: boolean; quarantine: boolean }[] } | undefined> {
     const journalRoots = this.machineRoots(), storageRoots = new Set([...this.runtimes.values()].map(maintenanceStorageRoot).filter(root => root !== undefined));
+    const names = new Set<string>(), found: { name: string; path: string; storage: boolean; quarantine: boolean }[] = [];
+    let complete = true, entries = 0;
     for (const root of new Set([...journalRoots, ...storageRoots])) {
       try {
         if (!ownedDirectory(root)) continue;
         const before = lstatSync(root);
         for await (const entry of await opendir(root)) {
-          if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
+          if (!live()) return undefined;
           if (++entries > 20_000) { complete = false; break; }
           if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
           const path = join(root, entry.name);
           const quarantine = storageRoots.has(root) && removalQuarantine.test(entry.name);
-          if (quarantine && entry.isDirectory() && knownQuarantines.has(path)) continue;
+          if (quarantine && entry.isDirectory() && known.quarantines.has(path)) continue;
           // Retirement only explains an old journal, never backing storage that still exists.
-          const unexplainedJournal = journalRoots.has(root) && !knownFolders.has(path) && !this.guard.records.get(entry.name)?.retired;
-          const unexplainedStorage = storageRoots.has(root) && !knownStorage.has(path) && storageId.test(entry.name);
+          const unexplainedJournal = journalRoots.has(root) && !known.folders.has(path) && !this.guard.records.get(entry.name)?.retired;
+          const unexplainedStorage = storageRoots.has(root) && !known.storage.has(path) && storageId.test(entry.name);
           if (!quarantine && !unexplainedJournal && !unexplainedStorage) continue;
-          if (unexpected.size >= 100 && !unexpected.has(entry.name) || entry.name.length > 200) { complete = false; break; }
-          unexpected.add(entry.name);
+          if (names.size >= 100 && !names.has(entry.name) || entry.name.length > 200) { complete = false; break; }
+          names.add(entry.name); found.push({ name: entry.name, path, storage: storageRoots.has(root), quarantine });
         }
         noLinks(root);
         const after = lstatSync(root);
         if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeMs !== before.mtimeMs) complete = false;
       } catch { complete = false; }
-      if (!complete) { issues.push("Local journal or provider storage inventory could not be completed."); break; }
+      if (!complete) break;
     }
-    const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
-      await this.inspectStopped(retained, true) : NOT_IDLE;
-    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
+    return { complete, found };
+  }
+  /** Pressure is sampled on its own cadence, so a slow resource collection cannot age it. */
+  async samplePressure(): Promise<void> {
+    if (!this.pressureMonitor) return;
+    let sample: PressureSample;
+    try { sample = await (this.dependencies.pressureSample ?? (() => this.readPressure()))(); }
+    catch { sample = { memory: null, disk: null }; }
+    const report = this.pressureMonitor.observe(sample, this.clock.now(), this.clock.wall());
+    if (!this.stopping) this.pressureReport = { ...report, gates: this.pressureGates };
+  }
+  private async readPressure(): Promise<PressureSample> {
+    let memory: PressureSample["memory"], disk: PressureSample["disk"] = null;
+    try { memory = await readMemorySignal(); } catch { memory = null; }
+    try {
+      // The tightest filesystem among the host's storage roots decides. A root that does not
+      // exist yet is measured through its nearest existing parent.
+      const roots = [this.config.storage ?? this.state, ...[...this.runtimes.values()].map(runtime => runtime.config?.storage)].filter((root): root is string => typeof root === "string" && isAbsolute(root));
+      for (let root of new Set(roots.length ? roots : [this.state])) {
+        while (!present(root) && dirname(root) !== root) root = dirname(root);
+        const sample = statfsSync(root), next = { freeGiB: sample.bavail * sample.bsize / 2 ** 30, totalGiB: sample.blocks * sample.bsize / 2 ** 30 };
+        if (!disk || next.freeGiB < disk.freeGiB) disk = next;
+      }
+    } catch { disk = null; }
+    return { memory, disk };
+  }
+  /** Devices with work this host can see but the controller may not, such as a local viewer:
+   * busy now, or busy at some point since the last delivered heartbeat. */
+  private busyMachines(): string[] {
+    const busy = new Set<string>([...this.deviceMachines, ...this.recentlyBusy]);
+    for (const key of this.active.keys()) {
+      const [kind, id] = key.split(":");
+      if (kind === "video" || kind === "display") { const job = this.queues[kind]?.find(entry => entry.id === id); if (job) busy.add(String(job.machineId)); }
+    }
+    // Local connector work is not attributed to one device, so it holds every running one.
+    if (this.updateExternalWork > 0) for (const machine of this.assignments) if (machine.desired === "running") busy.add(String(machine.id));
+    for (const id of busy) this.recentlyBusy.add(id);
+    return [...busy].sort();
+  }
+  /** Mobile hosts advertise their upkeep capability, idle-stop policy and locally busy devices. */
+  private upkeepReport(): RecordValue | undefined {
+    const mobile = [...this.runtimes.values()].filter(runtime => runtime.kind === "android" || runtime.kind === "ios");
+    if (!mobile.length) return undefined;
+    return { version: 1, platforms: mobile.filter(runtime => runtime.runtimeOperation).map(runtime => runtime.kind).sort(), idleStop: this.idlePolicy, busy: this.busyMachines() };
+  }
+  /** Reports every operation this runner holds but has not started as failed, so the controller
+   * records that it never ran. An operation with a journal started earlier: it keeps the outcome
+   * its journal holds, or `unknown` when it was interrupted, and is never run again. */
+  private declineHostOperations(code: string, detail: string, expiredOnly = false): void {
+    for (const task of this.queues.hostOperations ?? []) {
+      const id = identifier(task.id), path = join(this.state, "work", "hostOperations", `${id}.json`);
+      if (this.active.has(`upkeep:${id}`) || TERMINAL.has(String(this.hostOperationReports.get(id)?.state))) continue;
+      if (present(path)) {
+        if (!expiredOnly) this.publish(this.hostOperationReports, id, (readRecord(path) as unknown as DurableWork).report ?? { state: "unknown", detail: "Work was interrupted after dispatch; its effect is not replayed." });
+        continue;
+      }
+      if (expiredOnly && this.clock.wall() < Number(task.startBy)) continue;
+      this.publish(this.hostOperationReports, id, { state: "failed", result: { code, detail } });
+    }
+  }
+  private stepHostOperations(): void {
+    // An operation the controller stopped waiting for must not start late, and one still waiting
+    // for its lane says so at once instead of ending unknown at its deadline.
+    this.declineHostOperations("expired", "The start window ended before this host began the operation.", true);
+    for (const task of this.queues.hostOperations ?? []) {
+      const id = identifier(task.id), key = `upkeep:${id}`, kind = String(task.kind), args = object(task.arguments ?? {});
+      if (this.active.has(key) || TERMINAL.has(String(this.hostOperationReports.get(id)?.state))) continue;
+      // One install or removal per platform, one listing per platform and one storage operation at a time.
+      const lane = kind === "runtime-list" ? `list:${String(args.platform)}` : kind.startsWith("runtime-") ? `change:${String(args.platform)}` : "storage";
+      if ([...this.upkeepLanes.values()].includes(lane)) continue;
+      const path = join(this.state, "work", "hostOperations", `${id}.json`);
+      const authorized = (): boolean => this.fresh() && this.queues.hostOperations!.some(operation => operation.id === id);
+      this.upkeepLanes.set(key, lane);
+      this.launch(key, authorized, async context => {
+        try {
+          if (!present(path) && this.clock.wall() >= Number(task.startBy)) { this.publish(this.hostOperationReports, id, { state: "failed", result: { code: "expired", detail: "The start window ended before this host began the operation." } }); return; }
+          await this.durableWork("hostOperations", task, this.hostOperationReports, c => this.hostOperation(task, c), context);
+        } finally { this.upkeepLanes.delete(key); }
+      });
+    }
+  }
+  private async hostOperation(task: RecordValue, context: HostWorkContext): Promise<RecordValue> {
+    const id = identifier(task.id), kind = String(task.kind), args = object(task.arguments ?? {});
+    const authorized = (): boolean => !context.signal.aborted && context.authorized();
+    const interrupted = { state: "failed", result: { code: "interrupted", detail: "Authorization ended during the inspection; nothing was changed." } };
+    if (kind === "storage-inspect") { const inventory = await this.inspectStorage(authorized); return inventory ? { state: "succeeded", result: inventory } : interrupted; }
+    if (kind === "storage-purge") return this.purgeStorage(id, args, authorized);
+    const runtime = this.runtimes.get(String(args.platform));
+    if (!runtime?.runtimeOperation) return { state: "failed", result: { code: "upkeep_unsupported", detail: "This host has no runtime manager for that platform." } };
+    const timeoutSeconds = Math.max(1, Math.min(14_400, Number(task.timeoutSeconds) || 300));
+    return { ...await runtime.runtimeOperation(kind, args, { authorized, timeoutSeconds,
+      progress: update => { if (authorized() && this.hostOperationReports.get(id)?.state === "running") this.publish(this.hostOperationReports, id, { state: "running", progress: update }); },
+      uses: name => this.runtimeUses(runtime, name) }) };
+  }
+  /** Configured templates (offered or retained: the host check needs each one's runtime) and
+   * every assignment this host holds: those the controller delivers and unretired lease records.
+   * Storage left behind by anything else is counted by the provider's own storage scan. */
+  private runtimeUses(runtime: Runtime, name: string): string[] {
+    const pins = (template: unknown): boolean => { const device = object(object(template).device ?? {}); return device.systemImage === name || device.runtime === name; };
+    const uses: string[] = [];
+    if ((Array.isArray(runtime.config?.templates) ? runtime.config.templates as unknown[] : []).some(pins)) uses.push("template");
+    if (this.guard.assignments(this.assignments).some(machine => pins(machine.template))) uses.push("device");
+    return uses;
+  }
+  /** Read-only report of storage and journals that no live owner on this host explains, with the
+   * owning runtime's evidence for each. A live owner is an assignment the controller delivered on
+   * the last heartbeat, or a lease record this runner has not retired. Only android and ios
+   * storage can be proven; the caller must hold fresh controller contact. */
+  async inspectStorage(live: () => boolean = () => true): Promise<RecordValue | undefined> {
+    const held = new Map(this.guard.assignments(this.assignments).map(machine => [String(machine.id), machine])), known = { folders: new Set<string>(), storage: new Set<string>(), quarantines: new Set<string>() };
+    let complete = true;
+    for (const machine of held.values()) {
+      try {
+        const { runtime, folder } = this.runtimeContext(machine), root = maintenanceStorageRoot(runtime);
+        known.folders.add(resolve(folder));
+        if (root) known.storage.add(join(root, identifier(machine.id)));
+      } catch { complete = false; } // An assignment this host cannot place makes absence of an owner unprovable.
+    }
+    const scan = await this.scanRoots(known, live);
+    if (!scan) return undefined;
+    complete &&= scan.complete;
+    const runtimes = new Map([...this.runtimes.values()].map(runtime => [maintenanceStorageRoot(runtime), runtime] as const));
+    const entries: RecordValue[] = [];
+    for (const found of scan.found) {
+      if (!live()) return undefined;
+      const machineId = found.quarantine ? found.name.slice(10, 46) : found.name, base = { name: found.name, machineId, root: found.storage ? "storage" : "journal" };
+      if (!found.storage) { entries.push({ ...base, kind: "assignment-journal", owned: false, removable: false, reason: "journal_without_storage_proof" }); continue; }
+      const runtime = runtimes.get(dirname(found.path)), kind = found.quarantine ? "removal-quarantine" : "device-storage";
+      // A quarantine of an assignment this host still holds belongs to that assignment's own removal.
+      if (held.has(machineId)) entries.push({ ...base, runtime: runtime?.kind ?? null, kind, owned: true, removable: false, reason: "assignment_retained" });
+      else if (!runtime?.orphanEvidence) entries.push({ ...base, runtime: runtime?.kind ?? null, kind, owned: false, removable: false, reason: "unsupported_runtime" });
+      else {
+        const { hostId, ...evidence } = await runtime.orphanEvidence(found.name);
+        // The receipt names the host identity its assignment was issued to, and an identity belongs
+        // to one controller. Storage receipted for another identity is not this host's to remove.
+        if (evidence.removable && hostId !== this.identity?.id) Object.assign(evidence, { removable: false, reason: "owner_receipt_differs", removes: undefined });
+        // The assignment's own journal goes with its storage, and only when it records that same assignment.
+        if (evidence.removable && this.orphanJournal(runtime, machineId, evidence.assignmentFingerprint)) evidence.removes = [...evidence.removes ?? [], "assignment-journal"];
+        entries.push({ ...base, runtime: runtime.kind, ...evidence });
+      }
+    }
+    // Registrations and simulators that carry an assignment's name without any storage: report only.
+    const registries: Record<string, string> = {};
+    for (const runtime of this.runtimes.values()) if (runtime.strayDevices) {
+      try {
+        for (const stray of await runtime.strayDevices()) if (!held.has(stray.machineId)) entries.push({ name: stray.name, machineId: stray.machineId, root: "registry", runtime: runtime.kind, kind: stray.kind, owned: false, removable: false, reason: "no_storage_or_receipt" });
+        registries[runtime.kind] = "listed";
+      } catch { registries[runtime.kind] = "unavailable"; }
+    }
+    for (const entry of entries) if (!complete && entry.removable === true) Object.assign(entry, { removable: false, reason: "inventory_incomplete", removes: undefined });
+    // A journal is never named in a purge. It is listed with the storage entry that removes it.
+    for (const entry of entries) if (entry.kind === "assignment-journal") {
+      const storage = entries.find(candidate => candidate.root === "storage" && candidate.machineId === entry.machineId && candidate.removable === true);
+      if (storage && (storage.removes as string[]).includes("assignment-journal")) Object.assign(entry, { removedWith: storage.name, reason: "removed_with_its_storage" });
+      else if (storage) entry.reason = "journal_records_another_assignment";
+    }
+    return { complete, inspectedAt: this.clock.wall(), registries, entries: entries.map(entry => Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined))) };
+  }
+  /** Explicit administrator purge. Each named entry is inspected again and removed only as a
+   * proven orphan; nothing is stopped, and an entry that cannot be proven is refused. */
+  private async purgeStorage(requestId: string, args: RecordValue, live: () => boolean): Promise<RecordValue> {
+    const inventory = await this.inspectStorage(live);
+    if (!inventory) return { state: "failed", result: { code: "interrupted", detail: "Authorization ended before the purge; nothing was changed." } };
+    if (inventory.complete !== true) return { state: "failed", result: { code: "inventory_incomplete", detail: "This host could not inspect its whole storage; nothing was removed." } };
+    const results: RecordValue[] = []; let uncertain = false;
+    for (const name of (Array.isArray(args.entries) ? args.entries : []).map(String)) {
+      const entry = (inventory.entries as RecordValue[]).find(candidate => candidate.name === name && candidate.root === "storage");
+      const runtime = [...this.runtimes.values()].find(candidate => candidate.kind === entry?.runtime);
+      if (!entry || entry.removable !== true || !runtime?.purgeOrphan) { results.push({ name, state: "refused", reason: entry ? entry.reason : "not_found" }); continue; }
+      if (!live()) { results.push({ name, state: "refused", reason: "interrupted" }); continue; }
+      try {
+        const proof = await runtime.purgeOrphan(name, requestId, this.identity?.id), journal = this.orphanJournal(runtime, String(entry.machineId), proof.assignmentFingerprint);
+        if (journal) rmSync(journal, { recursive: true });
+        results.push({ name, state: "removed", removed: [...proof.removed, ...(journal ? ["assignment-journal"] : [])] });
+      } catch (error) {
+        // A refusal precedes any change; any other failure may have removed part of the storage.
+        if (error instanceof ServiceError && error.code === "orphan_refused") results.push({ name, state: "refused", reason: "evidence_changed" });
+        else { uncertain = true; results.push({ name, state: "unknown" }); }
+      }
+    }
+    return { state: uncertain ? "unknown" : "succeeded", result: { entries: results } };
+  }
+  /** The local journal directory of an orphan's assignment: only when it is this runner's own
+   * and carries the fingerprint of the assignment that the storage's owner receipt bound. */
+  private orphanJournal(runtime: Runtime, machineId: string, fingerprint: string | undefined): string | undefined {
+    if (!fingerprint) return undefined;
+    try {
+      const folder = join(runtime.state ?? this.state, "machines", identifier(machineId));
+      return ownedDirectory(folder) && readOwnedRecord(join(folder, "assignment.json")).fingerprint === fingerprint ? folder : undefined;
+    } catch { return undefined; }
   }
   async quiesceForUpdate(): Promise<{ idle: boolean; workloadsStopped: boolean; quiesced: boolean }> {
     this.fenceUpdateAdmission();
@@ -1350,6 +1950,7 @@ export class HostRunner {
         image.image = await prepareImage(image.source, cache);
       }
       await this.initializeProviders();
+      this.refreshBaselines();
       try { await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
       if (this.updateAdmissionBlocked) { await this.poll(); if (!this.fresh()) throw unknownOutcome("Managed startup needs fresh authenticated controller contact."); }
       this.loops.push(this.loop(async () => { try { await this.poll(); } catch { this.log("Host heartbeat failed; enforcing retained execution deadlines."); } }, this.pollInterval * 1000));
@@ -1357,6 +1958,7 @@ export class HostRunner {
       this.loops.push(this.loop(() => this.deadlines(), 100));
       this.loops.push(this.loop(() => this.cleanupStep(), 100));
       this.loops.push(this.loop(() => this.collectResources(), 5000));
+      this.loops.push(this.loop(() => this.samplePressure(), 5000));
       this.loops.push(this.loop(async () => { if (this.checkRequested || this.clock.wall() >= this.nextCheck) { this.checkRequested = false; this.nextCheck = this.clock.wall() + 60; await this.checkEnvironment(); } }, 1000));
       return this;
     } catch (error) { try { await this.close(); } catch { this.log("Host startup cleanup was not fully confirmed."); } throw error; }

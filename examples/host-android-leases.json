@@ -1,0 +1,13 @@
+{
+  "name": "android-leases",
+  "provider": "android",
+  "capacity": {"cpu": 4, "memoryMiB": 8192, "diskGiB": 40},
+  "storage": "/var/lib/canaveral/android",
+  "androidSDK": "/opt/android-sdk",
+  "templates": [{"templateFile": "templates/android-phone-play.json"}],
+  "leaseClockHelper": "/opt/canaveral/canaveral-mobile-native",
+  "leaseSupervisor": "/opt/canaveral/canaveral-mobile-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{"id": "android-phone-play", "revision": "1", "arch": "arm64", "runtime": "android"}],
+  "leaseTunnelProtocol": 1
+}

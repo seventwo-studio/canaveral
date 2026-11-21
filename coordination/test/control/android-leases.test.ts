@@ -5,7 +5,6 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startController } from "../../src/main.ts";
 import { HostRunner, hostOffer } from "../../src/host.ts";
 import { AndroidProvider, LEASE_ISOLATION_ARGUMENTS } from "../../src/providers/android.ts";
 import { nativeLeaseSupervisor } from "../../src/providers/mobile-native.ts";
@@ -13,10 +12,9 @@ import { SUPERVISOR_REFUSED, SupervisorLaunchError } from "../../src/providers/m
 import type { LeaseSupervisorTransport, RecordValue } from "../../src/providers/mobile.ts";
 import { normalizeOperatorTemplate } from "../../src/control/templates.ts";
 import { LeaseClient } from "../../src/sdk.ts";
-import { MP4, acquire, alive, arch, cleaned, emulators, groupAlive, harness, helper, operate, ready, skip, supervised, systemImage, unix, until, watchReceipt } from "./android-lease-fixture.ts";
-import type { Harness } from "./android-lease-fixture.ts";
+import { MP4, acquire, alive, arch, cleaned, emulators, groupAlive, harness, helper, operate, ready, skip, supervised, systemImage, unix, until, watchReceipt } from "./android-fixture.ts";
+import type { Harness } from "./android-fixture.ts";
 
-/** Android lease behaviour against the shared disposable harness (android-lease-fixture.ts). */
 test("leases are gated to supervised Android emulators with a native clock", () => {
   const image = { id: "phone", revision: "1", os: "android", arch, mode: "device", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, device: { systemImage, profile: "pixel_8" } };
   const base = { name: "h", provider: "android", capacity: { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, templates: [image] };
@@ -128,6 +126,13 @@ test("renewal extends the native deadline; lost replies replay by UUID; runner a
   assert.equal((await operate(h, a.id, a.key, "tap", { x: 7, y: 8 }, operation)).body.state, "succeeded");
   const taps = h.counters.get(`cvm-${a.machineId}:shell 'input' 'tap' '7' '8'`);
   assert.equal(taps, 1);
+  // Orientation, simulated position and an app permission go through the same fenced lease path to this emulator only.
+  assert.equal((await operate(h, a.id, a.key, "rotate", { orientation: "LANDSCAPE_LEFT" })).body.state, "succeeded");
+  assert.equal((await operate(h, a.id, a.key, "location", { latitude: 52.37, longitude: 4.9 })).body.state, "succeeded");
+  assert.equal((await operate(h, a.id, a.key, "permission", { app: "com.example.fixture", permission: "android.permission.CAMERA", state: "grant" })).body.state, "succeeded");
+  assert.equal(h.counters.get(`cvm-${a.machineId}:shell 'wm' 'user-rotation' 'lock' '1'`), 1);
+  assert.equal(h.counters.get(`cvm-${a.machineId}:emu geo fix 4.9 52.37`), 1);
+  assert.equal(h.counters.get(`cvm-${a.machineId}:shell 'pm' 'grant' 'com.example.fixture' 'android.permission.CAMERA'`), 1);
   // A lost operation reply: the same UUID returns the receipt without running again.
   const replay = await h.api("POST", `/v1/leases/${a.id}/operations`, { id: operation, member: "primary", action: "tap", arguments: { x: 7, y: 8 } }, a.key);
   assert.equal(replay.body.state, "succeeded");
