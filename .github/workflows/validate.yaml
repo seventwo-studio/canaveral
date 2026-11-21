@@ -33,7 +33,8 @@ jobs:
   typescript:
     name: TypeScript controller, SDK and guest services
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The full suite includes process fixtures with lease expiry and capture cleanup deadlines.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: coordination
