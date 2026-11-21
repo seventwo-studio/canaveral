@@ -656,6 +656,11 @@ impl Simulator {
             let down = matches!(state.as_deref(), Some("Shutdown" | "absent"));
             self.expected |= state.is_some() && !down;
             if !down && retried.is_none_or(|at| at.elapsed() >= SHUTDOWN_RETRY) {
+                // A late boot can become visible to CoreSimulator after the inventory above.
+                // Record its tree before shutdown can remove the parent.
+                if let Ok(processes) = (self.inventory)() {
+                    record(dir, identity, &mut self.sampled(), &processes);
+                }
                 let result = self.run(&["shutdown", &udid], SHUTDOWN_LIMIT, 0, || None);
                 shutdown = result.ok().and_then(|(status, _)| status);
                 retried = Some(Instant::now());
