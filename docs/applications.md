@@ -57,6 +57,11 @@ remain unavailable for consumer placement until deadline enforcement and owned
 cleanup are implemented. A catalogue capability is a template contract, not proof
 that a particular machine is ready or that an unimplemented platform adapter works.
 
+An entry with `isolation: "shared-host"` is an iOS simulator template. A lease of it runs as
+ordinary processes of the Mac host's user and is not isolated from that host; allowlist it
+only for applications that run trusted code. See
+[iOS simulator leases](mobile-control.md#ios-simulator-leases).
+
 Revocation invalidates application and subordinate lease authorization. Active
 leases transition to released with cleanup pending on the controller's next
 transaction. Host reservations remain until positive reclamation. Credential

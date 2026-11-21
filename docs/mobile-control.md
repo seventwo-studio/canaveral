@@ -21,7 +21,9 @@ use cases require access through the job's own scoped credentials. Android emula
 leases are now enabled; see [Android emulator leases](#android-emulator-leases). Since
 19 November 2026 a lease key can also install large builds and record MP4 of its own
 emulator ([lease recording and large installs](#lease-recording-and-large-installs)).
-iOS simulator leases remain open.
+Since 21 November 2026 iOS simulators can be leased too, as an operator opt-in under a
+declared `shared-host` isolation class for trusted code; see
+[iOS simulator leases](#ios-simulator-leases). That path is fixture-covered only.
 
 ## Current implementation
 
@@ -36,8 +38,8 @@ Use a private personal API token with `machines:access` for owned machines, or t
 existing operator credential. Other users, enrollment credentials, guest credentials
 and unrelated hosts cannot read these artifacts. Application/lease credentials are
 not supported by these administrative routes, and they refuse uploads for leased machines.
-A leased Android emulator takes uploads through its lease key on the same contract; see
-[lease recording and large installs](#lease-recording-and-large-installs).
+A leased Android emulator or iOS simulator takes uploads through its lease key on the same
+contract; see [lease recording and large installs](#lease-recording-and-large-installs).
 
 | Operation | Endpoint | Body |
 | --- | --- | --- |
@@ -431,7 +433,8 @@ Enabled 19 November 2026 for Android emulators only. An agent or CI job submits 
 `kind: "lease"` [request](requests.md) (or a direct `/v1/leases` acquisition) for an
 Android template. The request waits while the host is full, is admitted in the shared
 fair order and then gets a booted, checked, network-isolated emulator to itself. The
-lease follows the generic [lease contract](leases.md). iOS simulators and physical
+lease follows the generic [lease contract](leases.md). iOS simulators are leased under their
+own opt-in and isolation class ([iOS simulator leases](#ios-simulator-leases)). Physical
 devices still refuse leased execution.
 
 ### Host configuration
@@ -515,6 +518,10 @@ future work and needs its own isolation review.
 
 A future emulator could ignore or rename these flags. The readiness probe below
 therefore checks isolation on every leased boot and fails closed.
+
+None of this applies to an iOS simulator lease. A simulator has no guest network to
+restrict, so that class has no isolation flags and no isolation probe; see
+[iOS simulator leases](#ios-simulator-leases).
 
 ### Independent deadline and stop proof
 
@@ -610,6 +617,10 @@ The controller requires that positive access check for mobile lease members. The
 becomes `ready`, and its member shows `ready: true`, only after a checked device,
 never from inventory or a bare emulator process.
 
+Step 4 is specific to Android. An iOS simulator lease has no network isolation probe,
+because there is nothing to probe: its readiness is described under
+[iOS simulator leases](#simulator-readiness).
+
 ### Scoped control
 
 The application exchanges its key for a lease-scoped credential
@@ -627,7 +638,8 @@ member `primary` and resolve to that lease's own machine, host and AVD:
 | Record | MP4 video session (see below) | displayStream |
 
 App lifecycle and logs need `command` because the Android shell already grants
-them. They remain unavailable to iOS, which has no shell capability. Operations keep
+them. iOS has no shell capability, so on an iOS member the same actions need `files`
+instead; see [iOS scoped control](#ios-scoped-control). Operations keep
 the durable receipt semantics: the same UUID replays its receipt without running
 again; a changed body is 409; an operation in flight when authorization ends is
 `unknown` and is never replayed. Rotating the credential revokes the previous one.
@@ -678,6 +690,10 @@ declare at most 2 GiB in total across its leases (a quarter of the controller-wi
 upload pool), so one lease key cannot reserve the whole pool. Rotating the lease key
 during an install marks it `unknown`; its upload stays held until lease cleanup. Administrative routes neither read nor install
 lease uploads.
+
+An iOS simulator lease uses the same upload routes with `format: "ios-app-tar"` (the
+simulator `.app` archive described under [CI commands](#ci-commands)); see
+[iOS simulator leases](#ios-scoped-control). Lease recording is Android only.
 
 **Recording reuses the native video session** (#67, #68, #72): the same table, the same
 `canaveral-session-v1` broker and MP4 verification, the same host reservation (one CPU
@@ -869,6 +885,356 @@ restart and supervisor failures during launch are fixture-covered only. The
 supervised emulator's resource usage is not attributed by the
 [runtime ownership](android-runtime-ownership.md) sampler, because its launch has
 no recorded process birth time.
+
+## iOS simulator leases
+
+Enabled 21 November 2026 as an operator opt-in. An agent or CI job leases an iOS simulator
+the way it leases an Android emulator: a `kind: "lease"` [request](requests.md), or a direct
+`/v1/leases` acquisition, for an iOS template. It gets an exclusive, single-use simulator that
+was created for the lease, a deadline enforced without the runner or the controller, and
+removal only on proof.
+
+This path is covered by portable fixtures only. No leased simulator has been created, booted
+or deleted on real CoreSimulator; see [native acceptance is open](#native-acceptance-is-open).
+
+### Decision: shared-host isolation by operator opt-in
+
+Accepted by the owner on 21 November 2026.
+
+**Reason.** A simulator is not a guest. Its apps are ordinary processes of the Mac host's
+user. They use the host's network, can read every file that user can read and can reach host
+services, including other simulators and other leases on the same host. An Android lease
+fences its guest by removing the guest's network; nothing comparable exists for a simulator.
+
+**Decision.** iOS simulator leases run in a declared isolation class, `shared-host`, for
+trusted code only:
+
+- A host advertises an iOS lease image only when that lease image itself declares
+  `"isolation": "shared-host"` in the host's configuration. Without the declaration the host
+  keeps refusing, whatever else is configured. There is no default, no host-wide switch and no
+  environment variable that supplies it. The controller applies the same rule to the offer a
+  runner reports: an iOS selector without the declaration is rejected and never eligible.
+- Only an application whose immutable policy allowlists the template can lease it. The
+  declaration does not widen any allowlist.
+- The class is visible. The consumer sees `isolation: "shared-host"` on the template in
+  `GET /v1/environments/templates`, and on the lease and its member in `GET /v1/leases/{id}`.
+  The operator sees it in the host's `leaseImages` (`GET /v1/hosts`) and on the lease in the
+  administrative system view.
+- Everything else matches the Android lease contract: a single-use device created for the
+  lease, an independent deadline, positive stop and removal proof before the reservation is
+  released, credentials scoped to the lease, uncertain operations never replayed, and cleanup
+  blocked rather than assumed.
+
+Never describe an iOS lease as isolated from its host. Lease a simulator only to code you
+would run as that Mac account yourself.
+
+### iOS host configuration
+
+A host advertises iOS lease execution only when all of these hold. Any partial configuration
+keeps refusing `leaseProtocol` and `leaseImages`.
+
+- The host runs macOS, and its provider is `ios`, or `macos` with the `ios` runtime enabled.
+- `leaseClockHelper` is an absolute path to an installed `canaveral-mobile-native`.
+- The iOS runtime sets `leaseSupervisor` to an absolute path to the same helper, and
+  `idbCompanion` to an absolute path to `idb_companion`. `xcrun`, when set, is absolute; the
+  supervisor otherwise uses `/usr/bin/xcrun`.
+- `leaseProtocol: 1`, and every iOS `leaseImages` entry is exactly
+  `{id, revision, arch, runtime: "ios", isolation: "shared-host"}` naming an offered iOS template.
+
+```json
+{ "provider": "ios", "storage": "/Users/operator/Canaveral/ios", "idb": "/opt/homebrew/bin/idb",
+  "idbCompanion": "/opt/homebrew/bin/idb_companion",
+  "leaseClockHelper": "/ABS/canaveral-mobile-native", "leaseSupervisor": "/ABS/canaveral-mobile-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{ "id": "ios-phone", "revision": "1", "arch": "arm64", "runtime": "ios", "isolation": "shared-host" }] }
+```
+
+Size the host's `capacity` to the number of simulators it may run; requests beyond that wait.
+iOS CPU, memory and disk are scheduling reservations, as for owned simulators
+([devices](devices.md)).
+
+Keep `storage` short. Each lease's control socket is `<storage>/<machine>/idb.sock`, and macOS
+limits a Unix socket path to 104 bytes. When `storage` plus 46 bytes exceeds 100 bytes, or the
+path contains a colon, the environment check fails: the host reports failed health and takes
+no new work until the path is shortened. The same check fails when `idb_companion` is missing,
+or when the installed helper cannot inventory a simulator's process tree (an older
+`canaveral-mobile-native`), since such a host could never prove a stop.
+
+The host enforces the gate itself and does not rely on the controller. A leased iOS
+assignment whose template is not an advertised, declared `leaseImages` entry is never started:
+the host stops it and reports `error`, which fails the lease. The provider checks the
+declaration again before every leased command.
+
+Run the host so that stopping or restarting it does not kill the detached lease supervisors.
+How a macOS launchd job treats them is not verified; see
+[native acceptance is open](#native-acceptance-is-open).
+
+### Device ownership
+
+Each lease gets its own CoreSimulator device set, `<storage>/<machine>/device-set`, and one
+simulator created in it for the lease (`simctl --set <device set> create`). Xcode, Simulator
+and a plain `simctl` do not list it.
+
+Every later command names that device set (`simctl --set <device set> ...`). idb reaches the
+simulator only through the lease's own companion socket; it never looks a leased simulator up
+by UDID in the account's default device set. For a lease the runner never reads, changes or
+deletes anything in the default device set, so a personal or project simulator cannot be
+adopted, touched or deleted.
+
+Ownership is rechecked before every command. The device set must hold exactly one simulator.
+Its UDID must match the creation receipt (`simulator.json`), its name must be `cvm-<machine>`,
+its runtime and device type must match the pinned template, and its data path must lie inside
+the device set. Anything else refuses the command. The next reconcile then fences the lease
+and reports `error`, which fails it.
+
+Nothing is adopted. A creation whose outcome is uncertain is never repeated: the lease fails
+at its provisioning timeout, and cleanup removes whatever the attempt left in the device set.
+
+### Simulator deadline and stop proof
+
+The lease supervisor is the same `canaveral-mobile-native lease-supervise <storage>` process as
+for Android, with the same authorization file, lifetime lock, refusal status 75, sticky fence
+marker and 100 ms check ([independent deadline and stop proof](#independent-deadline-and-stop-proof)).
+Two things differ.
+
+**The supervised child is the lease's control companion**, not the simulator:
+`idb_companion --udid <udid> --device-set-path <device set> --grpc-domain-sock <storage>/idb.sock`,
+in its own process group. Its output goes to `companion.log`, capped at 16 MiB.
+
+**The simulator is not a child of the supervisor.** CoreSimulator starts a simulator's
+`launchd_sim` through launchd, so there is no process group the supervisor could own. The
+supervisor therefore:
+
+- refuses to start (status 75) when any process already names the device set;
+- records `lease-supervisor.json`, which names the device set and the UDID, and only then
+  boots the simulator with `simctl --set <device set> boot <udid>`. The boot may take up to
+  120 s and the deadline is checked throughout. `simctl` output goes to `simulator.log`. The
+  runner never boots a leased simulator and never uses `bootstatus -b`;
+- identifies the simulator's **process tree** from the process table (`ps`). The tree is every
+  live process whose command line names the device set path, every live descendant of such a
+  process, and every process recorded as a member earlier. `launchd_sim` is started with a
+  bootstrap path inside the device set, and every installed app runs from a bundle inside it;
+- samples the tree every 2 s and saves its members (PID and start time) in `lease-tree.json`,
+  so that a process which outlives `launchd_sim` is still found after it has been reparented;
+- stops when the deadline passes, the authorization is fenced, missing, malformed or bound
+  elsewhere, the clock fails, it receives SIGTERM, the companion exits, the boot fails, or the
+  simulator's tree disappears on its own.
+
+The stop always runs in this order and cannot return early:
+
+1. It writes `lease-fenced.json`. Device commands are refused from here on.
+2. It stops the companion's process group (SIGTERM, 5 s, SIGKILL) and waits until the group is gone.
+3. It runs `simctl --set <device set> shutdown <udid>`, for at most 30 s.
+4. It reads the process table until no tree member remains. A member still alive 5 s after the
+   shutdown command returned is sent SIGKILL. Its identity (PID and start time) is re-read in
+   the same inventory immediately before the signal; without a pidfd that is the narrowest
+   window available. Nothing outside the tree is ever signalled.
+5. It writes `lease-stopped.json` with `groupAbsent: true`, `treeAbsent: true`, `treeForced`
+   (whether step 4 had to kill anything), `shutdownStatus` and the device set and UDID, then
+   releases the lock by exiting.
+
+**What the proof establishes.** When the receipt was written, among the processes this macOS
+account can see on this host:
+
+- no process named the lease's device set in its command line. That covers the device's
+  `launchd_sim`, the companion, any `simctl` working on the set, and every app installed on the
+  device;
+- no process descended from such a process;
+- none of the processes the supervisor had recorded as tree members was still alive with its
+  recorded start time;
+- the companion's process group was absent.
+
+**What it does not establish.**
+
+- A process that left the tree between two samples without naming the device set is not found.
+  Simulated code that forks twice within the 2 s before the stop can do that.
+- Work the simulated code handed to the host outside the tree is not found: a launchd job it
+  registered, a host service that launchd started on its behalf, a file it wrote outside the
+  device set, or anything it did to another process of the same account.
+- Processes of other accounts, and their command lines, are not visible.
+- State that the CoreSimulator service keeps for the device is not inspected.
+
+These limits follow from the `shared-host` class; the supervisor does not hide them. When
+more than 1,024 tree members were alive at once the record is marked `truncated`,
+`treeAbsent` is `false` and cleanup stays blocked.
+
+The runner accepts stop proof for cleanup only when both of these hold:
+
+- one of: the supervisor's matching receipt with `groupAbsent` and `treeAbsent` true and its
+  lock free; a launch that never spawned (status 75, or no supervisor record and no
+  `lease-supervise <storage>` process); or a supervisor that is gone without a receipt while
+  its companion's PID and process group are positively absent; and
+- a fresh inventory by `canaveral-mobile-native lease-simulator-status <storage> <device set>`
+  that answers `absent`. It applies the same tree rule, including the members saved in
+  `lease-tree.json`. An answer of `present` or `unknown`, or an unavailable inventory, is not proof.
+
+### Simulator readiness
+
+A leased simulator reports `running` with `accessReady: true` only after all of these:
+
+1. CoreSimulator lists it as `Booted` in the lease's own device set.
+2. It is owned, by the checks under [device ownership](#device-ownership).
+3. Its boot has finished: `simctl bootstatus <udid>` returns.
+4. The install service answers: `simctl listapps <udid>`.
+5. The launch service answers: the device's launchd runs `simctl spawn <udid> launchctl print system`.
+6. The lease's companion describes this UDID as booted (`idb --companion <socket> describe`).
+
+The result is recorded once per launch in `lease-ready.json`, with `isolation: "shared-host"`
+and `networkIsolation: "not-probed"`. Until then the simulator reports `starting` with a
+detail, and the provisioning timeout fails a lease that never becomes ready. A companion that
+answers for another device fences the lease.
+
+**There is no network isolation probe for this class.** Android's readiness proves that the
+guest cannot reach the host. A simulator shares the host's network and nothing restricts it,
+so there is no such claim to check. A leased iOS app can reach the internet, the LAN, the
+controller and every loopback service of the host.
+
+### iOS scoped control
+
+The application exchanges its key for a lease-scoped credential, exactly as for Android. Only
+that credential authorizes the lease's operations, which resolve to the lease's own simulator.
+
+| Need | Action | Capability |
+| --- | --- | --- |
+| Install a build | Upload the simulator `.app` archive through the lease key with `format: "ios-app-tar"`, then `install-uploaded` | files |
+| Launch, stop, list or remove apps, open a URL | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | files |
+| Logs | `logs` (the simulator's last minute) | files |
+| App-container files | `list-files`, `push` (up to 512 KiB), `pull` (up to 4 MiB), each with `app` | files |
+| Screens | `screenshot` (PNG), `hierarchy`, `accessibility`, `accessibility-action` | screenshot, hierarchy |
+| Input | `tap`, `swipe`, `text`, `key` | input |
+
+iOS has no shell capability: `command` and `pty` stay `false` for an iOS template, and
+`shell` and the `shell-*` actions are refused with `capability_unsupported`. App lifecycle and
+logs therefore cannot depend on `command` as they do on Android. On an iOS member they need
+`files`, the capability that already covers installing a build and reading its app container.
+This is a mapping, not a new capability: the capability set on the wire is unchanged.
+
+`install` (a host-configured artifact), `permission`, `location` and `rotate` are not lease
+actions on either platform.
+
+The upload, chunk, publication, replay and install rules, the four-uploads-per-lease and
+2 GiB-per-application limits and the release-only-on-proof rules are those of
+[lease recording and large installs](#lease-recording-and-large-installs). The archive is
+staged and extracted in a private `.artifact-*` directory of the lease's own storage. The
+provider rechecks the supervisor and the simulator's identity before staging, before
+`simctl install` and after it. An app-container path must resolve inside the lease's device
+set.
+
+**Lease recording is refused on iOS** (`409 capability_unsupported` on
+`POST /v1/leases/{id}/video-sessions`, and again in the provider). It was left refused rather
+than wired and marked unaccepted. The administrative iOS recording path fails natively at
+idb's stop (idb-cli 1.7.8 exits 1 after the graceful interrupt), so every lease recording
+would end with unproven cleanup. Its capture process is also not scoped to the lease's device
+set. The administrative video and app-artifact routes refuse a leased simulator, as they
+refuse a leased emulator.
+
+The leased live display stream and lease file sessions are not accepted for iOS leases, as for
+Android.
+
+### iOS expiry, release and loss
+
+At expiry or release the controller refuses the old credential at once, fails queued
+operations and issues the cleanup intent, as for Android. The runner fences the supervisor.
+Cleanup then needs the stop proof above. With it, the runner deletes the simulator through
+CoreSimulator (`simctl --set <device set> delete <udid>`, only when the set holds nothing but
+this lease's shut-down simulator), removes the whole storage directory through the recoverable
+quarantine path, erases the assignment's credential directory and only then reports
+completion. The controller releases the host and application reservations on that report.
+
+A lease is never relaunched. The conservative fence, the "renew early" rule and the outcomes
+of controller loss and runner loss are those of the
+[Android section](#expiry-release-and-loss). A restarted runner recovers a running leased
+simulator without creating or booting anything.
+
+**Supervisor loss** (killed or crashed without a stop receipt): nothing enforces the deadline
+any more, so the lease ends at once. Device commands get 410 as soon as the lock is free. On
+its next reconcile the runner fences the authorization and reports `error`, which fails the
+lease. Cleanup then waits for stop proof.
+
+### Simulator cleanup recovery
+
+While stop proof is missing, cleanup reports `blocked`, the host, application and lease
+reservations stay held and the runner retries with backoff. There is no administrator override
+that releases them without proof. The reasons are:
+
+- `execution_pending`: the supervisor's lock is held, the simulator's tree or the companion is
+  still present, the inventory is unavailable or `unknown`, or CoreSimulator does not list the
+  simulator as `Shutdown`;
+- `ownership`: the device set holds a simulator the lease did not create. Nothing is deleted;
+- `storage_removal`: the device set could not be listed, or the delete was not confirmed.
+
+Recovery after supervisor loss:
+
+1. Confirm that `canaveral-mobile-native lease-status <storage>/<machine>` reports
+   `"supervisor": "free"`, so no supervisor is running.
+2. Read `<storage>/<machine>/lease-supervisor.json`. It names the device set and UDID
+   (`simulator`) and the companion's `childPid`, which is also its process group ID.
+3. Shut the lease's own simulator down in its own device set:
+   `xcrun simctl --set <device set> shutdown <udid>`. Never run this without `--set`.
+4. Confirm that the companion's command line names `--device-set-path <device set>`, then stop
+   that process group.
+5. Check `canaveral-mobile-native lease-simulator-status <storage>/<machine> <device set>`. Once
+   it answers `absent`, the runner's next retry deletes the simulator, removes storage, erases
+   credentials and reports completion.
+
+A reused PID that still shows as present keeps cleanup blocked. Wait for it to disappear;
+never signal an unidentified process to unblock cleanup.
+
+### iOS lease verification
+
+[ios-leases.test.ts](../coordination/test/control/ios-leases.test.ts) runs a real loopback
+controller and `HostRunner` with the native lease clock, the real `lease-supervise` helper and
+the SDK. `simctl`, idb and the companion are stand-ins. The stand-in `simctl boot` leaves a
+detached stand-in `launchd_sim` with one child, neither of which is a child of the supervisor.
+It covers:
+
+- refusal without the declaration, with another class, off macOS and without the supervisor
+  or companion, by the host and by the controller;
+- the host's own gate for an unadvertised template and for a selector that lost its declaration;
+- refusal for an application that is not allowlisted, directly and queued;
+- queue then admit on a one-simulator host, and the isolation class in the catalogue, the
+  lease view, the host offer and the administrative lease list;
+- lease-key screenshot, input, hierarchy, accessibility, app lifecycle, logs, app-container
+  files and a two-chunk `ios-app-tar` install, with UUID replay;
+- refusal of shell, recording and administrative routes, and of another lease's key, the
+  application key and the operator on lease-key routes;
+- expiry in use, the stop receipt, deletion through CoreSimulator and a clean hand-over;
+- renewal, and a runner restart that recovers the live simulator without creating or booting;
+- supervisor loss: immediate 410, a failed lease and a reservation held until the tree is gone;
+- cleanup blocked while the inventory is unavailable or `unknown`, despite a stop receipt;
+- a boot that fails, and a foreign simulator in a lease's device set (fenced; removal refused);
+- in every scenario, that no command reached the default device set.
+
+`lease_supervisor.rs` and `simulator_tree.rs` unit tests run real stand-in processes under the
+real supervisor loop. They cover a graceful shutdown, a tree member that outlives its parent,
+a shutdown command that fails, a simulator that stops by itself, a failed boot, a foreign or
+occupied device set refused before anything spawns, and the inventory a host uses after
+supervisor loss.
+
+### Native acceptance is open
+
+Nothing in this section has run against real CoreSimulator, Xcode or idb. The repository's
+policy required operator authorization for native runs, and none was given for this work. The
+flags used were read from `simctl` and `idb_companion` help text and from the idb 1.7.8 client
+source, not from a run. The [unexecuted trial plan](../coordination/native-acceptance/ios-lease-simulators.md)
+turns the list below into checks. Each of these needs a native trial before an iOS lease is relied on:
+
+- creating, booting, shutting down and deleting a simulator in a private device set under the
+  host's service account, including long or space-containing storage paths and whether
+  CoreSimulator leaves files outside the device set (for example under `/private/tmp`);
+- whether `launchd_sim` and installed apps name the device set in their command lines, which
+  the tree identification depends on, and how fast a real tree changes between samples;
+- whether `simctl shutdown` returns only after the tree is gone, whether SIGKILL of
+  `launchd_sim` ends its children, and what CoreSimulator reports after a forced stop
+  (`Shutdown` is needed before the delete);
+- `idb_companion` started before the boot with `--device-set-path` and `--grpc-domain-sock`,
+  and `idb --companion <socket>` for `describe`, `ui` input and `ui describe-all`;
+- the readiness probes on a fresh device, and how long a first boot takes;
+- that restarting the host under launchd leaves the detached supervisors running;
+- several leased simulators booted at once, and their real CPU, memory and disk use, which
+  nothing attributes or limits;
+- controller loss, runner loss, supervisor loss, renewal and expiry in use on a real simulator;
+- the leased live display stream, lease file sessions and lease recording.
 
 ## Acceptance boundaries
 

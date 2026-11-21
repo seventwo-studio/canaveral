@@ -22,6 +22,12 @@ MP4 recording (`video`) for leased Android emulators
 [accessibility](scoped-accessibility.md). Administrative, host and model routes use
 separate interfaces. The SDK does not establish provider eligibility.
 
+An [iOS simulator lease](mobile-control.md#ios-simulator-leases) uses the same install
+methods with `format: "ios-app-tar"` and refuses recording. Its catalogue entry
+(`CatalogueImage.isolation`), lease (`Lease.isolation`) and member carry `"shared-host"`: the
+lease is not isolated from the Mac host that runs it. The clients reject a reply that names
+any other isolation class, so an unknown class is never read as a stronger one.
+
 ```ts
 const client = new ConsumerClient({ baseUrl: "https://compute.example", applicationKey, caFile });
 const request = { id: persistedUuid, templateId, templateRevision, arch: "amd64" as const };
