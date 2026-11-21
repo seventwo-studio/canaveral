@@ -2612,6 +2612,30 @@
               }
             ]
           },
+          "baseline": {
+            "type": "object",
+            "description": "The saved device baseline every device of this image starts from. It carries whatever its preparer installed, signed in to or configured. Android only.",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"
+              },
+              "revision": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "name",
+              "revision",
+              "digest"
+            ],
+            "additionalProperties": false
+          },
           "isolation": {
             "type": "string",
             "enum": [
@@ -2802,6 +2826,14 @@
           },
           "resources": {
             "$ref": "#/components/schemas/Resources"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "warm",
+              "cold"
+            ],
+            "description": "How the device was obtained: taken over from the host's warm pool without another boot, or booted for this lease. Absent while a claimed warm device is still being handed over. A warm device passes the same readiness, network isolation and image checks as a cold one. No host detail is exposed."
           },
           "cleanup": {
             "$ref": "#/components/schemas/MemberCleanup"

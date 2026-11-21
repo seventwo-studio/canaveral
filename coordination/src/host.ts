@@ -1,6 +1,7 @@
 import { GuestHelperAccess } from "./control/sessions.ts";
 import { appArtifactSource } from './app-artifact-source.ts';
 import { markNotStaged } from './providers/mobile.ts';
+import type { WarmAuthorization } from './providers/mobile.ts';
 import { IOS_LEASE_ISOLATION } from './providers/ios.ts';
 import { serveMobileVideo } from './mobile-video.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
@@ -101,6 +102,10 @@ interface Runtime extends NativeProvider {
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
   ownsStorage?(machine: RecordValue, image: RecordValue, storage: string): boolean;
+  settleClaim?(machine: RecordValue, image: RecordValue, folder: string): Promise<void>;
+  saveBaseline?(machine: RecordValue, image: RecordValue, folder: string, request: { id: string; name: string; revision: string }, authorized: () => boolean): Promise<RecordValue>;
+  removeBaseline?(request: { id: string; name: string; revision: string }): RecordValue;
+  baselineInventory?(): RecordValue[];
   sweep?(active: Set<string>): Promise<unknown>;
   close?(): Promise<unknown>;
   resourceProcesses?(machine: RecordValue, image: RecordValue, folder: string): Promise<unknown[]>;
@@ -203,7 +208,10 @@ export function hostTransport(config: HostConfig): HostTransport {
  * macOS, with the native supervisor and the lease's control companion configured. There is no
  * default for the declaration and nothing outside this configuration can supply it. */
 export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
-  if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
+  if (!("leaseProtocol" in config) && !("leaseImages" in config)) {
+    if ("leaseWarmPool" in config) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
+    return {};
+  }
   const refuse = (detail = "before native fencing and owned cleanup acceptance"): never => { throw new ServiceError(`This runner cannot advertise lease execution ${detail}.`, 400); };
   if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
   const provider = String(config.provider);
@@ -228,7 +236,17 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
     }
     return refuse();
   });
-  return { leaseProtocol: 1, leaseImages };
+  // Warm devices are an explicit host opt-in with the host's own bounds. The controller's targets
+  // can only be smaller; this runner refuses a warm assignment beyond them whatever it is sent.
+  if (!("leaseWarmPool" in config)) return { leaseProtocol: 1, leaseImages };
+  if (!leaseImages.some(image => image.runtime === "android")) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
+  const pool = object(config.leaseWarmPool), bound = (key: string, minimum: number, maximum: number): number => {
+    const value = pool[key];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new ServiceError(`leaseWarmPool.${key} must be an integer from ${minimum} to ${maximum}.`, 400);
+    return value;
+  };
+  if (Object.keys(pool).sort().join() !== "maxAgeSeconds,maxDevices") throw new ServiceError("leaseWarmPool takes exactly maxDevices and maxAgeSeconds.", 400);
+  return { leaseProtocol: 1, leaseImages, warmPool: { maxDevices: bound("maxDevices", 1, 64), maxAgeSeconds: bound("maxAgeSeconds", 60, 86400) } };
 }
 export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
   const leases = leaseOffer(config, platform);
@@ -273,6 +291,11 @@ export class HostRunner {
   readonly inferenceReports = new Map<string, RecordValue>();
   readonly imageReports = new Map<string, RecordValue>();
   readonly sessionReports = new Map<string, RecordValue>();
+  readonly baselineReports = new Map<string, RecordValue>();
+  /** Each warm hold's fixed deadline on this runner's clock. It only ever shortens. */
+  private readonly warmHolds = new Map<string, { hold: string; deadline: number }>();
+  /** Public view of the baselines stored on this host, refreshed outside the heartbeat path. */
+  private baselines: RecordValue[] | undefined;
   readonly hostOperationReports = new Map<string, RecordValue>();
   readonly runtimes = new Map<string, Runtime>();
   readonly transport: HostTransport;
@@ -280,7 +303,7 @@ export class HostRunner {
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], hostOperations: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], baselines: [], hostOperations: [] };
   /** Running upkeep operations by lane: one runtime change per platform, one storage operation. */
   private readonly upkeepLanes = new Map<string, string>();
   /** Devices that had host-visible work since the last delivered heartbeat, so that work shorter
@@ -406,12 +429,12 @@ export class HostRunner {
     const path = join(this.state, "host-reports.json");
     if (!present(path)) return;
     const saved = readRecord(path, 16 * 1_048_576);
-    for (const [name, target] of [["machines", this.reports], ["device", this.deviceReports], ["inference", this.inferenceReports], ["images", this.imageReports], ["sessions", this.sessionReports], ["hostOperations", this.hostOperationReports]] as const) {
+    for (const [name, target] of [["machines", this.reports], ["device", this.deviceReports], ["inference", this.inferenceReports], ["images", this.imageReports], ["sessions", this.sessionReports], ["baselines", this.baselineReports], ["hostOperations", this.hostOperationReports]] as const) {
       for (const [id, report] of Object.entries(object(saved[name] ?? {}))) target.set(identifier(id), object(report));
     }
   }
   private saveReports(): void {
-    saveRecord(join(this.state, "host-reports.json"), { machines: Object.fromEntries(this.reports), device: Object.fromEntries(this.deviceReports), inference: Object.fromEntries(this.inferenceReports), images: Object.fromEntries(this.imageReports), sessions: Object.fromEntries(this.sessionReports), hostOperations: Object.fromEntries(this.hostOperationReports) });
+    saveRecord(join(this.state, "host-reports.json"), { machines: Object.fromEntries(this.reports), device: Object.fromEntries(this.deviceReports), inference: Object.fromEntries(this.inferenceReports), images: Object.fromEntries(this.imageReports), sessions: Object.fromEntries(this.sessionReports), baselines: Object.fromEntries(this.baselineReports), hostOperations: Object.fromEntries(this.hostOperationReports) });
   }
   async connect(): Promise<void> {
     const path = join(this.state, "identity.json"), orchestrator = this.config.url.replace(/\/+$/, "");
@@ -627,7 +650,7 @@ export class HostRunner {
   }
   async poll(): Promise<void> {
     if (!this.identity) throw new ServiceError("Host is not connected.", 409);
-    const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports);
+    const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports), baselineReports = firstReport(this.baselineReports, true);
     const sent = this.clock.now();
     // Read the current credential on every heartbeat. Rotation delivery may replace
     // identity.json between requests, but cannot change the host/controller binding.
@@ -643,19 +666,21 @@ export class HostRunner {
     const upkeep = this.upkeepReport(), hostOperationReports = upkeep ? Object.fromEntries([...this.hostOperationReports].slice(0, 16)) : {};
     const reportedBusy = upkeep ? upkeep.busy as string[] : [];
     const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
-      ...(this.pressureReport ? { pressure: this.pressureReport } : {}), ...(upkeep ? { upkeep, hostOperationReports } : {}) };
+      ...(this.pressureReport ? { pressure: this.pressureReport } : {}), ...(upkeep ? { upkeep, hostOperationReports } : {}), ...(this.baselines ? { baselines: this.baselines, baselineReports } : {}) };
     if (proof && Buffer.byteLength(JSON.stringify(body)) > MAX_HOST_MESSAGE) delete body.maintenance.proof;
     const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, body, this.identity.credential, this.stopController.signal);
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), hostOperations: records(response.hostOperations ?? [], "host operations") };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), baselines: records(response.baselineTasks ?? [], "baseline tasks"), hostOperations: records(response.hostOperations ?? [], "host operations") };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
+    this.observeWarm(machines, sent);
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
     for (const [id, report] of sentReports) if (!active.has(id)) {
       if (report.leaseCleanup && object(report.leaseCleanup).state === "complete") { const cleanup = object(report.leaseCleanup); this.guard.retire(id, String(cleanup.leaseId), String(cleanup.id)); }
+      if (report.deletion && object(report.deletion).state === "complete") this.forgetWarm(id);
       this.reports.delete(id);
     }
     if (legacyDigest({ machines: this.assignments, queues: this.queues }) !== legacyDigest({ machines, queues })) this.updateEpoch++;
@@ -667,13 +692,111 @@ export class HostRunner {
     for (const id of reportedBusy) this.recentlyBusy.delete(id);
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
     this.maintenanceChallenge = maintenance ?? null;
-    for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports], ["hostOperations", this.hostOperationReports, hostOperationReports]] as const) {
+    for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports], ["baselines", this.baselineReports, baselineReports], ["hostOperations", this.hostOperationReports, hostOperationReports]] as const) {
       const ids = new Set(queues[key].map(r => String(r.id)));
       for (const id of Object.keys(sentMap)) if (!ids.has(id)) target.delete(id);
     }
     if (typeof response.checksRequestedAt === "number" && response.checksRequestedAt > this.lastCheckRequest) { this.lastCheckRequest = response.checksRequestedAt; this.checkRequested = true; }
     this.saveReports(); this.cancelUnauthorized();
     this.inspectMaintenance();
+  }
+  /** A warm hold's deadline is fixed when the controller creates the device. On this runner's clock
+   * it is the earliest value ever derived for it, capped by the host's own maximum age. */
+  private observeWarm(machines: RecordValue[], sent: number): void {
+    const limit = Number(object(this.offer.warmPool ?? {}).maxAgeSeconds ?? 0), seen = new Set<string>();
+    for (const machine of machines) {
+      if (!machine.warm) continue;
+      const warm = object(machine.warm), id = String(machine.id), hold = identifier(warm.id), previous = this.warmHolds.get(id);
+      if (![warm.authorizationDeadline, warm.controllerNow].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new ServiceError("Invalid warm hold deadline.", 400);
+      const offered = sent + Math.max(0, Number(warm.authorizationDeadline) - Number(warm.controllerNow));
+      this.warmHolds.set(id, { hold, deadline: previous?.hold === hold ? Math.min(previous.deadline, offered) : Math.min(offered, sent + limit) });
+      seen.add(id);
+    }
+    for (const id of [...this.warmHolds.keys()]) if (!seen.has(id)) this.warmHolds.delete(id);
+  }
+  private warmAuthorization(id: string, hold: string): WarmAuthorization {
+    const held = this.warmHolds.get(id);
+    if (!held || held.hold !== hold) throw new ServiceError("The warm hold is unavailable.", 409);
+    return { holdID: hold, remainingSeconds: Math.max(0, held.deadline - this.clock.now()) };
+  }
+  /** Warm devices run only where this host's operator enabled them, for its advertised lease images,
+   * and never more of them than the host's own limit. */
+  warmEligible(machine: RecordValue): boolean {
+    const pool = this.offer.warmPool ? object(this.offer.warmPool) : undefined;
+    if (!pool || !this.leaseEligible(machine)) return false;
+    const held = this.assignments.filter(m => m.warm && !m.lease && !m.deletion && m.desired === "running").map(m => String(m.id)).sort();
+    return held.indexOf(String(machine.id)) < Number(pool.maxDevices);
+  }
+  /** A retired warm device leaves nothing on this host once the controller has acknowledged its proven removal. */
+  private forgetWarm(id: string): void {
+    const machine = this.updateAssignments.get(id);
+    if (!machine?.warm || machine.lease) return;
+    try {
+      const { folder } = this.context(machine), receipt = join(folder, "deletion.json");
+      if (!present(receipt)) return;
+      const proof = readRecord(receipt);
+      if (proof.state !== "complete" || proof.machineId !== id) return;
+      rmSync(folder, { recursive: true }); this.updateAssignments.delete(id);
+    } catch { this.log("A retired warm device's local journal was kept for inspection."); }
+  }
+  /** A claimed warm device's local assignment record gains its lease exactly once. */
+  private claimAssignment(machine: RecordValue, folder: string): void {
+    const receipt = join(folder, "assignment.json");
+    if (!machine.warm || !machine.lease || !present(receipt)) return;
+    const owner = readRecord(receipt);
+    if (owner.fingerprint === assignmentFingerprint(machine) && owner.warmId === object(machine.warm).id && owner.leaseId === undefined) saveRecord(receipt, { ...owner, leaseId: object(machine.lease).id });
+  }
+  /** A claimed warm device ran before its lease existed. Before that lease's cleanup, its local
+   * records are bound to the lease so the ordinary stop, removal and erasure proofs apply to it. */
+  private async settleClaim(machine: RecordValue, runtime: Runtime, image: RecordValue, folder: string): Promise<void> {
+    const id = identifier(machine.id), receipt = join(dirname(folder), ".lease-cleanup", `${id}.json`);
+    try {
+      this.guard.markStarted(id, String(object(machine.lease).id));
+      // Only before cleanup has removed anything: afterwards the assignment and its storage are gone on purpose.
+      if (!present(folder) || present(receipt) && readRecord(receipt).phase !== "planned") return;
+      await assignmentAccess(machine, folder, async () => { this.claimAssignment(machine, folder); await runtime.settleClaim?.(machine, image, folder); }, { exclusive: true });
+    } catch { this.log("A claimed warm device could not be settled before cleanup; cleanup reports the reason."); }
+  }
+  private refreshBaselines(): void {
+    const runtime = this.runtimes.get("android");
+    if (!runtime?.baselineInventory) return;
+    try { this.baselines = runtime.baselineInventory().slice(0, 100); } catch { this.log("The baseline inventory could not be read; the last one is kept."); }
+  }
+  /** One save or removal at a time. A save holds its device's assignment against reconciliation. */
+  private stepBaselines(): void {
+    if (!this.fresh() || this.updateAdmissionBlocked || [...this.active.keys()].some(key => key.startsWith("baselines:"))) return;
+    const task = (this.queues.baselines ?? []).find(t => !TERMINAL.has(String(this.baselineReports.get(String(t.id))?.state)));
+    if (!task) return;
+    const id = identifier(task.id), source = task.kind === "save" ? identifier(task.machineId) : undefined;
+    if (source && (this.active.has(`machine:${source}`) || this.deviceMachines.has(source))) return;
+    if (source) this.deviceMachines.add(source);
+    this.launch(`baselines:${id}`, () => this.fresh() && this.queues.baselines!.some(t => t.id === id), async context => {
+      try { await this.durableWork("baselines", task, this.baselineReports, c => this.baselineWork(task, c), context); }
+      finally { if (source) this.deviceMachines.delete(source); this.refreshBaselines(); }
+    });
+  }
+  private async baselineWork(task: RecordValue, context: HostWorkContext): Promise<RecordValue> {
+    const runtime = this.runtimes.get("android"), failed = (code: string, detail: string): RecordValue => ({ state: "failed", result: { code, detail } });
+    if (!runtime?.saveBaseline || !runtime.removeBaseline) return failed("capability_unsupported", "This host has no Android baseline store.");
+    const request = { id: identifier(task.baseline), name: String(task.name), revision: String(task.revision) };
+    const names = (template: unknown): boolean => { const baseline = object(template).baseline; return !!baseline && object(baseline).name === request.name && object(baseline).revision === request.revision; };
+    try {
+      if (task.kind === "remove") {
+        // The host refuses on its own account while anything here still names the baseline.
+        if ((this.config.templates as RecordValue[]).some(names) || this.assignments.some(machine => names(machine.template))) return failed("baseline_referenced", "A template or device on this host still names this baseline.");
+        return { state: "succeeded", result: runtime.removeBaseline(request) };
+      }
+      if (task.kind !== "save") return failed("invalid_request", "Unknown baseline task.");
+      // The source is this runner's own current, stopped, unleased assignment; nothing else is captured.
+      const machine = this.assignments.find(m => m.id === task.machineId);
+      if (!machine || machine.lease || machine.warm || machine.deletion || machine.desired !== "stopped" || assignmentFingerprint(machine) !== assignmentFingerprint(object(task.machine))) return failed("baseline_source_unsupported", "The source device is not a stopped, account-owned assignment of this host.");
+      const { image, folder } = this.context(machine);
+      return { state: "succeeded", result: await runtime.saveBaseline(machine, image, folder, request, context.authorized) };
+    } catch (error) {
+      // A baseline refusal precedes publication, and the store has already removed its staging directory.
+      if (error instanceof ServiceError && error.code.startsWith("baseline_")) return failed(error.code, error.message.slice(0, 500));
+      throw error;
+    }
   }
   fresh(): boolean {
     try { return !this.stopController.signal.aborted && contactFresh(this.lastContact, this.clock.now()); }
@@ -692,7 +815,9 @@ export class HostRunner {
   async reconcile(machine: RecordValue, context?: HostWorkContext): Promise<RecordValue> {
     if (this.updateAdmissionBlocked && machine.desired !== "stopped") throw new ServiceError("Host update admission is fenced.", 409);
     const { runtime, image: originalImage, folder } = this.context(machine), id = identifier(machine.id);
+    const hold = machine.warm ? identifier(object(machine.warm).id) : null;
     if (machine.leaseCleanup) {
+      if (hold && machine.lease) await this.settleClaim(machine, runtime, originalImage, folder);
       const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android", "ios"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
@@ -709,8 +834,9 @@ export class HostRunner {
     return assignmentAccess(machine, folder, async () => {
       const fingerprint = assignmentFingerprint(machine), receipt = join(folder, "assignment.json");
       privateDirectory(folder);
-      if (present(receipt)) { const owner = readRecord(receipt); if (owner.fingerprint !== fingerprint || (owner.leaseId ?? null) !== (machine.lease ? object(machine.lease).id : null)) throw new ServiceError("Local assignment ownership differs.", 409); }
-      else saveRecord(receipt, { fingerprint, ...(machine.lease ? { leaseId: object(machine.lease).id } : {}) });
+      if (hold && machine.lease) { this.guard.markStarted(id, String(object(machine.lease).id)); this.claimAssignment(machine, folder); }
+      if (present(receipt)) { const owner = readRecord(receipt); if (owner.fingerprint !== fingerprint || (owner.leaseId ?? null) !== (machine.lease ? object(machine.lease).id : null) || (owner.warmId ?? null) !== hold) throw new ServiceError("Local assignment ownership differs.", 409); }
+      else saveRecord(receipt, { fingerprint, ...(hold ? { warmId: hold } : {}), ...(machine.lease ? { leaseId: object(machine.lease).id } : {}) });
       if (machine.deletion) {
         const requestId = identifier(object(machine.deletion).id);
         if (!runtime.removeOwnedStorage) return { state: "unknown", deletion: { id: requestId, state: "blocked" }, detail: "Runtime does not implement verified owned removal." };
@@ -738,17 +864,26 @@ export class HostRunner {
         }
         leaseAuthorization = () => this.guard.authorization(id, String(object(machine.lease).id));
       }
+      let warmAuthorization: (() => WarmAuthorization) | undefined;
+      if (hold && !machine.lease) {
+        // A warm device is not a lease, but the host gates it the same way: its own opt-in, its
+        // advertised lease images and its own device limit, whatever the controller sends.
+        refused = machine.desired === "running" && !this.warmEligible(machine);
+        if (refused) current = { ...machine, desired: "stopped" };
+        warmAuthorization = () => this.warmAuthorization(id, hold);
+      }
+      const authorizations = { ...(leaseAuthorization ? { _leaseAuthorization: leaseAuthorization } : {}), ...(warmAuthorization ? { _warmAuthorization: warmAuthorization } : {}) };
       // Stopping bypasses credentials, source preparation and guest connectivity.
       if (current.desired === "stopped") {
-        const stopped = await runtime.reconcile(current, leaseAuthorization ? { ...image, _leaseAuthorization: leaseAuthorization } : image, folder);
-        return refused ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail: "This host does not offer leased execution for this runtime and template." } : stopped;
+        const stopped = await runtime.reconcile(current, { ...image, ...authorizations }, folder);
+        return refused ? { ...stopped, state: stopped.state === "stopped" ? "error" : stopped.state, detail: machine.lease ? "This host does not offer leased execution for this runtime and template." : "This host does not offer warm devices for this runtime and template." } : stopped;
       }
       if (context && !context.authorized()) throw new ServiceError("Assignment authorization ended.", 410);
       if (image.source && !image.image && !image.catalogueImageId) throw new ServiceError("Prepare and verify the configured base image before runtime creation.", 409);
       if (image.catalogueImageId) this.library.verifyDefinition(image);
       const backend = this.accessBackend(current);
       if (image.guestAccess && "prepare" in backend && backend.prepare) image = await backend.prepare(current, image, folder);
-      if (leaseAuthorization) image = { ...image, _leaseAuthorization: leaseAuthorization };
+      image = { ...image, ...authorizations };
       const prepared = image.prepare ? object(image.prepare) : undefined;
       let preparation: RecordValue | undefined;
       if (prepared) {
@@ -827,7 +962,7 @@ export class HostRunner {
   }
   private async durableWork(kind: string, task: RecordValue, target: Map<string, RecordValue>, work: (context: HostWorkContext) => Promise<RecordValue>, context: HostWorkContext): Promise<void> {
     const id = identifier(task.id), path = join(this.state, "work", kind, `${id}.json`);
-    const stable = kind === "device" ? ["id", "machineId", "leaseId", "action", "arguments"] : kind === "inference" ? ["id", "hostId", "request", "definition"] : kind === "images" ? ["id", "kind", "machineId", "name", "metadata", "registryId"] : kind === "hostOperations" ? ["id", "kind", "arguments"] : ["id", "generation", "leaseId", "machineId", "capability"];
+    const stable = kind === "device" ? ["id", "machineId", "leaseId", "action", "arguments"] : kind === "inference" ? ["id", "hostId", "request", "definition"] : kind === "images" ? ["id", "kind", "machineId", "name", "metadata", "registryId"] : kind === "baselines" ? ["id", "kind", "baseline", "name", "revision", "machineId"] : kind === "hostOperations" ? ["id", "kind", "arguments"] : ["id", "generation", "leaseId", "machineId", "capability"];
     const fingerprint = legacyDigest(Object.fromEntries(stable.filter(k => Object.hasOwn(task, k)).map(k => [k, task[k]])));
     if (present(path)) {
       const previous = readRecord(path) as unknown as DurableWork;
@@ -877,6 +1012,8 @@ export class HostRunner {
   }
   async step(): Promise<void> {
     this.cancelUnauthorized();
+    // Before machine reconciliation, so a pending save can take its stopped device's turn.
+    this.stepBaselines();
     const machines = this.guard.assignments(this.assignments);
     const activeIds = new Set(machines.filter(m => this.machineAuthorized(String(m.id))).map(m => String(m.id)));
     try { await this.sweepAccess(activeIds); } catch { this.log("Runtime connection closure is unconfirmed."); }
@@ -1090,6 +1227,7 @@ export class HostRunner {
       catch { checks.push({ id: runtime.kind, label: `${runtime.kind} runtime`, status: "failed", detail: "Runtime diagnostics failed; inspect private configuration." }); }
     }
     if (!this.stopController.signal.aborted) this.health = { status: checks.some(c => c.status === "failed") ? "failed" : "passed", checkedAt: this.clock.wall(), checks };
+    this.refreshBaselines();
   }
   async collectResources(): Promise<void> {
     const cores = cpus(), cpuCount = cores.length, idle = cores.reduce((n, c) => n + c.times.idle, 0), total = cores.reduce((n, c) => n + Object.values(c.times).reduce((a, b) => a + b, 0), 0);
@@ -1487,6 +1625,7 @@ export class HostRunner {
         image.image = await prepareImage(image.source, cache);
       }
       await this.initializeProviders();
+      this.refreshBaselines();
       try { await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
       if (this.updateAdmissionBlocked) { await this.poll(); if (!this.fresh()) throw unknownOutcome("Managed startup needs fresh authenticated controller contact."); }
       this.loops.push(this.loop(async () => { try { await this.poll(); } catch { this.log("Host heartbeat failed; enforcing retained execution deadlines."); } }, this.pollInterval * 1000));

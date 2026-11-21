@@ -47,6 +47,12 @@ app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
 app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
+warm-pool [list] | warm-pool show HOST    Warm device targets, ready, booting, failed, paused and last error
+warm-pool set HOST --request-file FILE   Replace a host's warm targets and headroom (administrator)
+baselines | baseline show ID             Saved device baselines, their image binding and stale state
+baseline save MACHINE --name NAME --revision REV --request-id UUID
+                                         Save a stopped, account-owned Android device (administrator)
+baseline remove ID --request-id UUID     Remove an unreferenced baseline (administrator)
 requests [list|show ID|submit --request-file FILE|cancel ID]   Durable waiting requests (application key)
 lease hold --template ID [--revision R --arch A --ttl S --name N --priority N --wait S]
            [--request-id UUID --source-file FILE --lease-key-file FILE --bind-pid PID | --detach]
@@ -113,7 +119,9 @@ const schemas: Record<string, Schema> = {
   logout: {}, account: { actions: ["password"], values: ["current-password-file", "password-file"] },
   users: { actions: ["list", "create", "update", "invite", "reset-password", "revoke-invite"], defaultAction: "list" },
   tokens: { actions: ["list", "create", "revoke"], defaultAction: "list" },
-  hosts: {}, machines: {}, templates: {}, models: {}, jobs: {}, images: {}, "image-tasks": {},
+  hosts: {}, machines: {}, templates: {}, models: {}, jobs: {}, images: {}, "image-tasks": {}, baselines: {},
+  "warm-pool": { actions: ["list", "show", "set"], defaultAction: "list" },
+  baseline: { actions: ["show", "save", "remove"] },
   machine: { positional: 1 }, job: { positional: 1 }, "cancel-job": { positional: 1 },
   generate: { values: ["model", "prompt-file", "max-tokens", "digest", "host-id", "request-id"], required: ["model", "prompt-file", "request-id"] },
   create: { positional: 1, values: ["template", "cpu", "memory-mib", "disk-gib", "template-revision", "arch", "host-id", "request-id"], required: ["template", "request-id"] },
@@ -153,6 +161,9 @@ const subSchemas: Record<string, Schema> = {
   "tokens:list": {}, "tokens:create": { values: ["name", "scope", "expires-in", "request-id", "output-file"], required: ["name", "scope", "request-id", "output-file"] },
   "tokens:revoke": { positional: 1 },
   "leases:acquire": { values: ["request-file"], required: ["request-file"] }, "leases:templates": {}, "leases:list": { values: ["after"] },
+  "warm-pool:list": {}, "warm-pool:show": { positional: 1 }, "warm-pool:set": { positional: 1, values: ["request-file"], required: ["request-file"] },
+  "baseline:show": { positional: 1 }, "baseline:save": { positional: 1, values: ["name", "revision", "request-id"], required: ["name", "revision", "request-id"] },
+  "baseline:remove": { positional: 1, values: ["request-id"], required: ["request-id"] },
   "requests:list": { values: ["after"] }, "requests:show": { positional: 1 }, "requests:cancel": { positional: 1 },
   "requests:submit": { values: ["request-file"], required: ["request-file"] },
   "lease:hold": { flags: ["detach"], values: ["template", "revision", "arch", "ttl", "name", "priority", "wait", "request-id", "source-file", "lease-key-file", "bind-pid", "ca-file"], required: ["template"] },
@@ -439,7 +450,20 @@ const deviceActions = ["screenshot", "hierarchy", "apps", "logs", "tap", "swipe"
 async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
   const client = io.client(args.url, await credential(args), args.allowHttp);
   let result: Record<string, unknown>;
-  if (["hosts", "machines", "templates", "models", "jobs", "images", "image-tasks"].includes(args.command)) result = await client.request("GET", "/v1/" + args.command);
+  if (["hosts", "machines", "templates", "models", "jobs", "images", "image-tasks", "baselines"].includes(args.command)) result = await client.request("GET", "/v1/" + args.command);
+  else if (args.command === "warm-pool") {
+    if (args.action === "list") result = await client.request("GET", "/v1/warm-pool");
+    else {
+      const route = `/v1/hosts/${uuid(positional(args))}/warm-pool`;
+      // The file holds the host's complete targets: {"targets":[{templateId,templateRevision,arch,count,maxAgeSeconds?}],"headroom":{cpu,memoryMiB,diskGiB}}.
+      result = args.action === "set" ? await client.request("POST", route, await jsonFile(option(args, "request-file"))) : await client.request("GET", route);
+    }
+  } else if (args.command === "baseline") {
+    const target = uuid(positional(args));
+    if (args.action === "show") result = await client.request("GET", `/v1/baselines/${target}`);
+    else if (args.action === "save") result = await client.request("POST", `/v1/machines/${target}/baselines`, { id: uuid(option(args, "request-id")), name: option(args, "name"), revision: option(args, "revision") });
+    else result = await client.request("POST", `/v1/baselines/${target}/remove`, { id: uuid(option(args, "request-id")) });
+  }
   else if (["machine", "job", "image-task"].includes(args.command)) result = await client.request("GET", `/v1/${{ machine: "machines", job: "jobs", "image-task": "image-tasks" }[args.command]}/${uuid(positional(args))}`);
   else if (args.command === "cancel-job") result = await client.request("POST", `/v1/jobs/${uuid(positional(args))}/cancel`, {});
   else if (args.command === "create") {

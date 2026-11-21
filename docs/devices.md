@@ -32,6 +32,8 @@ never installs or downloads a runtime, and neither does a lease or a machine
 creation. Install system images before enrollment, or later through an explicit
 administrator [runtime operation](mobile-host-upkeep.md#runtimes-and-system-images);
 an Android install must acknowledge the SDK licences in that request.
+For supervised leases and warm targets use the separate
+[Android warm-pool example](../examples/host-android-warm-pool.json).
 The host checks that the required tools and offered system-image directories exist.
 
 For iOS, use a native Mac with full Xcode, its selected developer directory and
@@ -225,6 +227,24 @@ of 19 November 2026; interrupted and uncertain removals are fixture-covered only
 Nothing deletes a device automatically. Storage that no assignment explains is reported, and removed only by
 an explicit [orphan purge](mobile-host-upkeep.md#orphan-storage). Snapshots, reset and
 migration remain outside the machine lifecycle.
+
+## Saving a device as a baseline
+
+An administrator can save a stopped Android device's disk state as a named, immutable
+[baseline](warm-pool-and-baselines.md#baselines), which a lease image can then name.
+Prepare the device with the actions above, run `sync` through `shell`, stop it and wait
+for the stopped observation:
+
+```sh
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token baseline save \
+  307cd365-a75d-43a8-aefb-1f23b22b8aa2 --name signed-in --revision 1 \
+  --request-id 5b0d6a0e-93f1-4c8e-a6f5-2f1f0e6d7c11
+node coordination/dist/src/cli.js --token-file ./secrets/admin.token baselines
+```
+
+A leased device, a warm pool device and a running device are refused. The device cannot
+be started or deleted while it is being saved. Fixture coverage only; whether a real
+emulator boots from the copied state is an open native question.
 
 The portable tests exercise real HTTP delivery, credential separation, large
 screenshot receipts, crash/timeout replay protection and fixture SDK ownership/

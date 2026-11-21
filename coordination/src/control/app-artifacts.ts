@@ -10,6 +10,7 @@ import { owns, requireScope } from './contracts.ts';
 import type { ControlModule, ControlRequest, Principal } from './contracts.ts';
 import { MachineStore, registerMachineHooks } from './machines.ts';
 import { installAttemptClean, installAttempts } from './install-cleanup.ts';
+import { requireNotPooled } from './pool-ledger.ts';
 import { decodeData, uuid } from './transfers.ts';
 
 import { APP_CHUNK_BYTES, APP_ARTIFACT_BYTES } from '../app-artifact-contract.ts';
@@ -160,6 +161,7 @@ export function createAppArtifactsModule(store: SqliteStore, machines: MachineSt
         const m = machine(db, p[2]!, principal);
         // Leased machines take uploads only through their lease key (lease-app-artifacts.ts).
         if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lease_members'").get() && db.prepare('SELECT 1 FROM lease_members WHERE machine=?').get(m.id!)) return fail(409);
+        requireNotPooled(db, String(m.id));
         const reserved = reserveArtifact(db, machines, m, req.body, null, old => { current(db, old, principal); });
         if ('replayed' in reserved) return { body: artifactView(reserved.replayed) };
         return { body: artifactView(insertArtifact(db, m, reserved, null)), status: 201 };

@@ -82,6 +82,24 @@ status.
 | `request_rejected` | client | The controller rejected the device request without admitting a lease | Read the reported reason and address it before submitting another request |
 | `request_waiting_limit` | 429 | The application has reached its limit of waiting requests | Yes, after cancelling waiting requests or after an admission |
 | `preview_waiting_limit` | 429 | An owner reached the dashboard's limit of waiting previews or builds | Yes, after one starts or is cancelled |
+| `baseline_clone_failed` | 409 | The host could not finish creating the device from the baseline | Inspect the lease receipt and confirm partial storage was cleaned |
+| `baseline_clone_incomplete` | 409 | A previous baseline copy into the device was interrupted | Let cleanup settle the device before requesting another lease |
+| `baseline_corrupt` | 409 | The stored baseline failed an integrity or manifest check | Replace the baseline with a verified capture |
+| `baseline_exists` | 409 | The baseline name and revision are already present on the host | Choose a new baseline revision or inspect the existing one |
+| `baseline_mismatch` | 409 | The baseline does not match the selected image or data size | Select a baseline with the matching immutable image definition |
+| `baseline_missing` | 409 | The recorded baseline is absent on the selected host | Make the required baseline available before trying again |
+| `baseline_overlay_unsupported` | 409 | The device image overlay cannot be copied independently | Use a supported self-contained image and verify its baseline |
+| `baseline_referenced` | 409, receipt | A template or device still points to the baseline | Clear its references before requesting removal |
+| `baseline_source_changed` | 409 | The source device changed while its baseline was being captured | Confirm the source is stopped and inspect the capture receipt |
+| `baseline_source_leased` | 409 | The source is a leased or warm device and cannot be saved | Choose an eligible stopped administrator-owned device |
+| `baseline_source_not_owned` | 403 | The caller does not own the device eligible for capture | Use an eligible device owned by the current principal |
+| `baseline_source_running` | 409 | The host has not confirmed the source device stopped | Wait until its host reports the device stopped |
+| `baseline_source_unsupported` | 409, receipt | The source device does not support a baseline capture | Choose a stopped Android emulator that supports capture |
+| `baseline_stale` | 409 | The baseline refers to a different installed system image | Capture a new baseline for the installed image |
+| `warm_pool_device` | 409 | An ordinary device action targeted storage owned by the warm pool | Use the pool controls to manage the warm target |
+| `warm_pool_disabled` | 409 | The operator has not enabled warm devices on this host | Select an opted-in Android lease host |
+| `warm_target_ineligible` | 409 | The host does not advertise the pinned image for Android leases | Choose a lease image advertised by the host |
+| `warm_target_limit` | 409 | The requested warm targets exceed the host's device bound | Reduce the target count to fit the host limit |
 | `error` | receipt | The native upkeep command ended without a conclusive result | Inspect the host before another mutation |
 | `expired` | receipt | The operation's start window elapsed before dispatch or execution | Submit a new operation if it is still needed |
 | `host_inspection_required` | 409 | A recent successful inspection is required for the requested upkeep change | Inspect the host and resolve any uncertain change first |

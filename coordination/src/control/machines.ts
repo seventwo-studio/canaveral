@@ -18,6 +18,7 @@ import type { PressureCode } from "./pressure.ts";
 import { reportImageTasks, assignedImageTasks, acknowledgedImages, validateCatalogueOffer } from "./images.ts";
 import { reportInferenceJobs, assignedInferenceJobs, INFERENCE_HOST_PROVIDERS } from "./inference.ts";
 import { blueprint, initializeBlueprints } from "./blueprints.ts";
+import { baselineUsable, pendingBaselineSave, requireNotPooled } from "./pool-ledger.ts";
 
 import { PhysicalDomains, physicalBudget, physicalMapping } from "../physical-domains.ts";
 
@@ -89,6 +90,12 @@ export function machineLeaseEligible(host: Json, image: Json): boolean {
     return host.leaseImages.some((entry: Json) => equal(entry, reference));
   } catch (error) { if (error instanceof ServiceError) return false; throw error; }
 }
+/** The size a request gets from an image, or undefined when it breaks the image's minimum or its
+ * memory step. One rule for admission and for anything that predicts an admission. */
+export function placementSize(image: Json, overrides: Partial<Resources>, preset?: { minimum: Resources; defaults: Resources } | null): Resources | undefined {
+  const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...overrides };
+  return size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key]) ? size : undefined;
+}
 export function validateOffer(value: unknown): Json {
   const input = object(value);
   const result: Json = { name: text(input.name, "host name"), capacity: machineResources(input.capacity), provider: text(input.provider, "provider") };
@@ -122,6 +129,13 @@ export function validateOffer(value: unknown): Json {
       if (seen.has(identity) || !image || entry.runtime !== machineImageRuntime(result, image)) failure("Lease image must uniquely match an installed image and its configured runtime.");
       seen.add(identity); return entry;
     }).sort((a: Json, b: Json) => { for (const key of ["id", "revision", "arch", "runtime"]) { if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1; } return 0; });
+  }
+  // A host's own opt-in and bounds for warm devices; meaningful only with lease execution.
+  if ("warmPool" in input) {
+    const pool = object(input.warmPool); fields(pool, ["maxDevices", "maxAgeSeconds"]);
+    if (result.leaseProtocol !== 1) failure("Warm devices require lease execution.");
+    result.warmPool = { maxDevices: integer(pool.maxDevices, "warm device limit", 64), maxAgeSeconds: integer(pool.maxAgeSeconds, "warm maximum age", 86400) };
+    if (result.warmPool.maxAgeSeconds < 60) failure("Invalid warm maximum age.");
   }
   if ("inference" in input) {
     if (!INFERENCE_HOST_PROVIDERS.includes(result.provider)) failure("Embedded inference requires a native Mac or Linux host.");
@@ -427,12 +441,13 @@ export class MachineStore implements ControlModule {
         const host = db.prepare("SELECT seen,offer FROM hosts WHERE id=?").get(old.host!);
         return this.machine(db, old, !!host && !!persistedOffer(host.offer) && this.store.clock() - Number(host.seen) < this.leaseSeconds);
       }
-      return this.createMachine(db, request, false, principal.kind === "operator" ? null : principal.user?.id ?? null);
+      // A baseline carries its preparer's data, so only an administrator makes an account-owned device from one.
+      return this.createMachine(db, request, false, principal.kind === "operator" ? null : principal.user?.id ?? null, principal.kind === "operator" || principal.user?.role === "admin");
     });
   }
   /** Transaction-local admission for generic leases. Caller authenticates the lease/application
    * and pins its member row in this same transaction. A lease never acquires user ownership. */
-  createMachine(db: DatabaseSync, value: Json, leased = false, ownerId: string | null = null): Json {
+  createMachine(db: DatabaseSync, value: Json, leased = false, ownerId: string | null = null, baselines = leased): Json {
     if (!db.isTransaction) throw new TypeError("Machine admission requires the caller transaction.");
     const request = validateMachineRequest(value), id = request.id;
     if (leased && ownerId !== null) failure("Leased machines cannot acquire human ownership.", 409);
@@ -446,6 +461,20 @@ export class MachineStore implements ControlModule {
     if (leased && request.blueprintId) failure("Application leases require their approved image policy, not a machine blueprint.", 400);
     if (request.hostId) requireHostAdmission(db, request.hostId);
     const preset = request.blueprintId ? blueprint(db, request.blueprintId, request.blueprintRevision) : null;
+    const candidates = this.placements(db, request, leased, baselines, preset);
+    if (!candidates.length) failure("No online accepting host offers this template and enough unreserved capacity.", 409);
+    if (!preset && !request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
+    const selected = candidates[0]!;
+
+    db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, ...(preset ? { templateId: selected.image.id, templateRevision: selected.image.revision, arch: selected.image.arch } : {}), resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);
+    return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, true);
+  }
+  /** Every host and image that would take this validated request, best first. This is the one
+   * placement rule: host health, admission and eligibility, the image's minimum and memory step, a
+   * usable baseline of the right data size, and unreserved capacity. Admission calls it as it is.
+   * `spare` asks what would be placed if a host had that much more (or less) unreserved capacity,
+   * for predicting an admission; it never changes what admission itself decides. */
+  placements(db: DatabaseSync, request: Json, leased: boolean, baselines: boolean, preset: { image: Json; minimum: Resources; defaults: Resources } | null = null, spare?: (hostId: string) => Resources): { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] {
     const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
     // Hosts that would have fitted but whose operator gates placement on pressure, and that are
     // under memory or disk pressure or have no current sample.
@@ -453,26 +482,31 @@ export class MachineStore implements ControlModule {
     for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
       if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
       const advertised = persistedOffer(host.offer); if (!advertised) continue;
-      const used = this.used(db, String(host.id)), remaining = this.remainingCapacity(db, String(host.id));
+      const reserved = this.used(db, String(host.id)), remaining = { ...this.remainingCapacity(db, String(host.id)) }, extra = spare?.(String(host.id));
+      // A prediction treats the spare capacity as no longer reserved, for the fit and for the score alike.
+      const used = extra ? Object.fromEntries(resourceKeys.map(key => [key, Math.max(0, reserved[key] - extra[key])])) as unknown as Resources : reserved;
+      if (extra) for (const key of resourceKeys) remaining[key] += extra[key];
       const limits = this.limits(db, host), pressure = pressureAdmission(db, String(host.id), this.store.clock());
       const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
       for (const image of advertised.templates) {
         if (leased && !machineLeaseEligible(advertised, image)) continue;
         if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
-        const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
-        if (size.memoryMiB % (image.memoryStepMiB ?? 1) !== 0 || !resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) continue;
-        // An opted-in host only withholds new work; pressure never stops or shrinks what it already runs.
-        if (pressure.blocked) pressured.add(pressure.code!); else candidates.push({ score: placementScore(capacity, used, size), host, image, size });
+        const size = placementSize(image, request.resources, preset);
+        if (!size) continue;
+        // A baseline-backed image is placed only where the host stores that exact, unstale baseline,
+        // saved with the data size this device would get. Leases reach it through their application's
+        // allowlist; other callers need administrator authority.
+        if (image.baseline && (!baselines || !baselineUsable(db, String(host.id), image, size.diskGiB))) continue;
+        if (!resourceKeys.every(key => size[key] <= remaining[key])) continue;
+        if (pressure.blocked) { pressured.add(pressure.code!); continue; }
+        // Admission scores every fitting candidate as before. A prediction on an overcommitted host
+        // can pass the clamped fit and still not be a valid reservation; it is then no candidate.
+        if (!extra) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
+        else try { candidates.push({ score: placementScore(capacity, used, size), host, image, size }); } catch (error) { if (!(error instanceof ServiceError)) throw error; }
       }
     }
-    if (!candidates.length && pressured.size) throw pressureRefusal(pressured, 409);
-    if (!candidates.length) failure("No online accepting host offers this template and enough unreserved capacity.", 409);
-    if (!preset && !request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
-    candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
-    const selected = candidates[0]!;
-
-    db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, ...(preset ? { templateId: selected.image.id, templateRevision: selected.image.revision, arch: selected.image.arch } : {}), resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);
-    return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, true);
+    if (!spare && !candidates.length && pressured.size) throw pressureRefusal(pressured, 409);
+    return candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
   }
   enable(id: string, enabled: unknown, req: ControlRequest): Json {
     return this.transaction(db => {
@@ -488,6 +522,8 @@ export class MachineStore implements ControlModule {
       if (state !== "running" && state !== "stopped") failure("Desired state must be running or stopped.");
       if (deletion(db, id)) failure("A machine with a deletion intent cannot change desired state.", 409);
       if (record(db, "lease_members", id)) failure("Lease-owned machines use lease lifecycle actions.", 409);
+      requireNotPooled(db, id);
+      if (state === "running" && pendingBaselineSave(db, id)) failure("Resolve the pending baseline save before restarting this device.", 409);
       if (state === "running" && row.desired !== "running") {
         requireHostAdmission(db, String(row.host));
         if (hasPendingPowerOff(db, id)) failure("Resolve the pending power-off intent before restarting.", 409);

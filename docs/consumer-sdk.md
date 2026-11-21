@@ -9,6 +9,10 @@ is a small Node 24 client for the application/lease subset of the
 | `ConsumerClient` | Application key | `submitRequest`, `inspectRequest`, `listRequests`, `cancelRequest`, `catalogue`, `listLeases`, `acquireLease`, `inspectLease`, `renewLease`, `releaseLease`, `rotateLeaseCredential` |
 | `LeaseClient` | One lease's current key | `inspect`, `renew`, `release`, `createOperation`, `operation` for its bound lease |
 
+`memberSource(lease, member?)` returns `"warm"`, `"cold"` or `undefined` for a lease member:
+whether its device was taken over from the host's
+[warm pool](warm-pool-and-baselines.md#what-a-consumer-sees) or booted for the lease.
+
 `LeaseClient` has no catalogue, listing, acquisition or credential-rotation method, and each
 client sends only its own bearer. `rotateLeaseCredential` is the explicit owner-only exchange:
 it is not idempotent, is never retried, revokes the previous lease key, and its result must not

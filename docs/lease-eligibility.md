@@ -103,6 +103,19 @@ original lease receipt without placing another machine. Withdrawal alone does
 not claim a VM stopped, erase storage, end the lease or release reservations.
 Those require the existing lifecycle and positive cleanup contracts.
 
+## Warm devices and baselines
+
+Eligibility also bounds the [warm pool](warm-pool-and-baselines.md). A warm device is
+kept only for an image the host lists in `leaseImages`, and only on a host whose offer
+carries `warmPool` (from the host's `leaseWarmPool`). Withdrawing the selector or the
+opt-in gives the host's warm devices up; it never turns one into a lease.
+
+A template may pin a device `baseline` by name, revision and digest. That reference is
+part of the immutable definition this page binds, so a baseline-backed image is a
+distinct revision that an application must be allowlisted for. A host is eligible for
+such an image only while it stores exactly that baseline, made from the template's own
+device definition and not stale.
+
 ## Evidence and remaining work
 
 The iOS selector gate, the isolation class in consumer views and the host's own refusal are

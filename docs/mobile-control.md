@@ -21,6 +21,10 @@ use cases require access through the job's own scoped credentials. Android emula
 leases are now enabled; see [Android emulator leases](#android-emulator-leases). Since
 19 November 2026 a lease key can also install large builds and record MP4 of its own
 emulator ([lease recording and large installs](#lease-recording-and-large-installs)).
+Since 21 November 2026 a host can keep Android emulators warm for leases and start them
+from a saved device baseline ([warm devices and baselines](#warm-devices-and-baselines));
+both are fixture-covered only.
+
 Since 21 November 2026 iOS simulators can be leased too, as an operator opt-in under a
 declared `shared-host` isolation class for trusted code; see
 [iOS simulator leases](#ios-simulator-leases). That path is fixture-covered only.
@@ -424,9 +428,10 @@ Existing [device controls](devices.md) cover gestures, text, app lifecycle, logs
 accessibility, permissions, location, small files and Android shells. iOS has no
 general guest shell; exposing the Mac host shell would violate simulator scope.
 A stopped device can be [deleted](devices.md#delivery-and-recovery) with its owned
-storage. Network-condition control, reset and snapshot capabilities and broader
+storage. Network-condition control, reset and running-memory snapshots capabilities and broader
 native inputs require explicit platform adapters and acceptance rather than claims
-of platform parity.
+of platform parity. A stopped, account-owned Android device can be saved as a
+[baseline](warm-pool-and-baselines.md#baselines).
 
 Host upkeep is separate from device control and is administrator-only; see
 [mobile host upkeep](mobile-host-upkeep.md). An administrator lists, installs and
@@ -445,6 +450,7 @@ fair order and then gets a booted, checked, network-isolated emulator to itself.
 lease follows the generic [lease contract](leases.md). iOS simulators are leased under their
 own opt-in and isolation class ([iOS simulator leases](#ios-simulator-leases)). Physical
 devices still refuse leased execution.
+Without a [warm pool](#warm-devices-and-baselines), Android leases cold boot.
 
 Coding agents and CI jobs need not call these routes themselves. The
 [agent surfaces](agent-surfaces.md) provide an MCP server, a CLI lease that is held and
@@ -466,10 +472,13 @@ and any partial configuration, keeps refusing `leaseProtocol` and `leaseImages`.
 { "provider": "android", "androidSDK": "/ABS/sdk", "storage": "/ABS/devices",
   "leaseClockHelper": "/ABS/canaveral-mobile-native", "leaseSupervisor": "/ABS/canaveral-mobile-native",
   "leaseProtocol": 1, "leaseImages": [{ "id": "phone", "revision": "1", "arch": "arm64", "runtime": "android" }],
-  "leaseIsolationPorts": [8443] }
+  "leaseIsolationPorts": [8443], "leaseWarmPool": { "maxDevices": 2, "maxAgeSeconds": 3600 } }
 ```
 
 Size the host's `capacity` to the number of emulators it may run. Requests beyond that wait.
+`leaseWarmPool` is optional. It lets the host keep up to `maxDevices`
+[warm devices](warm-pool-and-baselines.md#host-opt-in), each for at most `maxAgeSeconds`;
+size `capacity` for them too.
 On hosts whose operator set `pressure.gatePlacement`, a request also waits, with reason
 `host_pressure`, while every lease host that fits is under
 [memory or disk pressure](mobile-host-upkeep.md#memory-and-disk-pressure); leases already
@@ -546,7 +555,9 @@ restrict, so that class has no isolation flags and no isolation probe; see
 The runner never spawns a leased emulator itself. It writes a version 2 `launch.json`
 with `supervised: true`, then starts `canaveral-mobile-native lease-supervise <storage>`
 detached in its own session. The launch request (emulator argv and environment)
-travels on stdin. The supervisor:
+travels on stdin. Its owner is a lease (`leaseId`), or a warm hold (`warmId`) for a
+[warm device](warm-pool-and-baselines.md#the-warm-hold); everything below applies to
+both, and a record never names both. The supervisor:
 
 - takes an exclusive `flock` on `<storage>/lease-supervisor.lock` before anything else
   and holds it for its whole life. The descriptor is close-on-exec, so the emulator
@@ -567,9 +578,12 @@ travels on stdin. The supervisor:
   absolute deadline on the continuous clock (Mach continuous time or
   `CLOCK_BOOTTIME`) and a fence flag. Same or older revisions never extend the
   deadline, and a renewal first seen after expiry is ignored;
+- accepts one owner change only: a lease's authorization that names the still-current
+  warm hold it adopts ([adoption](warm-pool-and-baselines.md#adoption)). It records the
+  new owner durably before enforcing it;
 - stops the emulator when the deadline passes, the file is fenced, missing, malformed
-  or bound to another assignment or boot, the clock fails, or the supervisor receives
-  SIGTERM. It writes a sticky `lease-fenced.json`, sends SIGTERM to the group, waits
+  or bound to another assignment, owner or boot, the clock fails, or the supervisor
+  receives SIGTERM. It writes a sticky `lease-fenced.json`, sends SIGTERM to the group, waits
   5 s, then sends SIGKILL. The leader stays an unreaped child until every signal is
   sent, so its process group ID cannot be reused. Every path after spawn ends in this
   stop, which cannot return early: an error while waiting counts as "not yet exited"
@@ -872,6 +886,25 @@ automatically:
 - If such a process exists, cleanup stays blocked. Identify it, as in step 3 above,
   and stop it; the next retry completes.
 
+### Warm devices and baselines
+
+Two additions shorten and prepare a lease without changing any guarantee above. Their
+contract is on its own page, [warm devices and device baselines](warm-pool-and-baselines.md).
+
+- **Warm pool.** A host that sets `leaseWarmPool` keeps the administrator's target number
+  of emulators per lease image booted, isolated and checked under the same supervisor, as
+  warm holds with one fixed deadline. A warm device is an ordinary machine row on the
+  capacity ledger. A lease for the same image and size takes that row over; the
+  supervisor is rebound once to the lease's identity and deadline, and the lease is ready
+  only after the host proves it. A warm device that died first is removed with proof and
+  the lease cold boots under the same reservation. Waiting requests win over warm
+  devices.
+- **Baselines.** An administrator saves a stopped, account-owned device's disk state under
+  a name and revision. A template that pins that baseline's digest gives every device of
+  that image, cold or warm, its own copy before first boot. A baseline carries whatever
+  its preparer put on it, is immutable, is bound to its system image and device profile,
+  and is refused when stale.
+
 ### Verification
 
 [android-leases.test.ts](../coordination/test/control/android-leases.test.ts) runs a
@@ -905,7 +938,8 @@ grandchild in its group) through fake adb and avdmanager. It covers:
   interrupted install's upload only after lease cleanup), and application limits.
 
 `lease_supervisor.rs` unit tests cover the lifetime lock, the refusal before spawn, a
-clock failure after spawn that still stops the whole group, and the log cap.
+clock failure after spawn that still stops the whole group, and the log cap. They also
+cover warm holds and adoption; see the [warm pool and baseline verification](warm-pool-and-baselines.md#verification).
 
 The native trials of 19 November 2026 ([record](../coordination/native-acceptance/android-lease-agents.md))
 ran the two-agent, one-emulator case on the Mac Studio with a real API 36 emulator
