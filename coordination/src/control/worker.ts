@@ -12,6 +12,7 @@ import { createAppArtifactsModule } from './app-artifacts.ts';
 import { createLeaseAppArtifactsModule } from './lease-app-artifacts.ts';
 import { MobileVideoSessions } from './mobile-video-sessions.ts';
 import { OwnerDisplaySessions } from './display-sessions.ts';
+import { LeaseTunnels } from './lease-tunnels.ts';
 import { createModule as imagesModule } from "./images.ts";
 import { createModule as blueprintsModule } from "./blueprints.ts";
 import { createModule as infrastructureModule } from "./infrastructure.ts";
@@ -59,7 +60,8 @@ const principalHash = (db: Parameters<typeof accounts.principalHashDb>[0], hash:
 };
 const videoSessions = new MobileVideoSessions(store, machines, principalHash);
 const displaySessions = new OwnerDisplaySessions(store, machines, principalHash);
-modules.push(videoSessions, displaySessions);
+const leaseTunnels = new LeaseTunnels(store, machines);
+modules.push(videoSessions, displaySessions, leaseTunnels);
 modules.push(sessions);
 const leases = new LegacyLeases(store, options);
 modules.push(leases.warm, createBaselinesModule(store, machines));
@@ -137,6 +139,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
   }
   if (command.type === 'video-sessions.attach' || command.type === 'video-sessions.authorized' || command.type === 'video-sessions.disconnect') return videoSessions.command(command);
   if (command.type === 'display-sessions.attach' || command.type === 'display-sessions.authorized' || command.type === 'display-sessions.disconnect') return displaySessions.command(command);
+  if (command.type === 'tunnels.attach' || command.type === 'tunnels.authorized' || command.type === 'tunnels.disconnect') return leaseTunnels.command(command);
   if (command.type !== "http") return sessions.sessionCommand(command);
   const request: ControlRequest = {
     method: command.method, path: command.path, parts: command.path.split("/").filter(Boolean),

@@ -73,6 +73,15 @@ transaction. Host reservations remain until positive reclamation. Credential
 rotation changes only the application credential; rotate a lease credential at
 `POST /v1/leases/{id}/credential` to invalidate its previous scoped key.
 
+`limits.tunnelsPerLease` is an optional integer from 0 to 8: the number of
+[port tunnels](mobile-control.md#lease-port-tunnels) one lease may hold at once. It
+defaults to 0, so a policy without it, including every policy stored before
+21 November 2026, permits no tunnels. Administrator and catalogue responses return it
+normalized. A tunnel also needs a host that declares `leaseTunnelProtocol`
+([lease eligibility](lease-eligibility.md#lease-tunnel-declaration)). Tunnels reserve no
+capacity and do not count against `resources`. The limit is part of the immutable policy:
+to allow tunnels for an existing application, create a replacement application.
+
 Current policy is immutable. To change an allowlist or limits, create a new
 application and revoke the old identity under an explicit migration plan. An
 in-place policy editor and application dashboard are not implemented yet.

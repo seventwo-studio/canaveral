@@ -44,7 +44,8 @@ access. Store only credential hashes; issue credentials through authenticated
 exchange, never URLs, logs or persisted operation bodies. A consumer can exchange
 its credential for a fresh lease credential after a lost response. Rotation revokes
 the previous credential. Sessions are subordinate to lease authorization, never a
-way to extend it. Operators retain recovery access through a separate boundary.
+way to extend it. [Port tunnels](mobile-control.md#lease-port-tunnels) follow the same
+rule. Operators retain recovery access through a separate boundary.
 
 ## Lifecycle
 
@@ -115,6 +116,17 @@ gateway; do not remove existing direct-origin protections.
 | POST /v1/leases/{id}/sessions/{sessionId}/close | lease | close an owned session with `{}` |
 | POST /v1/leases/{id}/operations | lease | Submit or replay a durable discrete device/command operation |
 | GET /v1/leases/{id}/operations/{operationId} | lease | Inspect an owned operation receipt |
+| POST /v1/leases/{id}/tunnels | lease | Open or replay a port tunnel of a leased Android emulator |
+| GET /v1/leases/{id}/tunnels | lease | List the lease's tunnels, including ended ones |
+| GET /v1/leases/{id}/tunnels/{tunnelId} | lease | Inspect one tunnel |
+| POST /v1/leases/{id}/tunnels/{tunnelId}/close | lease | Close a tunnel with `{}` |
+
+Port tunnels are off unless the member's host declares them and the application's policy
+allows them. They accept only the lease's current key, hold no capacity reservation and
+end with the lease, a fence, a key rotation or supervisor loss. A tunnel never extends a
+lease and never delays its cleanup; see
+[lease port tunnels](mobile-control.md#lease-port-tunnels) for the contract and its
+native acceptance gaps.
 
 Acquisition example (UUIDs are caller-generated):
 

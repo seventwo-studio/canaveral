@@ -3,11 +3,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { object, secret, ServiceError } from "./errors.ts";
 import type { SqliteStore } from "./sqlite.ts";
 import { closeRevokedModelJobs } from "./model-settlement.ts";
+import { TUNNELS_PER_LEASE_MAX } from "./tunnel-relay.ts";
 
 export interface Resources { cpu: number; memoryMiB: number; diskGiB: number }
 export interface ImagePermission { id: string; revision: string; arch: "arm64" | "amd64" }
 export interface ApplicationLimits {
   resources: Resources; activeLeases: number; maxConcurrentBoxes?: number; maxWaitingRequests?: number; maxRequestPriority?: number; defaultTTLSeconds: number;
+  /** Port tunnels one lease may hold at once. Absent means none: tunnels are off by default. */
+  tunnelsPerLease?: number;
   maxTTLSeconds: number; maxLifetimeSeconds: number; provisioningTimeoutSeconds: number;
 }
 export interface ApplicationSpec { id: string; name: string; templates: ImagePermission[]; limits: ApplicationLimits; linuxEgress?: { enabled: boolean } }
@@ -46,7 +49,7 @@ function integer(value: unknown, label: string, maximum = 1_048_576): number {
 export function applicationLimits(value: unknown): ApplicationLimits {
   const limits = object(value);
   const ttlFields = ["defaultTTLSeconds", "maxTTLSeconds", "maxLifetimeSeconds", "provisioningTimeoutSeconds"] as const;
-  if (Object.keys(limits).some(key => !["resources", "activeLeases", "maxConcurrentBoxes", "maxWaitingRequests", "maxRequestPriority", ...ttlFields].includes(key))) {
+  if (Object.keys(limits).some(key => !["resources", "activeLeases", "maxConcurrentBoxes", "maxWaitingRequests", "maxRequestPriority", "tunnelsPerLease", ...ttlFields].includes(key))) {
     throw new ServiceError("Invalid application limits.", 400);
   }
   const budget = object(limits.resources);
@@ -65,6 +68,11 @@ export function applicationLimits(value: unknown): ApplicationLimits {
   const priority = limits.maxRequestPriority === undefined ? 0 : limits.maxRequestPriority;
   if (typeof priority !== "number" || !Number.isSafeInteger(priority) || priority < 0 || priority > 1000000) throw new ServiceError("Invalid maximum request priority.", 400);
   if (Object.hasOwn(limits,"maxRequestPriority")) result.maxRequestPriority = priority;
+  if (Object.hasOwn(limits, "tunnelsPerLease")) {
+    const tunnels = limits.tunnelsPerLease;
+    if (typeof tunnels !== "number" || !Number.isSafeInteger(tunnels) || tunnels < 0 || tunnels > TUNNELS_PER_LEASE_MAX) throw new ServiceError("Invalid lease tunnel limit.", 400);
+    result.tunnelsPerLease = tunnels;
+  }
   return result;
 }
 
@@ -114,7 +122,7 @@ export class ConsumerIdentities {
 
   private public(row: Row): Application {
     const spec = JSON.parse(row.specification) as ApplicationSpec;
-    return { ...spec, limits: { ...spec.limits, maxConcurrentBoxes: spec.limits.maxConcurrentBoxes ?? spec.limits.activeLeases }, linuxEgress: spec.linuxEgress ?? { enabled: false }, revoked: Boolean(row.revoked), createdAt: row.created };
+    return { ...spec, limits: { ...spec.limits, maxConcurrentBoxes: spec.limits.maxConcurrentBoxes ?? spec.limits.activeLeases, tunnelsPerLease: spec.limits.tunnelsPerLease ?? 0 }, linuxEgress: spec.linuxEgress ?? { enabled: false }, revoked: Boolean(row.revoked), createdAt: row.created };
   }
 
   create(value: unknown): Application & { credential: string } {

@@ -47,6 +47,8 @@ app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
 app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
+tunnel LEASE reverse --device-port N [--target HOST:PORT]    Device port to this machine
+tunnel LEASE forward --device-port N [--listen [HOST:]PORT]  This machine to a device port
 warm-pool [list] | warm-pool show HOST    Warm device targets, ready, booting, failed, paused and last error
 warm-pool set HOST --request-file FILE   Replace a host's warm targets and headroom (administrator)
 baselines | baseline show ID             Saved device baselines, their image binding and stale state
@@ -82,6 +84,11 @@ serve flags: --bind IP --port PORT --database FILE --admin-token-file FILE
 serve --config FILE accepts the explicit controller configuration used by src/main.ts.
 Account create/mint commands require a stable --request-id. Passwords and issued
 credentials stay in private files. Never retry an uncertain mutation with a new ID.
+tunnel holds one lease port tunnel open in the foreground until interrupted or until
+the lease ends; --token-file is the lease key file written by "lease ID credential".
+Options: --member NAME (primary) --request-id UUID --idle-seconds N (10-3600, default 600)
+--ca-file FILE. Targets and listeners default to 127.0.0.1 and the device port. A tunnel
+needs a host that declares leaseTunnelProtocol and an application with tunnelsPerLease.
 events and usage filters: --application ID --lease ID --request ID --host ID --machine ID
 (events), --application ID (usage). KIND is an event kind or a family such as lease.*.
 Alert webhook URLs and signing secrets are read from private 0600 files, never arguments.
@@ -138,6 +145,7 @@ const schemas: Record<string, Schema> = {
   requests: { actions: ["list", "show", "submit", "cancel"], defaultAction: "list" },
   mcp: { values: ["ca-file"] }, instructions: { flags: ["skill"] }, setup: { flags: ["force", "project"], values: ["agent", "directory"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
+  tunnel: { positional: 2, values: ["device-port", "target", "listen", "member", "request-id", "idle-seconds", "ca-file"], required: ["device-port"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
   events: { flags: ["follow", "own", "text"], values: ["after", "tail", "kind", "since", "limit", "application", "lease", "request", "host", "machine"] },
   usage: { flags: ["own"], values: ["from", "to", "last", "group-by", "format", "application"] },
@@ -614,6 +622,11 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
     const args = parseCli(argv);
     if (args.command === "init") { await initialize(positional(args)); io.stdout("Created private credential files in " + positional(args) + "\n"); return 0; }
     if (args.command === "promote-macos") { await promoteMacHost(args, io); return 0; }
+    if (args.command === "tunnel") {
+      const lifecycle = signals(io.signal);
+      try { const { runTunnel } = await import("./tunnel-cli.ts"); return await runTunnel(args, io, lifecycle.signal); }
+      finally { lifecycle.dispose(); }
+    }
     if (["serve", "dashboard", "host", "local"].includes(args.command)) {
       const lifecycle = signals(io.signal); let service: CliService | undefined;
       try {

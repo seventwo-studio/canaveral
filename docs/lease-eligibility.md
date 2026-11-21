@@ -77,6 +77,25 @@ only. The declaration is part of the selector:
 
 Nothing may describe an iOS lease as isolated from its host.
 
+## Lease tunnel declaration
+
+Since 2026-11-21 a host that offers lease execution may additionally declare
+`"leaseTunnelProtocol": 1`. It offers [lease port tunnels](mobile-control.md#lease-port-tunnels)
+for its Android lease images. The declaration is separate and explicit:
+
+- Absent, it grants nothing. A persisted or re-sent offer without it offers no tunnels,
+  and `leaseProtocol: 1` alone never implies them.
+- It is refused without `leaseProtocol: 1`, with any value other than 1, and on a runner
+  whose Android storage path cannot hold a tunnel socket.
+- The controller requires it when a tunnel is opened and on every later authority check.
+  Withdrawing it ends the affected tunnels (`disconnected`) like a withdrawn image
+  selector ends sessions. The runner enforces its own declaration independently.
+- It is a runner contract, not evidence of native acceptance; tunnels have fixture
+  coverage only.
+
+An application additionally needs `limits.tunnelsPerLease` above zero
+([applications](applications.md)).
+
 ## Enforcement and withdrawal
 
 The same binding check applies to:

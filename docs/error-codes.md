@@ -125,6 +125,17 @@ status.
 | `unsupported` | receipt | The host does not support the requested upkeep operation | Choose a host and platform with that capability |
 | `update_fenced` | receipt | A pending host update prevented the runner from starting upkeep | Wait for the update and confirm host readiness before retrying |
 | `upkeep_unsupported` | 409, receipt | The host does not offer runtime or storage upkeep for this platform | Choose a host with the required upkeep capability |
+| `tunnel_cancelled` | client | The caller cancelled the tunnel before attaching its peer | Inspect the tunnel receipt if a create request was sent |
+| `tunnel_ended` | 410, client | The tunnel identity already attached or reached a terminal state | Use a new UUID when opening another tunnel |
+| `tunnel_host_limit` | 429 | The host reached its limit for retained lease tunnels | Wait for active tunnels and pending mapping removals to settle |
+| `tunnel_identity_limit` | 429 | The lease reached its rolling hourly tunnel identity limit | Wait for an older identity to leave the rate window |
+| `tunnel_limit` | 429 | The application has no free tunnel slot for this lease | Close an active tunnel or wait for one to end |
+| `tunnel_listen_failed` | client | The local listener could not bind and the tunnel closed | Check the local address and use a new tunnel UUID |
+| `tunnel_mapping_failed` | 409 | The runner could not create the requested device port mapping | Check the device port and inspect the original mapping receipt |
+| `tunnel_mapping_lost` | 410 | The device port mapping disappeared while the tunnel was open | Inspect the ended tunnel and use a new UUID when reopening |
+| `tunnel_port_busy` | 409 | The lease already holds that device port and direction | Wait for removal proof or choose another device port |
+| `tunnel_residue_limit` | 429 | Too many ended tunnels still lack mapping removal proof | Wait for the host to confirm the pending removals |
+| `tunnels_not_permitted` | 403 | The application policy grants no port tunnels to this lease | Use an application with an explicit tunnel allowance |
 | `host_draining` | 409 | Admission is closed on the host by a drain, maintenance or an update | Later. A waiting request stays queued until admission reopens |
 | `maintenance_blocked` | 409 | A maintenance drain cannot be resumed; the reply lists the blockers | After resolving the listed resume blockers |
 | `session_disconnected` | 410, client | The session's stream ended; unconfirmed input was not applied on reconnect | Open a new session with a new UUID; do not replay input |

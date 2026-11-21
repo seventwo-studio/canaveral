@@ -16,6 +16,9 @@ import { openAndroidVideo } from './android-video.ts';
 import { androidOrphan, purgeOrphan, runtimeOperation, storageDevices, strayDevices } from "./mobile-runtimes.ts";
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./mobile-runtimes.ts";
 import type { AndroidVideoOptions } from './android-video.ts';
+import { AndroidTunnels, tunnelStorageProblem } from './android-tunnels.ts';
+import type { TunnelEndpoint, TunnelSpec } from './android-tunnels.ts';
+import type { Socket } from "node:net";
 
 /** Leased guests get no network path to the host. User-mode networking (slirp) maps
  * 10.0.2.2 to the host's loopback, so an unrestricted guest can reach the adb server,
@@ -96,6 +99,7 @@ export class AndroidProvider extends MobileProvider {
       if (!fs.statSync(directory).isDirectory()) throw new ServiceError("Install every offered Android system image.");
       if (this.config.transferHelperManifest != null) loadHelper(this.config, image);
     }
+    if (this.config.leaseTunnelProtocol !== undefined) { const problem = tunnelStorageProblem(text(this.config.storage, "storage")); if (problem) throw new ServiceError(problem, 400); }
     await this.run([this.tool("adb"), "start-server"]);
     return { ready: true, nativeAcceptance: false, androidUploadHelper: this.config.transferHelperManifest != null };
   }
@@ -234,7 +238,7 @@ export class AndroidProvider extends MobileProvider {
   private reconcileLocked(machine: RecordValue, image: RecordValue, storage: string, folder: string, lease: (() => LeaseAuthorization) | undefined, warm: (() => WarmAuthorization) | undefined): Promise<RecordValue> {
     return locked(path.join(storage, "assignment.lock"), async () => {
       if (machine.desired !== "running" && machine.desired !== "stopped") throw new ServiceError("Invalid desired mobile state.", 400);
-      if (machine.desired === "stopped") await this.closeShells(machine);
+      if (machine.desired === "stopped") { await this.closeShells(machine); await this.closeTunnels(machine); }
       if (machine.lease != null || machine.warm != null) return this.reconcileSupervised(machine, image, storage, folder, lease, warm);
       const endpoint = await this.endpoint(machine, storage), launchPath = path.join(storage, "launch.json"), stopPath = path.join(storage, "stop.json");
       if (endpoint) {
@@ -289,6 +293,16 @@ export class AndroidProvider extends MobileProvider {
       return launch(port);
     });
   }
+
+  // Lease port tunnels (android-tunnels.ts). Mappings exist only for a ready lease and are part
+  // of what readiness keeps checking: see the mapping audit in leasedReadiness.
+  readonly tunnels = new AndroidTunnels(this);
+  openTunnel(machine: RecordValue, image: RecordValue, _folder: string, spec: TunnelSpec, check: Authorized, onConnection: (socket: Socket) => void): Promise<TunnelEndpoint> {
+    if (this.config.leaseTunnelProtocol !== 1) unsupported("This host does not offer lease tunnels.");
+    return this.tunnels.open(machine, image, spec, check, onConnection);
+  }
+  tunnelMappingAbsent(machine: RecordValue, image: RecordValue, spec: TunnelSpec, check: Authorized): Promise<boolean> { return this.tunnels.absent(machine, image, spec, check); }
+  closeTunnels(machine: RecordValue): Promise<void> { return this.tunnels.closeMachine(uuid(machine.id)); }
 
   // Supervised emulators: leased devices and warm pool devices. The native lease supervisor owns
   // the emulator's process group and enforces the published boot-bound deadline even when this
@@ -550,7 +564,8 @@ export class AndroidProvider extends MobileProvider {
     this.executionAllowed(machine);
     if (this.resumeDiscard(machine, folder) && !fs.existsSync(this.leaseStorage(machine))) this.storage(machine, image);
   }
-  /** Ready means booted, owned, serving package management and network-isolated from the host. */
+  /** Ready means booted, owned, serving package management, network-isolated from the host and
+   * holding no port mapping other than its lease's open tunnels. */
   private async leasedReadiness(machine: RecordValue, storage: string, launch: RecordValue): Promise<RecordValue> {
     const waiting = (detail: string): RecordValue => ({ state: "starting", accessReady: false, detail });
     let serial: string | undefined;
@@ -573,6 +588,16 @@ export class AndroidProvider extends MobileProvider {
       if (probe.outcome !== "isolated") return waiting("Waiting for a conclusive guest network isolation check.");
       saveJson(receipt, { version: 1, bootId: launch.bootId, target: GUEST_HOST_ALIAS, ports: probe.ports, isolated: true });
     }
+    // A host that does not declare lease tunnels behaves exactly as before them: no mapping is
+    // listed or judged. (Known gap, older than tunnels: there, a reverse mapping created by other
+    // adb tooling is not detected.)
+    if (this.config.leaseTunnelProtocol !== 1) return { state: "running", accessReady: true };
+    // The probe above covers the guest's network path only. A reverse mapping gives the guest a
+    // path through its adb daemon instead, so the mappings themselves are checked on every
+    // reconcile, before readiness and for as long as the lease is ready.
+    const audit = await this.tunnels.audit(machine, serial, storage, launch.bootId, launch.leaseId);
+    if (audit === "foreign") return this.refuseDevice(storage, launch, "The supervised device holds an adb port mapping that no lease tunnel created; the device was fenced.");
+    if (audit !== "clean") return waiting("Waiting for a conclusive adb port-mapping check.");
     return { state: "running", accessReady: true };
   }
   /** Fences a device that failed a readiness check and keeps the reason with its launch, so later
@@ -640,7 +665,7 @@ export class AndroidProvider extends MobileProvider {
     this.executionAllowed(machine);
     const storage = this.leaseStorage(machine);
     if (!fs.existsSync(storage)) return { state: "stopped" };
-    await this.closeShells(machine);
+    await this.closeShells(machine); await this.closeTunnels(machine);
     if (await this.leaseStopped(machine, storage)) { this.supervisors.delete(uuid(machine.id)); return { state: "stopped" }; }
     this.fenceLease(storage);
     return { state: "stopping" };

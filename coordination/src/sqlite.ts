@@ -67,6 +67,21 @@ export class SqliteStore {
     } finally { this.active = undefined; db.close(); }
   }
 
+  /** A consistent snapshot without the write lock and without transaction hooks, for a check
+   * that is asked several times a second and changes nothing. The connection refuses writes;
+   * whatever the check finds is recorded by a separate `transaction`. Inside a transaction it
+   * reads through that transaction. */
+  read<T>(operation: (db: DatabaseSync) => T): T {
+    if (this.active) return operation(this.active);
+    const db = new DatabaseSync(this.path, { timeout: 15_000, enableForeignKeyConstraints: false });
+    try {
+      db.exec("PRAGMA query_only=1; BEGIN");
+      const result = operation(db);
+      this.synchronous(result);
+      return result;
+    } finally { db.close(); }
+  }
+
   private synchronous(value: unknown): void {
     if (value !== null && (typeof value === "object" || typeof value === "function") && "then" in value) {
       throw new TypeError("SQLite transactions must complete synchronously.");

@@ -26,6 +26,7 @@ by the controller modules and provider implementations described in this guide.
 | Submit or inspect a durable member operation | That lease's current key |
 | Create, inspect or close a member session | That lease's current key |
 | Attach the consumer WebSocket peer | That lease's current key and session generation |
+| Open, list, inspect or close a port tunnel; attach its WebSocket peer | That lease's current key (and the tunnel's generation to attach) |
 | Read or follow the application's own [events](events.md) | Application key |
 | Read the application's own [usage](usage.md) | Application key |
 
@@ -50,6 +51,13 @@ isolated from the host that runs it. Treat an unknown value as weaker, never as 
 
 The [durable operation contract](consumer-operations.md) describes scoped commands,
 retained receipts and uncertain effects.
+
+The tunnel routes (`/v1/leases/{leaseId}/tunnels`, document version 0.4.0) are described
+with their `CreateTunnel`, `Tunnel` and `TunnelList` schemas. They apply only to leased
+Android emulators on a host that declares tunnels, for an application whose policy allows
+them (`Limits.tunnelsPerLease`). Refusal codes, limits, teardown and the native acceptance
+gaps are in [lease port tunnels](mobile-control.md#lease-port-tunnels). The lease-key
+upload and recording routes of that page are not in the document yet.
 
 The WebSocket entry describes its HTTP upgrade only. The packaged
 [session control schema](session-protocol.md) covers direction-specific JSON

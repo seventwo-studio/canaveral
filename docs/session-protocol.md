@@ -27,6 +27,7 @@ proof. Session admission and peer attachment retain their
 | Accessibility | Empty begin | Snapshot schema/size; finish; worker error | Host snapshot bytes only |
 | Display | Take/release input; discrete action; receipt lookup | Ownership; action result; worker error | RFB in both directions |
 | Administrative video | Completion acknowledgement | MP4 metadata; verified finish; worker error | Host fragmented MP4 only |
+| Lease tunnel | Stream open/accept/end/reset; credit | Mapping installed; the same stream controls; worker error | Stream data in both directions |
 
 The `x-canaveral-streams` metadata records these bindings. Binary data is carried
 as WebSocket bytes, not as base64 inside JSON. Display binary messages contain an
@@ -88,6 +89,17 @@ These are isolated fixture proofs. Actual native adapters, separate-network TLS,
 RFB interoperability, live client examples, recovery and portable release remain
 acceptance gates. No live runner gains consumer execution support from loading
 this schema.
+
+A lease `tunnel` is another separate relay capability, with its own controller module
+and attach paths ([lease port tunnels](mobile-control.md#relay-and-limits)). Validate
+`tunnelConsumer` and `tunnelHost`. Unlike the other capabilities the relay does check
+these controls: a tunnel control carries a stream number and never a host, port or
+path, only the host may send the `tunnel` and `error` controls, and only the listening
+side may send `open`. A binary message is a four-byte big-endian stream number followed
+by 1 to 65,532 payload bytes. Flow control is per stream: `credit` returns at most
+262,144 bytes, the fixed window. The worker error code `tunnel_mapping_failed` belongs to
+this capability. Fixtures cover the relay rules and the multiplexer; no native adb has
+carried a tunnel.
 
 Administrative `video` is a separate relay capability from consumer lease access.
 Its session identities, finite capture limits, credential revalidation and cleanup

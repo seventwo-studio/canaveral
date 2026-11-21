@@ -66,6 +66,18 @@
     },
     {
       "$ref": "#/$defs/VideoAck"
+    },
+    {
+      "$ref": "#/$defs/TunnelMapped"
+    },
+    {
+      "$ref": "#/$defs/TunnelStream"
+    },
+    {
+      "$ref": "#/$defs/TunnelCredit"
+    },
+    {
+      "$ref": "#/$defs/TunnelReset"
     }
   ],
   "$defs": {
@@ -120,7 +132,10 @@
           "enum": [
             "capability_unsupported",
             "session_incomplete",
-            "upload_publication_uncertain"
+            "upload_publication_uncertain",
+            "tunnel_mapping_failed",
+            "tunnel_mapping_lost",
+            "tunnel_open_rate"
           ]
         },
         "message": {
@@ -1213,6 +1228,136 @@
           "$ref": "#/$defs/WorkerError"
         }
       ]
+    },
+    "TunnelMapped": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "tunnel"
+        },
+        "direction": {
+          "enum": [
+            "reverse",
+            "forward"
+          ]
+        },
+        "devicePort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "type",
+        "direction",
+        "devicePort"
+      ],
+      "additionalProperties": false
+    },
+    "TunnelStream": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "open",
+            "accept",
+            "end"
+          ]
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "type",
+        "stream"
+      ],
+      "additionalProperties": false
+    },
+    "TunnelCredit": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "credit"
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      },
+      "required": [
+        "type",
+        "stream",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "TunnelReset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "reset"
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "reason": {
+          "enum": [
+            "connect_failed",
+            "limit",
+            "idle",
+            "closed"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "stream",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "tunnelConsumer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TunnelStream"
+        },
+        {
+          "$ref": "#/$defs/TunnelCredit"
+        },
+        {
+          "$ref": "#/$defs/TunnelReset"
+        }
+      ]
+    },
+    "tunnelHost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TunnelMapped"
+        },
+        {
+          "$ref": "#/$defs/TunnelStream"
+        },
+        {
+          "$ref": "#/$defs/TunnelCredit"
+        },
+        {
+          "$ref": "#/$defs/TunnelReset"
+        },
+        {
+          "$ref": "#/$defs/WorkerError"
+        }
+      ]
     }
   },
   "x-canaveral-streams": {
@@ -1293,6 +1438,19 @@
         "host": "fragmented-mp4",
         "maxMessageBytes": 65536
       }
+    },
+    "tunnel": {
+      "consumerControl": {
+        "$ref": "#/$defs/tunnelConsumer"
+      },
+      "hostControl": {
+        "$ref": "#/$defs/tunnelHost"
+      },
+      "binary": {
+        "consumer": "tunnel-stream",
+        "host": "tunnel-stream",
+        "maxMessageBytes": 65536
+      }
     }
   },
   "x-canaveral-limits": {
@@ -1300,6 +1458,9 @@
     "maxBinaryMessageBytes": 65536,
     "maxQueuedMessagesPerDirection": 1,
     "accessibilityMaxBytes": 6291456,
-    "accessibilityMaxNodes": 2000
+    "accessibilityMaxNodes": 2000,
+    "tunnelStreamHeaderBytes": 4,
+    "tunnelWindowBytes": 262144,
+    "tunnelConnections": 32
   }
 }

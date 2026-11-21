@@ -35,6 +35,10 @@ an Android install must acknowledge the SDK licences in that request.
 For supervised leases and warm targets use the separate
 [Android warm-pool example](../examples/host-android-warm-pool.json).
 The host checks that the required tools and offered system-image directories exist.
+A host that leases emulators to applications needs more: the native lease helper, a
+user-build image and explicit lease declarations, optionally with port tunnels. See
+[host-android-leases.json](../examples/host-android-leases.json) and
+[Android emulator leases](mobile-control.md#android-emulator-leases).
 
 For iOS, use a native Mac with full Xcode, its selected developer directory and
 installed simulator runtime/device type. Set `DEVELOPER_DIR` in the host service
