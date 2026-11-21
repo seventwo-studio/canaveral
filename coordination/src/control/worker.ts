@@ -20,6 +20,7 @@ import { createModule as sessionsModule } from "./sessions.ts";
 import { AdminSystem } from "./admin-system.ts";
 import { LegacyLeases } from "./leases.ts";
 import { createModule as updatesModule } from "./updates.ts";
+import { createModule as upkeepModule } from "./upkeep.ts";
 import { requireHostAdmission, hostAdmissionClosed } from "./maintenance.ts";
 import { requireAdmin } from "./contracts.ts";
 import type { ControlOptions, ControlRequest, Principal } from "./contracts.ts";
@@ -58,6 +59,8 @@ const leases = new LegacyLeases(store, options);
 modules.push(leases);
 modules.push(new AdminSystem(leases));
 modules.push(updatesModule(store, options));
+// Runtime, storage and idle upkeep; registers its heartbeat hooks before the first request.
+modules.push(upkeepModule(store, options));
 if (options.browserHosts?.length) store.transaction(db => db.exec(`
   CREATE TABLE IF NOT EXISTS browser_launches (host TEXT NOT NULL,id TEXT NOT NULL,intent TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(host,id))`));
 
@@ -154,7 +157,15 @@ port.on("message", (message: { id: number; command: ControlCommand }) => {
       message: ({ request_kind_unsupported: "Use kind lease, linux-lease or model-job.",
         request_waiting_limit: "Waiting request limit reached; cancel waiting requests or wait for admission before submitting more.",
         request_priority_invalid: "Priority must be an integer within the application maximum.",
-        request_conflict: "Request UUID already has a different intent." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,
+        request_conflict: "Request UUID already has a different intent.",
+        host_pressure: "Every host that could take this work is under memory or disk pressure; nothing running was stopped.",
+        host_pressure_unknown: "Every host that could take this work has no current pressure sample.",
+        license_acknowledgement_required: "Android installs need an explicit licence acknowledgement in this request.",
+        runtime_in_use: "A template, device or lease on this host uses that runtime or system image.",
+        host_operation_busy: "Another install, removal or purge is in progress for this host and platform.",
+        host_inspection_required: "Inspect the host first: an earlier change ended unknown, or the purge names no recent successful inspection.",
+        storage_owner_exists: "Named storage still has a live owner or was not proven removable by that inspection.",
+        upkeep_unsupported: "This host has not advertised runtime and storage upkeep for that platform." } as Record<string,string>)[known.code] ?? messages[known.status] ?? "Controller request failed.", status: known.status,
       code: /^[a-z][a-z0-9_]{0,63}$/.test(known.code) ? known.code : "request_failed", retryable: known.retryable,
       ...(known.outcome ? { outcome: known.outcome } : {}),
     } });

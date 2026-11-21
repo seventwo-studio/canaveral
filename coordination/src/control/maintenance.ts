@@ -96,6 +96,10 @@ function ledger(db: DatabaseSync, host: string, browserHosts: readonly string[],
       entries.push({ kind: "operation", id: attempt.id, state: "uncertain", detail: "Uploaded app install cleanup is unconfirmed.", extra: { outcome: attempt.state } });
     }
   }
+  // Runtime installs, removals and storage purges are work on this host. One that ended unknown stays
+  // an uncertain operation until a later listing or storage inspection acknowledges it.
+  add(["host_operations"], "operation", "Host upkeep operation", `SELECT id,state,kind FROM host_operations WHERE host=? AND (state IN ('queued','running')
+    OR (state='unknown' AND acknowledged IS NULL AND kind IN ('runtime-install','runtime-remove','storage-purge')))`);
   add(["inference_jobs"], "operation", "Embedded inference", "SELECT id,state,desired FROM inference_jobs WHERE host=? AND state NOT IN ('succeeded','failed','cancelled')");
   add(["app_artifacts"], "operation", "App artifact upload", "SELECT id,state,received FROM app_artifacts WHERE host=? AND state='uploading'");
   add(["leases", "lease_members"], "lease", "Machine lease", `SELECT DISTINCT l.id,l.state,l.cleanup FROM leases l

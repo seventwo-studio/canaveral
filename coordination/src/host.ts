@@ -5,12 +5,12 @@ import { serveMobileVideo } from './mobile-video.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createSecureContext } from "node:tls";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setImmediate as yieldWork } from "node:timers/promises";
 import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
@@ -38,6 +38,9 @@ import { createInferenceExecutor } from "./inference-runtime.ts";
 import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
+import { PressureMonitor, pressureConfig, readMemorySignal } from "./pressure.ts";
+import type { PressureReport, PressureSample } from "./pressure.ts";
+import type { OrphanEvidence, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
@@ -73,6 +76,8 @@ export interface HostDependencies {
   guest?: GuestAccess;
   inference?: HostTaskAdapter; images?: HostImageAdapter; sessions?: HostTaskAdapter;
   log?: (message: string) => void;
+  /** One raw memory and disk reading; fixtures script it instead of reading this machine. */
+  pressureSample?: () => Promise<PressureSample> | PressureSample;
 }
 interface Runtime extends NativeProvider {
   guestHelperBinding?(machine: RecordValue, image: RecordValue, folder: string, authority: OwnedGuestAuthority): Promise<GuestHelperBinding>;
@@ -101,6 +106,11 @@ interface Runtime extends NativeProvider {
   desktop?: GuestAccess["desktop"];
   closeShells?(machine: RecordValue): Promise<void>;
   resourceReport?(assignments: RecordValue[]): Promise<RecordValue>;
+  /** Mobile runtimes only: operator-requested runtime changes and orphan storage evidence. */
+  runtimeOperation?(kind: string, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport>;
+  orphanEvidence?(name: string): Promise<OrphanEvidence>;
+  purgeOrphan?(name: string, requestId: string): Promise<{ assignmentFingerprint: string | undefined }>;
+  strayDevices?(): Promise<{ name: string; machineId: string; kind: string }[]>;
 }
 interface DurableWork { fingerprint: string; state: string; report?: RecordValue }
 interface MaintenanceFence { drainId: string; challenge: string }
@@ -115,6 +125,26 @@ const NOT_IDLE = { idle: false, workloadsStopped: false };
 const MAX_HOST_MESSAGE = 8 * 1_048_576;
 const TERMINAL = new Set(["succeeded", "failed", "unknown", "cancelled"]);
 const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile", "leaseClockHelper"]);
+export interface IdleStopPolicy { defaultSeconds: number | null; templates: Record<string, number | null> }
+/** Operator idle-stop policy (`upkeep` in the host file): off unless set, for the host and
+ * optionally per template. The controller applies it; this host only advertises it. */
+export function upkeepPolicy(value: unknown, templateIds: readonly string[]): IdleStopPolicy {
+  if (value === undefined) return { defaultSeconds: null, templates: {} };
+  const input = object(value), invalid = (): never => { throw new ServiceError("Invalid upkeep configuration.", 400); };
+  if (Object.keys(input).some(key => key !== "idleStopSeconds" && key !== "templates")) invalid();
+  const seconds = (raw: unknown): number | null => {
+    if (raw === undefined || raw === null || raw === 0) return null;
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 300 || raw > 2_592_000) invalid();
+    return raw as number;
+  };
+  const templates: Record<string, number | null> = {};
+  for (const [id, entry] of Object.entries(object(input.templates ?? {}))) {
+    const settings = object(entry);
+    if (!templateIds.includes(id) || Object.keys(settings).some(key => key !== "idleStopSeconds")) invalid();
+    templates[id] = seconds(settings.idleStopSeconds);
+  }
+  return { defaultSeconds: seconds(input.idleStopSeconds), templates };
+}
 
 /** Bounded JSON HTTP, no redirects or ambient proxy, optional host-scoped trust bundle. */
 export function hostTransport(config: HostConfig): HostTransport {
@@ -220,13 +250,19 @@ export class HostRunner {
   readonly inferenceReports = new Map<string, RecordValue>();
   readonly imageReports = new Map<string, RecordValue>();
   readonly sessionReports = new Map<string, RecordValue>();
+  readonly hostOperationReports = new Map<string, RecordValue>();
   readonly runtimes = new Map<string, Runtime>();
   readonly transport: HostTransport;
   identity: { id: string; credential: string; orchestrator: string } | undefined;
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], hostOperations: [] };
+  /** Running upkeep operations by lane: one runtime change per platform, one storage operation. */
+  private readonly upkeepLanes = new Map<string, string>();
+  readonly idlePolicy: IdleStopPolicy;
+  private pressureMonitor: PressureMonitor | undefined;
+  pressureReport: PressureReport | undefined;
   /** Owner display attachments are attempted once per identity; a refused attach is not retried. */
   private readonly displayAttempts = new Set<string>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; authorized: () => boolean }>();
@@ -324,6 +360,13 @@ export class HostRunner {
     if (!Number.isFinite(this.pollInterval) || this.pollInterval < .25 || this.pollInterval > 5 || !Number.isSafeInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 32) throw new ServiceError("Invalid host poll interval or concurrency.", 400);
     this.clock = clock;
     this.guard = new LeaseGuard(this.state, this.clock);
+    this.idlePolicy = upkeepPolicy(config.upkeep, (this.config.templates as RecordValue[]).map(template => String(template.id)));
+    const pressure = pressureConfig(config.pressure);
+    // A KubeVirt pool runner measures its own pod, not the cluster's nodes, so it reports no pressure.
+    if (this.config.provider !== "kubevirt") {
+      if (pressure.enabled) this.pressureMonitor = new PressureMonitor(pressure.thresholds);
+      else this.pressureReport = { version: 1, state: "disabled", sampledAt: clock.wall() };
+    }
     this.transport = dependencies.transport ?? transport; this.log = dependencies.log ?? (() => {}); this.guest = dependencies.guest;
     this.loadReports();
     const retained = join(this.state, "update-assignments.json");
@@ -333,12 +376,12 @@ export class HostRunner {
     const path = join(this.state, "host-reports.json");
     if (!present(path)) return;
     const saved = readRecord(path, 16 * 1_048_576);
-    for (const [name, target] of [["machines", this.reports], ["device", this.deviceReports], ["inference", this.inferenceReports], ["images", this.imageReports], ["sessions", this.sessionReports]] as const) {
+    for (const [name, target] of [["machines", this.reports], ["device", this.deviceReports], ["inference", this.inferenceReports], ["images", this.imageReports], ["sessions", this.sessionReports], ["hostOperations", this.hostOperationReports]] as const) {
       for (const [id, report] of Object.entries(object(saved[name] ?? {}))) target.set(identifier(id), object(report));
     }
   }
   private saveReports(): void {
-    saveRecord(join(this.state, "host-reports.json"), { machines: Object.fromEntries(this.reports), device: Object.fromEntries(this.deviceReports), inference: Object.fromEntries(this.inferenceReports), images: Object.fromEntries(this.imageReports), sessions: Object.fromEntries(this.sessionReports) });
+    saveRecord(join(this.state, "host-reports.json"), { machines: Object.fromEntries(this.reports), device: Object.fromEntries(this.deviceReports), inference: Object.fromEntries(this.inferenceReports), images: Object.fromEntries(this.imageReports), sessions: Object.fromEntries(this.sessionReports), hostOperations: Object.fromEntries(this.hostOperationReports) });
   }
   async connect(): Promise<void> {
     const path = join(this.state, "identity.json"), orchestrator = this.config.url.replace(/\/+$/, "");
@@ -566,13 +609,15 @@ export class HostRunner {
     // Dispatch can consume a challenge even if its response is lost.
     this.maintenanceChallenge = null;
     this.maintenanceProof = undefined;
-    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}) };
+    const upkeep = this.upkeepReport(), hostOperationReports = upkeep ? Object.fromEntries([...this.hostOperationReports].slice(0, 16)) : {};
+    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
+      ...(this.pressureReport ? { pressure: this.pressureReport } : {}), ...(upkeep ? { upkeep, hostOperationReports } : {}) };
     if (proof && Buffer.byteLength(JSON.stringify(body)) > MAX_HOST_MESSAGE) delete body.maintenance.proof;
     const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, body, this.identity.credential, this.stopController.signal);
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions') };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), hostOperations: records(response.hostOperations ?? [], "host operations") };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
@@ -588,7 +633,7 @@ export class HostRunner {
     this.assignments = machines; this.queues = queues; this.lastContact = sent;
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
     this.maintenanceChallenge = maintenance ?? null;
-    for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports]] as const) {
+    for (const [key, target, sentMap] of [["device", this.deviceReports, deviceReports], ["inference", this.inferenceReports, inferenceReports], ["images", this.imageReports, imageReports], ["hostOperations", this.hostOperationReports, hostOperationReports]] as const) {
       const ids = new Set(queues[key].map(r => String(r.id)));
       for (const id of Object.keys(sentMap)) if (!ids.has(id)) target.delete(id);
     }
@@ -745,7 +790,7 @@ export class HostRunner {
   }
   private async durableWork(kind: string, task: RecordValue, target: Map<string, RecordValue>, work: (context: HostWorkContext) => Promise<RecordValue>, context: HostWorkContext): Promise<void> {
     const id = identifier(task.id), path = join(this.state, "work", kind, `${id}.json`);
-    const stable = kind === "device" ? ["id", "machineId", "leaseId", "action", "arguments"] : kind === "inference" ? ["id", "hostId", "request", "definition"] : kind === "images" ? ["id", "kind", "machineId", "name", "metadata", "registryId"] : ["id", "generation", "leaseId", "machineId", "capability"];
+    const stable = kind === "device" ? ["id", "machineId", "leaseId", "action", "arguments"] : kind === "inference" ? ["id", "hostId", "request", "definition"] : kind === "images" ? ["id", "kind", "machineId", "name", "metadata", "registryId"] : kind === "hostOperations" ? ["id", "kind", "arguments"] : ["id", "generation", "leaseId", "machineId", "capability"];
     const fingerprint = legacyDigest(Object.fromEntries(stable.filter(k => Object.hasOwn(task, k)).map(k => [k, task[k]])));
     if (present(path)) {
       const previous = readRecord(path) as unknown as DurableWork;
@@ -846,6 +891,7 @@ export class HostRunner {
     this.outboundSessions?.step((this.queues.sessions ?? []) as unknown as RunnerSessionJob[]);
     this.stepVideo();
     this.stepDisplay();
+    this.stepHostOperations();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
       const task = this.queues[kind]?.find(t => !TERMINAL.has(String(target.get(String(t.id))?.state)));
@@ -1042,7 +1088,7 @@ export class HostRunner {
   private idleEligible(): boolean {
     return this.fresh() && !this.closed && this.active.size === 0 && this.updateExternalWork === 0 &&
       Object.values(this.queues).every(queue => queue.length === 0) &&
-      [this.reports, this.deviceReports, this.inferenceReports, this.imageReports, this.sessionReports].every(reports =>
+      [this.reports, this.deviceReports, this.inferenceReports, this.imageReports, this.sessionReports, this.hostOperationReports].every(reports =>
         [...reports.values()].every(r => ["stopped", "succeeded", "failed", "cancelled"].includes(String(r.state)) && (r.stopped === undefined || r.stopped === true) && !["pending", "unknown"].includes(String(r.cleanup))));
   }
   private retainedAssignments(current: RecordValue[]): Map<string, RecordValue> {
@@ -1109,7 +1155,7 @@ export class HostRunner {
     const assignments: MaintenanceProof["inventory"]["assignments"] = [];
     const knownFolders = new Set<string>(), knownStorage = new Set<string>(), knownQuarantines = new Set<string>();
     const unexpected = new Set<string>(), issues: string[] = [];
-    let complete = true, entries = 0;
+    let complete = true;
     for (const machine of current) {
       if (assignments.length % 32 === 0) await yieldWork();
       if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
@@ -1153,34 +1199,206 @@ export class HostRunner {
         knownFolders.add(resolve(folder)); retained.delete(id);
       } catch { /* Retain assignments with unconfirmed retirement. */ }
     }
+    const scan = await this.scanRoots({ folders: knownFolders, storage: knownStorage, quarantines: knownQuarantines }, () => challenge === this.maintenanceChallenge && this.fresh());
+    if (!scan) return;
+    for (const found of scan.found) unexpected.add(found.name);
+    if (!scan.complete) { complete = false; issues.push("Local journal or provider storage inventory could not be completed."); }
+    const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
+      await this.inspectStopped(retained, true) : NOT_IDLE;
+    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
+  }
+  /** Directory entries under the journal and provider storage roots that no known assignment
+   * explains. Shared by the maintenance proof and the storage inspection; it changes nothing. */
+  private async scanRoots(known: { folders: Set<string>; storage: Set<string>; quarantines: Set<string> }, live: () => boolean):
+    Promise<{ complete: boolean; found: { name: string; path: string; storage: boolean; quarantine: boolean }[] } | undefined> {
     const journalRoots = this.machineRoots(), storageRoots = new Set([...this.runtimes.values()].map(maintenanceStorageRoot).filter(root => root !== undefined));
+    const names = new Set<string>(), found: { name: string; path: string; storage: boolean; quarantine: boolean }[] = [];
+    let complete = true, entries = 0;
     for (const root of new Set([...journalRoots, ...storageRoots])) {
       try {
         if (!ownedDirectory(root)) continue;
         const before = lstatSync(root);
         for await (const entry of await opendir(root)) {
-          if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
+          if (!live()) return undefined;
           if (++entries > 20_000) { complete = false; break; }
           if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
           const path = join(root, entry.name);
           const quarantine = storageRoots.has(root) && removalQuarantine.test(entry.name);
-          if (quarantine && entry.isDirectory() && knownQuarantines.has(path)) continue;
+          if (quarantine && entry.isDirectory() && known.quarantines.has(path)) continue;
           // Retirement only explains an old journal, never backing storage that still exists.
-          const unexplainedJournal = journalRoots.has(root) && !knownFolders.has(path) && !this.guard.records.get(entry.name)?.retired;
-          const unexplainedStorage = storageRoots.has(root) && !knownStorage.has(path) && storageId.test(entry.name);
+          const unexplainedJournal = journalRoots.has(root) && !known.folders.has(path) && !this.guard.records.get(entry.name)?.retired;
+          const unexplainedStorage = storageRoots.has(root) && !known.storage.has(path) && storageId.test(entry.name);
           if (!quarantine && !unexplainedJournal && !unexplainedStorage) continue;
-          if (unexpected.size >= 100 && !unexpected.has(entry.name) || entry.name.length > 200) { complete = false; break; }
-          unexpected.add(entry.name);
+          if (names.size >= 100 && !names.has(entry.name) || entry.name.length > 200) { complete = false; break; }
+          names.add(entry.name); found.push({ name: entry.name, path, storage: storageRoots.has(root), quarantine });
         }
         noLinks(root);
         const after = lstatSync(root);
         if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeMs !== before.mtimeMs) complete = false;
       } catch { complete = false; }
-      if (!complete) { issues.push("Local journal or provider storage inventory could not be completed."); break; }
+      if (!complete) break;
     }
-    const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
-      await this.inspectStopped(retained, true) : NOT_IDLE;
-    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
+    return { complete, found };
+  }
+  /** Pressure is sampled on its own cadence, so a slow resource collection cannot age it. */
+  async samplePressure(): Promise<void> {
+    if (!this.pressureMonitor) return;
+    let sample: PressureSample;
+    try { sample = await (this.dependencies.pressureSample ?? (() => this.readPressure()))(); }
+    catch { sample = { memory: null, disk: null }; }
+    const report = this.pressureMonitor.observe(sample, this.clock.now(), this.clock.wall());
+    if (!this.stopping) this.pressureReport = report;
+  }
+  private async readPressure(): Promise<PressureSample> {
+    let memory: PressureSample["memory"], disk: PressureSample["disk"] = null;
+    try { memory = await readMemorySignal(); } catch { memory = null; }
+    try {
+      // The tightest filesystem among the host's storage roots decides. A root that does not
+      // exist yet is measured through its nearest existing parent.
+      const roots = [this.config.storage ?? this.state, ...[...this.runtimes.values()].map(runtime => runtime.config?.storage)].filter((root): root is string => typeof root === "string" && isAbsolute(root));
+      for (let root of new Set(roots.length ? roots : [this.state])) {
+        while (!present(root) && dirname(root) !== root) root = dirname(root);
+        const sample = statfsSync(root), next = { freeGiB: sample.bavail * sample.bsize / 2 ** 30, totalGiB: sample.blocks * sample.bsize / 2 ** 30 };
+        if (!disk || next.freeGiB < disk.freeGiB) disk = next;
+      }
+    } catch { disk = null; }
+    return { memory, disk };
+  }
+  /** Devices with work this host can see but the controller may not, such as a local viewer. */
+  private busyMachines(): string[] {
+    const busy = new Set<string>(this.deviceMachines);
+    for (const key of this.active.keys()) {
+      const [kind, id] = key.split(":");
+      if (kind === "video" || kind === "display") { const job = this.queues[kind]?.find(entry => entry.id === id); if (job) busy.add(String(job.machineId)); }
+    }
+    // Local connector work is not attributed to one device, so it holds every running one.
+    if (this.updateExternalWork > 0) for (const machine of this.assignments) if (machine.desired === "running") busy.add(String(machine.id));
+    return [...busy].sort();
+  }
+  /** Mobile hosts advertise their upkeep capability, idle-stop policy and locally busy devices. */
+  private upkeepReport(): RecordValue | undefined {
+    const mobile = [...this.runtimes.values()].filter(runtime => runtime.kind === "android" || runtime.kind === "ios");
+    if (!mobile.length) return undefined;
+    return { version: 1, platforms: mobile.filter(runtime => runtime.runtimeOperation).map(runtime => runtime.kind).sort(), idleStop: this.idlePolicy, busy: this.busyMachines() };
+  }
+  private stepHostOperations(): void {
+    for (const task of this.queues.hostOperations ?? []) {
+      const id = identifier(task.id), key = `upkeep:${id}`, kind = String(task.kind), args = object(task.arguments ?? {});
+      if (this.active.has(key) || TERMINAL.has(String(this.hostOperationReports.get(id)?.state))) continue;
+      // One install or removal per platform, one listing per platform and one storage operation at a time.
+      const lane = kind === "runtime-list" ? `list:${String(args.platform)}` : kind.startsWith("runtime-") ? `change:${String(args.platform)}` : "storage";
+      if ([...this.upkeepLanes.values()].includes(lane)) continue;
+      const path = join(this.state, "work", "hostOperations", `${id}.json`);
+      const authorized = (): boolean => this.fresh() && this.queues.hostOperations!.some(operation => operation.id === id);
+      this.upkeepLanes.set(key, lane);
+      this.launch(key, authorized, async context => {
+        try {
+          // An operation the controller stopped waiting for must not start late.
+          if (!present(path) && this.clock.wall() >= Number(task.startBy)) { this.publish(this.hostOperationReports, id, { state: "failed", result: { code: "expired", detail: "The start window ended before this host began the operation." } }); return; }
+          await this.durableWork("hostOperations", task, this.hostOperationReports, c => this.hostOperation(task, c), context);
+        } finally { this.upkeepLanes.delete(key); }
+      });
+    }
+  }
+  private async hostOperation(task: RecordValue, context: HostWorkContext): Promise<RecordValue> {
+    const id = identifier(task.id), kind = String(task.kind), args = object(task.arguments ?? {});
+    const authorized = (): boolean => !context.signal.aborted && context.authorized();
+    const interrupted = { state: "failed", result: { code: "interrupted", detail: "Authorization ended during the inspection; nothing was changed." } };
+    if (kind === "storage-inspect") { const inventory = await this.inspectStorage(authorized); return inventory ? { state: "succeeded", result: inventory } : interrupted; }
+    if (kind === "storage-purge") return this.purgeStorage(id, args, authorized);
+    const runtime = this.runtimes.get(String(args.platform));
+    if (!runtime?.runtimeOperation) return { state: "failed", result: { code: "upkeep_unsupported", detail: "This host has no runtime manager for that platform." } };
+    const timeoutSeconds = Math.max(1, Math.min(14_400, Number(task.timeoutSeconds) || 300));
+    return { ...await runtime.runtimeOperation(kind, args, { authorized, timeoutSeconds,
+      progress: update => { if (authorized() && this.hostOperationReports.get(id)?.state === "running") this.publish(this.hostOperationReports, id, { state: "running", progress: update }); },
+      uses: name => this.runtimeUses(runtime, name) }) };
+  }
+  /** Configured templates (offered or retained: the host check needs each one's runtime) and
+   * every assignment this host holds: those the controller delivers and unretired lease records.
+   * Storage left behind by anything else is counted by the provider's own storage scan. */
+  private runtimeUses(runtime: Runtime, name: string): string[] {
+    const pins = (template: unknown): boolean => { const device = object(object(template).device ?? {}); return device.systemImage === name || device.runtime === name; };
+    const uses: string[] = [];
+    if ((Array.isArray(runtime.config?.templates) ? runtime.config.templates as unknown[] : []).some(pins)) uses.push("template");
+    if (this.guard.assignments(this.assignments).some(machine => pins(machine.template))) uses.push("device");
+    return uses;
+  }
+  /** Read-only report of storage and journals that no live owner on this host explains, with the
+   * owning runtime's evidence for each. A live owner is an assignment the controller delivered on
+   * the last heartbeat, or a lease record this runner has not retired. Only android and ios
+   * storage can be proven; the caller must hold fresh controller contact. */
+  async inspectStorage(live: () => boolean = () => true): Promise<RecordValue | undefined> {
+    const held = new Map(this.guard.assignments(this.assignments).map(machine => [String(machine.id), machine])), known = { folders: new Set<string>(), storage: new Set<string>(), quarantines: new Set<string>() };
+    let complete = true;
+    for (const machine of held.values()) {
+      try {
+        const { runtime, folder } = this.runtimeContext(machine), root = maintenanceStorageRoot(runtime);
+        known.folders.add(resolve(folder));
+        if (root) known.storage.add(join(root, identifier(machine.id)));
+      } catch { complete = false; } // An assignment this host cannot place makes absence of an owner unprovable.
+    }
+    const scan = await this.scanRoots(known, live);
+    if (!scan) return undefined;
+    complete &&= scan.complete;
+    const runtimes = new Map([...this.runtimes.values()].map(runtime => [maintenanceStorageRoot(runtime), runtime] as const));
+    const entries: RecordValue[] = [];
+    for (const found of scan.found) {
+      if (!live()) return undefined;
+      const machineId = found.quarantine ? found.name.slice(10, 46) : found.name, base = { name: found.name, machineId, root: found.storage ? "storage" : "journal" };
+      if (!found.storage) { entries.push({ ...base, kind: "assignment-journal", owned: false, removable: false, reason: "journal_without_storage_proof" }); continue; }
+      const runtime = runtimes.get(dirname(found.path)), kind = found.quarantine ? "removal-quarantine" : "device-storage";
+      // A quarantine of an assignment this host still holds belongs to that assignment's own removal.
+      if (held.has(machineId)) entries.push({ ...base, runtime: runtime?.kind ?? null, kind, owned: true, removable: false, reason: "assignment_retained" });
+      else if (!runtime?.orphanEvidence) entries.push({ ...base, runtime: runtime?.kind ?? null, kind, owned: false, removable: false, reason: "unsupported_runtime" });
+      else entries.push({ ...base, runtime: runtime.kind, ...await runtime.orphanEvidence(found.name) });
+    }
+    // Registrations and simulators that carry an assignment's name without any storage: report only.
+    const registries: Record<string, string> = {};
+    for (const runtime of this.runtimes.values()) if (runtime.strayDevices) {
+      try {
+        for (const stray of await runtime.strayDevices()) if (!held.has(stray.machineId)) entries.push({ name: stray.name, machineId: stray.machineId, root: "registry", runtime: runtime.kind, kind: stray.kind, owned: false, removable: false, reason: "no_storage_or_receipt" });
+        registries[runtime.kind] = "listed";
+      } catch { registries[runtime.kind] = "unavailable"; }
+    }
+    const removable = new Set(entries.filter(entry => entry.removable === true).map(entry => String(entry.machineId)));
+    for (const entry of entries) {
+      if (entry.kind === "assignment-journal" && removable.has(String(entry.machineId))) entry.reason = "removed_with_its_storage";
+      if (!complete && entry.removable === true) { entry.removable = false; entry.reason = "inventory_incomplete"; }
+    }
+    return { complete, inspectedAt: this.clock.wall(), registries, entries };
+  }
+  /** Explicit administrator purge. Each named entry is inspected again and removed only as a
+   * proven orphan; nothing is stopped, and an entry that cannot be proven is refused. */
+  private async purgeStorage(requestId: string, args: RecordValue, live: () => boolean): Promise<RecordValue> {
+    const inventory = await this.inspectStorage(live);
+    if (!inventory) return { state: "failed", result: { code: "interrupted", detail: "Authorization ended before the purge; nothing was changed." } };
+    if (inventory.complete !== true) return { state: "failed", result: { code: "inventory_incomplete", detail: "This host could not inspect its whole storage; nothing was removed." } };
+    const results: RecordValue[] = []; let uncertain = false;
+    for (const name of (Array.isArray(args.entries) ? args.entries : []).map(String)) {
+      const entry = (inventory.entries as RecordValue[]).find(candidate => candidate.name === name && candidate.root === "storage");
+      const runtime = [...this.runtimes.values()].find(candidate => candidate.kind === entry?.runtime);
+      if (!entry || entry.removable !== true || !runtime?.purgeOrphan) { results.push({ name, state: "refused", reason: entry ? entry.reason : "not_found" }); continue; }
+      if (!live()) { results.push({ name, state: "refused", reason: "interrupted" }); continue; }
+      try {
+        const proof = await runtime.purgeOrphan(name, requestId);
+        results.push({ name, state: "removed", journalRemoved: this.removeOrphanJournal(runtime, String(entry.machineId), proof.assignmentFingerprint) });
+      } catch (error) {
+        // A refusal precedes any change; any other failure may have removed part of the storage.
+        if (error instanceof ServiceError && error.code === "orphan_refused") results.push({ name, state: "refused", reason: "evidence_changed" });
+        else { uncertain = true; results.push({ name, state: "unknown" }); }
+      }
+    }
+    return { state: uncertain ? "unknown" : "succeeded", result: { entries: results } };
+  }
+  /** The journal of a purged assignment goes with its storage, but only when it carries the
+   * fingerprint of the assignment that storage's owner receipt bound. */
+  private removeOrphanJournal(runtime: Runtime, machineId: string, fingerprint: string | undefined): boolean {
+    if (!fingerprint) return false;
+    try {
+      const folder = join(runtime.state ?? this.state, "machines", identifier(machineId));
+      if (!ownedDirectory(folder) || readOwnedRecord(join(folder, "assignment.json")).fingerprint !== fingerprint) return false;
+      rmSync(folder, { recursive: true }); return true;
+    } catch { return false; }
   }
   async quiesceForUpdate(): Promise<{ idle: boolean; workloadsStopped: boolean; quiesced: boolean }> {
     this.fenceUpdateAdmission();
@@ -1206,6 +1424,7 @@ export class HostRunner {
       this.loops.push(this.loop(() => this.deadlines(), 100));
       this.loops.push(this.loop(() => this.cleanupStep(), 100));
       this.loops.push(this.loop(() => this.collectResources(), 5000));
+      this.loops.push(this.loop(() => this.samplePressure(), 5000));
       this.loops.push(this.loop(async () => { if (this.checkRequested || this.clock.wall() >= this.nextCheck) { this.checkRequested = false; this.nextCheck = this.clock.wall() + 60; await this.checkEnvironment(); } }, 1000));
       return this;
     } catch (error) { try { await this.close(); } catch { this.log("Host startup cleanup was not fully confirmed."); } throw error; }
