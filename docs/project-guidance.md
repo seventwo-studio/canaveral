@@ -65,7 +65,7 @@ interpreter dependency to the controller, host or SDK; see
 - [usage reporting](usage.md) (requests, waits, leases and device-seconds from controller ledgers; not measured utilisation)
 - [tls clients](tls-clients.md)
 - [visual sdk](visual-sdk.md)
-- [warm devices and device baselines](warm-pool-and-baselines.md) (native warm adoption verified on one Mac; prepared baseline state retention remains open)
+- [warm devices and device baselines](warm-pool-and-baselines.md) (native warm adoption and prepared Android baseline state verified on one Mac)
 - [windows guest accessibility](windows-guest-accessibility.md)
 - [windows guest display](windows-guest-display.md)
 - [windows guest files](windows-guest-files.md)

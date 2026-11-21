@@ -58,7 +58,7 @@ export function sdk(root: string): { sdk: string; registry: string; events: stri
   // The installed system image's package and build metadata: what a baseline is bound to.
   const imageDirectory = join(sdkRoot, ...systemImage.split(";"));
   writeFileSync(join(imageDirectory, "source.properties"), "Pkg.Desc=Fixture system image\nPkg.Revision=9\n");
-  writeFileSync(join(imageDirectory, "build.prop"), "ro.build.fingerprint=fixture/35/9\n");
+  writeFileSync(join(imageDirectory, "build.prop"), "ro.build.fingerprint=fixture/35/9\nro.build.version.incremental=13818094\n");
   // The stand-in emulator registers its console port, keeps a grandchild in its own process
   // group and boots after a short delay. Only the lease supervisor ever signals it.
   const script = join(root, "fake-emulator.mjs");
@@ -72,10 +72,12 @@ let data = "", backing = "";
 if (process.env.ANDROID_AVD_HOME) {
   const avd = /^path=(.*)$/m.exec(readFileSync(process.env.ANDROID_AVD_HOME + "/" + name + ".ini", "utf8"))[1], overlay = avd + "/userdata-qemu.img.qcow2";
   if (!existsSync(avd + "/userdata-qemu.img")) writeFileSync(avd + "/userdata-qemu.img", "factory\\n");
-  if (!existsSync(overlay)) {
+  // The real emulator recreates the overlays when the system image's version cache is absent or stale.
+  const versionCache = avd + "/version_num.cache", expectedVersion = "13818094\\n";
+  if (!existsSync(overlay) || !existsSync(versionCache) || readFileSync(versionCache, "utf8") !== expectedVersion) {
     const header = Buffer.alloc(${OVERLAY_HEADER}), base = Buffer.from(avd + "/userdata-qemu.img");
     header.writeUInt32BE(0x514649fb, 0); header.writeUInt32BE(3, 4); header.writeBigUInt64BE(104n, 8); header.writeUInt32BE(base.length, 16); base.copy(header, 104);
-    writeFileSync(overlay, header);
+    writeFileSync(overlay, header); writeFileSync(versionCache, expectedVersion);
   }
   const image = readFileSync(overlay);
   data = image.subarray(${OVERLAY_HEADER}).toString("utf8"); backing = image.subarray(104, 104 + image.readUInt32BE(16)).toString("utf8");
