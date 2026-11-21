@@ -18,6 +18,7 @@ file loaders, `scopedLease`, session creation/attachment, streaming files,
 lease-key app installs (`uploadApp`, `appArtifact`, `deleteAppArtifact`, `installApp`) and
 MP4 recording (`video`) for leased Android emulators
 ([lease recording and large installs](mobile-control.md#lease-recording-and-large-installs)),
+[port tunnels](#lease-port-tunnels) (`tunnels`),
 [terminals](terminal-sdk.md), [display](visual-sdk.md) and
 [accessibility](scoped-accessibility.md). Administrative, host and model routes use
 separate interfaces. The SDK does not establish provider eligibility.
@@ -116,6 +117,47 @@ by the application's maximum. The controller returns 400
 configured default or maximum below 30 seconds without clamping. This is a Linux
 consumer contract change; other lease kinds and generic application limits keep
 their existing bounds. The SDK preserves this structured service error.
+
+## Lease port tunnels
+
+`LeaseClient.tunnels` (also exported as `@canaveral/coordination/tunnel-sdk`) opens
+[port tunnels](mobile-control.md#lease-port-tunnels) between a leased Android emulator and
+the machine the SDK runs on. It uses only the lease's current key.
+
+```ts
+// The app on the device reaches Metro on this machine at localhost:8081.
+const tunnel = await lease.tunnels.open({
+  id: persistedUuid, member: "primary", direction: "reverse", devicePort: 8081,
+  target: { host: "127.0.0.1", port: 8081 },
+});
+// This machine reaches port 9229 on the device through a loopback listener.
+const inspect = await lease.tunnels.open({ id: otherUuid, member: "primary", direction: "forward", devicePort: 9229 });
+console.log(inspect.local); // { host: "127.0.0.1", port: <ephemeral> }
+const end = await tunnel.closed; // { reason, code?, state? }; never rejects
+```
+
+- `open(request, { timeoutMs?, signal? })` creates (or replays) the tunnel, attaches and
+  resolves once the runner has installed the device mapping. A reverse request must name
+  `target: { host?, port }` (an IP literal or host name; default host `127.0.0.1`). A
+  forward request may name `listen: { host?, port? }`; it defaults to `127.0.0.1` and an
+  ephemeral port, and another address is the caller's explicit choice to expose the device
+  port there. The target and listener stay on the caller's machine and are never sent.
+- The returned `LeaseTunnel` has `local`, `stats`, `closed` and `close()`. It stays open
+  until it is closed, the process exits, or the lease ends or its key is rotated.
+- `create`, `connect`, `inspect`, `list` and `close` are the separate steps.
+- Nothing is retried. If the create reply is lost, `open` rejects with
+  `outcome: "unknown"`; inspect the UUID or deliberately call `open` again with the same
+  UUID and request, which attaches the one saved tunnel. A tunnel is attached once: a UUID
+  whose tunnel already attached or ended is refused locally with `tunnel_ended`, and a new
+  tunnel needs a new UUID.
+- Controller refusals keep their `code` (`tunnels_not_permitted`, `capability_unsupported`,
+  `member_not_ready`, `tunnel_port_busy`, `tunnel_limit`, `lease_ended`). A mapping the
+  runner could not create rejects with `tunnel_mapping_failed`, and a local listener that
+  cannot bind with `tunnel_listen_failed`.
+
+The command-line equivalent is `canaveral tunnel`
+([example](mobile-control.md#sdk-cli-and-metro)). Fixtures with a stand-in adb cover this
+client; nothing has run against a real emulator.
 
 ## Linux workspace transfers (ST-535)
 

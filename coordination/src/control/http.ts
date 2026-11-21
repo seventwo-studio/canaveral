@@ -169,7 +169,7 @@ export function createControllerUpgradeHandler(upgrade: UpgradeHandler): Upgrade
     try {
       const target = requestTarget(request);
       if (pending >= 64) throw new ServiceError("Session admission is busy.", 429, { retryable: false });
-      if (request.method !== "GET" || request.httpVersion !== "1.1" || !/^(?:\/v1\/(?:leases|hosts)\/[^/]+\/sessions\/[^/]+\/[^/]+|\/v1\/(?:machines|hosts)\/[^/]+\/(?:video|display)-sessions\/[^/]+\/[^/]+|\/v1\/leases\/[^/]+\/video-sessions\/[^/]+\/[^/]+)$/.test(target.path) ||
+      if (request.method !== "GET" || request.httpVersion !== "1.1" || !/^(?:\/v1\/(?:leases|hosts)\/[^/]+\/sessions\/[^/]+\/[^/]+|\/v1\/(?:machines|hosts)\/[^/]+\/(?:video|display)-sessions\/[^/]+\/[^/]+|\/v1\/leases\/[^/]+\/video-sessions\/[^/]+\/[^/]+|\/v1\/(?:leases|hosts)\/[^/]+\/tunnels\/[^/]+\/[^/]+)$/.test(target.path) ||
           target.query.size !== 0 || request.url?.includes("?") || request.headers["content-length"] !== undefined ||
           request.headers["transfer-encoding"] !== undefined || request.headers.expect !== undefined || request.headers.trailer !== undefined ||
           countHeader(request, "upgrade") !== 1 || request.headers.upgrade?.toLowerCase() !== "websocket" ||

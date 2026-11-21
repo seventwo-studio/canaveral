@@ -30,6 +30,10 @@ paths and choose a profile installed in that SDK. The example image is ARM64;
 on AMD64 set `arch: amd64` and use an `x86_64` system image. Runtime installation
 and downloads happen before enrollment, rather than during device reconciliation.
 The host checks that the required tools and offered system-image directories exist.
+A host that leases emulators to applications needs more: the native lease helper, a
+user-build image and explicit lease declarations, optionally with port tunnels. See
+[host-android-leases.json](../examples/host-android-leases.json) and
+[Android emulator leases](mobile-control.md#android-emulator-leases).
 
 For iOS, use a native Mac with full Xcode, its selected developer directory and
 installed simulator runtime/device type. Set `DEVELOPER_DIR` in the host service

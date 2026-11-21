@@ -23,6 +23,7 @@ import type { SessionCapability, SessionSide, SessionChannel, SessionMessage } f
 import type { RelayCapability } from './session-protocol.ts';
 import type { VideoSessionCommand } from './mobile-video-sessions.ts';
 import type { DisplaySessionCommand } from './display-sessions.ts';
+import type { TunnelCommand } from './lease-tunnels.ts';
 import { GuestHelperBinding, MAX_INSPECTION_BYTES, validateSnapshot } from "./session-protocol.ts";
 import { GuestChunkFiles } from "../guest/chunk-files.ts";
 import { GuestChunkShells } from "../guest/chunk-shells.ts";
@@ -228,8 +229,8 @@ export class AccessSessions implements SessionModule {
       return this.view(row);
     });
   }
-  sessionCommand(command: SessionCommand | VideoSessionCommand | DisplaySessionCommand): unknown {
-    if (command.type === 'video-sessions.attach' || command.type === 'video-sessions.authorized' || command.type === 'video-sessions.disconnect' || command.type === 'display-sessions.attach' || command.type === 'display-sessions.authorized' || command.type === 'display-sessions.disconnect') throw new ServiceError('Owner video and display sessions require their separate brokers.', 400);
+  sessionCommand(command: SessionCommand | VideoSessionCommand | DisplaySessionCommand | TunnelCommand): unknown {
+    if (command.type !== 'sessions.attach' && command.type !== 'sessions.authorized' && command.type !== 'sessions.disconnect') throw new ServiceError('Video, display and tunnel sessions require their separate brokers.', 400);
     const id = identifier(command.sessionId), generation = identifier(command.generation);
     return this.transaction(db => {
       const row = this.row(db, id);
@@ -287,11 +288,13 @@ export class AccessSessions implements SessionModule {
 }
 export function createModule(store: SqliteStore, options: ControlOptions): SessionModule { return new AccessSessions(store, options); }
 
-export interface SessionCommandClient { request(command: SessionCommand | VideoSessionCommand | DisplaySessionCommand): Promise<unknown> }
-/** Owner-scoped session families with their own controller modules; lease sessions use none. */
-export type SessionFamily = 'video' | 'display';
+export interface SessionCommandClient { request(command: SessionCommand | VideoSessionCommand | DisplaySessionCommand | TunnelCommand): Promise<unknown> }
+/** Session families with their own controller modules; ordinary lease sessions use none. */
+export type SessionFamily = 'video' | 'display' | 'tunnel';
+/** Route segment and command prefix of each family, and who may attach its consumer side. */
+const FAMILIES = { video: { segment: 'video-sessions', owners: 'hosts|machines|leases' }, display: { segment: 'display-sessions', owners: 'hosts|machines' }, tunnel: { segment: 'tunnels', owners: 'hosts|leases' } } as const;
 interface Pair {
-  view: { id: string; generation: string; capability: RelayCapability }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
+  view: { id: string; generation: string; capability: RelayCapability; direction?: string }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
   /** Video: the host's finish was relayed, so the consumer may acknowledge it. */
   finished?: boolean;
 }
@@ -409,11 +412,11 @@ class SocketPeer {
 }
 
 /** HTTP boundary checks are repeated here before durable attachment, including on direct callers. */
-type AttachCommand = Extract<SessionCommand | VideoSessionCommand | DisplaySessionCommand, { type: 'sessions.attach' | 'video-sessions.attach' | 'display-sessions.attach' }>;
+type AttachCommand = Extract<SessionCommand | VideoSessionCommand | DisplaySessionCommand | TunnelCommand, { type: 'sessions.attach' | 'video-sessions.attach' | 'display-sessions.attach' | 'tunnels.attach' }>;
 function upgradeRequest(req: IncomingMessage, family?: SessionFamily): { key: string; token: string; command: AttachCommand } {
   const path = req.url ?? "", p = path.split("/");
-  // Video consumers also attach through their lease; display relays remain owner-only.
-  const route = family ? new RegExp(`^/v1/(hosts|machines${family === 'video' ? '|leases' : ''})/[0-9a-f-]+/${family}-sessions/[0-9a-f-]+/[0-9a-f-]+$`) : /^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/;
+  // Video consumers also attach through their lease; display relays remain owner-only; tunnels are lease-only.
+  const route = family ? new RegExp(`^/v1/(${FAMILIES[family].owners})/[0-9a-f-]+/${FAMILIES[family].segment}/[0-9a-f-]+/[0-9a-f-]+$`) : /^\/v1\/(hosts|leases)\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/[0-9a-f-]+$/;
   if (req.method !== "GET" || !route.test(path)) throw new ServiceError("Invalid session attachment path.", 400);
   const counts = new Map<string, number>();
   for (let i = 0; i < req.rawHeaders.length; i += 2) { const k = req.rawHeaders[i]!.toLowerCase(); counts.set(k, (counts.get(k) ?? 0) + 1); }
@@ -425,7 +428,7 @@ function upgradeRequest(req: IncomingMessage, family?: SessionFamily): { key: st
   const key = h["sec-websocket-key"], authorization = h.authorization;
   if (typeof key !== "string" || !/^[A-Za-z0-9+/]{22}==$/.test(key) || Buffer.from(key, "base64").toString("base64") !== key || !authorization?.startsWith("Bearer ")) throw new ServiceError("Invalid session WebSocket credentials or key.", 400);
   const side: SessionSide = p[2] === "hosts" ? "host" : "consumer";
-  const command: AttachCommand = { type: family ? `${family}-sessions.attach` : 'sessions.attach', sessionId: identifier(p[5]), generation: identifier(p[6]), side, ownerId: identifier(p[3]), token: authorization.slice(7) };
+  const command: AttachCommand = { type: family ? `${FAMILIES[family].segment}.attach` : 'sessions.attach', sessionId: identifier(p[5]), generation: identifier(p[6]), side, ownerId: identifier(p[3]), token: authorization.slice(7) };
   const controller = h["x-canaveral-controller-id"], generation = h["x-canaveral-runner-generation"], incarnation = h["x-canaveral-incarnation-id"];
   if (side === "host" && [controller, generation, incarnation].some(x => x !== undefined)) {
     if (command.type !== 'sessions.attach') throw new ServiceError('Owner session host binding headers are unsupported.', 400);
@@ -436,10 +439,10 @@ function upgradeRequest(req: IncomingMessage, family?: SessionFamily): { key: st
 }
 /** Concurrent monitor checks, and consecutive transient failures (at 250 ms) before a pair ends. */
 const MONITOR_CONCURRENCY = 8, MONITOR_TRANSIENT_LIMIT = 40;
-export function createSessionUpgradeHandler(client: SessionCommandClient, options: { video?: boolean; display?: boolean; heartbeat?: SessionHeartbeat } = {}): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
-  if (options.video && options.display) throw new ServiceError("Choose one owner session family.", 400);
-  const family: SessionFamily | undefined = options.video ? 'video' : options.display ? 'display' : undefined;
-  const prefix = family ? `${family}-sessions` as const : 'sessions' as const;
+export function createSessionUpgradeHandler(client: SessionCommandClient, options: { video?: boolean; display?: boolean; tunnel?: boolean; heartbeat?: SessionHeartbeat } = {}): { handle(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>; close(): void } {
+  if ([options.video, options.display, options.tunnel].filter(Boolean).length > 1) throw new ServiceError("Choose one session family.", 400);
+  const family: SessionFamily | undefined = options.video ? 'video' : options.display ? 'display' : options.tunnel ? 'tunnel' : undefined;
+  const prefix = family ? FAMILIES[family].segment : 'sessions' as const;
   const pairs = new Map<string, Pair>(), heartbeat = heartbeatOption(options.heartbeat); let stopped = false, monitoring = false;
   const disconnect = (pair: Pair): void => {
     if (pair.closed) return;
@@ -515,6 +518,9 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
           // The video consumer may only acknowledge a relayed finish. An early message would sit
           // unread in the capturing runner and is never a valid completion proof.
           if (view.capability === "video" && command.side === "consumer" && !pair.finished) throw new ServiceError("Video acknowledgement preceded completion.", 409);
+          // Only the listening side of a tunnel opens streams: the runner for a reverse tunnel (the
+          // device connected), the lease holder for a forward tunnel. The other side never initiates.
+          if (view.capability === "tunnel" && !(relayed instanceof Uint8Array) && relayed.type === "open" && (view.direction === "reverse") !== (command.side === "host")) throw new ServiceError("Tunnel streams open only from the listening side.", 409);
           if (!await authorized(pair, true) || pair.closed) throw new ServiceError("Session authorization ended.", 410);
           const other = pair.peers[command.side === "host" ? "consumer" : "host"];
           if (!other) throw new ServiceError("Session peer ended.", 410);
@@ -571,7 +577,7 @@ export class SessionConnection implements SessionChannel {
   private check(): void { if (this.failure) throw this.failure; if (!this.allowed()) throw new ServiceError("Session authorization or connection ended.", 410, { code: "session_disconnected", retryable: false }); }
   static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"]; heartbeat?: SessionHeartbeat } = {}): Promise<SessionConnection> {
     let url: URL; try { url = new URL(origin); } catch { throw new ServiceError("Invalid session origin.", 400); }
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/sessions|(hosts|machines)\/[0-9a-f-]+\/(?:video|display)-sessions|leases\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/(?:sessions|tunnels)|(hosts|machines)\/[0-9a-f-]+\/(?:video|display)-sessions|leases\/[0-9a-f-]+\/video-sessions)\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
     secret(token);
     const allowed = options.authorized ?? (() => true), heartbeat = heartbeatOption(options.heartbeat);
     if (!allowed()) throw new ServiceError("Session authorization ended.", 410);

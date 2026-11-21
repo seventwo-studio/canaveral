@@ -35,6 +35,8 @@ app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
 app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
+tunnel LEASE reverse --device-port N [--target HOST:PORT]    Device port to this machine
+tunnel LEASE forward --device-port N [--listen [HOST:]PORT]  This machine to a device port
 image capture --request-file FILE | image-task ID
 updates [options] COMMAND                Manage signed runtime releases and rollouts
 install [options]                        Verify a fresh Unix installation; generate service config
@@ -44,6 +46,11 @@ serve flags: --bind IP --port PORT --database FILE --admin-token-file FILE
 serve --config FILE accepts the explicit controller configuration used by src/main.ts.
 Account create/mint commands require a stable --request-id. Passwords and issued
 credentials stay in private files. Never retry an uncertain mutation with a new ID.
+tunnel holds one lease port tunnel open in the foreground until interrupted or until
+the lease ends; --token-file is the lease key file written by "lease ID credential".
+Options: --member NAME (primary) --request-id UUID --idle-seconds N (10-3600, default 600)
+--ca-file FILE. Targets and listeners default to 127.0.0.1 and the device port. A tunnel
+needs a host that declares leaseTunnelProtocol and an application with tunnelsPerLease.
 Local Linux: --linux-image FILE --apple-runner FILE --guest-helper-manifest FILE
 (or CANAVERAL_GUEST_BUNDLE) requires an installed, runnable TypeScript guest bundle.
 Local macOS: --macos-image DIR --macos-restore-image FILE.ipsw --apple-runner FILE
@@ -79,6 +86,7 @@ const schemas: Record<string, Schema> = {
   apps: { actions: ["list", "create", "credential", "revoke"], defaultAction: "list" },
   leases: { actions: ["list", "acquire", "templates"], defaultAction: "list", values: ["after"] },
   lease: { positional: 1, values: ["request-file", "output-file"] },
+  tunnel: { positional: 2, values: ["device-port", "target", "listen", "member", "request-id", "idle-seconds", "ca-file"], required: ["device-port"] },
   image: { actions: ["capture"], values: ["request-file"], required: ["request-file"] }, "image-task": { positional: 1 },
 };
 const subSchemas: Record<string, Schema> = {
@@ -481,6 +489,11 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
     const args = parseCli(argv);
     if (args.command === "init") { await initialize(positional(args)); io.stdout("Created private credential files in " + positional(args) + "\n"); return 0; }
     if (args.command === "promote-macos") { await promoteMacHost(args, io); return 0; }
+    if (args.command === "tunnel") {
+      const lifecycle = signals(io.signal);
+      try { const { runTunnel } = await import("./tunnel-cli.ts"); return await runTunnel(args, io, lifecycle.signal); }
+      finally { lifecycle.dispose(); }
+    }
     if (["serve", "dashboard", "host", "local"].includes(args.command)) {
       const lifecycle = signals(io.signal); let service: CliService | undefined;
       try {

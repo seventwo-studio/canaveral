@@ -38,6 +38,10 @@ import { createInferenceExecutor } from "./inference-runtime.ts";
 import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
+import { TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
+import { TunnelMappingError, tunnelStorageProblem } from './providers/android-tunnels.ts';
+import type { TunnelEndpoint, TunnelSpec } from './providers/android-tunnels.ts';
+import { WORKER_MESSAGES } from './control/session-protocol.ts';
 
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
@@ -88,6 +92,10 @@ interface Runtime extends NativeProvider {
   inspectInstall?(machine: RecordValue, image: RecordValue, args: RecordValue): Promise<RecordValue>;
   openVideo?(machine: RecordValue, image: RecordValue, folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, authorized: () => boolean, cleanupAuthorized?: () => boolean): Promise<import('./providers/mobile.ts').NativePipe>;
   pipe?(argv: readonly string[]): Promise<import('./providers/mobile.ts').NativePipe>;
+  /** Installs one lease tunnel mapping. Throws TunnelMappingError once a mapping may exist; any other error means none was installed. */
+  openTunnel?(machine: RecordValue, image: RecordValue, folder: string, spec: TunnelSpec, authorized: () => boolean, onConnection: (socket: import('node:net').Socket) => void): Promise<TunnelEndpoint>;
+  tunnelMappingAbsent?(machine: RecordValue, image: RecordValue, spec: TunnelSpec, authorized: () => boolean): Promise<boolean>;
+  closeTunnels?(machine: RecordValue): Promise<void>;
   refreshExecution?(machine: RecordValue, image: RecordValue, folder: string, authorization: () => LeaseAuthorization): Promise<RecordValue | undefined>;
   removeOwnedStorage?(machine: RecordValue, image: RecordValue, folder: string, requestId: string, preboot?: boolean): Promise<RecordValue>;
   stopForCleanup?(machine: RecordValue, image: RecordValue, folder: string): Promise<RecordValue>;
@@ -162,7 +170,10 @@ export function hostTransport(config: HostConfig): HostTransport {
 /** Only supervised Android emulators have independent native deadline enforcement and owned
  * cleanup. Every other runtime keeps refusing lease declarations, whatever the configuration. */
 export function leaseOffer(config: RecordValue): RecordValue {
-  if (!("leaseProtocol" in config) && !("leaseImages" in config)) return {};
+  if (!("leaseProtocol" in config) && !("leaseImages" in config)) {
+    if ("leaseTunnelProtocol" in config) throw new ServiceError("Lease tunnels require lease execution on this host.", 400);
+    return {};
+  }
   const refuse = (): never => { throw new ServiceError("This runner cannot advertise lease execution before native fencing and owned cleanup acceptance.", 400); };
   if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
   const provider = String(config.provider);
@@ -175,7 +186,14 @@ export function leaseOffer(config: RecordValue): RecordValue {
     if (Object.keys(entry).sort().join() !== "arch,id,revision,runtime" || entry.runtime !== "android") refuse();
     return { id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch"), runtime: "android" };
   });
-  return { leaseProtocol: 1, leaseImages };
+  // Lease port tunnels are off unless the operator declares them. Their host-side sockets live in
+  // each lease's private storage, so the storage path must fit a Unix socket address.
+  if (config.leaseTunnelProtocol === undefined) return { leaseProtocol: 1, leaseImages };
+  if (config.leaseTunnelProtocol !== 1) throw new ServiceError("Unsupported lease tunnel protocol.", 400);
+  const runtime = object(android), root = typeof runtime.storage === "string" ? runtime.storage : typeof config.storage === "string" ? join(config.storage, "android") : undefined;
+  const problem = root === undefined ? "Lease tunnels need a configured Android storage path." : tunnelStorageProblem(root);
+  if (problem) throw new ServiceError(problem, 400);
+  return { leaseProtocol: 1, leaseImages, leaseTunnelProtocol: 1 };
 }
 export function hostOffer(config: RecordValue): RecordValue {
   const leases = leaseOffer(config);
@@ -226,7 +244,11 @@ export class HostRunner {
   assignments: RecordValue[] = [];
   lastContact = 0;
   health: RecordValue = { status: "checking", checkedAt: 0, checks: [] };
-  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [] };
+  private queues: Record<string, RecordValue[]> = { device: [], inference: [], images: [], sessions: [], video: [], display: [], tunnels: [] };
+  /** Running lease tunnels by tunnel id, and when an unconfirmed mapping removal is next rechecked. */
+  private readonly tunnelMachines = new Map<string, string>();
+  private readonly tunnelRetry = new Map<string, number>();
+  private readonly tunnelAuthority = new Map<string, { at: number; allowed: boolean }>();
   /** Owner display attachments are attempted once per identity; a refused attach is not retried. */
   private readonly displayAttempts = new Set<string>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; authorized: () => boolean }>();
@@ -572,7 +594,7 @@ export class HostRunner {
     const machines = records(response.machines, "machines");
     if (new Set(machines.map(m => identifier(m.id))).size !== machines.length) throw new ServiceError("Duplicate host assignments.", 409);
     // Validate the complete response before replacing current authorization.
-    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions') };
+    const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), tunnels: records(response.leaseTunnels ?? [], 'lease tunnels') };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
     this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
@@ -617,7 +639,7 @@ export class HostRunner {
       const nativeCleanup = runtime.kind === "apple" || ["libvirt", "android"].includes(runtime.kind) && !!runtime.stopForCleanup;
       return cleanupLease({ state: this.state, storageRoot: String(runtime.config?.storage ?? this.config.storage), machine, folder, guard: this.guard, now: this.clock.wall(),
         closeSessions: async () => {
-          this.outboundSessions?.closeMachine(id); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
+          this.outboundSessions?.closeMachine(id); await this.closeMachineTunnels(id, runtime, machine); await this.closeMachineAccess(id); await runtime.closeShells?.(machine);
           const active = new Set(this.assignments.filter(m => m.id !== id && this.machineAuthorized(String(m.id))).map(m => String(m.id))); await runtime.sweep?.(active);
         },
         ...(nativeCleanup && runtime.removeOwnedStorage ? {
@@ -846,6 +868,7 @@ export class HostRunner {
     this.outboundSessions?.step((this.queues.sessions ?? []) as unknown as RunnerSessionJob[]);
     this.stepVideo();
     this.stepDisplay();
+    this.stepTunnels();
     for (const [kind, adapter, target] of [["inference", this.inferenceAdapter, this.inferenceReports], ["images", this.imageAdapter, this.imageReports]] as const) {
       if ([...this.active.keys()].some(k => k.startsWith(`${kind}:`)) || kind === "inference" && [...target.values()].some(r => r.state === "unknown")) continue;
       const task = this.queues[kind]?.find(t => !TERMINAL.has(String(target.get(String(t.id))?.state)));
@@ -878,6 +901,126 @@ export class HostRunner {
       const allowed = () => this.fresh() && this.machineAuthorized(machineId) && this.leasedCaptureAuthorized(machineId) && this.queues.video!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending','attaching','ready'].includes(String(j.state))) && this.clock.wall() < Date.parse(String(job.authorizationDeadline)) / 1000;
       this.launch(key, allowed, context => this.runVideo(job, path, context));
     }
+  }
+  /** Lease port tunnels. Each delivered tunnel is attempted once: its journal is written before
+   * the broker attach and before any mapping, and a restart never installs it again. A tunnel
+   * whose mapping removal is not yet proven stays delivered until this runner confirms it, or
+   * the controller settles it from the lease's own cleanup. */
+  private stepTunnels(): void {
+    const queued = new Set((this.queues.tunnels ?? []).map(job => String(job.id)));
+    for (const id of this.tunnelRetry.keys()) if (!queued.has(id)) this.tunnelRetry.delete(id);
+    for (const id of this.tunnelAuthority.keys()) if (!this.assignments.some(machine => machine.id === id)) this.tunnelAuthority.delete(id);
+    for (const job of this.queues.tunnels ?? []) {
+      const id = identifier(job.id), key = `tunnel:${id}`, machineId = identifier(job.machineId), generation = identifier(job.generation), leaseId = identifier(job.leaseId);
+      // The caller already required fresh controller contact for this step.
+      if (this.active.has(key) || this.updateAdmissionBlocked || !this.identity) continue;
+      const path = join(this.state, 'work', 'tunnel', `${id}.json`);
+      if (present(path)) {
+        // A pacing timer only, so it needs no native clock sample.
+        if (performance.now() < (this.tunnelRetry.get(id) ?? 0)) continue;
+        const saved = readRecord(path);
+        if (saved.generation !== generation || saved.machineId !== machineId) continue;
+        this.tunnelRetry.set(id, performance.now() + 5000);
+        this.launch(key, () => this.fresh(), context => this.settleTunnel(id, path, saved, context));
+        continue; // Only the mapping-removal receipt repeats; a tunnel is never opened twice.
+      }
+      if (!['pending', 'attaching'].includes(String(job.state))) continue;
+      const allowed = () => !this.closed && this.tunnelAuthorized(machineId, leaseId) &&
+        this.queues.tunnels!.some(j => j.id === id && j.generation === generation && j.machineId === machineId && ['pending', 'attaching', 'ready'].includes(String(j.state)));
+      if (!allowed()) continue;
+      this.launch(key, allowed, context => this.runTunnel(job, path, context));
+    }
+  }
+  /** Runner-side authority for every tunnel of one lease: fresh controller contact, the lease
+   * guard's deadline, the assignment, and the host's own tunnel gate. Contact freshness and the
+   * lease guard each sample the native clock, which is a process spawn, and the session channel
+   * asks on every frame it relays. The result is therefore shared per machine and re-evaluated at
+   * most every 250 ms, the same bound as the channel's own watcher. The controller's broker still
+   * checks its authority on every relayed message. */
+  private tunnelAuthorized(machineId: string, leaseId: string): boolean {
+    const cached = this.tunnelAuthority.get(machineId), now = performance.now();
+    if (cached && now - cached.at < 250) return cached.allowed;
+    let allowed = false;
+    try { allowed = this.machineAuthorized(machineId) && this.tunnelOffered(machineId, leaseId); } catch { allowed = false; }
+    this.tunnelAuthority.set(machineId, { at: now, allowed });
+    return allowed;
+  }
+  /** The host's own gate, independent of the controller: tunnels only for a ready lease on an
+   * advertised Android lease image, and only when this host's configuration declares them. */
+  private tunnelOffered(machineId: string, leaseId: string): boolean {
+    const machine = this.assignments.find(m => m.id === machineId);
+    return !!machine?.lease && machine.ready === true && object(machine.lease).id === leaseId && object(machine.lease).state === "ready" &&
+      this.offer.leaseProtocol === 1 && this.offer.leaseTunnelProtocol === 1 && this.leaseEligible(machine);
+  }
+  private async runTunnel(job: RecordValue, path: string, context: HostWorkContext): Promise<void> {
+    const identity = this.identity, machine = this.assignments.find(m => m.id === job.machineId);
+    if (!identity || !machine || !context.authorized()) return;
+    const id = identifier(job.id), generation = identifier(job.generation), machineId = String(machine.id);
+    const intent = tunnelIntent(job.direction, job.devicePort, job.idleSeconds);
+    const { runtime, image, folder } = this.context(machine);
+    const journal = { generation, machineId, direction: job.direction, devicePort: job.devicePort };
+    saveRecord(path, { ...journal, state: 'started' });
+    this.tunnelMachines.set(id, machineId);
+    const live = () => !context.signal.aborted && context.authorized();
+    // A device mapping is removed only under the same assignment that installed it.
+    const assignment = assignmentFingerprint(machine), lease = object(machine.lease ?? {}).id;
+    const held = () => { const current = this.assignments.find(m => m.id === machineId); return !!current && assignmentFingerprint(current) === assignment && object(current.lease ?? {}).id === lease && this.machineAuthorized(machineId); };
+    let channel: SessionConnection | undefined, endpoint: TunnelEndpoint | undefined, mappingRemoved = true;
+    try {
+      channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/tunnels/${id}/${generation}`, identity.credential,
+        { authorized: live, ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      const connection = channel, ready = await connection.receive(30);
+      if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'tunnel') throw unknownOutcome('Tunnel peers did not attach.');
+      if (!intent || !runtime.openTunnel) throw new ServiceError('This runtime has no lease tunnel adapter.', 409, { code: 'capability_unsupported' });
+      // The device side listens for a reverse tunnel and connects for a forward tunnel. Neither
+      // side is ever told a destination: this endpoint is the tunnel's only one.
+      const relay = new TunnelRelay({ sendControl: value => connection.sendControl(value), sendBytes: value => connection.sendBytes(value), receive: () => connection.receive(30), close: () => connection.close() },
+        { role: intent.direction === 'reverse' ? 'listen' : 'connect', idleSeconds: intent.idleSeconds, authorized: live, alive: () => endpoint!.alive(),
+          ...(intent.direction === 'forward' ? { connect: () => endpoint!.connect() } : {}) });
+      try { endpoint = await runtime.openTunnel(machine, image, folder, { id, direction: intent.direction, devicePort: intent.devicePort }, live, socket => relay.accept(socket)); }
+      catch (error) { if (error instanceof TunnelMappingError) mappingRemoved = error.mappingRemoved; throw error; }
+      // Sent only once the mapping is installed and verified: the holder's open completes on it.
+      await connection.sendControl({ type: 'tunnel', direction: intent.direction, devicePort: intent.devicePort });
+      await relay.run();
+    } catch (error) {
+      const code = error instanceof ServiceError && ['capability_unsupported', 'tunnel_mapping_failed'].includes(error.code) ? error.code : 'session_incomplete';
+      try { await channel?.sendControl({ type: 'error', code, message: WORKER_MESSAGES[code]!, outcome: 'unknown' }); } catch { /* A disconnected holder learns the outcome from the tunnel's receipt. */ }
+    } finally {
+      channel?.close();
+      if (endpoint) { try { mappingRemoved = (await bounded(endpoint.close(held), 30_000)).mappingRemoved; } catch { mappingRemoved = false; } }
+      this.tunnelMachines.delete(id);
+      saveRecord(path, { ...journal, state: 'finished', mappingRemoved });
+      if (mappingRemoved) await this.tunnelReceipt(id, generation);
+    }
+  }
+  /** Repeats a saved removal receipt, or confirms a removal that was unproven when the tunnel
+   * ended (lost device authority, a failed adb call, a runner restart). Read-only on the device. */
+  private async settleTunnel(id: string, path: string, saved: RecordValue, context: HostWorkContext): Promise<void> {
+    const generation = identifier(saved.generation), machineId = identifier(saved.machineId);
+    if (saved.mappingRemoved !== true) {
+      const machine = this.assignments.find(m => m.id === machineId), intent = tunnelIntent(saved.direction, saved.devicePort, undefined);
+      if (!machine || !intent || !this.machineAuthorized(machineId)) return;
+      const { runtime, image } = this.context(machine);
+      if (!runtime.tunnelMappingAbsent) return;
+      try { if (!await runtime.tunnelMappingAbsent(machine, image, { id, direction: intent.direction, devicePort: intent.devicePort }, () => !context.signal.aborted && this.machineAuthorized(machineId))) return; }
+      catch { return; }
+      saveRecord(path, { ...saved, state: 'finished', mappingRemoved: true });
+    }
+    await this.tunnelReceipt(id, generation);
+  }
+  private async tunnelReceipt(id: string, generation: string): Promise<void> {
+    const identity = this.identity;
+    if (!identity) return;
+    try { await this.transport.request('POST', `/v1/hosts/${identity.id}/tunnels/${id}/finish`, { generation, mappingRemoved: true }, identity.credential, this.stopController.signal); }
+    catch { this.log('Tunnel mapping receipt was not acknowledged; it is repeated while the tunnel stays delivered.'); }
+  }
+  /** Lease cleanup: ends this machine's tunnels before the stop proof is evaluated. Host-side
+   * endpoints close without device access, and a tunnel never delays cleanup beyond this bound. */
+  private async closeMachineTunnels(machineId: string, runtime: Runtime, machine: RecordValue): Promise<void> {
+    const works = [...this.tunnelMachines].filter(([, owner]) => owner === machineId).map(([tunnel]) => this.active.get(`tunnel:${tunnel}`)).filter(work => work !== undefined);
+    for (const work of works) work.controller.abort();
+    try { await runtime.closeTunnels?.(machine); } catch { this.log('Tunnel endpoint closure needs inspection; cleanup continues from the stop proof.'); }
+    await Promise.race([Promise.allSettled(works.map(work => work.promise)), new Promise(resolvePromise => setTimeout(resolvePromise, 5000).unref())]);
   }
   /** A leased emulator records only while its lease is ready on this runner and the host offers
    * leased execution for it; the lease guard (machineAuthorized) fences it at the deadline. */

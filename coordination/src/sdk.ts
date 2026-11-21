@@ -16,6 +16,7 @@ import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
 import { receiveSnapshot, MAX_SNAPSHOT_BYTES } from './accessibility-sdk.ts';
 import { LeaseVideoClient } from './video-sdk.ts';
+import { LeaseTunnelClient } from './tunnel-sdk.ts';
 import { uploadAppArtifactFile } from './app-artifact-client.ts';
 import { appArtifactMetadata } from './app-artifact-contract.ts';
 import type { AppArtifactMetadata } from './app-artifact-contract.ts';
@@ -25,6 +26,8 @@ export { containerDownloadFiles, linuxDownloadFiles, scopedDownloadFiles, window
 export type { DownloadDirectory, DownloadFiles, DownloadStage, PublishResult, WindowsPublicationAPI, WindowsPublicationBridge } from './sdk-files.ts';
 export * from './consumer-client.ts';
 export { TerminalClient, DisplayClient };
+export { LeaseTunnel, LeaseTunnelClient } from './tunnel-sdk.ts';
+export type { Tunnel, TunnelBinding, TunnelClosed, TunnelListen, TunnelOpenOptions, TunnelRequest, TunnelTarget } from './tunnel-sdk.ts';
 export { validateSnapshot, snapshotSchema } from './accessibility-sdk.ts';
 
 export function record(value: unknown): value is Record<string, unknown> {
@@ -65,6 +68,7 @@ const WORKER_MESSAGES: Record<string, string> = {
   capability_unsupported: 'This worker does not support the requested capability. Inspect the session before selecting another environment.',
   session_incomplete: 'Access ended without confirmed completion. Inspect before retrying.',
   upload_publication_uncertain: 'Upload publication may have occurred. Inspect the destination before retrying.',
+  tunnel_mapping_failed: 'The device port mapping could not be created; the device port may be in use. Inspect the tunnel before opening another.',
 };
 export function checked<T>(value: T, requestId: string): T {
   if (record(value) && value.type === 'error') {
@@ -351,7 +355,11 @@ export class LeaseClient {
     return new LeaseClient({ ...options, leaseKey: credentialFile(options.credentialFile) });
   }
   #video: LeaseVideoClient;
-  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); }
+  #tunnels: LeaseTunnelClient;
+  constructor(options: LeaseClientOptions) { this.leaseId = identifier(options.leaseId); this.transport = new Transport(options, options.leaseKey); this.#http = new HttpLeaseClient(options); this.#video = new LeaseVideoClient(options); this.#tunnels = new LeaseTunnelClient(options); }
+  /** Port tunnels between this lease's device and the holder's machine: `open`, `create`,
+   * `connect`, `inspect`, `list` and `close`. Off unless the host and the application allow them. */
+  get tunnels(): LeaseTunnelClient { return this.#tunnels; }
   /** MP4 recording of this lease's own emulator: `create`, `connect`, `inspect`, `close` and `record`. */
   get video(): LeaseVideoClient { return this.#video; }
   async #artifactCall(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string): Promise<AppArtifactMetadata> {

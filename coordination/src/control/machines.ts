@@ -109,6 +109,11 @@ export function validateOffer(value: unknown): Json {
       seen.add(identity); return entry;
     }).sort((a: Json, b: Json) => { for (const key of ["id", "revision", "arch", "runtime"]) { if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1; } return 0; });
   }
+  // Lease port tunnels are a separate, explicit declaration on top of lease execution.
+  if ("leaseTunnelProtocol" in input) {
+    if (input.leaseTunnelProtocol !== 1 || result.leaseProtocol !== 1) failure("Lease tunnels require lease execution protocol 1 and tunnel protocol 1.");
+    result.leaseTunnelProtocol = 1;
+  }
   if ("inference" in input) {
     if (!INFERENCE_HOST_PROVIDERS.includes(result.provider)) failure("Embedded inference requires a native Mac or Linux host.");
     const inference = object(input.inference);

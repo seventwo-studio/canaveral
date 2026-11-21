@@ -3,7 +3,7 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Canaveral consumer lease API",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Implemented controller consumer subset. Independently usable execution; ordinary runners remain gated for consumer lease execution. No administrator, enrollment, model, registry or host API is implied. POST bodies are JSON objects of at most 1 MiB with a single Content-Length. Browser Origin requests are rejected. Remote use requires HTTPS; the embedded server uses HTTP behind operator TLS termination. Credentials are opaque bearer secrets, never URL parameters."
   },
   "paths": {
@@ -1255,6 +1255,495 @@
         "description": "The current scoped lease key can inspect retained receipts after lease termination or credential rotation. Other lease operations remain hidden. Unknown effects must be inspected before submitting another command."
       }
     },
+    "/v1/leases/{leaseId}/tunnels": {
+      "post": {
+        "operationId": "createLeaseTunnel",
+        "summary": "Open a port tunnel for a leased Android emulator",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New durable intent created; replay returns 200",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires the current lease key, a ready Android member, a host that declares leaseTunnelProtocol 1 and an application policy with limits.tunnelsPerLease above zero. Application, operator and other lease credentials are refused with 401. Persist the request UUID: a replay returns the saved tunnel in its current state and never opens a second one; a changed body is 409. Refusal codes: tunnels_not_permitted (403), capability_unsupported, member_not_ready and tunnel_port_busy (409), lease_ended (410), tunnel_limit and tunnel_host_limit (429). The body names a device port and a direction only; the holder-side target or listener never reaches the controller. The mapping is installed only after both peers attach.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTunnel"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "get": {
+        "operationId": "listLeaseTunnels",
+        "summary": "List the lease's tunnels",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TunnelList"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Requires the current lease key. Returns every tunnel identity of the lease in creation order, including ended ones; identities are tombstones."
+      }
+    },
+    "/v1/leases/{leaseId}/tunnels/{tunnelId}": {
+      "get": {
+        "operationId": "inspectLeaseTunnel",
+        "summary": "Inspect one tunnel",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Requires the current lease key, also after the lease ended. Another lease's tunnel is not found."
+      }
+    },
+    "/v1/leases/{leaseId}/tunnels/{tunnelId}/close": {
+      "post": {
+        "operationId": "closeLeaseTunnel",
+        "summary": "Close a tunnel idempotently",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tunnel"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Requires the current lease key. Ends the tunnel and every connection on it; the runner then removes the device mapping and reports it. mappingRemoved becomes true once that removal is proven, or once the lease's own cleanup proved the emulator stopped and removed."
+      }
+    },
+    "/v1/leases/{leaseId}/tunnels/{tunnelId}/{generation}": {
+      "get": {
+        "operationId": "attachLeaseTunnel",
+        "summary": "Attach the lease holder's WebSocket peer of a tunnel",
+        "security": [
+          {
+            "LeaseBearer": []
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade accepted; wait for the matching ready message before sending capability payloads.",
+            "headers": {
+              "Sec-WebSocket-Protocol": {
+                "schema": {
+                  "const": "canaveral-session-v1"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Application, resource or connection limit exceeded",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "60"
+                },
+                "description": "Seconds before retry admission; preserve mutation identity."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuredError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or service unavailable",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses must not be cached."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "HTTP handshake only, as for sessions: Upgrade: websocket, Sec-WebSocket-Version: 13 and Sec-WebSocket-Protocol: canaveral-session-v1, with the current lease key in the Authorization header. No Origin, body or query. One consumer peer attaches once per tunnel; the runner attaches outbound separately. After the broker's ready message the runner sends a tunnel control once the device mapping is installed; connections are then multiplexed as numbered streams with per-stream credit (session control schema, tunnel capability). Expiry, release, a fence, key rotation and supervisor loss end the relay within about a second. Nothing is replayed after a disconnect.",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
     "/v1/requests": {
       "post": {
         "operationId": "submitRequest",
@@ -2031,6 +2520,13 @@
             "minimum": 0,
             "maximum": 1000000,
             "default": 0
+          },
+          "tunnelsPerLease": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8,
+            "default": 0,
+            "description": "Port tunnels one lease may hold at once. Absent or zero permits none; normalized to a number in administrator and catalogue responses."
           }
         },
         "required": [
@@ -2725,6 +3221,181 @@
           "createdAt",
           "attachBefore",
           "authorizationDeadline"
+        ],
+        "additionalProperties": false
+      },
+      "CreateTunnel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "reverse",
+              "forward"
+            ],
+            "description": "reverse: the device's port reaches one target on the lease holder's machine. forward: a listener on the holder's machine reaches one port on the device."
+          },
+          "devicePort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Reverse tunnels use 1024-65535 (the device's adb daemon cannot bind a privileged port). 5555 is refused in both directions."
+          },
+          "idleSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 3600,
+            "default": 600,
+            "description": "A connection that carried no byte in either direction for this long is reset."
+          }
+        },
+        "required": [
+          "id",
+          "member",
+          "direction",
+          "devicePort"
+        ],
+        "additionalProperties": false
+      },
+      "Tunnel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "\\S"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "reverse",
+              "forward"
+            ],
+            "description": "reverse: the device's port reaches one target on the lease holder's machine. forward: a listener on the holder's machine reaches one port on the device."
+          },
+          "devicePort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Reverse tunnels use 1024-65535 (the device's adb daemon cannot bind a privileged port). 5555 is refused in both directions."
+          },
+          "idleSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 3600,
+            "default": 600,
+            "description": "A connection that carried no byte in either direction for this long is reset."
+          },
+          "generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "const": "tunnel"
+          },
+          "protocol": {
+            "const": "canaveral-session-v1"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "attaching",
+              "ready",
+              "closed",
+              "expired",
+              "revoked",
+              "disconnected"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "attachBefore": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authorizationDeadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mappingRemoved": {
+            "type": "boolean",
+            "description": "True once the device mapping is known to be gone: the runner never installed one, reported its removal, or the lease's cleanup proved the emulator stopped and removed. Until then an ended tunnel keeps its lease slot and device port."
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "connections": {
+                "type": "integer",
+                "const": 32,
+                "description": "Concurrent connections; a further one is closed at once."
+              },
+              "windowBytes": {
+                "type": "integer",
+                "const": 262144,
+                "description": "Unacknowledged bytes per connection and direction."
+              }
+            },
+            "required": [
+              "connections",
+              "windowBytes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "leaseId",
+          "member",
+          "direction",
+          "devicePort",
+          "idleSeconds",
+          "generation",
+          "capability",
+          "protocol",
+          "state",
+          "createdAt",
+          "attachBefore",
+          "authorizationDeadline",
+          "mappingRemoved",
+          "limits"
+        ],
+        "additionalProperties": false
+      },
+      "TunnelList": {
+        "type": "object",
+        "properties": {
+          "tunnels": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/Tunnel"
+            }
+          }
+        },
+        "required": [
+          "tunnels"
         ],
         "additionalProperties": false
       },
