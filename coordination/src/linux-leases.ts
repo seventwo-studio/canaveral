@@ -356,6 +356,20 @@ export class LinuxLeases {
     for (const key of Object.keys(overrides)) positive(overrides[key], 1_048_576, key);
     return { input, id, imageId, revision, a, name, required, overrides };
   }
+  /** Read-only: what a waiting acquisition would reserve and the runner domains that could serve
+   * it right now if they had the capacity, by the same image, minimum and approval rules as
+   * admission. Undefined when no domain could. The warm pool uses it to decide whether giving up
+   * a warm device on a mapped host would admit the request; nothing is reserved here. */
+  demand(db: DatabaseSync, value: unknown): { need: Resources; domains: string[] } | undefined {
+    let parsed: ReturnType<LinuxLeases["validateAcquisition"]>;
+    try { parsed = this.validateAcquisition(value); } catch { return undefined; }
+    const image = this.imageRow(db, parsed.imageId, parsed.revision, parsed.a);
+    if (!image) return undefined;
+    const minimum = JSON.parse(image.resources) as Resources, need = { ...minimum, ...parsed.overrides } as Resources;
+    if (keys.some(key => need[key] < minimum[key])) return undefined;
+    const domains = this.placements(db, image);
+    return domains.length ? { need, domains } : undefined;
+  }
   private acquireAuthorized(value: unknown, authorize: (db: DatabaseSync) => ReturnType<ConsumerIdentities["verify"]>) {
     const { input, id, imageId, revision, a, name, required, overrides } = this.validateAcquisition(value);
     return this.transaction((db, now) => {

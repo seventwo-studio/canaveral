@@ -6,9 +6,15 @@
  * the installed system image. It is published by one rename, never modified afterwards and
  * removed only as a whole. A lease gets its own copy; the emulator never opens the stored files.
  *
+ * A qcow2 overlay records its backing file by path, and a saved overlay still names the device it
+ * was captured from. A clone is therefore accepted only when every copied overlay's recorded
+ * backing path is the clone's own copied base image; otherwise it would read another device's
+ * live file. Saving and cloning fail closed when that cannot be arranged.
+ *
  * Implementation limit: which AVD files an emulator needs to boot from copied user data, and
- * whether its qcow2 overlays accept a moved backing file, is unverified. No real AVD has been
- * captured or booted from a clone. Native acceptance is open. */
+ * whether it accepts a rebased overlay, is unverified. The backing check reads the recorded path
+ * in the qcow2 header; no real overlay chain has been opened. No real AVD has been captured or
+ * booted from a clone. Native acceptance is open. */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -108,6 +114,24 @@ async function hashFile(file: string): Promise<{ bytes: number; sha256: string; 
     return { bytes: size, sha256: hash.digest("hex"), identity: identity(before) };
   } finally { await input.close(); }
 }
+const OVERLAY = ".qcow2";
+/** The backing file a qcow2 image records in its header, or null when it has none. Anything that
+ * is not a readable qcow2 header is refused: an overlay that cannot be inspected cannot be proven
+ * self-contained. Layout per the qcow2 specification: magic, version, then the backing file's
+ * offset (u64) and length (u32), all big-endian. */
+export function overlayBacking(file: string): string | null {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const size = fs.fstatSync(fd).size, header = Buffer.alloc(20);
+    if (size < 20 || fs.readSync(fd, header, 0, 20, 0) !== 20 || header.readUInt32BE(0) !== 0x514649fb || ![2, 3].includes(header.readUInt32BE(4))) return refuse("A device overlay is not a readable qcow2 image.", "baseline_overlay_unsupported");
+    const offset = header.readBigUInt64BE(8), length = header.readUInt32BE(16);
+    if (!length) return null;
+    if (length > 1023 || offset < 20n || offset + BigInt(length) > BigInt(size)) return refuse("A device overlay records an invalid backing file.", "baseline_overlay_unsupported");
+    const name = Buffer.alloc(length);
+    if (fs.readSync(fd, name, 0, length, Number(offset)) !== length || name.includes(0)) return refuse("A device overlay records an invalid backing file.", "baseline_overlay_unsupported");
+    return name.toString("utf8");
+  } finally { fs.closeSync(fd); }
+}
 function syncDirectory(directory: string): void { const fd = fs.openSync(directory, fs.constants.O_RDONLY); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
 function reference(value: { name: unknown; revision: unknown }): { name: string; revision: string } {
   if (typeof value.name !== "string" || BASELINE_NAME.exec(value.name)?.[0] !== value.name || typeof value.revision !== "string" || BASELINE_REVISION.exec(value.revision)?.[0] !== value.revision) throw new ServiceError("Invalid baseline name or revision.", 400);
@@ -193,7 +217,7 @@ export class BaselineStore {
   /** Copies a stopped device's disk state into a new immutable baseline. The caller holds the
    * assignment lock and has proven the device stopped. Nothing is visible until the final rename;
    * a failure before it removes the staging directory and leaves no baseline. */
-  async save(request: { id: string; name: string; revision: string }, source: { avd: string; machineId: string } & BaselineBinding, authorized: () => boolean): Promise<PublicBaseline> {
+  async save(request: { id: string; name: string; revision: string }, source: { avd: string; machineId: string; rebase: boolean } & BaselineBinding, authorized: () => boolean): Promise<PublicBaseline> {
     const id = uuid(request.id), key = reference(request), target = this.directory(key.name, key.revision);
     const existing = this.manifest(key.name, key.revision);
     if (existing) {
@@ -207,10 +231,20 @@ export class BaselineStore {
     privateDirectory(this.root);
     const staging = path.join(this.root, `.staging-${id}`);
     if (fs.existsSync(staging)) refuse("An earlier save of this baseline was interrupted; remove it before saving again.", "baseline_exists");
+    // Every overlay must be one a clone can make self-contained: its backing file is its own base
+    // image inside this device, that base is captured with it, and the host can rebase the copy.
+    const captured = this.walk(source.avd);
+    for (const relative of captured.filter(name => name.endsWith(OVERLAY))) {
+      const backing = overlayBacking(path.join(source.avd, relative));
+      if (backing === null) continue;
+      const base = relative.slice(0, -OVERLAY.length);
+      if (!captured.includes(base) || path.resolve(path.dirname(path.join(source.avd, relative)), backing) !== path.join(source.avd, base)) refuse("A device overlay is backed by a file outside this device's own captured images.", "baseline_overlay_unsupported");
+      if (path.isAbsolute(backing) && !source.rebase) refuse("This host cannot rebase a copied overlay (the SDK has no emulator/qemu-img), so the baseline could not be used.", "baseline_overlay_unsupported");
+    }
     fs.mkdirSync(staging, { mode: 0o700 });
     try {
       const files: BaselineFile[] = [];
-      for (const relative of this.walk(source.avd)) {
+      for (const relative of captured) {
         const destination = path.join(staging, "files", relative);
         fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
         files.push({ path: relative, ...await sparseCopy(path.join(source.avd, relative), destination, authorized) });
@@ -264,7 +298,7 @@ export class BaselineStore {
   /** Gives a fresh AVD its own copy of the baseline's files. The stored files are only read. A
    * copy-on-write clone is used where the filesystem has one; otherwise each file is copied and
    * its digest rechecked in the same pass. */
-  async clone(wanted: BaselineReference, binding: BaselineBinding, avd: string, authorized: () => boolean = () => true): Promise<RecordValue> {
+  async clone(wanted: BaselineReference, binding: BaselineBinding, avd: string, rebase: ((overlay: string, base: string) => Promise<void>) | undefined, authorized: () => boolean = () => true): Promise<RecordValue> {
     const manifest = await this.check(wanted, binding), directory = path.join(this.directory(manifest.name, manifest.revision), "files");
     let reflinked = 0;
     for (const file of manifest.files) {
@@ -285,7 +319,20 @@ export class BaselineStore {
     }
     // The stored files must still be the verified ones after the copy.
     await this.verify(manifest);
-    return { name: manifest.name, revision: manifest.revision, digest: manifest.digest, files: manifest.files.map(file => file.path), bytes: manifest.bytes, reflinked };
+    // No copied overlay may read anything but the clone's own copied base. A saved overlay names
+    // the device it was captured from, so it is rebased, and the recorded path is read back.
+    const copied = new Set(manifest.files.map(file => file.path)), relocated: string[] = [];
+    for (const relative of manifest.files.map(file => file.path).filter(name => name.endsWith(OVERLAY))) {
+      const overlay = path.join(avd, relative), base = path.join(avd, relative.slice(0, -OVERLAY.length));
+      const own = (): boolean => { const backing = overlayBacking(overlay); return backing === null || path.resolve(path.dirname(overlay), backing) === base && copied.has(relative.slice(0, -OVERLAY.length)); };
+      if (own()) continue;
+      if (!copied.has(relative.slice(0, -OVERLAY.length))) refuse("A stored overlay has no base image of its own in this baseline.", "baseline_overlay_unsupported");
+      if (!rebase) refuse("This host cannot rebase a copied overlay (the SDK has no emulator/qemu-img); the device is not booted from another device's file.", "baseline_overlay_unsupported");
+      await rebase!(overlay, base);
+      if (!own()) refuse("A copied overlay still records a backing file outside this device after the rebase.", "baseline_overlay_unsupported");
+      relocated.push(relative);
+    }
+    return { name: manifest.name, revision: manifest.revision, digest: manifest.digest, files: manifest.files.map(file => file.path), bytes: manifest.bytes, reflinked, relocated };
   }
   /** Removes one baseline as a whole, or what an interrupted save of it left behind. */
   remove(request: { id: string; name: string; revision: string }): RecordValue {

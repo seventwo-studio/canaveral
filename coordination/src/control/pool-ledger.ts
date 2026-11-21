@@ -22,14 +22,15 @@ export function pendingBaselineSave(db: DatabaseSync, machineId: string): boolea
   return table(db, "device_baselines") && !!db.prepare("SELECT 1 FROM device_baselines WHERE machine=? AND state IN ('saving','unknown')").get(machineId);
 }
 /** Whether a host last reported exactly the baseline a template pins: same name, revision and
- * digest, made from the template's own device definition and architecture, and not stale against
- * the host's installed system image. A template without a baseline is always usable. */
-export function baselineUsable(db: DatabaseSync, hostId: string, image: Record<string, unknown>): boolean {
+ * digest, made from the template's own device definition and architecture, with the data
+ * partition size the device would get, and not stale against the host's installed system image.
+ * A template without a baseline is always usable. */
+export function baselineUsable(db: DatabaseSync, hostId: string, image: Record<string, unknown>, diskGiB: number): boolean {
   if (image.baseline == null) return true;
   if (!table(db, "host_baselines")) return false;
   const row = db.prepare("SELECT report FROM host_baselines WHERE host=?").get(hostId);
   if (!row) return false;
   const wanted = image.baseline as Record<string, unknown>, device = image.device as Record<string, unknown> | undefined;
   return (JSON.parse(String(row.report)) as Record<string, unknown>[]).some(entry => entry.name === wanted.name && entry.revision === wanted.revision && entry.digest === wanted.digest &&
-    entry.stale === false && entry.arch === image.arch && !!device && (entry.device as Record<string, unknown>).systemImage === device.systemImage && (entry.device as Record<string, unknown>).profile === device.profile);
+    entry.stale === false && entry.arch === image.arch && entry.diskGiB === diskGiB && !!device && (entry.device as Record<string, unknown>).systemImage === device.systemImage && (entry.device as Record<string, unknown>).profile === device.profile);
 }

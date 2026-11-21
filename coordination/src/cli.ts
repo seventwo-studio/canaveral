@@ -35,7 +35,7 @@ app-upload MACHINE FILE --format apk|ios-app-tar --request-id UUID
 app-artifact ID [--delete]                Inspect or delete a staged build
 operation ID [--output FILE | --resolve-file FILE] | template validate|prepare FILE [--cache DIR]
 apps [list|create|credential|revoke] | leases [list|templates|acquire] | lease ID [renew|release|credential]
-warm-pool [list] | warm-pool show HOST    Warm device targets, ready, booting, failed and last error
+warm-pool [list] | warm-pool show HOST    Warm device targets, ready, booting, failed, paused and last error
 warm-pool set HOST --request-file FILE   Replace a host's warm targets and headroom (administrator)
 baselines | baseline show ID             Saved device baselines, their image binding and stale state
 baseline save MACHINE --name NAME --revision REV --request-id UUID

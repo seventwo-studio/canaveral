@@ -1,4 +1,4 @@
-import { hostAdmissionClosed } from "./maintenance.ts";
+import { domainAdmissionClosed, hostAdmissionClosed } from "./maintenance.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Requests } from "../requests.ts";
@@ -207,6 +207,19 @@ export function mergedLeasePage(db: DatabaseSync, applicationId: string, cursor:
     nextCursor: rows.length > 100 ? String(rows[99]!.id) : null };
 }
 
+/** Read-only: what a waiting model call would reserve and the runner domains whose current,
+ * unrevoked approval serves its model, by the claim's own eligibility. Undefined when none does. */
+function modelDemand(db: DatabaseSync, intent: Record<string, unknown>, current: (binding: Record<string, unknown>) => boolean): { need: { cpu: number; memoryMiB: number; diskGiB: number }; domains: string[] } | undefined {
+  if (!legacyTable(db, "model_catalog") || !legacyTable(db, "model_runner_approvals")) return undefined;
+  const entry = db.prepare("SELECT resources FROM model_catalog WHERE model=? AND digest=? AND adapter=?").get(String(intent.model), String(intent.digest), String(intent.adapter));
+  if (!entry) return undefined;
+  const domains = new Set<string>();
+  for (const approval of db.prepare("SELECT * FROM model_runner_approvals WHERE revoked=0 ORDER BY domain,runner").all()) {
+    const serves = (JSON.parse(String(approval.models)) as [string, string][]).some(([model, digest]) => model === intent.model && digest === intent.digest);
+    if (serves && !domainAdmissionClosed(db, String(approval.domain)) && current({ controllerId: approval.controller, runnerId: approval.runner, generation: approval.generation, incarnationId: approval.incarnation })) domains.add(String(approval.domain));
+  }
+  return domains.size ? { need: JSON.parse(String(entry.resources)) as { cpu: number; memoryMiB: number; diskGiB: number }, domains: [...domains] } : undefined;
+}
 function memberId(leaseId: string): string {
   const bytes = createHash("sha1").update(Buffer.from(leaseId.replaceAll("-", ""), "hex")).update("primary").digest().subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50; bytes[8] = (bytes[8]! & 0x3f) | 0x80;
@@ -237,7 +250,17 @@ export class LegacyLeases implements ControlModule {
   constructor(readonly store: SqliteStore, readonly options: ControlOptions) {
     this.applications = new ConsumerIdentities(store);
     this.machines = new MachineStore(store, options);
-    this.warm = new WarmPool(store, this.machines);
+    this.warm = new WarmPool(store, this.machines, {
+      // The application's own limits, as admission applies them after placement.
+      withinLimits: (db, applicationId, need) => {
+        const row = db.prepare("SELECT specification,revoked FROM consumers WHERE id=?").get(applicationId);
+        if (!row || row.revoked) return false;
+        const limits = (JSON.parse(String(row.specification)) as ApplicationSpec).limits, usage = applicationLeaseUsage(db, applicationId);
+        return usage.active < limits.activeLeases && resourceKeys.every(key => usage.resources[key] + need[key] <= limits.resources[key]);
+      },
+      runnerDemand: (db, request) => request.kind === "linux-lease" ? this.linux.demand(db, request.intent)
+        : request.kind === "model-job" ? modelDemand(db, request.intent, binding => !!this.linux.runners?.current(db, binding)) : undefined,
+    });
     this.linux = new LinuxLeases(store, this.applications, new RunnerEnrollment(store, options.controllerId));
     store.transaction(initializeLeases);
     store.addTransactionHook(refreshLegacyLeases);

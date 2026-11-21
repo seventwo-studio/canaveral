@@ -21,7 +21,7 @@ import type { ControlModule, ControlRequest, ControlResponse } from "./contracts
 import { healthReady } from "./infrastructure.ts";
 import { isDeleted } from "./lifecycle.ts";
 import { hostAdmissionClosed } from "./maintenance.ts";
-import { machineDigest, machineLeaseEligible } from "./machines.ts";
+import { machineDigest, machineLeaseEligible, placementSize, validateMachineRequest } from "./machines.ts";
 import type { MachineStore, Resources } from "./machines.ts";
 import { baselineUsable } from "./pool-ledger.ts";
 
@@ -32,12 +32,27 @@ export const WARM_BOOT_TIMEOUT_SECONDS = 300;
 /** A warm device stops being offered, and is recycled, this long before its hold's deadline, so an
  * adoption never races the native supervisor's own expiry of the hold. */
 export const WARM_HANDOVER_MARGIN_SECONDS = 20;
+/** A ready warm device that its host has not reported running and checked for this long is given
+ * up. It is the bound on how long a hung emulator can sit in the pool as if it were usable. */
+export const WARM_UNREADY_SECONDS = 60;
+/** A waiting request counts on a booting warm device of its own image for at most this long after
+ * the device was created; after that it takes the device's capacity like any other. */
+export const WARM_SERVE_BOOT_SECONDS = 90;
 const BACKOFF_BASE_SECONDS = 15, BACKOFF_MAX_SECONDS = 600, HOST_LEASE_SECONDS = 30;
 const LIVE = ["booting", "ready"];
+/** What the pool needs to know from the modules that own admission. */
+export interface WarmPoolHooks {
+  /** Whether the application's own limits would still admit a device lease of this size. */
+  withinLimits(db: DatabaseSync, applicationId: string, need: Resources): boolean;
+  /** For a waiting request that is not a device lease: what it would reserve, and the runner domains
+   * that could serve it right now if they had the capacity. Undefined when nothing could. */
+  runnerDemand(db: DatabaseSync, request: { kind: string; application: string; intent: Json }): { need: Resources; domains: string[] } | undefined;
+}
 
 interface WarmRow {
   machine: string; hold: string; host: string; template_id: string; revision: string; arch: string; state: string; reason: string | null;
   created: number; expires: number; ready_at: number | null; lease: string | null; origin: string | null; claimed_at: number | null; deletion: string | null; updated: number;
+  unready_since: number | null;
 }
 interface TargetRow { host: string; template_id: string; revision: string; arch: string; count: number; max_age: number; updated: number; actor: string }
 
@@ -45,13 +60,24 @@ export function initializeWarmPool(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS warm_targets (host TEXT NOT NULL,template_id TEXT NOT NULL,revision TEXT NOT NULL,arch TEXT NOT NULL,count INTEGER NOT NULL,max_age INTEGER NOT NULL,updated REAL NOT NULL,actor TEXT NOT NULL,PRIMARY KEY(host,template_id,revision,arch));
     CREATE TABLE IF NOT EXISTS warm_headroom (host TEXT PRIMARY KEY,resources TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS warm_devices (machine TEXT PRIMARY KEY,hold TEXT NOT NULL UNIQUE,host TEXT NOT NULL,template_id TEXT NOT NULL,revision TEXT NOT NULL,arch TEXT NOT NULL,state TEXT NOT NULL,reason TEXT,
-      created REAL NOT NULL,expires REAL NOT NULL,ready_at REAL,lease TEXT UNIQUE,origin TEXT,claimed_at REAL,deletion TEXT,updated REAL NOT NULL);
+      created REAL NOT NULL,expires REAL NOT NULL,ready_at REAL,lease TEXT UNIQUE,origin TEXT,claimed_at REAL,deletion TEXT,updated REAL NOT NULL,unready_since REAL);
     CREATE INDEX IF NOT EXISTS warm_devices_live ON warm_devices(host,state);
-    CREATE TABLE IF NOT EXISTS warm_backoff (host TEXT NOT NULL,template_id TEXT NOT NULL,revision TEXT NOT NULL,arch TEXT NOT NULL,failures INTEGER NOT NULL,next_attempt REAL NOT NULL,last_error TEXT,last_error_at REAL,PRIMARY KEY(host,template_id,revision,arch));`);
+    CREATE TABLE IF NOT EXISTS warm_backoff (host TEXT NOT NULL,template_id TEXT NOT NULL,revision TEXT NOT NULL,arch TEXT NOT NULL,failures INTEGER NOT NULL,next_attempt REAL NOT NULL,last_error TEXT,last_error_at REAL,proven INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(host,template_id,revision,arch));`);
+  if (!db.prepare("PRAGMA table_info(warm_devices)").all().some(column => column.name === "unready_since"))
+    db.exec("ALTER TABLE warm_devices ADD COLUMN unready_since REAL");
+  if (!db.prepare("PRAGMA table_info(warm_backoff)").all().some(column => column.name === "proven"))
+    db.exec("ALTER TABLE warm_backoff ADD COLUMN proven INTEGER NOT NULL DEFAULT 0");
 }
 function table(db: DatabaseSync, name: string): boolean { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name); }
 function size(db: DatabaseSync, machineId: string): Resources { return JSON.parse(String(db.prepare("SELECT request FROM machines WHERE id=?").get(machineId)!.request)).resources as Resources; }
-function fits(need: Resources, free: Resources): boolean { return KEYS.every(key => need[key] <= free[key]); }
+const none = (): Resources => ({ cpu: 0, memoryMiB: 0, diskGiB: 0 });
+const sum = (a: Resources, b: Resources, sign = 1): Resources => ({ cpu: a.cpu + sign * b.cpu, memoryMiB: a.memoryMiB + sign * b.memoryMiB, diskGiB: a.diskGiB + sign * b.diskGiB });
+/** Booted, checked and outside the hand-over margin: a lease could take it right now. */
+function adoptable(db: DatabaseSync, row: WarmRow, now: number): boolean {
+  if (row.state !== "ready" || row.expires - now <= WARM_HANDOVER_MARGIN_SECONDS) return false;
+  const machine = db.prepare("SELECT observed,access_ready FROM machines WHERE id=?").get(row.machine);
+  return machine?.observed === "running" && !!machine.access_ready;
+}
 function offerOf(host: Json): Json | undefined { try { return object(JSON.parse(String(host.offer))); } catch { return undefined; } }
 /** Online, accepting, healthy and not draining: the same gate as lease placement. */
 function hostReady(db: DatabaseSync, host: Json, now: number): boolean {
@@ -72,9 +98,12 @@ function retire(db: DatabaseSync, row: WarmRow, reason: string, now: number): vo
 }
 function failed(db: DatabaseSync, row: WarmRow, detail: string, now: number, counted: boolean): void {
   const error = [...detail].slice(0, 500).join("") || "The warm device did not become ready.";
-  db.prepare(`INSERT INTO warm_backoff VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(host,template_id,revision,arch) DO UPDATE SET failures=failures+excluded.failures,last_error=excluded.last_error,last_error_at=excluded.last_error_at`)
+  db.prepare(`INSERT INTO warm_backoff (host,template_id,revision,arch,failures,next_attempt,last_error,last_error_at) VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(host,template_id,revision,arch) DO UPDATE SET failures=failures+excluded.failures,last_error=excluded.last_error,last_error_at=excluded.last_error_at`)
     .run(row.host, row.template_id, row.revision, row.arch, counted ? 1 : 0, 0, error, now);
   if (counted) {
+    // A failed boot withdraws the image's proof on this host: the next devices come one at a time again.
+    db.prepare("UPDATE warm_backoff SET proven=0 WHERE host=? AND template_id=? AND revision=? AND arch=?").run(row.host, row.template_id, row.revision, row.arch);
     // Consecutive failed boots wait 15 s, 30 s, 60 s and so on, to at most 10 minutes.
     const failures = Number(db.prepare("SELECT failures FROM warm_backoff WHERE host=? AND template_id=? AND revision=? AND arch=?").get(row.host, row.template_id, row.revision, row.arch)!.failures);
     db.prepare("UPDATE warm_backoff SET next_attempt=? WHERE host=? AND template_id=? AND revision=? AND arch=?").run(now + Math.min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * 2 ** Math.min(failures - 1, 10)), row.host, row.template_id, row.revision, row.arch);
@@ -100,7 +129,9 @@ export function settleWarmDevices(db: DatabaseSync, now: number): void {
     if (row.state === "booting") {
       if (ready) {
         db.prepare("UPDATE warm_devices SET state='ready',ready_at=?,updated=? WHERE machine=?").run(now, now, row.machine);
-        db.prepare("UPDATE warm_backoff SET failures=0,next_attempt=0 WHERE host=? AND template_id=? AND revision=? AND arch=?").run(row.host, row.template_id, row.revision, row.arch);
+        // One device of this image booted and passed its checks here: the image is proven on this host.
+        db.prepare(`INSERT INTO warm_backoff (host,template_id,revision,arch,failures,next_attempt,proven) VALUES (?,?,?,?,0,0,1)
+          ON CONFLICT(host,template_id,revision,arch) DO UPDATE SET failures=0,next_attempt=0,proven=1`).run(row.host, row.template_id, row.revision, row.arch);
       } else if (ended || now - row.created >= WARM_BOOT_TIMEOUT_SECONDS) {
         failed(db, row, ended ? String(machine.detail) || "The warm device stopped while booting." : "The warm device was not ready within its boot timeout.", now, true);
         retire(db, row, "boot_failed", now);
@@ -109,6 +140,14 @@ export function settleWarmDevices(db: DatabaseSync, now: number): void {
       // A ready device that stopped is replaced, not counted as a failed boot.
       if (ended) { failed(db, row, String(machine.detail) || "The warm device stopped.", now, false); retire(db, row, "stopped", now); }
       else if (now >= row.expires - WARM_HANDOVER_MARGIN_SECONDS) retire(db, row, "age", now);
+      // A device that its host no longer reports running and checked (a hung emulator answers no
+      // readiness check) cannot be adopted. It is given up after a bounded time, not at its age.
+      else if (ready) { if (row.unready_since !== null) db.prepare("UPDATE warm_devices SET unready_since=NULL WHERE machine=?").run(row.machine); }
+      else if (row.unready_since === null) db.prepare("UPDATE warm_devices SET unready_since=? WHERE machine=?").run(now, row.machine);
+      else if (now - row.unready_since >= WARM_UNREADY_SECONDS) {
+        failed(db, row, `The warm device was not running and checked for ${WARM_UNREADY_SECONDS} seconds${machine.detail ? `: ${String(machine.detail)}` : "."}`, now, false);
+        retire(db, row, "unready", now);
+      }
     }
   }
 }
@@ -139,7 +178,7 @@ export function claimWarmDevice(db: DatabaseSync, leaseId: string, image: Json, 
     // Exactly the pinned definition and exactly the requested size; anything else is a cold boot.
     if (machineDigest(JSON.parse(String(row.template))) !== machineDigest(image) || !KEYS.every(key => JSON.parse(String(row.request)).resources[key] === wanted[key])) continue;
     const offer = offerOf(row);
-    if (!offer || !machineLeaseEligible(offer, image) || !hostReady(db, { id: row.host_id, enabled: row.enabled, seen: row.seen }, now) || !baselineUsable(db, String(row.host_id), image)) continue;
+    if (!offer || !machineLeaseEligible(offer, image) || !hostReady(db, { id: row.host_id, enabled: row.enabled, seen: row.seen }, now) || !baselineUsable(db, String(row.host_id), image, wanted.diskGiB)) continue;
     db.prepare("UPDATE warm_devices SET state='adopting',lease=?,claimed_at=?,updated=? WHERE machine=? AND state='ready'").run(leaseId, now, now, String(row.machine));
     db.prepare("UPDATE machines SET observed='starting',access_ready=0,detail='',updated=? WHERE id=?").run(now, String(row.machine));
     return String(row.machine);
@@ -178,7 +217,7 @@ export function warmReport(db: DatabaseSync, machineId: string, report: Json, no
 }
 
 export class WarmPool implements ControlModule {
-  constructor(readonly store: SqliteStore, readonly machines: MachineStore) { store.transaction(initializeWarmPool); }
+  constructor(readonly store: SqliteStore, readonly machines: MachineStore, private readonly hooks: WarmPoolHooks) { store.transaction(initializeWarmPool); }
   /** Timer and post-request entry. A busy database or an unexpected failure must not take the worker down. */
   wake(): boolean {
     try {
@@ -220,67 +259,116 @@ export class WarmPool implements ControlModule {
       }
     }
   }
-  /** A waiting request that capacity refused wins over warm devices. For a device lease, the fewest
-   * warm devices that make it fit on an eligible host are given up, unless a warm device of its own
-   * image and size on that host will serve it. Other kinds wait on a runner-domain budget; they
-   * press every host mapped to a physical domain. Returns the hosts that must not be refilled. */
+  /** What one waiting request would need for admission, and where. `fits` answers with the hosts
+   * that would take it if each had `spare` more unreserved capacity, by the owning module's own
+   * placement rule. Undefined when no capacity the pool holds could ever admit the request. */
+  private probe(db: DatabaseSync, request: Json, now: number): { need: Resources; own?: (spoken: Set<string>) => WarmRow | undefined; fits(spare: (host: string) => Resources): string[] } | undefined {
+    const intent = JSON.parse(String(request.intent)) as Json;
+    if (request.kind !== "lease") {
+      // A runner-domain request shares a host's budget only through an explicit physical mapping.
+      const demand = this.hooks.runnerDemand(db, { kind: String(request.kind), application: String(request.application), intent });
+      const mapped = (demand?.domains ?? []).flatMap(domain => { const host = physicalMapping(db, { domainId: domain })?.hostId; return host ? [{ domain, host }] : []; });
+      if (!demand || !mapped.length) return undefined;
+      return { need: demand.need, fits: spare => mapped.filter(({ domain, host }) => {
+        // The mapped budget is the smaller of the host's and the domain's capacity. It is compared
+        // unclamped: on a budget that is already overcommitted, a freed device may admit nothing.
+        const budget = physicalBudget(db, { domainId: domain }), extra = spare(host);
+        return !!budget && KEYS.every(key => demand.need[key] <= budget.capacity[key] - budget.reserved[key] + extra[key]);
+      }).map(entry => entry.host) };
+    }
+    const image = template(db, String(intent.templateId), String(intent.templateRevision), String(intent.arch));
+    // The same size rule as admission: a request below the image's minimum or off its memory step
+    // has no placement anywhere, whatever the pool gives up.
+    const need = image ? placementSize(image, intent.resources ?? {}) : undefined;
+    if (!image || !need || !this.hooks.withinLimits(db, String(request.application), need)) return undefined;
+    let wanted: Json;
+    try { wanted = validateMachineRequest({ id: randomUUID(), name: "placement", templateId: intent.templateId, templateRevision: intent.templateRevision, arch: intent.arch, resources: intent.resources ?? {} }); }
+    catch { return undefined; }
+    return { need,
+      // A warm device of the request's own image and size will serve it: one a lease could take
+      // now, or one that is still within its usual boot time.
+      own: spoken => (db.prepare("SELECT w.* FROM warm_devices w WHERE w.state IN ('booting','ready') AND w.template_id=? AND w.revision=? AND w.arch=? ORDER BY w.created,w.machine").all(String(image.id), String(image.revision), String(image.arch)) as unknown as WarmRow[])
+        .find(row => {
+          if (spoken.has(row.machine) || !(adoptable(db, row, now) || row.state === "booting" && now - row.created < WARM_SERVE_BOOT_SECONDS) || !KEYS.every(key => size(db, row.machine)[key] === need[key])) return false;
+          const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(row.host), offer = host ? offerOf(host) : undefined;
+          return !!host && !!offer && hostReady(db, host, now) && machineLeaseEligible(offer, image) && baselineUsable(db, row.host, image, need.diskGiB);
+        }),
+      fits: spare => this.machines.placements(db, wanted, true, true, null, spare).map(candidate => String(candidate.host.id)) };
+  }
+  /** A waiting request that capacity refused wins over warm devices, but only where giving them up
+   * would actually admit it. Each request is tested with the placement rule its own admission uses.
+   * If it fits once devices already being removed are gone, nothing more is given up. Otherwise the
+   * fewest warm devices that make it fit on one host are given up: unresponsive ones first, then
+   * booting ones, then the oldest ready ones. A request that no capacity of the pool could admit
+   * (an invalid size, an application limit, capacity held by other work) changes nothing.
+   * Returns the hosts that must not be refilled ahead of a request they are about to take. */
   private contention(db: DatabaseSync, now: number): Set<string> {
     const pressured = new Set<string>();
     if (!table(db, "requests")) return pressured;
-    const waiting = db.prepare("SELECT kind,intent FROM requests WHERE state='waiting' AND reason='capacity_unavailable' AND (deadline IS NULL OR deadline>?) ORDER BY sequence LIMIT 64").all(now);
+    const waiting = db.prepare("SELECT application,kind,intent FROM requests WHERE state='waiting' AND reason='capacity_unavailable' AND (deadline IS NULL OR deadline>?) ORDER BY sequence LIMIT 64").all(now);
     if (!waiting.length) return pressured;
-    const hosts = db.prepare("SELECT * FROM hosts WHERE id IN (SELECT host FROM warm_targets UNION SELECT host FROM warm_devices WHERE state IN ('booting','ready','retiring')) ORDER BY id").all();
     // Capacity already promised to an earlier waiting request in this pass, and warm devices already counted for one.
     const promised = new Map<string, Resources>(), spoken = new Set<string>();
+    /** Not free yet, but on its way without giving anything more up: devices already being removed, less what is promised. */
+    const pending = (host: string): Resources => (db.prepare("SELECT machine FROM warm_devices WHERE host=? AND state='retiring'").all(host))
+      .reduce<Resources>((total, row) => sum(total, size(db, String(row.machine))), sum(none(), promised.get(host) ?? none(), -1));
+    const givable = (host: string): WarmRow[] => {
+      const rows = this.live(db, host).filter(row => !spoken.has(row.machine));
+      const unready = rows.filter(row => row.state === "ready" && !adoptable(db, row, now));
+      return [...unready, ...rows.filter(row => row.state === "booting").reverse(), ...rows.filter(row => row.state === "ready" && !unready.includes(row))];
+    };
+    const promise = (host: string, need: Resources): void => { pressured.add(host); promised.set(host, sum(promised.get(host) ?? none(), need)); };
     for (const request of waiting) {
-      if (request.kind !== "lease") {
-        for (const host of hosts) if (physicalMapping(db, { hostId: String(host.id) })) { pressured.add(String(host.id)); for (const row of this.live(db, String(host.id))) retire(db, row, "contention", now); }
-        continue;
-      }
-      const intent = JSON.parse(String(request.intent)) as Json, image = template(db, String(intent.templateId), String(intent.templateRevision), String(intent.arch));
-      if (!image) continue;
-      const need: Resources = { ...(image.defaults ?? image.minimum), ...intent.resources };
-      for (const host of hosts) {
-        const id = String(host.id), offer = offerOf(host);
-        if (!offer || !hostReady(db, host, now) || !machineLeaseEligible(offer, image) || !baselineUsable(db, id, image)) continue;
-        // A request larger than the host's whole limit can never be served here and does not hold its pool.
-        const limits = table(db, "host_limits") ? db.prepare("SELECT limits FROM host_limits WHERE host=?").get(id) : undefined;
-        const ceiling = physicalBudget(db, { hostId: id })?.capacity ?? (limits ? JSON.parse(String(limits.limits)) as Resources : offer.capacity as Resources);
-        if (!KEYS.every(key => need[key] <= Math.min(Number(ceiling[key]), Number(offer.capacity[key])))) continue;
-        pressured.add(id);
-        const rows = this.live(db, id);
-        const own = rows.find(row => !spoken.has(row.machine) && row.template_id === image.id && row.revision === image.revision && row.arch === image.arch && KEYS.every(key => size(db, row.machine)[key] === need[key]));
-        if (own) { spoken.add(own.machine); break; }
-        // Capacity that is free now, or will be when devices already being given up are proven gone.
-        const free = { ...this.machines.remainingCapacity(db, id) }, taken = promised.get(id) ?? { cpu: 0, memoryMiB: 0, diskGiB: 0 };
-        for (const row of db.prepare("SELECT machine FROM warm_devices WHERE host=? AND state='retiring'").all(id)) { const held = size(db, String(row.machine)); for (const key of KEYS) free[key] += held[key]; }
-        for (const key of KEYS) free[key] -= taken[key];
-        const chosen: WarmRow[] = [];
-        for (const row of [...rows.filter(r => r.state === "booting").reverse(), ...rows.filter(r => r.state === "ready")]) {
-          if (fits(need, free) || spoken.has(row.machine)) continue;
-          const held = size(db, row.machine); for (const key of KEYS) free[key] += held[key];
-          chosen.push(row);
-        }
-        if (!fits(need, free)) continue; // Even without its warm devices this host cannot take the request yet.
-        for (const row of chosen) retire(db, row, "contention", now);
-        promised.set(id, { cpu: taken.cpu + need.cpu, memoryMiB: taken.memoryMiB + need.memoryMiB, diskGiB: taken.diskGiB + need.diskGiB });
-        break;
-      }
+      // One request's evaluation is its own savepoint: if it cannot be evaluated, it changes nothing
+      // and neither stops the pool nor the requests behind it.
+      try {
+        this.store.transaction(() => {
+          const probe = this.probe(db, request, now);
+          if (!probe) return;
+          const own = probe.own?.(spoken);
+          if (own) { spoken.add(own.machine); return; }
+          const already = probe.fits(pending)[0];
+          if (already) { promise(already, probe.need); return; }
+          const host = probe.fits(candidate => givable(candidate).reduce((total, row) => sum(total, size(db, row.machine)), pending(candidate)))[0];
+          if (!host) return; // Nothing the pool holds stands between this request and its admission.
+          const chosen: WarmRow[] = [];
+          let freed = none();
+          for (const row of givable(host)) {
+            chosen.push(row); freed = sum(freed, size(db, row.machine));
+            const offered = freed;
+            if (probe.fits(candidate => candidate === host ? sum(pending(candidate), offered) : pending(candidate)).includes(host)) break;
+          }
+          for (const row of chosen) retire(db, row, "contention", now);
+          promise(host, probe.need);
+        });
+      } catch { /* This request is skipped in this pass. */ }
     }
     return pressured;
+  }
+  /** A given-up device of this image that is not yet proven removed. While there is one, the image's
+   * pool on that host creates nothing: an unconfirmed failure is never multiplied. */
+  private unproven(db: DatabaseSync, host: string, templateId: string, revision: string, arch: string): Json | undefined {
+    return db.prepare(`SELECT w.machine,w.updated,w.reason,d.state AS removal FROM warm_devices w LEFT JOIN machine_deletions d ON d.id=w.deletion
+      WHERE w.host=? AND w.template_id=? AND w.revision=? AND w.arch=? AND w.state='retiring' ORDER BY w.updated,w.machine LIMIT 1`).get(host, templateId, revision, arch);
   }
   private replenish(db: DatabaseSync, now: number, pressured: Set<string>): void {
     for (const target of db.prepare("SELECT * FROM warm_targets WHERE count>0 ORDER BY host,template_id,revision,arch").all() as unknown as TargetRow[]) {
       if (pressured.has(target.host)) continue;
       const host = db.prepare("SELECT * FROM hosts WHERE id=?").get(target.host), offer = host ? offerOf(host) : undefined, image = template(db, target.template_id, target.revision, target.arch);
-      if (!host || !offer?.warmPool || !image || !hostReady(db, host, now) || !machineLeaseEligible(offer, image) || !baselineUsable(db, target.host, image)) continue;
-      const backoff = db.prepare("SELECT next_attempt FROM warm_backoff WHERE host=? AND template_id=? AND revision=? AND arch=?").get(target.host, target.template_id, target.revision, target.arch);
+      const need = image ? placementSize(image, {}) : undefined;
+      if (!host || !offer?.warmPool || !image || !need || !hostReady(db, host, now) || !machineLeaseEligible(offer, image) || !baselineUsable(db, target.host, image, need.diskGiB)) continue;
+      if (this.unproven(db, target.host, target.template_id, target.revision, target.arch)) continue;
+      const backoff = db.prepare("SELECT next_attempt,proven FROM warm_backoff WHERE host=? AND template_id=? AND revision=? AND arch=?").get(target.host, target.template_id, target.revision, target.arch);
       if (backoff && now < Number(backoff.next_attempt)) continue;
-      const headroom = this.headroom(db, target.host), need = (image.defaults ?? image.minimum) as Resources;
+      const headroom = this.headroom(db, target.host);
       // The host's own device limit counts every pool device that still runs or may run there.
       const count = (states: string, where = ""): number => Number(db.prepare(`SELECT count(*) AS n FROM warm_devices WHERE host=? AND state IN (${states})${where}`).get(target.host, ...(where ? [target.template_id, target.revision, target.arch] : []))!.n);
-      let held = count("'booting','ready','retiring'"), mine = count("'booting','ready'", " AND template_id=? AND revision=? AND arch=?");
+      let held = count("'booting','ready','retiring'"), mine = count("'booting','ready'", " AND template_id=? AND revision=? AND arch=?"), booting = count("'booting'", " AND template_id=? AND revision=? AND arch=?");
       while (mine < target.count && held < Number(offer.warmPool.maxDevices)) {
+        // Until one device of this image has booted and passed its checks on this host, and again
+        // after any failed boot, devices are created one at a time. A broken image or SDK then
+        // costs one slot, not every slot of the target at once.
+        if (!backoff?.proven && booting >= 1) break;
         const free = this.machines.remainingCapacity(db, target.host);
         // The pool never spends the operator's headroom and never more than the ledger has free.
         if (!KEYS.every(key => need[key] + headroom[key] <= free[key])) break;
@@ -290,7 +378,7 @@ export class WarmPool implements ControlModule {
         // The hold's deadline is fixed here and never extended; the host's supervisor enforces it.
         db.prepare("INSERT INTO warm_devices (machine,hold,host,template_id,revision,arch,state,created,expires,updated) VALUES (?,?,?,?,?,?,'booting',?,?,?)")
           .run(machine, randomUUID(), target.host, target.template_id, target.revision, target.arch, now, now + Math.min(target.max_age, Number(offer.warmPool.maxAgeSeconds)), now);
-        mine++; held++;
+        mine++; held++; booting++;
       }
     }
   }
@@ -303,12 +391,20 @@ export class WarmPool implements ControlModule {
     const targets = (db.prepare("SELECT * FROM warm_targets WHERE host=? ORDER BY template_id,revision,arch").all(id) as unknown as TargetRow[]).map(target => {
       const count = (state: string): number => Number(db.prepare("SELECT count(*) AS n FROM warm_devices WHERE host=? AND template_id=? AND revision=? AND arch=? AND state=?").get(id, target.template_id, target.revision, target.arch, state)!.n);
       const backoff = db.prepare("SELECT * FROM warm_backoff WHERE host=? AND template_id=? AND revision=? AND arch=?").get(id, target.template_id, target.revision, target.arch);
-      return { templateId: target.template_id, templateRevision: target.revision, arch: target.arch, count: target.count, maxAgeSeconds: target.max_age, ready: count("ready"), booting: count("booting"), retiring: count("retiring"),
-        failed: Number(backoff?.failures ?? 0), nextAttemptAt: backoff && Number(backoff.next_attempt) > now ? Number(backoff.next_attempt) : null,
+      // Why the pool creates nothing for this image here, when it does not: a given-up device is not
+      // yet proven removed (an operator must inspect one whose removal stays blocked), or the host
+      // does not usably store the baseline the image names.
+      const stuck = this.unproven(db, id, target.template_id, target.revision, target.arch), image = template(db, target.template_id, target.revision, target.arch), need = image ? placementSize(image, {}) : undefined;
+      const paused = stuck ? { reason: "removal_unproven", machineId: stuck.machine, since: stuck.updated, givenUpFor: stuck.reason, removal: stuck.removal ?? "queued" }
+        : image?.baseline && (!need || !baselineUsable(db, id, image, need.diskGiB)) ? { reason: "baseline_unavailable" } : null;
+      return { templateId: target.template_id, templateRevision: target.revision, arch: target.arch, count: target.count, maxAgeSeconds: target.max_age, ready: count("ready"), booting: count("booting"), retiring: count("retiring"), paused,
+        failed: Number(backoff?.failures ?? 0), proven: !!backoff?.proven, nextAttemptAt: backoff && Number(backoff.next_attempt) > now ? Number(backoff.next_attempt) : null,
         lastError: backoff?.last_error ?? null, lastErrorAt: backoff?.last_error_at ?? null };
     });
     const devices = (db.prepare("SELECT * FROM warm_devices WHERE host=? AND state IN ('booting','ready','adopting','retiring') ORDER BY created,machine").all(id) as unknown as WarmRow[]).map(row => ({
       machineId: row.machine, templateId: row.template_id, templateRevision: row.revision, arch: row.arch, state: row.state, reason: row.reason, createdAt: row.created, readyAt: row.ready_at, expiresAt: row.expires,
+      // Since when a ready device has not been reported running and checked; it is not offered meanwhile.
+      unreadySince: row.state === "ready" ? row.unready_since : null,
       ...(row.lease ? { leaseId: row.lease } : {}) }));
     return { hostId: id, name: offer?.name ?? null, online: now - Number(host.seen) < HOST_LEASE_SECONDS, enabled: !!offer?.warmPool, limits: offer?.warmPool ?? null, headroom: this.headroom(db, id), targets, devices };
   }

@@ -19,9 +19,12 @@ import type { CommandResult, LeaseSupervisorTransport, MobileTransport, NativePi
  * emulator or pre-existing device is touched.
  *
  * The stand-in emulator keeps "disk state" in its AVD directory the way a real one does: a base
- * data image, an overlay that holds what was written to the device, and per-launch files. That is
- * enough to prove what a baseline captures and what a clone starts from; it says nothing about
- * whether a real emulator boots from copied user data. */
+ * data image, an overlay that holds what was written to the device, and per-launch files. The
+ * overlay has a real qcow2 header that records its backing file by absolute path, as the
+ * emulator's own overlays do, and the stand-in qemu-img rewrites that record on a rebase. That is
+ * enough to prove what a baseline captures, what a clone starts from and which backing path a
+ * clone records. It says nothing about whether a real emulator boots from copied user data: the
+ * stand-in never opens the backing file. */
 export const helper = mobileNativeHelper({});
 export const unix = ["darwin", "linux"].includes(process.platform);
 export const skip = !unix || !existsSync(helper) ? "requires the built canaveral-mobile-native helper" : false;
@@ -36,7 +39,16 @@ export async function until(check: () => boolean | Promise<boolean>, label: stri
   assert.fail(`Timed out waiting for ${label}`);
 }
 
-export interface Emulator { name: string; port: number; pid: number; grandchild: number; bootedAt: number; data: string }
+export interface Emulator { name: string; port: number; pid: number; grandchild: number; bootedAt: number; data: string; backing: string }
+/** The stand-in overlay: a qcow2 header that names its backing file, then whatever was written to the device. */
+export const OVERLAY_HEADER = 2048;
+export function overlayHeader(backing: string): Buffer {
+  const header = Buffer.alloc(OVERLAY_HEADER), name = Buffer.from(backing);
+  header.writeUInt32BE(0x514649fb, 0); header.writeUInt32BE(3, 4); header.writeBigUInt64BE(104n, 8); header.writeUInt32BE(name.length, 16); name.copy(header, 104);
+  return header;
+}
+/** What `qemu-img rebase -u -b` does to the header: only the recorded backing path changes. */
+export function rebaseOverlay(file: string, backing: string): void { writeFileSync(file, Buffer.concat([overlayHeader(backing), readFileSync(file).subarray(OVERLAY_HEADER)])); }
 export function sdk(root: string): { sdk: string; registry: string; events: string } {
   const sdkRoot = join(root, "sdk"), registry = join(root, "emulators"), events = join(root, "events");
   for (const dir of ["platform-tools", "emulator", "cmdline-tools/latest/bin", ...systemImage.split(";").reduce<string[]>((paths, part) => [...paths, join(paths.at(-1) ?? "", part)], [])]) mkdirSync(join(sdkRoot, dir), { recursive: true });
@@ -52,19 +64,26 @@ export function sdk(root: string): { sdk: string; registry: string; events: stri
   writeFileSync(script, `import { spawn } from "node:child_process"; import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2), name = args[args.indexOf("-avd") + 1], port = Number(args[args.indexOf("-port") + 1]);
 const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-// Disk state: the base image is created once; everything written to the device lands in the overlay.
+// Disk state: the base image is created once; everything written to the device lands in the overlay,
+// a qcow2 file whose header records the base image as its backing file by absolute path.
 // A launch without the SDK environment (a stand-in supervisor that starts it bare) has none.
-let data = "";
+let data = "", backing = "";
 if (process.env.ANDROID_AVD_HOME) {
-  const avd = /^path=(.*)$/m.exec(readFileSync(process.env.ANDROID_AVD_HOME + "/" + name + ".ini", "utf8"))[1];
+  const avd = /^path=(.*)$/m.exec(readFileSync(process.env.ANDROID_AVD_HOME + "/" + name + ".ini", "utf8"))[1], overlay = avd + "/userdata-qemu.img.qcow2";
   if (!existsSync(avd + "/userdata-qemu.img")) writeFileSync(avd + "/userdata-qemu.img", "factory\\n");
-  data = existsSync(avd + "/userdata-qemu.img.qcow2") ? readFileSync(avd + "/userdata-qemu.img.qcow2", "utf8") : "";
-  appendFileSync(avd + "/userdata-qemu.img.qcow2", "boot:" + name + "\\n");
+  if (!existsSync(overlay)) {
+    const header = Buffer.alloc(${OVERLAY_HEADER}), base = Buffer.from(avd + "/userdata-qemu.img");
+    header.writeUInt32BE(0x514649fb, 0); header.writeUInt32BE(3, 4); header.writeBigUInt64BE(104n, 8); header.writeUInt32BE(base.length, 16); base.copy(header, 104);
+    writeFileSync(overlay, header);
+  }
+  const image = readFileSync(overlay);
+  data = image.subarray(${OVERLAY_HEADER}).toString("utf8"); backing = image.subarray(104, 104 + image.readUInt32BE(16)).toString("utf8");
+  appendFileSync(overlay, "boot:" + name + "\\n");
   // Per-launch files that belong to no baseline.
   writeFileSync(avd + "/hardware-qemu.ini", "avd.name=" + name + "\\n"); writeFileSync(avd + "/multiinstance.lock", String(process.pid));
   mkdirSync(avd + "/snapshots/default_boot", { recursive: true }); writeFileSync(avd + "/snapshots/default_boot/ram.bin", "ram of " + name);
 }
-writeFileSync(${JSON.stringify(registry)} + "/" + port + ".json", JSON.stringify({ name, port, pid: process.pid, grandchild: grandchild.pid, bootedAt: Date.now() + 300, data }));
+writeFileSync(${JSON.stringify(registry)} + "/" + port + ".json", JSON.stringify({ name, port, pid: process.pid, grandchild: grandchild.pid, bootedAt: Date.now() + 300, data, backing }));
 process.on("SIGTERM", () => { grandchild.kill("SIGTERM"); process.exit(0); });
 setInterval(() => {}, 1000);\n`);
   writeFileSync(join(sdkRoot, "emulator/emulator"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`, { mode: 0o755 });
@@ -163,16 +182,26 @@ export function transport(paths: { sdk: string; registry: string; events: string
       const tool = argv[0]!;
       if (tool.endsWith("avdmanager")) {
         const avd = argv[argv.indexOf("--path") + 1]!, name = argv[argv.indexOf("--name") + 1]!;
+        // A failing avdmanager leaves a partial AVD behind and no registration.
+        if (fixture.avdmanager === "fail") { mkdirSync(avd, { recursive: true }); return { stdout: "", exitCode: 1 }; }
         mkdirSync(avd, { recursive: true }); writeFileSync(join(avd, "config.ini"), "hw.lcd.density=420\n");
         writeFileSync(join(options.env.ANDROID_AVD_HOME!, name + ".ini"), "path=" + avd + "\n");
         return ok("");
       }
-      if (tool.endsWith("qemu-img")) { fixture.relocations?.push(argv.slice(1)); return ok(""); }
+      if (tool.endsWith("qemu-img")) {
+        fixture.relocations?.push(argv.slice(1));
+        if (fixture.qemuImg === "fail") return { stdout: "", exitCode: 1 };
+        // A tool that reports success without rewriting the recorded backing path.
+        if (fixture.qemuImg !== "noop") rebaseOverlay(argv.at(-1)!, argv[argv.indexOf("-b") + 1]!);
+        return ok("");
+      }
       if (argv[1] === "start-server") return ok("");
       if (argv[1] === "devices") return ok("List of devices attached\n" + emulators(paths.registry).map(e => `emulator-${e.port}\tdevice\n`).join(""));
       assert.equal(argv[1], "-s");
       const serial = argv[2]!, args = argv.slice(3), device = emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
       if (!device) return { stdout: "", exitCode: 1 };
+      // A hung emulator is still listed by adb but answers nothing.
+      if (fixture.hung?.has(device.name)) return { stdout: "", exitCode: 1 };
       const key = `${device.name}:${args.join(" ")}`; counters.set(key, (counters.get(key) ?? 0) + 1);
       writeFileSync(join(paths.events, `${Date.now()}-${randomUUID()}.json`), JSON.stringify({ serial, name: device.name, args }));
       if (args.join(" ") === "emu avd name") return ok(device.name + "\nOK");
@@ -229,6 +258,9 @@ export interface HarnessOptions {
   templates?: RecordValue[];
   /** Every qemu-img invocation, as argv after the tool. */
   relocations?: string[][];
+  qemuImg?: "ok" | "fail" | "noop"; avdmanager?: "ok" | "fail";
+  /** Emulators (by AVD name) that adb still lists but that answer no command. */
+  hung?: Set<string>;
 }
 
 export interface Harness {
@@ -346,3 +378,22 @@ export async function cleaned(h: Harness, app: string, lease: string): Promise<v
   await until(async () => (await h.api("GET", `/v1/leases/${lease}`, undefined, app)).body.cleanup?.state === "complete", "positive cleanup", 30000);
 }
 
+
+/** Warm pool helpers shared by the warm pool test files. */
+export const WARM_SLOT = { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, NOTHING = { cpu: 0, memoryMiB: 0, diskGiB: 0 };
+export const warmTarget = (count: number, templateId = "lease-phone", maxAgeSeconds?: number) => ({ templateId, templateRevision: "1", arch, count, ...(maxAgeSeconds ? { maxAgeSeconds } : {}) });
+export async function poolState(h: Harness): Promise<any> {
+  const reply = await h.api("GET", `/v1/hosts/${h.hostId()}/warm-pool`);
+  assert.equal(reply.status, 200, JSON.stringify(reply.body)); return reply.body;
+}
+export async function configurePool(h: Harness, targets: unknown[], headroom?: RecordValue): Promise<any> {
+  const reply = await h.api("POST", `/v1/hosts/${h.hostId()}/warm-pool`, { targets, ...(headroom ? { headroom } : {}) });
+  assert.equal(reply.status, 200, JSON.stringify(reply.body)); return reply.body;
+}
+/** Waits until `count` warm devices of one image are booted, checked and offered. */
+export async function warmReady(h: Harness, count = 1, templateId = "lease-phone", ms = 40000, except: string[] = []): Promise<any[]> {
+  let devices: any[] = [];
+  await until(async () => { devices = (await poolState(h)).devices.filter((d: any) => d.state === "ready" && d.templateId === templateId && !except.includes(d.machineId)); return devices.length >= count; }, `${count} ready warm device(s)`, ms);
+  return devices;
+}
+export const stored = (h: Harness, machineId: string, name: string): any => JSON.parse(readFileSync(join(h.storage(machineId), name), "utf8"));

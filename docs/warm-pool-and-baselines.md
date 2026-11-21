@@ -35,14 +35,16 @@ A host runs warm devices only when its operator says so, with the host's own bou
 [Android lease execution](mobile-control.md#host-configuration). The host publishes the two
 numbers in its offer as `warmPool`. It enforces them itself: a warm assignment for a
 template outside its `leaseImages`, on a host without the opt-in, or beyond `maxDevices`
-is never started and reports `error`, whatever the controller sent.
+is never started and reports `error`, whatever the controller sent. See the
+[leased host example](../examples/host-android-warm-pool.json) and its
+[pinned template](../examples/templates/android-phone-leased.json).
 
 ### Targets and headroom
 
 An administrator sets, per host, how many warm devices to keep for each lease image:
 
 ```json
-{ "targets": [{ "templateId": "android-phone", "templateRevision": "1", "arch": "arm64", "count": 2, "maxAgeSeconds": 1800 }],
+{ "targets": [{ "templateId": "android-phone-leased", "templateRevision": "1", "arch": "arm64", "count": 2, "maxAgeSeconds": 1800 }],
   "headroom": { "cpu": 2, "memoryMiB": 2048, "diskGiB": 8 } }
 ```
 
@@ -180,16 +182,11 @@ Admission always runs before the pool refills, and the pool never refills in a h
 heartbeat. A waiting [request](requests.md) that was refused for capacity takes precedence
 over warm devices:
 
-- For a device lease, the pool gives up the fewest warm devices that make the request fit
-  on an eligible host, booting ones first. It does nothing when a warm device of the
-  request's own image and size on that host will serve it, or when capacity already being
-  released is enough. A request larger than the host's whole limit does not hold its
-  pool.
-- A host with such a request is not refilled, so the freed capacity goes to the request.
-- Requests of other kinds (`linux-lease`, `model-job`) wait on a runner-domain budget.
-  They press every host that is [mapped to a physical domain](infrastructure.md#host-and-runner-physical-budget):
-  its warm devices are given up and it is not refilled while they wait. This is coarse;
-  the pool does not know which domain such a request needs.
+The pool gives up only the devices needed on one eligible host, starting with unresponsive
+devices, then booting ones, then the oldest ready devices. It holds back refills when
+pending removals can serve the request. A ready or recently booting pool device of the
+same image and size can serve the request directly. For Linux leases and model jobs, the
+pool checks eligible runner domains with a physical mapping to a host.
 
 The given-up device's capacity is free only after its proven removal. Direct
 `/v1/leases` acquisition does not wait and therefore reclaims nothing: it adopts a ready
@@ -204,7 +201,12 @@ never returns to the pool.
 A failed boot (an error, a stop or the 300-second timeout while `booting`) is counted per
 host and lease image. The next attempt waits 15 seconds, then 30, 60 and so on, to at most
 10 minutes. A device that becomes ready resets the count. The last error and its time
-stay visible in the pool state.
+stay visible in the pool state. A device that stops passing readiness checks is withheld
+immediately and retired after 60 seconds if it stays unready.
+
+An unproven removal pauses new boots for that image on that host and retains the
+reservation. The target reports `paused.reason: "removal_unproven"` with the machine ID.
+A missing, stale or incompatible baseline also pauses the target.
 
 ### Restart and loss
 
@@ -255,7 +257,9 @@ lease that uses it: apps, accounts, tokens, settings and device identifiers. Eve
 made from it starts with the same identity. Canaveral does not inspect or clean that
 content. Reaching it is therefore deliberately narrow:
 
-- Only administrators save and remove baselines, and only they can list them.
+- Administrators can list and remove baselines. An administrator saves a device their
+  account owns. The operator credential can save a device that has no user owner.
+  The receipt records `savedBy` and, for removal, `removedBy`.
 - Only a pinned template names a baseline, by name, revision and digest. That reference is
   part of the template's immutable public definition, so pointing at another baseline
   needs a new template revision.
@@ -347,10 +351,10 @@ Every device of that image, cold or warm, is a fresh AVD from `avdmanager` that 
 its own copy of the baseline's files before first boot. The copy is a copy-on-write clone
 where the filesystem has one; otherwise each file is copied and its digest rechecked in
 the same pass. The stored files' full digests are verified once per runner process and
-again whenever a file's identity changes. Each copied qcow2 overlay is then pointed at its
-own copied base image with the SDK's `qemu-img rebase -u`, when the SDK has that tool,
-because an overlay records its backing file by path and the saved one names the device it
-was captured from. The device then goes through the ordinary supervised launch and
+again whenever a file's identity changes. Each copied qcow2 overlay must resolve to its own copied base image. The runner uses
+`qemu-img rebase -u` when the overlay records the source device's path and reads the
+backing path again before booting. Unsupported overlays, missing tools and failed
+verification stop the clone. Partial copies are journaled for device cleanup. The device then goes through the ordinary supervised launch and
 readiness checks. A lease writes only to its own copy, which is destroyed with it.
 
 ### Removing
@@ -432,8 +436,7 @@ Known limits of the implementation:
 - Clones of one baseline share the guest's identifiers and accounts.
 - Warm devices appear in the administrator machine list. The dashboard has no warm pool
   or baseline view and offers its usual actions on them, which the controller refuses.
-- Contention from `linux-lease` and `model-job` requests is coarse (see above), and a
-  direct `/v1/leases` acquisition reclaims nothing.
+- A direct `/v1/leases` acquisition reclaims nothing.
 - A retired or adopted warm device leaves a machine tombstone in the controller
   database, like every lease. Tombstones are not pruned.
 - A lost runner can leave a warm device running for up to its maximum age.

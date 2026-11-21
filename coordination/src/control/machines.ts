@@ -78,6 +78,12 @@ export function machineLeaseEligible(host: Json, image: Json): boolean {
     return host.leaseImages.some((entry: Json) => equal(entry, reference));
   } catch (error) { if (error instanceof ServiceError) return false; throw error; }
 }
+/** The size a request gets from an image, or undefined when it breaks the image's minimum or its
+ * memory step. One rule for admission and for anything that predicts an admission. */
+export function placementSize(image: Json, overrides: Partial<Resources>, preset?: { minimum: Resources; defaults: Resources } | null): Resources | undefined {
+  const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...overrides };
+  return size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key]) ? size : undefined;
+}
 export function validateOffer(value: unknown): Json {
   const input = object(value);
   const result: Json = { name: text(input.name, "host name"), capacity: machineResources(input.capacity), provider: text(input.provider, "provider") };
@@ -438,30 +444,47 @@ export class MachineStore implements ControlModule {
     if (leased && request.blueprintId) failure("Application leases require their approved image policy, not a machine blueprint.", 400);
     if (request.hostId) requireHostAdmission(db, request.hostId);
     const preset = request.blueprintId ? blueprint(db, request.blueprintId, request.blueprintRevision) : null;
-    const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
-    for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
-      if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
-      const advertised = persistedOffer(host.offer); if (!advertised) continue;
-      const used = this.used(db, String(host.id)), remaining = this.remainingCapacity(db, String(host.id));
-      const limits = this.limits(db, host);
-      const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
-      for (const image of advertised.templates) {
-        if (leased && !machineLeaseEligible(advertised, image)) continue;
-        // A baseline-backed image is placed only where the host stores that exact, unstale baseline.
-        // Leases reach it through their application's allowlist; other callers need administrator authority.
-        if (image.baseline && (!baselines || !baselineUsable(db, String(host.id), image))) continue;
-        if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
-        const size: Resources = { ...(preset?.defaults ?? image.defaults ?? image.minimum), ...request.resources };
-        if (size.memoryMiB % (image.memoryStepMiB ?? 1) === 0 && resourceKeys.every(key => (preset?.minimum ?? image.minimum)[key] <= size[key] && size[key] <= remaining[key])) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
-      }
-    }
+    const candidates = this.placements(db, request, leased, baselines, preset);
     if (!candidates.length) failure("No online accepting host offers this template and enough unreserved capacity.", 409);
     if (!preset && !request.templateRevision && new Set(candidates.map(c => c.image.revision)).size > 1) failure("Multiple template revisions are available; choose templateRevision explicitly.", 409);
-    candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
     const selected = candidates[0]!;
 
     db.prepare("INSERT INTO machines(id,request,host,template,desired,observed,detail,updated,intent,owner) VALUES (?,?,?,?,'running','pending','',?,?,?)").run(id, JSON.stringify({ ...request, ...(preset ? { templateId: selected.image.id, templateRevision: selected.image.revision, arch: selected.image.arch } : {}), resources: selected.size }), selected.host.id!, JSON.stringify(selected.image), this.store.clock(), JSON.stringify(request), ownerId);
     return this.machine(db, db.prepare("SELECT * FROM machines WHERE id=?").get(id)!, true);
+  }
+  /** Every host and image that would take this validated request, best first. This is the one
+   * placement rule: host health, admission and eligibility, the image's minimum and memory step, a
+   * usable baseline of the right data size, and unreserved capacity. Admission calls it as it is.
+   * `spare` asks what would be placed if a host had that much more (or less) unreserved capacity,
+   * for predicting an admission; it never changes what admission itself decides. */
+  placements(db: DatabaseSync, request: Json, leased: boolean, baselines: boolean, preset: { image: Json; minimum: Resources; defaults: Resources } | null = null, spare?: (hostId: string) => Resources): { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] {
+    const candidates: { score: PlacementScore; host: MachineRow; image: Json; size: Resources }[] = [];
+    for (const host of db.prepare("SELECT * FROM hosts WHERE enabled=1 ORDER BY id").all()) {
+      if (!this.healthReady(db, String(host.id)) || this.store.clock() - Number(host.seen) >= this.leaseSeconds || (request.hostId ?? host.id) !== host.id || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(host.id!))) continue;
+      const advertised = persistedOffer(host.offer); if (!advertised) continue;
+      const reserved = this.used(db, String(host.id)), remaining = { ...this.remainingCapacity(db, String(host.id)) }, extra = spare?.(String(host.id));
+      // A prediction treats the spare capacity as no longer reserved, for the fit and for the score alike.
+      const used = extra ? Object.fromEntries(resourceKeys.map(key => [key, Math.max(0, reserved[key] - extra[key])])) as unknown as Resources : reserved;
+      if (extra) for (const key of resourceKeys) remaining[key] += extra[key];
+      const limits = this.limits(db, host);
+      const capacity = physicalBudget(db, { hostId: String(host.id) })?.capacity ?? Object.fromEntries(resourceKeys.map(key => [key, Math.min(advertised.capacity[key], limits[key])])) as unknown as Resources;
+      for (const image of advertised.templates) {
+        if (leased && !machineLeaseEligible(advertised, image)) continue;
+        if (preset ? !equal(image, preset.image) : (image.id !== request.templateId || (request.arch ?? image.arch) !== image.arch || (request.templateRevision ?? image.revision) !== image.revision)) continue;
+        const size = placementSize(image, request.resources, preset);
+        if (!size) continue;
+        // A baseline-backed image is placed only where the host stores that exact, unstale baseline,
+        // saved with the data size this device would get. Leases reach it through their application's
+        // allowlist; other callers need administrator authority.
+        if (image.baseline && (!baselines || !baselineUsable(db, String(host.id), image, size.diskGiB))) continue;
+        if (!resourceKeys.every(key => size[key] <= remaining[key])) continue;
+        // Admission scores every fitting candidate as before. A prediction on an overcommitted host
+        // can pass the clamped fit and still not be a valid reservation; it is then no candidate.
+        if (!extra) candidates.push({ score: placementScore(capacity, used, size), host, image, size });
+        else try { candidates.push({ score: placementScore(capacity, used, size), host, image, size }); } catch (error) { if (!(error instanceof ServiceError)) throw error; }
+      }
+    }
+    return candidates.sort((a, b) => comparePlacementScore(a.score, b.score) || (String(a.host.id) < String(b.host.id) ? -1 : String(a.host.id) > String(b.host.id) ? 1 : 0));
   }
   enable(id: string, enabled: unknown, req: ControlRequest): Json {
     return this.transaction(db => {

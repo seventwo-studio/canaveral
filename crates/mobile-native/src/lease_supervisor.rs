@@ -302,6 +302,17 @@ pub fn advance(current: &Authorization, next: &Authorization, now: f64) -> Autho
     }
 }
 
+/// A warm hold is never renewed: whatever is published for it, its deadline only ever
+/// shortens and a fence is sticky. No revision extends a hold, so the lifetime a lost
+/// runner depends on cannot be lengthened by anything written after the launch.
+pub fn hold(current: &Authorization, next: &Authorization) -> Authorization {
+    Authorization {
+        revision: current.revision,
+        deadline: current.deadline.min(next.deadline),
+        fenced: current.fenced || next.fenced,
+    }
+}
+
 fn private_directory(path: &str) -> Result<PathBuf> {
     let dir = PathBuf::from(path);
     let meta = std::fs::symlink_metadata(&dir)?;
@@ -726,7 +737,10 @@ fn watch(
             *current = next.terms;
             continue;
         }
-        *current = advance(current, &next.terms, now);
+        *current = match identity.owner {
+            Owner::Lease(_) => advance(current, &next.terms, now),
+            Owner::Warm(_) => hold(current, &next.terms),
+        };
         if current.fenced {
             return "fenced";
         }
@@ -785,6 +799,24 @@ mod tests {
         );
         assert!(advance(&current, &auth(1, 300.0, true), 50.0).fenced);
         assert!(advance(&auth(2, 100.0, true), &auth(3, 300.0, false), 50.0).fenced);
+    }
+    #[test]
+    fn a_warm_hold_is_never_extended_by_any_revision() {
+        let current = auth(1, 100.0, false);
+        // A lease would accept this renewal; a hold does not.
+        assert_eq!(
+            advance(&current, &auth(2, 500.0, false), 50.0).deadline,
+            500.0
+        );
+        assert_eq!(
+            hold(&current, &auth(2, 500.0, false)),
+            auth(1, 100.0, false)
+        );
+        assert_eq!(hold(&current, &auth(1, 500.0, false)).deadline, 100.0);
+        // It can only be shortened or fenced, and a fence stays.
+        assert_eq!(hold(&current, &auth(9, 40.0, false)).deadline, 40.0);
+        assert!(hold(&current, &auth(1, 100.0, true)).fenced);
+        assert!(hold(&auth(1, 100.0, true), &auth(2, 500.0, false)).fenced);
     }
     #[test]
     fn authorization_binds_assignment_owner_and_boot() {
@@ -1055,6 +1087,30 @@ mod tests {
         assert_eq!(stopped["groupAbsent"], true);
         assert_eq!(record(&dir, FENCED)["warmId"], HOLD);
         assert_eq!(status(&path).unwrap(), "free");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_later_deadline_published_for_a_warm_hold_does_not_keep_the_device_alive() {
+        let dir = storage("warm-extend");
+        let path = dir.to_str().unwrap().to_owned();
+        let start = real_clock().unwrap();
+        publish(&dir, ("warmId", HOLD), 1, start + 0.8, false);
+        let prepared = prepare(&path, &launch(&dir, ("warmId", HOLD)), real_clock).unwrap();
+        let worker = std::thread::spawn(move || run(prepared, real_clock, |_| {}));
+        wait_for("the supervisor record", || dir.join(SUPERVISOR).exists());
+        let pid = record(&dir, SUPERVISOR)["childPid"].as_i64().unwrap() as i32;
+        // Something rewrites the hold with a newer revision and a deadline a minute away.
+        publish(&dir, ("warmId", HOLD), 7, start + 60.0, false);
+        assert_eq!(worker.join().unwrap(), 0);
+        assert!(
+            real_clock().unwrap() < start + 10.0,
+            "stopped at the original deadline"
+        );
+        assert!(!group_alive(pid));
+        let stopped = record(&dir, STOPPED);
+        assert_eq!(stopped["reason"], "expired");
+        assert_eq!(stopped["warmId"], HOLD);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

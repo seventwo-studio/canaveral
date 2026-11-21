@@ -163,8 +163,8 @@ export class AndroidProvider extends MobileProvider {
     const saved = readJson(receipt), fingerprint = digest(this.binding(machine, image));
     if (!saved) {
       if (fs.existsSync(avd) || fs.existsSync(path.join(avds, this.name(machine) + ".ini")) || readJson(path.join(storage, "avd-create-started.json"))) throw new ServiceError("Partial or foreign AVD exists; inspect before provisioning again.");
-      // A missing, stale, mismatched or corrupt baseline is refused before anything is created, so
-      // the refusal leaves no partial device behind.
+      // A missing, stale or mismatched baseline, or one whose stored files fail their digests, is
+      // refused here, before anything is created. A failure later, inside the copy, is journaled below.
       if (image.baseline != null) await this.baselineStore().check(baselineReference(image.baseline), this.baselineBinding(machine, image));
       saveJson(path.join(storage, "avd-create-started.json"), { name: this.name(machine), fingerprint });
       const device = object(image.device);
@@ -173,12 +173,39 @@ export class AndroidProvider extends MobileProvider {
       const configPath = path.join(avd, "config.ini"), config = readRegular(configPath, 1048576);
       const fd = fs.openSync(configPath, fs.constants.O_APPEND | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
       try { if (!fs.fstatSync(fd).isFile()) throw new ServiceError("AVD configuration must be regular."); fs.writeSync(fd, Buffer.concat([Buffer.from(config.length && config.at(-1) === 10 ? "" : "\n"), Buffer.from(`disk.dataPartition.size=${integer(object(machine.resources).diskGiB, "disk", 1, 2 ** 30)}G\n`)])); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      // A baseline-backed template gives every device its own copy of the saved state before first boot.
-      if (image.baseline != null) saveJson(path.join(storage, "baseline-clone.json"), await this.cloneBaseline(machine, image, avd));
       saveJson(receipt, { name: this.name(machine), fingerprint });
     } else if (saved.name !== this.name(machine) || saved.fingerprint !== fingerprint) throw new ServiceError("AVD creation receipt belongs to another assignment.");
     if (!fs.lstatSync(avd).isDirectory() || fs.lstatSync(avd).isSymbolicLink()) throw new ServiceError("Owned AVD data is missing; it was not recreated.");
+    // A baseline-backed template gives every device its own copy of the saved state before first boot.
+    if (image.baseline != null) await this.applyBaseline(machine, image, storage, avd);
     return avd;
+  }
+  /** Copies the pinned baseline into an AVD whose creation is already confirmed, under its own
+   * journal. The copy writes only inside this device's AVD, which the creation receipt proves is
+   * this assignment's, so a failed or interrupted copy is removed with the device like any owned
+   * storage. It is never resumed and never booted: the journal stays short of `complete`. */
+  private async applyBaseline(machine: RecordValue, image: RecordValue, storage: string, avd: string): Promise<void> {
+    const wanted = baselineReference(image.baseline), journalPath = path.join(storage, "baseline-clone.json"), journal = readJson(journalPath);
+    if (journal) {
+      if (journal.state === "complete" && journal.name === wanted.name && journal.revision === wanted.revision && journal.digest === wanted.digest) return;
+      throw new ServiceError(typeof journal.detail === "string" ? journal.detail : "The baseline copy into this device was interrupted. The device is removed, never booted.", 409, { code: "baseline_clone_incomplete" });
+    }
+    saveJson(journalPath, { version: 1, ...wanted, state: "copying" });
+    let result: RecordValue;
+    try { result = await this.cloneBaseline(machine, image, avd); }
+    catch (error) {
+      const detail = error instanceof ServiceError && error.code.startsWith("baseline_") ? error.message : "The baseline could not be copied into this device. The device is removed, never booted.";
+      // The copying state already forbids a boot if this record cannot be written.
+      try { saveJson(journalPath, { version: 1, ...wanted, state: "failed", detail }); } catch { /* Keep the copying state. */ }
+      throw new ServiceError(detail, 409, { code: "baseline_clone_failed" });
+    }
+    saveJson(journalPath, { version: 1, ...wanted, state: "complete", files: result.files, bytes: result.bytes, reflinked: result.reflinked, relocated: result.relocated });
+  }
+  /** AVD creation was started for this assignment and never confirmed. The runner cannot retry it
+   * and cannot remove it on its own: an interrupted avdmanager may still be writing. */
+  private creationUnconfirmed(machine: RecordValue, storage: string): boolean {
+    if (readJson(path.join(storage, "avd-created.json"))) return false;
+    return !!readJson(path.join(storage, "avd-create-started.json")) || fs.existsSync(path.join(storage, "device.avd")) || fs.existsSync(path.join(this.environment().ANDROID_AVD_HOME!, this.name(machine) + ".ini"));
   }
   async reconcile(machine: RecordValue, supplied: RecordValue, folder: string): Promise<RecordValue> {
     this.executionAllowed(machine);
@@ -413,8 +440,13 @@ export class AndroidProvider extends MobileProvider {
       const helper = this.leaseHelper();
       try { await this.provision(machine, image, storage); }
       catch (error) {
-        // A refused baseline is a definite outcome: no device exists, and the lease or warm boot fails with the reason.
+        // A refused or failed baseline is a definite outcome: nothing was booted, and the lease or
+        // warm boot fails with the reason. A refusal before creation left nothing; a failure inside
+        // the copy left a partial copy in this device's own AVD, which is removed with the device.
         if (error instanceof ServiceError && error.code.startsWith("baseline_")) return { state: "error", detail: error.message };
+        // Unconfirmed AVD creation never recovers by retrying, so it is reported as the failure it
+        // is. Its removal stays blocked until an operator has inspected the storage.
+        if (this.creationUnconfirmed(machine, storage)) return { state: "error", detail: "The device's AVD creation did not complete and its outcome is unconfirmed. Inspect its storage on the host before it can be removed." };
         throw error;
       }
       return this.withPort(storage, async port => {
@@ -705,18 +737,21 @@ export class AndroidProvider extends MobileProvider {
   private baselineBinding(machine: RecordValue, image: RecordValue): BaselineBinding {
     return { arch: String(image.arch), device: object(image.device) as Record<string, string>, diskGiB: integer(object(machine.resources).diskGiB, "disk", 1, 2 ** 30) };
   }
-  /** Copies the pinned baseline into a fresh AVD, then points each copied qcow2 overlay at its own
-   * copied base image. An overlay records its backing file by path, and the saved one still names the
-   * device it was captured from. Implementation limit: whether the emulator needs this, and whether
-   * a device boots correctly from copied user data, is unverified on a real emulator. */
+  /** The SDK's own qemu-img, or undefined when this host has none. */
+  private overlayTool(): string | undefined {
+    const tool = path.join(text(this.config.androidSDK, "androidSDK"), "emulator", "qemu-img");
+    return fs.existsSync(tool) ? tool : undefined;
+  }
+  /** Copies the pinned baseline into a fresh AVD. A copied qcow2 overlay still records the device it
+   * was captured from as its backing file, so each is rebased onto its own copied base image, and
+   * the store reads the recorded path back. Without the tool, or if any overlay would still read a
+   * file outside this device, the clone is refused. Implementation limit: only the recorded path is
+   * checked; whether a real emulator boots from the rebased copy is unverified. */
   private async cloneBaseline(machine: RecordValue, image: RecordValue, avd: string): Promise<RecordValue> {
-    const cloned = await this.baselineStore().clone(baselineReference(image.baseline), this.baselineBinding(machine, image), avd);
-    const files = cloned.files as string[], tool = path.join(text(this.config.androidSDK, "androidSDK"), "emulator", "qemu-img"), relocated: string[] = [];
-    if (fs.existsSync(tool)) for (const overlay of files.filter(name => name.endsWith(".qcow2") && files.includes(name.slice(0, -6)))) {
-      await this.run([tool, "rebase", "-u", "-f", "qcow2", "-F", "raw", "-b", path.join(avd, overlay.slice(0, -6)), path.join(avd, overlay)], { timeoutMs: 60000 });
-      relocated.push(overlay);
-    }
-    return { name: cloned.name, revision: cloned.revision, digest: cloned.digest, files: files.length, bytes: cloned.bytes, reflinked: cloned.reflinked, relocated };
+    const tool = this.overlayTool();
+    const rebase = tool === undefined ? undefined : async (overlay: string, base: string): Promise<void> => { await this.run([tool, "rebase", "-u", "-f", "qcow2", "-F", "raw", "-b", base, overlay], { timeoutMs: 60000 }); };
+    const cloned = await this.baselineStore().clone(baselineReference(image.baseline), this.baselineBinding(machine, image), avd, rebase);
+    return { files: (cloned.files as string[]).length, bytes: cloned.bytes, reflinked: cloned.reflinked, relocated: cloned.relocated };
   }
   /** Saves the disk state of a stopped, account-owned device as a new immutable baseline. A leased
    * or warm device is never captured, and neither is one with any sign of a running emulator. */
@@ -735,7 +770,7 @@ export class AndroidProvider extends MobileProvider {
       const stat = fs.lstatSync(avd, { throwIfNoEntry: false });
       if (!created || created.name !== this.name(machine) || created.fingerprint !== digest(this.binding(machine, image)) || !stat?.isDirectory() || fs.realpathSync(avd) !== avd) throw new ServiceError("The device has no owned AVD to capture.", 409, { code: "baseline_source_unsupported" });
       if (!authorized()) throw new ServiceError("Baseline work lost its authorization.", 410);
-      return { ...await this.baselineStore().save(request, { avd, machineId: uuid(machine.id), ...this.baselineBinding(machine, image) }, authorized) };
+      return { ...await this.baselineStore().save(request, { avd, machineId: uuid(machine.id), rebase: this.overlayTool() !== undefined, ...this.baselineBinding(machine, image) }, authorized) };
     });
   }
   removeBaseline(request: { id: string; name: string; revision: string }): RecordValue { return this.baselineStore().remove(request); }
