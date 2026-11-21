@@ -9,12 +9,15 @@ import { LinuxLeases } from "./linux-leases.ts";
 import { ModelJobs } from "./model-jobs.ts";
 import type { IdentityCommand, IdentityReply } from "./identity-protocol.ts";
 import { SqliteStore } from "./sqlite.ts";
+import { installObservability } from "./observability.ts";
 
 if (!parentPort) throw new Error("Identity persistence requires its owned worker channel.");
 const port = parentPort;
 const administrator = secret(workerData.adminToken);
 const expected = createHash("sha256").update(administrator, "ascii").digest();
 const store = new SqliteStore(workerData.path as string);
+// This worker also writes the lease, request and model ledgers; its commits stamp and project their events.
+installObservability(store);
 const accounts = new Accounts(store), applications = new ConsumerIdentities(store);
 const runners = workerData.controllerId === undefined ? undefined : new RunnerEnrollment(store, workerData.controllerId as string);
 const jobs = new ModelJobs(store, applications, runners);

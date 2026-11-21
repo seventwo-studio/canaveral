@@ -1,3 +1,4 @@
+import { dropEventTriggers } from "../src/events.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -166,7 +167,11 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
     inspectDomain, acquire, rows,
     clock(seconds: number) { writeFileSync(clockFile, String(seconds)); },
     leaseClient(leaseId: string, leaseKey: string) { return new LeaseClient({ baseUrl: `http://127.0.0.1:${port()}`, leaseId, leaseKey, allowLoopbackHttp: true }); },
-    async restart() { await primary.kill(); primary = await start(); },
+    async restart(editState?: () => void) {
+      await primary.kill();
+      editState?.();
+      primary = await start();
+    },
   };
 }
 
@@ -599,8 +604,14 @@ test("additive failure-reason migration preserves existing lease and reservation
   const f = await fixture(t), app = await f.application(); await f.grant(app.id);
   const domain = await f.domain(VM), runner = await f.enroll(); await f.approve(runner, domain);
   const {lease} = await app.client().acquireLease(f.acquire());
-  const db = new DatabaseSync(f.statePath); db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason'); db.close();
-  await f.restart();
+  // Simulate the older schema between controller runs. Its event triggers did not exist yet.
+  await f.restart(() => {
+    const db = new DatabaseSync(f.statePath);
+    try {
+      dropEventTriggers(db);
+      db.exec('ALTER TABLE linux_leases DROP COLUMN failure_reason');
+    } finally { db.close(); }
+  });
   assert.equal((await app.client().inspectLease(lease.id)).state, 'provisioning');
   assert.equal((await f.inspectDomain(domain)).reservations, 1);
   assert.equal(f.rows('SELECT failure_reason FROM linux_leases')[0]!.failure_reason, null);

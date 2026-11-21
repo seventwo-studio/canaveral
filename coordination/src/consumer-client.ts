@@ -1,3 +1,4 @@
+import { serverSentEvents } from "./sse.ts";
 import type { FileTransfer, FileStep, FileRequest, TransferIntent } from "./linux-transfer-sdk.ts";
 export { uploadWorkspaceFile, downloadWorkspaceFile } from "./linux-transfer-sdk.ts";
 export type { FileTransfer, FileStep, FileRequest, TransferIntent, TransferJournal, TransferWait } from "./linux-transfer-sdk.ts";
@@ -69,6 +70,66 @@ function waitingRequest(value: unknown, id?: string): WaitingRequest {
       (value["state"] === "admitted" && (value["target"] !== value["id"] || value["admittedAt"] === null)) ||
       !(value["target"] === null || value["target"] === value["id"])) throw new TypeError("waiting request");
   return value as unknown as WaitingRequest;
+}
+/** One entry of the application's own event history. `sequence` is the resume cursor. */
+export interface ControllerEvent {
+  sequence: number; at: string; kind: string; applicationId?: string; leaseId?: string; requestId?: string; machineId?: string; data: Record<string, unknown>;
+}
+/** `cursor` is the `after` value for the next page. `truncated` means retention removed history after the supplied cursor. */
+export interface EventPage { events: ControllerEvent[]; cursor: number; more: boolean; truncated: boolean }
+export interface EventFilter { kinds?: string[]; leaseId?: string; requestId?: string }
+export interface EventListOptions extends EventFilter { after?: number; tail?: number; since?: string; limit?: number }
+export interface EventFollowOptions extends EventFilter {
+  after?: number; signal?: AbortSignal;
+  /** Called when retention removed history after `after`. Supplying it accepts the gap; without it the stream throws. */
+  onTruncated?: (gap: { after: number }) => void;
+  /** Called when the stream reports how far it has read without an event, so a quiet follower can save a fresh cursor. */
+  onCursor?: (cursor: number) => void;
+}
+/** An ordinary end of a followed stream. Continue with `after: cursor`. */
+export interface EventStreamEnd { reason: "stream_lifetime" | "controller_closing" | "aborted"; cursor: number | undefined }
+export interface UsageDistribution { p50: number | null; p95: number | null; samples: number }
+export interface UsageRow {
+  key: string; label?: string;
+  requests?: { submitted: number; admitted: number; cancelled: number; expired: number; rejected: number; waiting: number; waitSeconds: UsageDistribution };
+  leases: { admitted: number; ready: number; released: number; expired: number; failed: number; active: number; cleanupBlocked: number; deviceSeconds: number;
+    timeToReadySeconds: UsageDistribution; holdSeconds: UsageDistribution };
+}
+export interface UsageReport {
+  from: string; to: string; groupBy: "application" | "template" | "platform"; generatedAt: string; applicationId?: string;
+  retention: { requestRecords: string; leaseLedgerSeconds: number; leaseLedgerStartedAt: string | null }; rows: UsageRow[]; totals: UsageRow;
+}
+function controllerEvent(value: unknown): ControllerEvent {
+  if (!isRecord(value) || !Number.isSafeInteger(value["sequence"]) || Number(value["sequence"]) < 1 || typeof value["kind"] !== "string"
+    || typeof value["at"] !== "string" || !Number.isFinite(Date.parse(value["at"])) || !isRecord(value["data"])) throw new TypeError("event");
+  return value as unknown as ControllerEvent;
+}
+function eventPage(value: unknown): EventPage {
+  if (!isRecord(value) || !Array.isArray(value["events"]) || value["events"].length > 500 || !Number.isSafeInteger(value["cursor"]) || Number(value["cursor"]) < 0
+    || typeof value["more"] !== "boolean" || typeof value["truncated"] !== "boolean") throw new TypeError("event page");
+  return { events: value["events"].map(controllerEvent), cursor: value["cursor"] as number, more: value["more"], truncated: value["truncated"] };
+}
+function eventQuery(options: EventFilter & { after?: number; tail?: number; since?: string; limit?: number }): string {
+  const query = new URLSearchParams();
+  const whole = (value: unknown, what: string, max: number) => {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw new ConsumerConfigurationError(`${what} must be a whole number.`, "invalid_request");
+    return String(value);
+  };
+  if (options.after !== undefined) query.set("after", whole(options.after, "after", Number.MAX_SAFE_INTEGER));
+  if (options.tail !== undefined) query.set("tail", whole(options.tail, "tail", 500));
+  if (options.limit !== undefined) query.set("limit", String(positive(options.limit, "limit", 500)));
+  if (options.since !== undefined) {
+    if (typeof options.since !== "string" || !options.since.endsWith("Z") || !Number.isFinite(Date.parse(options.since))) throw new ConsumerConfigurationError("since must be UTC RFC3339.", "invalid_request");
+    query.set("since", options.since);
+  }
+  for (const kind of options.kinds ?? []) {
+    if (typeof kind !== "string" || !/^[a-z]+\.(?:[a-z_]+|\*)$/.test(kind)) throw new ConsumerConfigurationError("kinds must be event kinds or families such as lease.*.", "invalid_request");
+    query.append("kind", kind);
+  }
+  if (options.leaseId !== undefined) query.set("lease", uuid(options.leaseId, "leaseId"));
+  if (options.requestId !== undefined) query.set("request", uuid(options.requestId, "requestId"));
+  const text = query.toString();
+  return text ? "?" + text : "";
 }
 /** Fresh lease-scoped key. Store privately and never log it. */
 export interface LeaseCredential { id: string; credential: string }
@@ -358,6 +419,50 @@ export class Transport {
     throw this.#serviceError(status, json, mutating, requestId, reply.response, invalid);
   }
 
+  /** Opens a server-sent event stream. The request timeout bounds the wait for the reply headers; an
+   * open stream then lasts until the controller ends it, the caller aborts, or the connection fails.
+   * A refusal is read as the same structured error as any other reply. Nothing is retried. */
+  async stream(path: string, signal?: AbortSignal): Promise<IncomingMessage> {
+    const options: https.RequestOptions = {
+      protocol: this.#base.protocol, hostname: this.#base.hostname.replace(/^\[|\]$/g, ""), port: this.#base.port || undefined,
+      method: "GET", path: this.#prefix + path, agent: false,
+      headers: { Accept: "text/event-stream", Authorization: "Bearer " + this.#credential, Connection: "close", "User-Agent": "canaveral-consumer-sdk" },
+      ...(this.#secure ? { minVersion: "TLSv1.2" as const, rejectUnauthorized: true, ...(this.#ca !== undefined ? { ca: this.#ca } : {}) } : {}),
+    };
+    return new Promise<IncomingMessage>((resolve, reject) => {
+      let settled = false, verified = !this.#secure;
+      const request = (this.#secure ? https : http).request(options);
+      const abort = () => { request.destroy(); if (!settled) { settled = true; clearTimeout(timer); reject(new ConsumerTransportError("The event stream was aborted.", "connection_failed", {})); } };
+      const fail = (error: ConsumerError) => { if (!settled) { settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); request.destroy(); reject(error); } };
+      const timer = setTimeout(() => fail(new ConsumerTransportError("The request timed out.", "timeout", {})), this.#timeoutMs);
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener("abort", abort, { once: true });
+      request.on("socket", socket => { if (this.#secure) socket.once("secureConnect", () => { verified = true; }); });
+      request.on("error", (error: NodeJS.ErrnoException) => fail(new ConsumerTransportError("The connection failed.",
+        !verified && TLS_CODES.test(error.code ?? "") ? "tls_verification_failed" : "connection_failed", {})));
+      request.on("response", response => {
+        const status = response.statusCode ?? 0;
+        const invalid = (message: string, code = "response_invalid") => new ConsumerProtocolError(message, code, status, {});
+        if (status >= 300 && status < 400) { fail(invalid("The controller replied with a redirect, which is refused.", "redirect_refused")); return; }
+        if (status === 200) {
+          if (!/^text\/event-stream\s*(;|$)/i.test(String(response.headers["content-type"] ?? ""))) { fail(invalid("The reply is not an event stream.", "content_type_invalid")); return; }
+          settled = true; clearTimeout(timer);
+          response.once("close", () => signal?.removeEventListener("abort", abort));
+          resolve(response); return;
+        }
+        const chunks: Buffer[] = []; let received = 0;
+        response.on("data", (chunk: Buffer) => { received += chunk.length; if (received > 65536) fail(invalid("The reply exceeds the response size limit.", "response_too_large")); else chunks.push(chunk); });
+        response.on("error", () => fail(new ConsumerTransportError("The reply was interrupted.", "connection_failed", {})));
+        response.on("end", () => {
+          let json: unknown;
+          try { json = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))); } catch { fail(invalid("The reply is not valid JSON.")); return; }
+          fail(this.#serviceError(status, json, false, undefined, response, invalid));
+        });
+      });
+      request.end();
+    });
+  }
+
   #serviceError(status: number, json: unknown, mutating: boolean, requestId: string | undefined,
     response: IncomingMessage, invalid: (message: string) => ConsumerProtocolError): ConsumerError {
     // Only a 4xx structured reply is a definite rejection; anything else leaves a mutation uncertain.
@@ -540,6 +645,87 @@ export class ConsumerClient extends LeaseOperations {
   }
   async catalogue(): Promise<Catalogue> {
     return (await parsed(this.#transport, "GET", "/v1/environments/templates", undefined, [200], false, undefined, catalogue)).value;
+  }
+  /** One page of this application's own events, oldest first. Pass the returned `cursor` as `after` to continue. */
+  async listEvents(options: EventListOptions = {}): Promise<EventPage> {
+    const o = exact(options, ["after", "tail", "since", "limit", "kinds", "leaseId", "requestId"], "Event options") as EventListOptions;
+    if (o.after !== undefined && o.tail !== undefined) throw new ConsumerConfigurationError("Use either after or tail.", "invalid_request");
+    return (await parsed(this.#transport, "GET", "/v1/events" + eventQuery(o), undefined, [200], false, undefined, eventPage)).value;
+  }
+  /** Follows this application's events live over one server-sent event stream. Without `after` it starts
+   * with the next event. It never reconnects.
+   *
+   * How it ends is always visible:
+   * - It returns an `EventStreamEnd` when the controller ends the stream in the ordinary way
+   *   (`stream_lifetime` after an hour, `controller_closing`) or when the caller aborts. A `for await` loop
+   *   simply finishes; follow again with `after` set to the returned `cursor` or the last `sequence` seen.
+   * - It throws `ConsumerServiceError` when the stream ends because the credential is no longer accepted
+   *   (`unauthenticated`, `forbidden`) or the controller reports `unavailable`.
+   * - It throws `ConsumerTransportError` when the connection drops without an end message.
+   * - When retention has removed history after `after`, it calls `onTruncated` and continues. Without that
+   *   handler it throws `events_truncated`, so a consumer is never left unaware that it may have missed events.
+   * Stop iterating, or abort the signal, to close the stream. */
+  async *followEvents(options: EventFollowOptions = {}): AsyncGenerator<ControllerEvent, EventStreamEnd, void> {
+    const o = exact(options, ["after", "kinds", "leaseId", "requestId", "signal", "onTruncated", "onCursor"], "Event options") as EventFollowOptions;
+    const { signal, onTruncated, onCursor, ...filter } = o;
+    for (const handler of [onTruncated, onCursor]) if (handler !== undefined && typeof handler !== "function") throw new ConsumerConfigurationError("Event handlers must be functions.", "invalid_request");
+    let cursor: number | undefined = filter.after, response: IncomingMessage;
+    // An abort is the caller's own decision at any point, including while the stream is still being opened.
+    try { response = await this.#transport.stream("/v1/events/stream" + eventQuery(filter), signal); }
+    catch (error) { if (signal?.aborted) return { reason: "aborted", cursor }; throw error; }
+    const stop = () => response.destroy();
+    signal?.addEventListener("abort", stop, { once: true });
+    const position = (data: unknown): void => { if (isRecord(data) && Number.isSafeInteger(data["cursor"]) && Number(data["cursor"]) >= 0) cursor = data["cursor"] as number; };
+    const invalid = () => new ConsumerProtocolError("The event stream sent a message outside the consumer contract.", "response_invalid", 200, {});
+    try {
+      for await (const message of serverSentEvents(response)) {
+        let data: unknown;
+        try { data = JSON.parse(message.data); } catch { throw invalid(); }
+        if (message.event === "open" || message.event === "cursor") { position(data); if (cursor !== undefined) onCursor?.(cursor); continue; }
+        if (message.event === "truncated") {
+          if (!onTruncated) throw new ConsumerServiceError("Retention removed events after this cursor; some history may have been missed. Pass onTruncated to continue from what remains.", "events_truncated", 410, { retryable: false });
+          onTruncated({ after: filter.after ?? 0 });
+          continue;
+        }
+        if (message.event === "end") {
+          position(data);
+          const reason = isRecord(data) ? data["code"] : undefined;
+          if (reason === "stream_lifetime" || reason === "controller_closing") return { reason, cursor };
+          if (reason === "unauthenticated") throw new ConsumerServiceError("The credential is no longer accepted; the event stream ended.", "unauthenticated", 401, { retryable: false });
+          if (reason === "forbidden") throw new ConsumerServiceError("The credential may no longer read these events; the event stream ended.", "forbidden", 403, { retryable: false });
+          throw new ConsumerServiceError("The controller ended the event stream; resume from the last sequence received.", "unavailable", 503, { retryable: true });
+        }
+        if (message.event !== undefined) continue;
+        let event: ControllerEvent;
+        try { event = controllerEvent(data); } catch { throw invalid(); }
+        cursor = event.sequence;
+        yield event;
+      }
+    } catch (error) {
+      if (error instanceof ConsumerError) throw error;
+      if (signal?.aborted) return { reason: "aborted", cursor };
+      throw new ConsumerTransportError("The event stream was interrupted; resume from the last sequence received.", "connection_failed", {});
+    } finally { signal?.removeEventListener("abort", stop); response.destroy(); }
+    if (signal?.aborted) return { reason: "aborted", cursor };
+    // The response ended without an end message: the connection was cut, not closed by the controller.
+    throw new ConsumerTransportError("The event stream ended without a closing message; resume from the last sequence received.", "connection_failed", {});
+  }
+  /** This application's own usage over a UTC range (default: the last 24 hours), grouped by application, template or platform. */
+  async usage(options: { from?: string; to?: string; groupBy?: "application" | "template" | "platform" } = {}): Promise<UsageReport> {
+    const o = exact(options, ["from", "to", "groupBy"], "Usage options"), query = new URLSearchParams();
+    for (const key of ["from", "to"] as const) if (o[key] !== undefined) {
+      if (typeof o[key] !== "string" || !o[key].endsWith("Z") || !Number.isFinite(Date.parse(o[key]))) throw new ConsumerConfigurationError(`${key} must be UTC RFC3339.`, "invalid_request");
+      query.set(key, o[key]);
+    }
+    if (o["groupBy"] !== undefined) {
+      if (!["application", "template", "platform"].includes(o["groupBy"] as string)) throw new ConsumerConfigurationError("groupBy must be application, template or platform.", "invalid_request");
+      query.set("groupBy", o["groupBy"] as string);
+    }
+    const text = query.toString();
+    return (await parsed(this.#transport, "GET", "/v1/usage" + (text ? "?" + text : ""), undefined, [200], false, undefined, value => {
+      if (!isRecord(value) || !Array.isArray(value["rows"]) || !isRecord(value["totals"]) || !isRecord(value["retention"]) || typeof value["from"] !== "string" || typeof value["to"] !== "string") throw new TypeError("usage");
+      return value as unknown as UsageReport;
+    })).value;
   }
   async listLeases(options: { after?: string } = {}): Promise<LeasePage> {
     const query = options.after === undefined ? "" : "?after=" + uuid(options.after, "after");

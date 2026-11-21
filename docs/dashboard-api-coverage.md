@@ -49,6 +49,7 @@ store; browser storage is not used.
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
 | Mobile video admission, inspection and closure | Configuration; owner capture in machine details (PNG screenshot, verified MP4 recording) |
 | Managed update releases and rollouts | Configuration |
+| Event log, usage reports, alert destinations and diagnosis (`/v1/admin/events`, `/v1/admin/usage`, `/v1/admin/alerts`, `/v1/admin/diagnosis`) | API and CLI only; not forwarded by the dashboard gateway |
 
 ## Credential-specific protocols
 
@@ -90,6 +91,26 @@ building or testing these screens.
 | `GET /v1/admin/model-jobs` | none | Up to 100 application model jobs, open first (oldest first), then recently closed, with queue state and no prompts or results |
 | `POST /v1/admin/requests/{id}/cancel` | `{id: mutationUUID}` | Cancel waiting intent, release its admitted lease or request its admitted model job's stop |
 | `POST /v1/admin/jobs/{id}/cancel` | `{id: mutationUUID}` | Request model/inference cancellation without releasing claimed reservations early |
+
+## Administrator observability routes
+
+These routes use the same administrator authority and authenticate before any
+lookup. They have no dashboard screen and the gateway does not forward them; use the
+API or the CLI. Reads never change controller state. Each recovery receipt above is
+also recorded as an `admin.intervention` event.
+
+| Method and path | Request | Effect |
+| --- | --- | --- |
+| `GET /v1/admin/events` | `after`, `tail`, `since`, `kind`, `limit`, subject filters | The durable [event log](events.md), oldest first |
+| `GET /v1/admin/events/kinds` | none | The event kind catalogue |
+| `GET /v1/admin/events/stream` | `after` or `Last-Event-ID`, `kind`, subject filters | Live follow as server-sent events |
+| `GET /v1/admin/usage` | `from`, `to`, `groupBy`, `format`, `application` | [Usage](usage.md) as JSON or CSV |
+| `GET /v1/admin/alerts/destinations` | none | [Alert](alerts.md) destinations without their URL path or secret |
+| `POST /v1/admin/alerts/destinations` | `{id, name, type, url, secret?, kinds?}` | Add a destination; idempotent by UUID |
+| `POST /v1/admin/alerts/destinations/{id}/remove` | `{}` | Remove it, erase its URL and secret, cancel unsent deliveries |
+| `POST /v1/admin/alerts/destinations/{id}/test` | `{id: requestUUID}` | One recorded test delivery, never retried |
+| `GET /v1/admin/alerts/deliveries` | `destination`, `state`, `limit` | Recent alert deliveries and their outcomes |
+| `GET /v1/admin/diagnosis` | none | Read-only findings for [`canaveral doctor`](doctor.md) |
 
 These endpoints require existing administrator authority: an operator credential
 or an active account with administrator scope. They authenticate before resource

@@ -13,6 +13,7 @@ import type { Binding, RunnerEnrollment } from "./enrollment.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { resources, ResourceDomains } from "./resource-domains.ts";
 import type { SqliteStore } from "./sqlite.ts";
+import { recordLeaseRefusal } from "./observability.ts";
 
 /** Execution backends that can host a Linux guest. The guest OS is always Linux. */
 export const BACKENDS = ["kubevirt", "appleVirtualization"] as const;
@@ -339,7 +340,8 @@ export class LinuxLeases {
   }
 
   acquire(token: string, value: unknown): { created: boolean; lease: unknown } {
-    return this.acquireAuthorized(value, db => this.applications.verify(db, token));
+    try { return this.acquireAuthorized(value, db => this.applications.verify(db, token)); }
+    catch (error) { recordLeaseRefusal(this.store, db => this.applications.verify(db, token).id, error, "linux", value); throw error; }
   }
   /** Internal queue entry; shares every validation, reservation and lifecycle rule with direct acquisition. */
   acquireForApplication(application: string, value: unknown) {
