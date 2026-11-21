@@ -201,6 +201,60 @@ controller process with its control worker, and the batching against a scripted
 control client. No native lease run exercised them, and the hold was not measured
 under a slow or busy control worker.
 
+### Administrator queue view
+
+`GET /v1/admin/queue` returns every application's waiting requests in the same
+attempt order, for an operator credential or an active account with administrator
+scope. It is a separate administrator projection: it never uses an application
+credential, and an application credential is refused. It takes no query. Reading
+it admits, cancels and expires no request and runs no admission pass. Like the
+system inventory, it first applies lease deadlines that have already passed.
+
+```json
+{
+  "observedAt": "2026-11-21T09:14:03.512Z", "limit": 500,
+  "requests": [{
+    "id": "3d0c0a0e-6d3b-4d8a-9a51-0e6a3f0f6f11", "applicationId": "9415f91b-569d-4d93-a09d-8f7f903a8463", "applicationName": "Build agent",
+    "kind": "lease", "position": 1, "reason": "capacity_unavailable", "priority": 0,
+    "createdAt": "2026-11-21T09:10:41.000Z", "deadline": null, "label": "checkout-flow",
+    "template": { "id": "pixel-8", "revision": "3", "arch": "arm64" }, "platform": "android"
+  }],
+  "waitingTotal": 1,
+  "leases": [{
+    "id": "b7682a27-b32e-472a-8a4d-f54a98a6d962", "ledger": "generic", "applicationId": "9415f91b-569d-4d93-a09d-8f7f903a8463", "applicationName": "Build agent",
+    "name": "nightly-run", "state": "ready", "createdAt": "2026-11-21T08:50:00.000Z", "expiresAt": "2026-11-21T09:20:00.000Z",
+    "template": { "id": "pixel-8", "revision": "3", "arch": "arm64" }, "platform": "android"
+  }],
+  "activeTotal": 1
+}
+```
+
+- `requests` holds the positioned requests first, in position order. The order is
+  computed for all applications in one statement from the same query the
+  application view uses, so both always agree. Model calls and requests past their
+  deadline have `position: null` and follow in arrival order.
+- `reason` is the stable code of the last refusal, or `null` when the request has
+  not been tried or the ledger holds something that is not a code.
+- `label` is the display name the caller put in the intent. `template` and
+  `platform` identify what a lease request asks for; a model call carries `model`
+  instead. The stored intent, resources, `source` and every credential are left
+  out.
+- `leases` are the provisioning and ready leases of both ledgers (`generic` or
+  `linux`), soonest `expiresAt` first, with the caller's label in `name`
+  (`null` when a workspace lease was acquired without one). Lease lifecycle is
+  refreshed before the read, as for the system inventory, so an expired lease is
+  not listed as active.
+- Each list holds at most `limit` rows. `waitingTotal` and `activeTotal` are the
+  full counts, so a reader can tell what a bounded reply left out.
+- `observedAt` is the controller's clock. Compute waiting time and time remaining
+  against it rather than against the reader's clock.
+
+Position here has the same meaning and the same limits as above: an order of
+attempts, not a promise. Use `POST /v1/admin/requests/{id}/cancel` to cancel a
+waiting request; see the [administrator recovery contract](dashboard-api-coverage.md#administrator-recovery-contract).
+Portable fixtures cover this view against the real request and lease ledgers. No
+native lease run exercised it.
+
 Administrators set `limits.maxWaitingRequests` (default 100, maximum 1000) and
 `limits.maxRequestPriority` (default 0, range 0..1000000) when creating an
 application. Existing policies use these defaults. Priority may be negative down

@@ -345,7 +345,9 @@ exit status 1.
   than that.
 - At startup the controller scans both lease ledgers once to seed the usage ledger
   with the leases that are active.
-- The dashboard does not show events. The dashboard gateway does not forward these
-  routes.
+- The dashboard's Activity page shows the administrator view by reading the list
+  route with its cursor; see [the dashboard contract](dashboard.md#queue-activity-and-usage).
+  The gateway forwards `/v1/admin/events` and `/v1/admin/events/kinds` only. It
+  does not forward either stream or the application routes.
 - Host liveness is judged from heartbeats, as elsewhere in the controller. An event
   says that the host stopped reporting. It does not say that its machines stopped.

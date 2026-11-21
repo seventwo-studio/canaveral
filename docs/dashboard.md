@@ -198,8 +198,125 @@ format. Imported and derived artifact provenance follows the image contract.
 Administrators can open **System** for applications, leases, waiting requests, jobs,
 operations and access sessions, and **Configuration** for named administrative API
 actions. Closing an access session retains the lease; releasing a lease requests
-cleanup. See the [API coverage and authority map](dashboard-api-coverage.md) for
+cleanup. A lease shows the label its holder gave it and, while it is provisioning
+or ready, the time remaining until its deadline, counted against the controller's
+clock when the inventory carries it. See the [API coverage and authority map](dashboard-api-coverage.md) for
 credential boundaries and native acceptance limits.
+
+## Queue, activity and usage
+
+Administrators have three more destinations under Infrastructure. Each reads
+through the gateway with the signed-in administrator session; the controller
+decides administrator authority on every read. Ordinary accounts do not see the
+entries, a deep link returns them to Machines without a request, and a 401 or 403
+on any of these reads signs the session out. Nothing is kept in browser storage.
+See the [gateway allowlist and query rules](dashboard-api-coverage.md#queries-through-the-gateway).
+
+### Queue (`#queue`)
+
+The page reads `GET /api/v1/admin/queue` every five seconds while the tab is
+visible. See [the administrator queue view](requests.md#administrator-queue-view)
+for the fields.
+
+- **Waiting requests** are listed in the controller's attempt order. Each shows its
+  position, the reason it waits in plain words with the stable refusal code beside
+  it, the caller's label, kind, template or model, priority, how long it has
+  waited and its deadline, then the application and request identifiers. A code
+  the page has no words for is shown as the code. A request that has not been
+  tried says so.
+- The page states that position is an order of attempts, not a promise. Model calls
+  and requests past their deadline have no position, and the row says why.
+- **Leases holding capacity** lists provisioning and ready leases, soonest deadline
+  first, with the holder, the label, the template and the time remaining. Time
+  remaining is the lease deadline. It is not when capacity frees: a holder can
+  renew, and an ended lease keeps its reservation until cleanup is proven. Release
+  stays on System.
+- Waiting time and time remaining are counted against `observedAt`, the
+  controller's clock, and advance locally between reads.
+- **Cancel request** opens a confirmation that names the request, its identifier and
+  its application, and says what cancelling does, including that a request the
+  controller admitted in the meantime has its lease released instead. It sends
+  `POST /api/v1/admin/requests/{id}/cancel` with a new mutation UUID and the
+  application ID. After a lost response the button becomes **Retry same
+  cancellation** and reuses that UUID; the dialog cannot be dismissed into a second
+  attempt while the outcome is unknown. A definite refusal ends the attempt.
+- A list longer than the reply's bound says how many it shows of how many. A failed
+  read keeps the last queue with a stale notice, disables cancelling and offers
+  **Refresh queue**. A reply that is malformed or not in attempt order is not shown.
+- Application, request and lease identifiers link to their events on Activity.
+
+### Activity (`#activity`)
+
+The page shows the [event log](events.md), newest first: time, sequence, kind, the
+catalogue's sentence for that kind, the subjects it concerns and its payload
+fields. Kinds the event module marks `attention` carry a **Needs attention** badge.
+The kind catalogue comes from `GET /api/v1/admin/events/kinds`, so the page holds no
+list of kinds of its own.
+
+- **Filters:** family, kind, application, host and lease, and **Needs attention
+  only**, which selects exactly the kinds the catalogue marks. An identifier filter
+  applies once it is a complete UUID. Choosing an identifier in an event filters to
+  it. `#activity/<subject>/<uuid>`, with subject `application`, `lease`,
+  `request`, `host` or `machine`, opens the page filtered. A selection that
+  matches no marked kind, or more than the 32 kinds one read may carry, is said so
+  and is never sent as an unfiltered read.
+- **Live updates** are cursor reads of the list route, not a relayed stream. The
+  page opens with `tail=100`, then asks for `after=<cursor>` every three seconds
+  while the tab is visible, using the cursor the controller returned, so no event
+  is repeated or skipped. **Pause live updates** stops the reads; resuming continues
+  from the same cursor. The gateway does not forward the server-sent stream: every
+  gateway response is one bounded request that closes, a read by cursor carries the
+  same guarantee, each read is authorized on its own and so ends with the session,
+  and a stream would hold one of the controller's 32 follower slots per open tab
+  for up to an hour, at the expense of CLI and application followers. The cost is
+  latency of up to three seconds instead of one.
+- **Scroll-back:** the list route reads forwards or returns the newest N, so **Load
+  older events** works within that. It first reads a larger tail, up to the route's
+  500, which finds sparse matches in one request. Beyond that it walks backwards in
+  windows of 500 sequence numbers, each read holding every match in its window, up
+  to eight windows a step. The page shows the sequence it has searched back to and
+  says when no older event is retained. A tail that returns fewer events than asked
+  for ends the search at once.
+- The page keeps at most 2,000 events. Live updates drop the oldest beyond that;
+  scrolling back stops there and asks for narrower filters.
+- A cursor that retention has overtaken is reported as a gap, not hidden. A failed
+  read keeps the events with a stale notice and **Refresh activity** reads again.
+  An empty log and an empty filter result say what would appear.
+
+### Usage (`#usage`)
+
+The page reads [`GET /api/v1/admin/usage`](usage.md) for the last 24 hours, 7, 30 or
+90 days, or a custom range of at most 400 days, grouped by application, template,
+platform or host. A preset ends at the moment of the read. It reads when the
+choices change and on **Refresh usage**; it does not poll, because each report scans
+the request ledger for its range.
+
+- A total and one row per group show requests by outcome, wait until admitted,
+  leases by outcome, device time held with the group's share of the total, time to
+  ready, hold time and failures. Percentiles are p50 and p95 with their sample
+  count. No sample reads **No samples**.
+- The page says beside the figures what they are: the controller's records, counted
+  by submission and admission time; device time is held lease time, not CPU, memory
+  or power measured on a host. It states when the lease ledger began, flags a range
+  that starts before it, and shows lease figures as unavailable when the controller
+  reports no ledger. Grouping by host reports leases only and says why.
+- **Download CSV** fetches the controller's CSV for exactly the range and grouping on
+  screen and saves it as `canaveral-usage-<group>-<from>_<to>.csv`. A refusal or a
+  reply that is not CSV is shown in place and no file is offered.
+- A reply for a different grouping than was asked is not shown. A failed read keeps
+  the earlier report and says so.
+
+### Limits
+
+- Component tests, gateway tests against a real loopback controller and browser
+  fixtures at 320 and 1440 pixels cover these pages. No host, emulator, simulator or
+  lease run took part. Nothing here establishes native runtime acceptance.
+- These three pages show no device screens. Live pictures are on the
+  [screen wall](#screen-wall), for account-owned devices only.
+- Alerts, diagnosis, host pressure, runtime management, iOS leases and warm pools
+  have no dashboard page.
+- Activity shows the administrator view only. Access sessions and model job state
+  changes are not in the event log; see [event log limits](events.md#limits).
 
 ## Frontend development
 
@@ -649,11 +766,13 @@ positive cleanup without abandonment; see the [recording cleanup trial](../coord
 ## Owner live screen
 
 The gateway relays a live view of an account-owned mobile device, so a dashboard
-can show devices that run on another machine than the dashboard itself. This is the
-API and relay only; the pages that show one or several screens are separate work
-and use the routes and messages below. The contract is
-[live screen](mobile-control.md#live-screen). Fixture-covered only: no browser has
-decoded a live view, and no native run has measured its frame rate or latency.
+can show devices that run on another machine than the dashboard itself. The
+[screen wall](#screen-wall) uses the routes and messages below; Machine Control
+does not use them yet. The contract is
+[live screen](mobile-control.md#live-screen). Fixture-covered only: Chromium has
+decoded fixture segments through this relay (see the screen wall), no browser has
+decoded a native device's stream, and no native run has measured its frame rate or
+latency.
 
 Send JSON mutations with the dashboard session cookie and matching Origin.
 
@@ -687,8 +806,9 @@ Messages the page receives, in order:
    each) that total exactly its `bytes`:
    - `{"type":"init","epoch","bytes"}`: the initialization segment (`ftyp` and
      `moov`) of an epoch. The page reads the codec string from it. When a later
-     epoch starts, the page is expected to append its `init` to the `SourceBuffer`
-     it already has; no browser has been tried.
+     epoch starts, the page appends its `init` to the `SourceBuffer` it already
+     has. Chromium accepts that for fixture segments; no native stream has been
+     tried.
    - `{"type":"segment","epoch","sequence","keyframe","bytes"}`: one media segment
      (`moof` and `mdat`). The first of an epoch, and the first after a gap in
      `sequence`, is a key frame segment.
@@ -710,3 +830,59 @@ While a recording of the device runs, its viewers are fed the recording's stream
 as an epoch of its own. Input stays on the existing device operations (`tap`,
 `swipe`, `text`, `key`, `rotate` through POST `/api/v1/machines/{machine}/operations`);
 the live view carries none.
+
+## Screen wall
+
+**Screens** (`#screens`, under Workspace, for every account) shows up to four
+running mobile devices side by side, live and watch-only. It is built on the
+[owner live screen](#owner-live-screen) relay and adds no route of its own.
+
+- **Which devices.** A device is offered while it is a running Android or iOS
+  device that belongs to an account: its owner sees it, and an administrator sees
+  every account's. A device without a user owner is not offered to anyone. A leased
+  machine never has a user owner, so no leased device can appear, and the
+  controller refuses a leased device on this route as well. A leased device's
+  screen belongs to its lease holder.
+- **Nothing is captured until asked.** Opening the page opens no view. **Watch**
+  adds a device to the wall, up to four; `#screens/<uuid>+<uuid>` in the address
+  names the devices, so a reload or a shared link shows the same ones. Nothing is
+  kept in browser storage. The page states the cost: each watched device runs one
+  capture on its host, one of that host's four video sessions, with one CPU and
+  256 MiB reserved.
+- **One view per tile.** A tile opens a view with a 60-second lifetime and renews
+  it in-band every 20 seconds, only while its picture is on screen and the tab is
+  visible. A tile that is scrolled away or a tab in the background stops renewing,
+  so its view lapses and the capture stops within a minute. When the picture
+  returns it renews at once, or opens a new view if the old one lapsed meanwhile.
+  **Stop watching**, leaving the page and page unload (with a keepalive request)
+  close the view.
+- **Watch-only.** The picture has no controls and takes no input. **Open control**
+  opens the device's Machine Control, where input goes through the durable device
+  operations.
+- **States.** A tile says *Connecting*, then *Connected* until the first frame
+  (a still Android screen sends none until it changes), then *Live*. An ending is
+  shown in words from its reason. Endings that are an ordinary state are shown as
+  one and not as an error: *Not offered* for a host that does not serve live
+  views (iOS is off unless the host opts in), *Full* when the device or host has
+  all its viewers or video sessions, *Stopped*, and *Paused* for a view that
+  lapsed off screen. Failures offer **Watch again** unless asking again cannot
+  help. A 401 signs the session out.
+- **Playback.** Segments are appended through Media Source Extensions in
+  `sequence` mode, so a later epoch or a gap where the runner dropped a slow
+  viewer's backlog continues on one timeline. The codec string comes from each
+  initialization segment. The element stays within 1.5 seconds of the newest frame
+  and keeps about ten seconds behind the playhead. A browser without Media Source
+  Extensions or H.264 decoding says so in the tile and leaves the view.
+- **One module.** The routes and messages are used by
+  `dashboard/src/lib/live-view.ts` only, because the relay is still under review.
+
+What has been verified: component and module tests with a stand-in socket, and a
+browser test in which the production gateway relays a stand-in controller's stream
+to Chromium at 320 and 1440 pixels. That stream is cut from an FFmpeg recording made
+with the runner's encoder arguments. Chromium decoded it, reported the encoded
+picture size, and accepted a second epoch's initialization segment on the same
+source buffer. What has not: a native device's stream, its frame rate and latency,
+rotation, a recording taking over and handing back, and any browser other than
+Chromium. `ManagedMediaSource`, which iPhone Safari offers in place of
+`MediaSource`, is selected when it is the only one present but has not been tried
+on a device. Nothing here establishes native runtime acceptance.

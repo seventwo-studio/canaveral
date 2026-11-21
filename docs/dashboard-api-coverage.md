@@ -1,9 +1,10 @@
 # Dashboard API coverage
 
-The dashboard has two administrator workspaces in addition to the existing machine,
+The dashboard has administrator workspaces in addition to the existing machine,
 image, infrastructure and account screens. **System** is the operational inventory;
-**Configuration** exposes named administrative API actions and their exact request
-configuration. Complex immutable definitions use an editable JSON configuration with
+**Queue**, **Activity** and **Usage** show the waiting queue, the event log and
+usage reports; **Configuration** exposes named administrative API actions and their
+exact request configuration. Complex immutable definitions use an editable JSON configuration with
 an example. The gateway forwards only explicitly permitted routes to its fixed
 controller; it is not an arbitrary URL proxy.
 
@@ -36,8 +37,9 @@ store; browser storage is not used.
 | Administrative machine creation, desired state, power off and deletion | Machines and machine details |
 | Guest screen, files, shells and accessibility | Machine Control |
 | Application identities and policies | System and Configuration |
-| Application-owned legacy and Linux leases | System; administrator release |
+| Application-owned legacy and Linux leases | System; administrator release, with the holder's label and time remaining. Queue lists the leases that hold capacity |
 | Waiting requests, operation receipts and jobs | System; request/job cancellation and machine-operation receipt inspection |
+| Waiting queue with position and reason (`/v1/admin/queue`) | Queue; administrator cancellation of a named request |
 | Access and video sessions | System; administrator close |
 | Model catalog, resource domains, grants and runner approvals | Configuration |
 | Linux lease images, grants and runner approvals | Configuration |
@@ -48,9 +50,12 @@ store; browser storage is not used.
 | Discrete machine operations, including uploaded app installation | Configuration and Machine Control |
 | Uncertain uploaded-app install resolution (`/v1/operations/{id}/resolve`) | API and CLI only; not forwarded by the dashboard gateway |
 | Mobile video admission, inspection and closure | Configuration; owner capture in machine details (PNG screenshot, verified MP4 recording) |
-| Live views of account-owned mobile devices | Gateway routes and relay only ([owner live screen](dashboard.md#owner-live-screen)); no page yet. A live capture appears under System as a video session |
+| Live views of account-owned mobile devices | Screens: up to four devices side by side, watch-only ([screen wall](dashboard.md#screen-wall)), over the [owner live screen](dashboard.md#owner-live-screen) relay. A live capture appears under System as a video session. Leased devices are never offered |
 | Managed update releases and rollouts | Configuration |
-| Event log, usage reports, alert destinations and diagnosis (`/v1/admin/events`, `/v1/admin/usage`, `/v1/admin/alerts`, `/v1/admin/diagnosis`) | API and CLI only; not forwarded by the dashboard gateway |
+| Event log (`/v1/admin/events`, `/v1/admin/events/kinds`) | Activity; filters, scroll-back and live updates by cursor |
+| Live event stream (`/v1/admin/events/stream`) | API and CLI only; not forwarded by the dashboard gateway. Activity reads the list route by cursor instead |
+| Usage reports (`/v1/admin/usage`) | Usage; JSON report and CSV download |
+| Alert destinations, deliveries and diagnosis (`/v1/admin/alerts`, `/v1/admin/diagnosis`) | API and CLI only; not forwarded by the dashboard gateway |
 
 ## Credential-specific protocols
 
@@ -86,7 +91,8 @@ building or testing these screens.
 
 | Method and path | Request | Effect |
 | --- | --- | --- |
-| `GET /v1/admin/system` | none | Redacted activity across application, lease, request, job, operation and session ledgers |
+| `GET /v1/admin/system` | none | Redacted activity across application, lease, request, job, operation and session ledgers. Leases carry `name`, the caller's label, when one was given; `observedAt` is the controller's clock for the page |
+| `GET /v1/admin/queue` | none | The waiting queue in attempt order with position and last refusal code, and the active leases that hold capacity; see [the administrator queue view](requests.md#administrator-queue-view) |
 | `GET /v1/admin/configuration` | none | Configured models, domains, grants, approvals, runner bindings/enrollments and application artifact metadata |
 | `POST /v1/admin/leases/{id}/release` | `{id: mutationUUID}` | Terminalize the lease using its owning backend's cleanup rules |
 | `POST /v1/admin/sessions/{id}/close` | `{id: mutationUUID}` | Revoke a single access/video session without ending its lease. Closing a live capture ends every live view of its device; an administrator can end a leased device's capture this way but cannot watch it |
@@ -98,22 +104,46 @@ building or testing these screens.
 ## Administrator observability routes
 
 These routes use the same administrator authority and authenticate before any
-lookup. They have no dashboard screen and the gateway does not forward them; use the
-API or the CLI. Reads never change controller state. Each recovery receipt above is
-also recorded as an `admin.intervention` event.
+lookup. Reads never change controller state. Each recovery receipt above is also
+recorded as an `admin.intervention` event. The **Gateway** column says whether the
+dashboard gateway forwards the route; the others are API and CLI only.
 
-| Method and path | Request | Effect |
-| --- | --- | --- |
-| `GET /v1/admin/events` | `after`, `tail`, `since`, `kind`, `limit`, subject filters | The durable [event log](events.md), oldest first |
-| `GET /v1/admin/events/kinds` | none | The event kind catalogue |
-| `GET /v1/admin/events/stream` | `after` or `Last-Event-ID`, `kind`, subject filters | Live follow as server-sent events |
-| `GET /v1/admin/usage` | `from`, `to`, `groupBy`, `format`, `application` | [Usage](usage.md) as JSON or CSV |
-| `GET /v1/admin/alerts/destinations` | none | [Alert](alerts.md) destinations without their URL path or secret |
-| `POST /v1/admin/alerts/destinations` | `{id, name, type, url, secret?, kinds?}` | Add a destination; idempotent by UUID |
-| `POST /v1/admin/alerts/destinations/{id}/remove` | `{}` | Remove it, erase its URL and secret, cancel unsent deliveries |
-| `POST /v1/admin/alerts/destinations/{id}/test` | `{id: requestUUID}` | One recorded test delivery, never retried |
-| `GET /v1/admin/alerts/deliveries` | `destination`, `state`, `limit` | Recent alert deliveries and their outcomes |
-| `GET /v1/admin/diagnosis` | none | Read-only findings for [`canaveral doctor`](doctor.md) |
+| Method and path | Request | Effect | Gateway |
+| --- | --- | --- | --- |
+| `GET /v1/admin/events` | `after`, `tail`, `since`, `kind`, `limit`, subject filters | The durable [event log](events.md), oldest first | Forwarded |
+| `GET /v1/admin/events/kinds` | none | The event kind catalogue | Forwarded |
+| `GET /v1/admin/events/stream` | `after` or `Last-Event-ID`, `kind`, subject filters | Live follow as server-sent events | No |
+| `GET /v1/admin/usage` | `from`, `to`, `groupBy`, `format`, `application` | [Usage](usage.md) as JSON or CSV | Forwarded |
+| `GET /v1/admin/alerts/destinations` | none | [Alert](alerts.md) destinations without their URL path or secret | No |
+| `POST /v1/admin/alerts/destinations` | `{id, name, type, url, secret?, kinds?}` | Add a destination; idempotent by UUID | No |
+| `POST /v1/admin/alerts/destinations/{id}/remove` | `{}` | Remove it, erase its URL and secret, cancel unsent deliveries | No |
+| `POST /v1/admin/alerts/destinations/{id}/test` | `{id: requestUUID}` | One recorded test delivery, never retried | No |
+| `GET /v1/admin/alerts/deliveries` | `destination`, `state`, `limit` | Recent alert deliveries and their outcomes | No |
+| `GET /v1/admin/diagnosis` | none | Read-only findings for [`canaveral doctor`](doctor.md) | No |
+
+### Queries through the gateway
+
+The gateway refuses a query string on every route except two reads:
+`GET /api/v1/admin/events` and `GET /api/v1/admin/usage`. For those it accepts only
+the parameters in the table above, each at most once (`kind` up to 32 times, one
+kind or family per parameter), and only values of the expected shape: a sequence
+number, a count of up to three digits, a UTC instant such as
+`2026-11-21T09:14:03.512Z`, a lowercase UUID, a kind such as `lease.*` or
+`host.offline`, and the listed `groupBy` and `format` words. Anything else
+returns 400 before the controller is asked. The gateway rebuilds the upstream query
+from the pairs that passed; it never forwards the browser's string. None of these
+shapes can hold a credential, and the controller also refuses credential-named
+parameters. A query on a mutation, including the administrator cancel, is refused.
+
+`GET /api/v1/admin/usage` with `format=csv` relays the controller's CSV as an
+attachment named `canaveral-usage.csv`, bounded like every control message (8 MiB).
+A refusal stays a JSON error.
+
+`GET /api/v1/admin/queue` and `GET /api/v1/admin/events/kinds` take no query. The
+gateway sends the caller's own session as the bearer credential, so the controller
+decides administrator authority on every read: an ordinary account receives 403,
+and a read after sign-out or revocation receives 401. Nothing is cached or stored
+by the gateway or in browser storage.
 
 These endpoints require existing administrator authority: an operator credential
 or an active account with administrator scope. They authenticate before resource

@@ -157,5 +157,6 @@ database. One very long lease raises the look-back for every later report.
   run time are not part of usage.
 - There is no per-owner or per-source breakdown. `source` on a request drives no
   figure.
-- The dashboard does not show usage. The dashboard gateway does not forward these
-  routes.
+- The dashboard's Usage page shows the administrator report and downloads the
+  same CSV; see [the dashboard contract](dashboard.md#queue-activity-and-usage).
+  The gateway forwards `/v1/admin/usage` only, not the application route.

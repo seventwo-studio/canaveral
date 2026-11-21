@@ -515,3 +515,44 @@ test("confirmed actions queue fresh inventory behind an in-flight refresh", asyn
   expect(reads).toBe(3);
   expect(screen.queryByRole("button", { name: "Release lease" })).toBeNull();
 });
+
+test("leases show the holder's label and the time remaining against the controller's clock", async () => {
+  const now = 1800000000;
+  const leases = [
+    // A fraction of a second of margin keeps the whole-second reading stable while the test runs.
+    { ...lease, id: "labelled", name: "checkout-flow", expiresAt: now + 250.9 },
+    { ...lease, id: "unlabelled", family: "linux", expiresAt: now - 5 },
+    {
+      ...lease,
+      id: "ended",
+      state: "released",
+      name: "old-run",
+      expiresAt: now + 900,
+    },
+  ];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => response({ ...snapshot, leases, observedAt: now })),
+  );
+  render(<SystemControl user={user} onDenied={vi.fn()} />);
+  const section = within(await screen.findByRole("region", { name: "leases" }));
+  const card = (id: string) =>
+    within(
+      section
+        .getAllByText(id, { exact: false })[0]!
+        .closest('[data-slot="card"]') as HTMLElement,
+    );
+  const pair = (id: string, label: string) =>
+    card(id).queryByText(label, { selector: "dt" })?.nextElementSibling
+      ?.textContent;
+  // The controller's clock decides the countdown, whatever the browser's clock says.
+  expect(pair("labelled", "Label")).toBe("checkout-flow");
+  expect(pair("labelled", "Time remaining")).toBe("4m 10s");
+  expect(pair("unlabelled", "Label")).toBe("None given");
+  expect(pair("unlabelled", "Time remaining")).toBe("Deadline passed");
+  // An ended lease has no time remaining to count.
+  expect(pair("ended", "Label")).toBe("old-run");
+  expect(pair("ended", "Time remaining")).toBeUndefined();
+  expect(systemSnapshot({ ...snapshot, observedAt: now }).observedAt).toBe(now);
+  expect(() => systemSnapshot({ ...snapshot, observedAt: "now" })).toThrow();
+});
