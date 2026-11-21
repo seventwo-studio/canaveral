@@ -249,8 +249,9 @@ cancellation/priority, and native running-VM expiry requires live acceptance.
 Automatic Apple cleanup now uses the owned deletion and credential-erasure path
 below. Android emulator leases use the native lease supervisor's group-exit proof
 before the same owned removal and erasure. iOS simulator leases use the same supervisor,
-whose proof is the absence of the simulator's process tree for the lease's private device
-set; that proof has no native acceptance. Other provider cleanup remains unimplemented. The
+whose proof is CoreSimulator reporting the lease's own simulator shut down together with the
+absence of that simulator's process tree, both held across a settling period; that proof has
+no native acceptance. Other provider cleanup remains unimplemented. The
 runner explicitly rejects configuration that attempts to advertise protocol 1
 for any other runtime until those gates are complete. It must not be enabled just to make admission pass.
 

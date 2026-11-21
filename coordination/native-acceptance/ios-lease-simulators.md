@@ -24,10 +24,14 @@ identical. The trial may only create simulators inside lease device sets under `
 | Question | How to check | Open because |
 | --- | --- | --- |
 | Does a simulator in a private device set create, boot, shut down and delete under the host's account? | Lease once; watch `simulator.log` and `xcrun simctl --set <device set> list devices` | Only a stand-in `simctl` has run |
-| Do `launchd_sim` and installed apps name the device set in their command lines? | `ps -axww -o pid=,ppid=,command=` while leased, with an app launched | The tree identification depends on it |
+| Is `launchd_sim` named and argued as `launchd_sim <device directory>/…`, and do installed apps run from inside the device directory? | `ps -axww -o pid=,ppid=,command=` while leased, with an app launched. If not, every lease ends with `treeObserved: false` and blocked cleanup | The tree identification depends on it; this is the first check |
+| What does CoreSimulator report while a boot is in flight and after its `simctl` client was killed? Is five seconds of `Shutdown` with an empty tree enough to rule out a late boot? | Release a lease during its boot; watch `simctl --set <device set> list devices` and the process table against `lease-stopped.json` | The settling period is a judgement |
+| Does `simctl shutdown` work on a device that is still `Booting`? | The same run; read `simulator.log` | The supervisor retries every 5 s and waits |
 | Does `lease-tree.json` list the real tree, and how fast does the tree change? | Compare it with the process table every few seconds | The 2 s sample interval is a guess |
 | Does `simctl shutdown` return only after the tree is gone? Is `treeForced` false after a normal expiry? | Let a lease expire; read `lease-stopped.json` | Fixture stand-ins exit at once |
-| Does SIGKILL of `launchd_sim` end its children, and what does CoreSimulator report afterwards? | Force the stop path by making the shutdown command fail on a disposable lease | `Shutdown` is needed before the delete |
+| After the forced path stops and kills `launchd_sim` and its tree, does CoreSimulator report the device `Shutdown`? | Force the stop path by making the shutdown command fail on a disposable lease | If it keeps reporting `Booted`, the supervisor never finishes and cleanup stays blocked |
+| Are operator processes that mention the device set left alone by the forced path? | Keep a `tail -f` on a file in the device set during that run | Only tree members may be signalled |
+| Do `apps` and `logs` reach a lease holder without host paths, and does the real `listapps` output parse? | Compare a lease's `apps` and `logs` results with the raw `simctl` output | Only a stand-in listing was parsed |
 | Does CoreSimulator leave files outside the device set? | Search `/private/tmp` and `~/Library` for the lease's UDID after cleanup | Removal covers the lease's storage only |
 | Does `idb_companion` start before the boot with `--device-set-path` and `--grpc-domain-sock`, and does `idb --companion <socket>` drive input and hierarchy? | `tap`, `text`, `hierarchy` through a lease key | Flags were read from help text and client source |
 | Do the readiness probes pass on a fresh device, and how long does a first boot take? | Time from admission to `ready`; read `lease-ready.json` | Provisioning timeout sizing |

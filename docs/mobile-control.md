@@ -963,7 +963,8 @@ or when the installed helper cannot inventory a simulator's process tree (an old
 The host enforces the gate itself and does not rely on the controller. A leased iOS
 assignment whose template is not an advertised, declared `leaseImages` entry is never started:
 the host stops it and reports `error`, which fails the lease. The provider checks the
-declaration again before every leased command.
+declaration and the operating system again before every leased command. Neither check reads
+the host's configuration for the platform: only test fixtures can inject one, in code.
 
 Run the host so that stopping or restarting it does not kill the detached lease supervisors.
 How a macOS launchd job treats them is not verified; see
@@ -1002,71 +1003,148 @@ Two things differ.
 in its own process group. Its output goes to `companion.log`, capped at 16 MiB.
 
 **The simulator is not a child of the supervisor.** CoreSimulator starts a simulator's
-`launchd_sim` through launchd, so there is no process group the supervisor could own. The
-supervisor therefore:
+`launchd_sim` through launchd, so there is no process group the supervisor could own. Killing
+the supervisor's own `simctl` client does not stop what CoreSimulator already began for it. The
+supervisor therefore uses two sources and needs both:
 
-- refuses to start (status 75) when any process already names the device set;
-- records `lease-supervisor.json`, which names the device set and the UDID, and only then
-  boots the simulator with `simctl --set <device set> boot <udid>`. The boot may take up to
-  120 s and the deadline is checked throughout. `simctl` output goes to `simulator.log`. The
-  runner never boots a leased simulator and never uses `bootstatus -b`;
-- identifies the simulator's **process tree** from the process table (`ps`). The tree is every
-  live process whose command line names the device set path, every live descendant of such a
-  process, and every process recorded as a member earlier. `launchd_sim` is started with a
-  bootstrap path inside the device set, and every installed app runs from a bundle inside it;
-- samples the tree every 2 s and saves its members (PID and start time) in `lease-tree.json`,
-  so that a process which outlives `launchd_sim` is still found after it has been reparented;
-- stops when the deadline passes, the authorization is fenced, missing, malformed or bound
-  elsewhere, the clock fails, it receives SIGTERM, the companion exits, the boot fails, or the
-  simulator's tree disappears on its own.
+- **CoreSimulator's own state for the device**, read with
+  `simctl --set <device set> list devices --json`: `Shutdown`, `Booting`, `Booted` and so on, or
+  absent from the set. A query that is not answered is never read as shut down.
+- **The process table** (`ps`), for the simulator's process tree.
 
-The stop always runs in this order and cannot return early:
+#### Tree membership, and what can be signalled
+
+A member of the simulator's tree is exactly one of these. They are also the only processes the
+supervisor can ever signal.
+
+1. The device's own `launchd_sim`: a process named `launchd_sim` whose argument is a path inside
+   the lease's device directory, `<device set>/<UDID>`.
+2. A process whose command line begins with that device directory: an executable started from
+   inside the lease's own device, as an installed app is.
+3. A process recorded earlier as a member, while its PID still holds a process with the
+   recorded start time.
+4. A live descendant of any member.
+
+A process that only mentions the device set is not a member and is never signalled: an
+operator's `tail` or shell, the runner's own `simctl --set` calls, the companion, or a path that
+merely contains the device directory. The supervisor and its ancestors are never members.
+
+Every signal is sent only after that PID's start time was read again immediately before it
+(`ps -p <pid>`) and matched the recorded one. Without a pidfd the gap between that read and the
+signal cannot be closed, only kept that narrow.
+
+#### What the supervisor does
+
+- It refuses to start (status 75) unless CoreSimulator reports the device `Shutdown` and no
+  member exists. That also refuses a host whose CoreSimulator does not answer.
+- It records `lease-supervisor.json`, which names the device set and the UDID, and starts a
+  sampling thread. That thread takes the inventories: every 250 ms until the device's
+  `launchd_sim` has been seen, then every 2 s. It saves the members (PID and start time) in
+  `lease-tree.json`, so that a process which outlives `launchd_sim` is still found after it
+  has been reparented.
+- The supervision loop only reads what the sampling thread last recorded. An inventory is
+  bounded at 10 s, and even a stalled one cannot delay the deadline, fence and signal check.
+- Only then does it boot the simulator, with `simctl --set <device set> boot <udid>`. The boot
+  may take up to 120 s and the deadline is checked throughout. `simctl` output goes to
+  `simulator.log`. The runner never boots a leased simulator and never uses `bootstatus -b`.
+- It stops when the deadline passes, the authorization is fenced, missing, malformed or bound
+  elsewhere, the clock fails, it receives SIGTERM, the companion exits, the boot is refused or
+  times out, or the device's `launchd_sim` disappears on its own. It also stops, with reason
+  `unobserved`, when CoreSimulator accepted the boot but the device's `launchd_sim` never
+  appeared in the process table within 30 s: a simulator whose stop could not be proven does
+  not keep running.
+
+#### The stop
 
 1. It writes `lease-fenced.json`. Device commands are refused from here on.
 2. It stops the companion's process group (SIGTERM, 5 s, SIGKILL) and waits until the group is gone.
-3. It runs `simctl --set <device set> shutdown <udid>`, for at most 30 s.
-4. It reads the process table until no tree member remains. A member still alive 5 s after the
-   shutdown command returned is sent SIGKILL. Its identity (PID and start time) is re-read in
-   the same inventory immediately before the signal; without a pidfd that is the narrowest
-   window available. Nothing outside the tree is ever signalled.
-5. It writes `lease-stopped.json` with `groupAbsent: true`, `treeAbsent: true`, `treeForced`
-   (whether step 4 had to kill anything), `shutdownStatus` and the device set and UDID, then
-   releases the lock by exiting.
+3. It then repeats the following, every 500 ms, and **does not return on absence of evidence**:
+   - it takes an inventory and records every member in it, including any that a member started
+     during the stop;
+   - it reads the device's state from CoreSimulator;
+   - while that state is anything but `Shutdown` or absent, it asks for
+     `simctl --set <device set> shutdown <udid>` (at most 30 s), and asks again every 5 s;
+   - 5 s after the first shutdown request, or after the stop began when none was needed, it
+     forces whatever members remain. It first stops them (SIGSTOP), re-reading the inventory
+     until no member is left running, so that none can start another process between an
+     inventory and its signal. Then it kills them (SIGKILL);
+   - the stop is proven only when CoreSimulator reports the device `Shutdown` (or absent) and
+     no member is present, in every sample of a 5 s settling period of at least five
+     consecutive samples. Any other sample starts the period again.
+4. It writes `lease-stopped.json`, then releases the lock by exiting. Beside `groupAbsent` the
+   receipt carries `deviceState`, `settledSeconds`, `treeAbsent`, `treeObserved`, `treeForced`,
+   `bootStatus` and `shutdownStatus`.
 
-**What the proof establishes.** When the receipt was written, among the processes this macOS
-account can see on this host:
+While the device is `Booting`, or CoreSimulator does not answer, the supervisor keeps its lock
+and keeps going, however long the process table stays empty. A boot that a fence interrupted
+and that completes later is therefore shut down by the same supervisor. The settling period
+covers the moment after its `simctl` client was killed in which CoreSimulator may already hold
+the boot request while still reporting `Shutdown`.
 
-- no process named the lease's device set in its command line. That covers the device's
-  `launchd_sim`, the companion, any `simctl` working on the set, and every app installed on the
-  device;
-- no process descended from such a process;
-- none of the processes the supervisor had recorded as tree members was still alive with its
-  recorded start time;
+`treeAbsent` is true only when the settling period completed, the tree record lost no member
+(more than 1,024 alive at once marks it `truncated`), and one of these holds:
+
+- the device's `launchd_sim` was observed at some point (`treeObserved`), so its absence means
+  something; or
+- nothing indicates that the device ever left `Shutdown`: CoreSimulator refused the boot or
+  never acted on it, and never reported another state.
+
+A simulator that CoreSimulator booted but whose `launchd_sim` was never seen gets
+`treeAbsent: false` and `treeObserved: false`. The premise that the tree is visible in the
+process table did not hold for it, so an empty table proves nothing. It is reported as
+unproven, never as absent, and its cleanup stays blocked.
+
+#### What the proof establishes
+
+When the receipt was written, on this host and among the processes this macOS account can see:
+
+- CoreSimulator reported the device `Shutdown`, or no longer listed it, throughout the
+  settling period;
+- no member of the tree was present throughout that period, and the device's `launchd_sim`
+  had been seen earlier (or the device never left `Shutdown`);
 - the companion's process group was absent.
 
-**What it does not establish.**
+#### What it does not establish
 
-- A process that left the tree between two samples without naming the device set is not found.
-  Simulated code that forks twice within the 2 s before the stop can do that.
-- Work the simulated code handed to the host outside the tree is not found: a launchd job it
-  registered, a host service that launchd started on its behalf, a file it wrote outside the
-  device set, or anything it did to another process of the same account.
-- Processes of other accounts, and their command lines, are not visible.
-- State that the CoreSimulator service keeps for the device is not inspected.
+- **A process that a member started and that outlived it unrecorded.** A member can start a
+  child and exit, or the child's parent can exit, between two samples. The child then names
+  nothing, descends from nothing and is not found. The window is one sample interval: 250 ms
+  before the tree is first observed, 2 s during the lease and 500 ms during the graceful part
+  of the stop. It exists for the whole lease, not only at its end. The forced path closes it
+  by stopping members before killing them; the graceful path cannot.
+- **Work handed to the host outside the tree**: a launchd job the simulated code registered, a
+  host service that launchd started on its behalf, a file it wrote outside the device set, or
+  anything it did to another process of the same account.
+- **Processes of other accounts**, whose command lines are not visible.
+- **The premise itself.** That `launchd_sim` is named and argued as assumed, and that
+  CoreSimulator's state changes as assumed, was never checked on a real host. Where the premise
+  fails, the result is unproven and blocked, as above.
+- **The settling period.** Five seconds is a judgement; no real boot was interrupted to time it.
 
-These limits follow from the `shared-host` class; the supervisor does not hide them. When
-more than 1,024 tree members were alive at once the record is marked `truncated`,
-`treeAbsent` is `false` and cleanup stays blocked.
+These limits follow from the `shared-host` class; the supervisor does not hide them.
 
-The runner accepts stop proof for cleanup only when both of these hold:
+#### What the runner accepts for cleanup
 
-- one of: the supervisor's matching receipt with `groupAbsent` and `treeAbsent` true and its
-  lock free; a launch that never spawned (status 75, or no supervisor record and no
-  `lease-supervise <storage>` process); or a supervisor that is gone without a receipt while
-  its companion's PID and process group are positively absent; and
-- a fresh inventory by `canaveral-mobile-native lease-simulator-status <storage> <device set>`
-  that answers `absent`. It applies the same tree rule, including the members saved in
-  `lease-tree.json`. An answer of `present` or `unknown`, or an unavailable inventory, is not proof.
+Positive evidence only. An unanswered question is a negative answer.
+
+- **With the supervisor's receipt.** The receipt itself must state the proof: `groupAbsent` and
+  `treeAbsent` true, and `deviceState` `Shutdown` or `absent`. A fresh check must agree:
+  CoreSimulator still reports the device `Shutdown` or gone, and
+  `canaveral-mobile-native lease-simulator-status <storage> <device set> <udid>` still shows no
+  member. The command's exit status (`shutdownStatus`) is not evidence either way; the
+  device's state is.
+- **Without a receipt** (the supervisor was lost). The companion's PID and process group must be
+  positively absent. The device's `launchd_sim` must have been observed, by the supervisor's
+  record or by the runner since, unless no supervisor record exists, in which case no boot was
+  ever issued. And the device must be `Shutdown` or gone with no member present in every
+  check of a 5 s settling period (at least three checks, at most one a second).
+- **A launch that never reached a supervisor.** CoreSimulator must report every simulator in
+  the lease's device set `Shutdown`.
+
+A held lock, a receipt without the proof, a device CoreSimulator does not report as shut down,
+an unavailable inventory, a tree that was never observed or a record that lost members all
+stay unproven. The proof is recorded once it holds; storage is single-use and nothing boots
+that simulator again.
 
 ### Simulator readiness
 
@@ -1098,7 +1176,7 @@ that credential authorizes the lease's operations, which resolve to the lease's 
 | --- | --- | --- |
 | Install a build | Upload the simulator `.app` archive through the lease key with `format: "ios-app-tar"`, then `install-uploaded` | files |
 | Launch, stop, list or remove apps, open a URL | `launch`, `terminate`, `apps`, `uninstall`, `open-url` | files |
-| Logs | `logs` (the simulator's last minute) | files |
+| Logs | `logs` (the simulator's last minute, at most 1,000 lines and 512 KiB) | files |
 | App-container files | `list-files`, `push` (up to 512 KiB), `pull` (up to 4 MiB), each with `app` | files |
 | Screens | `screenshot` (PNG), `hierarchy`, `accessibility`, `accessibility-action` | screenshot, hierarchy |
 | Input | `tap`, `swipe`, `text`, `key` | input |
@@ -1111,6 +1189,23 @@ This is a mapping, not a new capability: the capability set on the wire is uncha
 
 `install` (a host-configured artifact), `permission`, `location` and `rotate` are not lease
 actions on either platform.
+
+**What a lease holder sees of the host.** `simctl` output carries the host's layout, so a
+lease result is not passed through raw:
+
+- `apps` returns `apps`, a list of `{bundleId, name, version, type}`, and `output`, the bundle
+  identifiers one per line. The raw listing, with each app's absolute host paths, is never
+  returned; a listing that cannot be read fails the action.
+- `logs` returns the last 1,000 lines (at most 512 KiB) with `truncated`. In it, and in every
+  other text result, the device directory, the device set, the lease's storage, the storage
+  root, the runner's state directory and the account's home are replaced by `<device>`,
+  `<device-set>`, `<lease>`, `<storage>`, `<state>` and `<home>`, and the device's UDID by `<udid>`.
+
+Still exposed under this class: the log text of every process in the simulator, system and
+app, which can include the Mac's host name, runtime paths under `/Library/Developer` and
+anything a process chose to log; host process IDs (`launch` prints one); and app-container
+file names. This is tidiness, not a boundary: code running in the simulator can read the
+host's files and environment directly.
 
 The upload, chunk, publication, replay and install rules, the four-uploads-per-lease and
 2 GiB-per-application limits and the release-only-on-proof rules are those of
@@ -1134,8 +1229,8 @@ Android.
 ### iOS expiry, release and loss
 
 At expiry or release the controller refuses the old credential at once, fails queued
-operations and issues the cleanup intent, as for Android. The runner fences the supervisor.
-Cleanup then needs the stop proof above. With it, the runner deletes the simulator through
+operations and issues the cleanup intent, as for Android. The runner fences the supervisor,
+whose stop takes at least its 5 s settling period. Cleanup then needs the stop proof above. With it, the runner deletes the simulator through
 CoreSimulator (`simctl --set <device set> delete <udid>`, only when the set holds nothing but
 this lease's shut-down simulator), removes the whole storage directory through the recoverable
 quarantine path, erases the assignment's credential directory and only then reports
@@ -1157,9 +1252,11 @@ While stop proof is missing, cleanup reports `blocked`, the host, application an
 reservations stay held and the runner retries with backoff. There is no administrator override
 that releases them without proof. The reasons are:
 
-- `execution_pending`: the supervisor's lock is held, the simulator's tree or the companion is
-  still present, the inventory is unavailable or `unknown`, or CoreSimulator does not list the
-  simulator as `Shutdown`;
+- `execution_pending`: the supervisor's lock is held (it is still stopping, or waiting for a
+  device that is `Booting` or for a CoreSimulator that does not answer), the simulator's tree
+  or the companion is still present, the inventory is unavailable or `unknown`, CoreSimulator
+  does not report the simulator as `Shutdown`, the settling period has not passed, or the tree
+  was never observed;
 - `ownership`: the device set holds a simulator the lease did not create. Nothing is deleted;
 - `storage_removal`: the device set could not be listed, or the delete was not confirmed.
 
@@ -1173,9 +1270,22 @@ Recovery after supervisor loss:
    `xcrun simctl --set <device set> shutdown <udid>`. Never run this without `--set`.
 4. Confirm that the companion's command line names `--device-set-path <device set>`, then stop
    that process group.
-5. Check `canaveral-mobile-native lease-simulator-status <storage>/<machine> <device set>`. Once
-   it answers `absent`, the runner's next retry deletes the simulator, removes storage, erases
-   credentials and reports completion.
+5. Check `canaveral-mobile-native lease-simulator-status <storage>/<machine> <device set> <udid>`.
+   Once it answers `"tree": "absent"` with `"observed": true`, and CoreSimulator lists the
+   simulator as `Shutdown`, the runner's settling period starts. After it, the next retry
+   deletes the simulator, removes storage, erases credentials and reports completion.
+
+**A supervisor that does not exit.** While its lock is held after a fence, the supervisor is
+still enforcing: it is waiting for CoreSimulator to report the device `Shutdown`. Check
+`simulator.log` and `xcrun simctl --set <device set> list devices`. Do not kill the supervisor
+to unblock cleanup; shut the simulator down in its own device set and it finishes by itself.
+
+**A tree that was never observed.** A receipt with `treeObserved: false` and `treeAbsent: false`,
+or a lost supervisor whose `lease-simulator-status` shows `"observed": false`, has no automatic
+recovery. It means that the device's `launchd_sim` never appeared in the process table in the
+assumed form, so the runner cannot tell a stopped simulator from an invisible one. The
+reservations stay held. This is the outcome to expect if the process-table premise does not
+hold on a real host, and it is the first thing a native trial has to settle.
 
 A reused PID that still shows as present keeps cleanup blocked. Wait for it to disappear;
 never signal an unidentified process to unblock cleanup.
@@ -1201,15 +1311,27 @@ It covers:
 - expiry in use, the stop receipt, deletion through CoreSimulator and a clean hand-over;
 - renewal, and a runner restart that recovers the live simulator without creating or booting;
 - supervisor loss: immediate 410, a failed lease and a reservation held until the tree is gone;
+- runner loss: the supervisor alone shuts the simulator down at its deadline;
+- a lease released while its simulator is still booting: the boot completes late, the same
+  supervisor shuts it down, and no receipt or removal comes first;
+- a simulator whose processes do not name their device: reported unproven, cleanup blocked;
 - cleanup blocked while the inventory is unavailable or `unknown`, despite a stop receipt;
 - a boot that fails, and a foreign simulator in a lease's device set (fenced; removal refused);
+- the provider's own refusal without the declaration or off macOS, before any native call;
+- `apps` and `logs` without host paths or the device identity;
 - in every scenario, that no command reached the default device set.
 
+The stand-in `launchd_sim` is named and argued like the real one. That is the unverified
+premise the proof rests on, so the fixtures show the mechanism, not that the premise holds.
+
 `lease_supervisor.rs` and `simulator_tree.rs` unit tests run real stand-in processes under the
-real supervisor loop. They cover a graceful shutdown, a tree member that outlives its parent,
-a shutdown command that fails, a simulator that stops by itself, a failed boot, a foreign or
-occupied device set refused before anything spawns, and the inventory a host uses after
-supervisor loss.
+real supervisor loop. They cover a graceful shutdown with its settling period, a tree member
+that outlives its parent, a shutdown command that fails (with a bystander that only mentions
+the device left alone), a simulator that stops by itself, a refused boot, an interrupted boot
+that completes late, a device that stays `Booting` longer than the settling period, a booted
+simulator whose tree is never observed, a stalled inventory that does not delay the fence,
+a foreign, occupied or unreported device refused before anything spawns, a command killed at
+its limit with its pipe still open, and a signal refused for a PID with another start time.
 
 ### Native acceptance is open
 
@@ -1222,11 +1344,15 @@ turns the list below into checks. Each of these needs a native trial before an i
 - creating, booting, shutting down and deleting a simulator in a private device set under the
   host's service account, including long or space-containing storage paths and whether
   CoreSimulator leaves files outside the device set (for example under `/private/tmp`);
-- whether `launchd_sim` and installed apps name the device set in their command lines, which
-  the tree identification depends on, and how fast a real tree changes between samples;
-- whether `simctl shutdown` returns only after the tree is gone, whether SIGKILL of
-  `launchd_sim` ends its children, and what CoreSimulator reports after a forced stop
-  (`Shutdown` is needed before the delete);
+- whether `launchd_sim` is named and argued as assumed and installed apps run from inside the
+  device directory, which the tree identification depends on, and how fast a real tree
+  changes between samples;
+- what CoreSimulator reports while a boot is in flight and after its client was killed, and
+  whether five seconds of `Shutdown` with an empty tree is long enough to rule out a late boot;
+- whether `simctl shutdown` works on a device that is still `Booting`, and whether it returns
+  only after the tree is gone;
+- whether stopping and killing `launchd_sim` and its tree leaves CoreSimulator reporting the
+  device `Shutdown`. If it keeps reporting `Booted`, the supervisor never finishes;
 - `idb_companion` started before the boot with `--device-set-path` and `--grpc-domain-sock`,
   and `idb --companion <socket>` for `describe`, `ui` input and `ui describe-all`;
 - the readiness probes on a fresh device, and how long a first boot takes;
