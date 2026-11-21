@@ -112,6 +112,15 @@ The [waiting request contract](requests.md) is opt-in. Request methods use only 
 
 Request views carry `position`, the request's place in the controller's attempt order while it waits, and lease views carry `name`, the caller's label. Both are optional in the SDK types because an older controller omits them. `inspectRequest(id, { waitSeconds })` asks the controller to hold one read for 1 to 15 seconds until the request's state, position or reason changes; it is a single bounded request, and it is refused when the wait does not leave five seconds inside the client's `timeoutMs`. The controller refuses a held read beyond its limits with 429 `request_wait_limit`, which the SDK reports as a retryable `ConsumerServiceError` with `retryAfterSeconds`; a controller that predates held reads answers 400. See [position and waiting](requests.md#position-and-waiting).
 
+`listEvents`, `followEvents` and `usage` read the application's own
+[event history](events.md) and [usage](usage.md) with the application key.
+`listEvents` returns one page and its `cursor`. `followEvents` is an async
+iterator over one server-sent event stream: it ends when the controller ends the
+stream, throws a transport error when the connection fails and never reconnects.
+Resume with `after` set to the last `sequence` received. Stop iterating or abort
+its `signal` to close it. `usage` returns the JSON report; request CSV from the
+route directly. A lease key cannot call these methods. Fixture coverage only.
+
 Linux lease acquisition and renewal require integer `ttlSeconds >= 30`, bounded
 by the application's maximum. The controller returns 400
 `linux_ttl_below_minimum` below this minimum. Acquisition also refuses a

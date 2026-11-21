@@ -7,6 +7,8 @@ import http from "node:http";
 import https from "node:https";
 import { createSecureContext } from "node:tls";
 import { secret } from "./errors.ts";
+import { serverSentEvents } from "./sse.ts";
+import type { ServerSentEvent } from "./sse.ts";
 
 /** A desktop host config embeds the private operator guest bundle (up to 128 MiB) in its
  * preparation recipe, its runtime copy and the template recipe; other JSON stays at 1 MiB. */
@@ -88,9 +90,9 @@ export class CliClient implements RequestClient {
           }
           catch { fail(uncertain("Controller returned invalid JSON. Inspect state before another mutation.", 502)); return; }
           if (status < 200 || status >= 300) {
-            // Provider diagnostics may contain user input. Only status and safe correlation data leave this client.
+            // Provider diagnostics may contain user input. Only status, the stable code and safe correlation data leave this client.
             const definite = status >= 400 && status < 500 && status !== 408;
-            fail(new CliError(`Controller request failed (HTTP ${status}). Inspect state before retrying.`, status, id, mutating && !definite ? "unknown" : undefined)); return;
+            fail(new CliError(`Controller request failed (HTTP ${status}${stableCode(result)}). Inspect state before retrying.`, status, id, mutating && !definite ? "unknown" : undefined)); return;
           }
           settled = true; clearTimeout(timer); resolve(result);
         });
@@ -98,6 +100,42 @@ export class CliClient implements RequestClient {
       request.end(payload);
     });
   }
+  /** Opens a read-only server-sent event stream. The 20 s deadline covers the reply headers only; the
+   * stream then lasts until the controller ends it, the signal aborts or the connection drops. No retry here. */
+  async stream(path: string, signal: AbortSignal): Promise<AsyncIterable<ServerSentEvent>> {
+    if (!path.startsWith("/v1/") || path.includes("#")) throw new CliError("Invalid controller route.");
+    const target = new URL(this.url + path);
+    const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      let settled = false;
+      const request = (target.protocol === "https:" ? https : http).request(target, {
+        method: "GET", agent: false, ...(this.#ca ? { ca: this.#ca } : {}), minVersion: "TLSv1.2", rejectUnauthorized: true,
+        headers: { Accept: "text/event-stream", Connection: "close", ...(this.token ? { Authorization: "Bearer " + this.token } : {}) },
+      });
+      const fail = (error: Error) => { if (!settled) { settled = true; clearTimeout(timer); signal.removeEventListener("abort", abort); request.destroy(); reject(error); } };
+      const abort = () => fail(new CliError("The event stream was closed.", 499));
+      const timer = setTimeout(() => fail(new CliError("Controller response was not confirmed.", 503)), 20_000);
+      if (signal.aborted) { abort(); return; }
+      signal.addEventListener("abort", abort, { once: true });
+      request.on("error", () => fail(new CliError("Controller response was not confirmed.", 503)));
+      request.on("response", reply => {
+        const status = reply.statusCode ?? 0;
+        if (status !== 200 || !/^text\/event-stream\s*(;|$)/i.test(String(reply.headers["content-type"] ?? ""))) { reply.resume(); fail(status === 200 ? new CliError("Controller did not return an event stream.", 502) : refused(status)); return; }
+        settled = true; clearTimeout(timer); signal.removeEventListener("abort", abort);
+        const close = () => reply.destroy();
+        signal.addEventListener("abort", close, { once: true });
+        reply.once("close", () => signal.removeEventListener("abort", close));
+        resolve(reply);
+      });
+      request.end();
+    });
+    return serverSentEvents(response);
+  }
+}
+/** Shared failure text: provider diagnostics never leave this client. */
+function refused(status: number): CliError { return new CliError(`Controller request failed (HTTP ${status}). Inspect state before retrying.`, status); }
+/** A catalogued code is a bounded identifier chosen by the controller, never caller or provider text; see docs/error-codes.md. */
+function stableCode(reply: Record<string, unknown> | null): string {
+  return typeof reply?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(reply.code) ? ", " + reply.code : "";
 }
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new CliError("Unexpected controller response. Inspect state before retrying.", 502);

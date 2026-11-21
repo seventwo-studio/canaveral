@@ -23,7 +23,7 @@ type BrowserReceiptCommand = { type: "browsers.receipt"; hostId: string; id: str
  * admission pass. Each read is verified against its own credential; one refusal does not affect the others. */
 export interface RequestReadsCommand { type: "requests.read"; reads: { token: string; id: string }[] }
 export type RequestRead = { view: unknown } | { error: { message: string; status: number; code: string; retryable: boolean } };
-export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | RequestReadsCommand | { type: "requests.wake" };
+export type ControlCommand = BrowserAuthorizeCommand | BrowserLaunchCommand | BrowserReceiptCommand | HttpCommand | SessionCommand | VideoSessionCommand | DisplaySessionCommand | HostAuthenticateCommand | RequestReadsCommand | { type: "requests.wake" } | { type: "events.latest" };
 export function mutatesControlCommand(command: ControlCommand): boolean {
   if (command.type === "http") return !["GET", "HEAD", "OPTIONS"].includes(command.method);
   return command.type === "browsers.launch" || command.type === "browsers.receipt" || command.type === "sessions.attach" || command.type === "sessions.disconnect" || command.type === 'video-sessions.attach' || command.type === 'video-sessions.disconnect' ||
@@ -71,6 +71,7 @@ export class ControlClient extends EventEmitter {
       ...(options.enrollmentToken === undefined ? {} : { enrollmentToken: options.enrollmentToken }),
       ...(options.updatePublicKeys === undefined ? {} : { updatePublicKeys: options.updatePublicKeys }),
       ...(options.browserHosts === undefined ? {} : { browserHosts: options.browserHosts }),
+      ...(options.observability === undefined ? {} : { observability: options.observability }),
     } });
     this.startup = setTimeout(() => { void this.close(); }, 20_000);
     this.startup.unref();
@@ -114,6 +115,7 @@ export class ControlClient extends EventEmitter {
 
   request(command: { type: "requests.wake" }): Promise<unknown>;
   request(command: RequestReadsCommand): Promise<RequestRead[]>;
+  request(command: { type: "events.latest" }): Promise<number>;
   request(command: BrowserAuthorizeCommand | BrowserReceiptCommand): Promise<unknown>;
   request(command: BrowserLaunchCommand): Promise<boolean | "inspect">;
   request(command: HttpCommand): Promise<ControlResponse | undefined>;

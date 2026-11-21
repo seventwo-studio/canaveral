@@ -38,7 +38,9 @@ way to extend it. Operators retain recovery access through a separate boundary.
 ## Lifecycle
 
 `state` is consumer lifecycle, `runtimeState` is observed execution, and `cleanup`
-is reclamation. These must remain separate. A stale host produces unknown runtime
+is reclamation. These must remain separate. Each transition below is recorded in
+the [event log](events.md) by the transaction that makes it; an application can read
+its own with `GET /v1/events`. A stale host produces unknown runtime
 state without extending the lease or freeing reservations.
 
 | Current state | Trigger | Result |
