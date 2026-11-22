@@ -24,7 +24,7 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 | --- | --- |
 | Shell | Desktop rail 256px wide, collapsed rail 48px, sticky header 48px high. The rail meets the canvas at a single vertical hairline. Use 16px horizontal content padding on phones and 24px on desktop. |
 | Surface and ink | White canvas and panels, #f8f8f8 shell, #202020 main text, #666666 supporting text. Group content with whitespace first, then a single #e3e3e3 rule when adjacent regions need a boundary. |
-| Identity and selection | Orange belongs to the Canaveral mark. Active navigation has a flat #eaeaea fill with dark text. Keep the product name, existing destinations and account menu. |
+| Identity and selection | Orange belongs to the Canaveral mark. Active navigation has a flat #eaeaea fill with dark text. Use a 4px radius for the selected row. The top bar names the destination once; detail pages add a link back to the parent. |
 | Typography | Use system sans for navigation, controls, table headers and prose. Use Geist Mono for machine IDs, code and technical values. Destination headings are 20px semibold. Draw attention with weight and position before increasing size. |
 | Spacing | Use the 4px spacing scale. Keep an icon close to its label, give neighboring actions more space, and leave 16–24px between independent content groups. Allow narrow toolbars to wrap in reading order. |
 | Controls | Keep button and field silhouettes rectangular with softly rounded corners. Use dark fill for the principal submit or create action, a light border for ordinary commands and a ghost treatment for low-emphasis row actions. Use a visible focus outline with clearance around the control. |
@@ -50,7 +50,7 @@ The Machines and Orchestrators lists keep creation actions in the sticky destina
 | --- | --- |
 | Activity, queue and system | Put filters and refresh near the list. Use horizontal rules between events, requests and leases. Keep the position or state visible beside the record; allow identifiers to wrap separately. |
 | Usage and host resources | Group related totals in a divided panel. Neutral chart segments have matching labels and values. Reservations and measured usage have separate sections. |
-| Hosts, images and blueprints | Keep selectable sources in cards. Within a host, use ruled lists for machines, images and reservations. Align form controls in import, setup and maintenance dialogs with the shared input height. |
+| Hosts, images and blueprints | On wide screens place catalogue entries in full-width rows with aligned actions. Use cards at narrower widths. Within a host, use ruled lists for machines, images and reservations. Align form controls in import, setup and maintenance dialogs with the shared input height. |
 | Users, API access and configuration | Keep filters with their results. Group the feature and action selectors above operation fields. Separate confirmation controls from the operation summary with a rule. |
 | Builds, previews and models | Group launch controls together. Give queue entries and results distinct sections, with technical identifiers and output in monospace. |
 | Screen wall and machine control | Keep device labels and actions beside their viewports. Use compact headers for files, terminal and inspection tools. Preserve the usable area of live displays and keep session controls accessible on phones. |

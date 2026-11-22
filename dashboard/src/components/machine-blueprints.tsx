@@ -123,6 +123,10 @@ function CatalogueToolbar({
   );
 }
 
+// Wide catalogues align identity, specifications and actions across each row.
+const catalogueRow =
+  "min-w-0 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)_minmax(12rem,0.8fr)] xl:items-start xl:gap-6 xl:rounded-none xl:border-0 xl:px-3 xl:shadow-none";
+
 export function ImageLibrary({
   sources,
   onBlueprint,
@@ -191,7 +195,7 @@ export function ImageLibrary({
         onRefresh={() => setReload((v) => v + 1)}
       />
       {!loaded ? (
-        <Empty className="min-h-60 border">
+        <Empty className="min-h-60 flex-none border">
           <EmptyHeader>
             <EmptyTitle role={error ? undefined : "status"}>
               {error ? "Image library unavailable" : "Loading image library…"}
@@ -215,7 +219,7 @@ export function ImageLibrary({
           )}
         </Empty>
       ) : !visible.length ? (
-        <Empty className="min-h-60 border">
+        <Empty className="min-h-60 flex-none border">
           <EmptyHeader>
             <EmptyTitle role="heading" aria-level={2}>
               {images.length ? "No matching images" : "No downloaded images"}
@@ -235,26 +239,31 @@ export function ImageLibrary({
           )}
         </Empty>
       ) : (
-        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-1 xl:gap-0 xl:divide-y xl:border-y">
           {visible.map((i) => {
             const source = sources.find((s) => s.id === i.id);
             const available = source?.hosts.some(
               (h) => h.id === i.hostId && h.online && h.accepting,
             );
             return (
-              <Card key={i.id} className="min-w-0">
-                <CardHeader className="min-w-0">
+              <Card key={i.id} className={catalogueRow}>
+                <CardHeader className="min-w-0 xl:px-0">
                   <CardTitle className="break-words text-base font-semibold tracking-tight">
                     {i.name}
                   </CardTitle>
                   <CardDescription>
                     {provider(i.os)} · {i.arch} · {i.format.toUpperCase()}
                   </CardDescription>
-                  <Badge variant="outline" className="mt-1">
+                  <Badge
+                    variant="outline"
+                    className={
+                      available ? "status-ready mt-1" : "status-pending mt-1"
+                    }
+                  >
                     {available ? "Available on host" : "Awaiting host"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="min-w-0 space-y-3 text-xs">
+                <CardContent className="min-w-0 space-y-3 text-xs xl:px-0">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-muted-foreground">
                       {i.mediaType === "installer" ? "Installer" : "Boot disk"}
@@ -301,7 +310,7 @@ export function ImageLibrary({
                   </details>
                 </CardContent>
                 {admin && (
-                  <CardFooter className="mt-auto">
+                  <CardFooter className="mt-auto xl:mt-0 xl:justify-end xl:px-0">
                     <Button
                       variant="outline"
                       disabled={!source || !!error}
@@ -404,7 +413,7 @@ export function MachineBlueprints({
         }}
       />
       {!loaded ? (
-        <Empty className="min-h-60 border">
+        <Empty className="min-h-60 flex-none border">
           <EmptyHeader>
             <EmptyTitle role={error ? undefined : "status"}>
               {error ? "Blueprints unavailable" : "Loading blueprints…"}
@@ -430,7 +439,7 @@ export function MachineBlueprints({
           )}
         </Empty>
       ) : !visible.length ? (
-        <Empty className="min-h-60 border">
+        <Empty className="min-h-60 flex-none border">
           <EmptyHeader>
             <EmptyTitle role="heading" aria-level={2}>
               {items.length
@@ -452,7 +461,7 @@ export function MachineBlueprints({
           )}
         </Empty>
       ) : (
-        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-1 xl:gap-0 xl:divide-y xl:border-y">
           {visible.map((b) => {
             const offered = blueprintOffer(b, sources),
               available =
@@ -461,9 +470,9 @@ export function MachineBlueprints({
             return (
               <Card
                 key={JSON.stringify([b.id, b.revision])}
-                className="min-w-0"
+                className={catalogueRow}
               >
-                <CardHeader className="min-w-0">
+                <CardHeader className="min-w-0 xl:px-0">
                   <CardTitle className="break-words text-base font-semibold tracking-tight">
                     {b.name}
                   </CardTitle>
@@ -473,7 +482,7 @@ export function MachineBlueprints({
                   </CardDescription>
                   <Badge
                     variant="outline"
-                    className="mt-1 max-w-full whitespace-normal"
+                    className={`mt-1 max-w-full whitespace-normal ${inventoryAvailable ? (available ? "status-ready" : "status-pending") : ""}`}
                   >
                     {!inventoryAvailable
                       ? "Host availability unavailable"
@@ -482,7 +491,7 @@ export function MachineBlueprints({
                         : "Awaiting host"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="min-w-0 space-y-3 text-xs">
+                <CardContent className="min-w-0 space-y-3 text-xs xl:px-0">
                   <dl className="grid grid-cols-3 gap-3">
                     <div>
                       <dt className="text-muted-foreground">CPU</dt>
@@ -515,7 +524,7 @@ export function MachineBlueprints({
                     </p>
                   )}
                 </CardContent>
-                <CardFooter className="mt-auto flex flex-wrap gap-2">
+                <CardFooter className="mt-auto flex flex-wrap gap-2 xl:mt-0 xl:justify-end xl:px-0">
                   <Button
                     disabled={!available || !!error}
                     onClick={() => onCreate(offered)}

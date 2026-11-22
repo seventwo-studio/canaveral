@@ -264,14 +264,14 @@ export function WorkspaceBuilds() {
     <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">Linux builds</h1>
       <form
-        className="max-w-2xl space-y-4 rounded-md border bg-card p-4"
+        className="max-w-2xl space-y-4 border-y py-4"
         onSubmit={(e) => {
           e.preventDefault();
           void launch();
         }}
       >
         <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Source directory
             <Input
               type="file"
@@ -280,7 +280,7 @@ export function WorkspaceBuilds() {
               onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
             />
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Approved workspace image
             <select
               className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
@@ -294,11 +294,11 @@ export function WorkspaceBuilds() {
               ))}
             </select>
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Command (one argument per line)
             <Textarea value={argv} onChange={(e) => setArgv(e.target.value)} />
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Artifact path
             <Input
               placeholder="dist/package.tar"
@@ -317,7 +317,7 @@ export function WorkspaceBuilds() {
             Launch request <code>{pending.id}</code>
           </p>
         )}
-        <Button disabled={busy || (!pending && !imageId)}>
+        <Button className="sm:ml-48" disabled={busy || (!pending && !imageId)}>
           {pending ? "Retry same launch" : "Launch build"}
         </Button>
       </form>
@@ -347,7 +347,12 @@ export function WorkspaceBuilds() {
         ))}
       </div>
       {!rows?.length && !loadError && (
-        <p role="status">{rows ? "No builds yet." : "Loading builds…"}</p>
+        <p
+          className="border-y py-8 text-center text-[13px] text-muted-foreground"
+          role="status"
+        >
+          {rows ? "No builds yet." : "Loading builds…"}
+        </p>
       )}
     </section>
   );

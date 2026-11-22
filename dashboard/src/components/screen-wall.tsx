@@ -93,10 +93,9 @@ export function ScreenWall({
       <div className="min-w-0 space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">Screens</h1>
         <p className="max-w-prose text-sm text-muted-foreground">
-          Watch up to four running mobile devices side by side. The pictures are
-          live and watch-only; open a device's control to act on it. Only
-          devices that belong to an account are offered: a leased device's
-          screen belongs to its lease holder and is never shown here.
+          Watch up to four devices. Open control to interact with a live screen.
+          Only account-owned devices appear here: a leased device's screen
+          belongs to its lease holder and is never shown here.
         </p>
       </div>
       {stale && (
@@ -163,13 +162,18 @@ export function ScreenWall({
             Devices you can watch{" "}
             <span className="text-muted-foreground">({candidates.length})</span>
           </h2>
-          <p className="max-w-prose text-sm text-muted-foreground">
-            Watching a device runs one screen capture on its host for as long as
-            its picture is on screen: one of that host's four video sessions,
-            with one CPU and 256 MiB reserved. A tile that is scrolled away, or
-            a tab in the background, stops renewing its view, and the capture
-            then stops within a minute.
-          </p>
+          <details className="max-w-prose text-[13px] text-muted-foreground">
+            <summary className="w-fit cursor-pointer">
+              Capture capacity and limits
+            </summary>
+            <p className="mt-1">
+              Watching a device runs one screen capture on its host for as long
+              as its picture is on screen: one of that host's four video
+              sessions, with one CPU and 256 MiB reserved. A tile that is
+              scrolled away, or a tab in the background, stops renewing its
+              view, and the capture then stops within a minute.
+            </p>
+          </details>
         </div>
         {full && (
           <p className="text-sm" role="status">
@@ -216,7 +220,7 @@ export function ScreenWall({
                     </p>
                   </div>
                   <Button
-                    variant={watching ? "outline" : "default"}
+                    variant="outline"
                     size="sm"
                     disabled={!watching && full}
                     aria-pressed={watching}
@@ -425,6 +429,7 @@ function ScreenTile({
         {controllable && (
           <Button
             size="sm"
+            variant="outline"
             aria-label={`Open control of ${machine.name}`}
             onClick={() => onControl(machine.id)}
           >

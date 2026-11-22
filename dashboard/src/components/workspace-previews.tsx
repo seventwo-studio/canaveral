@@ -220,15 +220,17 @@ export function WorkspacePreviews() {
         Workspace previews
       </h1>
       <form
-        className="max-w-2xl space-y-4 rounded-md border bg-card p-4"
+        className="max-w-2xl space-y-4 border-y py-4"
         onSubmit={(e) => {
           e.preventDefault();
           void act("launch");
         }}
       >
-        <p>New previews use the operator-configured pinned image.</p>
+        <p className="text-[13px] text-muted-foreground">
+          New previews use the operator-configured pinned image.
+        </p>
         <fieldset disabled={busy || !!pending} className="grid gap-3">
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Preview type{" "}
             <select
               className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
@@ -242,7 +244,7 @@ export function WorkspacePreviews() {
               <option value="command">Dynamic app</option>
             </select>
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Workspace directory
             <Input
               key={mode}
@@ -255,7 +257,7 @@ export function WorkspacePreviews() {
           {files.length > 0 && <p>{files.length} files selected</p>}
           {mode === "command" && (
             <>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
                 Foreground command and arguments (one per line)
                 <Textarea
                   required
@@ -263,7 +265,7 @@ export function WorkspacePreviews() {
                   onChange={(e) => setArgv(e.target.value)}
                 />
               </label>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
                 HTTP port
                 <Input
                   type="number"
@@ -282,7 +284,7 @@ export function WorkspacePreviews() {
             Launch request <code>{pending.id}</code>
           </p>
         )}
-        <Button disabled={busy}>
+        <Button className="sm:ml-48" disabled={busy}>
           {pending ? "Retry same launch" : "Launch preview"}
         </Button>
       </form>
@@ -309,7 +311,12 @@ export function WorkspacePreviews() {
         </p>
       )}
       {!loadError && !rows.length && (
-        <p role="status">{loaded ? "No previews yet." : "Loading previews…"}</p>
+        <p
+          className="border-y py-8 text-center text-[13px] text-muted-foreground"
+          role="status"
+        >
+          {loaded ? "No previews yet." : "Loading previews…"}
+        </p>
       )}
       <ul aria-live="polite" className="divide-y border-y empty:hidden">
         {rows.map((p) => {

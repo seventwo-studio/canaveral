@@ -357,11 +357,11 @@ type AcceptingProps = {
 };
 function AcceptingToggle({ host, busy, mutate }: AcceptingProps) {
   return (
-    <div className="flex items-center gap-2 text-sm">
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       <span>Legacy placement switch</span>{" "}
       <Button
         size="sm"
-        variant="ghost"
+        variant="outline"
         disabled={busy}
         onClick={() =>
           mutate(
@@ -399,30 +399,40 @@ export function InfrastructureCard({
 }) {
   const orchestrator = kind(host) === "orchestrator";
   const Icon = orchestrator ? Orbit : Server;
+  const availability = !host.online
+    ? "Offline"
+    : !host.enabled
+      ? "Draining"
+      : host.placementReady === false
+        ? "Needs attention"
+        : "Online";
   return (
     <Card className="min-w-0">
       <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Icon className="size-5 text-muted-foreground" />
-          <Badge variant="outline">
-            {!host.online
-              ? "Offline"
-              : !host.enabled
-                ? "Draining"
-                : host.placementReady === false
-                  ? "Needs attention"
-                  : "Online"}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Icon className="size-4 shrink-0 text-muted-foreground" />
+          <CardTitle className="min-w-0 flex-1 break-words text-base font-semibold tracking-tight">
+            <a
+              href={resourcesHref}
+              className="underline-offset-4 hover:underline"
+              aria-label={`${host.name} overview`}
+            >
+              {host.name}
+            </a>
+          </CardTitle>
+          <Badge
+            variant="outline"
+            className={
+              availability === "Online"
+                ? "status-online"
+                : availability === "Offline"
+                  ? ""
+                  : "status-pending"
+            }
+          >
+            {availability}
           </Badge>
         </div>
-        <CardTitle className="break-words text-base font-semibold tracking-tight">
-          <a
-            href={resourcesHref}
-            className="underline-offset-4 hover:underline"
-            aria-label={`${host.name} overview`}
-          >
-            {host.name}
-          </a>
-        </CardTitle>
         <CardDescription>
           {provider(host.platform || host.provider)} ·{" "}
           {orchestrator ? "Orchestrator pool" : "Direct host"}
@@ -459,9 +469,12 @@ export function InfrastructureCard({
           )}
         </a>
       </CardContent>
-      <CardFooter className="flex flex-wrap gap-2">
+      <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
         <AcceptingToggle host={host} busy={busy} mutate={mutate} />
-        <a className="text-sm underline" href={resourcesHref}>
+        <a
+          className="text-xs font-medium underline-offset-4 hover:underline"
+          href={resourcesHref}
+        >
           Manage maintenance
         </a>
       </CardFooter>

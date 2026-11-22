@@ -236,11 +236,12 @@ export function MachineControl({
                     {sessions.map((s) => (
                       <div
                         key={s.id}
-                        className={`flex items-center rounded-sm border ${selected === s.id ? "bg-muted" : ""}`}
+                        className={`flex items-center rounded-md border ${selected === s.id ? "border-input bg-background" : "border-transparent"}`}
                       >
                         <Button
                           size="sm"
                           variant="ghost"
+                          aria-pressed={selected === s.id}
                           onClick={() => setSelected(s.id)}
                         >
                           {s.name}

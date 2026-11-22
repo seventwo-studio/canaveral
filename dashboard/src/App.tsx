@@ -798,10 +798,6 @@ export function App() {
           />
           <Breadcrumb>
             <BreadcrumbList>
-              <BreadcrumbItem className="hidden sm:block">
-                {destinations[view].group}
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden sm:block" />
               <BreadcrumbItem>
                 {resourcePage ? (
                   <BreadcrumbLink href={destinations[view].href}>
@@ -851,7 +847,7 @@ export function App() {
                 disabled={busy}
               >
                 <Plus />
-                {view === "hosts" ? "Add host" : "Add orchestrator"}
+                Add<span className="max-sm:sr-only">{view === "hosts" ? " host" : " orchestrator"}</span>
               </Button>
             )}
             {view !== "admin" && (
@@ -1230,7 +1226,7 @@ export function App() {
               <section
                 className={
                   !items.length
-                    ? "min-w-0 overflow-hidden rounded-md border bg-card"
+                    ? "min-w-0 border-y bg-card"
                     : "min-w-0"
                 }
                 aria-label={`${title(view)} inventory`}
@@ -1243,7 +1239,7 @@ export function App() {
                     onBlueprint={setBlueprintSource}
                   />
                 ) : !loaded ? (
-                  <Empty className="min-h-80">
+                  <Empty className="min-h-48 sm:min-h-56">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
                         <Orbit />
@@ -1265,7 +1261,7 @@ export function App() {
                     </EmptyHeader>
                   </Empty>
                 ) : !items.length ? (
-                  <Empty className="min-h-80">
+                  <Empty className="min-h-48 sm:min-h-56">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
                         <Rocket />

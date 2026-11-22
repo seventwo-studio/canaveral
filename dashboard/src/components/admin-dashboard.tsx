@@ -322,7 +322,7 @@ export function AdminOverview({
             Access counts show the last available snapshot.
           </p>
         )}
-        <dl className="grid grid-cols-2 overflow-hidden rounded-md border bg-card text-xs sm:grid-cols-3 xl:grid-cols-5">
+        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border text-xs lg:grid-cols-5">
           {[
             ["Users", users?.length ?? "—"],
             [
@@ -342,7 +342,7 @@ export function AdminOverview({
           ].map(([label, value]) => (
             <div
               key={label}
-              className="border-r border-b px-3 py-3 text-center xl:border-b-0 xl:last:border-r-0"
+              className="bg-card p-3 text-center last:col-span-2 lg:last:col-span-1"
             >
               <dt className="text-muted-foreground">{label}</dt>
               <dd className="mt-1 text-xl font-medium tabular-nums">{value}</dd>
@@ -496,12 +496,12 @@ export function AdminTokensPage({
           </select>
         </label>
       </div>
-      <div className="min-w-0 overflow-hidden border-b">
-        <Table>
+      <div className="@container min-w-0 border-b">
+        <Table className="block @3xl:table">
           <TableCaption className="sr-only">
             Personal API tokens across all users
           </TableCaption>
-          <TableHeader>
+          <TableHeader className="sr-only @3xl:not-sr-only @3xl:table-header-group">
             <TableRow>
               {[
                 "Token",
@@ -518,9 +518,12 @@ export function AdminTokensPage({
               ))}
             </TableRow>
           </TableHeader>
-          <TableBody>
+          <TableBody className="block @3xl:table-row-group">
             {rows.map((t) => (
-              <TableRow key={t.id}>
+              <TableRow
+                key={t.id}
+                className="grid gap-2 py-3 @3xl:table-row @3xl:py-0 [&>td]:h-auto [&>td]:px-1 [&>td]:py-0 @3xl:[&>td]:px-3 @3xl:[&>td]:py-2"
+              >
                 <TableCell className="max-w-64 !whitespace-normal break-words">
                   <span className="font-medium">{t.name}</span>
                   <span className="block font-mono text-xs text-muted-foreground">
@@ -531,9 +534,15 @@ export function AdminTokensPage({
                   </span>
                 </TableCell>
                 <TableCell className="max-w-48 !whitespace-normal break-all">
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Owner
+                  </span>
                   {owner(t.userId)}
                 </TableCell>
                 <TableCell className="!whitespace-normal">
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Permissions
+                  </span>
                   <div className="flex flex-wrap gap-1">
                     {t.scopes.map((s) => (
                       <Badge key={s} variant="outline">
@@ -543,6 +552,9 @@ export function AdminTokensPage({
                   </div>
                 </TableCell>
                 <TableCell>
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Status
+                  </span>
                   <Badge variant="outline">{tokenState(t)}</Badge>
                   {t.revokedAt !== null && (
                     <span className="block text-xs text-muted-foreground">
@@ -550,8 +562,18 @@ export function AdminTokensPage({
                     </span>
                   )}
                 </TableCell>
-                <TableCell>{timestamp(t.lastUsedAt)}</TableCell>
-                <TableCell>{timestamp(t.expiresAt)}</TableCell>
+                <TableCell>
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Last used
+                  </span>
+                  {timestamp(t.lastUsedAt)}
+                </TableCell>
+                <TableCell>
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Expires
+                  </span>
+                  {timestamp(t.expiresAt)}
+                </TableCell>
                 <TableCell>
                   {t.revokedAt === null && (
                     <Button
@@ -567,10 +589,10 @@ export function AdminTokensPage({
               </TableRow>
             ))}
             {!rows.length && (
-              <TableRow>
+              <TableRow className="block @3xl:table-row">
                 <TableCell
                   colSpan={7}
-                  className="h-32 !whitespace-normal text-center text-muted-foreground"
+                  className="block h-auto py-8 !whitespace-normal text-center text-muted-foreground @3xl:table-cell"
                 >
                   {resource.loading
                     ? "Loading API access…"
@@ -585,9 +607,6 @@ export function AdminTokensPage({
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground sm:hidden">
-        Swipe across the table to view dates and actions.
-      </p>
       <p className="text-xs text-muted-foreground">
         Token secrets are shown only to their owner when created. Revocation
         blocks new requests and connected access; the record remains here. To

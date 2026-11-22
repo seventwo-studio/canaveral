@@ -448,14 +448,14 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
     <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">Models</h1>
       <form
-        className="max-w-2xl space-y-4 rounded-md border bg-card p-4"
+        className="max-w-2xl space-y-4 border-y py-4"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
       >
         <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Installed model
             <select
               className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
@@ -472,14 +472,14 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
               ))}
             </select>
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Prompt
             <Textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
             />
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
             Maximum output tokens
             <Input
               type="number"
@@ -509,7 +509,7 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
             </Button>
           </p>
         )}
-        <Button disabled={busy || (!pending && !choice)}>
+        <Button className="sm:ml-48" disabled={busy || (!pending && !choice)}>
           {pending ? "Retry same request" : "Run model"}
         </Button>
       </form>
@@ -549,7 +549,12 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
         ))}
       </div>
       {!rows?.length && !loadError && (
-        <p role="status">{rows ? "No model jobs yet." : "Loading jobs…"}</p>
+        <p
+          className="border-y py-8 text-center text-[13px] text-muted-foreground"
+          role="status"
+        >
+          {rows ? "No model jobs yet." : "Loading jobs…"}
+        </p>
       )}
       <ModelQueue onDenied={onDenied} />
     </section>

@@ -29,11 +29,11 @@ export function LoginScreen({
   const setup = auth === "setup";
   return (
     <AccountLayout>
-      <h1 className="mb-6 text-2xl font-semibold tracking-tight">
+      <h1 className="text-xl font-semibold tracking-tight">
         {setup || auth === "blocked" ? "Create admin account" : "Sign in"}
       </h1>
       {auth === "blocked" && (
-        <Alert className="mb-6">
+        <Alert className="mb-4">
           <AlertDescription>
             Ask the Canaveral operator to issue a setup link with the admin
             setup-link command, using this dashboard’s HTTPS URL and their

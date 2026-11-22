@@ -17,6 +17,7 @@ import {
   type SystemRecord,
   type SystemSnapshot,
 } from "@/lib/system-control";
+import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import {
@@ -316,10 +317,12 @@ function SystemControlPage({
         </Button>
       </div>
       {error && (
-        <p role="alert">
-          {snapshot ? "System data is stale. " : ""}
-          {error}
-        </p>
+        <Alert variant="destructive" role="alert">
+          <AlertDescription>
+            {snapshot ? "System data is stale. " : ""}
+            {error}
+          </AlertDescription>
+        </Alert>
       )}
       {observedAt !== null && (
         <p className="text-xs text-muted-foreground">

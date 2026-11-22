@@ -223,13 +223,13 @@ export function WorkspaceSidebar({
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent className="gap-0">
         {groups.map((label) => {
           const entries = links.filter(([, entry]) => entry.group === label);
           if (!entries.length) return null;
           return (
-            <SidebarGroup key={label}>
-              <SidebarGroupLabel className="text-xs font-medium text-muted-foreground">
+            <SidebarGroup key={label} className="py-1.5">
+              <SidebarGroupLabel className="h-7 font-normal text-muted-foreground group-data-[collapsible=icon]:-mt-7">
                 {label}
               </SidebarGroupLabel>
               <SidebarGroupContent>
@@ -248,7 +248,7 @@ export function WorkspaceSidebar({
                             asChild
                             isActive={view === key}
                             tooltip={title}
-                            className="h-10 md:h-8"
+                            className="h-10 rounded-sm md:h-8 md:text-[13px]"
                           >
                             <a
                               href={href}
@@ -260,7 +260,7 @@ export function WorkspaceSidebar({
                             </a>
                           </SidebarMenuButton>
                           {counts[key] !== undefined && (
-                            <SidebarMenuBadge className="font-mono text-xs tabular-nums">
+                            <SidebarMenuBadge className="text-xs tabular-nums text-muted-foreground">
                               {counts[key]}
                             </SidebarMenuBadge>
                           )}
@@ -286,7 +286,7 @@ export function WorkspaceSidebar({
                   isActive={view === "account" || view === "tokens"}
                   aria-label="Account menu"
                 >
-                  <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted text-sm font-medium">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-medium">
                     {user.username.slice(0, 2).toUpperCase()}
                   </span>
                   <div className="grid flex-1 text-left leading-tight">

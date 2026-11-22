@@ -307,7 +307,7 @@ function QueueSession({
                 {view.requests.map((request) => (
                   <li
                     key={`${request.applicationId}:${request.id}`}
-                    className="grid min-w-0 gap-3 px-1 py-3 lg:grid-cols-[5.5rem_minmax(0,1fr)_auto] lg:items-start"
+                    className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:grid-cols-[5.5rem_minmax(0,1fr)_auto] lg:items-start"
                   >
                     <div className="min-w-0">
                       {request.position === null ? (
@@ -396,6 +396,7 @@ function QueueSession({
                     <Button
                       variant="outline"
                       size="sm"
+                      className="justify-self-start"
                       disabled={!!intent || !!error}
                       aria-label={`Cancel request ${name(request)}`}
                       onClick={() => {
@@ -534,7 +535,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
 function LeaseRow({ lease, now }: { lease: QueueLease; now: number }) {
   const remaining = (Date.parse(lease.expiresAt) - now) / 1000;
   return (
-    <li className="grid min-w-0 gap-3 px-1 py-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
+    <li className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
       <div className="min-w-0">
         <Badge variant="outline">{lease.state}</Badge>
       </div>

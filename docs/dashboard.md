@@ -10,7 +10,7 @@ Administrators open the base image registry or import a downloaded publisher fil
 from this page. Imports still require an eligible host and storage reservation.
 
 **Machine blueprints** (`#blueprints`) lists immutable resource presets tied to
-an exact source revision. Administrators create blueprints from library cards or
+an exact source revision. Administrators create blueprints from library entries or
 select existing prepared captures in **New blueprint**. **New revision** preserves
 the previous version. Users with machine-write permission can create machines
 from an offered blueprint, apply resource overrides and select placement; the
@@ -350,8 +350,7 @@ to Canaveral workflows. Use a persistent resource rail, a compact breadcrumb hea
 and contextual actions beside the resources they affect. Keep the lowercase wordmark,
 rocket mark and real launch photograph. The font and icon licenses ship in `licenses.txt`.
 
-Keep template and host cards directly in the grid, without a second bordered panel
-around them. Do not add fabricated charts or telemetry.
+Use full-width catalogue rows on wide screens and cards on smaller screens. Host cards sit directly in the grid. Do not add fabricated charts or telemetry.
 
 Use shadcn compositions for the application structure as well as its controls.
 Navigation uses SidebarProvider, Sidebar, its header/content/menu/footer parts,

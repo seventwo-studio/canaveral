@@ -153,7 +153,7 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
   }
   const features = [...new Set(apiActions.map((item) => item.feature))];
   return (
-    <div className="min-w-0 space-y-6">
+    <div className="mx-auto w-full min-w-0 max-w-3xl space-y-6">
       <div className="space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">API controls</h1>
         <p className="text-sm text-muted-foreground">

@@ -62,7 +62,7 @@ import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "./ui/empty";
 
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="w-full max-w-2xl space-y-5">
+    <section className="mx-auto w-full max-w-2xl space-y-5">
       <h1 className="border-b pb-3 text-xl font-semibold tracking-tight">
         {title}
       </h1>
@@ -129,7 +129,10 @@ export function Secret({
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   return (
-    <section className="space-y-3 border p-4" aria-label={label}>
+    <section
+      className="space-y-3 rounded-md border bg-muted/30 p-4"
+      aria-label={label}
+    >
       <p>{label}. Save it now; it will not be shown again.</p>
       <Input aria-label={label} value={value} readOnly autoComplete="off" />
       <div className="flex flex-wrap gap-2">
@@ -824,7 +827,7 @@ export function UsersPage({
                 className="block py-3 @2xl:table-row @2xl:py-0"
                 aria-label={`${u.username} account`}
               >
-                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                   <span className="block break-all font-medium">
                     {u.username}
                     {u.id === user?.id && (
@@ -835,7 +838,7 @@ export function UsersPage({
                     {u.id}
                   </span>
                 </TableCell>
-                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                   <span className="mb-2 block text-sm">
                     {u.role === "admin" ? "Administrator" : "User"}
                   </span>
@@ -851,7 +854,7 @@ export function UsersPage({
                     )}
                 </TableCell>
                 {machines !== undefined && (
-                  <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                  <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                     <span className="@2xl:hidden">Machines: </span>
                     {
                       machines.filter(
@@ -860,7 +863,7 @@ export function UsersPage({
                     }
                   </TableCell>
                 )}
-                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                   <div className="flex flex-wrap gap-2">
                     {u.status === "pending" && (
                       <>

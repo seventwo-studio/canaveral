@@ -44,7 +44,7 @@ export function MachineInventory({
     <div className="min-w-0 overflow-hidden rounded-md border bg-card xl:rounded-none xl:border-x-0 xl:border-t-0">
       <div
         aria-hidden="true"
-        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-card px-4 py-3 text-xs font-medium text-muted-foreground xl:grid"
+        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-card px-3 py-2.5 text-xs font-normal text-muted-foreground xl:grid"
       >
         <span>Machine</span>
         <span>State</span>
@@ -112,7 +112,7 @@ function MachineRow({
   return (
     <li
       data-machine-id={m.id}
-      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:py-2.5 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center xl:hover:bg-muted/30"
+      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:px-3 xl:py-2 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center xl:hover:bg-muted/30"
     >
       <div className="flex min-w-0 items-start gap-3">
         <div className="min-w-0 space-y-1">
@@ -155,7 +155,7 @@ function MachineRow({
       </div>
       <dl className="min-w-0 text-xs">
         <dt className="mb-1 text-muted-foreground xl:sr-only">Resources</dt>
-        <dd className="break-words font-mono tabular-nums">
+        <dd className="break-words tabular-nums">
           {m.resources.cpu} vCPU · {memory(m.resources.memoryMiB)}
           <span className="mt-1 block text-muted-foreground">
             {number(m.resources.diskGiB)} GiB disk

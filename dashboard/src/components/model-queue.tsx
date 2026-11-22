@@ -303,7 +303,11 @@ export function ModelQueue({ onDenied }: { onDenied: () => void }) {
           />
         ))}
       </div>
-      {rows && !rows.length && !error && <p>No application model jobs.</p>}
+      {rows && !rows.length && !error && (
+        <p className="border-y py-8 text-center text-[13px] text-muted-foreground">
+          No application model jobs.
+        </p>
+      )}
     </section>
   );
 }

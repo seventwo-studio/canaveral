@@ -261,8 +261,9 @@ function ActivitySession({
             results.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           <Button
+            size="sm"
             variant="outline"
             aria-pressed={paused}
             onClick={() => setPaused((value) => !value)}
@@ -276,6 +277,7 @@ function ActivitySession({
           </Button>
           <Button
             variant="outline"
+            size="sm"
             onClick={() => (catalogue ? void follow() : loadKinds())}
           >
             <RefreshCw aria-hidden="true" />
