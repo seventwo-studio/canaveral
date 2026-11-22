@@ -33,7 +33,7 @@ export function BaseImageRegistry({
   const candidates = hosts.filter(
     (h) => h.online && h.kind !== "orchestrator" && h.provider !== "kubevirt",
   );
-  const [entries, setEntries] = useState<RegistryEntry[]>([]),
+  const [entries, setEntries] = useState<RegistryEntry[] | null>(null),
     [query, setQuery] = useState(""),
     [os, setOs] = useState("all"),
     [arch, setArch] = useState("all");
@@ -117,7 +117,7 @@ export function BaseImageRegistry({
   const pending = !!task && ["queued", "running"].includes(task.state);
   const selectedHost = candidates.find((h) => h.id === host);
   const hostArch = selectedHost?.health?.environment?.arch;
-  const visible = entries.filter(
+  const visible = (entries ?? []).filter(
     (e) =>
       (os === "all" || e.os === os) &&
       (arch === "all" || e.arch === arch) &&
@@ -220,9 +220,11 @@ export function BaseImageRegistry({
         )}
         {loading ? (
           <p className="text-xs text-muted-foreground">Loading registry…</p>
-        ) : !visible.length ? (
+        ) : !entries ? null : !visible.length ? (
           <p className="text-xs text-muted-foreground">
-            No images match these filters.
+            {entries.length
+              ? "No images match these filters."
+              : "No images are available in the registry."}
           </p>
         ) : (
           <div className="grid min-w-0 gap-3 md:grid-cols-2">
@@ -309,9 +311,7 @@ export function BaseImageRegistry({
                     {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB disk
                   </p>
                   {reason && (
-                    <p className="text-xs text-muted-foreground">
-                      {reason}
-                    </p>
+                    <p className="text-xs text-muted-foreground">{reason}</p>
                   )}
                   <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
                     {e.resolver ? (

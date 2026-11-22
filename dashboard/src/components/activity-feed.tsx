@@ -503,7 +503,7 @@ function ActivitySession({
         </p>
       )}
       {feed && !feed.events.length && (
-        <Empty className="border">
+        <Empty showIcon>
           <EmptyHeader>
             <EmptyTitle>
               {filtered(filter)

@@ -1,3 +1,4 @@
+import { Empty, EmptyDescription } from "./ui/empty";
 import { readFile } from "@/lib/workspace-file";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
@@ -311,12 +312,11 @@ export function WorkspacePreviews() {
         </p>
       )}
       {!loadError && !rows.length && (
-        <p
-          className="border-y py-8 text-center text-[13px] text-muted-foreground"
-          role="status"
-        >
-          {loaded ? "No previews yet." : "Loading previews…"}
-        </p>
+        <Empty showIcon={loaded} role="status">
+          <EmptyDescription>
+            {loaded ? "No previews yet." : "Loading previews…"}
+          </EmptyDescription>
+        </Empty>
       )}
       <ul aria-live="polite" className="divide-y border-y empty:hidden">
         {rows.map((p) => {

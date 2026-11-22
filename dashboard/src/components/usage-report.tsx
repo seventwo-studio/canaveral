@@ -443,7 +443,7 @@ function UsageSession({
               </span>
             </h2>
             {!report.rows.length ? (
-              <Empty className="border">
+              <Empty showIcon>
                 <EmptyHeader>
                   <EmptyTitle>Nothing recorded in this range</EmptyTitle>
                   <EmptyDescription>

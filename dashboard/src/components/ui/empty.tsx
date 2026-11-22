@@ -1,18 +1,34 @@
+import { Button } from "./button";
+import { Inbox } from "lucide-react";
 import type * as React from "react";
 import type { VariantProps } from "class-variance-authority";
 import { cva } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
-function Empty({ className, ...props }: React.ComponentProps<"div">) {
+function Empty({
+  className,
+  children,
+  showIcon = false,
+  ...props
+}: React.ComponentProps<"div"> & { showIcon?: boolean }) {
   return (
     <div
       data-slot="empty"
       className={cn(
-        "flex min-w-0 flex-1 flex-col items-center justify-center gap-4 rounded-lg p-6 text-center text-balance md:p-8",
+        "flex min-w-0 flex-1 flex-col items-center justify-center gap-3 px-4 py-8 text-center text-balance md:py-10",
         className,
       )}
       {...props}
-    />
+    >
+      {showIcon && (
+        <Inbox
+          aria-hidden="true"
+          strokeWidth={1.5}
+          className="size-6 text-muted-foreground"
+        />
+      )}
+      {children}
+    </div>
   );
 }
 
@@ -21,7 +37,7 @@ function EmptyHeader({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="empty-header"
       className={cn(
-        "flex max-w-sm flex-col items-center gap-2 text-center",
+        "flex max-w-md flex-col items-center gap-1 text-center",
         className,
       )}
       {...props}
@@ -30,12 +46,12 @@ function EmptyHeader({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 const emptyMediaVariants = cva(
-  "mb-2 flex shrink-0 items-center justify-center [&_svg]:pointer-events-none [&_svg]:shrink-0",
+  "flex shrink-0 items-center justify-center [&_svg]:pointer-events-none [&_svg]:shrink-0",
   {
     variants: {
       variant: {
         default: "bg-transparent",
-        icon: "flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground [&_svg:not([class*='size-'])]:size-6",
+        icon: "flex size-6 shrink-0 items-center justify-center text-muted-foreground [&_svg:not([class*='size-'])]:size-6",
       },
     },
     defaultVariants: {
@@ -63,7 +79,7 @@ function EmptyTitle({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="empty-title"
-      className={cn("text-base font-medium tracking-tight", className)}
+      className={cn("text-sm font-medium", className)}
       {...props}
     />
   );
@@ -77,7 +93,7 @@ function EmptyDescription({
     <div
       data-slot="empty-description"
       className={cn(
-        "text-sm/relaxed text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
+        "text-[13px]/5 text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
         className,
       )}
       {...props}
@@ -98,8 +114,28 @@ function EmptyContent({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
+function FilteredEmpty({
+  title,
+  action,
+  onClear,
+}: {
+  title: string;
+  action: string;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-4">
+      <h2 className="text-[13px] text-muted-foreground">{title}</h2>
+      <Button size="sm" variant="ghost" onClick={onClear}>
+        {action}
+      </Button>
+    </div>
+  );
+}
+
 export {
   Empty,
+  FilteredEmpty,
   EmptyHeader,
   EmptyTitle,
   EmptyDescription,

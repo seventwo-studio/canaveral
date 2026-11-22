@@ -182,14 +182,16 @@ export function ScreenWall({
           </p>
         )}
         {!candidates.length ? (
-          <Empty className="border">
+          <Empty showIcon={loaded && !stale}>
             <EmptyHeader>
               <EmptyTitle>
-                {loaded
-                  ? "No running mobile device to watch"
-                  : "Loading the device list…"}
+                {stale
+                  ? "Device inventory is unavailable"
+                  : loaded
+                    ? "No running mobile device to watch"
+                    : "Loading the device list…"}
               </EmptyTitle>
-              {loaded && (
+              {loaded && !stale && (
                 <EmptyDescription>
                   An Android or iOS device appears here while it is running and
                   belongs to {admin ? "an account" : "your account"}. Create or

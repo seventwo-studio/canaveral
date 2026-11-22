@@ -381,9 +381,8 @@ export function GuestFiles({
               </button>
             ))}
             {!visible.length && (
-              <div className="flex flex-col items-center gap-3 p-12 text-center text-muted-foreground">
-                <Folder className="size-8" />
-                <p className="text-sm">
+              <div className="px-4 py-3 text-[13px] text-muted-foreground">
+                <p>
                   {busy
                     ? "Loading files…"
                     : !loaded

@@ -128,7 +128,7 @@ export function MachineControl({
       <DialogContent
         showCloseButton={false}
         onEscapeKeyDown={(event) => event.preventDefault()}
-        className="fixed inset-0 top-0 left-0 flex h-svh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:max-w-none"
+        className="fixed inset-0 top-0 left-0 flex h-dvh max-h-none w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:max-w-none"
       >
         <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b bg-muted px-4 py-2 text-left">
           <div className="flex min-w-0 items-center gap-3">

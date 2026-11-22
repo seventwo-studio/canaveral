@@ -592,7 +592,7 @@ export function AdminTokensPage({
               <TableRow className="block @3xl:table-row">
                 <TableCell
                   colSpan={7}
-                  className="block h-auto py-8 !whitespace-normal text-center text-muted-foreground @3xl:table-cell"
+                  className="block h-auto py-3 !whitespace-normal text-left text-[13px] text-muted-foreground @3xl:table-cell"
                 >
                   {resource.loading
                     ? "Loading API access…"
@@ -630,6 +630,7 @@ export function AdminTokensPage({
           <AlertDialogFooter>
             <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               disabled={busy}
               onClick={(e) => {
                 e.preventDefault();

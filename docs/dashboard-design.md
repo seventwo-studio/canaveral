@@ -16,6 +16,12 @@ Overview uses enclosure selectively. Related metrics share an outline and intern
 
 Settings narrows the reading width inside the same shell. In Preferences the label column stays still as field widths and values change. Usage groups four measurements in a two-by-two panel. Projects uses separate groups for the project and its plan, with whitespace between headings and light rules within each group. [Preferences](https://mobbin.com/screens/afed0e5d-556b-4298-a286-e8cf31a331de) · [Project usage](https://mobbin.com/screens/915737bd-69f9-46f2-9832-313521874332) · [Projects](https://mobbin.com/screens/47c2c738-eafa-44d4-8f0b-dcdcab087b40)
 
+The invite dialog sits on a light, blurred backdrop. Its fields and section titles align left, and its primary action fills the available width. Canaveral uses a darker orange for positive form submissions to keep small white labels legible, and preserves distinct Cancel and destructive actions where an operation needs confirmation. [Invite members](https://mobbin.com/screens/34f504f8-87cd-4dcf-b5b6-9459cd121b39)
+
+Filter menus open beside their trigger with a fine outline, short rows and a soft shadow. Gray marks the highlighted row; the access picker also marks the selected value with an orange check. [Session filter](https://mobbin.com/screens/b633730a-9656-4a4e-8721-76845ed05684) · [Access picker](https://mobbin.com/screens/1e700e78-6640-4f99-80a6-48f56ddb6f15)
+
+Recent Runs centers a bare inbox icon and a short caption in an empty section. Invocations keeps its column labels and places the empty message along the left edge of the list. Use the section treatment for first use and the inline treatment for a filtered list. Show loading and failed reads separately. [Recent Runs](https://mobbin.com/screens/d3576662-8006-471e-bd1b-7d48e938e2a8) · [Invocations](https://mobbin.com/screens/1ca1bac4-ad5b-4dc6-b7e0-71b41470c5fe)
+
 ## Canaveral implementation specification
 
 These dimensions and colors are Canaveral implementation values chosen from visual comparison. The reference captures do not expose Browserbase’s CSS.
@@ -24,7 +30,7 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 | --- | --- |
 | Shell | Desktop rail 256px wide, collapsed rail 48px, sticky header 48px high. The rail meets the canvas at a single vertical hairline. Use 16px horizontal content padding on phones and 24px on desktop. |
 | Surface and ink | White canvas and panels, #f8f8f8 shell, #202020 main text, #666666 supporting text. Group content with whitespace first, then a single #e3e3e3 rule when adjacent regions need a boundary. |
-| Identity and selection | Orange belongs to the Canaveral mark. Active navigation has a flat #eaeaea fill with dark text. Use a 4px radius for the selected row. The top bar names the destination once; detail pages add a link back to the parent. |
+| Identity and selection | Orange marks the product, the checked option in a picker, and a positive dialog submission. Active navigation has a flat #eaeaea fill with dark text. Use a 4px radius for the selected row. The top bar names the destination once; detail pages add a link back to the parent. |
 | Typography | Use system sans for navigation, controls, table headers and prose. Use Geist Mono for machine IDs, code and technical values. Destination headings are 20px semibold. Draw attention with weight and position before increasing size. |
 | Spacing | Use the 4px spacing scale. Keep an icon close to its label, give neighboring actions more space, and leave 16–24px between independent content groups. Allow narrow toolbars to wrap in reading order. |
 | Controls | Keep button and field silhouettes rectangular with softly rounded corners. Use dark fill for the principal submit or create action, a light border for ordinary commands and a ghost treatment for low-emphasis row actions. Use a visible focus outline with clearance around the control. |
@@ -55,7 +61,7 @@ The Machines and Orchestrators lists keep creation actions in the sticky destina
 | Builds, previews and models | Group launch controls together. Give queue entries and results distinct sections, with technical identifiers and output in monospace. |
 | Screen wall and machine control | Keep device labels and actions beside their viewports. Use compact headers for files, terminal and inspection tools. Preserve the usable area of live displays and keep session controls accessible on phones. |
 
-Forms use 16px between fields and 6px between a label and its control. Dialog headings align left. A horizontal rule and 16px of top padding separate footer actions from content. The overlay darkens the workspace while leaving its context visible.
+Forms use 16px between fields and 6px between a label and its control. Dialog headings align left. A horizontal rule and 12px of top padding separate footer actions from content. The overlay darkens the workspace while leaving its context visible.
 
 ## Canaveral screen map
 
@@ -83,7 +89,7 @@ The image library also accepts `#templates`, user administration accepts `#users
 ## Design principles
 
 - Give the operator a stable location. Keep resource families in the rail, account actions at its foot and the current destination in the sticky header. On small screens the rail becomes a drawer. Changing destinations scrolls to the top and moves keyboard focus to the workspace.
-- Use a white work area and a pale neutral navigation rail. Reserve orange for the product mark and use monospace for identifiers and measurements. Keep the launch photograph on the account entry screens.
+- Use a white work area and a pale neutral navigation rail. Use orange sparingly for identity and action, and use monospace for identifiers and measurements. Keep the launch photograph on the account entry screens.
 - Give each machine an action appropriate to its state. Keep its name and status visible while the operator inspects details. On narrow screens, pair each value with its label.
 - Keep fleet health compact so search, filters and the first machine are visible together on a narrow phone. Use a full-width search input and a native state picker on phones. Keep host reservations expandable and label fleet counts as applying before filters.
 - Lead Overview with up to four actionable exceptions. When machines and connections both need attention, include at least one of each in the preview. Put fleet and host health before account administration, with one refresh action for the whole overview.

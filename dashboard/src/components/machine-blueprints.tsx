@@ -26,6 +26,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -33,6 +34,7 @@ import {
 import { Field, FieldLabel, FieldDescription, FieldGroup } from "./ui/field";
 import {
   Empty,
+  FilteredEmpty,
   EmptyHeader,
   EmptyTitle,
   EmptyDescription,
@@ -195,7 +197,7 @@ export function ImageLibrary({
         onRefresh={() => setReload((v) => v + 1)}
       />
       {!loaded ? (
-        <Empty className="min-h-60 flex-none border">
+        <Empty className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role={error ? undefined : "status"}>
               {error ? "Image library unavailable" : "Loading image library…"}
@@ -218,16 +220,20 @@ export function ImageLibrary({
             </EmptyContent>
           )}
         </Empty>
+      ) : !visible.length && images.length > 0 ? (
+        <FilteredEmpty
+          title="No matching images"
+          action="Clear search"
+          onClear={() => setQuery("")}
+        />
       ) : !visible.length ? (
-        <Empty className="min-h-60 flex-none border">
+        <Empty showIcon className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role="heading" aria-level={2}>
-              {images.length ? "No matching images" : "No downloaded images"}
+              No downloaded images
             </EmptyTitle>
             <EmptyDescription>
-              {images.length
-                ? "Try another name, OS or architecture."
-                : "Download an original from the registry or import a publisher file."}
+              Download an original from the registry or import a publisher file.
             </EmptyDescription>
           </EmptyHeader>
           {query && (
@@ -413,7 +419,7 @@ export function MachineBlueprints({
         }}
       />
       {!loaded ? (
-        <Empty className="min-h-60 flex-none border">
+        <Empty className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role={error ? undefined : "status"}>
               {error ? "Blueprints unavailable" : "Loading blueprints…"}
@@ -438,18 +444,21 @@ export function MachineBlueprints({
             </EmptyContent>
           )}
         </Empty>
+      ) : !visible.length && items.length > 0 ? (
+        <FilteredEmpty
+          title="No matching blueprints"
+          action="Clear search"
+          onClear={() => setQuery("")}
+        />
       ) : !visible.length ? (
-        <Empty className="min-h-60 flex-none border">
+        <Empty showIcon className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role="heading" aria-level={2}>
-              {items.length
-                ? "No matching blueprints"
-                : "No machine blueprints"}
+              No machine blueprints
             </EmptyTitle>
             <EmptyDescription>
-              {items.length
-                ? "Try another name, OS or architecture."
-                : "Save resource settings for a downloaded image or prepared snapshot."}
+              Save resource settings for a downloaded image or prepared
+              snapshot.
             </EmptyDescription>
           </EmptyHeader>
           {query && (
@@ -736,7 +745,7 @@ export function BlueprintEditor({
               </p>
             )}
           </FieldGroup>
-          <div className="flex justify-end gap-2">
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"
@@ -748,7 +757,7 @@ export function BlueprintEditor({
             <Button type="submit" disabled={busy || !source}>
               {busy ? "Saving…" : "Save blueprint"}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

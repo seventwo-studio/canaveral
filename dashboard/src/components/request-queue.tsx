@@ -288,7 +288,7 @@ function QueueSession({
               </p>
             )}
             {!view.requests.length ? (
-              <Empty className="border">
+              <Empty showIcon>
                 <EmptyHeader>
                   <EmptyTitle>No requests are waiting</EmptyTitle>
                   <EmptyDescription>
@@ -441,15 +441,18 @@ function QueueSession({
                   the controller admitted it since this page last refreshed,
                   cancelling releases its lease instead and cleanup follows the
                   lease rules.
-                  <br />
-                  Request: <span className="font-mono">{intent.target.id}</span>
-                  <br />
-                  Application:{" "}
-                  {intent.target.applicationName
-                    ? `${intent.target.applicationName} · `
-                    : ""}
-                  <span className="font-mono">
-                    {intent.target.applicationId}
+                  <span className="mt-3 block text-xs">
+                    Request:{" "}
+                    <span className="font-mono">{intent.target.id}</span>
+                  </span>
+                  <span className="mt-1 block text-xs">
+                    Application:{" "}
+                    {intent.target.applicationName
+                      ? `${intent.target.applicationName} · `
+                      : ""}
+                    <span className="font-mono">
+                      {intent.target.applicationId}
+                    </span>
                   </span>
                 </>
               )}
@@ -470,7 +473,11 @@ function QueueSession({
             <AlertDialogCancel disabled={busy || uncertain}>
               Keep waiting
             </AlertDialogCancel>
-            <Button disabled={busy} onClick={() => void cancel()}>
+            <Button
+              variant="destructive"
+              disabled={busy}
+              onClick={() => void cancel()}
+            >
               {busy
                 ? "Waiting…"
                 : uncertain
@@ -509,7 +516,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
         </p>
       )}
       {!view.leases.length ? (
-        <Empty className="border">
+        <Empty showIcon>
           <EmptyHeader>
             <EmptyTitle>No lease holds capacity</EmptyTitle>
             <EmptyDescription>

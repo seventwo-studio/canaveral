@@ -122,6 +122,14 @@ const m = {
 for (const width of [1440, 1133, 390, 320])
   test(`production dashboard at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 1000 });
+    async function captureSurface(name) {
+      if (process.env.CANAVERAL_SCREENSHOT_DIR) {
+        await page.screenshot({
+          path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/${name}-${width}.png`,
+        });
+      }
+    }
+
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     page.on("console", (msg) => {
@@ -215,6 +223,7 @@ for (const width of [1440, 1133, 390, 320])
     await expect(
       page.getByRole("heading", { name: "No matching machines" }),
     ).toBeVisible();
+    await captureSurface("filtered-empty");
     if (width < 768) {
       await expect(state).toHaveValue("stopped");
       await state.selectOption("all");
@@ -252,6 +261,15 @@ for (const width of [1440, 1133, 390, 320])
     await create.click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await page.getByRole("combobox", { name: "Placement" }).click();
+    const listbox = page.getByRole("listbox");
+    await expect(listbox).toBeInViewport({ ratio: 1 });
+    await captureSurface("placement-options");
+    await page.keyboard.press("Escape");
+    await expect(listbox).toHaveCount(0);
+    await expect(
+      page.getByRole("combobox", { name: "Placement" }),
+    ).toBeFocused();
+    await page.keyboard.press("ArrowDown");
     await page.getByRole("option", { name: "Arctic" }).click();
     await expect(page.getByRole("combobox", { name: "Placement" })).toHaveText(
       "Arctic",
@@ -260,6 +278,18 @@ for (const width of [1440, 1133, 390, 320])
       path: testInfo.outputPath("create.png"),
       fullPage: true,
     });
+    if (width === 1133) {
+      await page.setViewportSize({ width, height: 350 });
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeInViewport({ ratio: 1 });
+      const submit = dialog.getByRole("button", {
+        name: "Create machine",
+        exact: true,
+      });
+      await submit.scrollIntoViewIfNeeded();
+      await expect(submit).toBeInViewport({ ratio: 1 });
+      await page.setViewportSize({ width, height: 1000 });
+    }
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
     await expect(create).toBeFocused();
@@ -304,6 +334,8 @@ for (const width of [1440, 1133, 390, 320])
     await expect(
       page.getByRole("menuitem", { name: "Sign out" }),
     ).toBeVisible();
+    await expect(page.getByRole("menu")).toBeInViewport({ ratio: 1 });
+    await captureSurface("account-menu");
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await expect(
       page.getByRole("button", { name: "Sign in", exact: true }),

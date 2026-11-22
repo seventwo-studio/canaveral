@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -104,7 +105,7 @@ export function MachineDelete({
             <Button onClick={onClose}>Close</Button>
           </div>
         ) : (
-          <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
+          <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>
@@ -115,7 +116,7 @@ export function MachineDelete({
                   ? "Check deletion"
                   : "Delete machine"}
             </Button>
-          </div>
+          </DialogFooter>
         )}
       </DialogContent>
     </Dialog>

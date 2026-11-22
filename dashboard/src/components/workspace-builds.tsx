@@ -1,3 +1,4 @@
+import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { record } from "@/lib/types";
@@ -347,12 +348,11 @@ export function WorkspaceBuilds() {
         ))}
       </div>
       {!rows?.length && !loadError && (
-        <p
-          className="border-y py-8 text-center text-[13px] text-muted-foreground"
-          role="status"
-        >
-          {rows ? "No builds yet." : "Loading builds…"}
-        </p>
+        <Empty showIcon={!!rows} role="status">
+          <EmptyDescription>
+            {rows ? "No builds yet." : "Loading builds…"}
+          </EmptyDescription>
+        </Empty>
       )}
     </section>
   );

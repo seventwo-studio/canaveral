@@ -792,7 +792,7 @@ export function UsersPage({
         </p>
       )}
       {loaded && visible && filtered.length === 0 && (
-        <Empty>
+        <Empty showIcon>
           <EmptyHeader>
             <EmptyTitle>
               {users.length ? "No users match" : "No users available"}

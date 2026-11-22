@@ -1,3 +1,4 @@
+import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { ModelQueue } from "./model-queue";
@@ -549,12 +550,11 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
         ))}
       </div>
       {!rows?.length && !loadError && (
-        <p
-          className="border-y py-8 text-center text-[13px] text-muted-foreground"
-          role="status"
-        >
-          {rows ? "No model jobs yet." : "Loading jobs…"}
-        </p>
+        <Empty showIcon={!!rows} role="status">
+          <EmptyDescription>
+            {rows ? "No model jobs yet." : "Loading jobs…"}
+          </EmptyDescription>
+        </Empty>
       )}
       <ModelQueue onDenied={onDenied} />
     </section>

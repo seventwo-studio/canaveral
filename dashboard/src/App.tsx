@@ -87,7 +87,6 @@ const statusCode = (error: unknown) =>
     : undefined;
 import { useEffect, useRef, useState } from "react";
 import {
-  Rocket,
   ArrowUpRight,
   Plus,
   Search,
@@ -174,6 +173,7 @@ import {
 } from "@/components/ui/input-group";
 import {
   Empty,
+  FilteredEmpty,
   EmptyHeader,
   EmptyMedia,
   EmptyTitle,
@@ -847,7 +847,10 @@ export function App() {
                 disabled={busy}
               >
                 <Plus />
-                Add<span className="max-sm:sr-only">{view === "hosts" ? " host" : " orchestrator"}</span>
+                Add
+                <span className="max-sm:sr-only">
+                  {view === "hosts" ? " host" : " orchestrator"}
+                </span>
               </Button>
             )}
             {view !== "admin" && (
@@ -1225,9 +1228,7 @@ export function App() {
               )}
               <section
                 className={
-                  !items.length
-                    ? "min-w-0 border-y bg-card"
-                    : "min-w-0"
+                  !items.length ? "min-w-0 border-y bg-card" : "min-w-0"
                 }
                 aria-label={`${title(view)} inventory`}
               >
@@ -1244,11 +1245,7 @@ export function App() {
                       <EmptyMedia variant="icon">
                         <Orbit />
                       </EmptyMedia>
-                      <EmptyTitle
-                        className="font-display text-xl font-medium"
-                        role="heading"
-                        aria-level={2}
-                      >
+                      <EmptyTitle role="heading" aria-level={2}>
                         {stale
                           ? "Awaiting connection"
                           : "Contacting your control plane…"}
@@ -1260,44 +1257,29 @@ export function App() {
                       </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
+                ) : !items.length && total > 0 ? (
+                  <FilteredEmpty
+                    title={`No matching ${view}`}
+                    action="Clear filters"
+                    onClear={() => {
+                      setQuery("");
+                      setFilter("all");
+                      setOwner("all");
+                    }}
+                  />
                 ) : !items.length ? (
-                  <Empty className="min-h-48 sm:min-h-56">
+                  <Empty showIcon className="min-h-48 sm:min-h-56">
                     <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <Rocket />
-                      </EmptyMedia>
-                      <EmptyTitle
-                        className="font-display text-xl font-medium"
-                        role="heading"
-                        aria-level={2}
-                      >
-                        {total ? `No matching ${view}` : `No ${view} yet`}
+                      <EmptyTitle role="heading" aria-level={2}>
+                        No {view} yet
                       </EmptyTitle>
                       <EmptyDescription>
-                        {total
-                          ? "Try a different filter or search term."
-                          : view === "machines"
-                            ? "Create a machine from an image available on one of your hosts."
-                            : isInfrastructure
-                              ? "Add a connection setup, run its environment checks, then connect the runner."
-                              : "Install a base image on a host, then register it with Canaveral."}
+                        {view === "machines"
+                          ? "Create a machine from an image available on one of your hosts."
+                          : "Add a connection setup, run its environment checks, then connect the runner."}
                       </EmptyDescription>
                     </EmptyHeader>
-                    {total > 0 && (
-                      <EmptyContent>
-                        <Button
-                          variant="outline"
-                          onClick={() => {
-                            setQuery("");
-                            setFilter("all");
-                            setOwner("all");
-                          }}
-                        >
-                          Clear filters
-                        </Button>
-                      </EmptyContent>
-                    )}
-                    {view === "machines" && !total && (
+                    {view === "machines" && (
                       <EmptyContent>
                         <Button
                           variant="outline"
@@ -1470,7 +1452,6 @@ export function App() {
         }}
       >
         <DialogContent
-          className="max-h-[calc(100svh-2rem)] overflow-y-auto"
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             focus(detailTrigger.current);
@@ -1701,7 +1682,6 @@ function CreateMachine({
       }}
     >
       <DialogContent
-        className="max-h-[calc(100svh-2rem)] overflow-y-auto"
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           focus(config.returnFocus);

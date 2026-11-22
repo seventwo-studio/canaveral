@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -90,14 +91,14 @@ export function MachinePowerOff({
             <Button onClick={onClose}>Close</Button>
           </div>
         ) : (
-          <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
+          <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>
             <Button variant="destructive" disabled={busy} onClick={submit}>
               {busy ? "Requesting…" : "Power off VM"}
             </Button>
-          </div>
+          </DialogFooter>
         )}
       </DialogContent>
     </Dialog>

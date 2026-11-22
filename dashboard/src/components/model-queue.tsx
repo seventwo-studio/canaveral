@@ -1,3 +1,4 @@
+import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { systemReceipt } from "@/lib/system-control";
@@ -304,9 +305,9 @@ export function ModelQueue({ onDenied }: { onDenied: () => void }) {
         ))}
       </div>
       {rows && !rows.length && !error && (
-        <p className="border-y py-8 text-center text-[13px] text-muted-foreground">
-          No application model jobs.
-        </p>
+        <Empty showIcon role="status">
+          <EmptyDescription>No application model jobs.</EmptyDescription>
+        </Empty>
       )}
     </section>
   );

@@ -37,7 +37,6 @@ import {
   AlertDialogFooter,
   AlertDialogCancel,
 } from "./ui/alert-dialog";
-import { Empty, EmptyHeader, EmptyTitle } from "./ui/empty";
 
 interface Intent {
   collection: SystemCollection;
@@ -370,11 +369,9 @@ function SystemControlPage({
               </span>
             </h2>
             {!snapshot[collection].length ? (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>No {collection} on this page</EmptyTitle>
-                </EmptyHeader>
-              </Empty>
+              <p className="border-t px-1 py-3 text-[13px] text-muted-foreground">
+                No {collection} on this page
+              </p>
             ) : (
               <div className="divide-y border-y">
                 {snapshot[collection].map((item) => {

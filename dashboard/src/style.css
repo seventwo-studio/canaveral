@@ -78,6 +78,17 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
+/* Positive form submissions in dialogs use the reference's orange action. */
+[data-slot="dialog-content"] button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-variant="default"]) {
+  background-color: #bd3900;
+  color: white;
+}
+[data-slot="dialog-content"] button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-variant="default"]):hover:enabled {
+  background-color: #a43100;
+}
+[data-slot="dialog-footer"] > button[type="submit"][data-slot="button"] {
+  flex-grow: 1;
+}
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -119,11 +130,6 @@
   [data-slot="card-content"],
   [data-slot="card-footer"] {
     padding-inline: 1rem;
-  }
-  [data-slot="dialog-content"],
-  [data-slot="alert-dialog-content"] {
-    max-height: calc(100dvh - 2rem);
-    overflow-y: auto;
   }
 }
 /* Product artwork stays separate from the shadcn component system. */
