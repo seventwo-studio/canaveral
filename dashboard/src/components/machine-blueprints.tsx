@@ -266,17 +266,13 @@ export function ImageLibrary({
             return (
               <Card key={i.id} className={catalogueRow}>
                 <CardHeader className="min-w-0 xl:px-0">
-                  <CardTitle className="break-words text-base font-semibold tracking-tight">
-                    {i.name}
-                  </CardTitle>
+                  <CardTitle className="break-words">{i.name}</CardTitle>
                   <CardDescription>
                     {provider(i.os)} · {i.arch} · {i.format.toUpperCase()}
                   </CardDescription>
                   <Badge
-                    variant="outline"
-                    className={
-                      available ? "status-ready mt-1" : "status-pending mt-1"
-                    }
+                    variant={available ? "success" : "warning"}
+                    className="mt-1"
                   >
                     {available ? "Available on host" : "Awaiting host"}
                   </Badge>
@@ -495,16 +491,20 @@ export function MachineBlueprints({
                 className={catalogueRow}
               >
                 <CardHeader className="min-w-0 xl:px-0">
-                  <CardTitle className="break-words text-base font-semibold tracking-tight">
-                    {b.name}
-                  </CardTitle>
+                  <CardTitle className="break-words">{b.name}</CardTitle>
                   <CardDescription>
                     Revision {b.revision} · {provider(b.image.os)} ·{" "}
                     {b.image.arch}
                   </CardDescription>
                   <Badge
-                    variant="outline"
-                    className={`mt-1 max-w-full whitespace-normal ${inventoryAvailable ? (available ? "status-ready" : "status-pending") : ""}`}
+                    variant={
+                      !inventoryAvailable
+                        ? "secondary"
+                        : available
+                          ? "success"
+                          : "warning"
+                    }
+                    className="mt-1"
                   >
                     {!inventoryAvailable
                       ? "Host availability unavailable"

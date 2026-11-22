@@ -6,7 +6,7 @@ import { ownerLabel } from "@/lib/admin";
 import type { User } from "@/lib/inventory";
 import { MoreHorizontal } from "lucide-react";
 import { Button } from "./ui/button";
-import { Badge } from "./ui/badge";
+import { StatusBadge } from "./ui/badge";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -132,13 +132,7 @@ function MachineRow({
         </div>
       </div>
       <div className="min-w-0 justify-self-end space-y-1 xl:order-first xl:justify-self-start">
-        <Badge
-          variant="outline"
-          className={`status status-${status.toLowerCase().replaceAll(" ", "-")}`}
-        >
-          <span className="status-dot" aria-hidden="true" />
-          {status}
-        </Badge>
+        <StatusBadge state={status} />
         {m.desired !== m.observed &&
           !["error", "unknown"].includes(m.observed) && (
             <p className="text-xs text-muted-foreground">

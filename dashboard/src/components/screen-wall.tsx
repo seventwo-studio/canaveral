@@ -1,3 +1,4 @@
+import { Card } from "./ui/card";
 import { useEffect, useRef, useState } from "react";
 import { provider } from "@/lib/api";
 import { ownerLabel } from "@/lib/admin";
@@ -120,31 +121,30 @@ export function ScreenWall({
                       onDenied={onDenied}
                     />
                   ) : (
-                    <article
-                      aria-label={`Screen of ${machine?.name ?? id}`}
-                      className="flex h-full min-w-0 flex-col gap-3 rounded-md border bg-card p-4"
-                    >
-                      <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
-                        {machine?.name ?? (
-                          <span className="font-mono text-xs">{id}</span>
-                        )}
-                      </h2>
-                      <p className="text-sm text-muted-foreground">
-                        {!loaded
-                          ? "Loading the device list…"
-                          : machine
-                            ? "This device is not running, or is not an account-owned mobile device. Its screen returns here when it runs again."
-                            : "This device is not in your device list."}
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="mt-auto self-start"
-                        onClick={() => toggle(id)}
-                      >
-                        Remove from the wall
-                      </Button>
-                    </article>
+                    <Card asChild className="h-full gap-3 px-4">
+                      <article aria-label={`Screen of ${machine?.name ?? id}`}>
+                        <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
+                          {machine?.name ?? (
+                            <span className="font-mono text-xs">{id}</span>
+                          )}
+                        </h2>
+                        <p className="text-sm text-muted-foreground">
+                          {!loaded
+                            ? "Loading the device list…"
+                            : machine
+                              ? "This device is not running, or is not an account-owned mobile device. Its screen returns here when it runs again."
+                              : "This device is not in your device list."}
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="mt-auto self-start"
+                          onClick={() => toggle(id)}
+                        >
+                          Remove from the wall
+                        </Button>
+                      </article>
+                    </Card>
                   )}
                 </li>
               );
@@ -378,84 +378,89 @@ function ScreenTile({
           : "";
   const controllable = machine.ready;
   return (
-    <article
-      aria-label={`Live screen of ${machine.name}`}
-      className="flex h-full min-w-0 flex-col gap-3 rounded-md border bg-card p-3"
-    >
-      <header className="flex min-w-0 items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
-            {machine.name}
-          </h2>
-          <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
-            {where}
-          </p>
+    <Card asChild className="h-full gap-3 px-4">
+      <article aria-label={`Live screen of ${machine.name}`}>
+        <header className="flex min-w-0 items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
+              {machine.name}
+            </h2>
+            <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+              {where}
+            </p>
+          </div>
+          <Badge
+            variant={
+              phase === "live"
+                ? "success"
+                : phase === "ended"
+                  ? calm
+                    ? "secondary"
+                    : "destructive"
+                  : "warning"
+            }
+          >
+            {status}
+          </Badge>
+        </header>
+        <div
+          ref={frame}
+          className="relative mx-auto flex max-h-[70svh] w-full items-center justify-center overflow-hidden rounded-sm bg-neutral-950"
+          style={{
+            aspectRatio: size ? `${size.width} / ${size.height}` : "9 / 19.5",
+          }}
+        >
+          {/* Watch-only: no controls and no input. The device is acted on through its control page. */}
+          <video
+            ref={video}
+            className={`pointer-events-none size-full object-contain ${phase === "live" ? "" : "invisible"}`}
+            aria-label={`Screen of ${machine.name}`}
+            muted
+            playsInline
+            autoPlay
+            disablePictureInPicture
+            tabIndex={-1}
+          />
+          {phase !== "live" && (
+            <p
+              role={phase === "ended" && !calm ? "alert" : "status"}
+              className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-neutral-200"
+            >
+              {detail}
+            </p>
+          )}
         </div>
-        <Badge
-          variant="outline"
-          className={`status ${phase === "live" ? "status-ready" : phase === "ended" && !calm ? "status-error" : phase === "ended" ? "" : "status-pending"}`}
-        >
-          <span className="status-dot" aria-hidden="true" />
-          {status}
-        </Badge>
-      </header>
-      <div
-        ref={frame}
-        className="relative mx-auto flex max-h-[70svh] w-full items-center justify-center overflow-hidden rounded-sm bg-neutral-950"
-        style={{
-          aspectRatio: size ? `${size.width} / ${size.height}` : "9 / 19.5",
-        }}
-      >
-        {/* Watch-only: no controls and no input. The device is acted on through its control page. */}
-        <video
-          ref={video}
-          className={`pointer-events-none size-full object-contain ${phase === "live" ? "" : "invisible"}`}
-          aria-label={`Screen of ${machine.name}`}
-          muted
-          playsInline
-          autoPlay
-          disablePictureInPicture
-          tabIndex={-1}
-        />
-        {phase !== "live" && (
-          <p
-            role={phase === "ended" && !calm ? "alert" : "status"}
-            className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-neutral-200"
-          >
-            {detail}
-          </p>
-        )}
-      </div>
-      <footer className="mt-auto flex min-w-0 flex-wrap gap-2">
-        {controllable && (
+        <footer className="mt-auto flex min-w-0 flex-wrap gap-2">
+          {controllable && (
+            <Button
+              size="sm"
+              variant="outline"
+              aria-label={`Open control of ${machine.name}`}
+              onClick={() => onControl(machine.id)}
+            >
+              Open control
+            </Button>
+          )}
+          {phase === "ended" && !problem && ending?.again !== "no" && (
+            <Button
+              size="sm"
+              variant="outline"
+              aria-label={`Watch ${machine.name} again`}
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              Watch again
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
-            aria-label={`Open control of ${machine.name}`}
-            onClick={() => onControl(machine.id)}
+            aria-label={`Stop watching ${machine.name}`}
+            onClick={onRemove}
           >
-            Open control
+            Stop watching
           </Button>
-        )}
-        {phase === "ended" && !problem && ending?.again !== "no" && (
-          <Button
-            size="sm"
-            variant="outline"
-            aria-label={`Watch ${machine.name} again`}
-            onClick={() => setAttempt((value) => value + 1)}
-          >
-            Watch again
-          </Button>
-        )}
-        <Button
-          size="sm"
-          variant="outline"
-          aria-label={`Stop watching ${machine.name}`}
-          onClick={onRemove}
-        >
-          Stop watching
-        </Button>
-      </footer>
-    </article>
+        </footer>
+      </article>
+    </Card>
   );
 }

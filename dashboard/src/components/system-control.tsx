@@ -19,7 +19,7 @@ import {
 } from "@/lib/system-control";
 import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import {
   Card,
   CardHeader,
@@ -388,7 +388,7 @@ function SystemControlPage({
                         </CardDescription>
                       </CardHeader>
                       <CardContent className="min-w-0 space-y-2 px-0">
-                        <Badge variant="outline">{item.state}</Badge>
+                        <StatusBadge state={item.state} />
                         {item.cleanup === "blocked" && (
                           <Badge variant="destructive">
                             Cleanup blocked · reservations retained

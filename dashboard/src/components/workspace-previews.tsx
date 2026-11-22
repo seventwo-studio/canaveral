@@ -1,3 +1,4 @@
+import { StatusBadge } from "./ui/badge";
 import { SettingsRows } from "./ui/field";
 import { NativeSelect } from "./ui/native-select";
 import { Empty, EmptyDescription } from "./ui/empty";
@@ -328,9 +329,11 @@ export function WorkspacePreviews() {
             p.state === "provisioning" && p.request?.state === "waiting";
           return (
             <li key={p.id} className="space-y-2 px-3 py-3 text-[13px]">
-              <p>
-                {p.mode === "command" ? "Dynamic app" : "Static site"} ·{" "}
-                {waiting ? "waiting for capacity" : p.state}
+              <p className="flex flex-wrap items-center gap-2">
+                {p.mode === "command" ? "Dynamic app" : "Static site"}
+                <StatusBadge
+                  state={waiting ? "waiting for capacity" : p.state}
+                />
               </p>
               <code className="break-all text-xs text-muted-foreground">
                 {p.id}

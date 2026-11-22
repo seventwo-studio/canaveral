@@ -13,7 +13,6 @@ import {
   CardDescription,
   CardContent,
 } from "./ui/card";
-import { Badge } from "./ui/badge";
 
 const states = [
   "Ready",
@@ -29,12 +28,12 @@ const stateColor = (state: string) =>
   ["Error", "Unknown", "Setup failed"].includes(state)
     ? "var(--destructive)"
     : state === "Ready"
-      ? "var(--state-ready)"
+      ? "var(--foreground)"
       : ["Preparing", "Pending"].includes(state)
         ? "var(--state-pending)"
         : state === "Running"
-          ? "var(--foreground)"
-          : "var(--muted-foreground)";
+          ? "var(--muted-foreground)"
+          : "color-mix(in srgb, var(--foreground) 40%, var(--background))";
 
 /** Each machine appears once; preserve new controller states rather than hiding them. */
 export function machineDistribution(inventory: Inventory) {
@@ -89,13 +88,17 @@ export function FleetPulse({
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="text-sm">Fleet status</CardTitle>
-            <Badge variant="outline">
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span
+                aria-hidden="true"
+                className={`size-1.5 rounded-full ${!loaded ? "bg-muted-foreground" : stale ? "bg-[var(--state-pending)]" : "bg-[var(--state-ready)]"}`}
+              />
               {!loaded
                 ? "Unavailable"
                 : stale
                   ? "Last snapshot"
                   : "Current snapshot"}
-            </Badge>
+            </span>
           </div>
           <CardDescription>
             {loaded
@@ -113,13 +116,16 @@ export function FleetPulse({
               <div
                 role="img"
                 aria-label={`${total} machines by state`}
-                className="flex h-1.5 gap-px overflow-hidden rounded-sm"
+                className="flex h-2 overflow-hidden rounded-[2px] bg-muted"
               >
                 {distribution.map(({ label, count }) => (
                   <span
                     key={label}
-                    className="min-w-0.5"
-                    style={{ flex: count, backgroundColor: stateColor(label) }}
+                    className="min-w-0 border-r border-background last:border-0"
+                    style={{
+                      width: `${(count / total) * 100}%`,
+                      backgroundColor: stateColor(label),
+                    }}
                   />
                 ))}
               </div>

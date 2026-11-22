@@ -139,13 +139,6 @@ form button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-va
   box-shadow: none;
   opacity: 1;
 }
-@media (max-width: 39.99rem) {
-  [data-slot="card-header"],
-  [data-slot="card-content"],
-  [data-slot="card-footer"] {
-    padding-inline: 1rem;
-  }
-}
 /* Product artwork stays separate from the shadcn component system. */
 .launch-poster .rocket-art {
   position: absolute;
@@ -179,35 +172,6 @@ form button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-va
 }
 .rocket-art[data-rendered="true"] img {
   opacity: 0;
-}
-/* Domain states extend Badge without overriding shared component anatomy. */
-.status {
-  gap: 0.4rem;
-}
-.status-dot {
-  width: 0.3rem;
-  height: 0.3rem;
-  border-radius: 50%;
-  background: currentColor;
-}
-.status-ready,
-.status-online {
-  color: var(--state-ready);
-  border-color: #acccb7;
-  background: #edf5ed;
-}
-.status-error,
-.status-setup-failed {
-  color: var(--destructive);
-  border-color: #e9bbb4;
-  background: #fbeee9;
-}
-.status-preparing,
-.status-pending,
-.status-draining {
-  color: var(--state-pending);
-  border-color: #d9c7a0;
-  background: #f8f1de;
 }
 /* Native meter semantics describe reservations, not task completion. */
 meter {

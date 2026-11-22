@@ -34,15 +34,21 @@ const denied = (e: unknown) =>
   typeof e === "object" &&
   "status" in e &&
   (e.status === 401 || e.status === 403);
-const figure = "font-mono tabular-nums";
+const figure = "tabular-nums";
 
 /** p50 and p95 with the number of samples behind them, so a percentile over three leases reads as one. */
-function Percentiles({ value }: { value: Distribution }) {
+function Percentiles({
+  value,
+  valueClass,
+}: {
+  value: Distribution;
+  valueClass: string;
+}) {
   if (!value.samples)
     return <span className="text-muted-foreground">No samples</span>;
   return (
     <>
-      <span className={figure}>
+      <span className={valueClass}>
         {seconds(value.p50)} · {seconds(value.p95)}
       </span>
       <span className="block text-xs text-muted-foreground">
@@ -60,7 +66,7 @@ function Pair({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 space-y-1">
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="text-sm [overflow-wrap:anywhere]">{children}</dd>
     </div>
@@ -69,18 +75,21 @@ function Pair({
 function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
   const part = share(row.leases.deviceSeconds, total.leases.deviceSeconds);
   const failed = failures(row);
+  const valueClass =
+    row === total ? "text-lg font-medium tracking-tight tabular-nums" : figure;
   return (
     <dl
       className={
         row === total
-          ? "grid min-w-0 grid-cols-2 gap-px overflow-hidden rounded-md border bg-border md:grid-cols-4 [&>div]:bg-card [&>div]:p-3 [&>div:last-child]:col-span-2"
+          ? "grid min-w-0 grid-cols-2 gap-px overflow-hidden rounded-sm border bg-border lg:grid-cols-4 [&>div]:bg-card [&>div]:p-3 [&>div]:text-center [&>div:last-child]:col-span-2"
           : "grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4"
       }
     >
       <Pair label="Requests by outcome">
         {row.requests ? (
           <>
-            <span className={figure}>{row.requests.submitted}</span> submitted
+            <span className={valueClass}>{row.requests.submitted}</span>{" "}
+            submitted
             <span className="block text-xs text-muted-foreground">
               <span className={figure}>{row.requests.admitted}</span> admitted ·{" "}
               <span className={figure}>{row.requests.cancelled}</span> cancelled
@@ -96,13 +105,16 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
       </Pair>
       <Pair label="Wait until admitted">
         {row.requests ? (
-          <Percentiles value={row.requests.waitSeconds} />
+          <Percentiles
+            value={row.requests.waitSeconds}
+            valueClass={valueClass}
+          />
         ) : (
           <span className="text-muted-foreground">Not counted by host</span>
         )}
       </Pair>
       <Pair label="Leases">
-        <span className={figure}>{row.leases.admitted}</span> admitted
+        <span className={valueClass}>{row.leases.admitted}</span> admitted
         <span className="block text-xs text-muted-foreground">
           <span className={figure}>{row.leases.ready}</span> became ready ·{" "}
           <span className={figure}>{row.leases.released}</span> released ·{" "}
@@ -111,7 +123,9 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
         </span>
       </Pair>
       <Pair label="Device time held">
-        <span className={figure}>{deviceTime(row.leases.deviceSeconds)}</span>
+        <span className={valueClass}>
+          {deviceTime(row.leases.deviceSeconds)}
+        </span>
         {row !== total && part !== null && (
           <>
             <meter
@@ -128,13 +142,16 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
         )}
       </Pair>
       <Pair label="Time to ready">
-        <Percentiles value={row.leases.timeToReadySeconds} />
+        <Percentiles
+          value={row.leases.timeToReadySeconds}
+          valueClass={valueClass}
+        />
       </Pair>
       <Pair label="Hold time">
-        <Percentiles value={row.leases.holdSeconds} />
+        <Percentiles value={row.leases.holdSeconds} valueClass={valueClass} />
       </Pair>
       <Pair label="Failures">
-        <span className={`${figure} ${failed ? "text-destructive" : ""}`}>
+        <span className={`${valueClass} ${failed ? "text-destructive" : ""}`}>
           {failed}
         </span>
         <span className="block text-xs text-muted-foreground">

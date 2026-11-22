@@ -92,6 +92,13 @@ for (const width of [320, 1440])
     await expect(
       dialog.getByText("Publisher download", { exact: true }),
     ).toBeVisible();
+    if (process.env.CANAVERAL_SCREENSHOT_DIR)
+      await dialog
+        .getByRole("article")
+        .first()
+        .screenshot({
+          path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/registry-card-${width}.png`,
+        });
     await dialog
       .getByRole("button", { name: "Import to host", exact: true })
       .click();

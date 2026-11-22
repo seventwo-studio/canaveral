@@ -610,8 +610,7 @@ const EventRow = memo(function EventRow({
             {event.kind}
           </span>
           {info?.attention && (
-            <Badge variant="outline" className="status status-error">
-              <span className="status-dot" aria-hidden="true" />
+            <Badge variant="destructive">
               Needs attention
             </Badge>
           )}

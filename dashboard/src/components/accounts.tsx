@@ -35,7 +35,7 @@ import {
   CardDescription,
   CardContent,
 } from "./ui/card";
-import { Badge } from "./ui/badge";
+import { StatusBadge } from "./ui/badge";
 import {
   Select,
   SelectContent,
@@ -447,10 +447,15 @@ export function TokensPage({ user }: { user: User }) {
         </Button>
       </div>
       {tokens.map((t) => (
-        <section key={t.id} className="space-y-2 border-t pt-4">
-          <h3 className="break-words text-sm font-medium">
-            {t.name} · {tokenState(t)}
-          </h3>
+        <section
+          key={t.id}
+          aria-label={`Token ${t.name}`}
+          className="space-y-2 border-t pt-4"
+        >
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h3 className="break-all text-sm font-medium">{t.name}</h3>
+            <StatusBadge state={tokenState(t)} />
+          </div>
           <p className="break-all font-mono text-xs">
             {t.prefix} · {t.scopes.join(", ")}
           </p>
@@ -886,12 +891,7 @@ export function UsersPage({
                 <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span>{u.role === "admin" ? "Administrator" : "User"}</span>
-                    <Badge
-                      variant="outline"
-                      className={`capitalize ${u.status === "active" ? "status-ready" : u.status === "pending" ? "status-pending" : ""}`}
-                    >
-                      {u.status}
-                    </Badge>
+                    <StatusBadge state={u.status} className="capitalize" />
                   </div>
                   {u.role === "admin" &&
                     u.status === "active" &&

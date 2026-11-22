@@ -8,7 +8,7 @@ import type {
 import type { Resources } from "@/lib/catalogue";
 import { useState } from "react";
 import { memory, number, provider, title } from "@/lib/api";
-import { Badge } from "./ui/badge";
+import { Badge, statusBadgeVariant } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
@@ -56,7 +56,7 @@ export function StackedResources({
         </p>
       ) : (
         <>
-          <div className="grid min-w-0 gap-4 lg:grid-cols-3">
+          <div className="grid min-w-0 gap-px overflow-hidden rounded-sm border bg-border sm:grid-cols-3">
             {(
               [
                 ["cpu", "CPU"],
@@ -73,16 +73,17 @@ export function StackedResources({
                 free = Math.max(0, capacity - total);
               let offset = 0;
               return (
-                <div key={key} className="min-w-0 space-y-2">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
+                <div key={key} className="min-w-0 space-y-2 bg-card p-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 text-xs">
                     <h3 className="font-medium">{label}</h3>
-                    <span>
+                    <span className="tabular-nums">
                       {amount(key, total)} / {amount(key, capacity)}
                     </span>
                   </div>
                   <svg
                     viewBox="0 0 1000 24"
-                    className="h-6 w-full"
+                    preserveAspectRatio="none"
+                    className="block h-2 w-full overflow-hidden rounded-[2px]"
                     role="img"
                     aria-label={`${label} reservations by category`}
                   >
@@ -108,7 +109,8 @@ export function StackedResources({
                           height="24"
                           fill={fills[item.id] || "var(--muted-foreground)"}
                           stroke="var(--background)"
-                          strokeWidth="1"
+                          vectorEffect="non-scaling-stroke"
+                          strokeWidth={item[key] > 0 ? 0.5 : 0}
                         >
                           <title>
                             {item.label}: {amount(key, item[key])}
@@ -123,7 +125,8 @@ export function StackedResources({
                         y1="0"
                         y2="24"
                         stroke="var(--destructive)"
-                        strokeWidth="3"
+                        vectorEffect="non-scaling-stroke"
+                        strokeWidth="2"
                       />
                     )}
                   </svg>
@@ -146,18 +149,14 @@ export function StackedResources({
                   className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2 text-xs"
                 >
                   <dt className="flex min-w-0 items-center gap-2">
-                    <svg
-                      width="10"
-                      height="10"
-                      className="shrink-0"
+                    <span
                       aria-hidden="true"
-                    >
-                      <rect
-                        width="10"
-                        height="10"
-                        fill={fills[item.id] || "var(--muted-foreground)"}
-                      />
-                    </svg>
+                      className="size-2 shrink-0 rounded-full"
+                      style={{
+                        backgroundColor:
+                          fills[item.id] || "var(--muted-foreground)",
+                      }}
+                    />
                     <span className="break-words">{item.label}</span>
                   </dt>
                   <dd className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
@@ -241,7 +240,13 @@ export function HostMachines({
                 <span className="min-w-0 break-words text-sm font-medium">
                   {machine.name}
                 </span>
-                <Badge variant="outline">
+                <Badge
+                  variant={
+                    host.online
+                      ? statusBadgeVariant(machine.observed)
+                      : "secondary"
+                  }
+                >
                   {host.online ? title(machine.observed) : "Host offline"}
                 </Badge>
               </div>

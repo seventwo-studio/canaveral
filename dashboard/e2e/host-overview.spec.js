@@ -191,6 +191,16 @@ for (const width of [320, 768, 1440]) {
     await expect(cpu).toBeVisible();
     await expect(cpu.locator("circle[data-value]")).toHaveCount(3);
     await expect(cpu.locator("circle[data-value='0']")).toHaveCount(1);
+    if (process.env.CANAVERAL_SCREENSHOT_DIR) {
+      await page
+        .getByRole("region", { name: "Resources by category", exact: true })
+        .screenshot({
+          path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/reservation-cards-${width}.png`,
+        });
+      await page.getByRole("figure", { name: "CPU history" }).screenshot({
+        path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/cpu-history-${width}.png`,
+      });
+    }
     if (width === 1440)
       await page.screenshot({
         path: testInfo.outputPath("host-overview.png"),

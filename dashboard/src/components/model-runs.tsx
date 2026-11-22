@@ -1,3 +1,4 @@
+import { Badge, statusBadgeVariant } from "./ui/badge";
 import { SettingsRows } from "./ui/field";
 import { NativeSelect } from "./ui/native-select";
 import { Empty, EmptyDescription } from "./ui/empty";
@@ -245,10 +246,18 @@ function JobRow({
         {short(row.digest)} · host {row.hostId} · {row.id}
       </p>
       <p role={follow ? "status" : undefined}>
-        {stateLabels[row.state]}
-        {row.cancelRequested && !terminal.includes(row.state)
-          ? " · Cancellation requested"
-          : ""}
+        <Badge
+          variant={
+            row.cancelRequested && !terminal.includes(row.state)
+              ? "warning"
+              : statusBadgeVariant(stateLabels[row.state] ?? row.state)
+          }
+        >
+          {stateLabels[row.state] ?? row.state}
+          {row.cancelRequested && !terminal.includes(row.state)
+            ? " · Cancellation requested"
+            : ""}
+        </Badge>
       </p>
       {row.detail && <p className="break-words">{row.detail}</p>}
       <p>

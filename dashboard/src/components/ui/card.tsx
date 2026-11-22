@@ -1,12 +1,18 @@
 import * as React from "react";
+import { Slot } from "radix-ui";
 import { cn } from "@/lib/utils";
 
-function Card({ className, ...props }: React.ComponentProps<"div">) {
+function Card({
+  asChild,
+  className,
+  ...props
+}: React.ComponentProps<"div"> & { asChild?: boolean }) {
+  const Component = asChild ? Slot.Root : "div";
   return (
-    <div
+    <Component
       data-slot="card"
       className={cn(
-        "flex flex-col gap-4 rounded-lg border bg-card py-4 text-card-foreground shadow-xs",
+        "flex min-w-0 flex-col gap-4 rounded-sm border bg-card py-4 text-card-foreground",
         className,
       )}
       {...props}
@@ -19,7 +25,7 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card-header"
       className={cn(
-        "@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1 px-4 has-data-[slot=card-action]:grid-cols-[1fr_auto] [.border-b]:pb-4",
+        "@container/card-header grid min-w-0 auto-rows-min items-start gap-1 px-4 has-data-[slot=card-action]:grid-cols-[minmax(0,1fr)_auto] [.border-b]:pb-4",
         className,
       )}
       {...props}
@@ -64,7 +70,7 @@ function CardContent({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-content"
-      className={cn("px-4", className)}
+      className={cn("min-w-0 px-4", className)}
       {...props}
     />
   );

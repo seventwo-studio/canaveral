@@ -1,3 +1,4 @@
+import { Card } from "./ui/card";
 import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { imageTask, registryEntries } from "@/lib/catalogue";
@@ -11,7 +12,7 @@ import { Download, ExternalLink } from "lucide-react";
 import { api, memory, errorMessage } from "@/lib/api";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -193,26 +194,24 @@ export function BaseImageRegistry({
           </p>
         )}
         {task && (
-          <section
-            aria-label="Registry import status"
-            className="space-y-2 rounded-md border p-3 text-xs"
-            aria-live="polite"
-          >
-            <p className="font-medium">
-              {task.name} · {task.state}
-            </p>
-            <p className="break-all text-muted-foreground">
-              {task.state === "queued"
-                ? "Resolving the publisher’s current image before reserving storage."
-                : task.state === "running"
-                  ? "Downloading and verifying on the host. You can continue in the background."
-                  : task.state === "succeeded"
-                    ? "Imported and registered. The image is now in your host catalogue."
-                    : task.result?.detail ||
-                      "Inspect the image task before retrying."}
-            </p>
-            <p className="break-all text-muted-foreground">Task {task.id}</p>
-          </section>
+          <Card asChild className="gap-2 px-4 text-xs">
+            <section aria-label="Registry import status" aria-live="polite">
+              <p className="flex flex-wrap items-center gap-2 font-medium">
+                {task.name} <StatusBadge state={task.state} />
+              </p>
+              <p className="break-all text-muted-foreground">
+                {task.state === "queued"
+                  ? "Resolving the publisher’s current image before reserving storage."
+                  : task.state === "running"
+                    ? "Downloading and verifying on the host. You can continue in the background."
+                    : task.state === "succeeded"
+                      ? "Imported and registered. The image is now in your host catalogue."
+                      : task.result?.detail ||
+                        "Inspect the image task before retrying."}
+              </p>
+              <p className="break-all text-muted-foreground">Task {task.id}</p>
+            </section>
+          </Card>
         )}
         {loading ? (
           <p className="text-xs text-muted-foreground">Loading registry…</p>
@@ -261,85 +260,82 @@ export function BaseImageRegistry({
                       ? "This host has no Linux VM runtime."
                       : "";
               return (
-                <article
-                  key={e.id}
-                  aria-label={e.name + " " + e.arch}
-                  className="flex min-w-0 flex-col gap-3 rounded-md border bg-card p-4 shadow-xs"
-                >
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">
-                      {e.publisher}
-                    </p>
-                    <h3 className="break-words text-sm font-medium">
-                      {e.name}
-                    </h3>
-                    <div className="flex flex-wrap gap-1">
-                      <Badge variant="outline">
-                        {e.arch === "amd64" ? "x86-64" : "ARM64"}
-                      </Badge>
-                      <Badge variant="outline">
-                        {e.mediaType === "installer"
-                          ? "Installer"
-                          : "Boot disk"}
-                      </Badge>
-                      <Badge variant="outline">{e.format.toUpperCase()}</Badge>
-                      {e.status !== "available" && (
-                        <Badge variant="outline">
-                          {e.status === "unavailable"
-                            ? "Not currently offered"
-                            : "Publisher download"}
+                <Card asChild key={e.id} className="gap-3 px-4">
+                  <article aria-label={e.name + " " + e.arch}>
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">
+                        {e.publisher}
+                      </p>
+                      <h3 className="break-words text-sm font-medium">
+                        {e.name}
+                      </h3>
+                      <div className="flex flex-wrap gap-1">
+                        <Badge>{e.arch === "amd64" ? "x86-64" : "ARM64"}</Badge>
+                        <Badge>
+                          {e.mediaType === "installer"
+                            ? "Installer"
+                            : "Boot disk"}
                         </Badge>
-                      )}
+                        <Badge>{e.format.toUpperCase()}</Badge>
+                        {e.status !== "available" && (
+                          <Badge>
+                            {e.status === "unavailable"
+                              ? "Not currently offered"
+                              : "Publisher download"}
+                          </Badge>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  <p className="break-words text-xs leading-relaxed text-muted-foreground">
-                    {e.note}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {e.resolver === "apple"
-                      ? "Apple restore source; local content hash recorded after download."
-                      : e.resolver
-                        ? "Publisher SHA-256 required before adding to the library."
-                        : "Verify the download with the publisher before importing."}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Starting size: {e.minimum.cpu} vCPU ·{" "}
-                    {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB disk
-                  </p>
-                  {reason && (
-                    <p className="text-xs text-muted-foreground">{reason}</p>
-                  )}
-                  <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
-                    {e.resolver ? (
-                      <Button
-                        size="sm"
-                        disabled={busy || pending || !host || !!reason}
-                        onClick={() => importEntry(e)}
-                      >
-                        <Download />
-                        Import to host
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={e.status === "unavailable"}
-                        onClick={() => onImportFile(e)}
-                      >
-                        Import downloaded file
-                      </Button>
+                    <p className="break-words text-xs leading-relaxed text-muted-foreground">
+                      {e.note}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {e.resolver === "apple"
+                        ? "Apple restore source; local content hash recorded after download."
+                        : e.resolver
+                          ? "Publisher SHA-256 required before adding to the library."
+                          : "Verify the download with the publisher before importing."}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Starting size: {e.minimum.cpu} vCPU ·{" "}
+                      {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB
+                      disk
+                    </p>
+                    {reason && (
+                      <p className="text-xs text-muted-foreground">{reason}</p>
                     )}
-                    <a
-                      href={e.sourcePage}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-4"
-                    >
-                      Official source
-                      <ExternalLink className="size-3" />
-                    </a>
-                  </div>
-                </article>
+                    <div className="mt-auto flex flex-wrap items-center gap-2 border-t pt-3">
+                      {e.resolver ? (
+                        <Button
+                          size="sm"
+                          disabled={busy || pending || !host || !!reason}
+                          onClick={() => importEntry(e)}
+                        >
+                          <Download />
+                          Import to host
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={e.status === "unavailable"}
+                          onClick={() => onImportFile(e)}
+                        >
+                          Import downloaded file
+                        </Button>
+                      )}
+                      <a
+                        href={e.sourcePage}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-4"
+                      >
+                        Official source
+                        <ExternalLink className="size-3" />
+                      </a>
+                    </div>
+                  </article>
+                </Card>
               );
             })}
           </div>

@@ -31,7 +31,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "./ui/alert-dialog";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 
@@ -319,7 +319,7 @@ function QueueSession({
                     >
                       <div className="min-w-0">
                         {request.position === null ? (
-                          <Badge variant="outline">No position</Badge>
+                          <Badge>No position</Badge>
                         ) : (
                           <p
                             className="text-base font-semibold tabular-nums"
@@ -555,7 +555,7 @@ function LeaseRow({ lease, now }: { lease: QueueLease; now: number }) {
   return (
     <li className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:px-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
       <div className="min-w-0">
-        <Badge variant="outline">{lease.state}</Badge>
+        <StatusBadge state={lease.state} />
       </div>
       <div className="min-w-0 space-y-3">
         <p

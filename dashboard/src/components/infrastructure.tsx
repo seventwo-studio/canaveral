@@ -101,7 +101,19 @@ const Metric = ({
 function Health({ host }: { host: Host }) {
   const health = host.health;
   return (
-    <Badge variant="outline">
+    <Badge
+      variant={
+        !health
+          ? "secondary"
+          : !health.fresh || health.status === "warning"
+            ? "warning"
+            : health.status === "passed"
+              ? "success"
+              : health.status === "checking"
+                ? "secondary"
+                : "destructive"
+      }
+    >
       {!health
         ? "Checks not reported"
         : !health.fresh
@@ -137,7 +149,7 @@ function Usage({ host }: { host: Host }) {
           ? new Date(0).toLocaleString()
           : since(u.receivedAt)}
       </p>
-      <dl className="grid min-w-0 grid-cols-1 gap-3 min-[420px]:grid-cols-3 opacity-90">
+      <dl className="grid min-w-0 grid-cols-1 gap-px overflow-hidden rounded-sm border bg-border min-[420px]:grid-cols-3 [&>div]:bg-card [&>div]:p-3 [&_dd]:text-sm [&_dd]:font-medium [&_dd]:tabular-nums">
         <Metric label="CPU busy">
           {u.cpuPercent == null ? "Unavailable" : `${number(u.cpuPercent)}%`}
         </Metric>
@@ -219,92 +231,96 @@ export function NamespaceResources({
       value,
     );
   return (
-    <section className="space-y-2 rounded-md border p-3 text-xs">
-      <h3 className="font-medium">Namespace {cluster.namespace}</h3>
-      <p className="text-muted-foreground">
-        Includes all workloads in the namespace · sampled{" "}
-        {since(cluster.sampledAt)}
-      </p>
-      <p>
-        {metrics.status === "available"
-          ? `${cores(metrics.cpuCores)} CPU cores · ${memory(metrics.memoryMiB)} · ${metrics.podCount} measured pods`
-          : "Namespace usage unavailable. Check metrics-server, pod inventory and API permissions."}
-      </p>
-      {metrics.coverage && (
+    <Card asChild className="gap-2 px-4 text-xs">
+      <section>
+        <h3 className="text-sm font-semibold [overflow-wrap:anywhere]">
+          Namespace {cluster.namespace}
+        </h3>
         <p className="text-muted-foreground">
-          {metrics.coverage.status === "unavailable"
-            ? "Measurement coverage unavailable."
-            : `${metrics.coverage.measuredPods} of ${metrics.coverage.activePods} active pods have fresh complete measurements.`}
-          {metrics.status === "available" && metrics.sampledAt
-            ? ` Oldest measurement ${since(metrics.sampledAt)}.`
-            : " Incomplete measurements are not shown as namespace totals."}
+          Includes all workloads in the namespace · sampled{" "}
+          {since(cluster.sampledAt)}
         </p>
-      )}
-      <section
-        aria-label="Canaveral VM workload usage"
-        className="space-y-1 border-t pt-2"
-      >
-        <h4 className="font-medium">Canaveral VM workloads</h4>
-        {cluster.canaveral?.ownership.status === "complete" &&
-        cluster.canaveral?.metrics.status === "available" ? (
-          <>
-            <p>
-              {cores(cluster.canaveral.metrics.cpuCores)} CPU cores ·{" "}
-              {memory(cluster.canaveral.metrics.memoryMiB)} ·{" "}
-              {cluster.canaveral.metrics.podCount} measured pods
-            </p>
-            <p className="text-muted-foreground">
-              Verified for {cluster.canaveral.ownership.verifiedMachines}{" "}
-              assigned machine
-              {cluster.canaveral.ownership.verifiedMachines === 1 ? "" : "s"}.
-              Oldest measurement {since(cluster.canaveral.metrics.sampledAt)}.
-            </p>
-          </>
-        ) : (
+        <p>
+          {metrics.status === "available"
+            ? `${cores(metrics.cpuCores)} CPU cores · ${memory(metrics.memoryMiB)} · ${metrics.podCount} measured pods`
+            : "Namespace usage unavailable. Check metrics-server, pod inventory and API permissions."}
+        </p>
+        {metrics.coverage && (
           <p className="text-muted-foreground">
-            Canaveral VM usage unavailable. Ownership or measurements are
-            incomplete.
+            {metrics.coverage.status === "unavailable"
+              ? "Measurement coverage unavailable."
+              : `${metrics.coverage.measuredPods} of ${metrics.coverage.activePods} active pods have fresh complete measurements.`}
+            {metrics.status === "available" && metrics.sampledAt
+              ? ` Oldest measurement ${since(metrics.sampledAt)}.`
+              : " Incomplete measurements are not shown as namespace totals."}
           </p>
         )}
+        <section
+          aria-label="Canaveral VM workload usage"
+          className="space-y-1 border-t pt-2"
+        >
+          <h4 className="font-medium">Canaveral VM workloads</h4>
+          {cluster.canaveral?.ownership.status === "complete" &&
+          cluster.canaveral?.metrics.status === "available" ? (
+            <>
+              <p>
+                {cores(cluster.canaveral.metrics.cpuCores)} CPU cores ·{" "}
+                {memory(cluster.canaveral.metrics.memoryMiB)} ·{" "}
+                {cluster.canaveral.metrics.podCount} measured pods
+              </p>
+              <p className="text-muted-foreground">
+                Verified for {cluster.canaveral.ownership.verifiedMachines}{" "}
+                assigned machine
+                {cluster.canaveral.ownership.verifiedMachines === 1 ? "" : "s"}.
+                Oldest measurement {since(cluster.canaveral.metrics.sampledAt)}.
+              </p>
+            </>
+          ) : (
+            <p className="text-muted-foreground">
+              Canaveral VM usage unavailable. Ownership or measurements are
+              incomplete.
+            </p>
+          )}
+          <p className="text-muted-foreground">
+            Assigned VM pods and their support pods. This usage is included in
+            the namespace total.
+          </p>
+        </section>
+        {quotas.status === "unavailable" ? (
+          <p className="text-muted-foreground">
+            Namespace quotas unavailable. Check resourcequota read permissions.
+          </p>
+        ) : !quotas.items.length ? (
+          <p className="text-muted-foreground">
+            No namespace resource quotas configured.
+          </p>
+        ) : (
+          quotas.items.map((q) => (
+            <div key={q.name} className="space-y-1 border-t pt-2">
+              <p className="font-medium">Quota: {q.name}</p>
+              {Object.entries(q.hard).map(([key, limit]) => (
+                <p key={key} className="break-words text-muted-foreground">
+                  {key}:{" "}
+                  {q.used[key] == null ? "Unavailable" : number(q.used[key])} /{" "}
+                  {number(limit)}{" "}
+                  {key.includes("memory")
+                    ? "MiB"
+                    : key.includes("storage")
+                      ? "GiB"
+                      : key.includes("cpu")
+                        ? "cores"
+                        : "claims"}
+                </p>
+              ))}
+            </div>
+          ))
+        )}
         <p className="text-muted-foreground">
-          Assigned VM pods and their support pods. This usage is included in the
-          namespace total.
+          Kubernetes quota and live usage are observations; Canaveral host
+          limits constrain placement reservations.
         </p>
       </section>
-      {quotas.status === "unavailable" ? (
-        <p className="text-muted-foreground">
-          Namespace quotas unavailable. Check resourcequota read permissions.
-        </p>
-      ) : !quotas.items.length ? (
-        <p className="text-muted-foreground">
-          No namespace resource quotas configured.
-        </p>
-      ) : (
-        quotas.items.map((q) => (
-          <div key={q.name} className="space-y-1 border-t pt-2">
-            <p className="font-medium">Quota: {q.name}</p>
-            {Object.entries(q.hard).map(([key, limit]) => (
-              <p key={key} className="break-words text-muted-foreground">
-                {key}:{" "}
-                {q.used[key] == null ? "Unavailable" : number(q.used[key])} /{" "}
-                {number(limit)}{" "}
-                {key.includes("memory")
-                  ? "MiB"
-                  : key.includes("storage")
-                    ? "GiB"
-                    : key.includes("cpu")
-                      ? "cores"
-                      : "claims"}
-              </p>
-            ))}
-          </div>
-        ))
-      )}
-      <p className="text-muted-foreground">
-        Kubernetes quota and live usage are observations; Canaveral host limits
-        constrain placement reservations.
-      </p>
-    </section>
+    </Card>
   );
 }
 function ReservationMeters({
@@ -314,12 +330,14 @@ function ReservationMeters({
   host: Host;
   expanded?: boolean;
 }) {
-  if (!host.reserved)
+  const reserved = host.reserved;
+  if (!reserved)
     return (
       <p className="text-xs text-muted-foreground">
         Reservation details unavailable.
       </p>
     );
+  const limits = allocationLimits(host);
   return (
     <div
       className={expanded ? "grid min-w-0 gap-4 sm:grid-cols-3" : "space-y-3"}
@@ -330,24 +348,32 @@ function ReservationMeters({
           ["memoryMiB", "Memory", null],
           ["diskGiB", "Storage", "GiB"],
         ] as const
-      ).map(([key, label, unit]) => (
-        <div key={key}>
-          <div className="mb-1 flex flex-wrap justify-between gap-1 text-xs">
-            <span>{label}</span>
-            <span>
-              {unit
-                ? `${number(host.reserved?.[key] || 0)} / ${number(allocationLimits(host)[key])} ${unit}`
-                : `${memory(host.reserved?.[key] || 0)} / ${memory(allocationLimits(host)[key])}`}
-            </span>
+      ).map(([key, label, unit]) => {
+        const used = reserved[key];
+        const limit = limits[key];
+        const amount = unit
+          ? `${number(used)} / ${number(limit)} ${unit}`
+          : `${memory(used)} / ${memory(limit)}`;
+        return (
+          <div key={key}>
+            <div className="mb-1 flex flex-wrap justify-between gap-1 text-xs">
+              <span>{label}</span>
+              <span
+                className={`tabular-nums ${used > limit ? "text-destructive" : "text-muted-foreground"}`}
+              >
+                {amount}
+              </span>
+            </div>
+            <meter
+              min="0"
+              max={Math.max(1, used, limit)}
+              value={used}
+              aria-label={`${label} reserved`}
+              aria-valuetext={amount}
+            />
           </div>
-          <meter
-            min="0"
-            max={Math.max(1, allocationLimits(host)[key])}
-            value={host.reserved?.[key] || 0}
-            aria-label={`${label} reserved`}
-          />
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -412,7 +438,7 @@ export function InfrastructureCard({
       <CardHeader>
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Icon className="size-4 shrink-0 text-muted-foreground" />
-          <CardTitle className="min-w-0 flex-1 break-words text-base font-semibold tracking-tight">
+          <CardTitle className="min-w-0 flex-1 break-words">
             <a
               href={resourcesHref}
               className="underline-offset-4 hover:underline"
@@ -422,13 +448,12 @@ export function InfrastructureCard({
             </a>
           </CardTitle>
           <Badge
-            variant="outline"
-            className={
+            variant={
               availability === "Online"
-                ? "status-online"
+                ? "success"
                 : availability === "Offline"
-                  ? ""
-                  : "status-pending"
+                  ? "secondary"
+                  : "warning"
             }
           >
             {availability}
@@ -443,8 +468,10 @@ export function InfrastructureCard({
             {host.runtimes.map(provider).join(" · ")}
           </p>
         )}
-        <div>
-          {host.maintenance?.phase === "draining" && <Badge>Maintenance</Badge>}
+        <div className="flex flex-wrap gap-1.5">
+          {host.maintenance?.phase === "draining" && (
+            <Badge variant="warning">Maintenance</Badge>
+          )}
           <Health host={host} />
         </div>
       </CardHeader>

@@ -1,3 +1,4 @@
+import { StatusBadge } from "./ui/badge";
 import { SettingsRows } from "./ui/field";
 import { NativeSelect } from "./ui/native-select";
 import { Empty, EmptyDescription } from "./ui/empty";
@@ -101,7 +102,9 @@ function BuildRow({ initial }: { initial: Build }) {
       <p className="break-all font-mono text-xs text-muted-foreground">
         {row.imageId} · {row.id}
       </p>
-      <p role="status">{row.state}</p>
+      <p role="status">
+        <StatusBadge state={row.state} />
+      </p>
       {row.result && (
         <>
           <p>

@@ -17,7 +17,7 @@ import {
 import { timestamp, tokenState } from "@/lib/accounts";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import { Alert, AlertDescription } from "./ui/alert";
 import {
   Table,
@@ -232,10 +232,7 @@ export function AdminOverview({
                   <div className="min-w-0">
                     <p className="break-words text-sm font-medium">{m.name}</p>
                     <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <Badge variant="outline" className="status status-error">
-                        <span className="status-dot" aria-hidden="true" />
-                        {machineStatus(m)}
-                      </Badge>
+                      <Badge variant="destructive">{machineStatus(m)}</Badge>
                       <span className="[overflow-wrap:anywhere]">
                         {ownerLabel(m, users ?? [])}
                       </span>
@@ -292,7 +289,10 @@ export function AdminOverview({
         stale={Boolean(stale)}
         showHosts
       />
-      <section aria-labelledby="overview-access" className="space-y-3">
+      <section
+        aria-labelledby="overview-access"
+        className="@container space-y-3"
+      >
         <header className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="overview-access" className="text-base font-semibold">
             Access management
@@ -311,7 +311,7 @@ export function AdminOverview({
             Access counts show the last available snapshot.
           </p>
         )}
-        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border text-xs lg:grid-cols-5">
+        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-sm border bg-border text-xs @2xl:grid-cols-5">
           {[
             ["Users", users?.length ?? "—"],
             [
@@ -331,10 +331,12 @@ export function AdminOverview({
           ].map(([label, value]) => (
             <div
               key={label}
-              className="bg-card p-3 text-center last:col-span-2 lg:last:col-span-1"
+              className="flex min-w-0 flex-col justify-between bg-card px-3 py-4 text-center last:col-span-2 @2xl:last:col-span-1"
             >
               <dt className="text-muted-foreground">{label}</dt>
-              <dd className="mt-1 text-xl font-medium tabular-nums">{value}</dd>
+              <dd className="mt-1 text-xl font-medium tracking-tight tabular-nums">
+                {value}
+              </dd>
             </div>
           ))}
         </dl>
@@ -551,9 +553,7 @@ export function AdminTokensPage({
                   </span>
                   <div className="flex flex-wrap gap-1">
                     {t.scopes.map((s) => (
-                      <Badge key={s} variant="outline">
-                        {s}
-                      </Badge>
+                      <Badge key={s}>{s}</Badge>
                     ))}
                   </div>
                 </TableCell>
@@ -561,12 +561,7 @@ export function AdminTokensPage({
                   <span className="block text-xs text-muted-foreground @3xl:hidden">
                     Status
                   </span>
-                  <Badge
-                    variant="outline"
-                    className={tokenState(t) === "Active" ? "status-ready" : ""}
-                  >
-                    {tokenState(t)}
-                  </Badge>
+                  <StatusBadge state={tokenState(t)} />
                   {t.revokedAt !== null && (
                     <span className="block text-xs text-muted-foreground">
                       {timestamp(t.revokedAt)}

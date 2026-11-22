@@ -31,7 +31,7 @@ current inventory and credential snapshots. Unavailable data stays unavailable;
 these are not historical utilization or audit charts.
 
 The machine workspace and administration overview share a **Fleet pulse**.
-Its donut partitions the full inventory snapshot (before search and owner filters),
+Its segmented bar partitions the full inventory snapshot (before search and owner filters),
 with exact counts and state labels. Selecting a state clears existing search and
 owner filters and shows that group; **Running** in the chart means running but not
 ready/preparing, while the inventory's **Running** filter includes all running

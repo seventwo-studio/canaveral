@@ -47,7 +47,7 @@ for (const width of [320, 1440]) {
       await route.fulfill({ json: result });
     });
     await page.goto("/#previews");
-    await expect(page.getByText(/· waiting for capacity/)).toBeVisible();
+    await expect(page.getByText("waiting for capacity")).toBeVisible();
     await expect(page.getByText(/Queued at priority 0/)).toBeVisible();
     await page.getByRole("button", { name: "Cancel waiting preview" }).click();
     await expect(

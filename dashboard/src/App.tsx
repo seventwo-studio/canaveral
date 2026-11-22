@@ -99,7 +99,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -288,17 +288,7 @@ function Notice({
     </Alert>
   ) : null;
 }
-function Status({ text }: { text: string }) {
-  return (
-    <Badge
-      variant="outline"
-      className={`status status-${text.toLowerCase().replaceAll(" ", "-")}`}
-    >
-      <span className="status-dot" />
-      {text}
-    </Badge>
-  );
-}
+
 export function App() {
   const [claim, setClaim] = useState(takeClaim);
   const identity = useRef<User | null>(null);
@@ -1505,7 +1495,7 @@ export function App() {
               <dl className="grid divide-y">
                 {(
                   [
-                    ["State", <Status text={machineStatus(detail)} />],
+                    ["State", <StatusBadge state={machineStatus(detail)} />],
                     ["Requested", title(detail.desired)],
                     ["Preparation", detail.preparation.state],
                     ["Host", hostName(detail.hostId)],

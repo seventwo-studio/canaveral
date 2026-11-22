@@ -16,6 +16,14 @@ Give each destination one page heading. The workspace header carries this headin
 
 Account and API tokens share the Settings header. A secondary navigation column identifies the active section beside its form. When the content area is narrow, the links move above the form. [Browserbase Preferences](https://mobbin.com/screens/b8124a12-8111-4ed7-8bfa-4f217b03a98c)
 
+## Cards, charts and badges
+
+Use a white card with a 1px border, 4px corners and 16px insets for standalone resources. In Overview, a group of related totals shares one outline. A fine rule separates adjacent cells. Center the short label above its value, use tabular numerals, and keep supplementary units and sample counts smaller. Section lists can use horizontal rules without an enclosing card. [Overview metrics](https://mobbin.com/screens/654392d0-9063-4db4-8987-6b7fc6742537)
+
+The analytics reference uses dark marks, pale dashed guides and captions close to the plot. Canaveral’s CPU history uses separate dots at the reported timestamps, so missing measurements leave a gap. The solid baseline marks zero. Reservation bars share one panel and retain a written value for each category and a limit marker when allocations exceed capacity. [Browserbase analytics](https://mobbin.com/screens/a46ff01a-ec77-472b-b013-45ad476c0166)
+
+Session states use short text labels on softly tinted pills. Use green for success, amber for waits, red for failure, and gray for metadata or unrecognized states. Keep dots in chart legends and freshness indicators. The state name carries the meaning inside a badge. [Browserbase session states](https://mobbin.com/screens/7f018244-22df-44fb-832a-4f883773bb49)
+
 ## Reading the reference
 
 The Sessions list puts search in the header and filters directly above the results. Its column labels are small, quiet and left aligned. White rows have horizontal separators and no vertical grid. Pale green pills identify completed sessions, so a reader can scan the status column without reading every ID. The empty space below a short result set stays white. [Filtered sessions](https://mobbin.com/screens/c7cff77e-7495-45ca-9eac-5031fddb1650)
@@ -43,7 +51,7 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 | Spacing | Use the 4px spacing scale. Keep an icon close to its label, give neighboring actions more space, and leave 16–24px between independent content groups. Allow narrow toolbars to wrap in reading order. |
 | Controls | Keep button and field silhouettes rectangular with softly rounded corners. Use orange for the primary creation action in the page header and for positive dialog submissions. Use a light border for ordinary commands and a ghost treatment for low-emphasis row actions. Use a visible focus outline with clearance around the control. |
 | Tables and metrics | Place muted column names on white, align names with their values and separate rows with 1px rules. Use tabular figures for comparable numbers. Put related summary values inside one divided strip and allow them to wrap on phones. |
-| Status and danger | Use small tinted pills with readable state names. A dot can reinforce the label. Keep success green, waiting amber and failure red. Reserve destructive action styling for commands that warrant confirmation. |
+| Status and danger | Use small tinted pills with readable state names. Keep success green, waiting amber and failure red. Reserve destructive action styling for commands that warrant confirmation. |
 | Sheets and dialogs | Keep the title, affected resource and decision in the same panel. Give overlays more elevation than inline panels. Constrain tall content to the viewport, preserve keyboard focus and expose controls at narrow widths. |
 
 The Sessions list puts status first and separates rows with fine horizontal rules. On wide screens Machines follows that order. On phones the machine name leads each labeled record. Active search, state and owner filters are individually removable, and the inventory count appears once beneath the results. [Filtered Sessions](https://mobbin.com/screens/c7cff77e-7495-45ca-9eac-5031fddb1650)
@@ -56,9 +64,9 @@ For settings, keep related field labels and controls within one divided group. P
 | --- | --- |
 | Button | 24px extra-small, 28px small, 32px default and 40px large. Default horizontal padding is 12px or 10px with an icon. Use 13px medium-weight labels, 16px icons and 6px corners. |
 | Input, select, toggle | Default height 32px. Editable text is 16px on small screens and 13px on desktop. Use a white selected segment on a neutral track with 2px padding. |
-| Card | 16px padding and section gaps. Titles are 14px semibold, descriptions 13px with 20px line height. A hairline and small shadow separate panels on white. |
+| Card | 16px padding and section gaps. Titles are 14px semibold, descriptions 13px with 20px line height. A 1px outline separates flat panels on white. |
 | Table | 36px header, 44px minimum data rows, 12px horizontal padding. Set muted headings at 12px and data at 13px. Allow multiline resource details to increase row height. |
-| Badge | A 20px pill with 6px horizontal padding. Keep neutral labels quiet and pair domain color with a written state. |
+| Badge | A pill with a 20px minimum height and 6px horizontal padding. Keep neutral labels quiet and pair domain color with a written state. |
 
 ### Page layouts
 

@@ -34,14 +34,12 @@ it("plots actual sample time spacing and CPU values, including timestamp zero an
   const zero = container.querySelector('circle[data-time="0"]');
   const quarter = container.querySelector('circle[data-time="10"]');
   const full = container.querySelector('circle[data-time="40"]');
-  expect(zero?.getAttribute("cy")).toBe("168");
-  expect(full?.getAttribute("cy")).toBe("8");
-  expect(quarter?.getAttribute("cy")).toBe("128");
-  const distance =
-    Number(full?.getAttribute("cx")) - Number(zero?.getAttribute("cx"));
-  expect(
-    Number(quarter?.getAttribute("cx")) - Number(zero?.getAttribute("cx")),
-  ).toBe(distance / 4);
+  expect(zero?.getAttribute("cy")).toBe("100%");
+  expect(full?.getAttribute("cy")).toBe("0%");
+  expect(quarter?.getAttribute("cy")).toBe("75%");
+  expect(zero?.getAttribute("cx")).toBe("0%");
+  expect(quarter?.getAttribute("cx")).toBe("25%");
+  expect(full?.getAttribute("cx")).toBe("100%");
   expect(
     container.querySelector('time[datetime="1970-01-01T00:00:00.000Z"]'),
   ).toBeTruthy();
