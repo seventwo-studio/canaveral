@@ -130,7 +130,7 @@ export function MachineControl({
         onEscapeKeyDown={(event) => event.preventDefault()}
         className="fixed inset-0 top-0 left-0 flex h-svh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:max-w-none"
       >
-        <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b px-4 py-3 text-left">
+        <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b bg-muted px-4 py-2 text-left">
           <div className="flex min-w-0 items-center gap-3">
             <Button
               variant="ghost"
@@ -145,14 +145,14 @@ export function MachineControl({
               <DialogTitle className="break-all text-sm">
                 {machine.name}
               </DialogTitle>
-              <DialogDescription className="mt-1 text-[10px]">
+              <DialogDescription className="mt-0.5 text-xs">
                 {machine.template.os} · {machine.template.arch} ·{" "}
                 {machine.ready ? "Ready" : machine.observed}
               </DialogDescription>
             </div>
           </div>
           <div
-            className="flex flex-wrap items-center gap-1"
+            className="flex flex-wrap items-center gap-1 rounded-md border bg-background p-0.5"
             aria-label="Workspace views"
           >
             {views.map(([key, label, Icon]) => (
@@ -232,7 +232,7 @@ export function MachineControl({
                       : "hidden"
                   }
                 >
-                  <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-3 py-2">
+                  <div className="flex shrink-0 flex-wrap items-center gap-1 border-b bg-muted px-3 py-1.5">
                     {sessions.map((s) => (
                       <div
                         key={s.id}

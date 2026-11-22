@@ -256,7 +256,7 @@ export function DesktopView({
       ref={panel}
       className="flex h-full min-h-80 min-w-0 flex-col bg-neutral-950"
     >
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-4 py-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-muted px-3 py-2">
         <div className="flex items-center gap-2 text-xs">
           <span
             className={`size-2 rounded-full ${status === "connected" ? "bg-[var(--state-ready)]" : "bg-muted-foreground"}`}

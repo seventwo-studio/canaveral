@@ -93,7 +93,7 @@ const Metric = ({
   children: ReactNode;
 }) => (
   <div className="min-w-0">
-    <dt className="text-[10px] text-muted-foreground">{label}</dt>
+    <dt className="text-xs text-muted-foreground">{label}</dt>
     <dd className="mt-1 break-words text-xs">{children}</dd>
   </div>
 );
@@ -400,7 +400,7 @@ export function InfrastructureCard({
   const orchestrator = kind(host) === "orchestrator";
   const Icon = orchestrator ? Orbit : Server;
   return (
-    <Card className="min-w-0 rounded-md shadow-none">
+    <Card className="min-w-0">
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Icon className="size-5 text-muted-foreground" />
@@ -414,7 +414,7 @@ export function InfrastructureCard({
                   : "Online"}
           </Badge>
         </div>
-        <CardTitle className="break-words text-xl">
+        <CardTitle className="break-words text-base font-semibold tracking-tight">
           <a
             href={resourcesHref}
             className="underline-offset-4 hover:underline"
@@ -563,7 +563,7 @@ export function InfrastructureDetails({
           await onRefresh();
         }}
       />
-      <div className="grid min-w-0 gap-6 border-t pt-6 xl:grid-cols-2">
+      <div className="grid min-w-0 gap-4 border-t pt-4 xl:grid-cols-2">
         <HostMachines
           host={host}
           machines={machines}
@@ -581,10 +581,10 @@ export function InfrastructureDetails({
           }
         />
       </div>
-      <div className="grid min-w-0 gap-8 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="min-w-0 space-y-6">
           <section className="min-w-0 space-y-3">
-            <h2 className="text-sm font-medium">Observed resources</h2>
+            <h2 className="text-sm font-semibold">Observed resources</h2>
             <Usage host={host} />
             {host.usage?.cluster && (
               <NamespaceResources cluster={host.usage.cluster} />
@@ -614,7 +614,7 @@ export function InfrastructureDetails({
         >
           <section className="space-y-3">
             <div className="flex flex-wrap justify-between gap-2">
-              <h2 className="text-sm font-medium">Environment checks</h2>
+              <h2 className="text-sm font-semibold">Environment checks</h2>
               <Button
                 size="sm"
                 variant="outline"
@@ -637,9 +637,9 @@ export function InfrastructureDetails({
                 enable diagnostics.
               </p>
             )}
-            <ul className="space-y-2">
+            <ul className="divide-y border-y">
               {host.health?.checks?.map((c) => (
-                <li key={c.id} className="rounded-md border p-3">
+                <li key={c.id} className="py-3">
                   <div className="flex items-center gap-2 text-xs">
                     {c.status === "passed" ? (
                       <Check className="size-3 text-[var(--state-ready)]" />
@@ -677,7 +677,7 @@ export function InfrastructureDetails({
             </dl>
           </section>
           <section className="space-y-3 border-t pt-4">
-            <h2 className="text-sm font-medium">Configured capabilities</h2>
+            <h2 className="text-sm font-semibold">Configured capabilities</h2>
             <div className="flex flex-wrap gap-2">
               {Object.entries(host.health?.capabilities || {}).map(
                 ([key, value]) => (
@@ -916,7 +916,7 @@ export function ConnectionSetup({
                 Connection type
                 <select
                   aria-label="Connection type"
-                  className="h-9 w-full rounded-md border bg-background px-2"
+                  className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
                   value={type}
                   onChange={(e) => {
                     setType(
@@ -941,7 +941,7 @@ export function ConnectionSetup({
                       ? "Provider"
                       : "Host operating system"
                   }
-                  className="h-9 w-full rounded-md border bg-background px-2"
+                  className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
                   value={backend}
                   onChange={(e) => change(e.target.value)}
                 >
@@ -1124,14 +1124,14 @@ export function ConnectionSetup({
               <li>
                 Place the private setup file on that machine and check its
                 environment:
-                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border p-3">
+                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-3 font-mono text-xs">
                   canaveral host --setup-file ./canaveral-setup.json --state
                   ./state/runner --check
                 </pre>
               </li>
               <li>
                 Connect the runner:
-                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border p-3">
+                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-3 font-mono text-xs">
                   canaveral host --setup-file ./canaveral-setup.json --state
                   ./state/runner
                 </pre>

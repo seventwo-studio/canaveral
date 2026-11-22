@@ -215,12 +215,12 @@ export function WorkspacePreviews() {
     }
   }
   return (
-    <section className="space-y-6">
+    <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">
         Workspace previews
       </h1>
       <form
-        className="space-y-4 rounded-lg border p-4"
+        className="max-w-2xl space-y-4 rounded-md border bg-card p-4"
         onSubmit={(e) => {
           e.preventDefault();
           void act("launch");
@@ -228,9 +228,10 @@ export function WorkspacePreviews() {
       >
         <p>New previews use the operator-configured pinned image.</p>
         <fieldset disabled={busy || !!pending} className="grid gap-3">
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Preview type{" "}
             <select
+              className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
               value={mode}
               onChange={(e) => {
                 setMode(e.target.value);
@@ -241,7 +242,7 @@ export function WorkspacePreviews() {
               <option value="command">Dynamic app</option>
             </select>
           </label>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Workspace directory
             <Input
               key={mode}
@@ -254,7 +255,7 @@ export function WorkspacePreviews() {
           {files.length > 0 && <p>{files.length} files selected</p>}
           {mode === "command" && (
             <>
-              <label>
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 Foreground command and arguments (one per line)
                 <Textarea
                   required
@@ -262,7 +263,7 @@ export function WorkspacePreviews() {
                   onChange={(e) => setArgv(e.target.value)}
                 />
               </label>
-              <label>
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 HTTP port
                 <Input
                   type="number"
@@ -285,30 +286,44 @@ export function WorkspacePreviews() {
           {pending ? "Retry same launch" : "Launch preview"}
         </Button>
       </form>
-      {error && <p role="alert">{error}</p>}
-      <h2 className="text-xl">Your previews</h2>
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => setRefresh((v) => v + 1)}
-      >
-        Refresh previews
-      </Button>
-      {loadError && <p role="alert">{loadError}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold tracking-tight">
+          Your previews
+        </h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setRefresh((v) => v + 1)}
+        >
+          Refresh previews
+        </Button>
+      </div>
+      {loadError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadError}
+        </p>
+      )}
       {!loadError && !rows.length && (
         <p role="status">{loaded ? "No previews yet." : "Loading previews…"}</p>
       )}
-      <ul aria-live="polite" className="space-y-3">
+      <ul aria-live="polite" className="divide-y border-y empty:hidden">
         {rows.map((p) => {
           const waiting =
             p.state === "provisioning" && p.request?.state === "waiting";
           return (
-            <li key={p.id} className="space-y-2 rounded-lg border p-4">
+            <li key={p.id} className="space-y-2 px-3 py-3 text-[13px]">
               <p>
                 {p.mode === "command" ? "Dynamic app" : "Static site"} ·{" "}
                 {waiting ? "waiting for capacity" : p.state}
               </p>
-              <code>{p.id}</code>
+              <code className="break-all text-xs text-muted-foreground">
+                {p.id}
+              </code>
               {p.request && !waiting && p.request.state !== "admitted" && (
                 <p>
                   Request {p.request.state}

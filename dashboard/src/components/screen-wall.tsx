@@ -108,7 +108,7 @@ export function ScreenWall({
       )}
       {selected.length > 0 && (
         <section aria-label="Watched screens" className="min-w-0">
-          <ul className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <ul className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {selected.map((id) => {
               const machine = machines.find((m) => m.id === id);
               return (
@@ -126,7 +126,7 @@ export function ScreenWall({
                       aria-label={`Screen of ${machine?.name ?? id}`}
                       className="flex h-full min-w-0 flex-col gap-3 rounded-md border bg-card p-4"
                     >
-                      <h2 className="font-display text-base font-medium [overflow-wrap:anywhere]">
+                      <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
                         {machine?.name ?? (
                           <span className="font-mono text-xs">{id}</span>
                         )}
@@ -156,7 +156,10 @@ export function ScreenWall({
       )}
       <section className="min-w-0 space-y-3" aria-labelledby="wall-devices">
         <div className="space-y-1">
-          <h2 id="wall-devices" className="text-lg font-semibold">
+          <h2
+            id="wall-devices"
+            className="text-base font-semibold tracking-tight"
+          >
             Devices you can watch{" "}
             <span className="text-muted-foreground">({candidates.length})</span>
           </h2>
@@ -195,17 +198,17 @@ export function ScreenWall({
         ) : (
           <ul
             aria-label="Devices you can watch"
-            className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+            className="min-w-0 divide-y border-y bg-card"
           >
             {candidates.map((machine) => {
               const watching = selected.includes(machine.id);
               return (
                 <li
                   key={machine.id}
-                  className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3"
+                  className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-3 py-2.5"
                 >
                   <div className="min-w-0">
-                    <p className="font-display text-base font-medium [overflow-wrap:anywhere]">
+                    <p className="text-sm font-semibold [overflow-wrap:anywhere]">
                       {machine.name}
                     </p>
                     <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
@@ -376,7 +379,7 @@ function ScreenTile({
     >
       <header className="flex min-w-0 items-start justify-between gap-2">
         <div className="min-w-0">
-          <h2 className="font-display text-base font-medium [overflow-wrap:anywhere]">
+          <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
             {machine.name}
           </h2>
           <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
@@ -393,7 +396,7 @@ function ScreenTile({
       </header>
       <div
         ref={frame}
-        className="relative mx-auto flex max-h-[70svh] w-full items-center justify-center overflow-hidden rounded-sm bg-sidebar"
+        className="relative mx-auto flex max-h-[70svh] w-full items-center justify-center overflow-hidden rounded-sm bg-neutral-950"
         style={{
           aspectRatio: size ? `${size.width} / ${size.height}` : "9 / 19.5",
         }}
@@ -412,7 +415,7 @@ function ScreenTile({
         {phase !== "live" && (
           <p
             role={phase === "ended" && !calm ? "alert" : "status"}
-            className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-sidebar-foreground"
+            className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-neutral-200"
           >
             {detail}
           </p>

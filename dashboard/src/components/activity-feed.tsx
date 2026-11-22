@@ -285,7 +285,7 @@ function ActivitySession({
       </div>
 
       <form
-        className="grid min-w-0 grid-cols-2 gap-3 rounded-md border bg-card p-4 xl:grid-cols-6"
+        className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 border-y py-3 xl:grid-cols-6"
         aria-label="Filter events"
         onSubmit={(event) => event.preventDefault()}
       >
@@ -519,7 +519,7 @@ function ActivitySession({
       {feed && feed.events.length > 0 && (
         <ol
           aria-label="Events, newest first"
-          className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+          className="min-w-0 divide-y border-y bg-card"
         >
           {feed.events.map((event) => (
             <EventRow
@@ -581,7 +581,7 @@ const EventRow = memo(function EventRow({
 }) {
   const fields = dataFields(event);
   return (
-    <li className="grid min-w-0 gap-2 px-4 py-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-4">
+    <li className="grid min-w-0 gap-2 px-1 py-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-4">
       <div className="min-w-0 space-y-1">
         <time
           dateTime={event.at}

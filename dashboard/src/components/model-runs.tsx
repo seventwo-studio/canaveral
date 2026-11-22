@@ -234,11 +234,11 @@ function JobRow({
   }
   return (
     <article
-      className="min-w-0 space-y-3 rounded-lg border p-4"
+      className="min-w-0 space-y-2 px-3 py-3 text-[13px]"
       aria-label={"Model job " + row.id}
     >
-      <h3 className="break-all font-semibold">{row.model}</h3>
-      <p className="break-all text-sm text-muted-foreground">
+      <h3 className="break-all text-sm font-semibold">{row.model}</h3>
+      <p className="break-all font-mono text-xs text-muted-foreground">
         {short(row.digest)} · host {row.hostId} · {row.id}
       </p>
       <p role={follow ? "status" : undefined}>
@@ -256,7 +256,7 @@ function JobRow({
       {row.output && (
         <>
           <h4>Output</h4>
-          <pre className="overflow-auto whitespace-pre-wrap break-words">
+          <pre className="overflow-auto whitespace-pre-wrap break-words rounded-sm bg-muted p-3 font-mono text-xs">
             {row.output.text}
           </pre>
           <p className="text-sm text-muted-foreground">
@@ -265,7 +265,11 @@ function JobRow({
           </p>
         </>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         {!inspect && row.state === "succeeded" && (
           <Button variant="outline" onClick={() => setInspect(true)}>
@@ -441,20 +445,20 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
     }
   }
   return (
-    <section className="min-w-0 space-y-6">
+    <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">Models</h1>
       <form
-        className="space-y-4 rounded-lg border p-4"
+        className="max-w-2xl space-y-4 rounded-md border bg-card p-4"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
       >
         <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Installed model
             <select
-              className="block w-full"
+              className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
               value={choice}
               onChange={(e) => setChoice(e.target.value)}
             >
@@ -468,14 +472,14 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
               ))}
             </select>
           </label>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Prompt
             <Textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
             />
           </label>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Maximum output tokens
             <Input
               type="number"
@@ -486,7 +490,11 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
             />
           </label>
         </fieldset>
-        {error && <p role="alert">{error}</p>}
+        {error && (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        )}
         {pending && (
           <p>
             Request <code>{pending.id}</code> may already have started. Retry
@@ -505,27 +513,41 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
           {pending ? "Retry same request" : "Run model"}
         </Button>
       </form>
-      <h2 className="text-xl">Recent model jobs</h2>
-      {offerError && <p role="alert">Model offers unavailable: {offerError}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold tracking-tight">
+          Recent model jobs
+        </h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setRefresh((n) => n + 1)}
+        >
+          Refresh models and jobs
+        </Button>
+      </div>
+      {offerError && (
+        <p className="text-sm text-destructive" role="alert">
+          Model offers unavailable: {offerError}
+        </p>
+      )}
       {offers && !offers.length && !offerError && (
         <p role="status">No host offers an installed model.</p>
       )}
-      {loadError && <p role="alert">{loadError}</p>}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => setRefresh((n) => n + 1)}
-      >
-        Refresh models and jobs
-      </Button>
-      {rows?.map((row) => (
-        <JobRow
-          key={row.id}
-          initial={row}
-          follow={followed.includes(row.id)}
-          onDenied={onDenied}
-        />
-      ))}
+      {loadError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadError}
+        </p>
+      )}
+      <div className="divide-y border-y empty:hidden">
+        {rows?.map((row) => (
+          <JobRow
+            key={row.id}
+            initial={row}
+            follow={followed.includes(row.id)}
+            onDenied={onDenied}
+          />
+        ))}
+      </div>
       {!rows?.length && !loadError && (
         <p role="status">{rows ? "No model jobs yet." : "Loading jobs…"}</p>
       )}

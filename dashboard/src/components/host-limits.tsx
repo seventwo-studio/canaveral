@@ -56,9 +56,9 @@ export function HostLimits({
     <form
       onSubmit={save}
       aria-label="Canaveral host limits"
-      className="space-y-3 border-t pt-6"
+      className="space-y-3 border-t pt-4"
     >
-      <h2 className="text-sm font-medium">Canaveral host limits</h2>
+      <h2 className="text-sm font-semibold">Canaveral host limits</h2>
       <p className="text-xs text-muted-foreground">
         Allocation budget across this host’s runtimes. Host capacity still
         applies.

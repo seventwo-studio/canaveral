@@ -360,7 +360,7 @@ function SystemControlPage({
             className="space-y-3"
             aria-label={collection}
           >
-            <h2 className="text-lg font-semibold capitalize">
+            <h2 className="text-base font-semibold capitalize">
               {collection}{" "}
               <span className="text-muted-foreground">
                 ({snapshot[collection].length})
@@ -373,15 +373,15 @@ function SystemControlPage({
                 </EmptyHeader>
               </Empty>
             ) : (
-              <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+              <div className="divide-y border-y">
                 {snapshot[collection].map((item) => {
                   const action = actionFor(collection, item);
                   return (
                     <Card
                       key={`${item.family}:${item.id}:${item.applicationId ?? ""}`}
-                      className="min-w-0"
+                      className="grid min-w-0 gap-3 rounded-none border-0 px-1 py-3 shadow-none lg:grid-cols-[minmax(10rem,1fr)_minmax(0,3fr)_auto] lg:items-start"
                     >
-                      <CardHeader>
+                      <CardHeader className="min-w-0 px-0">
                         <CardTitle className="break-all">
                           {item.name || item.id}
                         </CardTitle>
@@ -390,14 +390,14 @@ function SystemControlPage({
                           {item.name ? ` · ${item.id}` : ""}
                         </CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-3">
+                      <CardContent className="min-w-0 space-y-2 px-0">
                         <Badge variant="outline">{item.state}</Badge>
                         {item.cleanup === "blocked" && (
                           <Badge variant="destructive">
                             Cleanup blocked · reservations retained
                           </Badge>
                         )}
-                        <dl className="grid grid-cols-1 gap-2 text-sm">
+                        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs xl:grid-cols-3">
                           {(
                             [
                               // A lease's `name` is the label its holder gave it.
@@ -512,7 +512,7 @@ function SystemControlPage({
                         </details>
                       </CardContent>
                       {action && (
-                        <CardFooter>
+                        <CardFooter className="px-0">
                           <Button
                             variant="outline"
                             disabled={!!intent || !!error}

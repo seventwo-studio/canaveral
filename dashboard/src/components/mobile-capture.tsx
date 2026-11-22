@@ -193,10 +193,10 @@ export function MobileCapture({ machine }: { machine: Machine }) {
   }
 
   return (
-    <section className="grid gap-3" aria-label="Capture">
+    <section className="grid gap-3 border-t pt-3" aria-label="Capture">
       <h3 className="text-sm font-medium">Capture</h3>
       <div className="grid gap-2">
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-[13px] font-medium">
           Screenshot name
           <Input
             value={shotName}
@@ -228,7 +228,7 @@ export function MobileCapture({ machine }: { machine: Machine }) {
         )}
       </div>
       <div className="grid gap-2">
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-[13px] font-medium">
           Recording name
           <Input
             value={clipName}
@@ -237,10 +237,10 @@ export function MobileCapture({ machine }: { machine: Machine }) {
             onChange={(e) => setClipName(e.target.value)}
           />
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-[13px] font-medium">
           Recording length
           <select
-            className="h-8 rounded-sm border bg-transparent px-2 text-sm"
+            className="h-8 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
             value={duration}
             disabled={recording}
             onChange={(e) => setDuration(Number(e.target.value))}

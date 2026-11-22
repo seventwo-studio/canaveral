@@ -46,6 +46,17 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 
 The Machines and Orchestrators lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area and a 448px form column so related fields and actions share a left edge.
 
+| Other destinations | Layout |
+| --- | --- |
+| Activity, queue and system | Put filters and refresh near the list. Use horizontal rules between events, requests and leases. Keep the position or state visible beside the record; allow identifiers to wrap separately. |
+| Usage and host resources | Group related totals in a divided panel. Neutral chart segments have matching labels and values. Reservations and measured usage have separate sections. |
+| Hosts, images and blueprints | Keep selectable sources in cards. Within a host, use ruled lists for machines, images and reservations. Align form controls in import, setup and maintenance dialogs with the shared input height. |
+| Users, API access and configuration | Keep filters with their results. Group the feature and action selectors above operation fields. Separate confirmation controls from the operation summary with a rule. |
+| Builds, previews and models | Group launch controls together. Give queue entries and results distinct sections, with technical identifiers and output in monospace. |
+| Screen wall and machine control | Keep device labels and actions beside their viewports. Use compact headers for files, terminal and inspection tools. Preserve the usable area of live displays and keep session controls accessible on phones. |
+
+Forms use 16px between fields and 6px between a label and its control. Dialog headings align left. A horizontal rule and 16px of top padding separate footer actions from content. The overlay darkens the workspace while leaving its context visible.
+
 ## Canaveral screen map
 
 | Entry | Destination | Next steps |

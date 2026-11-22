@@ -71,7 +71,13 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
   const part = share(row.leases.deviceSeconds, total.leases.deviceSeconds);
   const failed = failures(row);
   return (
-    <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4">
+    <dl
+      className={
+        row === total
+          ? "grid min-w-0 grid-cols-2 gap-px overflow-hidden rounded-md border bg-border md:grid-cols-4 [&>div]:bg-card [&>div]:p-3 [&>div:last-child]:col-span-2"
+          : "grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4"
+      }
+    >
       <Pair label="Requests by outcome">
         {row.requests ? (
           <>
@@ -299,7 +305,7 @@ function UsageSession({
       </div>
 
       <form
-        className="grid min-w-0 gap-3 rounded-md border bg-card p-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid min-w-0 gap-3 border-y py-3 sm:grid-cols-2 lg:grid-cols-4"
         aria-label="Choose a usage report"
         onSubmit={(event) => event.preventDefault()}
       >
@@ -423,17 +429,14 @@ function UsageSession({
               its resource domain is bound to.
             </p>
           )}
-          <section
-            className="min-w-0 space-y-3 rounded-md border bg-card p-4"
-            aria-labelledby="usage-totals"
-          >
-            <h2 id="usage-totals" className="text-lg font-semibold">
+          <section className="min-w-0 space-y-3" aria-labelledby="usage-totals">
+            <h2 id="usage-totals" className="text-base font-semibold">
               Total for the range
             </h2>
             <Figures row={report.totals} total={report.totals} />
           </section>
           <section className="min-w-0 space-y-3" aria-labelledby="usage-groups">
-            <h2 id="usage-groups" className="text-lg font-semibold">
+            <h2 id="usage-groups" className="text-base font-semibold">
               By {groupLabels[report.groupBy].toLowerCase()}{" "}
               <span className="text-muted-foreground">
                 ({report.rows.length})
@@ -455,10 +458,10 @@ function UsageSession({
             ) : (
               <ul
                 aria-label={`Usage by ${groupLabels[report.groupBy].toLowerCase()}`}
-                className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+                className="min-w-0 divide-y border-y bg-card"
               >
                 {report.rows.map((row) => (
-                  <li key={row.key} className="min-w-0 space-y-3 px-4 py-4">
+                  <li key={row.key} className="min-w-0 space-y-3 px-1 py-3">
                     <div className="min-w-0">
                       {row.label && (
                         <p className="font-display text-base font-medium [overflow-wrap:anywhere]">

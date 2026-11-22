@@ -278,7 +278,7 @@ function QueueSession({
             className="min-w-0 space-y-3"
             aria-labelledby="queue-waiting"
           >
-            <h2 id="queue-waiting" className="text-lg font-semibold">
+            <h2 id="queue-waiting" className="text-base font-semibold">
               Waiting requests
             </h2>
             {view.requests.length < view.waitingTotal && (
@@ -302,19 +302,19 @@ function QueueSession({
             ) : (
               <ol
                 aria-label="Waiting requests in attempt order"
-                className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+                className="min-w-0 divide-y border-y bg-card"
               >
                 {view.requests.map((request) => (
                   <li
                     key={`${request.applicationId}:${request.id}`}
-                    className="grid min-w-0 gap-3 px-4 py-4 lg:grid-cols-[5.5rem_minmax(0,1fr)_auto] lg:items-start"
+                    className="grid min-w-0 gap-3 px-1 py-3 lg:grid-cols-[5.5rem_minmax(0,1fr)_auto] lg:items-start"
                   >
                     <div className="min-w-0">
                       {request.position === null ? (
                         <Badge variant="outline">No position</Badge>
                       ) : (
                         <p
-                          className="font-mono text-2xl font-medium tabular-nums"
+                          className="text-xl font-semibold tabular-nums"
                           aria-label={`Position ${request.position}`}
                         >
                           #{request.position}
@@ -487,7 +487,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
   return (
     <section className="min-w-0 space-y-3" aria-labelledby="queue-leases">
       <div className="space-y-1">
-        <h2 id="queue-leases" className="text-lg font-semibold">
+        <h2 id="queue-leases" className="text-base font-semibold">
           Leases holding capacity
         </h2>
         <p className="max-w-prose text-sm text-muted-foreground">
@@ -521,7 +521,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
       ) : (
         <ul
           aria-label="Leases holding capacity"
-          className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+          className="min-w-0 divide-y border-y bg-card"
         >
           {view.leases.map((lease) => (
             <LeaseRow key={lease.id} lease={lease} now={now} />
@@ -534,7 +534,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
 function LeaseRow({ lease, now }: { lease: QueueLease; now: number }) {
   const remaining = (Date.parse(lease.expiresAt) - now) / 1000;
   return (
-    <li className="grid min-w-0 gap-3 px-4 py-4 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
+    <li className="grid min-w-0 gap-3 px-1 py-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
       <div className="min-w-0">
         <Badge variant="outline">{lease.state}</Badge>
       </div>

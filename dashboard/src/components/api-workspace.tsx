@@ -167,47 +167,49 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
         </CardHeader>
         <CardContent>
           <FieldSet disabled={busy}>
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="api-feature">Feature</FieldLabel>
-                <Select
-                  value={action.feature}
-                  onValueChange={(feature) =>
-                    choose(
-                      apiActions.find((item) => item.feature === feature)!.id,
-                    )
-                  }
-                >
-                  <SelectTrigger id="api-feature" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {features.map((feature) => (
-                      <SelectItem key={feature} value={feature}>
-                        {feature}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="api-action">Action</FieldLabel>
-                <Select value={selected} onValueChange={choose}>
-                  <SelectTrigger id="api-action" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {apiActions
-                      .filter((item) => item.feature === action.feature)
-                      .map((item) => (
-                        <SelectItem key={item.id} value={item.id}>
-                          {item.label}
+            <FieldGroup className="gap-4">
+              <div className="grid min-w-0 items-start gap-3 border-b pb-4 sm:grid-cols-2">
+                <Field className="min-w-0">
+                  <FieldLabel htmlFor="api-feature">Feature</FieldLabel>
+                  <Select
+                    value={action.feature}
+                    onValueChange={(feature) =>
+                      choose(
+                        apiActions.find((item) => item.feature === feature)!.id,
+                      )
+                    }
+                  >
+                    <SelectTrigger id="api-feature" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {features.map((feature) => (
+                        <SelectItem key={feature} value={feature}>
+                          {feature}
                         </SelectItem>
                       ))}
-                  </SelectContent>
-                </Select>
-                <FieldDescription>{action.help}</FieldDescription>
-              </Field>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="api-action">Action</FieldLabel>
+                  <Select value={selected} onValueChange={choose}>
+                    <SelectTrigger id="api-action" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {apiActions
+                        .filter((item) => item.feature === action.feature)
+                        .map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>{action.help}</FieldDescription>
+                </Field>
+              </div>
               {action.identifier && (
                 <Field>
                   <FieldLabel htmlFor="api-identifier">
@@ -309,7 +311,7 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
             </p>
             <pre
               aria-label="API response"
-              className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all text-xs"
+              className="max-h-[36rem] overflow-auto rounded-md border bg-muted/40 p-3 whitespace-pre-wrap break-all font-mono text-xs"
             >
               {JSON.stringify(result, null, 2)}
             </pre>

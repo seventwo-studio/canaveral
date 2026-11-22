@@ -98,13 +98,13 @@ export function MachineDelete({
                   ? "The host could not confirm removal. Storage and its reservation are retained; inspect the host before retrying."
                   : "Deletion requested. Waiting for the host to confirm removal."}
             </p>
-            <p className="break-all text-muted-foreground">
+            <p className="break-all font-mono text-muted-foreground">
               Request {result.id}
             </p>
             <Button onClick={onClose}>Close</Button>
           </div>
         ) : (
-          <div className="flex flex-wrap justify-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
             <Button variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>

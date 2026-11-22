@@ -13,12 +13,12 @@ import { Button } from "./ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
 const fills: Record<string, string> = {
-  virtualMachines: "var(--primary)",
-  simulators: "var(--foreground)",
-  retainedDisks: "var(--muted-foreground)",
+  virtualMachines: "var(--foreground)",
+  simulators: "color-mix(in srgb, var(--foreground) 80%, var(--background))",
+  retainedDisks: "color-mix(in srgb, var(--foreground) 65%, var(--background))",
   images: "color-mix(in srgb, var(--foreground) 35%, var(--background))",
-  imageTasks: "color-mix(in srgb, var(--primary) 45%, var(--background))",
-  inference: "var(--secondary-foreground)",
+  imageTasks: "color-mix(in srgb, var(--foreground) 50%, var(--background))",
+  inference: "color-mix(in srgb, var(--foreground) 25%, var(--background))",
 };
 const amount = (key: keyof Resources, value: number) =>
   key === "memoryMiB"
@@ -42,7 +42,7 @@ export function StackedResources({
   return (
     <section className="min-w-0 space-y-5" aria-label="Resources by category">
       <div>
-        <h2 className="text-base font-medium">Resources</h2>
+        <h2 className="text-sm font-semibold">Resources</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           Reserved capacity against this host’s limit. Measured usage is shown
           separately below.
@@ -56,7 +56,7 @@ export function StackedResources({
         </p>
       ) : (
         <>
-          <div className="grid min-w-0 gap-5 lg:grid-cols-3">
+          <div className="grid min-w-0 gap-4 lg:grid-cols-3">
             {(
               [
                 ["cpu", "CPU"],
@@ -139,7 +139,7 @@ export function StackedResources({
             })}
           </div>
           <section aria-label="Canaveral reservations by category">
-            <dl className="divide-y rounded-md border px-3">
+            <dl className="divide-y border-y">
               {categories.map((item) => (
                 <div
                   key={item.id}
@@ -213,7 +213,7 @@ export function HostMachines({
   return (
     <section className="min-w-0 space-y-3" aria-label="Host machines">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-base font-medium">Machines</h2>
+        <h2 className="text-sm font-semibold">Machines</h2>
         <span className="text-xs text-muted-foreground">
           {host.online ? `${running} running` : "Runtime unknown"} ·{" "}
           {members.length} assigned
@@ -233,7 +233,7 @@ export function HostMachines({
         </ToggleGroupItem>
       </ToggleGroup>
       {visible.length ? (
-        <ul className="divide-y rounded-md border px-3">
+        <ul className="divide-y border-y">
           {visible.map((machine) => (
             <li key={machine.id} className="min-w-0 space-y-2 py-3">
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -256,7 +256,7 @@ export function HostMachines({
                 {number(machine.resources.diskGiB)} GiB disk
               </p>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[10px] text-muted-foreground">
+                <span className="text-xs text-muted-foreground">
                   {machine.computeReserved === false
                     ? "Disk retained"
                     : "Compute and disk reserved"}
@@ -314,7 +314,7 @@ export function HostImages({
   return (
     <section className="min-w-0 space-y-3" aria-label="Installed images">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-base font-medium">Installed images</h2>
+        <h2 className="text-sm font-semibold">Installed images</h2>
         <span className="text-xs text-muted-foreground">
           {!loading &&
             !unavailable &&
@@ -328,7 +328,7 @@ export function HostImages({
             : "Loading installed images…"}
         </p>
       ) : images.length ? (
-        <ul className="divide-y rounded-md border px-3">
+        <ul className="divide-y border-y">
           {images.map((image) => (
             <li
               key={`${image.id}:${image.revision}:${image.arch}`}

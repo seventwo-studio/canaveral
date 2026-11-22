@@ -112,7 +112,7 @@ export function AccessibilityInspector({
       className="flex h-full min-h-0 min-w-0 flex-col border-l bg-background"
       aria-label="Accessibility inspector"
     >
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-muted px-3 py-2">
         <h2 className="text-sm font-medium">Accessibility</h2>
         <div className="flex gap-1">
           <Button
@@ -243,7 +243,7 @@ export function AccessibilityInspector({
         </section>
       )}
       {snapshot && (
-        <p className="shrink-0 border-t px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">
+        <p className="shrink-0 border-t bg-muted px-3 py-2 text-xs leading-relaxed text-muted-foreground">
           {live ? "Live · " : ""}Updated{" "}
           {new Date(snapshot.capturedAt * 1000).toLocaleTimeString()}. Targets
           expire after 15 seconds. {snapshot.coverage}

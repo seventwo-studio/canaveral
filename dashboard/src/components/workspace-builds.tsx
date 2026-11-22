@@ -93,9 +93,9 @@ function BuildRow({ initial }: { initial: Build }) {
     }
   }
   return (
-    <article className="min-w-0 space-y-3 rounded-lg border p-4">
-      <h3 className="break-all font-semibold">{row.artifact}</h3>
-      <p className="break-all">
+    <article className="min-w-0 space-y-2 px-3 py-3 text-[13px]">
+      <h3 className="break-all text-sm font-semibold">{row.artifact}</h3>
+      <p className="break-all font-mono text-xs text-muted-foreground">
         {row.imageId} · {row.id}
       </p>
       <p role="status">{row.state}</p>
@@ -110,12 +110,20 @@ function BuildRow({ initial }: { initial: Build }) {
             {row.result.truncated ? " · Output truncated" : ""}
           </p>
           <h4>Standard output</h4>
-          <pre className="overflow-auto">{output(row.result.stdoutBase64)}</pre>
+          <pre className="overflow-auto rounded-sm bg-muted p-3 font-mono text-xs">
+            {output(row.result.stdoutBase64)}
+          </pre>
           <h4>Standard error</h4>
-          <pre className="overflow-auto">{output(row.result.stderrBase64)}</pre>
+          <pre className="overflow-auto rounded-sm bg-muted p-3 font-mono text-xs">
+            {output(row.result.stderrBase64)}
+          </pre>
         </>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         {error && (
           <Button variant="outline" onClick={() => setRefresh((n) => n + 1)}>
@@ -253,17 +261,17 @@ export function WorkspaceBuilds() {
     }
   }
   return (
-    <section className="min-w-0 space-y-6">
+    <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">Linux builds</h1>
       <form
-        className="space-y-4 rounded-lg border p-4"
+        className="max-w-2xl space-y-4 rounded-md border bg-card p-4"
         onSubmit={(e) => {
           e.preventDefault();
           void launch();
         }}
       >
         <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Source directory
             <Input
               type="file"
@@ -272,10 +280,10 @@ export function WorkspaceBuilds() {
               onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
             />
           </label>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Approved workspace image
             <select
-              className="block w-full"
+              className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
               value={imageId}
               onChange={(e) => setImageId(e.target.value)}
             >
@@ -286,11 +294,11 @@ export function WorkspaceBuilds() {
               ))}
             </select>
           </label>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Command (one argument per line)
             <Textarea value={argv} onChange={(e) => setArgv(e.target.value)} />
           </label>
-          <label>
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Artifact path
             <Input
               placeholder="dist/package.tar"
@@ -299,7 +307,11 @@ export function WorkspaceBuilds() {
             />
           </label>
         </fieldset>
-        {error && <p role="alert">{error}</p>}
+        {error && (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        )}
         {pending && (
           <p>
             Launch request <code>{pending.id}</code>
@@ -309,19 +321,31 @@ export function WorkspaceBuilds() {
           {pending ? "Retry same launch" : "Launch build"}
         </Button>
       </form>
-      <h2 className="text-xl">Your builds</h2>
-      {imageError && <p role="alert">Build images unavailable: {imageError}</p>}
-      {loadError && <p role="alert">{loadError}</p>}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => setRefresh((n) => n + 1)}
-      >
-        Refresh builds
-      </Button>
-      {rows?.map((row) => (
-        <BuildRow key={row.id} initial={row} />
-      ))}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold tracking-tight">Your builds</h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setRefresh((n) => n + 1)}
+        >
+          Refresh builds
+        </Button>
+      </div>
+      {imageError && (
+        <p className="text-sm text-destructive" role="alert">
+          Build images unavailable: {imageError}
+        </p>
+      )}
+      {loadError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadError}
+        </p>
+      )}
+      <div className="divide-y border-y empty:hidden">
+        {rows?.map((row) => (
+          <BuildRow key={row.id} initial={row} />
+        ))}
+      </div>
       {!rows?.length && !loadError && (
         <p role="status">{rows ? "No builds yet." : "Loading builds…"}</p>
       )}

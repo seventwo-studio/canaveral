@@ -84,13 +84,13 @@ export function MachinePowerOff({
               Power-off request: {result.state}. Resources stay reserved until
               the host confirms that the VM and disk handles are closed.
             </p>
-            <p className="break-all text-muted-foreground">
+            <p className="break-all font-mono text-muted-foreground">
               Request {result.id}
             </p>
             <Button onClick={onClose}>Close</Button>
           </div>
         ) : (
-          <div className="flex flex-wrap justify-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
             <Button variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>

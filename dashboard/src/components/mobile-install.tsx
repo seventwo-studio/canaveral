@@ -194,8 +194,8 @@ export function MobileInstall({ machine }: { machine: Machine }) {
     }
   }
   return (
-    <section className="grid gap-2">
-      <label>
+    <section className="grid gap-3 border-t pt-3 text-[13px]">
+      <label className="grid min-w-0 gap-1.5 font-medium">
         {android
           ? "Android APK"
           : "iOS Simulator .app in an uncompressed ustar archive"}{" "}
@@ -211,7 +211,11 @@ export function MobileInstall({ machine }: { machine: Machine }) {
           }}
         />
       </label>
-      <Button disabled={!file || busy} onClick={install}>
+      <Button
+        className="justify-self-start"
+        disabled={!file || busy}
+        onClick={install}
+      >
         Upload and install
       </Button>
       {status && <p role="status">{status}</p>}

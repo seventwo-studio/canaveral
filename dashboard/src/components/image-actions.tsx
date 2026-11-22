@@ -202,7 +202,7 @@ export function ImageImport({
                 <select
                   aria-label="Destination host"
                   required
-                  className="h-9 w-full rounded-md border bg-background px-2"
+                  className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
                 >
@@ -226,7 +226,7 @@ export function ImageImport({
                     {label}
                     <select
                       aria-label={label}
-                      className="h-9 w-full rounded-md border bg-background px-2"
+                      className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
                       value={value}
                       onChange={(e) => set(e.target.value)}
                     >
@@ -244,7 +244,7 @@ export function ImageImport({
                   Media type
                   <select
                     aria-label="Media type"
-                    className="h-9 w-full rounded-md border bg-background px-2"
+                    className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
                     value={media}
                     onChange={(e) => {
                       setMedia(
@@ -263,7 +263,7 @@ export function ImageImport({
                   Format
                   <select
                     aria-label="Format"
-                    className="h-9 w-full rounded-md border bg-background px-2"
+                    className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
                     value={format}
                     onChange={(e) => setFormat(e.target.value)}
                   >
@@ -549,7 +549,7 @@ export function ImageActivity(_props: { onRefresh: Refresh }) {
       className="space-y-2 rounded-md border p-4"
       aria-label="Image activity"
     >
-      <h2 className="text-sm font-medium">Image activity</h2>
+      <h2 className="text-sm font-semibold">Image activity</h2>
       {error && <p className="text-xs text-destructive">{error}</p>}
       {tasks.slice(0, 8).map((task) => (
         <div

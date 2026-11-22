@@ -35,7 +35,7 @@ export function MachineTerminal({
     const term = new Terminal({
       documentOverride: terminalDocument,
       cursorBlink: true,
-      fontFamily: "monospace",
+      fontFamily: '"Geist Mono", monospace',
       fontSize: 13,
       scrollback: 2000,
       theme: { background: "#090909" },
@@ -144,7 +144,7 @@ export function MachineTerminal({
     <div
       ref={element}
       className={
-        active ? "h-full min-h-48 min-w-0 bg-neutral-950 p-3" : "hidden"
+        active ? "h-full min-h-48 min-w-0 bg-[#090909] p-2 sm:p-3" : "hidden"
       }
       aria-label="Shell terminal"
     />

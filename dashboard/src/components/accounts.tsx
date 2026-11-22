@@ -734,7 +734,7 @@ export function UsersPage({
           </p>
         </div>
       )}
-      <Card>
+      <Card className="gap-3 sm:grid sm:grid-cols-[minmax(12rem,1fr)_minmax(0,2fr)] sm:items-end">
         <CardHeader>
           <CardTitle>
             <h2>New user</h2>
@@ -757,7 +757,7 @@ export function UsersPage({
           </form>
         </CardContent>
       </Card>
-      <FieldGroup className="gap-3 sm:flex-row sm:items-end">
+      <FieldGroup className="gap-3 border-y py-3 sm:flex-row sm:items-end">
         <Field>
           <FieldLabel htmlFor="users-search">Search users</FieldLabel>
           <Input

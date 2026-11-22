@@ -468,8 +468,8 @@ export function AdminTokensPage({
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="grid flex-1 gap-1 text-sm">
+      <div className="flex flex-wrap items-end gap-3 border-y py-3">
+        <label className="grid min-w-36 flex-1 gap-1 text-xs font-medium">
           Search API tokens
           <Input
             aria-label="Search API tokens"
@@ -478,11 +478,11 @@ export function AdminTokensPage({
             placeholder="Name, owner or permission…"
           />
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1 text-xs font-medium">
           Token status
           <select
             aria-label="Token status"
-            className="h-9 rounded-md border bg-background px-3"
+            className="h-8 rounded-md border border-input bg-card px-2.5 text-sm shadow-xs"
             value={state}
             onChange={(e) => setState(e.target.value)}
           >
@@ -496,7 +496,7 @@ export function AdminTokensPage({
           </select>
         </label>
       </div>
-      <div className="min-w-0 overflow-hidden rounded-md border">
+      <div className="min-w-0 overflow-hidden border-b">
         <Table>
           <TableCaption className="sr-only">
             Personal API tokens across all users

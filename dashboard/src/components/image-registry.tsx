@@ -145,7 +145,7 @@ export function BaseImageRegistry({
             Import onto host
             <select
               aria-label="Registry target host"
-              className="h-9 w-full min-w-0 rounded-md border bg-background px-2"
+              className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
               value={host}
               onChange={(e) => setHost(e.target.value)}
             >
@@ -168,7 +168,7 @@ export function BaseImageRegistry({
           <label className="space-y-1 text-xs">
             Operating system
             <select
-              className="h-9 w-full rounded-md border bg-background px-2"
+              className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
               value={os}
               onChange={(e) => setOs(e.target.value)}
             >
@@ -181,7 +181,7 @@ export function BaseImageRegistry({
           <label className="space-y-1 text-xs">
             Architecture
             <select
-              className="h-9 w-full rounded-md border bg-background px-2"
+              className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
               value={arch}
               onChange={(e) => setArch(e.target.value)}
             >
@@ -266,10 +266,10 @@ export function BaseImageRegistry({
                 <article
                   key={e.id}
                   aria-label={e.name + " " + e.arch}
-                  className="flex min-w-0 flex-col gap-3 rounded-md border p-4"
+                  className="flex min-w-0 flex-col gap-3 rounded-md border bg-card p-4 shadow-xs"
                 >
                   <div className="space-y-2">
-                    <p className="text-[10px] text-muted-foreground">
+                    <p className="text-xs text-muted-foreground">
                       {e.publisher}
                     </p>
                     <h3 className="break-words text-sm font-medium">
@@ -304,12 +304,12 @@ export function BaseImageRegistry({
                         ? "Publisher SHA-256 required before adding to the library."
                         : "Verify the download with the publisher before importing."}
                   </p>
-                  <p className="text-[10px] text-muted-foreground">
+                  <p className="text-xs text-muted-foreground">
                     Starting size: {e.minimum.cpu} vCPU ·{" "}
                     {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB disk
                   </p>
                   {reason && (
-                    <p className="text-[10px] text-muted-foreground">
+                    <p className="text-xs text-muted-foreground">
                       {reason}
                     </p>
                   )}

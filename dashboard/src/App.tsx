@@ -1513,10 +1513,18 @@ export function App() {
                 ).map(([k, v]) => (
                   <div
                     key={k}
-                    className="grid grid-cols-[6rem_1fr] gap-4 py-3 text-sm"
+                    className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-2 text-[13px]"
                   >
                     <dt className="text-muted-foreground">{k}</dt>
-                    <dd className="min-w-0 break-words">{v}</dd>
+                    <dd
+                      className={
+                        k === "Machine ID"
+                          ? "break-all font-mono text-xs"
+                          : "min-w-0 break-words"
+                      }
+                    >
+                      {v}
+                    </dd>
                   </div>
                 ))}
               </dl>
@@ -1719,7 +1727,7 @@ function CreateMachine({
               : "Choose a source, resources and placement."}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} onChange={changed} className="space-y-6">
+        <form onSubmit={submit} onChange={changed} className="space-y-4">
           <FieldSet disabled={busy}>
             <FieldGroup>
               <Field>
@@ -1793,7 +1801,7 @@ function CreateMachine({
               {template ? (
                 <>
                   <FieldGroup
-                    className="grid grid-cols-1 gap-4 sm:grid-cols-3"
+                    className="grid grid-cols-1 gap-3 border-y py-4 sm:grid-cols-3"
                     key={index}
                   >
                     {(

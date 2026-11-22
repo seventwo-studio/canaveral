@@ -91,26 +91,25 @@ function CatalogueToolbar({
   onRefresh: () => void;
 }) {
   return (
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
-        <InputGroup className="w-full sm:w-72">
-          <InputGroupInput
-            aria-label={label}
-            placeholder={placeholder}
-            value={query}
-            onChange={(e) => onQuery(e.target.value)}
-          />
-          <InputGroupAddon>
-            <Search aria-hidden="true" />
-          </InputGroupAddon>
-        </InputGroup>
-        {loaded && (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {count} of {total}
-          </span>
-        )}
-      </div>
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 sm:flex sm:flex-wrap">
+      <InputGroup className="w-full sm:max-w-72">
+        <InputGroupInput
+          aria-label={label}
+          placeholder={placeholder}
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+        />
+        <InputGroupAddon>
+          <Search aria-hidden="true" />
+        </InputGroupAddon>
+      </InputGroup>
+      {loaded && (
+        <span className="col-span-2 row-start-2 text-xs text-muted-foreground tabular-nums">
+          {count} of {total}
+        </span>
+      )}
       <Button
+        className="col-start-2 row-start-1 sm:ml-auto"
         variant="outline"
         size="sm"
         disabled={refreshing}
@@ -236,16 +235,16 @@ export function ImageLibrary({
           )}
         </Empty>
       ) : (
-        <div className="grid min-w-0 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-3">
           {visible.map((i) => {
             const source = sources.find((s) => s.id === i.id);
             const available = source?.hosts.some(
               (h) => h.id === i.hostId && h.online && h.accepting,
             );
             return (
-              <Card key={i.id} className="min-w-0 gap-4 shadow-none">
+              <Card key={i.id} className="min-w-0">
                 <CardHeader className="min-w-0">
-                  <CardTitle className="break-words font-display text-xl font-medium">
+                  <CardTitle className="break-words text-base font-semibold tracking-tight">
                     {i.name}
                   </CardTitle>
                   <CardDescription>
@@ -282,7 +281,7 @@ export function ImageLibrary({
                     <dl className="mt-3 space-y-2">
                       <div>
                         <dt className="text-muted-foreground">SHA-256</dt>
-                        <dd className="mt-1 break-all">{i.sha256}</dd>
+                        <dd className="mt-1 break-all font-mono">{i.sha256}</dd>
                       </div>
                       <div>
                         <dt className="text-muted-foreground">Size</dt>
@@ -453,7 +452,7 @@ export function MachineBlueprints({
           )}
         </Empty>
       ) : (
-        <div className="grid min-w-0 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-3">
           {visible.map((b) => {
             const offered = blueprintOffer(b, sources),
               available =
@@ -462,10 +461,10 @@ export function MachineBlueprints({
             return (
               <Card
                 key={JSON.stringify([b.id, b.revision])}
-                className="min-w-0 gap-4 shadow-none"
+                className="min-w-0"
               >
                 <CardHeader className="min-w-0">
-                  <CardTitle className="break-words font-display text-xl font-medium">
+                  <CardTitle className="break-words text-base font-semibold tracking-tight">
                     {b.name}
                   </CardTitle>
                   <CardDescription>
@@ -670,7 +669,7 @@ export function BlueprintEditor({
                 value={selected}
                 disabled={busy}
                 onChange={(e) => setSelected(e.target.value)}
-                className="h-9 w-full min-w-0 rounded-md border bg-background px-2 text-sm"
+                className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
               >
                 {!source && (
                   <option value={selected} disabled>

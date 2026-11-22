@@ -146,9 +146,9 @@ export function Maintenance({ host }: { host: string }) {
   return (
     <section
       aria-label="Host maintenance"
-      className="space-y-3 rounded-md border p-4"
+      className="space-y-3 border-t pt-4"
     >
-      <h2 className="font-semibold">Planned maintenance</h2>
+      <h2 className="text-sm font-semibold">Planned maintenance</h2>
       <div aria-live="polite" className="space-y-1 text-sm">
         {status === undefined ? (
           <p>{readError || "Checking maintenance status…"}</p>
