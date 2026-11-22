@@ -91,9 +91,7 @@ export function ScreenWall({
   return (
     <div className="min-w-0 space-y-6">
       <div className="min-w-0 space-y-1">
-        <h1 className="font-display text-3xl font-medium tracking-tight">
-          Screens
-        </h1>
+        <h1 className="text-xl font-semibold tracking-tight">Screens</h1>
         <p className="max-w-prose text-sm text-muted-foreground">
           Watch up to four running mobile devices side by side. The pictures are
           live and watch-only; open a device's control to act on it. Only

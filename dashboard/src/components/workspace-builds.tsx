@@ -254,7 +254,7 @@ export function WorkspaceBuilds() {
   }
   return (
     <section className="min-w-0 space-y-6">
-      <h1 className="font-display text-3xl">Linux builds</h1>
+      <h1 className="text-xl font-semibold tracking-tight">Linux builds</h1>
       <form
         className="space-y-4 rounded-lg border p-4"
         onSubmit={(e) => {

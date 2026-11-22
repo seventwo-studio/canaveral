@@ -787,9 +787,9 @@ export function App() {
         user={user}
         onSignOut={() => signOut()}
       />
-      <SidebarInset className="min-w-0 md:rounded-sm">
+      <SidebarInset className="min-w-0">
         <header
-          className={`sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b px-4 lg:px-6 ${view === "hosts" && !resourcePage ? "min-h-14 flex-wrap py-2" : "h-14"}`}
+          className={`sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b px-4 lg:px-6 ${view === "hosts" && !resourcePage ? "min-h-12 flex-wrap py-1" : "h-12"}`}
         >
           <SidebarTrigger className="-ml-1" />
           <Separator
@@ -1008,7 +1008,7 @@ export function App() {
                 >
                   Back to {view}
                 </a>
-                <h1 className="break-words font-display text-3xl font-medium tracking-tight">
+                <h1 className="break-words font-display text-xl font-semibold tracking-tight">
                   {resourceHost?.name || "Resources"}
                 </h1>
                 <p className="text-sm text-muted-foreground">
@@ -1063,7 +1063,7 @@ export function App() {
               ) : (
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="space-y-1">
-                    <h1 className="font-display text-3xl font-medium tracking-tight">
+                    <h1 className="font-display text-xl font-semibold tracking-tight">
                       {title(view)}
                     </h1>
                     <p className="sr-only">

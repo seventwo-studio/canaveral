@@ -136,6 +136,7 @@ export function CpuHistory({
                   y1={y(value)}
                   y2={y(value)}
                   stroke="var(--border)"
+                  strokeDasharray="2 3"
                   strokeWidth="1"
                   vectorEffect="non-scaling-stroke"
                 />
@@ -147,7 +148,7 @@ export function CpuHistory({
                     x2={x(sample.receivedAt)}
                     y1="168"
                     y2={y(sample.cpuPercent)}
-                    stroke="var(--primary)"
+                    stroke="var(--foreground)"
                     opacity="0.2"
                     strokeWidth="1"
                     vectorEffect="non-scaling-stroke"
@@ -156,7 +157,7 @@ export function CpuHistory({
                     cx={x(sample.receivedAt)}
                     cy={y(sample.cpuPercent)}
                     r="3"
-                    fill="var(--primary)"
+                    fill="var(--foreground)"
                     data-time={sample.receivedAt}
                     data-value={sample.cpuPercent}
                   >

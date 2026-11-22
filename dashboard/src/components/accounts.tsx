@@ -691,7 +691,7 @@ export function UsersPage({
         <div className="space-y-2">
           <h1
             id="users-heading"
-            className="font-display text-2xl font-semibold"
+            className="text-xl font-semibold tracking-tight"
           >
             Users
           </h1>

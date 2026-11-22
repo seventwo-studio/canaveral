@@ -29,7 +29,7 @@ export function LoginScreen({
   const setup = auth === "setup";
   return (
     <AccountLayout>
-      <h1 className="mb-8 font-display text-4xl font-medium tracking-tight">
+      <h1 className="mb-6 text-2xl font-semibold tracking-tight">
         {setup || auth === "blocked" ? "Create admin account" : "Sign in"}
       </h1>
       {auth === "blocked" && (

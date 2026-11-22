@@ -350,7 +350,7 @@ export function GuestFiles({
             />
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="grid grid-cols-[minmax(0,1fr)_5rem] gap-3 border-b bg-muted/30 px-4 py-2 text-[10px] uppercase text-muted-foreground sm:grid-cols-[minmax(0,1fr)_5rem_9rem]">
+            <div className="grid grid-cols-[minmax(0,1fr)_5rem] gap-3 border-b bg-card px-4 py-2 text-xs text-muted-foreground sm:grid-cols-[minmax(0,1fr)_5rem_9rem]">
               <span>Name</span>
               <span>Size</span>
               <span className="hidden sm:block">Modified</span>
@@ -364,7 +364,7 @@ export function GuestFiles({
               >
                 <span className="flex min-w-0 items-center gap-3">
                   {entry.kind === "directory" ? (
-                    <Folder className="size-4 shrink-0 text-primary" />
+                    <Folder className="size-4 shrink-0 text-muted-foreground" />
                   ) : (
                     <File className="size-4 shrink-0 text-muted-foreground" />
                   )}

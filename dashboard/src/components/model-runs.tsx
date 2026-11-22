@@ -442,7 +442,7 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
   }
   return (
     <section className="min-w-0 space-y-6">
-      <h1 className="font-display text-3xl">Models</h1>
+      <h1 className="text-xl font-semibold tracking-tight">Models</h1>
       <form
         className="space-y-4 rounded-lg border p-4"
         onSubmit={(e) => {

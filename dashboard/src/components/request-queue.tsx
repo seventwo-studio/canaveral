@@ -241,9 +241,7 @@ function QueueSession({
     <div className="min-w-0 space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-display text-3xl font-medium tracking-tight">
-            Queue
-          </h1>
+          <h1 className="text-xl font-semibold tracking-tight">Queue</h1>
           <p className="max-w-prose text-sm text-muted-foreground">
             Requests waiting for a machine, device or runner, in the order the
             controller will try them. Position is an order of attempts, not a

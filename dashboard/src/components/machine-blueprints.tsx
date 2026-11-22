@@ -375,7 +375,7 @@ export function MachineBlueprints({
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="font-display text-3xl font-medium">
+        <h1 className="text-xl font-semibold tracking-tight">
           Machine blueprints
         </h1>
         {admin && (

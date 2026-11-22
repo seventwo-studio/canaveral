@@ -200,11 +200,11 @@ export function WorkspaceSidebar({
     "Administration",
   ];
   return (
-    <Sidebar collapsible="icon" variant="inset">
-      <SidebarHeader className="border-b border-sidebar-border">
+    <Sidebar collapsible="icon" variant="sidebar">
+      <SidebarHeader className="h-12 justify-center border-b border-sidebar-border">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton size="lg" asChild tooltip="Canaveral">
+            <SidebarMenuButton className="px-1 group-data-[collapsible=icon]:p-0!" asChild tooltip="Canaveral">
               <a
                 href="#machines"
                 aria-label="Canaveral machines"
@@ -229,7 +229,7 @@ export function WorkspaceSidebar({
           if (!entries.length) return null;
           return (
             <SidebarGroup key={label}>
-              <SidebarGroupLabel className="text-[10px] uppercase tracking-widest">
+              <SidebarGroupLabel className="text-xs font-medium text-muted-foreground">
                 {label}
               </SidebarGroupLabel>
               <SidebarGroupContent>

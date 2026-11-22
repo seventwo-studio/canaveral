@@ -321,8 +321,7 @@ the request ledger for its range.
 ## Frontend development
 
 The dashboard uses React, Tailwind CSS v4 and checked-in shadcn/ui components
-(Radix primitives) in `dashboard/`. The workspace uses warm paper surfaces, a graphite navigation rail and a restrained
-launch-orange accent. Account entry screens use a deterministic Bayer-dithered
+(Radix primitives) in `dashboard/`. The workspace uses a white canvas, a light gray navigation rail and a compact orange brand mark. The [dashboard design guide](dashboard-design.md) defines the component treatments. Account entry screens use a deterministic Bayer-dithered
 launch photograph rendered with four-tone grayscale and warm flame palettes. The original
 Unsplash photo (`paris-bilal-X3o5blcQGXA-unsplash.jpg`, Paris Bilal / Unsplash)
 is bundled unchanged as `dashboard/public/launch.jpg` under the Unsplash License;

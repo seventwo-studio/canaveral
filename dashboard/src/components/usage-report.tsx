@@ -270,9 +270,7 @@ function UsageSession({
     <div className="min-w-0 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-display text-3xl font-medium tracking-tight">
-            Usage
-          </h1>
+          <h1 className="text-xl font-semibold tracking-tight">Usage</h1>
           <p className="max-w-prose text-sm text-muted-foreground">
             What applications requested, what the controller admitted and how
             long leases were held. These are the controller's records. Device

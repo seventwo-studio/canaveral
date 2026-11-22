@@ -110,7 +110,9 @@ export function ClaimScreen({
   }
   return (
     <AccountLayout>
-      <h1 className="font-display text-3xl">Choose your Canaveral password</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">
+        Choose your Canaveral password
+      </h1>
       <p>Use a new password for Canaveral only. Choose 12–1024 characters.</p>
       {info?.username && <p>Account: {info.username}</p>}
       <form onSubmit={submit}>

@@ -44,7 +44,7 @@ export function MachineInventory({
     <div className="min-w-0 overflow-hidden rounded-md border bg-card">
       <div
         aria-hidden="true"
-        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-muted/50 px-4 py-3 text-xs font-medium text-muted-foreground xl:grid"
+        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-card px-4 py-3 text-xs font-medium text-muted-foreground xl:grid"
       >
         <span>Machine</span>
         <span>State</span>

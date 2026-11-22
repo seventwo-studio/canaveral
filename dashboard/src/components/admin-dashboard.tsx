@@ -141,9 +141,7 @@ function Heading({
 }) {
   return (
     <div className="space-y-1">
-      <h1 className="font-display text-3xl font-medium tracking-tight">
-        {title}
-      </h1>
+      <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
       <p className="text-sm text-muted-foreground">{description}</p>
     </div>
   );
@@ -187,9 +185,7 @@ export function AdminOverview({
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="font-display text-3xl font-medium tracking-tight">
-          Overview
-        </h1>
+        <h1 className="text-xl font-semibold tracking-tight">Overview</h1>
         <Button
           variant="outline"
           disabled={directory.loading || tokens.loading}
@@ -328,7 +324,7 @@ export function AdminOverview({
               Access counts show the last available snapshot.
             </p>
           )}
-          <dl className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 xl:grid-cols-5">
+          <dl className="grid grid-cols-2 overflow-hidden rounded-md border bg-card text-xs sm:grid-cols-3 xl:grid-cols-5">
             {[
               ["Users", users?.length ?? "—"],
               [
@@ -347,9 +343,11 @@ export function AdminOverview({
                 users?.filter((u) => u.status === "disabled").length ?? "—",
               ],
             ].map(([label, value]) => (
-              <div key={label}>
+              <div key={label} className="border-r border-b px-3 py-3 text-center xl:border-b-0 xl:last:border-r-0">
                 <dt className="text-muted-foreground">{label}</dt>
-                <dd className="mt-1 font-mono text-xl tabular-nums">{value}</dd>
+                <dd className="mt-1 text-xl font-medium tabular-nums">
+                  {value}
+                </dd>
               </div>
             ))}
           </dl>

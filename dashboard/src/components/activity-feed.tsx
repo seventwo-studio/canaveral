@@ -253,9 +253,7 @@ function ActivitySession({
     <div className="min-w-0 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-display text-3xl font-medium tracking-tight">
-            Activity
-          </h1>
+          <h1 className="text-xl font-semibold tracking-tight">Activity</h1>
           <p className="max-w-prose text-sm text-muted-foreground">
             The controller's event log, newest first: what changed on leases,
             requests, hosts, machines, operations and updates, written with each

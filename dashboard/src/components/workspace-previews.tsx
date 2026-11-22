@@ -216,7 +216,9 @@ export function WorkspacePreviews() {
   }
   return (
     <section className="space-y-6">
-      <h1 className="font-display text-3xl">Workspace previews</h1>
+      <h1 className="text-xl font-semibold tracking-tight">
+        Workspace previews
+      </h1>
       <form
         className="space-y-4 rounded-lg border p-4"
         onSubmit={(e) => {
