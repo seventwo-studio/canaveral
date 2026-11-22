@@ -1141,8 +1141,8 @@ export function App() {
                   aria-label={`Filter ${view}`}
                   className="flex min-w-0 flex-wrap items-center gap-2 border-b pb-2"
                 >
-                  <div className="grid w-full min-w-0 grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap">
-                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-8 md:w-64">
+                  <div className="grid w-full min-w-0 grid-cols-1 gap-2 min-[360px]:grid-cols-2 md:flex md:w-auto md:flex-wrap">
+                    <InputGroup className="col-span-full h-10 w-full bg-card md:h-8 md:w-64">
                       <InputGroupInput
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
