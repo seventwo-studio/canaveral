@@ -62,12 +62,12 @@ import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "./ui/empty";
 
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <Card className="max-w-3xl">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-5">{children}</CardContent>
-    </Card>
+    <section className="w-full max-w-2xl space-y-5">
+      <h1 className="border-b pb-3 text-xl font-semibold tracking-tight">
+        {title}
+      </h1>
+      {children}
+    </section>
   );
 }
 function TextField({
@@ -194,18 +194,20 @@ export function AccountPage({
   }
   return (
     <Panel title="Account">
-      <p>
+      <p className="text-sm text-muted-foreground">
         {user.username} · {user.role === "admin" ? "Administrator" : "User"} ·{" "}
         {user.status}
       </p>
-      <h2>Change password</h2>
-      <p>
-        Choose a password for Canaveral only. Changing it signs you out of all
-        sessions and revokes your API tokens.
-      </p>
-      <form onSubmit={submit}>
+      <div className="space-y-1.5 border-t pt-4">
+        <h2 className="text-sm font-semibold">Change password</h2>
+        <p className="max-w-prose text-[13px] leading-5 text-muted-foreground">
+          Choose a password for Canaveral only. Changing it signs you out of all
+          sessions and revokes your API tokens.
+        </p>
+      </div>
+      <form className="max-w-md" onSubmit={submit}>
         <FieldSet disabled={busy || uncertain}>
-          <FieldGroup>
+          <FieldGroup className="gap-4">
             <TextField
               name="currentPassword"
               label="Current password"
@@ -213,7 +215,7 @@ export function AccountPage({
             />
             <TextField name="password" label="New password" password />
             <TextField name="confirmation" label="Confirm password" password />
-            <Button type="submit">
+            <Button type="submit" className="self-start">
               {busy ? "Saving…" : "Change password"}
             </Button>
           </FieldGroup>
@@ -336,7 +338,7 @@ export function TokensPage({ user }: { user: User }) {
   }
   return (
     <Panel title="API tokens">
-      <p>
+      <p className="max-w-prose text-[13px] leading-5 text-muted-foreground">
         Tokens grant access to your account. Save each secret when you create
         it.
       </p>
@@ -347,9 +349,9 @@ export function TokensPage({ user }: { user: User }) {
           onDismiss={() => setSecret(null)}
         />
       )}
-      <form onSubmit={create}>
+      <form className="max-w-md" onSubmit={create}>
         <FieldSet disabled={busy || !!uncertain || !!secret}>
-          <FieldGroup>
+          <FieldGroup className="gap-4">
             <TextField name="name" label="Token name" />
             <Field>
               <FieldLabel htmlFor="scopes">Permissions</FieldLabel>
@@ -357,7 +359,7 @@ export function TokensPage({ user }: { user: User }) {
                 id="scopes"
                 value={preset}
                 onChange={(e) => setPreset(e.target.value)}
-                className="border bg-background p-2"
+                className="h-8 w-full rounded-md border border-input bg-card px-2.5 text-base shadow-xs md:text-[13px]"
               >
                 <option value="read">Read my machines</option>
                 <option value="manage">Manage my machines</option>
@@ -379,7 +381,9 @@ export function TokensPage({ user }: { user: User }) {
                 required
               />
             </Field>
-            <Button type="submit">Create token</Button>
+            <Button type="submit" className="self-start">
+              Create token
+            </Button>
           </FieldGroup>
         </FieldSet>
       </form>
@@ -398,22 +402,25 @@ export function TokensPage({ user }: { user: User }) {
           </Button>
         </div>
       )}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => load().catch((e) => setError(errorMessage(e)))}
-      >
-        Refresh tokens
-      </Button>
+      <div className="flex items-center justify-between gap-3 border-t pt-4">
+        <h2 className="text-sm font-semibold">Your tokens</h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => load().catch((e) => setError(errorMessage(e)))}
+        >
+          Refresh tokens
+        </Button>
+      </div>
       {tokens.map((t) => (
         <section key={t.id} className="space-y-2 border-t pt-4">
-          <h2>
+          <h3 className="break-words text-sm font-medium">
             {t.name} · {tokenState(t)}
-          </h2>
-          <p className="break-all">
+          </h3>
+          <p className="break-all font-mono text-xs">
             {t.prefix} · {t.scopes.join(", ")}
           </p>
-          <p className="text-sm">
+          <p className="text-xs leading-5 text-muted-foreground">
             Created: {timestamp(t.createdAt)} · Expires:{" "}
             {timestamp(t.expiresAt)} · Last used: {timestamp(t.lastUsedAt)} ·
             Revoked: {timestamp(t.revokedAt)}

@@ -4,7 +4,7 @@ import type { Host } from "@/lib/infrastructure";
 import { machineStatus, memory, number } from "@/lib/api";
 import { ownerLabel } from "@/lib/admin";
 import type { User } from "@/lib/inventory";
-import { Monitor, MoreHorizontal } from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import {
@@ -41,7 +41,7 @@ export function MachineInventory({
   onDelete: (id: string, trigger: Element | null) => void;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded-md border bg-card">
+    <div className="min-w-0 overflow-hidden rounded-md border bg-card xl:rounded-none xl:border-x-0 xl:border-t-0">
       <div
         aria-hidden="true"
         className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-card px-4 py-3 text-xs font-medium text-muted-foreground xl:grid"
@@ -112,17 +112,13 @@ function MachineRow({
   return (
     <li
       data-machine-id={m.id}
-      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center xl:hover:bg-muted/30"
+      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:py-2.5 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center xl:hover:bg-muted/30"
     >
       <div className="flex min-w-0 items-start gap-3">
-        <Monitor
-          aria-hidden="true"
-          className="hidden size-8 shrink-0 rounded-md border bg-muted/50 p-1.5 text-muted-foreground sm:block"
-        />
         <div className="min-w-0 space-y-1">
           <Button
             variant="link"
-            className="h-auto max-w-full justify-start whitespace-normal p-0 text-left font-display text-base font-medium text-foreground [overflow-wrap:anywhere]"
+            className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-sm font-medium text-foreground [overflow-wrap:anywhere]"
             onClick={(e) => onInspect(m.id, e.currentTarget)}
           >
             {m.name}

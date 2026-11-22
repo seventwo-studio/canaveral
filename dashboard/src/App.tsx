@@ -789,12 +789,12 @@ export function App() {
       />
       <SidebarInset className="min-w-0">
         <header
-          className={`sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b px-4 lg:px-6 ${view === "hosts" && !resourcePage ? "min-h-12 flex-wrap py-1" : "h-12"}`}
+          className={`sticky top-0 z-10 flex shrink-0 items-center gap-1 border-b px-2 sm:gap-2 sm:px-4 lg:px-6 ${(isInfrastructure || view === "machines") && !resourcePage ? "min-h-12 flex-wrap py-1" : "h-12"}`}
         >
           <SidebarTrigger className="-ml-1" />
           <Separator
             orientation="vertical"
-            className="mx-2 data-[orientation=vertical]:h-4"
+            className="mx-2 hidden data-[orientation=vertical]:h-4 sm:block"
           />
           <Breadcrumb>
             <BreadcrumbList>
@@ -823,18 +823,36 @@ export function App() {
               )}
             </BreadcrumbList>
           </Breadcrumb>
-          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
-            {view === "hosts" && !resourcePage && (
+          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 sm:gap-2">
+            {view === "machines" && (
               <>
                 <Button
+                  variant="outline"
                   size="sm"
-                  onClick={() => setConnectionSetup("host")}
+                  className="max-sm:size-8 max-sm:px-0"
+                  onClick={() => openCreate(undefined, true)}
                   disabled={busy}
                 >
+                  <Monitor />
+                  <span className="max-sm:sr-only">Launch desktop</span>
+                </Button>
+                <Button size="sm" onClick={() => openCreate()} disabled={busy}>
                   <Plus />
-                  Add host
+                  Create<span className="max-sm:sr-only"> machine</span>
                 </Button>
               </>
+            )}
+            {isInfrastructure && !resourcePage && (
+              <Button
+                size="sm"
+                onClick={() =>
+                  setConnectionSetup(view === "hosts" ? "host" : "orchestrator")
+                }
+                disabled={busy}
+              >
+                <Plus />
+                {view === "hosts" ? "Add host" : "Add orchestrator"}
+              </Button>
             )}
             {view !== "admin" && (
               <Button
@@ -1058,87 +1076,37 @@ export function App() {
             </>
           ) : (
             <>
-              {view === "hosts" ? (
-                <h1 className="sr-only">Hosts</h1>
-              ) : (
+              {view === "templates" ? (
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="space-y-1">
-                    <h1 className="font-display text-xl font-semibold tracking-tight">
-                      {title(view)}
-                    </h1>
-                    <p className="sr-only">
-                      {view === "machines"
-                        ? user.role === "admin"
-                          ? "Manage every user's machines and their lifecycle."
-                          : "Manage your machines and their lifecycle."
-                        : isInfrastructure
-                          ? "Connect infrastructure, verify capabilities and track resources."
-                          : "Downloaded OS originals, separate from prepared machine snapshots."}
-                    </p>
-                  </div>
+                  <h1 className="text-xl font-semibold tracking-tight">
+                    {title(view)}
+                  </h1>
                   <div className="flex flex-wrap gap-2">
-                    {view === "machines" && (
-                      <Button
-                        variant="outline"
-                        className="max-sm:size-8 max-sm:px-0"
-                        onClick={() => openCreate(undefined, true)}
-                        disabled={busy}
-                      >
-                        <Monitor />
-                        <span className="max-sm:sr-only">Launch desktop</span>
-                      </Button>
-                    )}
-                    {view === "templates" && user.role === "admin" && (
-                      <Button
-                        variant="outline"
-                        onClick={() => setRegistryOpen(true)}
-                      >
-                        Base image registry
-                      </Button>
-                    )}
-                    {view === "templates" && user.role === "admin" && (
-                      <Button onClick={() => setImageImport(true)}>
-                        Import image
-                      </Button>
+                    {user.role === "admin" && (
+                      <>
+                        <Button
+                          variant="outline"
+                          onClick={() => setRegistryOpen(true)}
+                        >
+                          Base image registry
+                        </Button>
+                        <Button onClick={() => setImageImport(true)}>
+                          Import image
+                        </Button>
+                      </>
                     )}
                     <Button
-                      variant={view === "templates" ? "ghost" : "default"}
-                      className={
-                        view === "machines"
-                          ? "max-sm:px-2.5 max-sm:text-xs"
-                          : undefined
-                      }
-                      onClick={() =>
-                        isInfrastructure
-                          ? setConnectionSetup(
-                              view === "orchestrators"
-                                ? "orchestrator"
-                                : "host",
-                            )
-                          : view === "templates"
-                            ? (location.hash = "blueprints")
-                            : openCreate()
-                      }
+                      variant="ghost"
+                      onClick={() => (location.hash = "blueprints")}
                       disabled={busy}
                     >
-                      {view === "templates" ? <ArrowUpRight /> : <Plus />}
-                      {isInfrastructure ? (
-                        view === "orchestrators" ? (
-                          "Add orchestrator"
-                        ) : (
-                          "Add host"
-                        )
-                      ) : view === "templates" ? (
-                        "Machine blueprints"
-                      ) : (
-                        <>
-                          Create
-                          <span className="max-sm:sr-only"> machine</span>
-                        </>
-                      )}
+                      <ArrowUpRight />
+                      Machine blueprints
                     </Button>
                   </div>
                 </div>
+              ) : (
+                <h1 className="sr-only">{title(view)}</h1>
               )}
               <Notice error>{stale}</Notice>
               <Notice>{message}</Notice>
@@ -1169,7 +1137,7 @@ export function App() {
               {view !== "templates" && (
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="grid w-full min-w-0 grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap">
-                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-9 md:w-56 xl:w-64">
+                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-8 md:w-56 xl:w-64">
                       <InputGroupInput
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
@@ -1197,7 +1165,7 @@ export function App() {
                     {view === "machines" && user.role === "admin" && (
                       <select
                         aria-label="Machine owner"
-                        className="h-10 min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9 md:max-w-44"
+                        className="h-10 min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-8 md:max-w-44"
                         value={owner}
                         onChange={(e) => setOwner(e.target.value)}
                       >

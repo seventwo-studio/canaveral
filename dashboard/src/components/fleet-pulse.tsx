@@ -83,14 +83,12 @@ export function FleetPulse({
   return (
     <section
       aria-label="Fleet pulse"
-      className={`grid min-w-0 items-start gap-2 md:gap-3 ${showHosts ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]" : ""}`}
+      className={`grid min-w-0 overflow-hidden rounded-md border bg-card ${showHosts ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]" : ""}`}
     >
-      <Card className="min-w-0 gap-2 py-3 shadow-none md:gap-3 md:py-4">
+      <Card className="min-w-0 gap-2 rounded-none border-0 py-3 shadow-none md:gap-3 md:py-4">
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="font-display text-base">
-              Fleet status
-            </CardTitle>
+            <CardTitle className="text-sm">Fleet status</CardTitle>
             <Badge variant="outline">
               {!loaded
                 ? "Unavailable"
@@ -115,7 +113,7 @@ export function FleetPulse({
               <div
                 role="img"
                 aria-label={`${total} machines by state`}
-                className="flex h-1.5 gap-0.5 overflow-hidden rounded-full"
+                className="flex h-1.5 gap-px overflow-hidden rounded-sm"
               >
                 {distribution.map(({ label, count }) => (
                   <span
@@ -138,7 +136,7 @@ export function FleetPulse({
                         aria-hidden="true"
                       />
                       <span>{label}</span>
-                      <span className="font-mono text-muted-foreground">
+                      <span className="tabular-nums text-muted-foreground">
                         {count}
                       </span>
                     </>
@@ -186,12 +184,10 @@ export function FleetPulse({
         </CardContent>
       </Card>
       {showHosts && (
-        <Card className="min-w-0 gap-3 py-3 shadow-none md:py-4">
+        <Card className="min-w-0 gap-3 rounded-none border-0 border-t py-3 shadow-none md:py-4 xl:border-t-0 xl:border-l">
           <CardHeader className="md:has-data-[slot=card-action]:grid-cols-1">
             <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-              <CardTitle className="font-display text-base">
-                Host reservations
-              </CardTitle>
+              <CardTitle className="text-sm">Host reservations</CardTitle>
               {loaded && (
                 <span className="text-xs text-muted-foreground">
                   {inventory.hosts.filter((h) => h.online).length}/

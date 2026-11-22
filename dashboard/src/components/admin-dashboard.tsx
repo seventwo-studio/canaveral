@@ -18,13 +18,6 @@ import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { Alert, AlertDescription } from "./ui/alert";
 import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from "./ui/card";
-import {
   Table,
   TableHeader,
   TableBody,
@@ -215,26 +208,22 @@ export function AdminOverview({
           Refreshing administration…
         </p>
       )}
-      <Card
-        role="region"
-        aria-label="Needs attention"
-        className="min-w-0 gap-3 py-4 shadow-none"
-      >
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <CardTitle>Needs attention</CardTitle>
-            <Badge variant="outline">{loaded ? issueCount : "—"}</Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
+      <section aria-labelledby="overview-attention" className="min-w-0">
+        <div className="flex items-center gap-2 border-b pb-2">
+          <h2 id="overview-attention" className="text-base font-semibold">
+            Needs attention
+          </h2>
+          <Badge variant="secondary">{loaded ? issueCount : "—"}</Badge>
+        </div>
+        <div className="divide-y">
           {!loaded ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="py-3 text-sm text-muted-foreground">
               Inventory unavailable.
             </p>
           ) : (
             <>
               {!issueCount && (
-                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <p className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
                   {!stale && (
                     <CircleCheck
                       className="size-4 shrink-0 text-[color:var(--state-ready)]"
@@ -249,7 +238,7 @@ export function AdminOverview({
               {visibleMachines.map((m) => (
                 <div
                   key={m.id}
-                  className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"
+                  className="flex items-center justify-between gap-3 py-2.5"
                 >
                   <div className="min-w-0">
                     <p className="break-words text-sm font-medium">{m.name}</p>
@@ -275,7 +264,7 @@ export function AdminOverview({
               {visibleHosts.map((h) => (
                 <div
                   key={h.id}
-                  className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"
+                  className="flex items-center justify-between gap-3 py-2.5"
                 >
                   <div className="min-w-0">
                     <p className="break-words text-sm font-medium">{h.name}</p>
@@ -306,51 +295,19 @@ export function AdminOverview({
               )}
             </>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
       <FleetPulse
         inventory={inventory}
         loaded={loaded}
         stale={Boolean(stale)}
         showHosts
       />
-      <Card className="gap-3 py-4 shadow-none">
-        <CardHeader>
-          <CardTitle>Access management</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {(directory.error || tokens.error) && (
-            <p className="text-xs text-destructive">
-              Access counts show the last available snapshot.
-            </p>
-          )}
-          <dl className="grid grid-cols-2 overflow-hidden rounded-md border bg-card text-xs sm:grid-cols-3 xl:grid-cols-5">
-            {[
-              ["Users", users?.length ?? "—"],
-              [
-                "Active administrators",
-                users?.filter(
-                  (u) => u.role === "admin" && u.status === "active",
-                ).length ?? "—",
-              ],
-              ["Active API tokens", activeTokens ?? "—"],
-              [
-                "Pending invitations",
-                users?.filter((u) => u.status === "pending").length ?? "—",
-              ],
-              [
-                "Disabled accounts",
-                users?.filter((u) => u.status === "disabled").length ?? "—",
-              ],
-            ].map(([label, value]) => (
-              <div key={label} className="border-r border-b px-3 py-3 text-center xl:border-b-0 xl:last:border-r-0">
-                <dt className="text-muted-foreground">{label}</dt>
-                <dd className="mt-1 text-xl font-medium tabular-nums">
-                  {value}
-                </dd>
-              </div>
-            ))}
-          </dl>
+      <section aria-labelledby="overview-access" className="space-y-3">
+        <header className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="overview-access" className="text-base font-semibold">
+            Access management
+          </h2>
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline">
               <a href="#admin/users">Manage users</a>
@@ -359,8 +316,40 @@ export function AdminOverview({
               <a href="#admin/tokens">Review API access</a>
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </header>
+        {(directory.error || tokens.error) && (
+          <p className="text-xs text-destructive">
+            Access counts show the last available snapshot.
+          </p>
+        )}
+        <dl className="grid grid-cols-2 overflow-hidden rounded-md border bg-card text-xs sm:grid-cols-3 xl:grid-cols-5">
+          {[
+            ["Users", users?.length ?? "—"],
+            [
+              "Active administrators",
+              users?.filter((u) => u.role === "admin" && u.status === "active")
+                .length ?? "—",
+            ],
+            ["Active API tokens", activeTokens ?? "—"],
+            [
+              "Pending invitations",
+              users?.filter((u) => u.status === "pending").length ?? "—",
+            ],
+            [
+              "Disabled accounts",
+              users?.filter((u) => u.status === "disabled").length ?? "—",
+            ],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="border-r border-b px-3 py-3 text-center xl:border-b-0 xl:last:border-r-0"
+            >
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="mt-1 text-xl font-medium tabular-nums">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
     </>
   );
 }

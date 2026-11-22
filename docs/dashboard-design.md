@@ -42,6 +42,10 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 | Table | 36px header, 44px minimum data rows, 12px horizontal padding. Set muted headings at 12px and data at 13px. Allow multiline resource details to increase row height. |
 | Badge | A 20px pill with 6px horizontal padding. Keep neutral labels quiet and pair domain color with a written state. |
 
+### Page layouts
+
+The Machines and Orchestrators lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area and a 448px form column so related fields and actions share a left edge.
+
 ## Canaveral screen map
 
 | Entry | Destination | Next steps |
