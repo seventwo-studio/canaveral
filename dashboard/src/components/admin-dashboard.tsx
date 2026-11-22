@@ -1,3 +1,4 @@
+import { WorkspaceHeaderActions } from "./workspace-header-actions";
 import { NativeSelect } from "@/components/ui/native-select";
 import { hostIssue } from "@/lib/fleet";
 import { FleetPulse } from "./fleet-pulse";
@@ -126,21 +127,8 @@ function ErrorNotice({ children }: { children: string }) {
     </Alert>
   ) : null;
 }
-function Heading({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="space-y-1">
-      <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-      <p className="text-sm text-muted-foreground">{description}</p>
-    </div>
-  );
-}
 export function AdminOverview({
+  headerActions,
   user,
   inventory,
   loaded,
@@ -150,6 +138,7 @@ export function AdminOverview({
   onInspect,
   onRefresh,
 }: {
+  headerActions?: HTMLElement | null;
   user: User;
   inventory: Inventory;
   loaded: boolean;
@@ -178,8 +167,7 @@ export function AdminOverview({
   ).length;
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold tracking-tight">Overview</h1>
+      <WorkspaceHeaderActions container={headerActions}>
         <Button
           variant="outline"
           disabled={directory.loading || tokens.loading}
@@ -192,7 +180,7 @@ export function AdminOverview({
           <RefreshCw />
           Refresh overview
         </Button>
-      </div>
+      </WorkspaceHeaderActions>
       <ErrorNotice>{stale}</ErrorNotice>
       <ErrorNotice>
         {directory.error
@@ -439,10 +427,9 @@ export function AdminTokensPage({
   return (
     <>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <Heading
-          title="API access"
-          description="Review and revoke personal API tokens across all user accounts."
-        />
+        <p className="text-sm text-muted-foreground">
+          Review and revoke personal API tokens across all user accounts.
+        </p>
         <Button
           variant="outline"
           disabled={busy || resource.loading}

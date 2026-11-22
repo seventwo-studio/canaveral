@@ -30,6 +30,7 @@ import {
 import {
   Sidebar,
   SidebarHeader,
+  SidebarTrigger,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
@@ -38,7 +39,6 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarMenuButton,
-  SidebarMenuBadge,
   useSidebar,
 } from "./ui/sidebar";
 
@@ -201,34 +201,37 @@ export function WorkspaceSidebar({
   ];
   return (
     <Sidebar collapsible="icon" variant="sidebar">
-      <SidebarHeader className="h-12 justify-center border-b border-sidebar-border">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton className="px-1 group-data-[collapsible=icon]:p-0!" asChild tooltip="Canaveral">
-              <a
-                href="#machines"
-                aria-label="Canaveral machines"
-                onClick={() => setOpenMobile(false)}
-              >
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-sm bg-sidebar-primary text-sidebar-primary-foreground">
-                  <Rocket className="size-4" />
-                </span>
-                <div className="grid flex-1 text-left leading-tight">
-                  <span className="w-fit truncate font-display text-base font-semibold leading-tight tracking-tight text-foreground">
-                    canaveral
-                  </span>
-                </div>
-              </a>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+      <SidebarHeader className="h-12 flex-row items-center justify-between border-b border-sidebar-border pr-12 md:pr-2 group-data-[collapsible=icon]:justify-center">
+        <SidebarMenuButton
+          className="w-auto min-w-0 gap-2.5 px-1 group-data-[collapsible=icon]:hidden"
+          asChild
+        >
+          <a
+            href="#machines"
+            aria-label="Canaveral machines"
+            onClick={() => setOpenMobile(false)}
+          >
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-sm bg-sidebar-primary text-sidebar-primary-foreground">
+              <Rocket className="size-4" aria-hidden="true" />
+            </span>
+            <span className="truncate text-sm font-semibold text-foreground">
+              canaveral
+            </span>
+          </a>
+        </SidebarMenuButton>
+        <SidebarTrigger className="hidden shrink-0 text-muted-foreground md:inline-flex" />
       </SidebarHeader>
-      <SidebarContent className="gap-0">
+      <SidebarContent className="gap-0 py-2">
         {groups.map((label) => {
           const entries = links.filter(([, entry]) => entry.group === label);
           if (!entries.length) return null;
           return (
-            <SidebarGroup key={label} className="py-1.5">
+            <SidebarGroup
+              key={label}
+              className={
+                label === "Administration" ? "mt-auto py-1.5" : "py-1.5"
+              }
+            >
               <SidebarGroupLabel className="h-7 font-normal text-muted-foreground group-data-[collapsible=icon]:-mt-7">
                 {label}
               </SidebarGroupLabel>
@@ -240,7 +243,7 @@ export function WorkspaceSidebar({
                       : label + " navigation"
                   }
                 >
-                  <SidebarMenu>
+                  <SidebarMenu className="gap-0.5 md:gap-0">
                     {entries.map(
                       ([key, { label: title, icon: Icon, href }]) => (
                         <SidebarMenuItem key={key}>
@@ -252,18 +255,27 @@ export function WorkspaceSidebar({
                           >
                             <a
                               href={href}
+                              aria-label={title}
+                              aria-describedby={
+                                counts[key] === undefined
+                                  ? undefined
+                                  : `nav-count-${key}`
+                              }
                               aria-current={view === key ? "page" : undefined}
                               onClick={() => setOpenMobile(false)}
                             >
                               <Icon aria-hidden="true" />
-                              <span>{title}</span>
+                              <span className="min-w-0 truncate">{title}</span>
+                              {counts[key] !== undefined && (
+                                <span
+                                  id={`nav-count-${key}`}
+                                  className="ml-auto shrink-0 pl-2 text-xs font-normal tabular-nums text-muted-foreground group-data-[collapsible=icon]:hidden"
+                                >
+                                  {counts[key]}
+                                </span>
+                              )}
                             </a>
                           </SidebarMenuButton>
-                          {counts[key] !== undefined && (
-                            <SidebarMenuBadge className="text-xs tabular-nums text-muted-foreground">
-                              {counts[key]}
-                            </SidebarMenuBadge>
-                          )}
                         </SidebarMenuItem>
                       ),
                     )}
@@ -280,22 +292,21 @@ export function WorkspaceSidebar({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton
-                  size="lg"
-                  className="data-[state=open]:bg-sidebar-accent"
+                  className="h-10 rounded-sm md:h-8 data-[state=open]:bg-sidebar-accent group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-0!"
                   tooltip={user.username}
                   isActive={view === "account" || view === "tokens"}
                   aria-label="Account menu"
                 >
-                  <span className="flex size-7 shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-medium">
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-[10px] font-medium text-sidebar-foreground">
                     {user.username.slice(0, 2).toUpperCase()}
                   </span>
-                  <div className="grid flex-1 text-left leading-tight">
-                    <span className="truncate text-sm">{user.username}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {user.role === "admin" ? "Administrator" : "User"}
-                    </span>
-                  </div>
-                  <ChevronsUpDown className="ml-auto size-4" />
+                  <span className="min-w-0 flex-1 truncate text-left text-[13px] group-data-[collapsible=icon]:hidden">
+                    {user.username}
+                  </span>
+                  <ChevronsUpDown
+                    className="size-3.5 text-muted-foreground group-data-[collapsible=icon]:hidden"
+                    aria-hidden="true"
+                  />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent
@@ -303,7 +314,12 @@ export function WorkspaceSidebar({
                 side={isMobile ? "bottom" : "right"}
                 align="end"
               >
-                <DropdownMenuLabel>{user.username}</DropdownMenuLabel>
+                <DropdownMenuLabel className="grid gap-0.5">
+                  <span className="break-all">{user.username}</span>
+                  <span className="font-normal text-muted-foreground">
+                    {user.role === "admin" ? "Administrator" : "User"}
+                  </span>
+                </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
                   <a

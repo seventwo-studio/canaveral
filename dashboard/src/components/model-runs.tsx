@@ -449,7 +449,6 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
   }
   return (
     <section className="min-w-0 space-y-5 text-sm">
-      <h1 className="text-xl font-semibold tracking-tight">Models</h1>
       <form
         className="max-w-2xl space-y-3"
         onSubmit={(e) => {

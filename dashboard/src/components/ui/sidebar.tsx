@@ -162,6 +162,8 @@ function Sidebar({
   collapsible?: "offcanvas" | "icon" | "none";
 }) {
   const { isMobile, state, openMobile, setOpenMobile } = useSidebar();
+  const returnFocus = React.useRef<HTMLElement | null>(null);
+  const openedAt = React.useRef("");
 
   if (collapsible === "none") {
     return (
@@ -185,7 +187,22 @@ function Sidebar({
           data-sidebar="sidebar"
           data-slot="sidebar"
           data-mobile="true"
-          className="w-(--sidebar-width) bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
+          className="w-(--sidebar-width) max-w-[calc(100vw-2rem)] gap-0 overflow-hidden bg-sidebar p-0 text-sidebar-foreground [&>button]:top-2 [&>button]:right-2"
+          onOpenAutoFocus={() => {
+            openedAt.current = window.location.hash;
+            returnFocus.current =
+              document.activeElement instanceof HTMLElement
+                ? document.activeElement
+                : null;
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const target =
+              openedAt.current === window.location.hash
+                ? returnFocus.current
+                : document.getElementById("workspace-content");
+            target?.focus({ preventScroll: true });
+          }}
           style={
             {
               "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
@@ -197,7 +214,7 @@ function Sidebar({
             <SheetTitle>Sidebar</SheetTitle>
             <SheetDescription>Displays the mobile sidebar.</SheetDescription>
           </SheetHeader>
-          <div className="flex h-full w-full flex-col">{children}</div>
+          <div className="flex h-full min-h-0 w-full flex-col">{children}</div>
         </SheetContent>
       </Sheet>
     );
@@ -336,7 +353,7 @@ function SidebarHeader({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-header"
       data-sidebar="header"
-      className={cn("flex flex-col gap-2 p-2", className)}
+      className={cn("flex shrink-0 flex-col gap-2 p-2", className)}
       {...props}
     />
   );
@@ -347,7 +364,7 @@ function SidebarFooter({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-footer"
       data-sidebar="footer"
-      className={cn("flex flex-col gap-2 p-2", className)}
+      className={cn("flex shrink-0 flex-col gap-2 p-2", className)}
       {...props}
     />
   );
@@ -373,7 +390,7 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
       data-slot="sidebar-content"
       data-sidebar="content"
       className={cn(
-        "flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden",
+        "flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto overscroll-contain",
         className,
       )}
       {...props}

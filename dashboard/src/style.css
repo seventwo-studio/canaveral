@@ -78,11 +78,13 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
-/* Positive form submissions in dialogs use the reference's orange action. */
+/* Primary destination actions and positive dialog submissions share the brand color. */
+[data-header-primary],
 [data-slot="dialog-content"] button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-variant="default"]) {
   background-color: #bd3900;
   color: white;
 }
+[data-header-primary]:hover:enabled,
 [data-slot="dialog-content"] button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-variant="default"]):hover:enabled {
   background-color: #a43100;
 }

@@ -1,3 +1,4 @@
+import { destinations } from "./workspace-sidebar";
 import { NativeSelect } from "./ui/native-select";
 import {
   useEffect,
@@ -62,14 +63,43 @@ import {
 } from "./ui/alert-dialog";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "./ui/empty";
 
-function Panel({ title, children }: { title: string; children: ReactNode }) {
+function PersonalSettings({
+  page,
+  children,
+}: {
+  page: "account" | "tokens";
+  children: ReactNode;
+}) {
   return (
-    <section className="mx-auto w-full max-w-2xl space-y-5">
-      <h1 className="border-b pb-3 text-xl font-semibold tracking-tight">
-        {title}
-      </h1>
-      {children}
-    </section>
+    <div className="@container min-w-0">
+      <div className="grid items-start gap-5 @3xl:grid-cols-[10rem_minmax(0,1fr)] @3xl:gap-6">
+        <nav
+          aria-label="Personal settings"
+          className="flex gap-1 border-b pb-2 @3xl:flex-col @3xl:border-0 @3xl:pb-0"
+        >
+          {(["account", "tokens"] as const).map((key) => {
+            const { href, label, icon: Icon } = destinations[key];
+            return (
+              <a
+                key={key}
+                href={href}
+                aria-current={page === key ? "page" : undefined}
+                className="inline-flex min-h-8 items-center gap-2 rounded-sm px-2 text-[13px] hover:bg-muted aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-medium"
+              >
+                <Icon aria-hidden="true" className="size-4" />
+                {label}
+              </a>
+            );
+          })}
+        </nav>
+        <section className="mx-auto w-full min-w-0 max-w-2xl space-y-5">
+          <h1 className="text-xl font-semibold tracking-tight">
+            {destinations[page].label}
+          </h1>
+          {children}
+        </section>
+      </div>
+    </div>
   );
 }
 function TextField({
@@ -198,7 +228,7 @@ export function AccountPage({
     }
   }
   return (
-    <Panel title="Account">
+    <PersonalSettings page="account">
       <p className="text-sm text-muted-foreground">
         {user.username} · {user.role === "admin" ? "Administrator" : "User"} ·{" "}
         {user.status}
@@ -227,7 +257,7 @@ export function AccountPage({
         </FieldSet>
       </form>
       {error && <FieldError>{error}</FieldError>}
-    </Panel>
+    </PersonalSettings>
   );
 }
 export function TokensPage({ user }: { user: User }) {
@@ -342,7 +372,7 @@ export function TokensPage({ user }: { user: User }) {
     }
   }
   return (
-    <Panel title="API tokens">
+    <PersonalSettings page="tokens">
       <p className="max-w-prose text-[13px] leading-5 text-muted-foreground">
         Tokens grant access to your account. Save each secret when you create
         it.
@@ -440,7 +470,7 @@ export function TokensPage({ user }: { user: User }) {
           )}
         </section>
       ))}
-    </Panel>
+    </PersonalSettings>
   );
 }
 interface UserMutation {
@@ -694,18 +724,9 @@ export function UsersPage({
     (u) => u.role === "admin" && u.status === "active",
   ).length;
   return (
-    <section
-      className="@container min-w-0 space-y-6"
-      aria-labelledby="users-heading"
-    >
+    <section className="@container min-w-0 space-y-6" aria-label="Users">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
-          <h1
-            id="users-heading"
-            className="text-xl font-semibold tracking-tight"
-          >
-            Users
-          </h1>
           <p className="max-w-2xl text-sm text-muted-foreground">
             Invite people and manage account access. Users can access only their
             own machines.

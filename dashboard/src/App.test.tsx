@@ -138,8 +138,8 @@ async function login() {
 }
 describe("dashboard contracts", () => {
   it.each([
-    ["system", "System control", "admin/system"],
-    ["configuration", "API controls", "admin/configuration"],
+    ["system", "System", "admin/system"],
+    ["configuration", "Configuration", "admin/configuration"],
     ["queue", "Queue", "admin/queue"],
     ["activity", "Activity", "admin/events/kinds"],
     ["usage", "Usage", "admin/usage"],

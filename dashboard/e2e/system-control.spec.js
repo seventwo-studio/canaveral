@@ -53,9 +53,7 @@ for (const width of [320, 1440]) {
       await route.fulfill({ json: result });
     });
     await page.goto("/#system");
-    await expect(
-      page.getByRole("heading", { name: "System control" }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "System" })).toBeVisible();
     await page
       .getByRole("button", { name: "Release lease", exact: true })
       .click();
@@ -70,7 +68,7 @@ for (const width of [320, 1440]) {
     await expect(page.getByText("pending", { exact: true })).toBeVisible();
     await page.goto("/#configuration");
     await expect(
-      page.getByRole("heading", { name: "API controls" }),
+      page.getByRole("heading", { name: "Configuration" }),
     ).toBeVisible();
     await page
       .getByRole("button", { name: "Refresh", exact: true })

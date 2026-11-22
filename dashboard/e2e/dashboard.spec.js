@@ -151,9 +151,13 @@ for (const width of [1440, 1133, 390, 320])
             ? { hosts: [h] }
             : path === "machines"
               ? { machines: [m] }
-              : path === "templates"
-                ? { templates: [t] }
-                : {};
+              : path === "users"
+                ? { users: [adminUser] }
+                : path === "auth/tokens"
+                  ? { tokens: [] }
+                  : path === "templates"
+                    ? { templates: [t] }
+                    : {};
       await route.fulfill({ json: value });
     });
     const response = await page.goto("/");
@@ -200,6 +204,42 @@ for (const width of [1440, 1133, 390, 320])
       page.getByRole("button", { name: "Voyager", exact: true }),
     ).toBeVisible();
     await expect(page.getByLabel("Password", { exact: true })).toHaveCount(0);
+    const toggle = page.getByRole("button", { name: "Toggle Sidebar" });
+    await captureSurface("workspace-navigation");
+    if (width >= 768) {
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(
+        page.getByRole("link", { name: "Machines", exact: true }),
+      ).toHaveAttribute("aria-current", "page");
+      const rail = page.locator('[data-slot="sidebar-container"]');
+      await expect(rail).toHaveCSS("width", "48px");
+      if (width === 1133) {
+        await page.setViewportSize({ width, height: 350 });
+        const config = rail.getByRole("link", { name: "Configuration" });
+        await config.focus();
+        await expect(config).toBeInViewport({ ratio: 1 });
+        await expect(
+          rail.getByRole("button", { name: "Account menu" }),
+        ).toBeInViewport({ ratio: 1 });
+        await page.setViewportSize({ width, height: 1000 });
+      }
+      await captureSurface("collapsed-navigation");
+      await toggle.click();
+    } else {
+      await toggle.click();
+      const drawer = page.getByRole("dialog", { name: "Sidebar" });
+      await expect(
+        drawer.getByRole("link", { name: "Machines", exact: true }),
+      ).toHaveAttribute("aria-current", "page");
+      await captureSurface("navigation-drawer");
+      await drawer.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(drawer).toHaveCount(0);
+      await expect(toggle).toBeFocused();
+      await toggle.click();
+      await drawer.getByRole("button", { name: "Close" }).press("Escape");
+      await expect(toggle).toBeFocused();
+    }
     await page.screenshot({
       path: testInfo.outputPath("machines.png"),
       fullPage: true,
@@ -336,6 +376,20 @@ for (const width of [1440, 1133, 390, 320])
     ).toBeVisible();
     await expect(page.getByRole("menu")).toBeInViewport({ ratio: 1 });
     await captureSurface("account-menu");
+    await page.getByRole("menuitem", { name: "Account", exact: true }).click();
+    const settingsNav = page.getByRole("navigation", {
+      name: "Personal settings",
+    });
+    await expect(
+      settingsNav.getByRole("link", { name: "Account" }),
+    ).toHaveAttribute("aria-current", "page");
+    await captureSurface("settings-navigation");
+    await settingsNav.getByRole("link", { name: "API tokens" }).click();
+    await expect(
+      settingsNav.getByRole("link", { name: "API tokens" }),
+    ).toHaveAttribute("aria-current", "page");
+    if (width < 768) await toggle.click();
+    await page.getByRole("button", { name: "Account menu" }).click();
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await expect(
       page.getByRole("button", { name: "Sign in", exact: true }),

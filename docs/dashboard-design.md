@@ -8,6 +8,14 @@ The Agents page keeps the same rail and header while the recent runs section mov
 
 The supplied release link requires a Mobbin login in the shared browser. The connector supplied individual Browserbase screens. Their membership in that specific release and the full release screen count are unverified. [Requested release](https://mobbin.com/apps/browserbase-web-1605b46c-b3e7-46e3-a6bb-eb0a74433f48/d24cfac2-0619-4e87-a964-946cf423d3cb/screens)
 
+## Navigation and page headers
+
+The desktop rail pairs a compact identity row with a 48px destination header. Align the title with the content below. Keep the collapse control with the identity and the current page visible as a flat gray row. Administration sits above the account when space allows. In short windows the destination list scrolls while the account remains reachable. On phones the header opens a drawer with a visible close control. [Browserbase Overview](https://mobbin.com/screens/654392d0-9063-4db4-8987-6b7fc6742537)
+
+Give each destination one page heading. The workspace header carries this heading on operational pages. Put its creation action at the far right. For nested resources, show a muted parent link, a slash and the resource name; a long name can truncate while the parent remains available. [Session detail](https://mobbin.com/screens/619c4cff-d4e2-4d15-8feb-3ea24843f373) · [Agents](https://mobbin.com/screens/91fff3d4-82a6-4d59-95bd-0da39f7d3d51)
+
+Account and API tokens share the Settings header. A secondary navigation column identifies the active section beside its form. When the content area is narrow, the links move above the form. [Browserbase Preferences](https://mobbin.com/screens/b8124a12-8111-4ed7-8bfa-4f217b03a98c)
+
 ## Reading the reference
 
 The Sessions list puts search in the header and filters directly above the results. Its column labels are small, quiet and left aligned. White rows have horizontal separators and no vertical grid. Pale green pills identify completed sessions, so a reader can scan the status column without reading every ID. The empty space below a short result set stays white. [Filtered sessions](https://mobbin.com/screens/c7cff77e-7495-45ca-9eac-5031fddb1650)
@@ -30,10 +38,10 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 | --- | --- |
 | Shell | Desktop rail 256px wide, collapsed rail 48px, sticky header 48px high. The rail meets the canvas at a single vertical hairline. Use 16px horizontal content padding on phones and 24px on desktop. |
 | Surface and ink | White canvas and panels, #f8f8f8 shell, #202020 main text, #666666 supporting text. Group content with whitespace first, then a single #e3e3e3 rule when adjacent regions need a boundary. |
-| Identity and selection | Orange marks the product, the checked option in a picker, and a positive dialog submission. Active navigation has a flat #eaeaea fill with dark text. Use a 4px radius for the selected row. The top bar names the destination once; detail pages add a link back to the parent. |
-| Typography | Use system sans for navigation, controls, table headers and prose. Use Geist Mono for machine IDs, code and technical values. Destination headings are 20px semibold. Draw attention with weight and position before increasing size. |
+| Identity and selection | Orange marks the product, the checked option in a picker, and a primary create or submit action. Active navigation has a flat #eaeaea fill with dark text. Use a 4px radius for the selected row. The top bar names the destination once; detail pages add a link back to the parent. |
+| Typography | Use system sans for navigation, controls, table headers and prose. Use Geist Mono for machine IDs, code and technical values. The header title is 13px medium. In Settings, the section heading above the form is 20px semibold. Draw attention with weight and position before increasing size. |
 | Spacing | Use the 4px spacing scale. Keep an icon close to its label, give neighboring actions more space, and leave 16–24px between independent content groups. Allow narrow toolbars to wrap in reading order. |
-| Controls | Keep button and field silhouettes rectangular with softly rounded corners. Use dark fill for the principal submit or create action, a light border for ordinary commands and a ghost treatment for low-emphasis row actions. Use a visible focus outline with clearance around the control. |
+| Controls | Keep button and field silhouettes rectangular with softly rounded corners. Use orange for the primary creation action in the page header and for positive dialog submissions. Use a light border for ordinary commands and a ghost treatment for low-emphasis row actions. Use a visible focus outline with clearance around the control. |
 | Tables and metrics | Place muted column names on white, align names with their values and separate rows with 1px rules. Use tabular figures for comparable numbers. Put related summary values inside one divided strip and allow them to wrap on phones. |
 | Status and danger | Use small tinted pills with readable state names. A dot can reinforce the label. Keep success green, waiting amber and failure red. Reserve destructive action styling for commands that warrant confirmation. |
 | Sheets and dialogs | Keep the title, affected resource and decision in the same panel. Give overlays more elevation than inline panels. Constrain tall content to the viewport, preserve keyboard focus and expose controls at narrow widths. |

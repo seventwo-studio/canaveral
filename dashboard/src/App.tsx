@@ -151,7 +151,6 @@ import {
   SidebarInset,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
 import {
   Breadcrumb,
   BreadcrumbList,
@@ -667,9 +666,21 @@ export function App() {
   const resourceHost = infrastructureHosts.find(
     (host) => host.id === infrastructureId,
   );
+  const [headerActionContainer, setHeaderActionContainer] =
+    useState<HTMLDivElement | null>(null);
+  const resourceLabel = resourceHost?.name || infrastructureId;
+  const destinationLabel = destinations[view].label;
+  const personalSettings = view === "account" || view === "tokens";
   const locationLabel = resourcePage
-    ? `${resourceHost?.name || "Overview"} · ${destinations[view].label}`
-    : destinations[view].label;
+    ? `${resourceLabel} · ${destinationLabel}`
+    : destinationLabel;
+  const inventoryPage =
+    isInfrastructure || view === "machines" || view === "templates";
+  const headerLabel = personalSettings ? "Settings" : destinationLabel;
+  // These pages use the inventory or directory refreshed by this header action.
+  const showInventoryRefresh =
+    inventoryPage ||
+    ["blueprints", "screens", "users", "api-access"].includes(view);
   const routeKey = infrastructureId ? `${view}/${infrastructureId}` : view;
   const previousRoute = useRef(routeKey);
   useEffect(() => {
@@ -790,51 +801,77 @@ export function App() {
         onSignOut={() => signOut()}
       />
       <SidebarInset className="min-w-0">
-        <header
-          className={`sticky top-0 z-10 flex shrink-0 items-center gap-1 border-b px-2 sm:gap-2 sm:px-4 lg:px-6 ${(isInfrastructure || view === "machines") && !resourcePage ? "min-h-12 flex-wrap py-1" : "h-12"}`}
-        >
-          <SidebarTrigger className="-ml-1" />
-          <Separator
-            orientation="vertical"
-            className="mx-2 hidden data-[orientation=vertical]:h-4 sm:block"
-          />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem>
-                {resourcePage ? (
-                  <BreadcrumbLink href={destinations[view].href}>
-                    {destinations[view].label}
-                  </BreadcrumbLink>
-                ) : (
-                  <BreadcrumbPage>{destinations[view].label}</BreadcrumbPage>
-                )}
-              </BreadcrumbItem>
+        <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-1 border-b px-2 md:gap-3 md:px-4 lg:px-6">
+          <SidebarTrigger className="shrink-0 md:hidden" />
+          <Breadcrumb className="min-w-0 flex-1">
+            <BreadcrumbList className="flex-nowrap gap-1.5 text-[13px] leading-5 sm:gap-2">
               {resourcePage && (
                 <>
-                  <BreadcrumbSeparator />
-                  <BreadcrumbItem>
-                    <BreadcrumbPage className="block max-w-[28vw] truncate">
-                      {resourceHost?.name || "Overview"}
-                    </BreadcrumbPage>
+                  <BreadcrumbItem className="shrink-0">
+                    <BreadcrumbLink
+                      href={destinations[view].href}
+                      aria-label={`Back to ${view}`}
+                    >
+                      {destinationLabel}
+                    </BreadcrumbLink>
                   </BreadcrumbItem>
+                  <BreadcrumbSeparator className="font-normal text-muted-foreground">
+                    /
+                  </BreadcrumbSeparator>
                 </>
               )}
+              <BreadcrumbItem className="min-w-0">
+                {!personalSettings ? (
+                  <h1 className="min-w-0">
+                    <BreadcrumbPage
+                      className="block truncate font-medium"
+                      title={
+                        resourcePage ? (resourceLabel ?? undefined) : undefined
+                      }
+                    >
+                      {resourcePage ? resourceLabel : headerLabel}
+                    </BreadcrumbPage>
+                  </h1>
+                ) : (
+                  <BreadcrumbPage className="truncate font-medium">
+                    {headerLabel}
+                  </BreadcrumbPage>
+                )}
+              </BreadcrumbItem>
             </BreadcrumbList>
           </Breadcrumb>
-          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 sm:gap-2">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+            {showInventoryRefresh && (
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label={stale ? "Retry connection" : "Refresh"}
+                title={stale ? "Retry connection" : "Refresh"}
+                onClick={() => {
+                  void refresh();
+                  void directory.refresh();
+                }}
+              >
+                <RefreshCw />
+              </Button>
+            )}
             {view === "machines" && (
               <>
                 <Button
                   variant="outline"
-                  size="sm"
                   className="max-sm:size-8 max-sm:px-0"
+                  title="Launch desktop"
                   onClick={() => openCreate(undefined, true)}
                   disabled={busy}
                 >
                   <Monitor />
                   <span className="max-sm:sr-only">Launch desktop</span>
                 </Button>
-                <Button size="sm" onClick={() => openCreate()} disabled={busy}>
+                <Button
+                  data-header-primary
+                  onClick={() => openCreate()}
+                  disabled={busy}
+                >
                   <Plus />
                   Create<span className="max-sm:sr-only"> machine</span>
                 </Button>
@@ -842,7 +879,7 @@ export function App() {
             )}
             {isInfrastructure && !resourcePage && (
               <Button
-                size="sm"
+                data-header-primary
                 onClick={() =>
                   setConnectionSetup(view === "hosts" ? "host" : "orchestrator")
                 }
@@ -855,21 +892,16 @@ export function App() {
                 </span>
               </Button>
             )}
-            {view !== "admin" && (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="size-11 md:size-8"
-                aria-label={stale ? "Retry connection" : "Refresh"}
-                title={stale ? "Retry connection" : "Refresh"}
-                onClick={() => {
-                  void refresh();
-                  void directory.refresh();
-                }}
-              >
-                <RefreshCw />
+            {view === "templates" && user.role === "admin" && (
+              <Button data-header-primary onClick={() => setImageImport(true)}>
+                <Plus />
+                Import<span className="max-sm:sr-only"> image</span>
               </Button>
             )}
+            <div
+              ref={setHeaderActionContainer}
+              className="flex shrink-0 items-center gap-1 empty:hidden sm:gap-2"
+            />
           </div>
         </header>
         <div
@@ -930,6 +962,7 @@ export function App() {
             />
           ) : view === "admin" && user.role === "admin" ? (
             <AdminOverview
+              headerActions={headerActionContainer}
               key={user.id}
               user={user}
               inventory={inventory}
@@ -1011,6 +1044,7 @@ export function App() {
             <>
               <Notice error>{stale}</Notice>
               <MachineBlueprints
+                headerActions={headerActionContainer}
                 key={user.id}
                 sources={templates}
                 admin={user.role === "admin"}
@@ -1020,22 +1054,13 @@ export function App() {
             </>
           ) : resourcePage ? (
             <>
-              <div className="min-w-0 space-y-2">
-                <a
-                  href={`#${view}`}
-                  className="text-xs text-muted-foreground underline-offset-4 hover:underline"
-                >
-                  Back to {view}
-                </a>
-                <h1 className="break-words font-display text-xl font-semibold tracking-tight">
-                  {resourceHost?.name || "Resources"}
-                </h1>
+              {resourceHost && (
                 <p className="text-sm text-muted-foreground">
-                  {resourceHost
-                    ? `${provider(resourceHost.platform || resourceHost.provider)} · ${(resourceHost.runtimes || []).map(provider).join(" · ") || (view === "hosts" ? "Direct host" : "Orchestrator pool")}`
-                    : "Host overview"}
+                  {provider(resourceHost.platform || resourceHost.provider)} ·{" "}
+                  {(resourceHost.runtimes || []).map(provider).join(" · ") ||
+                    (view === "hosts" ? "Direct host" : "Orchestrator pool")}
                 </p>
-              </div>
+              )}
               <Notice error>{stale}</Notice>
               <Notice>{message}</Notice>
               <Notice error>{actionError}</Notice>
@@ -1064,50 +1089,33 @@ export function App() {
                     <EmptyDescription>
                       {loaded
                         ? "This connection is no longer in the inventory."
-                        : "Fetching the current host inventory."}
+                        : `Fetching the current ${view === "hosts" ? "host" : "orchestrator"} inventory.`}
                     </EmptyDescription>
                   </EmptyHeader>
-                  <EmptyContent>
-                    <Button asChild variant="outline">
-                      <a href={`#${view}`}>Back to {view}</a>
-                    </Button>
-                  </EmptyContent>
                 </Empty>
               )}
             </>
           ) : (
             <>
-              {view === "templates" ? (
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <h1 className="text-xl font-semibold tracking-tight">
-                    {title(view)}
-                  </h1>
-                  <div className="flex flex-wrap gap-2">
-                    {user.role === "admin" && (
-                      <>
-                        <Button
-                          variant="outline"
-                          onClick={() => setRegistryOpen(true)}
-                        >
-                          Base image registry
-                        </Button>
-                        <Button onClick={() => setImageImport(true)}>
-                          Import image
-                        </Button>
-                      </>
-                    )}
+              {view === "templates" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {user.role === "admin" && (
                     <Button
-                      variant="ghost"
-                      onClick={() => (location.hash = "blueprints")}
-                      disabled={busy}
+                      variant="outline"
+                      onClick={() => setRegistryOpen(true)}
                     >
-                      <ArrowUpRight />
-                      Machine blueprints
+                      Base image registry
                     </Button>
-                  </div>
+                  )}
+                  <Button
+                    variant="ghost"
+                    onClick={() => (location.hash = "blueprints")}
+                    disabled={busy}
+                  >
+                    <ArrowUpRight />
+                    Machine blueprints
+                  </Button>
                 </div>
-              ) : (
-                <h1 className="sr-only">{title(view)}</h1>
               )}
               <Notice error>{stale}</Notice>
               <Notice>{message}</Notice>

@@ -152,13 +152,15 @@ export function MachineControl({
             </div>
           </div>
           <div
-            className="flex flex-wrap items-center gap-1 rounded-md border bg-background p-0.5"
+            className="flex flex-wrap items-center gap-1 rounded-md bg-muted p-0.5"
+            role="group"
             aria-label="Workspace views"
           >
             {views.map(([key, label, Icon]) => (
               <Button
                 size="sm"
-                variant={view === key ? "secondary" : "ghost"}
+                variant="ghost"
+                className="aria-pressed:bg-card aria-pressed:shadow-xs"
                 key={key}
                 onClick={() => setView(key)}
                 aria-pressed={view === key}
@@ -173,7 +175,8 @@ export function MachineControl({
             {accessibilitySupported && (
               <Button
                 size="sm"
-                variant={inspect ? "secondary" : "ghost"}
+                variant="ghost"
+                className="aria-pressed:bg-card aria-pressed:shadow-xs"
                 aria-pressed={inspect}
                 onClick={() => setInspect(!inspect)}
               >

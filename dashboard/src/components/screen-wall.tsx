@@ -91,7 +91,6 @@ export function ScreenWall({
   return (
     <div className="min-w-0 space-y-6">
       <div className="min-w-0 space-y-1">
-        <h1 className="text-xl font-semibold tracking-tight">Screens</h1>
         <p className="max-w-prose text-sm text-muted-foreground">
           Watch up to four devices. Open control to interact with a live screen.
           Only account-owned devices appear here: a leased device's screen

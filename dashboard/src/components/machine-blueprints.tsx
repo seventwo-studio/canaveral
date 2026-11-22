@@ -1,3 +1,4 @@
+import { WorkspaceHeaderActions } from "./workspace-header-actions";
 import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -349,11 +350,13 @@ export function ImageLibrary({
 }
 
 export function MachineBlueprints({
+  headerActions,
   sources,
   admin,
   onCreate,
   inventoryAvailable = true,
 }: {
+  headerActions?: HTMLElement | null;
   sources: GroupedImage[];
   admin: boolean;
   onCreate: (offer: GroupedImage) => void;
@@ -399,14 +402,13 @@ export function MachineBlueprints({
   );
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold tracking-tight">
-          Machine blueprints
-        </h1>
-        {admin && (
-          <Button onClick={() => setEditing("new")}>New blueprint</Button>
-        )}
-      </div>
+      {admin && (
+        <WorkspaceHeaderActions container={headerActions}>
+          <Button data-header-primary onClick={() => setEditing("new")}>
+            New<span className="max-sm:sr-only"> blueprint</span>
+          </Button>
+        </WorkspaceHeaderActions>
+      )}
       <CatalogueNotice error={error} loaded={loaded} name="Blueprints" />
       {!inventoryAvailable && (
         <Alert role="status">
