@@ -225,6 +225,7 @@ export function HostMachines({
         size="sm"
         value={filter}
         onValueChange={(value) => value && setFilter(value)}
+        className="max-w-full flex-wrap border"
         aria-label="Host machine filter"
       >
         <ToggleGroupItem value="all">All machines</ToggleGroupItem>

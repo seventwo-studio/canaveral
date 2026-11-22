@@ -1,5 +1,7 @@
+import { FilterChip } from "./ui/filter-chip";
+import { NativeSelect } from "@/components/ui/native-select";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Pause, Play, RefreshCw, X } from "lucide-react";
+import { Pause, Play, RefreshCw } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
 import {
   HELD_LIMIT,
@@ -41,8 +43,6 @@ const denied = (e: unknown) =>
   typeof e === "object" &&
   "status" in e &&
   (e.status === 401 || e.status === 403);
-const select =
-  "h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9";
 /** The subjects with a text field. Request and machine filters come from a link or an event. */
 const typed = ["application", "host", "lease"] as const;
 const labels: Record<SubjectFilter, string> = {
@@ -287,15 +287,15 @@ function ActivitySession({
       </div>
 
       <form
-        className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 border-y py-3 xl:grid-cols-6"
+        className="grid min-w-0 grid-cols-2 items-start gap-2 border-y py-2 md:grid-cols-3 xl:grid-cols-6 [&_[data-slot=field]]:gap-1"
         aria-label="Filter events"
         onSubmit={(event) => event.preventDefault()}
       >
         <Field>
           <FieldLabel htmlFor="activity-family">Family</FieldLabel>
-          <select
+          <NativeSelect
             id="activity-family"
-            className={select}
+            className="h-10 w-full md:h-8"
             value={filter.family}
             disabled={!catalogue}
             onChange={(event) =>
@@ -312,13 +312,13 @@ function ActivitySession({
                 {name}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
         <Field>
           <FieldLabel htmlFor="activity-kind">Kind</FieldLabel>
-          <select
+          <NativeSelect
             id="activity-kind"
-            className={`${select} font-mono`}
+            className="h-10 w-full font-mono md:h-8"
             value={filter.kind}
             disabled={!catalogue}
             onChange={(event) =>
@@ -344,7 +344,7 @@ function ActivitySession({
                   {entry.kind}
                 </option>
               ))}
-          </select>
+          </NativeSelect>
         </Field>
         <Button
           type="button"
@@ -368,7 +368,7 @@ function ActivitySession({
               <FieldLabel htmlFor={`activity-${key}`}>{labels[key]}</FieldLabel>
               <Input
                 id={`activity-${key}`}
-                className="font-mono text-xs"
+                className="h-10 font-mono md:h-8"
                 placeholder="UUID"
                 autoComplete="off"
                 spellCheck={false}
@@ -396,8 +396,8 @@ function ActivitySession({
             </Field>
           );
         })}
-        <div className="col-span-2 flex min-w-0 flex-col justify-end gap-2 md:col-span-1">
-          <label className="flex min-h-10 items-center gap-2 text-sm md:min-h-9">
+        <div className="col-span-2 flex min-w-0 flex-col justify-end gap-2 self-end md:col-span-1">
+          <label className="flex min-h-10 items-center gap-2 text-[13px] md:min-h-8">
             <input
               type="checkbox"
               className="size-4 accent-primary"
@@ -413,26 +413,26 @@ function ActivitySession({
             Needs attention only
           </label>
         </div>
-        {filtered(filter) && (
-          <div className="col-span-2 flex min-w-0 flex-wrap items-center gap-2 xl:col-span-6">
+        {(filtered(filter) || typed.some((key) => drafts[key] !== "")) && (
+          <div className="col-span-2 flex min-w-0 flex-wrap items-center gap-2 md:col-span-3 xl:col-span-6">
             {(["request", "machine"] as const).map(
               (key) =>
                 filter[key] && (
-                  <Badge key={key} variant="outline" className="max-w-full">
-                    <span>{labels[key]}</span>
-                    <span className="truncate font-mono">{filter[key]}</span>
-                    <button
-                      type="button"
-                      className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      aria-label={`Remove the ${key} filter`}
-                      onClick={() => setSubject(key, "")}
-                    >
-                      <X aria-hidden="true" className="size-3" />
-                    </button>
-                  </Badge>
+                  <FilterChip
+                    key={key}
+                    label={labels[key]}
+                    value={filter[key]!}
+                    onRemove={() => setSubject(key, "")}
+                  />
                 ),
             )}
-            <Button type="button" variant="ghost" size="sm" onClick={clear}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="ml-auto"
+              onClick={clear}
+            >
               Clear filters
             </Button>
           </div>
@@ -519,19 +519,28 @@ function ActivitySession({
         </Empty>
       )}
       {feed && feed.events.length > 0 && (
-        <ol
-          aria-label="Events, newest first"
-          className="min-w-0 divide-y border-y bg-card"
-        >
-          {feed.events.map((event) => (
-            <EventRow
-              key={event.sequence}
-              event={event}
-              info={summaries.get(event.kind)}
-              onSubject={setSubject}
-            />
-          ))}
-        </ol>
+        <div>
+          <div
+            aria-hidden="true"
+            className="hidden h-9 items-center gap-4 px-3 text-xs text-muted-foreground lg:grid lg:grid-cols-[13rem_minmax(0,1fr)]"
+          >
+            <span>Time</span>
+            <span>Event</span>
+          </div>
+          <ol
+            aria-label="Events, newest first"
+            className="min-w-0 divide-y border-y bg-card"
+          >
+            {feed.events.map((event) => (
+              <EventRow
+                key={event.sequence}
+                event={event}
+                info={summaries.get(event.kind)}
+                onSubject={setSubject}
+              />
+            ))}
+          </ol>
+        </div>
       )}
       {feed && (
         <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -583,7 +592,7 @@ const EventRow = memo(function EventRow({
 }) {
   const fields = dataFields(event);
   return (
-    <li className="grid min-w-0 gap-2 px-1 py-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-4">
+    <li className="grid min-w-0 gap-2 px-1 py-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-4 lg:px-3">
       <div className="min-w-0 space-y-1">
         <time
           dateTime={event.at}

@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import type { Host } from "@/lib/infrastructure";
@@ -113,10 +114,10 @@ export function BrowserLaunch({ host }: { host: Host }) {
   return (
     <section aria-label="Browser session" className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 text-sm">
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-[13px] font-medium">
           Browser engine
-          <select
-            className="h-8 rounded-md border border-input bg-card px-2.5 text-base shadow-xs md:text-[13px]"
+          <NativeSelect
+            className="w-auto"
             value={engine}
             disabled={busy || Boolean(id)}
             onChange={(event) => setEngine(event.target.value as Engine)}
@@ -126,7 +127,7 @@ export function BrowserLaunch({ host }: { host: Host }) {
                 {label}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         {eligible && !receipt && (
           <Button disabled={busy} onClick={() => run("launch")}>

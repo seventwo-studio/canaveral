@@ -1,3 +1,4 @@
+import { NativeSelect } from "@/components/ui/native-select";
 import { hostIssue } from "@/lib/fleet";
 import { FleetPulse } from "./fleet-pulse";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -468,21 +469,26 @@ export function AdminTokensPage({
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
-      <div className="flex flex-wrap items-end gap-3 border-y py-3">
-        <label className="grid min-w-36 flex-1 gap-1 text-xs font-medium">
+      <div
+        role="group"
+        aria-label="Filter API tokens"
+        className="flex flex-wrap items-end gap-2 border-y py-2"
+      >
+        <label className="grid w-full gap-1 text-[13px] font-medium sm:w-64">
           Search API tokens
           <Input
             aria-label="Search API tokens"
+            className="h-10 md:h-8"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Name, owner or permission…"
           />
         </label>
-        <label className="grid gap-1 text-xs font-medium">
+        <label className="grid w-full gap-1 text-[13px] font-medium sm:w-40">
           Token status
-          <select
+          <NativeSelect
             aria-label="Token status"
-            className="h-8 rounded-md border border-input bg-card px-2.5 text-sm shadow-xs"
+            className="h-10 w-full md:h-8"
             value={state}
             onChange={(e) => setState(e.target.value)}
           >
@@ -493,8 +499,21 @@ export function AdminTokensPage({
                   : s[0]?.toUpperCase() + s.slice(1)}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
+        {(query || state !== "all") && (
+          <Button
+            className="ml-auto"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setQuery("");
+              setState("all");
+            }}
+          >
+            Clear filters
+          </Button>
+        )}
       </div>
       <div className="@container min-w-0 border-b">
         <Table className="block @3xl:table">
@@ -529,11 +548,11 @@ export function AdminTokensPage({
                   <span className="block font-mono text-xs text-muted-foreground">
                     {t.prefix}…
                   </span>
-                  <span className="block text-xs text-muted-foreground">
+                  <span className="block text-xs tabular-nums text-muted-foreground">
                     Created {timestamp(t.createdAt)}
                   </span>
                 </TableCell>
-                <TableCell className="max-w-48 !whitespace-normal break-all">
+                <TableCell className="max-w-48 !whitespace-normal [overflow-wrap:anywhere]">
                   <span className="block text-xs text-muted-foreground @3xl:hidden">
                     Owner
                   </span>
@@ -555,7 +574,12 @@ export function AdminTokensPage({
                   <span className="block text-xs text-muted-foreground @3xl:hidden">
                     Status
                   </span>
-                  <Badge variant="outline">{tokenState(t)}</Badge>
+                  <Badge
+                    variant="outline"
+                    className={tokenState(t) === "Active" ? "status-ready" : ""}
+                  >
+                    {tokenState(t)}
+                  </Badge>
                   {t.revokedAt !== null && (
                     <span className="block text-xs text-muted-foreground">
                       {timestamp(t.revokedAt)}

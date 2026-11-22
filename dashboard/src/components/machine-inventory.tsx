@@ -15,6 +15,9 @@ import {
   DropdownMenuSeparator,
 } from "./ui/dropdown-menu";
 
+const machineColumns =
+  "xl:grid-cols-[minmax(6rem,.8fr)_minmax(0,1.45fr)_minmax(0,1.15fr)_minmax(0,1fr)_13rem]";
+
 export function MachineInventory({
   machines,
   hosts,
@@ -44,10 +47,10 @@ export function MachineInventory({
     <div className="min-w-0 overflow-hidden rounded-md border bg-card xl:rounded-none xl:border-x-0 xl:border-t-0">
       <div
         aria-hidden="true"
-        className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] items-center gap-4 border-b bg-card px-3 py-2.5 text-xs font-normal text-muted-foreground xl:grid"
+        className={`hidden h-9 items-center gap-4 border-b bg-card px-3 text-xs font-normal text-muted-foreground xl:grid ${machineColumns}`}
       >
-        <span>Machine</span>
         <span>State</span>
+        <span>Machine</span>
         <span>Resources</span>
         <span>{admin ? "Host / owner" : "Host"}</span>
         <span className="text-right">Actions</span>
@@ -112,13 +115,13 @@ function MachineRow({
   return (
     <li
       data-machine-id={m.id}
-      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:px-3 xl:py-2 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_13rem] xl:items-center xl:hover:bg-muted/30"
+      className={`grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 px-4 py-3 focus-within:bg-muted/30 sm:gap-y-3 sm:py-4 xl:px-3 xl:py-2 ${machineColumns} xl:items-center xl:hover:bg-muted/30`}
     >
       <div className="flex min-w-0 items-start gap-3">
         <div className="min-w-0 space-y-1">
           <Button
             variant="link"
-            className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-sm font-medium text-foreground [overflow-wrap:anywhere]"
+            className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-[13px] font-medium text-foreground [overflow-wrap:anywhere]"
             onClick={(e) => onInspect(m.id, e.currentTarget)}
           >
             {m.name}
@@ -128,7 +131,7 @@ function MachineRow({
           </p>
         </div>
       </div>
-      <div className="min-w-0 justify-self-end space-y-1 xl:justify-self-start">
+      <div className="min-w-0 justify-self-end space-y-1 xl:order-first xl:justify-self-start">
         <Badge
           variant="outline"
           className={`status status-${status.toLowerCase().replaceAll(" ", "-")}`}

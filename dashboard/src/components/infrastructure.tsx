@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { Maintenance } from "./maintenance";
 import { BrowserLaunch } from "./browser-launch";
 import type { FormEvent, ReactNode } from "react";
@@ -923,13 +924,13 @@ export function ConnectionSetup({
           </p>
         )}
         {!issued ? (
-          <form onSubmit={issue} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <label className="space-y-2 text-xs">
+          <form onSubmit={issue} className="@container/setup space-y-4">
+            <div className="grid gap-4 @sm/setup:grid-cols-2">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 Connection type
-                <select
+                <NativeSelect
                   aria-label="Connection type"
-                  className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
                   value={type}
                   onChange={(e) => {
                     setType(
@@ -944,17 +945,17 @@ export function ConnectionSetup({
                 >
                   <option value="host">Direct host</option>
                   <option value="orchestrator">External orchestrator</option>
-                </select>
+                </NativeSelect>
               </label>
-              <label className="space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 {type === "orchestrator" ? "Provider" : "Host operating system"}
-                <select
+                <NativeSelect
                   aria-label={
                     type === "orchestrator"
                       ? "Provider"
                       : "Host operating system"
                   }
-                  className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
                   value={backend}
                   onChange={(e) => change(e.target.value)}
                 >
@@ -966,10 +967,10 @@ export function ConnectionSetup({
                       {provider(p)}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
             </div>
-            <label className="block space-y-2 text-xs">
+            <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
               Connection name
               <Input
                 required
@@ -979,27 +980,40 @@ export function ConnectionSetup({
                 placeholder="Build Mac or development cluster"
               />
             </label>
-            <label className="block space-y-2 text-xs">
-              Controller URL
+            <div className="grid min-w-0 gap-1.5">
+              <label
+                htmlFor="runner-controller-url"
+                className="text-[13px] font-medium"
+              >
+                Controller URL
+              </label>
               <Input
+                id="runner-controller-url"
                 type="url"
+                aria-describedby="runner-controller-hint"
                 required
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 placeholder="https://canaveral.example.com"
               />
-              <p className="text-muted-foreground">
+              <span
+                id="runner-controller-hint"
+                className="text-xs font-normal text-muted-foreground"
+              >
                 Use an address reachable from this runner. Localhost only works
                 on the controller machine.
-              </p>
-            </label>
+              </span>
+            </div>
             <fieldset className="space-y-2">
               <legend className="text-xs font-medium">
                 Canaveral host limits
               </legend>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid gap-3 @sm/setup:grid-cols-3">
                 {resourceFields.map(([key, label]) => (
-                  <label key={key} className="space-y-2 text-xs">
+                  <label
+                    key={key}
+                    className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                  >
                     {label}
                     <Input
                       type="number"
@@ -1024,9 +1038,12 @@ export function ConnectionSetup({
                 pool.
               </p>
             </fieldset>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 @sm/setup:grid-cols-2">
               {fields.map(([key, label]) => (
-                <label key={key} className="block space-y-2 text-xs">
+                <label
+                  key={key}
+                  className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                >
                   {label}
                   <Input
                     required
@@ -1064,7 +1081,7 @@ export function ConnectionSetup({
                       Object.entries(runtimeDefaults(name)).map(([key]) => (
                         <label
                           key={key}
-                          className="block space-y-2 pl-5 text-xs"
+                          className="grid min-w-0 gap-1.5 pl-5 text-[13px] font-medium"
                         >
                           {provider(name)} {key}
                           <Input
@@ -1090,7 +1107,7 @@ export function ConnectionSetup({
               <summary className="cursor-pointer text-xs font-medium">
                 Advanced configuration and images
               </summary>
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 Runner configuration
                 <Textarea
                   className="min-h-44 font-mono text-xs"

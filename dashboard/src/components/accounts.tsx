@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import {
   useEffect,
   useRef,
@@ -22,6 +23,7 @@ import {
   Field,
   FieldLabel,
   FieldGroup,
+  SettingsRows,
   FieldSet,
   FieldError,
 } from "./ui/field";
@@ -208,9 +210,9 @@ export function AccountPage({
           sessions and revokes your API tokens.
         </p>
       </div>
-      <form className="max-w-md" onSubmit={submit}>
+      <form onSubmit={submit}>
         <FieldSet disabled={busy || uncertain}>
-          <FieldGroup className="gap-4">
+          <SettingsRows>
             <TextField
               name="currentPassword"
               label="Current password"
@@ -218,10 +220,10 @@ export function AccountPage({
             />
             <TextField name="password" label="New password" password />
             <TextField name="confirmation" label="Confirm password" password />
-            <Button type="submit" className="self-start">
-              {busy ? "Saving…" : "Change password"}
-            </Button>
-          </FieldGroup>
+          </SettingsRows>
+          <Button type="submit" className="self-end">
+            {busy ? "Saving…" : "Change password"}
+          </Button>
         </FieldSet>
       </form>
       {error && <FieldError>{error}</FieldError>}
@@ -352,24 +354,23 @@ export function TokensPage({ user }: { user: User }) {
           onDismiss={() => setSecret(null)}
         />
       )}
-      <form className="max-w-md" onSubmit={create}>
+      <form onSubmit={create}>
         <FieldSet disabled={busy || !!uncertain || !!secret}>
-          <FieldGroup className="gap-4">
+          <SettingsRows>
             <TextField name="name" label="Token name" />
             <Field>
               <FieldLabel htmlFor="scopes">Permissions</FieldLabel>
-              <select
+              <NativeSelect
                 id="scopes"
                 value={preset}
                 onChange={(e) => setPreset(e.target.value)}
-                className="h-8 w-full rounded-md border border-input bg-card px-2.5 text-base shadow-xs md:text-[13px]"
               >
                 <option value="read">Read my machines</option>
                 <option value="manage">Manage my machines</option>
                 {user.role === "admin" && (
                   <option value="admin">Administrator access</option>
                 )}
-              </select>
+              </NativeSelect>
             </Field>
             <Field>
               <FieldLabel htmlFor="days">Expires in days</FieldLabel>
@@ -384,10 +385,10 @@ export function TokensPage({ user }: { user: User }) {
                 required
               />
             </Field>
-            <Button type="submit" className="self-start">
-              Create token
-            </Button>
-          </FieldGroup>
+          </SettingsRows>
+          <Button type="submit" className="self-end">
+            Create token
+          </Button>
         </FieldSet>
       </form>
       {error && <FieldError>{error}</FieldError>}
@@ -760,21 +761,28 @@ export function UsersPage({
           </form>
         </CardContent>
       </Card>
-      <FieldGroup className="gap-3 border-y py-3 sm:flex-row sm:items-end">
-        <Field>
+      <FieldGroup
+        aria-label="Filter users"
+        className="gap-2 border-y py-2 sm:flex-row sm:flex-wrap sm:items-end [&_[data-slot=field]]:gap-1"
+      >
+        <Field className="sm:max-w-64">
           <FieldLabel htmlFor="users-search">Search users</FieldLabel>
           <Input
             id="users-search"
+            className="h-10 md:h-8"
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Username or user ID"
           />
         </Field>
-        <Field className="sm:max-w-48">
+        <Field className="sm:max-w-40">
           <FieldLabel htmlFor="users-status">User status</FieldLabel>
           <Select value={status} onValueChange={setStatus}>
-            <SelectTrigger id="users-status" className="w-full">
+            <SelectTrigger
+              id="users-status"
+              className="w-full data-[size=default]:h-10 md:data-[size=default]:h-8"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -785,6 +793,19 @@ export function UsersPage({
             </SelectContent>
           </Select>
         </Field>
+        {(query || status !== "all") && (
+          <Button
+            className="self-end sm:ml-auto"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setQuery("");
+              setStatus("all");
+            }}
+          >
+            Clear filters
+          </Button>
+        )}
       </FieldGroup>
       {loading && (
         <p role="status" className="text-sm text-muted-foreground">
@@ -828,27 +849,33 @@ export function UsersPage({
                 aria-label={`${u.username} account`}
               >
                 <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
-                  <span className="block break-all font-medium">
+                  <span className="block font-medium [overflow-wrap:anywhere]">
                     {u.username}
                     {u.id === user?.id && (
                       <span className="text-muted-foreground"> (you)</span>
                     )}
                   </span>
-                  <span className="mt-1 block break-all text-xs text-muted-foreground">
+                  <span
+                    title={u.id}
+                    className="mt-1 block break-all font-mono text-xs text-muted-foreground @2xl:truncate"
+                  >
                     {u.id}
                   </span>
                 </TableCell>
                 <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
-                  <span className="mb-2 block text-sm">
-                    {u.role === "admin" ? "Administrator" : "User"}
-                  </span>
-                  <Badge variant="outline" className="capitalize">
-                    {u.status}
-                  </Badge>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span>{u.role === "admin" ? "Administrator" : "User"}</span>
+                    <Badge
+                      variant="outline"
+                      className={`capitalize ${u.status === "active" ? "status-ready" : u.status === "pending" ? "status-pending" : ""}`}
+                    >
+                      {u.status}
+                    </Badge>
+                  </div>
                   {u.role === "admin" &&
                     u.status === "active" &&
                     activeAdmins === 1 && (
-                      <p className="mt-2 text-xs text-muted-foreground">
+                      <p className="mt-1 text-xs text-muted-foreground">
                         Last active administrator
                       </p>
                     )}

@@ -194,7 +194,11 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
                 <Field>
                   <FieldLabel htmlFor="api-action">Action</FieldLabel>
                   <Select value={selected} onValueChange={choose}>
-                    <SelectTrigger id="api-action" className="w-full">
+                    <SelectTrigger
+                      id="api-action"
+                      aria-describedby="api-action-help"
+                      className="w-full"
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -207,7 +211,9 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
                         ))}
                     </SelectContent>
                   </Select>
-                  <FieldDescription>{action.help}</FieldDescription>
+                  <FieldDescription id="api-action-help">
+                    {action.help}
+                  </FieldDescription>
                 </Field>
               </div>
               {action.identifier && (
@@ -252,9 +258,10 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
                   </FieldLabel>
                   <Textarea
                     id="api-configuration"
+                    aria-describedby="api-configuration-help"
                     autoComplete="off"
                     spellCheck={false}
-                    className="min-h-64 font-mono text-xs"
+                    className="min-h-48 font-mono sm:min-h-64"
                     value={configuration}
                     onChange={(event) => {
                       setConfiguration(event.target.value);
@@ -262,7 +269,7 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
                       setResult(undefined);
                     }}
                   />
-                  <FieldDescription>
+                  <FieldDescription id="api-configuration-help">
                     Examples require your actual resource identities and
                     verified digests. Request IDs and configuration remain
                     unchanged until you edit or select another action.

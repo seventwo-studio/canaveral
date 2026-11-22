@@ -121,9 +121,21 @@
 [data-slot="card-title"] {
   letter-spacing: -0.018em;
 }
-:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+:where(a, button, input, select, textarea, [tabindex]):not([data-slot="input-group-control"]):focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+@media (forced-colors: active) {
+  [data-slot="input-group"]:has([data-slot="input-group-control"]:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+form button[type="submit"][data-slot="button"]:is(:not([data-variant]), [data-variant="default"]):disabled {
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  box-shadow: none;
+  opacity: 1;
 }
 @media (max-width: 39.99rem) {
   [data-slot="card-header"],
@@ -219,5 +231,18 @@ meter::-moz-meter-bar {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Keep the platform picker while aligning its closed control with Radix Select. */
+@media (forced-colors: none) {
+  [data-slot="native-select"]:not([multiple]):not([size]) {
+    appearance: none;
+    background-image:
+      linear-gradient(45deg, transparent 48%, var(--muted-foreground) 50% 67%, transparent 69%),
+      linear-gradient(-45deg, transparent 48%, var(--muted-foreground) 50% 67%, transparent 69%);
+    background-position: right 13px center, right 9px center;
+    background-size: 4px 5px;
+    background-repeat: no-repeat;
   }
 }

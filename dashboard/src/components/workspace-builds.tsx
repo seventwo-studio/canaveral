@@ -1,3 +1,5 @@
+import { SettingsRows } from "./ui/field";
+import { NativeSelect } from "./ui/native-select";
 import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
@@ -265,48 +267,52 @@ export function WorkspaceBuilds() {
     <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">Linux builds</h1>
       <form
-        className="max-w-2xl space-y-4 border-y py-4"
+        className="max-w-2xl space-y-3"
         onSubmit={(e) => {
           e.preventDefault();
           void launch();
         }}
       >
-        <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Source directory
-            <Input
-              type="file"
-              multiple
-              {...{ webkitdirectory: "" }}
-              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-            />
-          </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Approved workspace image
-            <select
-              className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
-              value={imageId}
-              onChange={(e) => setImageId(e.target.value)}
-            >
-              {images.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Command (one argument per line)
-            <Textarea value={argv} onChange={(e) => setArgv(e.target.value)} />
-          </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Artifact path
-            <Input
-              placeholder="dist/package.tar"
-              value={artifact}
-              onChange={(e) => setArtifact(e.target.value)}
-            />
-          </label>
+        <fieldset className="min-w-0" disabled={busy || !!pending}>
+          <SettingsRows>
+            <label className="text-[13px] font-medium">
+              Source directory
+              <Input
+                type="file"
+                multiple
+                {...{ webkitdirectory: "" }}
+                onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+              />
+            </label>
+            <label className="text-[13px] font-medium">
+              Approved workspace image
+              <NativeSelect
+                value={imageId}
+                onChange={(e) => setImageId(e.target.value)}
+              >
+                {images.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </label>
+            <label className="text-[13px] font-medium">
+              Command (one argument per line)
+              <Textarea
+                value={argv}
+                onChange={(e) => setArgv(e.target.value)}
+              />
+            </label>
+            <label className="text-[13px] font-medium">
+              Artifact path
+              <Input
+                placeholder="dist/package.tar"
+                value={artifact}
+                onChange={(e) => setArtifact(e.target.value)}
+              />
+            </label>
+          </SettingsRows>
         </fieldset>
         {error && (
           <p className="text-sm text-destructive" role="alert">
@@ -318,7 +324,10 @@ export function WorkspaceBuilds() {
             Launch request <code>{pending.id}</code>
           </p>
         )}
-        <Button className="sm:ml-48" disabled={busy || (!pending && !imageId)}>
+        <Button
+          className="ml-auto flex"
+          disabled={busy || (!pending && !imageId)}
+        >
           {pending ? "Retry same launch" : "Launch build"}
         </Button>
       </form>

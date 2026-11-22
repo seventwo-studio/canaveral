@@ -1,3 +1,5 @@
+import { SettingsRows } from "./ui/field";
+import { NativeSelect } from "./ui/native-select";
 import { Empty, EmptyDescription } from "./ui/empty";
 import { readFile } from "@/lib/workspace-file";
 import { useEffect, useState } from "react";
@@ -221,7 +223,7 @@ export function WorkspacePreviews() {
         Workspace previews
       </h1>
       <form
-        className="max-w-2xl space-y-4 border-y py-4"
+        className="max-w-2xl space-y-3"
         onSubmit={(e) => {
           e.preventDefault();
           void act("launch");
@@ -230,62 +232,67 @@ export function WorkspacePreviews() {
         <p className="text-[13px] text-muted-foreground">
           New previews use the operator-configured pinned image.
         </p>
-        <fieldset disabled={busy || !!pending} className="grid gap-3">
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Preview type{" "}
-            <select
-              className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
-              value={mode}
-              onChange={(e) => {
-                setMode(e.target.value);
-                setFiles([]);
-              }}
-            >
-              <option value="static">Static site</option>
-              <option value="command">Dynamic app</option>
-            </select>
-          </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Workspace directory
-            <Input
-              key={mode}
-              type="file"
-              multiple
-              {...{ webkitdirectory: "" }}
-              onChange={(e) => setFiles(Array.from(e.target.files || []))}
-            />
-          </label>
-          {files.length > 0 && <p>{files.length} files selected</p>}
-          {mode === "command" && (
-            <>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-                Foreground command and arguments (one per line)
-                <Textarea
-                  required
-                  value={argv}
-                  onChange={(e) => setArgv(e.target.value)}
-                />
-              </label>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-                HTTP port
-                <Input
-                  type="number"
-                  min="1"
-                  max="65535"
-                  required
-                  value={port}
-                  onChange={(e) => setPort(e.target.value)}
-                />
-              </label>
-            </>
-          )}
+        <fieldset disabled={busy || !!pending} className="min-w-0">
+          <SettingsRows>
+            <label className="text-[13px] font-medium">
+              Preview type{" "}
+              <NativeSelect
+                value={mode}
+                onChange={(e) => {
+                  setMode(e.target.value);
+                  setFiles([]);
+                }}
+              >
+                <option value="static">Static site</option>
+                <option value="command">Dynamic app</option>
+              </NativeSelect>
+            </label>
+            <label className="text-[13px] font-medium">
+              Workspace directory
+              <Input
+                key={mode}
+                type="file"
+                multiple
+                {...{ webkitdirectory: "" }}
+                onChange={(e) => setFiles(Array.from(e.target.files || []))}
+              />
+            </label>
+            {mode === "command" && (
+              <>
+                <label className="text-[13px] font-medium">
+                  Foreground command and arguments (one per line)
+                  <Textarea
+                    required
+                    value={argv}
+                    onChange={(e) => setArgv(e.target.value)}
+                  />
+                </label>
+                <label className="text-[13px] font-medium">
+                  HTTP port
+                  <Input
+                    type="number"
+                    min="1"
+                    max="65535"
+                    required
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                  />
+                </label>
+              </>
+            )}
+          </SettingsRows>
         </fieldset>
+        {files.length > 0 && (
+          <p className="text-right text-xs text-muted-foreground" role="status">
+            {files.length} files selected
+          </p>
+        )}
         {pending && (
           <p>
             Launch request <code>{pending.id}</code>
           </p>
         )}
-        <Button className="sm:ml-48" disabled={busy}>
+        <Button className="ml-auto flex" disabled={busy}>
           {pending ? "Retry same launch" : "Launch preview"}
         </Button>
       </form>

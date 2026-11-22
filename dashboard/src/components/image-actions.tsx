@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -186,9 +187,9 @@ export function ImageImport({
             <Button onClick={onClose}>Done</Button>
           </div>
         ) : (
-          <form className="space-y-4" onSubmit={submit}>
+          <form className="@container/import space-y-4" onSubmit={submit}>
             <fieldset disabled={busy} className="space-y-4">
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 Image name
                 <Input
                   required
@@ -197,12 +198,12 @@ export function ImageImport({
                   onChange={(e) => setName(e.target.value)}
                 />
               </label>
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 Destination host
-                <select
+                <NativeSelect
                   aria-label="Destination host"
                   required
-                  className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
                 >
@@ -211,9 +212,9 @@ export function ImageImport({
                       {h.name} · {provider(h.platform || h.provider)}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 @sm/import:grid-cols-2">
                 {(
                   [
                     ["Guest OS", os, setOs, ["linux", "windows", "macos"]],
@@ -222,11 +223,14 @@ export function ImageImport({
                     [string, string, (value: string) => void, string[]]
                   >
                 ).map(([label, value, set, options]) => (
-                  <label key={label} className="space-y-2 text-xs">
+                  <label
+                    key={label}
+                    className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                  >
                     {label}
-                    <select
+                    <NativeSelect
                       aria-label={label}
-                      className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
                       value={value}
                       onChange={(e) => set(e.target.value)}
                     >
@@ -235,16 +239,16 @@ export function ImageImport({
                           {v}
                         </option>
                       ))}
-                    </select>
+                    </NativeSelect>
                   </label>
                 ))}
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="space-y-2 text-xs">
+              <div className="grid gap-3 @sm/import:grid-cols-2">
+                <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                   Media type
-                  <select
+                  <NativeSelect
                     aria-label="Media type"
-                    className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
                     value={media}
                     onChange={(e) => {
                       setMedia(
@@ -257,13 +261,13 @@ export function ImageImport({
                   >
                     <option value="disk">Installed boot disk</option>
                     <option value="installer">OS installer</option>
-                  </select>
+                  </NativeSelect>
                 </label>
-                <label className="space-y-2 text-xs">
+                <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                   Format
-                  <select
+                  <NativeSelect
                     aria-label="Format"
-                    className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
                     value={format}
                     onChange={(e) => setFormat(e.target.value)}
                   >
@@ -273,12 +277,15 @@ export function ImageImport({
                     ).map((v) => (
                       <option key={v}>{v}</option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </label>
               </div>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid gap-3 @sm/import:grid-cols-3">
                 {resourceFields.map(([key, label]) => (
-                  <label key={key} className="space-y-2 text-xs">
+                  <label
+                    key={key}
+                    className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                  >
                     {label}
                     <Input
                       type="number"
@@ -313,7 +320,7 @@ export function ImageImport({
                   </span>
                 </label>
               )}
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
                 Image file
                 <Input
                   type="file"
@@ -487,7 +494,7 @@ export function ImageCapture({
           </div>
         ) : (
           <form className="space-y-4" onSubmit={submit}>
-            <label className="block space-y-2 text-xs">
+            <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
               Snapshot name
               <Input
                 required

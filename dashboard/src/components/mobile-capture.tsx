@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { errorMessage } from "@/lib/api";
 import {
@@ -239,8 +240,7 @@ export function MobileCapture({ machine }: { machine: Machine }) {
         </label>
         <label className="grid gap-1.5 text-[13px] font-medium">
           Recording length
-          <select
-            className="h-8 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
+          <NativeSelect
             value={duration}
             disabled={recording}
             onChange={(e) => setDuration(Number(e.target.value))}
@@ -254,7 +254,7 @@ export function MobileCapture({ machine }: { machine: Machine }) {
                     : `${s / 60} minutes`}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <div className="flex gap-2">
           <Button disabled={recording} onClick={record}>

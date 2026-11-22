@@ -349,18 +349,18 @@ export function GuestFiles({
               onChange={(e) => setFilter(e.target.value)}
             />
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="grid grid-cols-[minmax(0,1fr)_5rem] gap-3 border-b bg-background px-4 py-2 text-xs text-muted-foreground sm:grid-cols-[minmax(0,1fr)_5rem_9rem]">
+          <div className="@container/files min-h-0 flex-1 overflow-y-auto">
+            <div className="grid grid-cols-[minmax(0,1fr)_5rem] h-9 items-center gap-3 border-b bg-background px-3 text-xs text-muted-foreground @lg/files:grid-cols-[minmax(0,1fr)_5rem_9rem]">
               <span>Name</span>
               <span>Size</span>
-              <span className="hidden sm:block">Modified</span>
+              <span className="hidden @lg/files:block">Modified</span>
             </div>
             {visible.map((entry) => (
               <button
                 key={entry.name}
                 disabled={busy}
                 onClick={() => action(() => inspect(entry))}
-                className={`grid w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b px-3 py-2 text-left text-xs hover:bg-muted sm:grid-cols-[minmax(0,1fr)_5rem_9rem] ${selected?.name === entry.name ? "bg-muted" : ""}`}
+                className={`grid min-h-11 w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b px-3 py-2 text-left text-[13px] hover:bg-muted @lg/files:grid-cols-[minmax(0,1fr)_5rem_9rem] ${selected?.name === entry.name ? "bg-muted" : ""}`}
               >
                 <span className="flex min-w-0 items-center gap-3">
                   {entry.kind === "directory" ? (
@@ -370,10 +370,10 @@ export function GuestFiles({
                   )}
                   <span className="min-w-0 break-all">{entry.name}</span>
                 </span>
-                <span className="text-muted-foreground">
+                <span className="tabular-nums text-muted-foreground">
                   {entry.kind === "directory" ? "Folder" : size(entry.size)}
                 </span>
-                <span className="hidden text-muted-foreground sm:block">
+                <span className="hidden tabular-nums text-muted-foreground @lg/files:block">
                   {entry.modifiedAt
                     ? new Date(entry.modifiedAt * 1000).toLocaleString()
                     : "—"}

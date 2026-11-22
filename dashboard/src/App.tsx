@@ -1,3 +1,5 @@
+import { FilterChip } from "@/components/ui/filter-chip";
+import { NativeSelect } from "@/components/ui/native-select";
 import { matchesMachineState } from "./lib/fleet";
 import {
   MobileInstall,
@@ -1134,9 +1136,13 @@ export function App() {
                 />
               )}
               {view !== "templates" && (
-                <div className="flex flex-wrap items-center justify-between gap-2">
+                <div
+                  role="group"
+                  aria-label={`Filter ${view}`}
+                  className="flex min-w-0 flex-wrap items-center gap-2 border-b pb-2"
+                >
                   <div className="grid w-full min-w-0 grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap">
-                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-8 md:w-56 xl:w-64">
+                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-8 md:w-64">
                       <InputGroupInput
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
@@ -1148,9 +1154,9 @@ export function App() {
                       </InputGroupAddon>
                     </InputGroup>
                     {view === "machines" && (
-                      <select
+                      <NativeSelect
                         aria-label="Machine state"
-                        className="h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:hidden"
+                        className="h-10 w-full md:hidden"
                         value={filter}
                         onChange={(e) => setFilter(e.target.value)}
                       >
@@ -1159,12 +1165,12 @@ export function App() {
                             {value === "all" ? "All states" : label}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     )}
                     {view === "machines" && user.role === "admin" && (
-                      <select
+                      <NativeSelect
                         aria-label="Machine owner"
-                        className="h-10 min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-8 md:max-w-44"
+                        className="h-10 w-full md:h-8 md:w-40"
                         value={owner}
                         onChange={(e) => setOwner(e.target.value)}
                       >
@@ -1175,23 +1181,23 @@ export function App() {
                             {u.username}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     )}
                   </div>
                   <ToggleGroup
-                    className={`max-w-full flex-wrap rounded-md border bg-muted p-0.5 ${view === "machines" ? "hidden md:flex" : ""}`}
+                    className={`max-w-full flex-wrap rounded-md border bg-muted p-0.5 md:ml-auto ${view === "machines" ? "hidden md:flex" : ""}`}
                     type="single"
                     value={filter}
                     onValueChange={(value) => {
                       if (value) setFilter(value);
                     }}
                     size="sm"
-                    spacing={1}
+                    spacing={0}
                     aria-label="Filter inventory"
                   >
                     {filters.map(({ value, label }) => (
                       <ToggleGroupItem
-                        className="rounded-md text-muted-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-xs"
+                        className="px-2 text-muted-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-xs"
                         key={value}
                         value={value}
                       >
@@ -1202,25 +1208,48 @@ export function App() {
                 </div>
               )}
               {view !== "templates" &&
-                items.length > 0 &&
                 (query || filter !== "all" || owner !== "all") && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <span className="text-muted-foreground" role="status">
-                      {items.length} of {total} {view} ·{" "}
-                      {filter === "all" ? "All states" : filterLabel(filter)}
-                      {query ? ` · “${query}”` : ""}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setQuery("");
-                        setFilter("all");
-                        setOwner("all");
-                      }}
-                    >
-                      Clear filters
-                    </Button>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                    {query && (
+                      <FilterChip
+                        label="Search"
+                        value={query}
+                        onRemove={() => setQuery("")}
+                      />
+                    )}
+                    {filter !== "all" && (
+                      <FilterChip
+                        label="State"
+                        value={filterLabel(filter)}
+                        onRemove={() => setFilter("all")}
+                      />
+                    )}
+                    {owner !== "all" && (
+                      <FilterChip
+                        label="Owner"
+                        value={
+                          owner === "none"
+                            ? "No user owner"
+                            : (directory.data?.find((u) => u.id === owner)
+                                ?.username ?? owner)
+                        }
+                        onRemove={() => setOwner("all")}
+                      />
+                    )}
+                    {items.length > 0 && (
+                      <Button
+                        className="ml-auto"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setQuery("");
+                          setFilter("all");
+                          setOwner("all");
+                        }}
+                      >
+                        Clear filters
+                      </Button>
+                    )}
                   </div>
                 )}
               {view === "templates" && user.role === "admin" && (

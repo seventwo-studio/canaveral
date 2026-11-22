@@ -1,3 +1,5 @@
+import { SettingsRows } from "./ui/field";
+import { NativeSelect } from "./ui/native-select";
 import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
@@ -449,47 +451,48 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
     <section className="min-w-0 space-y-5 text-sm">
       <h1 className="text-xl font-semibold tracking-tight">Models</h1>
       <form
-        className="max-w-2xl space-y-4 border-y py-4"
+        className="max-w-2xl space-y-3"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
       >
-        <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Installed model
-            <select
-              className="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2 text-base md:text-[13px]"
-              value={choice}
-              onChange={(e) => setChoice(e.target.value)}
-            >
-              {choices.map((c) => (
-                <option key={key(c)} value={key(c)} disabled={!c.ready}>
-                  {c.id} · {short(c.digest)} ·{" "}
-                  {c.ready
-                    ? `${c.ready} ready host${c.ready === 1 ? "" : "s"}`
-                    : "no ready host"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Prompt
-            <Textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-baseline sm:gap-4">
-            Maximum output tokens
-            <Input
-              type="number"
-              min={1}
-              max={4096}
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(e.target.value)}
-            />
-          </label>
+        <fieldset className="min-w-0" disabled={busy || !!pending}>
+          <SettingsRows>
+            <label className="text-[13px] font-medium">
+              Installed model
+              <NativeSelect
+                value={choice}
+                onChange={(e) => setChoice(e.target.value)}
+              >
+                {choices.map((c) => (
+                  <option key={key(c)} value={key(c)} disabled={!c.ready}>
+                    {c.id} · {short(c.digest)} ·{" "}
+                    {c.ready
+                      ? `${c.ready} ready host${c.ready === 1 ? "" : "s"}`
+                      : "no ready host"}
+                  </option>
+                ))}
+              </NativeSelect>
+            </label>
+            <label className="text-[13px] font-medium">
+              Prompt
+              <Textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+              />
+            </label>
+            <label className="text-[13px] font-medium">
+              Maximum output tokens
+              <Input
+                type="number"
+                min={1}
+                max={4096}
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(e.target.value)}
+              />
+            </label>
+          </SettingsRows>
         </fieldset>
         {error && (
           <p className="text-sm text-destructive" role="alert">
@@ -510,7 +513,10 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
             </Button>
           </p>
         )}
-        <Button className="sm:ml-48" disabled={busy || (!pending && !choice)}>
+        <Button
+          className="ml-auto flex"
+          disabled={busy || (!pending && !choice)}
+        >
           {pending ? "Retry same request" : "Run model"}
         </Button>
       </form>

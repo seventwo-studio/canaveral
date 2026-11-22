@@ -1,3 +1,4 @@
+import { NativeSelect } from "@/components/ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
@@ -33,8 +34,6 @@ const denied = (e: unknown) =>
   typeof e === "object" &&
   "status" in e &&
   (e.status === 401 || e.status === 403);
-const select =
-  "h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9";
 const figure = "font-mono tabular-nums";
 
 /** p50 and p95 with the number of samples behind them, so a percentile over three leases reads as one. */
@@ -305,15 +304,15 @@ function UsageSession({
       </div>
 
       <form
-        className="grid min-w-0 gap-3 border-y py-3 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid min-w-0 grid-cols-2 items-start gap-2 border-y py-2 sm:grid-cols-[repeat(2,minmax(0,11rem))] lg:grid-cols-[repeat(2,minmax(0,11rem))_repeat(2,minmax(0,14rem))] [&_[data-slot=field]]:gap-1"
         aria-label="Choose a usage report"
         onSubmit={(event) => event.preventDefault()}
       >
         <Field>
           <FieldLabel htmlFor="usage-range">Range</FieldLabel>
-          <select
+          <NativeSelect
             id="usage-range"
-            className={select}
+            className="h-10 w-full md:h-8"
             value={choice}
             onChange={(event) => setChoice(event.target.value as RangeChoice)}
           >
@@ -323,13 +322,13 @@ function UsageSession({
               </option>
             ))}
             <option value="custom">Custom range</option>
-          </select>
+          </NativeSelect>
         </Field>
         <Field>
           <FieldLabel htmlFor="usage-group">Group by</FieldLabel>
-          <select
+          <NativeSelect
             id="usage-group"
-            className={select}
+            className="h-10 w-full md:h-8"
             value={groupBy}
             onChange={(event) => setGroupBy(event.target.value as UsageGroup)}
           >
@@ -338,16 +337,16 @@ function UsageSession({
                 {groupLabels[key]}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
         {choice === "custom" && (
           <>
-            <Field>
+            <Field className="col-span-2 sm:col-span-1">
               <FieldLabel htmlFor="usage-from">From (local time)</FieldLabel>
               <Input
                 id="usage-from"
                 type="datetime-local"
-                className="font-mono text-xs"
+                className="h-10 font-mono md:h-8"
                 value={custom.from}
                 onChange={(event) =>
                   setCustom((current) => ({
@@ -357,12 +356,15 @@ function UsageSession({
                 }
               />
             </Field>
-            <Field data-invalid={!!rangeError || undefined}>
+            <Field
+              className="col-span-2 sm:col-span-1"
+              data-invalid={!!rangeError || undefined}
+            >
               <FieldLabel htmlFor="usage-to">To (local time)</FieldLabel>
               <Input
                 id="usage-to"
                 type="datetime-local"
-                className="font-mono text-xs"
+                className="h-10 font-mono md:h-8"
                 aria-invalid={!!rangeError || undefined}
                 aria-describedby={rangeError ? "usage-range-error" : undefined}
                 value={custom.to}

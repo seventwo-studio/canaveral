@@ -14,12 +14,35 @@ function FieldSet({ className, ...props }: React.ComponentProps<"fieldset">) {
     <fieldset
       data-slot="field-set"
       className={cn(
-        "flex flex-col gap-4",
+        "flex min-w-0 flex-col gap-4",
         "has-[>[data-slot=checkbox-group]]:gap-3 has-[>[data-slot=radio-group]]:gap-3",
         className,
       )}
       {...props}
     />
+  );
+}
+
+// The form column controls when settings rows can fit a label beside a control.
+function SettingsRows({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<"div">) {
+  return (
+    <div className="@container/settings min-w-0">
+      <div
+        className={cn(
+          "divide-y rounded-md border bg-card",
+          "[&>*]:grid [&>*]:min-w-0 [&>*]:gap-1.5 [&>*]:px-4 [&>*]:py-3",
+          "@lg/settings:[&>*]:grid-cols-[minmax(9rem,1fr)_minmax(0,1fr)] @lg/settings:[&>*]:items-baseline @lg/settings:[&>*]:gap-x-4",
+          className,
+        )}
+        {...props}
+      >
+        {children}
+      </div>
+    </div>
   );
 }
 
@@ -57,7 +80,7 @@ function FieldGroup({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 const fieldVariants = cva(
-  "group/field flex w-full gap-1.5 data-[invalid=true]:text-destructive",
+  "group/field flex min-w-0 w-full gap-1.5 data-[invalid=true]:text-destructive",
   {
     variants: {
       orientation: {
@@ -145,7 +168,7 @@ function FieldDescription({ className, ...props }: React.ComponentProps<"p">) {
     <p
       data-slot="field-description"
       className={cn(
-        "text-sm leading-normal font-normal text-muted-foreground group-has-[[data-orientation=horizontal]]/field:text-balance",
+        "text-[13px] leading-5 font-normal text-muted-foreground group-has-[[data-orientation=horizontal]]/field:text-balance",
         "last:mt-0 nth-last-2:-mt-1 [[data-variant=legend]+&]:-mt-1.5",
         "[&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
         className,
@@ -243,6 +266,7 @@ export {
   FieldLegend,
   FieldSeparator,
   FieldSet,
+  SettingsRows,
   FieldContent,
   FieldTitle,
 };

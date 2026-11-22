@@ -38,6 +38,10 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 | Status and danger | Use small tinted pills with readable state names. A dot can reinforce the label. Keep success green, waiting amber and failure red. Reserve destructive action styling for commands that warrant confirmation. |
 | Sheets and dialogs | Keep the title, affected resource and decision in the same panel. Give overlays more elevation than inline panels. Constrain tall content to the viewport, preserve keyboard focus and expose controls at narrow widths. |
 
+The Sessions list puts status first and separates rows with fine horizontal rules. On wide screens Machines follows that order. On phones the machine name leads each labeled record. Active search, state and owner filters are individually removable, and the inventory count appears once beneath the results. [Filtered Sessions](https://mobbin.com/screens/c7cff77e-7495-45ca-9eac-5031fddb1650)
+
+For settings, keep related field labels and controls within one divided group. Put help text beside its field and keep it available to assistive technology. Native pickers use the same border, height and focus treatment as adjacent inputs. [Project settings](https://mobbin.com/screens/e984b51b-6945-46cf-8459-fbafff41fd52)
+
 ### Shared shadcn dimensions
 
 | Primitive | Size and detail |
@@ -50,7 +54,7 @@ These dimensions and colors are Canaveral implementation values chosen from visu
 
 ### Page layouts
 
-The Machines and Orchestrators lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area and a 448px form column so related fields and actions share a left edge.
+The Machines and Orchestrators lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area. Editable settings share one outlined group with horizontal row dividers. At a form width of 512px, each row puts its label and control in equal columns. Narrower groups stack each label above its control. Place the submit action beneath the group at its trailing edge.
 
 | Other destinations | Layout |
 | --- | --- |

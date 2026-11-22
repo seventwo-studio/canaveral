@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { imageTask, registryEntries } from "@/lib/catalogue";
 import type {
@@ -141,11 +142,11 @@ export function BaseImageRegistry({
           </DialogDescription>
         </DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Import onto host
-            <select
+            <NativeSelect
               aria-label="Registry target host"
-              className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+
               value={host}
               onChange={(e) => setHost(e.target.value)}
             >
@@ -155,9 +156,9 @@ export function BaseImageRegistry({
                   {h.name}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Search registry
             <Input
               value={query}
@@ -165,30 +166,25 @@ export function BaseImageRegistry({
               placeholder="Ubuntu, macOS, Windows…"
             />
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Operating system
-            <select
-              className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
-              value={os}
-              onChange={(e) => setOs(e.target.value)}
-            >
+            <NativeSelect value={os} onChange={(e) => setOs(e.target.value)}>
               <option value="all">All operating systems</option>
               <option value="linux">Linux</option>
               <option value="macos">macOS</option>
               <option value="windows">Windows</option>
-            </select>
+            </NativeSelect>
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
             Architecture
-            <select
-              className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
+            <NativeSelect
               value={arch}
               onChange={(e) => setArch(e.target.value)}
             >
               <option value="all">All architectures</option>
               <option value="arm64">ARM64</option>
               <option value="amd64">x86-64</option>
-            </select>
+            </NativeSelect>
           </label>
         </div>
         {error && (

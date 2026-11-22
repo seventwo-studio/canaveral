@@ -300,119 +300,131 @@ function QueueSession({
                 </EmptyHeader>
               </Empty>
             ) : (
-              <ol
-                aria-label="Waiting requests in attempt order"
-                className="min-w-0 divide-y border-y bg-card"
-              >
-                {view.requests.map((request) => (
-                  <li
-                    key={`${request.applicationId}:${request.id}`}
-                    className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:grid-cols-[5.5rem_minmax(0,1fr)_auto] lg:items-start"
-                  >
-                    <div className="min-w-0">
-                      {request.position === null ? (
-                        <Badge variant="outline">No position</Badge>
-                      ) : (
-                        <p
-                          className="text-xl font-semibold tabular-nums"
-                          aria-label={`Position ${request.position}`}
-                        >
-                          #{request.position}
-                        </p>
-                      )}
-                    </div>
-                    <div className="min-w-0 space-y-3">
-                      <div className="min-w-0 space-y-1">
-                        <p
-                          className={`font-display text-base font-medium [overflow-wrap:anywhere] ${request.label ? "" : "text-muted-foreground"}`}
-                        >
-                          {request.label ?? "No label"}
-                        </p>
-                        <p className="text-sm">
-                          {waitingReason(request)}
-                          {request.reason && (
-                            <>
-                              {" "}
-                              <span className="font-mono text-xs text-muted-foreground">
-                                {request.reason}
-                              </span>
-                            </>
-                          )}
-                        </p>
-                        {request.position === null && (
-                          <p className="text-sm text-muted-foreground">
-                            {unorderedReason(request, now)}
+              <div>
+                <div
+                  aria-hidden="true"
+                  className="hidden h-9 items-center gap-3 px-3 text-xs text-muted-foreground lg:grid lg:grid-cols-[5.5rem_minmax(0,1fr)_7rem]"
+                >
+                  <span>Position</span>
+                  <span>Request</span>
+                  <span>Actions</span>
+                </div>
+                <ol
+                  aria-label="Waiting requests in attempt order"
+                  className="min-w-0 divide-y border-y bg-card"
+                >
+                  {view.requests.map((request) => (
+                    <li
+                      key={`${request.applicationId}:${request.id}`}
+                      className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:px-3 lg:grid-cols-[5.5rem_minmax(0,1fr)_7rem] lg:items-start"
+                    >
+                      <div className="min-w-0">
+                        {request.position === null ? (
+                          <Badge variant="outline">No position</Badge>
+                        ) : (
+                          <p
+                            className="text-base font-semibold tabular-nums"
+                            aria-label={`Position ${request.position}`}
+                          >
+                            #{request.position}
                           </p>
                         )}
                       </div>
-                      <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 xl:grid-cols-5">
-                        <Pair label="Kind">{kindLabels[request.kind]}</Pair>
-                        <Pair
-                          label={
-                            request.kind === "model-job" ? "Model" : "Template"
-                          }
-                        >
-                          <What subject={request} />
-                        </Pair>
-                        <Pair label="Priority" mono>
-                          {request.priority}
-                        </Pair>
-                        <Pair label="Waiting for" mono>
-                          <span
-                            title={`Submitted ${localTime(request.createdAt)}`}
+                      <div className="min-w-0 space-y-3">
+                        <div className="min-w-0 space-y-1">
+                          <p
+                            className={`font-display text-base font-medium [overflow-wrap:anywhere] ${request.label ? "" : "text-muted-foreground"}`}
                           >
-                            {duration(
-                              (now - Date.parse(request.createdAt)) / 1000,
+                            {request.label ?? "No label"}
+                          </p>
+                          <p className="text-sm">
+                            {waitingReason(request)}
+                            {request.reason && (
+                              <>
+                                {" "}
+                                <span className="font-mono text-xs text-muted-foreground">
+                                  {request.reason}
+                                </span>
+                              </>
                             )}
-                          </span>
-                        </Pair>
-                        <Pair label="Deadline" mono>
-                          {request.deadline === null ? (
-                            "None"
-                          ) : (
-                            <span title={localTime(request.deadline)}>
-                              {Date.parse(request.deadline) > now
-                                ? `in ${duration((Date.parse(request.deadline) - now) / 1000)}`
-                                : "passed"}
-                            </span>
+                          </p>
+                          {request.position === null && (
+                            <p className="text-sm text-muted-foreground">
+                              {unorderedReason(request, now)}
+                            </p>
                           )}
-                        </Pair>
-                      </dl>
-                      <dl className="grid min-w-0 gap-x-4 gap-y-3 sm:grid-cols-2">
-                        <Pair label="Application">
-                          <Holder subject={request} />
-                        </Pair>
-                        <Pair label="Request" mono>
-                          <a
-                            className="underline-offset-4 hover:underline"
-                            href={`#activity/request/${request.id}`}
-                            aria-label={`Activity of request ${request.id}`}
+                        </div>
+                        <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 xl:grid-cols-5">
+                          <Pair label="Kind">{kindLabels[request.kind]}</Pair>
+                          <Pair
+                            label={
+                              request.kind === "model-job"
+                                ? "Model"
+                                : "Template"
+                            }
                           >
-                            {request.id}
-                          </a>
-                        </Pair>
-                      </dl>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="justify-self-start"
-                      disabled={!!intent || !!error}
-                      aria-label={`Cancel request ${name(request)}`}
-                      onClick={() => {
-                        setUncertain(false);
-                        setNotice("");
-                        setIntent({
-                          target: request,
-                          requestId: crypto.randomUUID(),
-                        });
-                      }}
-                    >
-                      Cancel request
-                    </Button>
-                  </li>
-                ))}
-              </ol>
+                            <What subject={request} />
+                          </Pair>
+                          <Pair label="Priority" mono>
+                            {request.priority}
+                          </Pair>
+                          <Pair label="Waiting for" mono>
+                            <span
+                              title={`Submitted ${localTime(request.createdAt)}`}
+                            >
+                              {duration(
+                                (now - Date.parse(request.createdAt)) / 1000,
+                              )}
+                            </span>
+                          </Pair>
+                          <Pair label="Deadline" mono>
+                            {request.deadline === null ? (
+                              "None"
+                            ) : (
+                              <span title={localTime(request.deadline)}>
+                                {Date.parse(request.deadline) > now
+                                  ? `in ${duration((Date.parse(request.deadline) - now) / 1000)}`
+                                  : "passed"}
+                              </span>
+                            )}
+                          </Pair>
+                        </dl>
+                        <dl className="grid min-w-0 gap-x-4 gap-y-3 sm:grid-cols-2">
+                          <Pair label="Application">
+                            <Holder subject={request} />
+                          </Pair>
+                          <Pair label="Request" mono>
+                            <a
+                              className="underline-offset-4 hover:underline"
+                              href={`#activity/request/${request.id}`}
+                              aria-label={`Activity of request ${request.id}`}
+                            >
+                              {request.id}
+                            </a>
+                          </Pair>
+                        </dl>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="justify-self-start"
+                        disabled={!!intent || !!error}
+                        aria-label={`Cancel request ${name(request)}`}
+                        onClick={() => {
+                          setUncertain(false);
+                          setNotice("");
+                          setIntent({
+                            target: request,
+                            requestId: crypto.randomUUID(),
+                          });
+                        }}
+                      >
+                        Cancel request
+                      </Button>
+                    </li>
+                  ))}
+                </ol>
+              </div>
             )}
           </section>
           <ActiveLeases view={view} now={now} />
@@ -542,7 +554,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
 function LeaseRow({ lease, now }: { lease: QueueLease; now: number }) {
   const remaining = (Date.parse(lease.expiresAt) - now) / 1000;
   return (
-    <li className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
+    <li className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:px-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
       <div className="min-w-0">
         <Badge variant="outline">{lease.state}</Badge>
       </div>

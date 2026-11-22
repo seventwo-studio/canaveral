@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Search, RefreshCw } from "lucide-react";
@@ -93,8 +94,8 @@ function CatalogueToolbar({
   onRefresh: () => void;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 sm:flex sm:flex-wrap">
-      <InputGroup className="w-full sm:max-w-72">
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b pb-2 sm:flex sm:flex-wrap">
+      <InputGroup className="h-10 w-full sm:max-w-64 md:h-8">
         <InputGroupInput
           aria-label={label}
           placeholder={placeholder}
@@ -106,14 +107,24 @@ function CatalogueToolbar({
         </InputGroupAddon>
       </InputGroup>
       {loaded && (
-        <span className="col-span-2 row-start-2 text-xs text-muted-foreground tabular-nums">
+        <span className="col-start-1 row-start-2 text-xs text-muted-foreground tabular-nums">
           {count} of {total}
         </span>
       )}
+      {query && count > 0 && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="col-start-2 row-start-2 justify-self-end sm:ml-auto"
+          onClick={() => onQuery("")}
+        >
+          Clear search
+        </Button>
+      )}
       <Button
-        className="col-start-2 row-start-1 sm:ml-auto"
+        className={`col-start-2 row-start-1 ${query && count > 0 ? "" : "sm:ml-auto"}`}
         variant="outline"
-        size="sm"
+        size="default"
         disabled={refreshing}
         aria-label={`Refresh ${label.replace(/^Search /, "")}`}
         onClick={onRefresh}
@@ -653,7 +664,7 @@ export function BlueprintEditor({
             writable disk.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="space-y-4">
+        <form onSubmit={submit} className="@container/blueprint space-y-4">
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor="blueprint-name">Blueprint name</FieldLabel>
@@ -669,12 +680,13 @@ export function BlueprintEditor({
               <FieldLabel htmlFor="blueprint-revision">Revision</FieldLabel>
               <Input
                 id="blueprint-revision"
+                aria-describedby="blueprint-revision-hint"
                 name="revision"
                 defaultValue={previous ? "" : "1"}
                 required
                 disabled={busy}
               />
-              <FieldDescription>
+              <FieldDescription id="blueprint-revision-hint">
                 Saved revisions are immutable.
               </FieldDescription>
             </Field>
@@ -682,12 +694,11 @@ export function BlueprintEditor({
               <FieldLabel htmlFor="blueprint-source">
                 Source image or prepared snapshot
               </FieldLabel>
-              <select
+              <NativeSelect
                 id="blueprint-source"
                 value={selected}
                 disabled={busy}
                 onChange={(e) => setSelected(e.target.value)}
-                className="h-8 w-full min-w-0 rounded-md border border-input bg-card px-2.5 text-[13px] shadow-xs"
               >
                 {!source && (
                   <option value={selected} disabled>
@@ -703,12 +714,12 @@ export function BlueprintEditor({
                     {s.imageKind === "derived" ? " · Prepared snapshot" : ""}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
             {source ? (
               <div
                 key={JSON.stringify([source.id, source.revision, source.arch])}
-                className="grid grid-cols-3 gap-3"
+                className="grid gap-3 @sm/blueprint:grid-cols-3"
               >
                 {(["cpu", "memoryMiB", "diskGiB"] as const).map((k) => (
                   <Field key={k}>
