@@ -71,6 +71,17 @@ fn private(file: &File, directory: bool) -> Result<()> {
     }
     Ok(())
 }
+pub(super) fn same_inode(first: &File, second: &File) -> Result<()> {
+    let a = io(first.metadata())?;
+    let b = io(second.metadata())?;
+    if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+const PACKAGE_PENDING: &str = "runtime-package.next";
+
 pub(super) struct Directory {
     path: PathBuf,
     dir: File,
@@ -177,8 +188,8 @@ impl Directory {
     }
     pub fn package_workspace(&self) -> Result<File> {
         self.check()?;
-        self.remove_package("runtime-package.next")?;
-        let n = name("runtime-package.next".as_ref())?;
+        self.remove_package(PACKAGE_PENDING)?;
+        let n = name(PACKAGE_PENDING.as_ref())?;
         if unsafe { libc::mkdirat(self.dir.as_raw_fd(), n.as_ptr(), 0o700) } != 0 {
             return Err(invalid());
         }
@@ -233,22 +244,41 @@ impl Directory {
         private(&dir, true)?;
         Ok(Some(dir))
     }
-    pub fn publish_package(&self, cache: &str) -> Result<()> {
+    pub fn discard_package_workspace(&self, staging: &File) -> Result<()> {
+        if let Some(pending) = self.cached_package(PACKAGE_PENDING)? {
+            same_inode(staging, &pending)?;
+            self.remove_package(PACKAGE_PENDING)?;
+            io(self.dir.sync_all())?;
+        }
+        self.check()
+    }
+
+    pub fn publish_package(&self, cache: &str, staging: &File) -> Result<()> {
         self.check()?;
         if self.cached_package(cache)?.is_some() {
             return Err("runtime cache changed during installation");
         }
+        let pending = name(PACKAGE_PENDING.as_ref())?;
+        let destination = name(cache.as_ref())?;
+        same_inode(
+            staging,
+            &openat(&self.dir, &pending, libc::O_RDONLY | libc::O_DIRECTORY)?,
+        )?;
         if unsafe {
             libc::renameat(
                 self.dir.as_raw_fd(),
-                name("runtime-package.next".as_ref())?.as_ptr(),
+                pending.as_ptr(),
                 self.dir.as_raw_fd(),
-                name(cache.as_ref())?.as_ptr(),
+                destination.as_ptr(),
             )
         } != 0
         {
             return Err(invalid());
         }
+        same_inode(
+            staging,
+            &openat(&self.dir, &destination, libc::O_RDONLY | libc::O_DIRECTORY)?,
+        )?;
         io(self.dir.sync_all())?;
         self.check()
     }
@@ -276,12 +306,15 @@ impl Directory {
         &self,
         current: &str,
         references: &super::PackageReferences,
-        mut eligible: impl FnMut(&str, &File) -> Result<bool>,
+        mut eligible: impl FnMut(&str, &File) -> bool,
     ) -> Result<()> {
         for entry in self.package_entries()? {
             if entry != current && !references.contains(&entry) {
-                let package = self.cached_package(&entry)?.ok_or_else(invalid)?;
-                if eligible(&entry, &package)? {
+                let Ok(Some(package)) = self.cached_package(&entry) else {
+                    self.check()?;
+                    continue;
+                };
+                if eligible(&entry, &package) {
                     self.delete_package(&entry, references)?;
                 }
             }

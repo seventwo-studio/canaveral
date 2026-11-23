@@ -211,20 +211,39 @@ The catalog ships as [compiled-in release data](../crates/model-execution/src/ru
 Each archive uses the bounded HTTPS client. GitHub release URLs can follow one
 redirect to GitHub's HTTPS release asset host. The executor checks exact
 compressed bytes and SHA-256 before parsing, bounds expansion to 128:1 and
-applies the per-file and package limits above. It allows 4,096 archive entries
-with paths up to 1,024 bytes. ZIP support covers single-disk stored and
-deflated files, with standard end records. Unsafe paths, case collisions,
-special files, set-id bits and hard links fail before publication. Catalog
-tarballs may opt into materializing same-directory symlink chains as regular
-files. The installer discards permitted PAX timestamp and Apple code-signing
-annotations, so native acceptance must check any dependency on those attributes.
+applies the per-file and package limits above. Each pin's `unpackedBytes` also
+caps installed file data, including materialized aliases. The executor checks
+filesystem free space for the download and installed tree, then checks again
+before extraction. Both checks reserve a 64 MiB margin. Failed extraction
+removes the staging directory under the executor lock.
+
+Archives allow 4,096 entries with paths up to 1,024 bytes. Zstandard tarballs
+use a single frame with an 8 MiB maximum window. The executor uses ruzstd for
+pure-Rust streaming decoding with a configurable allocation bound, avoiding a
+native dependency. ZIP support covers single-disk stored and deflated files
+with standard end records. Unsafe paths, case collisions, special files,
+set-id bits and hard links fail before publication. Catalog tarballs may opt
+into materializing same-directory symlink chains from retained file descriptors.
+Pinned omissions, such as the Ollama GPU subtrees, still undergo tar validation
+and count toward decompressed stream limits. The installer discards permitted
+PAX timestamp and Apple code-signing annotations, so native acceptance must
+check any dependency on those attributes.
+
+The executor verifies the staging directory's device and inode on either side
+of publication and rechecks the executable's digest and identity before spawn.
+As with [managed updates](runtime-updates.md), these checks assume a controlled
+directory tree. Same-account concurrent malicious filesystem mutation is outside
+that trust boundary. Old cache entries with unreadable or undecodable manifests
+are skipped during inventory and pruning. A corrupt current package fails
+verification. Explicit removal still refuses journal-referenced packages.
 
 To update a pin, download the versioned upstream asset to a disposable directory.
 Measure its byte count with `wc -c` and its SHA-256 with `shasum -a 256`.
 Compare both against the release metadata and checksum list when available.
 Update the URL, version, retrieval date, format, strip prefix, entrypoint and
-executable paths in the catalog. Run the offline archive check with all catalog
-assets present. The check prints the calculated tree digest if it differs from
+executable paths in the catalog. Record the installed byte count after omissions
+and including materialized aliases. Run the offline archive check with all
+catalog assets present. The check prints the calculated tree digest if it differs from
 `treeSha256`. Review the installed file layout and update the tree pin and notices
 before landing the release. Remove the downloaded copies afterwards.
 

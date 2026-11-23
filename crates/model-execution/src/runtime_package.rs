@@ -270,6 +270,31 @@ fn copy_hashed(
     }
     Ok(())
 }
+pub(super) fn verify_executable(
+    path: &Path,
+    expected: &str,
+    state: &private::Directory,
+) -> Result<()> {
+    let parent = path.parent().ok_or_else(invalid)?;
+    let name = private::name(path.file_name().ok_or_else(invalid)?)?;
+    let mut file = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
+    trusted(&file, false)?;
+    let metadata = file.metadata().map_err(|_| invalid())?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o500 {
+        return Err("unsafe staged runtime executable");
+    }
+    let deadline = Instant::now() + Duration::from_secs(600);
+    copy_hashed(&mut file, None, expected, &mut 0, deadline)?;
+    let current = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
+    trusted(&current, false)?;
+    private::same_inode(&file, &current)?;
+    let after = current.metadata().map_err(|_| invalid())?;
+    if (metadata.ctime(), metadata.ctime_nsec()) != (after.ctime(), after.ctime_nsec()) {
+        return Err("staged runtime executable changed during verification");
+    }
+    state.check()
+}
+
 pub(super) fn verify_cache(
     package: &RuntimePackage,
     root: &File,
@@ -393,7 +418,7 @@ fn stage_inner(
         verify_cache(package, &installed, deadline, None)?;
         state.check()?;
         state.prune_packages(&cache, references, |_, root| {
-            Ok(crate::runtime_archive::manifest_bytes(root)?.is_none())
+            matches!(crate::runtime_archive::manifest_bytes(root), Ok(None))
         })?;
         return Ok(installed_path);
     }
@@ -490,7 +515,7 @@ fn stage_inner(
     }
     publish(package, state, &output, &cache, deadline, None)?;
     state.prune_packages(&cache, references, |_, root| {
-        Ok(crate::runtime_archive::manifest_bytes(root)?.is_none())
+        matches!(crate::runtime_archive::manifest_bytes(root), Ok(None))
     })?;
     Ok(installed_path)
 }
@@ -518,7 +543,7 @@ pub(super) fn publish(
 ) -> Result<()> {
     output.sync_all().map_err(|_| invalid())?;
     verify_cache(package, output, deadline, archive_manifest)?;
-    state.publish_package(cache)
+    state.publish_package(cache, output)
 }
 
 #[cfg(test)]

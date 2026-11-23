@@ -6,12 +6,13 @@ use crate::{
     PackageReferences, Result,
 };
 use flate2::read::MultiGzDecoder;
+use ruzstd::decoding::StreamingDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -23,12 +24,16 @@ const DOWNLOAD: &str = ".canaveral-download";
 const ENTRIES: usize = 4096;
 const MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const RATIO: u64 = 128;
+const SPACE_MARGIN: u64 = 64 * 1024 * 1024;
+const ZSTD_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Format {
     #[serde(rename = "tar.gz")]
     TarGz,
+    #[serde(rename = "tar.zst")]
+    TarZst,
     Zip,
 }
 
@@ -41,6 +46,7 @@ pub(super) struct Pin {
     arch: String,
     pub url: String,
     pub bytes: u64,
+    unpacked_bytes: u64,
     pub sha256: String,
     format: Format,
     #[serde(default)]
@@ -50,6 +56,8 @@ pub(super) struct Pin {
     executables: Vec<String>,
     #[serde(default)]
     materialize_links: bool,
+    #[serde(default)]
+    omit_prefixes: Vec<String>,
     tree_sha256: String,
     pub qualified: bool,
     retrieved: String,
@@ -119,6 +127,19 @@ impl Pin {
         cache_name(self.backend, &self.version, &self.tree_sha256)
     }
 
+    fn expansion_limit(&self) -> u64 {
+        PACKAGE_BYTES.min(self.bytes.saturating_mul(RATIO))
+    }
+
+    fn omits(&self, path: &str) -> bool {
+        self.omit_prefixes.iter().any(|prefix| {
+            path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+
     fn validate(&self, test_loopback: bool) -> Result<()> {
         let url = package::https_url(&self.url, test_loopback)?;
         if url.path().ends_with('/')
@@ -134,12 +155,20 @@ impl Pin {
             || !package::hash_valid(&self.sha256)
             || !package::hash_valid(&self.tree_sha256)
             || !(1..=PACKAGE_BYTES).contains(&self.bytes)
+            || !(1..=self.expansion_limit()).contains(&self.unpacked_bytes)
+            || (matches!(self.format, Format::Zip) && !self.omit_prefixes.is_empty())
             || !matches!(self.os.as_str(), "macos" | "linux")
             || !matches!(self.arch.as_str(), "aarch64" | "x86_64")
         {
             return Err(invalid());
         }
+        for prefix in &self.omit_prefixes {
+            archive_parts(prefix)?;
+        }
         archive_parts(&self.entrypoint)?;
+        if self.omits(&self.entrypoint) || self.executables.iter().any(|path| self.omits(path)) {
+            return Err(invalid());
+        }
         if let Some(prefix) = &self.strip_prefix {
             archive_parts(prefix)?;
         }
@@ -222,9 +251,52 @@ impl Manifest {
 }
 
 pub(super) fn verify(pin: &Pin, root: &File, deadline: Instant) -> Result<()> {
+    let (manifest, bytes) = pinned_manifest(pin, root)?;
+    package::verify_cache(&manifest.package, root, deadline, Some(&bytes))
+}
+
+pub(super) fn pinned_entrypoint_digest(pin: &Pin, state: &Directory) -> Result<String> {
+    let root = state.cached_package(&pin.cache())?.ok_or_else(invalid)?;
+    let (manifest, _) = pinned_manifest(pin, &root)?;
+    Ok(manifest.package.files[&manifest.package.entrypoint].clone())
+}
+
+fn pinned_manifest(pin: &Pin, root: &File) -> Result<(Manifest, Vec<u8>)> {
     let bytes = manifest_bytes(root)?.ok_or_else(invalid)?;
     let manifest = Manifest::decode(&pin.cache(), &bytes)?;
-    package::verify_cache(&manifest.package, root, deadline, Some(&bytes))
+    Ok((manifest, bytes))
+}
+
+fn require_space(root: &File, bytes: u64) -> Result<()> {
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatvfs(root.as_raw_fd(), &mut stat) } != 0 {
+        return Err("runtime installation free space unavailable");
+    }
+    check_space(u128::from(stat.f_bavail) * u128::from(stat.f_frsize), bytes)
+}
+
+fn check_space(available: u128, bytes: u64) -> Result<()> {
+    if available < u128::from(bytes) + u128::from(SPACE_MARGIN) {
+        return Err("insufficient space for runtime installation");
+    }
+    Ok(())
+}
+
+struct DeadlineReader<R> {
+    input: R,
+    deadline: Instant,
+}
+
+impl<R: Read> Read for DeadlineReader<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "runtime installation deadline",
+            ));
+        }
+        self.input.read(output)
+    }
 }
 
 fn redirect_policy() -> reqwest::redirect::Policy {
@@ -361,9 +433,24 @@ struct Extraction<'a> {
     total: u64,
     files: BTreeMap<String, String>,
     links: BTreeMap<String, String>,
+    link_sources: BTreeMap<String, Option<File>>,
 }
 
-impl Extraction<'_> {
+impl<'a> Extraction<'a> {
+    fn new(pin: &'a Pin, root: &'a File, deadline: Instant) -> Self {
+        Self {
+            pin,
+            root,
+            deadline,
+            paths: Paths::default(),
+            entries: 0,
+            total: 0,
+            files: BTreeMap::new(),
+            links: BTreeMap::new(),
+            link_sources: BTreeMap::new(),
+        }
+    }
+
     fn count(&mut self) -> Result<()> {
         self.entries += 1;
         if self.entries > ENTRIES || Instant::now() >= self.deadline {
@@ -396,35 +483,41 @@ impl Extraction<'_> {
         Ok(Some(path.to_owned()))
     }
 
-    fn parent(&self, path: &str, create: bool) -> Result<(File, std::ffi::CString)> {
+    fn parent(&self, path: &str) -> Result<(File, std::ffi::CString)> {
         let components = archive_parts(path)?;
         let (name, parents) = components.split_last().ok_or_else(invalid)?;
         let mut dir = self.root.try_clone().map_err(|_| invalid())?;
         for part in parents {
-            dir = package::directory(&dir, part, create)?;
+            dir = package::directory(&dir, part, true)?;
         }
         Ok((dir, private::name(name.as_ref())?))
     }
 
-    fn file(&mut self, path: String, size: u64, input: &mut dyn Read) -> Result<()> {
+    fn file(&mut self, path: &str, size: u64, input: &mut dyn Read) -> Result<File> {
         self.total = self.total.checked_add(size).ok_or_else(invalid)?;
-        if size > FILE_BYTES || self.total > PACKAGE_BYTES.min(self.pin.bytes.saturating_mul(RATIO))
-        {
-            return Err("runtime archive byte or compression ratio bound exceeded");
+        if size > FILE_BYTES || self.total > self.pin.unpacked_bytes {
+            return Err("runtime archive byte bound exceeded");
         }
-        let (dir, name) = self.parent(&path, true)?;
-        let mut target =
-            private::openat(&dir, &name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+        let (dir, name) = self.parent(path)?;
+        let mut target = private::openat(&dir, &name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
         let hash = copy(input, &mut target, size, self.deadline)?;
-        let executable = path == self.pin.entrypoint || self.pin.executables.contains(&path);
+        let executable =
+            path == self.pin.entrypoint || self.pin.executables.iter().any(|entry| entry == path);
         finalize(&target, if executable { 0o500 } else { 0o400 })?;
         dir.sync_all().map_err(|_| invalid())?;
-        self.files.insert(path, hash);
-        Ok(())
+        self.files.insert(path.to_owned(), hash);
+        Ok(target)
     }
 
     fn link(&mut self, path: String, raw_target: &[u8]) -> Result<()> {
         let target = std::str::from_utf8(raw_target).map_err(|_| invalid())?;
+        // Some omitted vendor aliases spell out the current directory.
+        // Validate their target shape without allowing them to become installed aliases.
+        let target = if self.pin.omits(&path) {
+            target.strip_prefix("./").unwrap_or(target)
+        } else {
+            target
+        };
         if !self.pin.materialize_links || archive_parts(target)?.len() != 1 {
             return Err("unsafe runtime archive link");
         }
@@ -440,26 +533,73 @@ impl Extraction<'_> {
             let mut resolved = path.as_str();
             let mut hops = 0;
             while let Some(next) = self.links.get(resolved) {
+                if !self.pin.omits(&path) && self.pin.omits(resolved) {
+                    return Err("runtime archive link target was omitted");
+                }
                 hops += 1;
                 if hops > 32 {
                     return Err("runtime archive link cycle or depth exceeded");
                 }
                 resolved = next;
             }
-            if !self.files.contains_key(resolved) {
-                return Err("runtime archive link target is missing or not a file");
+            let source = self
+                .link_sources
+                .get(resolved)
+                .ok_or("runtime archive link target is missing or not a file")?;
+            if self.pin.omits(&path) {
+                continue;
             }
-            let (dir, name) = self.parent(resolved, false)?;
-            let mut input = private::openat(&dir, &name, libc::O_RDONLY)?;
+            let mut input = source
+                .as_ref()
+                .ok_or("runtime archive link target was omitted")?
+                .try_clone()
+                .map_err(|_| invalid())?;
+            let expected = self.files[resolved].clone();
             let size = input.metadata().map_err(|_| invalid())?.len();
-            self.file(path, size, &mut input)?;
+            input.rewind().map_err(|_| invalid())?;
+            self.file(&path, size, &mut input)?;
+            if self.files[&path] != expected {
+                return Err("runtime archive link target identity mismatch");
+            }
         }
         Ok(())
     }
 
-    fn tar(&mut self, input: File) -> Result<()> {
-        let limit = PACKAGE_BYTES.min(self.pin.bytes.saturating_mul(RATIO));
-        let stream = MultiGzDecoder::new(input).take(limit + 1);
+    fn extract(&mut self, input: File) -> Result<()> {
+        match self.pin.format {
+            Format::TarGz => self.tar(MultiGzDecoder::new(input))?,
+            Format::TarZst => {
+                let source = DeadlineReader {
+                    input: BufReader::new(input),
+                    deadline: self.deadline,
+                };
+                let mut decoder =
+                    StreamingDecoder::new_with_max_window_size(source, ZSTD_WINDOW_BYTES)
+                        .map_err(|_| "invalid runtime Zstandard frame")?;
+                self.tar(&mut decoder)?;
+                // The pinned subset allows one frame. Check the compressed stream
+                // position because the decoder stops at the first frame boundary.
+                if decoder
+                    .into_inner()
+                    .input
+                    .stream_position()
+                    .map_err(|_| invalid())?
+                    != self.pin.bytes
+                {
+                    return Err("unexpected data after runtime Zstandard frame");
+                }
+            }
+            Format::Zip => self.zip(input)?,
+        }
+        self.materialize()
+    }
+
+    fn tar(&mut self, input: impl Read) -> Result<()> {
+        let stream = DeadlineReader {
+            input,
+            deadline: self.deadline,
+        }
+        .take(self.pin.expansion_limit() + 1);
         let mut archive = tar::Archive::new(stream);
         let mut pax = false;
         for entry in archive.entries().map_err(|_| invalid())?.raw(true) {
@@ -486,7 +626,16 @@ impl Extraction<'_> {
             let path = self.path(&entry.path_bytes(), kind.is_dir())?;
             match (kind, entry.size(), path) {
                 (tar::EntryType::Directory, 0, _) => {}
-                (tar::EntryType::Regular, size, Some(path)) => self.file(path, size, &mut entry)?,
+                (tar::EntryType::Regular, size, Some(path)) if size <= FILE_BYTES => {
+                    let source = if self.pin.omits(&path) {
+                        None
+                    } else {
+                        Some(self.file(&path, size, &mut entry)?)
+                    };
+                    if self.pin.materialize_links {
+                        self.link_sources.insert(path, source);
+                    }
+                }
                 (tar::EntryType::Symlink, 0, Some(path)) => {
                     self.link(path, &entry.link_name_bytes().ok_or_else(invalid)?)?;
                 }
@@ -542,7 +691,7 @@ impl Extraction<'_> {
             }
             let path = self.path(entry.name_raw(), directory)?;
             if !directory {
-                self.file(path.ok_or_else(invalid)?, entry.size(), &mut entry)?;
+                self.file(&path.ok_or_else(invalid)?, entry.size(), &mut entry)?;
             }
         }
         Ok(())
@@ -625,59 +774,64 @@ pub(super) fn stage(
         verify(pin, &root, deadline)?;
     } else {
         let root = state.package_workspace()?;
-        let archive = download(pin, &root, test_loopback, deadline)?;
-        let mut extraction = Extraction {
-            pin,
-            root: &root,
-            deadline,
-            paths: Paths::default(),
-            entries: 0,
-            total: 0,
-            files: BTreeMap::new(),
-            links: BTreeMap::new(),
-        };
-        match pin.format {
-            Format::TarGz => extraction.tar(archive)?,
-            Format::Zip => extraction.zip(archive)?,
+        if let Err(error) = install(pin, state, &root, &cache, test_loopback, deadline) {
+            state.discard_package_workspace(&root)?;
+            return Err(error);
         }
-        extraction.materialize()?;
-        let package = pin.package(extraction.files);
-        package::validate_package(&package, false)?;
-        if tree_digest(&package)? != pin.tree_sha256 {
-            return Err("runtime archive tree identity mismatch");
-        }
-        let manifest = Manifest {
-            backend: pin.backend,
-            version: pin.version.clone(),
-            package,
-        };
-        let bytes = serde_json::to_vec(&manifest).map_err(|_| invalid())?;
-        if bytes.len() as u64 > MANIFEST_BYTES {
-            return Err(invalid());
-        }
-        let mut file = private::openat(
-            &root,
-            &private::name(MANIFEST.as_ref())?,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        )?;
-        file.write_all(&bytes).map_err(|_| invalid())?;
-        finalize(&file, 0o400)?;
-        package::publish(
-            &manifest.package,
-            state,
-            &root,
-            &cache,
-            deadline,
-            Some(&bytes),
-        )?;
     }
     state.prune_packages(&cache, references, |entry, root| {
-        Ok(manifest_bytes(root)?
-            .map(|bytes| Manifest::decode(entry, &bytes))
-            .transpose()?
-            .is_some_and(|manifest| manifest.backend == pin.backend))
+        cached_manifest(entry, root).is_some_and(|manifest| manifest.backend == pin.backend)
     })?;
     Ok(state_path.join(cache).join(&pin.entrypoint))
+}
+
+pub(super) fn cached_manifest(cache: &str, root: &File) -> Option<Manifest> {
+    let bytes = manifest_bytes(root).ok()??;
+    Manifest::decode(cache, &bytes).ok()
+}
+
+fn install(
+    pin: &Pin,
+    state: &Directory,
+    root: &File,
+    cache: &str,
+    test_loopback: bool,
+    deadline: Instant,
+) -> Result<()> {
+    require_space(root, pin.bytes + pin.unpacked_bytes)?;
+    let archive = download(pin, root, test_loopback, deadline)?;
+    require_space(root, pin.unpacked_bytes)?;
+    let mut extraction = Extraction::new(pin, root, deadline);
+    extraction.extract(archive)?;
+    let package = pin.package(extraction.files);
+    package::validate_package(&package, false)?;
+    if tree_digest(&package)? != pin.tree_sha256 {
+        return Err("runtime archive tree identity mismatch");
+    }
+    let manifest = Manifest {
+        backend: pin.backend,
+        version: pin.version.clone(),
+        package,
+    };
+    let bytes = serde_json::to_vec(&manifest).map_err(|_| invalid())?;
+    if bytes.len() as u64 > MANIFEST_BYTES {
+        return Err(invalid());
+    }
+    let mut file = private::openat(
+        root,
+        &private::name(MANIFEST.as_ref())?,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )?;
+    file.write_all(&bytes).map_err(|_| invalid())?;
+    finalize(&file, 0o400)?;
+    package::publish(
+        &manifest.package,
+        state,
+        root,
+        cache,
+        deadline,
+        Some(&bytes),
+    )
 }
 
 #[cfg(test)]
@@ -697,12 +851,14 @@ mod tests {
             arch: "aarch64".into(),
             url: "https://example.invalid/archive".into(),
             bytes: bytes.len() as u64,
+            unpacked_bytes: (bytes.len() as u64 * RATIO).min(PACKAGE_BYTES),
             sha256: format!("{:x}", Sha256::digest(bytes)),
             format,
             strip_prefix: None,
             entrypoint: "server".into(),
             executables: vec![],
             materialize_links: true,
+            omit_prefixes: Vec::new(),
             tree_sha256: String::new(),
             qualified: false,
             retrieved: "2026-11-23".into(),
@@ -765,7 +921,7 @@ mod tests {
 
     fn extract(bytes: &[u8], pin: &Pin) -> Result<RuntimePackage> {
         let (_temp, path) = write_fixture(bytes);
-        extract_file(File::open(path).unwrap(), pin)
+        extract_file(File::open(path).unwrap(), pin).map(|(package, _)| package)
     }
 
     fn write_fixture(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -775,27 +931,14 @@ mod tests {
         (temp, path)
     }
 
-    fn extract_file(input: File, pin: &Pin) -> Result<RuntimePackage> {
+    fn extract_file(input: File, pin: &Pin) -> Result<(RuntimePackage, u64)> {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().canonicalize().unwrap().join("state");
         let state = Directory::open(&path).unwrap();
         let root = state.package_workspace().unwrap();
-        let mut extraction = Extraction {
-            pin,
-            root: &root,
-            deadline: Instant::now() + Duration::from_secs(600),
-            paths: Paths::default(),
-            entries: 0,
-            total: 0,
-            files: BTreeMap::new(),
-            links: BTreeMap::new(),
-        };
-        match pin.format {
-            Format::TarGz => extraction.tar(input)?,
-            Format::Zip => extraction.zip(input)?,
-        }
-        extraction.materialize()?;
-        Ok(pin.package(extraction.files))
+        let mut extraction = Extraction::new(pin, &root, Instant::now() + Duration::from_secs(600));
+        extraction.extract(input)?;
+        Ok((pin.package(extraction.files), extraction.total))
     }
 
     #[test]
@@ -825,9 +968,10 @@ mod tests {
             std::io::copy(&mut file, &mut hash).unwrap();
             assert_eq!(format!("{:x}", hash.finalize()), pin.sha256, "{asset}");
             file.rewind().unwrap();
-            let extracted =
+            let (extracted, unpacked_bytes) =
                 extract_file(file, pin).unwrap_or_else(|error| panic!("{asset}: {error}"));
             package::validate_package(&extracted, false).unwrap();
+            assert_eq!(unpacked_bytes, pin.unpacked_bytes, "{asset}");
             assert_eq!(tree_digest(&extracted).unwrap(), pin.tree_sha256, "{asset}");
         }
     }
@@ -993,21 +1137,121 @@ mod tests {
         let fixture = pin(b"fixture", Format::TarGz);
         let workspace = tempfile::tempdir().unwrap();
         let root = File::open(workspace.path()).unwrap();
-        let mut extraction = Extraction {
-            pin: &fixture,
-            root: &root,
-            deadline: Instant::now() + Duration::from_secs(1),
-            paths: Paths::default(),
-            entries: 0,
-            total: 0,
-            files: BTreeMap::new(),
-            links: BTreeMap::new(),
-        };
+        let mut extraction =
+            Extraction::new(&fixture, &root, Instant::now() + Duration::from_secs(1));
         assert!(extraction
-            .file("server".into(), FILE_BYTES + 1, &mut &b""[..])
+            .file("server", FILE_BYTES + 1, &mut &b""[..])
             .is_err());
-        extraction.total = PACKAGE_BYTES;
-        assert!(extraction.file("server".into(), 1, &mut &b"a"[..]).is_err());
+        extraction.total = fixture.unpacked_bytes;
+        assert!(extraction.file("server", 1, &mut &b"a"[..]).is_err());
+    }
+
+    fn zstd_tar(entries: impl IntoIterator<Item = TarEntry<'static>>) -> Vec<u8> {
+        // A single-segment Zstandard frame containing one raw block.
+        let mut data = Vec::new();
+        MultiGzDecoder::new(tar(entries).as_slice())
+            .read_to_end(&mut data)
+            .unwrap();
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x60];
+        let frame_size = u16::try_from(data.len() - 256).unwrap();
+        frame.extend(frame_size.to_le_bytes());
+        let block_header = (u32::try_from(data.len()).unwrap() << 3) | 1;
+        frame.extend(&block_header.to_le_bytes()[..3]);
+        frame.extend(data);
+        frame
+    }
+
+    #[test]
+    fn zstandard_uses_the_same_tar_rules_and_bounds() {
+        let bytes = zstd_tar([
+            regular("server", ENTRY),
+            regular("gpu/driver", b"omitted"),
+            TarEntry {
+                kind: tar::EntryType::Symlink,
+                target: "./driver",
+                ..regular("gpu/alias", b"")
+            },
+        ]);
+        let mut fixture = pin(&bytes, Format::TarZst);
+        fixture.unpacked_bytes = ENTRY.len() as u64;
+        fixture.omit_prefixes = vec!["gpu".into()];
+        assert_eq!(extract(&bytes, &fixture).unwrap().files.len(), 1);
+        fixture.unpacked_bytes -= 1;
+        assert_eq!(
+            extract(&bytes, &fixture).err(),
+            Some("runtime archive byte bound exceeded")
+        );
+
+        let valid = zstd_tar([regular("server", ENTRY)]);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        assert_eq!(
+            extract(&trailing, &pin(&trailing, Format::TarZst)).err(),
+            Some("unexpected data after runtime Zstandard frame")
+        );
+        let truncated = &valid[..valid.len() - 1];
+        assert!(extract(truncated, &pin(truncated, Format::TarZst)).is_err());
+
+        let oversized_window = [0x28, 0xb5, 0x2f, 0xfd, 0, 0x70];
+        assert_eq!(
+            extract(&oversized_window, &pin(&oversized_window, Format::TarZst)).err(),
+            Some("invalid runtime Zstandard frame")
+        );
+        let unsafe_path = zstd_tar([regular("gpu/../escape", ENTRY)]);
+        let mut fixture = pin(&unsafe_path, Format::TarZst);
+        fixture.omit_prefixes = vec!["gpu".into()];
+        assert!(extract(&unsafe_path, &fixture).is_err());
+    }
+
+    #[test]
+    fn validates_unpacked_budget_and_checks_disk_margin() {
+        let bytes = tar([regular("server", ENTRY)]);
+        let mut fixture = pin(&bytes, Format::TarGz);
+        for bound in [0, fixture.expansion_limit() + 1, PACKAGE_BYTES + 1] {
+            fixture.unpacked_bytes = bound;
+            assert!(fixture.validate(false).is_err());
+        }
+        assert!(check_space(u128::from(SPACE_MARGIN + 1), 2).is_err());
+        assert!(check_space(u128::from(SPACE_MARGIN + 2), 2).is_ok());
+    }
+
+    #[test]
+    fn materialized_alias_uses_the_verified_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        let state = Directory::open(&path).unwrap();
+        let root = state.package_workspace().unwrap();
+        let pending = path.join("runtime-package.next");
+        let fixture = pin(&[0; 1024], Format::TarGz);
+        let mut extraction =
+            Extraction::new(&fixture, &root, Instant::now() + Duration::from_secs(60));
+        let source = extraction
+            .file("server", ENTRY.len() as u64, &mut &ENTRY[..])
+            .unwrap();
+        extraction
+            .link_sources
+            .insert("server".into(), Some(source));
+        extraction.link("alias".into(), b"server").unwrap();
+        fs::rename(pending.join("server"), pending.join("original")).unwrap();
+        fs::write(pending.join("server"), b"replacement").unwrap();
+        extraction.materialize().unwrap();
+        assert_eq!(fs::read(pending.join("alias")).unwrap(), ENTRY);
+    }
+
+    #[test]
+    fn refuses_publication_if_the_staging_name_was_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        let state = Directory::open(&path).unwrap();
+        let verified = state.package_workspace().unwrap();
+        let pending = path.join("runtime-package.next");
+        fs::rename(&pending, path.join("original")).unwrap();
+        let _replacement = state.package_workspace().unwrap();
+        let cache = cache_name(Backend::Ollama, "1.0.0", &"a".repeat(64));
+        assert!(state.publish_package(&cache, &verified).is_err());
+        assert!(state.cached_package(&cache).unwrap().is_none());
+        assert!(state.discard_package_workspace(&verified).is_err());
+        assert!(pending.exists());
     }
 
     fn serve(bytes: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
@@ -1028,12 +1272,21 @@ mod tests {
         for (bytes, format) in [
             (tar([regular("server", ENTRY)]), Format::TarGz),
             (zip(&[("server", ENTRY)]), Format::Zip),
+            (zstd_tar([regular("server", ENTRY)]), Format::TarZst),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().canonicalize().unwrap().join("state");
             let state = Directory::open(&path).unwrap();
             let mut pin = pin(&bytes, format);
-            for fault in ["size", "digest", ""] {
+            let corrupt_cache = path.join(cache_name(pin.backend, "1.2.2", &pin.tree_sha256));
+            fs::create_dir(&corrupt_cache).unwrap();
+            fs::set_permissions(&corrupt_cache, fs::Permissions::from_mode(0o700)).unwrap();
+            let corrupt_manifest = corrupt_cache.join(MANIFEST);
+            fs::write(&corrupt_manifest, b"{truncated").unwrap();
+            fs::set_permissions(&corrupt_manifest, fs::Permissions::from_mode(0o400)).unwrap();
+
+            let unpacked = pin.unpacked_bytes;
+            for fault in ["size", "digest", "extract", ""] {
                 let (url, task) = serve(bytes.clone());
                 pin.url = url;
                 let expected = pin.sha256.clone();
@@ -1041,11 +1294,14 @@ mod tests {
                     pin.bytes += 1;
                 } else if fault == "digest" {
                     pin.sha256 = "a".repeat(64);
+                } else if fault == "extract" {
+                    pin.unpacked_bytes = 1;
                 }
                 let result = stage(&pin, &state, &path, &Default::default(), true);
                 task.join().unwrap();
                 if fault.is_empty() {
                     let installed = result.unwrap();
+                    assert!(corrupt_manifest.exists());
                     assert_eq!(fs::read(&installed).unwrap(), ENTRY);
                     assert_eq!(fs::metadata(&installed).unwrap().mode() & 0o7777, 0o500);
                     // The only server has stopped, so success proves the cache was reused.
@@ -1056,18 +1312,23 @@ mod tests {
                     fs::set_permissions(&installed, fs::Permissions::from_mode(0o700)).unwrap();
                     fs::write(&installed, b"tampered").unwrap();
                     fs::set_permissions(&installed, fs::Permissions::from_mode(0o500)).unwrap();
+                    let expected = pinned_entrypoint_digest(&pin, &state).unwrap();
+                    assert!(package::verify_executable(&installed, &expected, &state).is_err());
                     assert!(stage(&pin, &state, &path, &Default::default(), true).is_err());
                 } else {
                     assert_eq!(
                         result,
-                        Err(if fault == "size" {
-                            "runtime archive size mismatch"
-                        } else {
-                            "runtime archive digest mismatch"
+                        Err(match fault {
+                            "size" => "runtime archive size mismatch",
+                            "digest" => "runtime archive digest mismatch",
+                            _ => "runtime archive byte bound exceeded",
                         })
                     );
                     assert!(state.cached_package(&pin.cache()).unwrap().is_none());
+                    assert!(!path.join("runtime-package.next").exists());
+                    let _stale = state.package_workspace().unwrap();
                     fs::write(path.join("runtime-package.next/interrupted"), b"partial").unwrap();
+                    pin.unpacked_bytes = unpacked;
                     pin.bytes = bytes.len() as u64;
                     pin.sha256 = expected;
                 }

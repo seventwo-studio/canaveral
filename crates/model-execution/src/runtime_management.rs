@@ -155,13 +155,13 @@ fn inventory(
         {
             continue;
         }
-        let root = directory
-            .cached_package(&cache)?
-            .ok_or("runtime cache disappeared")?;
-        let Some(bytes) = archive::manifest_bytes(&root)? else {
+        let Ok(Some(root)) = directory.cached_package(&cache) else {
+            directory.check()?;
             continue;
         };
-        let manifest = archive::Manifest::decode(&cache, &bytes)?;
+        let Some(manifest) = archive::cached_manifest(&cache, &root) else {
+            continue;
+        };
         if manifest.backend == backend {
             installed.push(Installed {
                 referenced: references.contains(&cache),

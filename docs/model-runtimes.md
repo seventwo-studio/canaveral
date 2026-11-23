@@ -42,21 +42,24 @@ the user does not install Python, pip packages or a virtual environment.
 ## Distribution and lifecycle
 
 The [engine catalog](../crates/model-execution/src/runtime-pins.json) ships inside
-the trusted Canaveral release. It pins the upstream archive URL, byte count,
-SHA-256 and extracted tree for each engine and host combination. The Rust
-executor owns the package store and provisions the matching engine before
-claiming work. The local [management commands](rust-model-execution.md#runtime-management)
+the trusted Canaveral release. It pins the upstream archive URL, compressed and
+installed byte counts, SHA-256 and extracted tree for each engine and host
+combination. The Rust executor owns the package store and provisions the matching
+engine before claiming work. The local [management commands](rust-model-execution.md#runtime-management)
 can prepare and verify the same cache ahead of a job.
 
 | Engine | Pinned release | Catalog hosts |
 | --- | --- | --- |
-| Ollama | v0.40.17 | macOS aarch64 |
+| Ollama | v0.40.17 | macOS aarch64, Linux aarch64 and x86_64 (CPU) |
 | llama.cpp | v1.0.0, binary tag b12359 | macOS aarch64, Linux aarch64 and x86_64 |
 
-The Ollama Linux assets use Zstandard and need additional archive format support.
-Separate GPU builds are deferred. MLX-LM and vLLM remain unavailable in the
-catalog pending qualified hermetic packages. Every entry remains unqualified for
-native operation.
+The Ollama Linux pins use the upstream base Zstandard archives. The installed
+trees omit bundled CUDA and Vulkan libraries. GPU support, including separate
+CUDA/JetPack and ROCm packages, is deferred. The Ollama v0.40.17 assets were
+retrieved on 2026-11-23 and checked against the
+[upstream checksum list](https://github.com/ollama/ollama/releases/download/v0.40.17/sha256sum.txt).
+MLX-LM and vLLM remain unavailable pending qualified hermetic packages. Every
+catalog entry remains unqualified for native operation.
 
 The executor verifies compressed size and SHA-256 before opening an archive and
 publishes only a complete verified tree. Installation preserves relative

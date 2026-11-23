@@ -15,9 +15,11 @@ canaveral/web/licenses.txt. Dependency packages retain their own licenses.
 ## Managed model engines
 
 Canaveral fetches these releases from their upstream projects. The packages
-retain license and notice files present in the original archives.
+retain license and notice files for the installed components.
 
-- Ollama v0.40.17 (MIT). The macOS archive also includes licenses and notices
+- Ollama v0.40.17 (MIT). The macOS and Linux archives include licenses and notices
   for bundled libraries and tools. [Ollama license](https://github.com/ollama/ollama/blob/v0.40.17/LICENSE)
 - llama.cpp v1.0.0 (MIT). The stable release identifies b12359 as its binary
   build tag. [llama.cpp license](https://github.com/ggml-org/llama.cpp/blob/v1.0.0/LICENSE)
+
+The model executor decodes Zstandard archives with [ruzstd 0.9.1](https://crates.io/crates/ruzstd/0.9.1) (MIT).
