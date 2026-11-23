@@ -206,9 +206,18 @@ export async function nativeService(paths) {
     },
     async uninstall() {
       await removeDefinition();
+      await assert.rejects(lstat(destination), { code: 'ENOENT' });
       if (linux) {
-        assert.equal((await ctl('list-unit-files', '--no-legend', target)).trim(), '');
-        assert.equal((await ctl('list-units', '--all', '--no-legend', target)).trim(), '');
+        // Filtering list-unit-files by a missing unit returns an error.
+        // A successful listing lets us distinguish absence from a manager error.
+        const lists = await Promise.all([
+          ctl('list-unit-files', '--type=service', '--no-legend', '--no-pager'),
+          ctl('list-units', '--type=service', '--all', '--no-legend', '--no-pager', '--plain'),
+        ]);
+        for (const list of lists) {
+          assert.ok(!list.split('\n').some(line => line.trim().split(/\s+/)[0] === target),
+            'unit absent from systemd listing');
+        }
       } else {
         await assert.rejects(ctl('print', target), /failed \(113\)/);
       }
