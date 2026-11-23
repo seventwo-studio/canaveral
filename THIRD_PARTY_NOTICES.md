@@ -11,3 +11,13 @@ unmodified image or compiling images to replicate a competing service is exclude
 
 Bundled font license terms are in dashboard/public/licenses.txt and
 canaveral/web/licenses.txt. Dependency packages retain their own licenses.
+
+## Managed model engines
+
+Canaveral fetches these releases from their upstream projects. The packages
+retain license and notice files present in the original archives.
+
+- Ollama v0.40.17 (MIT). The macOS archive also includes licenses and notices
+  for bundled libraries and tools. [Ollama license](https://github.com/ollama/ollama/blob/v0.40.17/LICENSE)
+- llama.cpp v1.0.0 (MIT). The stable release identifies b12359 as its binary
+  build tag. [llama.cpp license](https://github.com/ggml-org/llama.cpp/blob/v1.0.0/LICENSE)

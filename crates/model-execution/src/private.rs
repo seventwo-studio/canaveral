@@ -95,7 +95,27 @@ impl Directory {
         let dir = openat(&parent, &n, libc::O_RDONLY | libc::O_DIRECTORY)?;
         private(&dir, true)?;
         let lock = openat(&dir, &name("lock".as_ref())?, libc::O_RDWR | libc::O_CREAT)?;
-        Self::finish(path, dir, lock)
+        let result = Self::finish(path, dir, lock)?;
+        // Network requests are sent only after journal publication and directory fsync.
+        result.clear_pending("receipt.next")?;
+        result.clear_pending("claim.next")?;
+        result.check()?;
+        Ok(result)
+    }
+    pub fn inspect(path: &Path) -> Result<Option<Self>> {
+        let parent = walk(path.parent().ok_or_else(invalid)?)?;
+        let n = name(path.file_name().ok_or_else(invalid)?)?;
+        if !exists_at(&parent, &n)? {
+            return Ok(None);
+        }
+        let dir = openat(&parent, &n, libc::O_RDONLY | libc::O_DIRECTORY)?;
+        private(&dir, true)?;
+        let n = name("lock".as_ref())?;
+        if !exists_at(&dir, &n)? && entries(&dir)?.is_empty() {
+            return Ok(None);
+        }
+        let lock = openat(&dir, &n, libc::O_RDONLY)?;
+        Self::finish(path, dir, lock).map(Some)
     }
     fn finish(path: &Path, dir: File, lock: File) -> Result<Self> {
         private(&dir, true)?;
@@ -108,11 +128,6 @@ impl Directory {
             dir,
             lock,
         };
-        result.check()?;
-        // The exclusive owner can discard only an unpublished journal candidate.
-        // Network requests are sent only after publication and directory fsync.
-        result.clear_pending("receipt.next")?;
-        result.clear_pending("claim.next")?;
         result.check()?;
         Ok(result)
     }
@@ -237,19 +252,41 @@ impl Directory {
         io(self.dir.sync_all())?;
         self.check()
     }
-    pub fn prune_packages(&self, current: &str) -> Result<()> {
+    pub fn package_entries(&self) -> Result<Vec<String>> {
         self.check()?;
-        for entry in entries(&self.dir)? {
-            if entry != current
-                && entry
+        Ok(entries(&self.dir)?
+            .into_iter()
+            .filter(|entry| {
+                entry
                     .strip_prefix("runtime-package.")
                     .is_some_and(super::runtime_package::hash_valid)
-            {
-                self.remove_package(&entry)?;
-            }
+            })
+            .collect())
+    }
+    pub fn delete_package(&self, cache: &str, references: &super::PackageReferences) -> Result<()> {
+        self.check()?;
+        if references.contains(cache) {
+            return Err("runtime_in_use");
         }
+        self.remove_package(cache)?;
         io(self.dir.sync_all())?;
         self.check()
+    }
+    pub fn prune_packages(
+        &self,
+        current: &str,
+        references: &super::PackageReferences,
+        mut eligible: impl FnMut(&str, &File) -> Result<bool>,
+    ) -> Result<()> {
+        for entry in self.package_entries()? {
+            if entry != current && !references.contains(&entry) {
+                let package = self.cached_package(&entry)?.ok_or_else(invalid)?;
+                if eligible(&entry, &package)? {
+                    self.delete_package(&entry, references)?;
+                }
+            }
+        }
+        Ok(())
     }
     pub fn cleanup_workspace(&self) -> Result<()> {
         self.check()?;
@@ -334,6 +371,25 @@ impl Directory {
             let _ = self.clear_pending(pending);
         }
         result
+    }
+}
+
+pub(super) fn exists_at(dir: &File, name: &CString) -> Result<bool> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        Ok(true)
+    } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+        Ok(false)
+    } else {
+        Err(invalid())
     }
 }
 

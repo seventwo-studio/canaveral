@@ -54,7 +54,11 @@ impl Backend {
         if config.acceleration == Acceleration::Cpu && matches!(self, Self::Vllm | Self::Mlx) {
             return Err("CPU policy is not supported by this backend");
         }
-        if self != Self::Ollama && config.runtime_packages.is_empty() {
+        if self != Self::Ollama
+            && config.runtime_packages.is_empty()
+            && (!config.executable.as_os_str().is_empty()
+                || crate::runtime_archive::host_pin(self).is_none())
+        {
             return Err("backend requires a managed runtime package");
         }
         if self == Self::Ollama {
