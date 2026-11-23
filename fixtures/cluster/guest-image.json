@@ -1,8 +1,9 @@
 {
   "name": "CirrOS 0.6.3 x86_64",
-  "url": "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img",
+  "url": "https://github.com/cirros-dev/cirros/releases/download/0.6.3/cirros-0.6.3-x86_64-disk.img",
   "checksums": "https://download.cirros-cloud.net/0.6.3/SHA256SUMS",
   "sha256": "7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b",
   "format": "qcow2",
-  "maxBytes": 67108864
+  "mirror": "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img",
+  "bytes": 21692416
 }

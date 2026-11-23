@@ -122,9 +122,6 @@ if (ready) {
   host = await step('single-claim enrollment and heartbeats', async () => {
     const id = randomUUID(), { name, provider, capacity } = setup;
     const issued = await request('/v1/connection-setups', { id, name, provider, capacity });
-    if (issued.status === 400 && issued.body.error === 'Choose a VM or simulator provider.') {
-      throw new Blocked('POST /v1/connection-setups returned HTTP 400 for the CPU native offer: Choose a VM or simulator provider.');
-    }
     assert.equal(issued.status, 200, rejection(issued));
     command('sudo', ['bash', 'script/provision_cluster_node.sh'], { input: issued.body.enrollmentToken + '\n' });
     kubectl('apply', '-f', 'deploy/kubernetes/canaverald/base/namespace.json');
@@ -274,14 +271,20 @@ if (ready) {
   if (capability) {
     const guestDisk = await step('verify the pinned VM guest disk', () => {
       const disk = work + '/guest.qcow2';
-      command('curl', ['--fail', '--silent', '--show-error', '--location', '--proto', '=https', '--proto-redir', '=https',
-        '--max-time', '120', '--max-filesize', String(guest.maxBytes), '--output', disk, guest.url]);
+      const download = url => command('curl', ['--fail', '--silent', '--show-error', '--location',
+        '--proto', '=https', '--proto-redir', '=https', '--max-redirs', '4', '--connect-timeout', '12',
+        '--max-time', '45', '--retry', '1', '--retry-max-time', '100', '--max-filesize', String(guest.bytes),
+        '--output', disk, url]);
+      let source = 'GitHub release';
+      try { download(guest.url); }
+      catch { source = 'CirrOS download mirror'; download(guest.mirror); }
       const bytes = readFileSync(disk);
+      assert.equal(bytes.length, guest.bytes);
       assert.equal(createHash('sha256').update(bytes).digest('hex'), guest.sha256);
       const info = JSON.parse(command('qemu-img', ['info', '-f', guest.format, '--output=json', disk]));
       assert.equal(info.format, guest.format);
       assert(!info['backing-filename'], 'Guest template must be self-contained.');
-      return { sha256: guest.sha256, format: info.format, bytes: bytes.length };
+      return { sha256: guest.sha256, format: info.format, bytes: bytes.length, source };
     });
     if (cpuRetained && guestDisk) await exerciseVm();
     else {
@@ -399,8 +402,13 @@ async function exerciseVm() {
       return machine.observed === 'running' && machine.ready;
     }).catch(error => {
       const native = virsh('list', '--all', '--uuid').split('\n').includes(machineId);
-      const state = native ? virsh('domstate', machineId) : 'undefined';
-      throw new Error(error.message + `; provider reports ${machine?.observed}: ${machine?.detail ?? ''}; libvirt domain state: ${state}`);
+      const nativeState = native ? virsh('domstate', machineId) : 'undefined';
+      const xml = native ? virsh('dumpxml', machineId) : '';
+      const diskSource = xml.match(/<source file=['"][^'"]*disk\.qcow2['"]([^>]*)>/)?.[1];
+      const detail = String(machine?.detail ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 180);
+      throw new Error(error.message + ': ' + JSON.stringify({
+        observed: machine?.observed, detail, nativeState, diskSourceHasIndex: diskSource?.includes('index='),
+      }));
     });
     assert.equal(virsh('domstate', machineId), 'running');
     const ip = await eventually('guest DHCP and SSH service', async () => {
