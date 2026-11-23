@@ -10,6 +10,7 @@ on:
       - 'deploy/kubernetes/**'
       - 'deploy/orchestrator/**'
       - 'script/provision_cluster_node.sh'
+      - 'script/publish_release*.mjs'
       - 'fixtures/cluster/**'
       - 'fixtures/model-execution/real-model.json'
       - 'coordination/src/host*.ts'
@@ -33,12 +34,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
       - name: Render deployment overlays
         run: |
           for overlay in deploy/kubernetes/*/ deploy/kubernetes/canaverald/vm; do
             kubectl kustomize "$overlay" >/dev/null
           done
           bash -n script/provision_cluster_node.sh fixtures/cluster/setup.sh
+      - name: Check the release bundle, image pin and shutdown budget
+        run: node --test script/publish_release.test.mjs
   native:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04

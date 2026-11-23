@@ -195,15 +195,22 @@ async function libvirt(config: HostConfigData, env: Environment): Promise<Backen
     }
     throw error;
   }
-  let kvm = kubernetes;
-  try { if (!kubernetes) kvm = env.lstat("/dev/kvm").isCharacterDevice(); }
-  catch (error) { if (!missing(error)) throw error; kvm = false; }
-  if (!kvm) {
-    return record(id, true, "installed", blocker("libvirt_kvm_missing", "The /dev/kvm device is unavailable."), version);
+  // Host QEMU, not the pod, opens /dev/kvm. In Kubernetes the pod has no
+  // device mount, so libvirtd's domcapabilities over the socket decides KVM.
+  if (!kubernetes) {
+    let kvm: boolean;
+    try { kvm = env.lstat("/dev/kvm").isCharacterDevice(); }
+    catch (error) { if (!missing(error)) throw error; kvm = false; }
+    if (!kvm) {
+      return record(id, true, "installed", blocker("libvirt_kvm_missing", "The /dev/kvm device is unavailable."), version);
+    }
   }
   const provider = new LibvirtProvider({ ...settings, templates: [], adapters: { platform: env.platform, run: (argv: string[]) => probe(env, argv) } }, "/");
   try { await provider.check(); }
-  catch { return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", "The local libvirt KVM capability probe did not pass."), version); }
+  catch {
+    const detail = kubernetes ? "Host libvirtd did not report KVM support over the mounted socket." : "The local libvirt KVM capability probe did not pass.";
+    return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", detail), version);
+  }
   return record(id, true, "verified", undefined, version);
 }
 

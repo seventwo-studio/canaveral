@@ -54,6 +54,12 @@ function command(bin, args, { input, timeout = 190_000 } = {}) {
   }
 }
 const kubectl = (...args) => command('kubectl', args);
+// Run a command that must fail, returning its stderr for an exact refusal check.
+function refusal(bin, args, input) {
+  try { execFileSync(bin, args, { encoding: 'utf8', timeout: 60_000, input, stdio: ['pipe', 'pipe', 'pipe'] }); }
+  catch (error) { return String(error.stderr ?? ''); }
+  throw new Error(`${bin} unexpectedly succeeded`);
+}
 const daemon = (...args) => kubectl('-n', 'canaverald', ...args);
 const daemonPods = () => JSON.parse(daemon('get', 'pods', '-l', 'app.kubernetes.io/name=canaverald', '-o', 'json')).items;
 const waitForDaemon = async (previousUid) => eventually('ready daemon Pod', () => {
@@ -145,6 +151,56 @@ if (ready) {
     });
     inPod('test', '!', '-e', state + '/bootstrap/enrollment-token');
     return { id: next.id, provider: next.provider, lastSeen: next.lastSeen };
+  });
+}
+
+if (host) {
+  await step('admission policy rejects forbidden canaverald pods', async () => {
+    const policy = await eventually('type-checked admission policy', () => {
+      const value = JSON.parse(kubectl('get', 'validatingadmissionpolicy', 'canaverald-pod-security', '-o', 'json'));
+      return value.status?.observedGeneration === value.metadata.generation && value;
+    });
+    assert.deepEqual(policy.status.typeChecking?.expressionWarnings ?? [], []);
+    const container = {
+      name: 'probe', image: 'busybox:1.37', command: ['true'],
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
+    };
+    const pod = (name, change = spec => spec, namespace = 'canaverald') => {
+      const spec = change({
+        securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: 'RuntimeDefault' } },
+        containers: [structuredClone(container)],
+        volumes: [{ name: 'state', hostPath: { path: state, type: 'Directory' } }],
+      });
+      return JSON.stringify({ apiVersion: 'v1', kind: 'Pod', metadata: { name, namespace }, spec });
+    };
+    const dryRun = ['create', '--dry-run=server', '-o', 'name', '-f', '-'];
+    const privileged = spec => { spec.containers[0].securityContext.privileged = true; return spec; };
+    // The apiserver loads a new policy asynchronously; wait until it denies.
+    await eventually('policy enforcement', () => {
+      try { command('kubectl', dryRun, { input: pod('admission-wait', privileged) }); return false; }
+      catch { return true; }
+    }, 30);
+    command('kubectl', dryRun, { input: pod('admission-allowed') });
+    command('kubectl', dryRun, { input: pod('admission-other-namespace', privileged, 'default') });
+    const forbidden = {
+      privileged: [privileged, /must not be privileged/],
+      'extra-host-path': [spec => { spec.volumes.push({ name: 'etc', hostPath: { path: '/etc', type: 'Directory' } }); return spec; }, /hostPath volumes are limited/],
+      'create-host-path': [spec => { spec.volumes[0].hostPath.type = 'DirectoryOrCreate'; return spec; }, /hostPath volumes are limited/],
+      'host-network': [spec => ({ ...spec, hostNetwork: true }), /host network/],
+      'host-pid': [spec => ({ ...spec, hostPID: true }), /host PID/],
+      'added-capability': [spec => { spec.containers[0].securityContext.capabilities.add = ['NET_ADMIN']; return spec; }, /drop ALL capabilities and add none/],
+      escalation: [spec => { delete spec.containers[0].securityContext.allowPrivilegeEscalation; return spec; }, /allowPrivilegeEscalation/],
+      'host-port': [spec => { spec.containers[0].ports = [{ containerPort: 80, hostPort: 8080 }]; return spec; }, /host ports/],
+      'init-privileged': [spec => { spec.initContainers = [{ ...structuredClone(container), name: 'init', securityContext: { privileged: true } }]; return spec; }, /Init containers must not be privileged/],
+    };
+    const rejected = {};
+    for (const [name, [change, message]] of Object.entries(forbidden)) {
+      const stderr = refusal('kubectl', dryRun, pod('admission-' + name, change));
+      assert.match(stderr, /canaverald-pod-security/, name);
+      assert.match(stderr, message, name);
+      rejected[name] = 'denied';
+    }
+    return { policy: policy.metadata.name, allowed: ['compliant pod', 'privileged pod outside canaverald'], rejected };
   });
 }
 
@@ -243,7 +299,12 @@ if (host) {
       const identity = sudo('jq', '-r', '.id', state + '/identity.json');
       assert.equal(identity, host.id);
       assert.equal(sudo('stat', '-c', '%u:%g:%a', state), '10001:10001:700');
-      return { state: 'retained', hostId: identity };
+      await eventually('daemon process exit', () => {
+        try { command('pgrep', ['-u', '10001', '-f', 'canaverald']); return false; } catch { return true; }
+      }, 90);
+      const unused = randomBytes(32).toString('base64url') + '\n';
+      assert.match(refusal('sudo', ['bash', 'script/provision_cluster_node.sh', 'replace-token'], unused), /identity\.json exists: this node is enrolled/);
+      return { state: 'retained', hostId: identity, tokenReplacementRefused: 'identity exists' };
     });
   }
 }
@@ -261,7 +322,7 @@ if (ready) {
     command('sudo', ['apt-get', 'update'], { timeout: 240_000 });
     command('sudo', ['env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends',
       'libvirt-daemon-system', 'libvirt-daemon-driver-qemu', 'libvirt-daemon-config-network',
-      'libvirt-clients', 'qemu-system-x86', 'qemu-utils', 'ovmf', 'dnsmasq-base'], { timeout: 360_000 });
+      'libvirt-clients', 'qemu-system-x86', 'qemu-utils', 'ovmf', 'dnsmasq-base', 'polkitd'], { timeout: 360_000 });
     try { sudo('test', '-c', '/dev/kvm'); }
     catch { throw new Blocked('The hosted runner has no /dev/kvm character device after installing host QEMU and libvirt.'); }
     sudo('systemctl', 'start', 'libvirtd.socket');
@@ -320,34 +381,25 @@ async function exerciseVm() {
     minimum: { cpu: 1, memoryMiB: 512, diskGiB: 1 },
   };
   const enrollment = await step('enroll the VM overlay and verify the mounted socket', async () => {
-    // Stop the service before applying the socket group and fixture QEMU identity.
-    const group = Number(command('getent', ['group', 'libvirt']).split(':')[2]);
-    assert(Number.isSafeInteger(group) && group > 0);
-    sudo('systemctl', 'stop', 'libvirtd.service', 'libvirtd.socket', 'libvirtd-ro.socket', 'libvirtd-admin.socket');
-    sudo('groupadd', '--gid', '10001', 'canaveral-ci');
-    sudo('useradd', '--uid', '10001', '--gid', '10001', '--no-create-home', 'canaveral-ci');
-    sudo('chgrp', 'canaveral-ci', '/dev/kvm');
-    sudo('chmod', '0660', '/dev/kvm');
-    sudo('install', '-d', '-m', '0755', '/etc/systemd/system/libvirtd.socket.d');
-    command('sudo', ['tee', '/etc/systemd/system/libvirtd.socket.d/canaveral-ci.conf'], {
-      input: '[Socket]\nSocketGroup=libvirt\nSocketMode=0660\n',
-    });
-    command('sudo', ['tee', '-a', '/etc/libvirt/libvirtd.conf'], { input: '\nauth_unix_rw = "none"\n' });
-    // CI uses a disposable QEMU account with the same UID so libvirtd does
-    // not change ownership of the files the daemon must continue to validate.
-    command('sudo', ['tee', '-a', '/etc/libvirt/qemu.conf'], {
-      input: '\nuser = "canaveral-ci"\ngroup = "canaveral-ci"\ndynamic_ownership = 0\n',
-    });
-    sudo('systemctl', 'daemon-reload');
-    sudo('systemctl', 'start', 'libvirtd.socket');
-    sudo('test', '-S', '/var/run/libvirt/libvirt-sock');
+    // Configure the host exactly as docs/cluster-hosts.md "Host libvirt setup" instructs.
+    const prepared = command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000 });
+    assert.match(prepared, /^libvirt host ready: QEMU account libvirt-qemu in canaveral-vm \(GID 10002\); socket group canaveral-libvirt \(GID 10003\)/);
+    assert.equal(sudo('stat', '-c', '%U:%G:%a', '/run/libvirt/libvirt-sock'), 'root:canaveral-libvirt:660');
+    assert.equal(sudo('stat', '-c', '%U:%G:%a', storage), 'canaverald:canaveral-vm:2750');
+    for (const [file, setting] of [['/etc/libvirt/qemu.conf', /^\s*(user|group|dynamic_ownership)\s*=/m], ['/etc/libvirt/libvirtd.conf', /^\s*auth_unix_rw\s*=/m]]) {
+      assert.doesNotMatch(sudo('cat', file), setting, file + ' keeps its distribution default');
+    }
+    assert(command('id', ['-nG', 'libvirt-qemu']).split(' ').includes('canaveral-vm'));
+    assert.equal(command('id', ['-nG', 'canaverald']), 'canaverald');
+    assert.notEqual(sudo('stat', '-c', '%g', '/dev/kvm'), '10001');
+    // A second run changes nothing and keeps every check.
+    command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000 });
     if (!virsh('net-list', '--name').split('\n').includes('default')) virsh('net-start', 'default');
 
     // The CPU uninstall already verified state retention. Keep that state
     // aside on this one-node runner so the VM profile gets its own identity.
     sudo('mv', '-T', state, state + '-cpu-acceptance');
-    sudo('install', '-d', '-m', '0700', '-o', '10001', '-g', '10001', storage);
-    sudo('install', '-m', '0600', '-o', '10001', '-g', '10001', work + '/guest.qcow2', template.image);
+    sudo('install', '-m', '0640', '-o', '10001', '-g', 'canaveral-vm', work + '/guest.qcow2', template.image);
     kubectl('apply', '-f', 'deploy/kubernetes/canaverald/base/namespace.json');
     daemon('create', 'configmap', 'canaveral-controller-ca', '--from-file=ca.crt=' + work + '/ca.crt');
     const overlay = JSON.parse(kubectl('apply', '-k', 'deploy/kubernetes/canaverald/vm', '--dry-run=client', '-o', 'json'));
@@ -355,11 +407,22 @@ async function exerciseVm() {
     const vm = JSON.parse(config.data['host.json']);
     vm.templates = [template];
     config.data['host.json'] = JSON.stringify(vm);
-    const daemonSet = overlay.items.find(item => item.kind === 'DaemonSet');
-    daemonSet.spec.template.spec.securityContext.supplementalGroups = [group];
-    const id = randomUUID();
-    const issued = await call('/v1/connection-setups', { id, name: vm.name, provider: vm.provider, capacity: vm.capacity });
-    command('sudo', ['bash', 'script/provision_cluster_node.sh'], { input: issued.enrollmentToken + '\n' });
+    const pod = overlay.items.find(item => item.kind === 'DaemonSet').spec.template.spec;
+    assert.deepEqual(pod.securityContext.supplementalGroups, [10003]);
+    assert(!pod.volumes.some(volume => volume.hostPath?.path === '/dev/kvm'));
+    // Exercise the documented replacement of an unclaimed token before the first claim.
+    const setup = async () => {
+      const id = randomUUID();
+      return { id, token: (await call('/v1/connection-setups', { id, name: vm.name, provider: vm.provider, capacity: vm.capacity })).enrollmentToken };
+    };
+    const provisioning = mode => ['bash', 'script/provision_cluster_node.sh', mode];
+    const first = await setup(), { id, token } = await setup();
+    command('sudo', provisioning('token'), { input: first.token + '\n' });
+    assert.match(refusal('sudo', provisioning('token'), token + '\n'), /already provisioned.*Use replace-token/);
+    assert.match(refusal('sudo', provisioning('replace-token'), 'not-a-token\n'), /setup token on stdin is malformed/);
+    await call('/v1/connection-setups/' + first.id + '/revoke', {});
+    command('sudo', provisioning('replace-token'), { input: token + '\n' });
+    assert.equal(sudo('stat', '-c', '%u:%g:%a:%h', state + '/bootstrap/enrollment-token'), '10001:10001:600:1');
     kubectl('label', '--overwrite', node, 'canaveral.dev/host-profile=vm');
     command('kubectl', ['apply', '-f', '-'], { input: JSON.stringify(overlay) });
     await waitForDaemon();
@@ -378,13 +441,15 @@ async function exerciseVm() {
         available: candidate?.available };
       throw new Error(error.message + ': ' + JSON.stringify(summary));
     });
-    inPod('test', '-c', '/dev/kvm');
+    inPod('test', '!', '-e', '/dev/kvm');
     inPod('test', '-w', storage);
+    assert.match(refusal('sudo', provisioning('replace-token'), token + '\n'), /canaverald process is running/);
     const status = JSON.parse(inPod('canaverald', 'runtimes', 'status', '--config', '/etc/canaverald/host.json', '--state', state, '--json'));
     const libvirt = status.find(row => row.id === 'libvirt');
     assert.equal(libvirt?.state, 'verified', JSON.stringify(libvirt));
     assert.equal(libvirt.qualified, false);
-    return { hostId: view.id, libvirt: libvirt.version, qualified: libvirt.qualified };
+    return { hostId: view.id, libvirt: libvirt.version, qualified: libvirt.qualified, kvmProbe: 'domcapabilities over the mounted socket',
+      socket: 'root:canaveral-libvirt:660', storage: 'canaverald:canaveral-vm:2750', replacedUnclaimedToken: true };
   });
   if (!enrollment) return;
 

@@ -2,13 +2,19 @@
   "apiVersion": "apps/v1",
   "kind": "DaemonSet",
   "metadata": {
-    "name": "canaverald"
+    "name": "canaverald",
+    "namespace": "canaverald"
   },
   "spec": {
     "template": {
       "spec": {
         "nodeSelector": {
           "canaveral.dev/host-profile": "vm"
+        },
+        "securityContext": {
+          "supplementalGroups": [
+            10003
+          ]
         },
         "containers": [
           {
@@ -17,11 +23,6 @@
               {
                 "name": "libvirt-socket",
                 "mountPath": "/var/run/libvirt/libvirt-sock",
-                "readOnly": true
-              },
-              {
-                "name": "kvm",
-                "mountPath": "/dev/kvm",
                 "readOnly": true
               },
               {
@@ -38,13 +39,6 @@
             "hostPath": {
               "path": "/var/run/libvirt/libvirt-sock",
               "type": "Socket"
-            }
-          },
-          {
-            "name": "kvm",
-            "hostPath": {
-              "path": "/dev/kvm",
-              "type": "CharDevice"
             }
           },
           {
