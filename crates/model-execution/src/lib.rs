@@ -138,7 +138,7 @@ fn load_history(directory: &private::Directory) -> Result<Option<Store>> {
 pub struct Executor {
     config: Config,
     directory: private::Directory,
-    staged: Result<PathBuf>,
+    staged: Result<runtime_package::StagedRuntime>,
     journal: Option<Journal>,
     history: BTreeMap<String, Journal>,
     poisoned: bool,
@@ -322,8 +322,11 @@ impl Executor {
             launch_intent: true,
             stop_confirmed: false,
             cleanup_confirmed: false,
-            runtime_package_digest: self.staged.as_ref().ok().and_then(|path| {
-                let relative = path.strip_prefix(&self.config.state_dir).ok()?;
+            runtime_package_digest: self.staged.as_ref().ok().and_then(|staged| {
+                let relative = staged
+                    .entrypoint
+                    .strip_prefix(&self.config.state_dir)
+                    .ok()?;
                 relative
                     .components()
                     .next()?
@@ -389,7 +392,7 @@ impl Executor {
             self.staged = self.stage_runtime();
         }
     }
-    fn stage_runtime(&self) -> Result<PathBuf> {
+    fn stage_runtime(&self) -> Result<runtime_package::StagedRuntime> {
         validate_models(&self.config.models_dir)?;
         self.config.backend.verify_models(&self.config)?;
         let references = PackageReferences::from_history(&self.history);
@@ -424,7 +427,6 @@ impl Executor {
             return Err("unsafe runtime permissions");
         }
         // Stage the verified bytes privately: macOS cannot execute /dev/fd artifacts.
-        let staged = self.config.state_dir.join("runtime");
         let mut output = self.directory.runtime_output()?;
         let mut hash = Sha256::new();
         let mut buffer = [0; 65536];
@@ -441,43 +443,20 @@ impl Executor {
                 .map_err(|_| "runtime staging failed")?;
         }
         output.sync_all().map_err(|_| "runtime sync failed")?;
+        let staged_metadata = output
+            .metadata()
+            .map_err(|_| "runtime metadata unavailable")?;
         drop(output);
         if format!("{:x}", hash.finalize()) != self.config.executable_sha256 {
             return Err("runtime identity mismatch");
         }
         self.directory.check()?;
-        Ok(staged)
-    }
-    fn verify_staged_executable(
-        &self,
-        path: &Path,
-        check_progress: impl FnMut() -> Result<()>,
-    ) -> Result<()> {
-        if let Some(package) = runtime_package::select(&self.config.runtime_packages)? {
-            return runtime_package::verify_executable(
-                path,
-                &package.files[&package.entrypoint],
-                &self.directory,
-                check_progress,
-            );
-        }
-        if self.config.executable.as_os_str().is_empty() {
-            let pin = runtime_archive::host_pin(self.config.backend)
-                .ok_or("no runtime package for this host")?;
-            let digest = runtime_archive::pinned_entrypoint_digest(pin, &self.directory)?;
-            return runtime_package::verify_executable(
-                path,
-                &digest,
-                &self.directory,
-                check_progress,
-            );
-        }
-        runtime_package::verify_executable(
-            path,
-            &self.config.executable_sha256,
-            &self.directory,
-            check_progress,
-        )
+        let identity = runtime_package::ExecutableIdentity::from_metadata(&staged_metadata);
+        Ok(runtime_package::StagedRuntime::new(
+            self.config.state_dir.clone(),
+            "runtime",
+            [("runtime".to_owned(), identity)].into_iter().collect(),
+        ))
     }
 
     fn generate<F: FnMut() -> Control>(
@@ -498,7 +477,7 @@ impl Executor {
             .map_err(|_| "loopback unavailable")?
             .port();
         let host = format!("127.0.0.1:{port}");
-        let mut cmd = Command::new(staged);
+        let mut cmd = Command::new(&staged.entrypoint);
         cmd.env_clear()
             .env("HOME", work)
             .env("TMPDIR", work)
@@ -525,9 +504,8 @@ impl Executor {
         self.config
             .backend
             .configure(&mut cmd, &self.config, model, port, &key, &key_file)?;
-        // Large entrypoints must not starve controller supervision while hashing.
-        self.verify_staged_executable(staged, || check(control))?;
         check(control)?;
+        staged.verify_executables(&self.directory)?;
         drop(listener);
         let start = clock::Clock::now();
         let child = cmd.spawn().map_err(|_| "runtime launch failed")?;

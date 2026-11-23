@@ -14,7 +14,7 @@ use std::{
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
-    path::{Path, PathBuf},
+    path::Path,
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -250,15 +250,9 @@ impl Manifest {
     }
 }
 
-pub(super) fn verify(pin: &Pin, root: &File, deadline: Instant) -> Result<()> {
+pub(super) fn verify(pin: &Pin, root: &File, deadline: Instant) -> Result<package::Executables> {
     let (manifest, bytes) = pinned_manifest(pin, root)?;
     package::verify_cache(&manifest.package, root, deadline, Some(&bytes))
-}
-
-pub(super) fn pinned_entrypoint_digest(pin: &Pin, state: &Directory) -> Result<String> {
-    let root = state.cached_package(&pin.cache())?.ok_or_else(invalid)?;
-    let (manifest, _) = pinned_manifest(pin, &root)?;
-    Ok(manifest.package.files[&manifest.package.entrypoint].clone())
 }
 
 fn pinned_manifest(pin: &Pin, root: &File) -> Result<(Manifest, Vec<u8>)> {
@@ -766,23 +760,30 @@ pub(super) fn stage(
     state_path: &Path,
     references: &PackageReferences,
     test_loopback: bool,
-) -> Result<PathBuf> {
+) -> Result<package::StagedRuntime> {
     pin.validate(test_loopback)?;
     let cache = pin.cache();
     let deadline = Instant::now() + Duration::from_secs(600);
-    if let Some(root) = state.cached_package(&cache)? {
-        verify(pin, &root, deadline)?;
+    let executables = if let Some(root) = state.cached_package(&cache)? {
+        verify(pin, &root, deadline)?
     } else {
         let root = state.package_workspace()?;
-        if let Err(error) = install(pin, state, &root, &cache, test_loopback, deadline) {
-            state.discard_package_workspace(&root)?;
-            return Err(error);
+        match install(pin, state, &root, &cache, test_loopback, deadline) {
+            Ok(executables) => executables,
+            Err(error) => {
+                state.discard_package_workspace(&root)?;
+                return Err(error);
+            }
         }
-    }
+    };
     state.prune_packages(&cache, references, |entry, root| {
         cached_manifest(entry, root).is_some_and(|manifest| manifest.backend == pin.backend)
     })?;
-    Ok(state_path.join(cache).join(&pin.entrypoint))
+    Ok(package::StagedRuntime::new(
+        state_path.join(cache),
+        &pin.entrypoint,
+        executables,
+    ))
 }
 
 pub(super) fn cached_manifest(cache: &str, root: &File) -> Option<Manifest> {
@@ -797,7 +798,7 @@ fn install(
     cache: &str,
     test_loopback: bool,
     deadline: Instant,
-) -> Result<()> {
+) -> Result<package::Executables> {
     require_space(root, pin.bytes + pin.unpacked_bytes)?;
     let archive = download(pin, root, test_loopback, deadline)?;
     require_space(root, pin.unpacked_bytes)?;
@@ -839,6 +840,7 @@ mod tests {
     use super::*;
     use std::{
         collections::BTreeSet, fs, io::Cursor, net::TcpListener, os::unix::fs::PermissionsExt,
+        path::PathBuf,
     };
 
     const ENTRY: &[u8] = b"\x7fELF archive fixture";
@@ -1302,21 +1304,22 @@ mod tests {
                 if fault.is_empty() {
                     let installed = result.unwrap();
                     assert!(corrupt_manifest.exists());
-                    assert_eq!(fs::read(&installed).unwrap(), ENTRY);
-                    assert_eq!(fs::metadata(&installed).unwrap().mode() & 0o7777, 0o500);
+                    assert_eq!(fs::read(&installed.entrypoint).unwrap(), ENTRY);
+                    assert_eq!(
+                        fs::metadata(&installed.entrypoint).unwrap().mode() & 0o7777,
+                        0o500
+                    );
                     // The only server has stopped, so success proves the cache was reused.
                     assert_eq!(
                         stage(&pin, &state, &path, &Default::default(), true).unwrap(),
                         installed
                     );
-                    fs::set_permissions(&installed, fs::Permissions::from_mode(0o700)).unwrap();
-                    fs::write(&installed, b"tampered").unwrap();
-                    fs::set_permissions(&installed, fs::Permissions::from_mode(0o500)).unwrap();
-                    let expected = pinned_entrypoint_digest(&pin, &state).unwrap();
-                    assert!(
-                        package::verify_executable(&installed, &expected, &state, || Ok(()))
-                            .is_err()
-                    );
+                    fs::set_permissions(&installed.entrypoint, fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    fs::write(&installed.entrypoint, b"tampered").unwrap();
+                    fs::set_permissions(&installed.entrypoint, fs::Permissions::from_mode(0o500))
+                        .unwrap();
+                    assert!(installed.verify_executables(&state).is_err());
                     assert!(stage(&pin, &state, &path, &Default::default(), true).is_err());
                 } else {
                     assert_eq!(

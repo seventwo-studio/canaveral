@@ -230,7 +230,9 @@ PAX timestamp and Apple code-signing annotations, so native acceptance must
 check any dependency on those attributes.
 
 The executor verifies the staging directory's device and inode on either side
-of publication and rechecks the executable's digest and identity before spawn.
+of publication. It verifies file digests during staging and checks the
+entrypoint and other listed executables against their verified file metadata
+before spawn.
 As with [managed updates](runtime-updates.md), these checks assume a controlled
 directory tree. Same-account concurrent malicious filesystem mutation is outside
 that trust boundary. Old cache entries with unreadable or undecodable manifests
