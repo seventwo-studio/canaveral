@@ -120,6 +120,8 @@ using [dashboard.md](dashboard.md).
 
 ## Kubernetes
 
+For node-local execution through a DaemonSet, see [Kubernetes hosts](cluster-hosts.md).
+
 The controller needs one persistent volume, its operator/enrollment Secret, TLS Secret and
 one replica with a Recreate strategy. It does not need Kubernetes API access. Use `deploy/kubernetes/orchestrator` for a direct installation,
 or the release artifact's namespace-free `orchestrator/` Kustomization for your

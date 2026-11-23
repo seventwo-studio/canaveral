@@ -57,3 +57,16 @@ COPY --from=rust-build /source/target/release/canaveral-mobile-native /usr/local
 USER 10001:10001
 # Each native executable keeps its own strict configuration and acceptance gates.
 ENTRYPOINT ["/usr/local/bin/canaveral-model-execution"]
+
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS canaverald
+WORKDIR /app
+ENV NODE_ENV=production HOME=/tmp
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libvirt-clients qemu-utils genisoimage &&     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 canaverald &&     useradd --uid 10001 --gid 10001 --no-create-home canaverald
+COPY --from=node-build /app/coordination/dist/src ./coordination/dist/src
+COPY coordination/package.json ./coordination/package.json
+COPY canaveral/schemas ./canaveral/schemas
+COPY --from=rust-build /source/target/release/canaveral-model-execution /usr/local/bin/
+RUN ln -s /app/coordination/dist/src/canaverald.js /usr/local/bin/canaverald &&     chmod 0755 /app/coordination/dist/src/canaverald.js
+USER 10001:10001
+ENTRYPOINT ["canaverald"]
+CMD ["--config", "/etc/canaverald/host.json", "--state", "/var/lib/canaverald"]

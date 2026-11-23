@@ -1,0 +1,145 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "DaemonSet",
+  "metadata": {
+    "name": "canaverald"
+  },
+  "spec": {
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "canaverald"
+      }
+    },
+    "updateStrategy": {
+      "type": "OnDelete"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "canaverald"
+        }
+      },
+      "spec": {
+        "nodeSelector": {
+          "kubernetes.io/os": "linux",
+          "canaveral.dev/host-profile": "cpu"
+        },
+        "terminationGracePeriodSeconds": 120,
+        "serviceAccountName": "canaverald",
+        "automountServiceAccountToken": false,
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "runAsGroup": 10001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "containers": [
+          {
+            "name": "canaverald",
+            "image": "canaverald:local",
+            "imagePullPolicy": "IfNotPresent",
+            "args": [
+              "--config",
+              "/etc/canaverald/host.json",
+              "--state",
+              "/var/lib/canaverald",
+              "--url",
+              "$(CONTROLLER_URL)",
+              "--ca-file",
+              "/run/controller-ca/ca.crt"
+            ],
+            "env": [
+              {
+                "name": "CONTROLLER_URL",
+                "valueFrom": {
+                  "configMapKeyRef": {
+                    "name": "canaverald-config",
+                    "key": "controller"
+                  }
+                }
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "1280Mi"
+              },
+              "limits": {
+                "cpu": "1",
+                "memory": "1280Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-ec",
+                  "test -s /var/lib/canaverald/identity.json && test ! -e /var/lib/canaverald/bootstrap/enrollment-token"
+                ]
+              },
+              "periodSeconds": 3
+            },
+            "volumeMounts": [
+              {
+                "name": "state",
+                "mountPath": "/var/lib/canaverald"
+              },
+              {
+                "name": "config",
+                "mountPath": "/etc/canaverald",
+                "readOnly": true
+              },
+              {
+                "name": "controller-ca",
+                "mountPath": "/run/controller-ca",
+                "readOnly": true
+              },
+              {
+                "name": "tmp",
+                "mountPath": "/tmp"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "state",
+            "hostPath": {
+              "path": "/var/lib/canaverald",
+              "type": "Directory"
+            }
+          },
+          {
+            "name": "config",
+            "configMap": {
+              "name": "canaverald-config"
+            }
+          },
+          {
+            "name": "controller-ca",
+            "configMap": {
+              "name": "canaveral-controller-ca"
+            }
+          },
+          {
+            "name": "tmp",
+            "emptyDir": {
+              "sizeLimit": "1Gi"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

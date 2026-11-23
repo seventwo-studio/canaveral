@@ -1,0 +1,72 @@
+name: Kubernetes canaverald acceptance
+on:
+  push:
+    branches: ['feat/cluster-*']
+  pull_request:
+    paths:
+      - '.github/workflows/cluster-acceptance.yaml'
+      - '.github/workflows/release.yaml'
+      - 'Dockerfile'
+      - 'deploy/kubernetes/**'
+      - 'deploy/orchestrator/**'
+      - 'script/provision_cluster_node.sh'
+      - 'fixtures/cluster/**'
+      - 'fixtures/model-execution/real-model.json'
+      - 'coordination/src/host*.ts'
+      - 'coordination/src/host-runtimes/**'
+      - 'coordination/src/providers/libvirt*'
+      - 'coordination/src/linux-leases.ts'
+      - 'crates/model-execution/**'
+  schedule:
+    - cron: '43 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cluster-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  manifests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Render deployment overlays
+        run: |
+          for overlay in deploy/kubernetes/*/ deploy/kubernetes/canaverald/vm; do
+            kubectl kustomize "$overlay" >/dev/null
+          done
+          bash -n script/provision_cluster_node.sh fixtures/cluster/setup.sh
+  native:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Set disposable paths
+        run: |
+          printf '%s\n' "CLUSTER_WORK=$RUNNER_TEMP/canaveral-cluster" \
+            "CLUSTER_EVIDENCE=$RUNNER_TEMP/canaveral-cluster-evidence.json" \
+            "KUBECONFIG=$RUNNER_TEMP/canaveral-cluster/kubeconfig" >> "$GITHUB_ENV"
+      - name: Set up disposable k3s controller
+        run: bash fixtures/cluster/setup.sh
+      - name: Exercise enrollment, CPU generation and maintenance over TLS
+        run: |
+          kubectl -n canaveral port-forward service/orchestrator 8765:8765 >"$CLUSTER_WORK/port-forward.log" 2>&1 &
+          trap 'kill "$!" 2>/dev/null || true' EXIT
+          export NODE_EXTRA_CA_CERTS="$CLUSTER_WORK/ca.crt"
+          node fixtures/cluster/acceptance.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cluster-acceptance
+          path: ${{ env.CLUSTER_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7

@@ -84,6 +84,43 @@ jobs:
           subject-digest: ${{ steps.digests.outputs.dashboard }}
           push-to-registry: true
           create-storage-record: false
+      - name: Build or reuse reviewed canaverald image
+        id: daemon
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync } from 'node:fs';
+          import { Registry, capture, checkIdentity, publishedManifest } from './script/publish_release.mjs';
+          const image = 'ghcr.io/seventwo-studio/canaveral/canaverald';
+          const version = process.env.RELEASE_TAG.slice(1);
+          const revision = process.env.GITHUB_SHA;
+          const registry = await Registry.connect(image);
+          let manifest = await registry.manifest(version);
+          if (!manifest) {
+            const labels = {
+              source: 'https://github.com/seventwo-studio/canaveral',
+              version, revision,
+            };
+            capture('docker', ['buildx', 'build', '.', '--target', 'canaverald',
+              '--platform', 'linux/amd64,linux/arm64', '--push', '--tag', image + ':' + version,
+              ...Object.entries(labels).flatMap(([key, value]) => {
+                const label = 'org.opencontainers.image.' + key + '=' + value;
+                return ['--label', label, '--annotation', 'index:' + label];
+              }),
+            ]);
+            manifest = await publishedManifest(Registry.connect, image, version);
+          }
+          checkIdentity(manifest[0], version, revision);
+          appendFileSync(process.env.GITHUB_OUTPUT, 'digest=' + manifest[1] + '\n');
+          JS
+      - name: Attest canaverald provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/seventwo-studio/canaveral/canaverald
+          subject-digest: ${{ steps.daemon.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
       - name: Attest deploy provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
