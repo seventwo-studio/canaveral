@@ -13,9 +13,9 @@ KVM by asking host libvirtd (`virsh domcapabilities --virttype kvm`) over the
 socket. Consumer libvirt leases require a production native connection,
 supervisor and owned-storage adapters. The controller's bound Linux lease API
 currently admits Apple Virtualization. Native acceptance of administrative VM
-startup remains open. The hosted test reached a durable prepared state, but the
-definition command could not reopen the Node child process's standard input.
-Keep the owned state for inspection if the controller reports an unknown
+startup remains open. The hosted test defines the domain, but it cannot start
+until the daemon gives QEMU group access to VM storage (see
+[Host libvirt setup](#host-libvirt-setup)). Keep the owned state for inspection if the controller reports an unknown
 assignment. Containerd operations, Android and GPU execution are outside this
 deployment.
 
@@ -208,7 +208,9 @@ files. VM directories must be `2750` and disks `0660` for QEMU to open them.
 The current daemon writes no `seclabel`, creates VM directories `0700` and disks
 `0600`, and refuses group-writable disks. Until the libvirt lease work ships
 those changes, VM boot on this host model remains blocked. The hosted
-acceptance run is blocked earlier, at domain definition.
+acceptance run defines the domain and stops there: the daemon's VM directory is
+`2700` and its disk `0600`, so QEMU never starts. It reports that exact state as
+blocked; any other boot failure fails the run.
 
 Administrative starts use host libvirtd and can keep running through pod
 replacement. Verify the same host ID, domain and owned disk when the pod returns.
