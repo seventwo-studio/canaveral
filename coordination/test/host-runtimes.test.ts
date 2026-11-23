@@ -317,3 +317,31 @@ test("daemon CLI and inventory expose the registry without contacting the contro
   assert.deepEqual((inventory.runtimes as { id: string }[]).map(entry => entry.id), backendIds);
   assert.ok(!Object.hasOwn(inventory.offer as object, "runtimes"));
 });
+
+test("Kubernetes runtime commands refuse containerd before touching host receipts", async () => {
+  const config = { deployment: "kubernetes", provider: "native" };
+  const env = { ...linux, receipt: () => assert.fail("Probed containerd receipt in the pod"), lstat: () => assert.fail("Probed host runtime path") };
+  const backends = await runtimeInventory(config, env);
+  assert.equal(backends.find(backend => backend.id === "containerd")?.blocker?.code, "kubernetes_containerd_disabled");
+  for (const action of ["install", "verify", "remove"] as const) {
+    const report = await mutateRuntime(config, action, "containerd", false, undefined, env);
+    assert.deepEqual(report.result, { state: "failed", code: "kubernetes_containerd_disabled" });
+  }
+});
+
+test("Kubernetes runtime status inspects the mounted libvirt endpoint without local QEMU", async () => {
+  const commands: string[][] = [];
+  const backends = await runtimeInventory({
+    deployment: "kubernetes", provider: "linux", runtimes: { libvirt: { socketPath: "/run/libvirt/host-sock" } },
+  }, {
+    ...linux,
+    run: async argv => { commands.push([...argv]); return { stdout: "version 1.2.3", exit: 0 }; },
+  });
+  assert.equal(backends.find(backend => backend.id === "libvirt")?.state, "verified");
+  assert.deepEqual(commands, [
+    ["virsh", "--version"],
+    ["qemu-img", "--version"],
+    ["virsh", "--connect", "qemu+unix:///system?socket=/run/libvirt/host-sock", "domcapabilities", "--virttype", "kvm"],
+    ["qemu-img", "--version"],
+  ]);
+});

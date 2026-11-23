@@ -56,6 +56,7 @@ export async function enrollKubernetesHost(state: string, orchestrator: string, 
   const path = join(state, "bootstrap", "enrollment-token");
   const intentPath = join(state, "enrollment-intent.json");
   const pending = present(intentPath);
+  if (!pending && ["lease-execution.json", "host-reports.json", "update-assignments.json"].some(file => present(join(state, file)))) throw recoveryError();
   let input: ReturnType<typeof bootstrapToken>;
   try { input = bootstrapToken(path); } catch (error) { throw pending ? recoveryError() : error; }
   const tokenDigest = legacyDigest(input.token);
@@ -80,7 +81,7 @@ export async function enrollKubernetesHost(state: string, orchestrator: string, 
   }
   const identity = { id: intent.id, credential: intent.credential, orchestrator };
   saveRecord(join(state, "identity.json"), identity);
-  removeBootstrapToken(path, input.stat);
+  try { removeBootstrapToken(path, input.stat); } catch { throw tokenError(); }
   unlinkSync(intentPath);
   syncDirectory(state);
   return identity;

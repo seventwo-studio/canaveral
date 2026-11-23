@@ -1,11 +1,34 @@
 import * as fs from "node:fs";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, normalize } from "node:path";
+import { kubernetesDeployment } from "../host-deployment.ts";
 import { ServiceError, object } from "../errors.ts";
 import { noLinks, present } from "../runtime-process.ts";
 import { LibvirtLeaseBinding, SupervisorJournal, StorageHandleGuard, absolute, bindDomainXML, canonical, deadlineArtifact, digest, domainEmulator, domainHasTPM, escapeXML, exact, fingerprint, finite, hash, inode, matches, noSymlinks, owned, readPrivate, refuse, regular, sameInode, snapshotFile, uuid, validateDomainXML } from "./libvirt-ownership.ts";
 import type { BindingData, FileLeaseFactory, Inode, ManifestEntry, RecordValue } from "./libvirt-ownership.ts";
+
+const mountedSocketPrefix = "qemu+unix:///system?socket=";
+
+function validSocketPath(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 107 && /^\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/.test(value) && normalize(value) === value;
+}
+
+export function localLibvirtUri(config: RecordValue): string {
+  const uri = config.uri ?? "qemu:///system";
+  if (config.socketPath !== undefined || config.deployment === "kubernetes") {
+    const path = config.socketPath === undefined ? "/var/run/libvirt/libvirt-sock" : config.socketPath;
+    if (uri !== "qemu:///system" || !validSocketPath(path)) refuse("Use a local system libvirt URI and a normalized absolute socketPath.");
+    return mountedSocketPrefix + path;
+  }
+  if (uri !== "qemu:///system" && uri !== "qemu:///session") refuse("Use a local libvirt connection.");
+  return uri;
+}
+
+function validSavedUri(value: unknown): boolean {
+  return value === "qemu:///system" || value === "qemu:///session" ||
+    typeof value === "string" && value.startsWith(mountedSocketPrefix) && validSocketPath(value.slice(mountedSocketPrefix.length));
+}
 
 export interface Invocation { input?:string; timeoutMs:number; maxOutputBytes:number }
 export type ProcessRunner=(argv:readonly string[],options:Invocation)=>Promise<string>;
@@ -27,6 +50,9 @@ export interface NativeDriver {
   undefine(flags:number):void;
   close():void;
 }
+const VIR_DOMAIN_START_PAUSED = 1;
+const VIR_DOMAIN_START_AUTODESTROY = 2;
+
 export class OwnedNativeConnection {
   private attempted=false;private resumed=false;private closed=false;private binding:LibvirtLeaseBinding|undefined;
   constructor(readonly driver:NativeDriver){}
@@ -38,7 +64,7 @@ export class OwnedNativeConnection {
     if(!active&&(s.managedSave!==0||s.snapshots!==0||s.checkpoints!==0))refuse("Saved execution, snapshots or checkpoints remain unknown.");
     this.binding=binding;
   }
-  startPaused():void{if(this.attempted||this.closed||!this.binding)refuse("Native create cannot be replayed or adopt an unvalidated domain.");this.validate(this.binding,false);this.attempted=true;this.invoke(()=>this.driver.create(1|2));}
+  startPaused():void{if(this.attempted||this.closed||!this.binding)refuse("Native create cannot be replayed or adopt an unvalidated domain.");this.validate(this.binding,false);this.attempted=true;this.invoke(()=>this.driver.create(VIR_DOMAIN_START_PAUSED | VIR_DOMAIN_START_AUTODESTROY));}
   resume():void{if(!this.attempted||this.resumed||this.closed||!this.binding)refuse("Native resume cannot be replayed.");this.validate(this.binding,true,true);this.resumed=true;this.invoke(()=>this.driver.resume());}
   absent():boolean{if(this.closed)refuse("Native connection ended.");const v=this.invoke(()=>this.driver.lookup());if(v!=="present"&&v!=="VIR_ERR_NO_DOMAIN")refuse("Native domain absence is unconfirmed.");return v==="VIR_ERR_NO_DOMAIN";}
   retire(binding:LibvirtLeaseBinding):void{this.validate(binding,false);if(this.snapshot().persistent!==true)refuse("Only an owned persistent domain can be retired.");this.validate(binding,false);this.invoke(()=>this.driver.undefine(8|64));if(!this.absent())refuse("Native domain remains after retirement.");}
@@ -114,7 +140,7 @@ export class LibvirtProvider {
   private journal(folder:string,prefix?:string):SupervisorJournal{return new SupervisorJournal(folder,prefix,{fixture:this.adapters.fixture===true});}
   private boot():string{return (this.adapters.hostBoot??linuxBootId)();}
   private clock():number{if(!this.adapters.clock)refuse("Suspend-aware CLOCK_BOOTTIME binding is unavailable.");return this.adapters.clock();}
-  private uri():string{const uri=this.config.uri??"qemu:///system";if(uri!=="qemu:///system"&&uri!=="qemu:///session")refuse("Use a local libvirt connection.");return uri;}
+  private uri():string{return localLibvirtUri(this.config);}
   private async command(argv:readonly string[],timeoutMs=300000,input?:string):Promise<string>{try{return await(this.adapters.run??runProcess)(argv,{timeoutMs,maxOutputBytes:1048576,...(input===undefined?{}:{input})});}catch{throw new ServiceError("Backend command failed or timed out; its outcome is unconfirmed.",409,{outcome:"unknown"});}}
   private virsh(...args:string[]):Promise<string>{return this.command(["virsh","--connect",this.uri(),...args],30000);}
   private connection(spec:ExecutionSpec,b:LibvirtLeaseBinding):OwnedNativeConnection{if(!this.adapters.connect)refuse("Native libvirt connection binding is unavailable.");return this.adapters.connect(spec.uri,b.machine_id);}
@@ -136,7 +162,7 @@ export class LibvirtProvider {
   }
   private location(b:LibvirtLeaseBinding,s:ExecutionSpec):boolean{return s.uri===this.uri()&&b.disk===join(this.storagePath({id:b.machine_id}),"disk.qcow2");}
   private readSpec(j:SupervisorJournal,machine:RecordValue,storage=true):{binding:LibvirtLeaseBinding;spec:ExecutionSpec}{
-    const value=j.readNamed("libvirt-binding.json");if(!value||!exact(value,["version","binding","uri","library","storageIdentity","diskIdentity"])||value.version!==1||!["qemu:///system","qemu:///session"].includes(String(value.uri)))refuse("Execution binding is missing or invalid.");
+    const value=j.readNamed("libvirt-binding.json");if(!value||!exact(value,["version","binding","uri","library","storageIdentity","diskIdentity"])||value.version!==1||!validSavedUri(value.uri))refuse("Execution binding is missing or invalid.");
     const raw=object(value.binding);if(!exact(raw,["machine_id","lease_id","boot_id","host_boot_id","fingerprint","disk"]))refuse("Malformed execution binding.");const b=new LibvirtLeaseBinding(raw as unknown as BindingData);const spec=value as ExecutionSpec;
     for(const key of ["storageIdentity","diskIdentity"] as const){const id=object(value[key]);if(!exact(id,["device","inode"])||!Object.values(id).every(n=>typeof n==="number"&&Number.isSafeInteger(n)&&n>=0))refuse("Invalid storage birth identity.");}
     const library=object(value.library);if(!exact(library,["path","sha256"])||typeof library.sha256!=="string"||!/^[a-f0-9]{64}$/.test(library.sha256))refuse("Invalid native artifact binding.");absolute(library.path);
@@ -225,6 +251,21 @@ export class LibvirtProvider {
       if(machine.desired==="stopped"){if(state==="shut off")return{state:"stopped"};await this.adminAction(machine,folder,b,s,"shutdown");return{state:"stopping",detail:"Graceful shutdown requested; storage retained."};}
       if(state==="shut off"){await this.adminAction(machine,folder,b,s,"start");return{state:"starting"};}return{state:state==="running"?"running":"unknown"};
     }finally{gate.close();}
+  }
+  async updateStopped(machine: RecordValue, _image: RecordValue, folder: string, readOnly = false): Promise<boolean> {
+    if (machine.lease) return this.confirmExecutionStopped(machine, folder, readOnly)?.executionStopped === true;
+    if (machine.desired !== "stopped" || !kubernetesDeployment(this.config)) return false;
+    let journal: SupervisorJournal | undefined;
+    try {
+      journal = new SupervisorJournal(folder, "libvirt-reconcile", { fixture: this.adapters.fixture === true, existingOnly: readOnly });
+      const { binding, spec } = this.readSpec(journal, machine);
+      if (!this.location(binding, spec)) return false;
+      if (await this.virsh("domuuid", binding.machine_id) !== binding.machine_id) return false;
+      validateDomainXML(await this.virsh("dumpxml", binding.machine_id), binding);
+      if (await this.virsh("domstate", binding.machine_id) !== "shut off") return false;
+      return this.location(binding, spec) && canonical(this.readSpec(journal, machine).spec) === canonical(spec);
+    } catch { return false; }
+    finally { journal?.close(); }
   }
   private async adminAction(machine:RecordValue,folder:string,b:LibvirtLeaseBinding,s:ExecutionSpec,action:"start"|"shutdown"):Promise<void>{
     const j=this.journal(folder);try{const old=j.read();if(old?.phase===`${action}-pending`)refuse("Uncertain native action is not replayed.");

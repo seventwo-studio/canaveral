@@ -1,3 +1,4 @@
+import { requireKubernetesBackends } from "../host-deployment.ts";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -194,6 +195,7 @@ export function loadHostConfig(path: string): Record<string, unknown> & { templa
   return loadHost(config, dirname(resolve(path)));
 }
 export function loadHost(config: Record<string, unknown>, directory: string): Record<string, unknown> & { templates: Record<string, unknown>[] } {
+  requireKubernetesBackends(config);
   hostProvider(config.provider);
   if (!Array.isArray(config.templates)) throw new ServiceError("Invalid host template catalogue.", 400);
   const templates = config.templates.map(item => {

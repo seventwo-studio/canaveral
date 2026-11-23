@@ -186,3 +186,86 @@ for(const threaded of [false,true])test(`cgroup-v2 attribution excludes siblings
 test("partial cgroup mounts cannot establish native process attribution",t=>{
   const root=temporary(t),proc=join(root,"proc"),group=join(root,"cgroup");fs.mkdirSync(join(proc,"self"),{recursive:true});fs.mkdirSync(group);fs.writeFileSync(join(proc,"self/mountinfo"),`1 0 0:1 /partial ${group} rw - cgroup2 cgroup rw\n`);assert.throws(()=>new LinuxDomainCgroup(proc,group).domain(42,7,"cvm-fixture"));
 });
+
+test("mounted libvirt uses only the selected local system socket", async t => {
+  const f = fixture(t);
+  const options = { ...f.provider.config, deployment: "kubernetes" };
+  const defaults = new LibvirtProvider(options, f.root);
+  await defaults.check();
+  const defaultUri = "qemu+unix:///system?socket=/var/run/libvirt/libvirt-sock";
+  assert.deepEqual(f.commands[0], ["virsh", "--connect", defaultUri, "domcapabilities", "--virttype", "kvm"]);
+
+  const path = "/run/canaveral/libvirt-sock", uri = "qemu+unix:///system?socket=" + path;
+  const custom = new LibvirtProvider({ ...options, socketPath: path }, f.root);
+  await custom.check();
+  assert.equal(f.commands[2]?.[2], uri);
+  f.commands.length = 0;
+  for (const invalid of [
+    { socketPath: "relative/socket" }, { socketPath: "/run/../socket" }, { socketPath: "/run/sock?mode=direct" },
+    { socketPath: "/run/sock%3F" }, { socketPath: "/".padEnd(108, "s") }, { socketPath: null },
+    { uri: "qemu+tcp://example.test/system" }, { uri: "qemu:///session" },
+  ]) await assert.rejects(new LibvirtProvider({ ...options, ...invalid }, f.root).check());
+  assert.deepEqual(f.commands, []);
+});
+
+test("a fresh mounted-socket connection proves stop only after supervisor exit and guest teardown", async t => {
+  const f = fixture(t), socketPath = "/run/canaveral/libvirt-sock", uri = "qemu+unix:///system?socket=" + socketPath;
+  save(join(f.folder, "libvirt-binding.json"), { ...f.spec, uri });
+  f.write("libvirt-launch", { ...f.binding.identity(), pid: 123, createdAt: 20 });
+  f.write("libvirt-execution", { ...f.binding.identity(), phase: "running" });
+  f.driver.state = "running";
+  let exited = false;
+  const supervisor = new Driver(f.driver.xml, f.binding.machine_id);
+  supervisor.afterClose = () => { f.driver.state = "shut off"; };
+  const connection = new OwnedNativeConnection(supervisor);
+  connection.validate(f.binding, false);
+  connection.startPaused();
+  connection.resume();
+  assert.deepEqual(supervisor.events, ["create", "resume"]);
+
+  f.adapters.connect = (target, id) => {
+    assert.equal(target, uri);
+    assert.equal(id, f.binding.machine_id);
+    return new OwnedNativeConnection(f.driver);
+  };
+  f.adapters.processBirth = () => exited ? "gone" : "unknown";
+  const provider = new LibvirtProvider({ ...f.provider.config, deployment: "kubernetes", socketPath }, f.root);
+  f.terminal();
+  assert.equal((await provider.stopForCleanup(f.machine, f.image, f.folder)).state, "stopping");
+  exited = true;
+  assert.equal(provider.confirmExecutionStopped(f.machine, f.folder), null, "supervisor exit alone gives no stop proof");
+  connection.close();
+  assert.equal(provider.confirmExecutionStopped(f.machine, f.folder)?.evidence, "supervisor-exited");
+  assert.ok(fs.existsSync(f.disk), "stop evidence leaves the reservation and storage cleanup outstanding");
+
+  f.driver.unknownAbsence = true;
+  const id = String((f.machine.leaseCleanup as RecordValue).id);
+  await assert.rejects(provider.removeOwnedStorage(f.machine, f.image, f.folder, id));
+  f.driver.unknownAbsence = false;
+  assert.equal((await provider.removeOwnedStorage(f.machine, f.image, f.folder, id)).state, "complete");
+  assert.equal(fs.existsSync(f.storage), false);
+  assert.deepEqual(supervisor.events, ["create", "resume", "close"]);
+  assert.equal(f.driver.events.includes("create"), false);
+});
+
+test("Kubernetes administrative drain verifies the owned VM is stopped through the mounted socket", async t => {
+  const f = fixture(t);
+  delete f.machine.lease;
+  f.machine.desired = "stopped";
+  const binding = new LibvirtLeaseBinding({ ...f.binding, lease_id: f.binding.machine_id });
+  const socketPath = "/run/canaveral/libvirt-sock", uri = "qemu+unix:///system?socket=" + socketPath;
+  save(join(f.folder, "assignment.json"), { fingerprint: binding.fingerprint });
+  save(join(f.folder, "libvirt-binding.json"), { ...f.spec, binding: { ...binding }, uri });
+  f.driver.xml = bindDomainXML(domainXML(f.machine, f.image, f.disk), binding);
+  const provider = new LibvirtProvider({ ...f.provider.config, deployment: "kubernetes", socketPath }, f.root);
+  f.driver.state = "running";
+  assert.equal(await provider.updateStopped(f.machine, f.image, f.folder), false);
+  f.driver.state = "shut off";
+  assert.equal(await provider.updateStopped(f.machine, f.image, f.folder, true), true);
+  assert.ok(f.commands.every(command => command[2] === uri));
+  const other = new LibvirtProvider({ ...provider.config, socketPath: "/run/other/libvirt-sock" }, f.root);
+  const commands = f.commands.length;
+  assert.equal(await other.updateStopped(f.machine, f.image, f.folder, true), false);
+  assert.equal(f.commands.length, commands);
+  assert.ok(fs.existsSync(f.disk));
+});

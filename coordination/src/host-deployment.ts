@@ -1,4 +1,4 @@
-import { ServiceError } from "./errors.ts";
+import { object, ServiceError } from "./errors.ts";
 
 export function kubernetesDeployment(config: Record<string, unknown>): boolean {
   if (config.deployment === undefined) {
@@ -13,7 +13,14 @@ export function kubernetesDeployment(config: Record<string, unknown>): boolean {
   return true;
 }
 
-export const clusterContainerdCode = "kubernetes_containerd_disabled";
+export function requireKubernetesBackends(config: Record<string, unknown>): void {
+  if (!kubernetesDeployment(config)) return;
+  const runtimes = config.runtimes;
+  if (config.provider === "containerd" || (Array.isArray(runtimes)
+    ? runtimes.includes("containerd") : Object.hasOwn(object(runtimes ?? {}), "containerd"))) {
+    throw new ServiceError("containerd is disabled in Kubernetes.", 409, { code: "kubernetes_containerd_disabled" });
+  }
+}
 
 export function requireManagedUpdates(config: Record<string, unknown>): void {
   if (kubernetesDeployment(config)) {

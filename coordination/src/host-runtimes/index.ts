@@ -1,4 +1,3 @@
-import { clusterContainerdCode } from "../host-deployment.ts";
 import { lstatSync } from "node:fs";
 import { backendIds, blocker, isModel, run } from "./core.ts";
 import type { BackendId, BackendRecord, Environment, HostConfigData } from "./core.ts";
@@ -27,7 +26,7 @@ export async function mutateRuntime(config: HostConfigData, action: "install" | 
     const container = id === "containerd";
     const code = container ? "containerd_root_installer_required" : "runtime_detect_only";
     const backend = await nativeRecord(id, config, env);
-    if (backend.blocker?.code === clusterContainerdCode) return { backends: [backend], result: { state: "failed", code: clusterContainerdCode } };
+    if (backend.blocker?.code === "kubernetes_containerd_disabled") return { backends: [backend], result: { state: "failed", code: backend.blocker.code } };
     if (!backend.supported) return { backends: [backend], result: { state: "failed", code: "runtime_platform_unsupported" } };
     backend.blocker ??= blocker(code, container ? installerInstruction : "Use runtimes status to inspect this backend.");
     return { backends: [backend], result: { state: "failed", code } };
