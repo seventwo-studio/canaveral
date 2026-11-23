@@ -206,6 +206,15 @@ fn remove_preserves_referenced_versions_and_verify_reports_damage() {
     let verify = fixture.report("--runtime-verify", &["--backend", "llama.cpp"], 1);
     assert_eq!(verify["backends"][0]["state"], "failed");
     assert_eq!(verify["backends"][0]["installed"][0]["verified"], false);
+    assert_eq!(verify["result"]["code"], "runtime_integrity_failed");
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o755)).unwrap();
+    let status = fixture.report("--runtime-status", &[], 1);
+    assert_eq!(
+        status["backends"][1]["blocker"]["code"],
+        "runtime_cache_entry_unsafe"
+    );
+    let verify = fixture.report("--runtime-verify", &["--backend", "llama.cpp"], 1);
+    assert_eq!(verify["result"]["code"], "runtime_cache_entry_unsafe");
     let remove = ["--backend", "llama.cpp", "--version", version];
     for (digest, pending, unresolved, live) in [
         (Some(digest.as_str()), false, true, false),
@@ -221,6 +230,8 @@ fn remove_preserves_referenced_versions_and_verify_reports_damage() {
         );
         assert_eq!(result["backends"][0]["installed"][0]["referenced"], true);
         assert!(cache.is_dir());
+        let prepare = fixture.report("--runtime-prepare", &["--backend", "llama.cpp"], 1);
+        assert_eq!(prepare["result"]["code"], "runtime_in_use");
     }
     fixture.journal(Some(&digest), false, false, false);
     let safe_plan = fixture.report(

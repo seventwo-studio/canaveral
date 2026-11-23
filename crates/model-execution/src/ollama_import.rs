@@ -3,7 +3,12 @@ use crate::{decode, runtime_backend::open_model_file, runtime_package::hash_vali
 use reqwest::blocking::{Body, Client};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    fs::{self, File},
+    io::Read,
+    os::unix::fs::MetadataExt,
+    path::Path,
+};
 
 pub(crate) const ALIAS: &str = "canaveral-local:run";
 const MANIFEST: &str = "manifests-v2/ollama.com/library/canaveral-local/run";
@@ -15,10 +20,9 @@ pub(super) fn create(
     base: &str,
     pid: u32,
     port: u16,
-    source: &Path,
+    file: File,
     digest: &str,
 ) -> Result<()> {
-    let file = open_model_file(source)?;
     let size = file.metadata().map_err(|_| "model unavailable")?.len();
     let owned = || {
         crate::socket_owner::owned(pid, port)

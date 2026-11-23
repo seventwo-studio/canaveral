@@ -59,7 +59,10 @@ CUDA/JetPack and ROCm packages, is deferred. The Ollama v0.40.17 assets were
 retrieved on 2026-11-23 and checked against the
 [upstream checksum list](https://github.com/ollama/ollama/releases/download/v0.40.17/sha256sum.txt).
 MLX-LM and vLLM remain unavailable pending qualified hermetic packages. Every
-catalog entry remains unqualified for native operation.
+catalog entry remains unqualified for native operation. Use Ollama only on
+trusted single-tenant hosts. The importer and server expose an unauthenticated
+loopback API. Proxy settings and model verification reduce exposure.
+Qualification requires host-enforced ingress, egress and filesystem isolation.
 
 The executor verifies compressed size and SHA-256 before opening an archive and
 publishes only a complete verified tree. Installation preserves relative
@@ -69,7 +72,9 @@ live or unresolved journal references them. For older journals without a
 package identity, the executor retains every version until reconciliation.
 Install and verify from the updated executor to select a new catalog pin. The
 registry reports installed versions and references in JSON. Reinstall an
-unreferenced current pin to repair integrity failures. See
+unreferenced current pin to repair integrity failures, including
+`runtime_cache_entry_unsafe`. Repair preserves the damaged entry in private
+quarantine. See
 [runtime management](rust-model-execution.md#runtime-management) for recovery.
 
 Model artifacts remain separately pinned. GGUF models and model snapshot

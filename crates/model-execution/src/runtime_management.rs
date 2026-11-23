@@ -112,7 +112,7 @@ impl<'a> Request<'a> {
 struct Installed {
     cache: String,
     version: String,
-    verified: bool,
+    verification: Result<()>,
     referenced: bool,
 }
 
@@ -130,21 +130,20 @@ fn inventory(
     for cache in directory.package_entries()? {
         // Resolve current entries from trusted metadata even if files or manifest are damaged.
         if let Some(pin) = pin.filter(|_| current.as_ref() == Some(&cache)) {
-            let verified = directory
-                .cached_package(&cache)
-                .and_then(|root| {
-                    archive::verify(
-                        pin,
-                        &root.ok_or("runtime cache disappeared")?,
-                        Instant::now() + Duration::from_secs(600),
-                    )
-                })
-                .is_ok();
+            let verification = match directory.cached_package(&cache) {
+                Ok(Some(root)) => {
+                    archive::verify(pin, &root, Instant::now() + Duration::from_secs(600))
+                        .map(|_| ())
+                        .map_err(|_| "runtime_integrity_failed")
+                }
+                Err(super::private::UNSAFE_CACHE_ENTRY) => Err(super::private::UNSAFE_CACHE_ENTRY),
+                _ => return Err("runtime_state_unknown"),
+            };
             installed.push(Installed {
                 referenced: references.contains(&cache),
                 cache,
                 version: pin.version.clone(),
-                verified,
+                verification,
             });
             continue;
         }
@@ -167,7 +166,7 @@ fn inventory(
                 referenced: references.contains(&cache),
                 cache,
                 version: manifest.version,
-                verified: false,
+                verification: Err("runtime_integrity_failed"),
             });
         }
     }
@@ -182,12 +181,12 @@ fn inventory(
 fn report_backend(backend: Backend, installed: &[Installed], unknown: bool) -> Value {
     let pin = archive::host_pin(backend);
     let active = pin.and_then(|pin| installed.iter().find(|entry| entry.cache == pin.cache()));
-    let broken = active.is_some_and(|entry| !entry.verified);
+    let damage = active.and_then(|entry| entry.verification.err());
     let state = if unknown {
         "unknown"
     } else if pin.is_none() {
         "unavailable"
-    } else if broken {
+    } else if damage.is_some() {
         "failed"
     } else if active.is_some() {
         "verified"
@@ -202,13 +201,13 @@ fn report_backend(backend: Backend, installed: &[Installed], unknown: bool) -> V
         "installed": installed.iter().map(|entry| json!({
             "version": entry.version,
             "packageDigest": entry.cache.trim_start_matches("runtime-package."),
-            "verified": entry.verified, "referenced": entry.referenced,
+            "verified": entry.verification.is_ok(), "referenced": entry.referenced,
         })).collect::<Vec<_>>(),
     });
     if let Some(version) = archive::catalog_version(backend) {
         report["catalogVersion"] = json!(version);
     }
-    if let Some(entry) = active.filter(|entry| entry.verified) {
+    if let Some(entry) = active.filter(|entry| entry.verification.is_ok()) {
         report["active"] = json!(entry.version);
     }
     if unknown {
@@ -216,8 +215,13 @@ fn report_backend(backend: Backend, installed: &[Installed], unknown: bool) -> V
     } else if pin.is_none() {
         report["blocker"] = json!({"code":"runtime_unavailable","detail":archive::unavailable(backend)
             .unwrap_or("No catalog package is available for this platform and architecture.")});
-    } else if broken {
-        report["blocker"] = json!({"code":"runtime_integrity_failed","detail":"The installed runtime failed verification.",
+    } else if let Some(code) = damage {
+        let detail = if code == super::private::UNSAFE_CACHE_ENTRY {
+            "The runtime cache entry has an unsafe type, owner or permissions."
+        } else {
+            "The installed runtime failed verification."
+        };
+        report["blocker"] = json!({"code":code,"detail":detail,
             "action":"Reinstall the package once the version is unreferenced."});
     }
     report
@@ -285,22 +289,21 @@ pub fn execute(request: &Request<'_>, config: &Config) -> Result<(Value, bool)> 
                 pin.and_then(|pin| installed.iter().find(|entry| entry.cache == pin.cache()));
             match request.operation {
                 Operation::Status => {
-                    if current.is_some_and(|entry| !entry.verified) {
-                        result = Err("runtime_integrity_failed");
+                    if let Some(entry) = current {
+                        result = entry.verification;
                     }
                 }
                 Operation::Verify => {
                     result = match (pin, current) {
                         (None, _) => Err("runtime_unavailable"),
                         (_, None) => Err("runtime_absent"),
-                        (_, Some(entry)) if !entry.verified => Err("runtime_integrity_failed"),
-                        _ => Ok(()),
+                        (_, Some(entry)) => entry.verification,
                     };
                 }
                 Operation::Prepare => {
                     result = match (pin, current) {
                         (None, _) => Err("runtime_unavailable"),
-                        (_, Some(entry)) if entry.verified => Ok(()),
+                        (_, Some(entry)) if entry.verification.is_ok() => Ok(()),
                         (Some(pin), _)
                             if references.contains(&pin.cache()) && current.is_some() =>
                         {
@@ -412,7 +415,7 @@ fn prepare_error(error: &'static str) -> &'static str {
         "runtime archive digest mismatch"
         | "runtime archive size mismatch"
         | "runtime archive tree identity mismatch" => "runtime_archive_integrity_failed",
-        "runtime_in_use" | "runtime_state_unknown" => error,
+        "runtime_in_use" | "runtime_state_unknown" | super::private::UNSAFE_CACHE_ENTRY => error,
         _ => "runtime_prepare_failed",
     }
 }

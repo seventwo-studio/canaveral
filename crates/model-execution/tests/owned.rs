@@ -56,6 +56,12 @@ fn serve() {
         return;
     };
     assert_eq!(std::env::var("OLLAMA_NOPRUNE").unwrap(), "1");
+    assert_eq!(std::env::var("OLLAMA_NO_CLOUD").unwrap(), "1");
+    assert_eq!(std::env::var("OLLAMA_REMOTES").unwrap(), ",");
+    assert_eq!(std::env::var("HTTP_PROXY").unwrap(), "http://127.0.0.1:0");
+    assert_eq!(std::env::var("HTTPS_PROXY").unwrap(), "http://127.0.0.1:0");
+    assert_eq!(std::env::var("NO_PROXY").unwrap(), host);
+    assert!(host.starts_with("127.0.0.1:"));
     let exe = std::env::current_exe().unwrap();
     if exe.file_name().unwrap() == "requires-assets" {
         assert_eq!(

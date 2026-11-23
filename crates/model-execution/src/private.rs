@@ -81,6 +81,7 @@ pub(super) fn same_inode(first: &File, second: &File) -> Result<()> {
 }
 
 const PACKAGE_PENDING: &str = "runtime-package.next";
+pub(super) const UNSAFE_CACHE_ENTRY: &str = "runtime_cache_entry_unsafe";
 
 pub(super) struct Directory {
     path: PathBuf,
@@ -240,10 +241,61 @@ impl Directory {
             }
             return Err(invalid());
         }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || stat.st_uid != unsafe { libc::geteuid() }
+            || stat.st_mode & 0o7777 != 0o700
+        {
+            return Err(UNSAFE_CACHE_ENTRY);
+        }
         let dir = openat(&self.dir, &n, libc::O_RDONLY | libc::O_DIRECTORY)?;
         private(&dir, true)?;
         Ok(Some(dir))
     }
+
+    pub fn quarantine_package(
+        &self,
+        cache: &str,
+        previous: Option<&File>,
+        references: &super::PackageReferences,
+    ) -> Result<()> {
+        self.check()?;
+        if references.contains(cache) {
+            return Err("runtime_in_use");
+        }
+        match (previous, self.cached_package(cache)) {
+            (Some(previous), Ok(Some(current))) => same_inode(previous, &current)?,
+            (None, Err(UNSAFE_CACHE_ENTRY)) => {}
+            _ => return Err(invalid()),
+        }
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|_| invalid())?;
+        let quarantine = format!("runtime-quarantine.{:032x}", u128::from_be_bytes(nonce));
+        let quarantine = name(quarantine.as_ref())?;
+        if unsafe { libc::mkdirat(self.dir.as_raw_fd(), quarantine.as_ptr(), 0o700) } != 0 {
+            return Err(invalid());
+        }
+        let directory = openat(&self.dir, &quarantine, libc::O_RDONLY | libc::O_DIRECTORY)?;
+        private(&directory, true)?;
+        io(self.dir.sync_all())?;
+
+        // Move the directory entry itself, without opening or traversing it.
+        let n = name(cache.as_ref())?;
+        if unsafe {
+            libc::renameat(
+                self.dir.as_raw_fd(),
+                n.as_ptr(),
+                directory.as_raw_fd(),
+                n.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(invalid());
+        }
+        io(directory.sync_all())?;
+        io(self.dir.sync_all())?;
+        self.check()
+    }
+
     pub fn discard_package_workspace(&self, staging: &File) -> Result<()> {
         if let Some(pending) = self.cached_package(PACKAGE_PENDING)? {
             same_inode(staging, &pending)?;

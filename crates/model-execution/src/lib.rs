@@ -552,10 +552,16 @@ impl Executor {
             control,
         };
         startup.check()?;
+        let import_file = import
+            .map(|artifact| {
+                runtime_backend::open_model_file(&self.config.models_dir.join(&artifact.path))
+            })
+            .transpose()?;
+        startup.check()?;
         let mut port = launch(scope)?;
         let mut inventory_model = model.as_str();
         let mut inventory_digest = digest.clone();
-        if let Some(artifact) = import {
+        if let Some(file) = import_file {
             let server = scope.as_mut().unwrap();
             startup.probe(
                 server,
@@ -566,14 +572,13 @@ impl Executor {
             )?;
             let remaining = budget.saturating_sub(start.elapsed());
             let client = runtime_client(remaining)?;
-            let source = self.config.models_dir.join(&artifact.path);
             let expected = digest.clone();
             let pid = server.child.id();
             let base = format!("http://127.0.0.1:{port}");
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             std::thread::spawn(move || {
                 let _ = tx.send(ollama_import::create(
-                    &client, &base, pid, port, &source, &expected,
+                    &client, &base, pid, port, file, &expected,
                 ));
             });
             startup.wait(Some(server), &rx)??;
@@ -679,6 +684,26 @@ impl Executor {
             }
         })?;
         let r = backend.result(job, runtime_model, &v)?;
+        if import.is_some() {
+            if !scope.as_mut().unwrap().stop(self.config.stop_ms, true) {
+                return Err("Ollama server stop unconfirmed");
+            }
+            let mut verification = Startup {
+                directory: &self.directory,
+                start: clock::Clock::now(),
+                budget,
+                control,
+            };
+            verification.check()?;
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let digest = digest.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(ollama_import::verify(&store, &digest));
+            });
+            if verification.wait(None, &rx)?? != inventory_digest {
+                return Err("Ollama manifest identity changed during generation");
+            }
+        }
         receipt(
             job,
             State::Succeeded,

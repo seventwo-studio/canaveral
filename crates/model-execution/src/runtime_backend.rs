@@ -136,10 +136,18 @@ impl Backend {
         let host = format!("127.0.0.1:{port}");
         match self {
             Self::Ollama => {
+                // The pinned registry client uses Go's default HTTP transport.
+                // Port zero cannot be assigned to a listening proxy.
+                let deny_proxy = "http://127.0.0.1:0";
                 cmd.arg("serve")
+                    .env("HTTP_PROXY", deny_proxy)
+                    .env("HTTPS_PROXY", deny_proxy)
+                    .env("NO_PROXY", &host)
                     .env("OLLAMA_HOST", host)
                     .env("OLLAMA_MODELS", &config.models_dir)
                     .env("OLLAMA_NO_CLOUD", "1")
+                    // An unset value restores ollama.com. A comma yields no hostname.
+                    .env("OLLAMA_REMOTES", ",")
                     .env("OLLAMA_NOPRUNE", "1")
                     .env("OLLAMA_NUM_PARALLEL", "1")
                     .env("OLLAMA_MAX_LOADED_MODELS", "1")

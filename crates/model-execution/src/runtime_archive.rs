@@ -776,19 +776,24 @@ pub(super) fn stage_with_repair(
     pin.validate(test_loopback)?;
     let cache = pin.cache();
     let deadline = Instant::now() + Duration::from_secs(600);
-    let existing = state.cached_package(&cache)?;
-    let installed = existing.as_ref().map(|root| verify(pin, root, deadline));
-    if installed.as_ref().is_some_and(|result| result.is_err())
-        && repair
-        && references.contains(&cache)
-    {
+    let (existing, installed) = match state.cached_package(&cache) {
+        Ok(Some(root)) => {
+            let installed = verify(pin, &root, deadline);
+            (Some(root), Some(installed))
+        }
+        Ok(None) => (None, None),
+        Err(private::UNSAFE_CACHE_ENTRY) => (None, Some(Err(private::UNSAFE_CACHE_ENTRY))),
+        Err(error) => return Err(error),
+    };
+    let damaged = installed.as_ref().is_some_and(|result| result.is_err());
+    if damaged && repair && references.contains(&cache) {
         return Err("runtime_in_use");
     }
     let executables = if let Some(result) = installed.filter(|result| result.is_ok() || !repair) {
         result?
     } else {
         let root = state.package_workspace()?;
-        let replace = existing.as_ref().map(|file| (file, references));
+        let replace = damaged.then_some((existing.as_ref(), references));
         match install(pin, state, &root, replace, test_loopback, deadline) {
             Ok(executables) => executables,
             Err(error) => {
@@ -820,7 +825,7 @@ fn install(
     pin: &Pin,
     state: &Directory,
     root: &File,
-    replace: Option<(&File, &PackageReferences)>,
+    replace: Option<(Option<&File>, &PackageReferences)>,
     test_loopback: bool,
     deadline: Instant,
 ) -> Result<package::Executables> {
@@ -854,12 +859,8 @@ fn install(
     let executables = package::verify_cache(&manifest.package, root, deadline, Some(&bytes))?;
     let cache = pin.cache();
     if let Some((previous, references)) = replace {
-        let current = state
-            .cached_package(&cache)?
-            .ok_or("runtime_state_unknown")?;
-        private::same_inode(previous, &current).map_err(|_| "runtime_state_unknown")?;
         state
-            .delete_package(&cache, references)
+            .quarantine_package(&cache, previous, references)
             .map_err(|_| "runtime_state_unknown")?;
     }
     state
@@ -1380,7 +1381,7 @@ mod tests {
         fs::write(&staged.entrypoint, b"damaged").unwrap();
         fs::set_permissions(&staged.entrypoint, fs::Permissions::from_mode(0o500)).unwrap();
         assert!(stage(&current, &state, &path, &references, true).is_err());
-        let (url, task) = serve(bytes);
+        let (url, task) = serve(bytes.clone());
         current.url = url;
         stage_with_repair(&current, &state, &path, &references, true, true)
             .unwrap()
@@ -1388,6 +1389,66 @@ mod tests {
             .unwrap();
         task.join().unwrap();
         assert!(old_staged.verify_executables(&state).is_ok());
+
+        let cache = current.cache();
+        let current_path = path.join(&cache);
+        fs::set_permissions(&current_path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            stage(&current, &state, &path, &references, true),
+            Err(private::UNSAFE_CACHE_ENTRY)
+        );
+        references
+            .digests
+            .insert(cache.trim_start_matches("runtime-package.").into());
+        assert_eq!(
+            stage_with_repair(&current, &state, &path, &references, true, true),
+            Err("runtime_in_use")
+        );
+        assert_eq!(
+            fs::metadata(&current_path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        references
+            .digests
+            .remove(cache.trim_start_matches("runtime-package."));
+        let (url, task) = serve(bytes);
+        current.url = url;
+        stage_with_repair(&current, &state, &path, &references, true, true)
+            .unwrap()
+            .verify_executables(&state)
+            .unwrap();
+        task.join().unwrap();
+        let preserved = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                entry
+                    .file_name()
+                    .to_str()?
+                    .starts_with("runtime-quarantine.")
+                    .then(|| entry.path())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(preserved.len(), 2);
+        for directory in &preserved {
+            assert_eq!(
+                fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(preserved
+            .iter()
+            .any(|directory| fs::metadata(directory.join(&cache))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+                == 0o755));
+        assert!(preserved
+            .iter()
+            .any(
+                |directory| fs::read(directory.join(&cache).join("server")).unwrap() == b"damaged"
+            ));
         let job = serde_json::from_value(serde_json::json!({
             "version": 1, "applicationId": "11111111-1111-4111-8111-111111111111",
             "id": "22222222-2222-4222-8222-222222222222",
