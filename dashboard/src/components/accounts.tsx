@@ -84,7 +84,7 @@ function PersonalSettings({
                 key={key}
                 href={href}
                 aria-current={page === key ? "page" : undefined}
-                className="inline-flex min-h-8 items-center gap-2 rounded-sm px-2 text-[13px] hover:bg-muted aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-medium"
+                className="inline-flex min-h-8 items-center gap-2 rounded-sm px-2 text-ui hover:bg-muted aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-medium"
               >
                 <Icon aria-hidden="true" className="size-4" />
                 {label}
@@ -235,7 +235,7 @@ export function AccountPage({
       </p>
       <div className="space-y-1.5 border-t pt-4">
         <h2 className="text-sm font-semibold">Change password</h2>
-        <p className="max-w-prose text-[13px] leading-5 text-muted-foreground">
+        <p className="max-w-prose text-ui text-muted-foreground">
           Choose a password for Canaveral only. Changing it signs you out of all
           sessions and revokes your API tokens.
         </p>
@@ -373,7 +373,7 @@ export function TokensPage({ user }: { user: User }) {
   }
   return (
     <PersonalSettings page="tokens">
-      <p className="max-w-prose text-[13px] leading-5 text-muted-foreground">
+      <p className="max-w-prose text-ui text-muted-foreground">
         Tokens grant access to your account. Save each secret when you create
         it.
       </p>
@@ -424,8 +424,9 @@ export function TokensPage({ user }: { user: User }) {
       {error && <FieldError>{error}</FieldError>}
       {uncertain && (
         <div className="space-y-2">
-          <p>
-            Token: {uncertain.name} · {uncertain.id}
+          <p className="text-ui [overflow-wrap:anywhere]">
+            Token: {uncertain.name} ·{" "}
+            <span className="font-mono text-xs">{uncertain.id}</span>
           </p>
           <Button
             variant="outline"
@@ -436,45 +437,58 @@ export function TokensPage({ user }: { user: User }) {
           </Button>
         </div>
       )}
-      <div className="flex items-center justify-between gap-3 border-t pt-4">
-        <h2 className="text-sm font-semibold">Your tokens</h2>
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => load().catch((e) => setError(errorMessage(e)))}
-        >
-          Refresh tokens
-        </Button>
-      </div>
-      {tokens.map((t) => (
-        <section
-          key={t.id}
-          aria-label={`Token ${t.name}`}
-          className="space-y-2 border-t pt-4"
-        >
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h3 className="break-all text-sm font-medium">{t.name}</h3>
-            <StatusBadge state={tokenState(t)} />
-          </div>
-          <p className="break-all font-mono text-xs">
-            {t.prefix} · {t.scopes.join(", ")}
-          </p>
-          <p className="text-xs leading-5 text-muted-foreground">
-            Created: {timestamp(t.createdAt)} · Expires:{" "}
-            {timestamp(t.expiresAt)} · Last used: {timestamp(t.lastUsedAt)} ·
-            Revoked: {timestamp(t.revokedAt)}
-          </p>
-          {t.revokedAt === null && (
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => revoke(t.id)}
-            >
-              Revoke {t.name}
-            </Button>
-          )}
-        </section>
-      ))}
+      <section
+        aria-labelledby="personal-tokens-title"
+        className="divide-y border-t"
+      >
+        <div className="flex items-center justify-between gap-3 py-3">
+          <h2 id="personal-tokens-title" className="text-sm font-semibold">
+            Your tokens
+          </h2>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => load().catch((e) => setError(errorMessage(e)))}
+          >
+            Refresh tokens
+          </Button>
+        </div>
+        {tokens.map((t) => (
+          <section
+            key={t.id}
+            aria-label={`Token ${t.name}`}
+            className="space-y-1.5 py-3"
+          >
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <h3 className="text-ui font-medium [overflow-wrap:anywhere]">
+                  {t.name}
+                </h3>
+                <StatusBadge state={tokenState(t)} />
+              </div>
+              {t.revokedAt === null && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label={`Revoke ${t.name}`}
+                  disabled={busy}
+                  onClick={() => revoke(t.id)}
+                >
+                  Revoke
+                </Button>
+              )}
+            </div>
+            <p className="break-all font-mono text-xs">
+              {t.prefix} · {t.scopes.join(", ")}
+            </p>
+            <p className="text-xs text-muted-foreground tabular-nums">
+              Created: {timestamp(t.createdAt)} · Expires:{" "}
+              {timestamp(t.expiresAt)} · Last used: {timestamp(t.lastUsedAt)} ·
+              Revoked: {timestamp(t.revokedAt)}
+            </p>
+          </section>
+        ))}
+      </section>
     </PersonalSettings>
   );
 }

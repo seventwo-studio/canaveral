@@ -114,7 +114,7 @@ export function BrowserLaunch({ host }: { host: Host }) {
   return (
     <section aria-label="Browser session" className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex min-w-0 flex-wrap items-center gap-2 text-[13px] font-medium">
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-ui font-medium">
           Browser engine
           <NativeSelect
             className="w-auto"
@@ -159,7 +159,7 @@ export function BrowserLaunch({ host }: { host: Host }) {
         </p>
       )}
       {receipt && (
-        <dl className="grid min-w-0 gap-x-4 gap-y-1 border-y py-3 text-[13px] sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-y-2 [&_dt]:text-muted-foreground [&_dd]:break-all">
+        <dl className="grid min-w-0 gap-x-4 gap-y-1 border-y py-3 text-ui sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-y-2 [&_dt]:text-muted-foreground [&_dd]:break-all">
           <dt>Playwright endpoint</dt>
           <dd>
             <code>{receipt.endpoint}</code>

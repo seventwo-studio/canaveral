@@ -396,7 +396,7 @@ function ActivitySession({
           );
         })}
         <div className="col-span-2 flex min-w-0 flex-col justify-end gap-2 self-end md:col-span-1">
-          <label className="flex min-h-10 items-center gap-2 text-[13px] md:min-h-8">
+          <label className="flex min-h-10 items-center gap-2 text-ui md:min-h-8">
             <input
               type="checkbox"
               className="size-4 accent-primary"
@@ -596,7 +596,7 @@ const EventRow = memo(function EventRow({
         <time
           dateTime={event.at}
           title={event.at}
-          className="block font-mono text-xs tabular-nums"
+          className="block text-ui tabular-nums"
         >
           {localTime(event.at)}
         </time>
@@ -606,21 +606,19 @@ const EventRow = memo(function EventRow({
       </div>
       <div className="min-w-0 space-y-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="font-mono text-sm font-medium [overflow-wrap:anywhere]">
+          <span className="font-mono text-ui font-medium [overflow-wrap:anywhere]">
             {event.kind}
           </span>
           {info?.attention && (
-            <Badge variant="destructive">
-              Needs attention
-            </Badge>
+            <Badge variant="destructive">Needs attention</Badge>
           )}
         </div>
-        {info && <p className="text-sm">{info.summary}</p>}
+        {info && <p className="text-ui">{info.summary}</p>}
         <dl className="grid min-w-0 gap-x-4 gap-y-1 sm:grid-cols-2">
           {subjects.map(
             ([key, label, filter]) =>
               event[key] && (
-                <div key={key} className="min-w-0">
+                <div key={key} className="min-w-0 space-y-0.5">
                   <dt className="text-xs text-muted-foreground">{label}</dt>
                   <dd className="min-w-0">
                     <button

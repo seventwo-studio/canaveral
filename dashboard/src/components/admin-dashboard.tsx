@@ -193,7 +193,7 @@ export function AdminOverview({
           : ""}
       </ErrorNotice>
       {(directory.loading || tokens.loading) && (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="status" className="text-ui text-muted-foreground">
           Refreshing administration…
         </p>
       )}
@@ -206,13 +206,13 @@ export function AdminOverview({
         </div>
         <div className="divide-y">
           {!loaded ? (
-            <p className="py-3 text-sm text-muted-foreground">
+            <p className="py-3 text-ui text-muted-foreground">
               Inventory unavailable.
             </p>
           ) : (
             <>
               {!issueCount && (
-                <p className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+                <p className="flex items-center gap-2 py-3 text-ui text-muted-foreground">
                   {!stale && (
                     <CircleCheck
                       className="size-4 shrink-0 text-[color:var(--state-ready)]"
@@ -230,7 +230,7 @@ export function AdminOverview({
                   className="flex items-center justify-between gap-3 py-2.5"
                 >
                   <div className="min-w-0">
-                    <p className="break-words text-sm font-medium">{m.name}</p>
+                    <p className="break-words text-ui font-medium">{m.name}</p>
                     <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <Badge variant="destructive">{machineStatus(m)}</Badge>
                       <span className="[overflow-wrap:anywhere]">
@@ -253,7 +253,7 @@ export function AdminOverview({
                   className="flex items-center justify-between gap-3 py-2.5"
                 >
                   <div className="min-w-0">
-                    <p className="break-words text-sm font-medium">{h.name}</p>
+                    <p className="break-words text-ui font-medium">{h.name}</p>
                     <p className="text-xs text-muted-foreground">
                       {hostIssue(h)}
                     </p>
@@ -463,7 +463,7 @@ export function AdminTokensPage({
         aria-label="Filter API tokens"
         className="flex flex-wrap items-end gap-2 border-y py-2"
       >
-        <label className="grid w-full gap-1 text-[13px] font-medium sm:w-64">
+        <label className="grid w-full gap-1 text-ui font-medium sm:w-64">
           Search API tokens
           <Input
             aria-label="Search API tokens"
@@ -473,7 +473,7 @@ export function AdminTokensPage({
             placeholder="Name, owner or permission…"
           />
         </label>
-        <label className="grid w-full gap-1 text-[13px] font-medium sm:w-40">
+        <label className="grid w-full gap-1 text-ui font-medium sm:w-40">
           Token status
           <NativeSelect
             aria-label="Token status"
@@ -598,7 +598,7 @@ export function AdminTokensPage({
               <TableRow className="block @3xl:table-row">
                 <TableCell
                   colSpan={7}
-                  className="block h-auto py-3 !whitespace-normal text-left text-[13px] text-muted-foreground @3xl:table-cell"
+                  className="block h-auto py-3 !whitespace-normal text-left text-ui text-muted-foreground @3xl:table-cell"
                 >
                   {resource.loading
                     ? "Loading API access…"

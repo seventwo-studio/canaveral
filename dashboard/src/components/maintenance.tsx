@@ -198,7 +198,7 @@ export function Maintenance({ host }: { host: string }) {
               finish. Resume admission after reconciliation.
             </DialogDescription>
           </DialogHeader>
-          <label className="grid gap-1.5 text-[13px] font-medium">
+          <label className="grid gap-1.5 text-ui font-medium">
             Reason (optional)
             <Input
               maxLength={500}

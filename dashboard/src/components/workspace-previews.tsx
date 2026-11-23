@@ -219,7 +219,7 @@ export function WorkspacePreviews() {
     }
   }
   return (
-    <section className="min-w-0 space-y-5 text-sm">
+    <section className="min-w-0 space-y-6 text-ui">
       <form
         className="max-w-2xl space-y-3"
         onSubmit={(e) => {
@@ -227,12 +227,12 @@ export function WorkspacePreviews() {
           void act("launch");
         }}
       >
-        <p className="text-[13px] text-muted-foreground">
+        <p className="text-ui text-muted-foreground">
           New previews use the operator-configured pinned image.
         </p>
         <fieldset disabled={busy || !!pending} className="min-w-0">
           <SettingsRows>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Preview type{" "}
               <NativeSelect
                 value={mode}
@@ -245,7 +245,7 @@ export function WorkspacePreviews() {
                 <option value="command">Dynamic app</option>
               </NativeSelect>
             </label>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Workspace directory
               <Input
                 key={mode}
@@ -257,7 +257,7 @@ export function WorkspacePreviews() {
             </label>
             {mode === "command" && (
               <>
-                <label className="text-[13px] font-medium">
+                <label className="text-ui font-medium">
                   Foreground command and arguments (one per line)
                   <Textarea
                     required
@@ -265,7 +265,7 @@ export function WorkspacePreviews() {
                     onChange={(e) => setArgv(e.target.value)}
                   />
                 </label>
-                <label className="text-[13px] font-medium">
+                <label className="text-ui font-medium">
                   HTTP port
                   <Input
                     type="number"
@@ -328,7 +328,7 @@ export function WorkspacePreviews() {
           const waiting =
             p.state === "provisioning" && p.request?.state === "waiting";
           return (
-            <li key={p.id} className="space-y-2 px-3 py-3 text-[13px]">
+            <li key={p.id} className="space-y-2 px-3 py-3 text-ui">
               <p className="flex flex-wrap items-center gap-2">
                 {p.mode === "command" ? "Dynamic app" : "Static site"}
                 <StatusBadge

@@ -1,3 +1,4 @@
+import { BrandMark } from "./brand";
 import {
   LogOut,
   ChevronsUpDown,
@@ -211,9 +212,7 @@ export function WorkspaceSidebar({
             aria-label="Canaveral machines"
             onClick={() => setOpenMobile(false)}
           >
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-sm bg-sidebar-primary text-sidebar-primary-foreground">
-              <Rocket className="size-4" aria-hidden="true" />
-            </span>
+            <BrandMark />
             <span className="truncate text-sm font-semibold text-foreground">
               canaveral
             </span>
@@ -251,7 +250,7 @@ export function WorkspaceSidebar({
                             asChild
                             isActive={view === key}
                             tooltip={title}
-                            className="h-10 rounded-sm md:h-8 md:text-[13px]"
+                            className="h-10 rounded-sm md:h-8 md:text-ui"
                           >
                             <a
                               href={href}
@@ -300,7 +299,7 @@ export function WorkspaceSidebar({
                   <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-[10px] font-medium text-sidebar-foreground">
                     {user.username.slice(0, 2).toUpperCase()}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-left text-[13px] group-data-[collapsible=icon]:hidden">
+                  <span className="min-w-0 flex-1 truncate text-left text-ui group-data-[collapsible=icon]:hidden">
                     {user.username}
                   </span>
                   <ChevronsUpDown
@@ -327,6 +326,7 @@ export function WorkspaceSidebar({
                     aria-current={view === "account" ? "page" : undefined}
                     onClick={() => setOpenMobile(false)}
                   >
+                    <User aria-hidden="true" />
                     Account
                   </a>
                 </DropdownMenuItem>
@@ -336,6 +336,7 @@ export function WorkspaceSidebar({
                     aria-current={view === "tokens" ? "page" : undefined}
                     onClick={() => setOpenMobile(false)}
                   >
+                    <KeyRound aria-hidden="true" />
                     API tokens
                   </a>
                 </DropdownMenuItem>
@@ -346,12 +347,13 @@ export function WorkspaceSidebar({
                       aria-current={view === "users" ? "page" : undefined}
                       onClick={() => setOpenMobile(false)}
                     >
+                      <Users aria-hidden="true" />
                       Users
                     </a>
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem onSelect={onSignOut}>
-                  <LogOut />
+                  <LogOut aria-hidden="true" />
                   Sign out
                 </DropdownMenuItem>
               </DropdownMenuContent>

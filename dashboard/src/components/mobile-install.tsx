@@ -194,7 +194,7 @@ export function MobileInstall({ machine }: { machine: Machine }) {
     }
   }
   return (
-    <section className="grid gap-3 border-t pt-3 text-[13px]">
+    <section className="grid gap-3 border-t pt-3 text-ui">
       <label className="grid min-w-0 gap-1.5 font-medium">
         {android
           ? "Android APK"

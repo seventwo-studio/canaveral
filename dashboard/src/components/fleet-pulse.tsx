@@ -108,7 +108,7 @@ export function FleetPulse({
         </CardHeader>
         <CardContent>
           {!loaded || !total ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-ui text-muted-foreground">
               {loaded ? "No machines yet" : "Waiting for inventory…"}
             </p>
           ) : (
@@ -224,7 +224,7 @@ export function FleetPulse({
             className={mobileReservations ? "" : "hidden md:block"}
           >
             {!loaded || !inventory.hosts.length ? (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-ui text-muted-foreground">
                 {loaded ? "No hosts connected" : "Inventory unavailable"}
               </p>
             ) : (
@@ -239,7 +239,7 @@ export function FleetPulse({
                     >
                       <div className="min-w-0 space-y-1">
                         <a
-                          className="block break-words text-sm underline-offset-4 hover:underline"
+                          className="block break-words text-ui font-medium underline-offset-4 hover:underline"
                           href={`#${host.kind === "orchestrator" || host.provider === "kubevirt" ? "orchestrators" : "hosts"}/${encodeURIComponent(host.id)}/resources`}
                         >
                           {host.name}
@@ -288,7 +288,7 @@ export function FleetPulse({
                                     high={limit || undefined}
                                   />
                                   <p
-                                    className={`break-words font-mono tabular-nums ${used > limit ? "text-destructive" : ""}`}
+                                    className={`break-words text-ui tabular-nums ${used > limit ? "text-destructive" : ""}`}
                                   >
                                     {format(used)} / {format(limit)}
                                     {used > limit && (

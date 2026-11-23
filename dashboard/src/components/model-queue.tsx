@@ -184,10 +184,10 @@ function QueueRow({
   const queue = job.queue;
   return (
     <article
-      className="min-w-0 space-y-2 px-3 py-3 text-[13px]"
+      className="min-w-0 space-y-2 px-3 py-3 text-ui"
       aria-label={"Application model job " + job.id}
     >
-      <h3 className="break-all text-sm font-semibold">{job.model}</h3>
+      <h3 className="[overflow-wrap:anywhere] text-sm font-semibold">{job.model}</h3>
       <p className="break-all font-mono text-xs text-muted-foreground">
         {job.digest.slice(0, 19)} · application {job.applicationId} · {job.id}
       </p>

@@ -130,7 +130,7 @@ export function MachineControl({
         onEscapeKeyDown={(event) => event.preventDefault()}
         className="fixed inset-0 top-0 left-0 flex h-dvh max-h-none w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:max-w-none"
       >
-        <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b bg-muted px-4 py-2 text-left">
+        <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b bg-muted px-3 py-2 sm:px-4 text-left">
           <div className="flex min-w-0 items-center gap-3">
             <Button
               variant="ghost"
@@ -142,7 +142,7 @@ export function MachineControl({
               <ArrowLeft />
             </Button>
             <div className="min-w-0">
-              <DialogTitle className="break-all text-sm">
+              <DialogTitle className="[overflow-wrap:anywhere] text-sm">
                 {machine.name}
               </DialogTitle>
               <DialogDescription className="mt-0.5 text-xs">
@@ -269,7 +269,7 @@ export function MachineControl({
                       <Plus />
                       New shell
                     </Button>
-                    <span className="ml-auto text-[10px] text-muted-foreground">
+                    <span className="ml-auto text-xs text-muted-foreground">
                       {sessions.length} sessions
                     </span>
                   </div>

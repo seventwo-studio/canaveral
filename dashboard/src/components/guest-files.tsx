@@ -360,7 +360,7 @@ export function GuestFiles({
                 key={entry.name}
                 disabled={busy}
                 onClick={() => action(() => inspect(entry))}
-                className={`grid min-h-11 w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b px-3 py-2 text-left text-[13px] hover:bg-muted @lg/files:grid-cols-[minmax(0,1fr)_5rem_9rem] ${selected?.name === entry.name ? "bg-muted" : ""}`}
+                className={`grid min-h-11 w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b px-3 py-2 text-left text-ui hover:bg-muted @lg/files:grid-cols-[minmax(0,1fr)_5rem_9rem] ${selected?.name === entry.name ? "bg-muted" : ""}`}
               >
                 <span className="flex min-w-0 items-center gap-3">
                   {entry.kind === "directory" ? (
@@ -368,7 +368,7 @@ export function GuestFiles({
                   ) : (
                     <File className="size-4 shrink-0 text-muted-foreground" />
                   )}
-                  <span className="min-w-0 break-all">{entry.name}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{entry.name}</span>
                 </span>
                 <span className="tabular-nums text-muted-foreground">
                   {entry.kind === "directory" ? "Folder" : size(entry.size)}
@@ -381,7 +381,7 @@ export function GuestFiles({
               </button>
             ))}
             {!visible.length && (
-              <div className="px-4 py-3 text-[13px] text-muted-foreground">
+              <div className="px-3 py-3 text-ui text-muted-foreground">
                 <p>
                   {busy
                     ? "Loading files…"

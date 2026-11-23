@@ -66,7 +66,7 @@ export function HostLimits({
       </p>
       <SettingsRows>
         {resourceFields.map(([key, label]) => (
-          <label key={key} className="text-[13px] font-medium">
+          <label key={key} className="text-ui font-medium">
             {label}
             <Input
               type="number"

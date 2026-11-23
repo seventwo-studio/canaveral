@@ -9,6 +9,8 @@
 }
 @custom-variant dark (&:is(.dark *));
 @theme inline {
+  --text-ui: 0.8125rem;
+  --text-ui--line-height: 1.25rem;
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: "Geist Mono", monospace;
@@ -197,6 +199,14 @@ meter::-moz-meter-bar {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Lucide uses a 24-unit drawing grid. Set its standard outline once;
+   explicit strokes on artwork and selection marks keep their own weight. */
+@layer base {
+  .lucide[stroke-width="2"] {
+    stroke-width: 1.75;
   }
 }
 

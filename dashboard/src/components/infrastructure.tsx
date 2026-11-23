@@ -168,7 +168,7 @@ function Usage({ host }: { host: Host }) {
         className="space-y-2 border-t pt-3"
         aria-label="Canaveral measured usage"
       >
-        <h3 className="text-xs font-medium">Canaveral measured usage</h3>
+        <h3 className="text-ui font-medium">Canaveral measured usage</h3>
         {u.canaveral ? (
           u.canaveral.categories.map((g) => (
             <div
@@ -571,7 +571,7 @@ export function InfrastructureDetails({
     }
   }
   return (
-    <div className="min-w-0 space-y-6" aria-label={`${host.name} overview`}>
+    <div className="min-w-0 space-y-5" aria-label={`${host.name} overview`}>
       {error && (
         <div
           role="alert"
@@ -622,8 +622,8 @@ export function InfrastructureDetails({
           }
         />
       </div>
-      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <div className="min-w-0 space-y-6">
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-5">
           <section className="min-w-0 space-y-3">
             <h2 className="text-sm font-semibold">Observed resources</h2>
             <Usage host={host} />
@@ -650,7 +650,7 @@ export function InfrastructureDetails({
           </section>
         </div>
         <aside
-          className="min-w-0 space-y-6"
+          className="min-w-0 space-y-5"
           aria-label="Environment and capabilities"
         >
           <section className="space-y-3">
@@ -687,7 +687,7 @@ export function InfrastructureDetails({
                     ) : (
                       <AlertTriangle className="size-3 text-[var(--state-pending)]" />
                     )}
-                    <span className="font-medium">{c.label}</span>
+                    <span className="text-ui font-medium">{c.label}</span>
                     <span className="ml-auto text-muted-foreground">
                       {c.status}
                     </span>
@@ -953,7 +953,7 @@ export function ConnectionSetup({
         {!issued ? (
           <form onSubmit={issue} className="@container/setup space-y-4">
             <div className="grid gap-4 @sm/setup:grid-cols-2">
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Connection type
                 <NativeSelect
                   aria-label="Connection type"
@@ -974,7 +974,7 @@ export function ConnectionSetup({
                   <option value="orchestrator">External orchestrator</option>
                 </NativeSelect>
               </label>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 {type === "orchestrator" ? "Provider" : "Host operating system"}
                 <NativeSelect
                   aria-label={
@@ -997,7 +997,7 @@ export function ConnectionSetup({
                 </NativeSelect>
               </label>
             </div>
-            <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+            <label className="grid min-w-0 gap-1.5 text-ui font-medium">
               Connection name
               <Input
                 required
@@ -1010,7 +1010,7 @@ export function ConnectionSetup({
             <div className="grid min-w-0 gap-1.5">
               <label
                 htmlFor="runner-controller-url"
-                className="text-[13px] font-medium"
+                className="text-ui font-medium"
               >
                 Controller URL
               </label>
@@ -1039,7 +1039,7 @@ export function ConnectionSetup({
                 {resourceFields.map(([key, label]) => (
                   <label
                     key={key}
-                    className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                    className="grid min-w-0 gap-1.5 text-ui font-medium"
                   >
                     {label}
                     <Input
@@ -1069,7 +1069,7 @@ export function ConnectionSetup({
               {fields.map(([key, label]) => (
                 <label
                   key={key}
-                  className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                  className="grid min-w-0 gap-1.5 text-ui font-medium"
                 >
                   {label}
                   <Input
@@ -1108,7 +1108,7 @@ export function ConnectionSetup({
                       Object.entries(runtimeDefaults(name)).map(([key]) => (
                         <label
                           key={key}
-                          className="grid min-w-0 gap-1.5 pl-5 text-[13px] font-medium"
+                          className="grid min-w-0 gap-1.5 pl-5 text-ui font-medium"
                         >
                           {provider(name)} {key}
                           <Input
@@ -1134,7 +1134,7 @@ export function ConnectionSetup({
               <summary className="cursor-pointer text-xs font-medium">
                 Advanced configuration and images
               </summary>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Runner configuration
                 <Textarea
                   className="min-h-44 font-mono text-xs"
@@ -1210,7 +1210,7 @@ export function ConnectionSetup({
         )}
         {activity.some((s) => s.state === "pending") && (
           <section className="space-y-2 border-t pt-4">
-            <h2 className="text-xs font-medium">Pending setup credentials</h2>
+            <h2 className="text-sm font-semibold">Pending setup credentials</h2>
             {activity
               .filter((s) => s.state === "pending")
               .map((s) => (

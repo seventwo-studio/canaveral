@@ -68,7 +68,7 @@ function Pair({
   return (
     <div className="min-w-0 space-y-1">
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-sm [overflow-wrap:anywhere]">{children}</dd>
+      <dd className="text-ui [overflow-wrap:anywhere]">{children}</dd>
     </div>
   );
 }
@@ -482,12 +482,12 @@ function UsageSession({
                   <li key={row.key} className="min-w-0 space-y-3 px-1 py-3">
                     <div className="min-w-0">
                       {row.label && (
-                        <p className="font-display text-base font-medium [overflow-wrap:anywhere]">
+                        <p className="text-ui font-medium [overflow-wrap:anywhere]">
                           {row.label}
                         </p>
                       )}
                       <p
-                        className={`[overflow-wrap:anywhere] ${row.label ? "font-mono text-xs text-muted-foreground" : "font-mono text-sm font-medium"}`}
+                        className={`[overflow-wrap:anywhere] ${row.label ? "font-mono text-xs text-muted-foreground" : "font-mono text-ui font-medium"}`}
                       >
                         {row.key}
                       </p>

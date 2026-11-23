@@ -16,6 +16,12 @@ Give each destination one page heading. The workspace header carries this headin
 
 Account and API tokens share the Settings header. A secondary navigation column identifies the active section beside its form. When the content area is narrow, the links move above the form. [Browserbase Preferences](https://mobbin.com/screens/b8124a12-8111-4ed7-8bfa-4f217b03a98c)
 
+## Typography, icons and spacing
+
+Use the system sans face for interface text and Geist Mono for identifiers, code and terminal output. Controls, row names and regular values use 13px type on a 20px line. Secondary labels, timestamps and chart ticks use 12px on 16px. Keep editable phone fields at 16px. Let names wrap at spaces, and allow long identifiers to break within the available column. [Browserbase session detail](https://mobbin.com/screens/67179442-fde1-4b51-9a93-8f9f0d553a18)
+
+Standard controls and navigation use 16px Lucide icons with a 1.75-unit outline. Small controls and disclosure arrows use 14px glyphs, and the smallest indicators use 12px. Control size governs the hit area independently. Desktop content starts 24px inside the workspace, with 24px between major sections. A settings list uses 12px row padding and a single divider between records. Keep row actions beside the record and include its name in the accessible label. [Browserbase Preferences](https://mobbin.com/screens/b8124a12-8111-4ed7-8bfa-4f217b03a98c)
+
 ## Cards, charts and badges
 
 Use a white card with a 1px border, 4px corners and 16px insets for standalone resources. In Overview, a group of related totals shares one outline. A fine rule separates adjacent cells. Center the short label above its value, use tabular numerals, and keep supplementary units and sample counts smaller. Section lists can use horizontal rules without an enclosing card. [Overview metrics](https://mobbin.com/screens/654392d0-9063-4db4-8987-6b7fc6742537)

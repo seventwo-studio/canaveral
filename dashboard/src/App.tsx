@@ -794,7 +794,7 @@ export function App() {
         <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-1 border-b px-2 md:gap-3 md:px-4 lg:px-6">
           <SidebarTrigger className="shrink-0 md:hidden" />
           <Breadcrumb className="min-w-0 flex-1">
-            <BreadcrumbList className="flex-nowrap gap-1.5 text-[13px] leading-5 sm:gap-2">
+            <BreadcrumbList className="flex-nowrap gap-1.5 text-ui sm:gap-2">
               {resourcePage && (
                 <>
                   <BreadcrumbItem className="shrink-0">
@@ -897,7 +897,7 @@ export function App() {
         <div
           id="workspace-content"
           tabIndex={-1}
-          className="flex min-w-0 flex-1 flex-col gap-3 px-4 py-4 outline-none md:gap-4 md:py-5 lg:gap-5 lg:px-6"
+          className="flex min-w-0 flex-1 flex-col gap-3 px-4 py-4 outline-none md:gap-4 md:py-5 lg:gap-6 lg:px-6 lg:py-6"
         >
           {view === "system" && user.role === "admin" ? (
             <SystemControl
@@ -1517,9 +1517,9 @@ export function App() {
                 ).map(([k, v]) => (
                   <div
                     key={k}
-                    className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-2 text-[13px]"
+                    className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-2 text-ui"
                   >
-                    <dt className="text-muted-foreground">{k}</dt>
+                    <dt className="self-baseline text-xs text-muted-foreground">{k}</dt>
                     <dd
                       className={
                         k === "Machine ID"

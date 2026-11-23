@@ -143,7 +143,7 @@ export function BaseImageRegistry({
           </DialogDescription>
         </DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Import onto host
             <NativeSelect
               aria-label="Registry target host"
@@ -159,7 +159,7 @@ export function BaseImageRegistry({
               ))}
             </NativeSelect>
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Search registry
             <Input
               value={query}
@@ -167,7 +167,7 @@ export function BaseImageRegistry({
               placeholder="Ubuntu, macOS, Windows…"
             />
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Operating system
             <NativeSelect value={os} onChange={(e) => setOs(e.target.value)}>
               <option value="all">All operating systems</option>
@@ -176,7 +176,7 @@ export function BaseImageRegistry({
               <option value="windows">Windows</option>
             </NativeSelect>
           </label>
-          <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Architecture
             <NativeSelect
               value={arch}
@@ -209,7 +209,7 @@ export function BaseImageRegistry({
                       : task.result?.detail ||
                         "Inspect the image task before retrying."}
               </p>
-              <p className="break-all text-muted-foreground">Task {task.id}</p>
+              <p className="text-muted-foreground">Task <code className="break-all">{task.id}</code></p>
             </section>
           </Card>
         )}

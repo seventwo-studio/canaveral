@@ -154,7 +154,21 @@ for (const width of [1440, 1133, 390, 320])
               : path === "users"
                 ? { users: [adminUser] }
                 : path === "auth/tokens"
-                  ? { tokens: [] }
+                  ? {
+                      tokens: [
+                        "Release automation",
+                        "Build workspace " + "x".repeat(55),
+                      ].map((name, i) => ({
+                        id: "fixture-" + i,
+                        name,
+                        prefix: "cv_fixture_" + i,
+                        scopes: ["machines:read"],
+                        createdAt: 100,
+                        expiresAt: 9999999999,
+                        lastUsedAt: null,
+                        revokedAt: null,
+                      })),
+                    }
                   : path === "templates"
                     ? { templates: [t] }
                     : {};
@@ -165,6 +179,12 @@ for (const width of [1440, 1133, 390, 320])
       "script-src 'self'",
     );
     await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();
+    const signInMark = page.locator(".lucide-rocket").first();
+    await expect(signInMark).toHaveCSS("width", "28px");
+    await expect(page.getByLabel("Username")).toHaveCSS(
+      "font-size",
+      width >= 768 ? "13px" : "16px",
+    );
     await page.evaluate(() => document.fonts.load('14px "Geist Mono"'));
     expect(
       await page.evaluate(() => document.fonts.check('14px "Geist Mono"')),
@@ -205,6 +225,16 @@ for (const width of [1440, 1133, 390, 320])
     ).toBeVisible();
     await expect(page.getByLabel("Password", { exact: true })).toHaveCount(0);
     const toggle = page.getByRole("button", { name: "Toggle Sidebar" });
+    const createButton = page.getByRole("button", {
+      name: "Create machine",
+      exact: true,
+    });
+    await expect(createButton).toHaveCSS("font-size", "13px");
+    await expect(createButton).toHaveCSS("line-height", "20px");
+    await expect(createButton.locator("svg")).toHaveCSS(
+      "stroke-width",
+      "1.75px",
+    );
     await captureSurface("workspace-navigation");
     if (width >= 768) {
       await toggle.click();
@@ -388,6 +418,23 @@ for (const width of [1440, 1133, 390, 320])
     await expect(
       settingsNav.getByRole("link", { name: "API tokens" }),
     ).toHaveAttribute("aria-current", "page");
+    const tokens = page.getByRole("region", {
+      name: "Your tokens",
+      exact: true,
+    });
+    await expect(tokens.getByRole("heading", { level: 3 })).toHaveCount(2);
+    const longTokenAction = tokens.getByRole("button", {
+      name: /^Revoke Build workspace /,
+    });
+    await expect(longTokenAction).toHaveText("Revoke");
+    await expect(longTokenAction).toHaveCSS("height", "28px");
+    expect(
+      await tokens.evaluate((el) => el.scrollWidth <= el.clientWidth),
+    ).toBe(true);
+    if (process.env.CANAVERAL_SCREENSHOT_DIR)
+      await tokens.screenshot({
+        path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/token-type-${width}.png`,
+      });
     if (width < 768) await toggle.click();
     await page.getByRole("button", { name: "Account menu" }).click();
     await page.getByRole("menuitem", { name: "Sign out" }).click();

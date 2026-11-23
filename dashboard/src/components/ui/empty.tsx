@@ -93,7 +93,7 @@ function EmptyDescription({
     <div
       data-slot="empty-description"
       className={cn(
-        "text-[13px]/5 text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
+        "text-ui text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
         className,
       )}
       {...props}
@@ -125,7 +125,7 @@ function FilteredEmpty({
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-4">
-      <h2 className="text-[13px] text-muted-foreground">{title}</h2>
+      <h2 className="text-ui text-muted-foreground">{title}</h2>
       <Button size="sm" variant="ghost" onClick={onClear}>
         {action}
       </Button>

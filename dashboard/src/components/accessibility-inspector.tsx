@@ -195,7 +195,7 @@ export function AccessibilityInspector({
           nodes.map((n) => (
             <button
               key={n.id}
-              className={`block w-full border-b px-3 py-2 text-left text-xs hover:bg-muted ${selected === n.id ? "bg-muted" : ""}`}
+              className={`block w-full border-b px-3 py-2 text-left text-ui hover:bg-muted ${selected === n.id ? "bg-muted" : ""}`}
               style={{ paddingLeft: `${12 + Math.min(n.depth || 0, 8) * 8}px` }}
               onClick={() => {
                 selectedIdentity.current = identity(n);
@@ -210,7 +210,7 @@ export function AccessibilityInspector({
                   {n.name || n.identifier || "Unnamed"}
                 </span>
               </div>
-              <div className="mt-1 break-all text-[10px] text-muted-foreground">
+              <div className="mt-0.5 break-all font-mono text-xs text-muted-foreground">
                 {n.id}
                 {n.identifier ? " · " + n.identifier : ""}
               </div>
@@ -237,7 +237,7 @@ export function AccessibilityInspector({
               </Button>
             ))}
           </div>
-          <pre className="whitespace-pre-wrap break-all text-[11px] leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all text-xs leading-5">
             {JSON.stringify(node, null, 2)}
           </pre>
         </section>

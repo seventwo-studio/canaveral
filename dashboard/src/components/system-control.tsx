@@ -301,7 +301,7 @@ function SystemControlPage({
   if (user.role !== "admin")
     return <p role="alert">Administrator access is required.</p>;
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-muted-foreground">
@@ -339,7 +339,7 @@ function SystemControlPage({
         >
           Previous page
         </Button>
-        <span className="text-sm">Page {page + 1}</span>
+        <span className="text-ui tabular-nums">Page {page + 1}</span>
         <Button
           variant="outline"
           disabled={
@@ -366,7 +366,7 @@ function SystemControlPage({
               </span>
             </h2>
             {!snapshot[collection].length ? (
-              <p className="border-t px-1 py-3 text-[13px] text-muted-foreground">
+              <p className="border-t px-1 py-3 text-ui text-muted-foreground">
                 No {collection} on this page
               </p>
             ) : (
@@ -379,10 +379,10 @@ function SystemControlPage({
                       className="grid min-w-0 gap-3 rounded-none border-0 px-1 py-3 shadow-none lg:grid-cols-[minmax(10rem,1fr)_minmax(0,3fr)_auto] lg:items-start"
                     >
                       <CardHeader className="min-w-0 px-0">
-                        <CardTitle className="break-all">
+                        <CardTitle className="text-ui font-medium [overflow-wrap:anywhere]">
                           {item.name || item.id}
                         </CardTitle>
-                        <CardDescription className="break-all">
+                        <CardDescription className="text-xs [overflow-wrap:anywhere]">
                           {item.family}
                           {item.name ? ` · ${item.id}` : ""}
                         </CardDescription>
@@ -473,11 +473,16 @@ function SystemControlPage({
                           ).map(
                             ([label, value]) =>
                               value !== undefined && (
-                                <div key={label} className="min-w-0">
+                                <div
+                                  key={label}
+                                  className="min-w-0 space-y-0.5"
+                                >
                                   <dt className="text-muted-foreground">
                                     {label}
                                   </dt>
-                                  <dd className="break-all">{value}</dd>
+                                  <dd className="text-ui [overflow-wrap:anywhere]">
+                                    {value}
+                                  </dd>
                                 </div>
                               ),
                           )}
@@ -500,7 +505,7 @@ function SystemControlPage({
                           ))}
                         </dl>
                         <details>
-                          <summary className="cursor-pointer text-sm">
+                          <summary className="cursor-pointer text-ui">
                             Record details
                           </summary>
                           <pre className="mt-2 whitespace-pre-wrap break-all text-xs">

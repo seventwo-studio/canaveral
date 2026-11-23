@@ -115,12 +115,12 @@ export function ClaimScreen({
       </h1>
       <p
         id="claim-password-guidance"
-        className="text-[13px] leading-5 text-muted-foreground"
+        className="text-ui text-muted-foreground"
       >
         Use a new password for Canaveral only. Choose 12–1024 characters.
       </p>
       {info?.username && (
-        <p className="break-all text-[13px] font-medium">
+        <p className="break-all text-ui font-medium">
           Account: {info.username}
         </p>
       )}

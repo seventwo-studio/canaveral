@@ -191,7 +191,7 @@ export function ImageImport({
         ) : (
           <form className="@container/import space-y-4" onSubmit={submit}>
             <fieldset disabled={busy} className="space-y-4">
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Image name
                 <Input
                   required
@@ -200,7 +200,7 @@ export function ImageImport({
                   onChange={(e) => setName(e.target.value)}
                 />
               </label>
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Destination host
                 <NativeSelect
                   aria-label="Destination host"
@@ -227,7 +227,7 @@ export function ImageImport({
                 ).map(([label, value, set, options]) => (
                   <label
                     key={label}
-                    className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                    className="grid min-w-0 gap-1.5 text-ui font-medium"
                   >
                     {label}
                     <NativeSelect
@@ -246,7 +246,7 @@ export function ImageImport({
                 ))}
               </div>
               <div className="grid gap-3 @sm/import:grid-cols-2">
-                <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+                <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                   Media type
                   <NativeSelect
                     aria-label="Media type"
@@ -265,7 +265,7 @@ export function ImageImport({
                     <option value="installer">OS installer</option>
                   </NativeSelect>
                 </label>
-                <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+                <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                   Format
                   <NativeSelect
                     aria-label="Format"
@@ -286,7 +286,7 @@ export function ImageImport({
                 {resourceFields.map(([key, label]) => (
                   <label
                     key={key}
-                    className="grid min-w-0 gap-1.5 text-[13px] font-medium"
+                    className="grid min-w-0 gap-1.5 text-ui font-medium"
                   >
                     {label}
                     <Input
@@ -322,7 +322,7 @@ export function ImageImport({
                   </span>
                 </label>
               )}
-              <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Image file
                 <Input
                   type="file"
@@ -496,7 +496,7 @@ export function ImageCapture({
           </div>
         ) : (
           <form className="space-y-4" onSubmit={submit}>
-            <label className="grid min-w-0 gap-1.5 text-[13px] font-medium">
+            <label className="grid min-w-0 gap-1.5 text-ui font-medium">
               Snapshot name
               <Input
                 required

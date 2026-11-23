@@ -75,7 +75,7 @@ export function StackedResources({
               return (
                 <div key={key} className="min-w-0 space-y-2 bg-card p-3">
                   <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 text-xs">
-                    <h3 className="font-medium">{label}</h3>
+                    <h3 className="text-ui font-medium">{label}</h3>
                     <span className="tabular-nums">
                       {amount(key, total)} / {amount(key, capacity)}
                     </span>
@@ -235,9 +235,9 @@ export function HostMachines({
       {visible.length ? (
         <ul className="divide-y border-y">
           {visible.map((machine) => (
-            <li key={machine.id} className="min-w-0 space-y-2 py-3">
+            <li key={machine.id} className="min-w-0 space-y-1.5 py-3">
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                <span className="min-w-0 break-words text-sm font-medium">
+                <span className="min-w-0 break-words text-ui font-medium">
                   {machine.name}
                 </span>
                 <Badge
@@ -338,10 +338,10 @@ export function HostImages({
           {images.map((image) => (
             <li
               key={`${image.id}:${image.revision}:${image.arch}`}
-              className="min-w-0 space-y-2 py-3"
+              className="min-w-0 space-y-1.5 py-3"
             >
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                <span className="min-w-0 break-words text-sm font-medium">
+                <span className="min-w-0 break-words text-ui font-medium">
                   {image.name || image.id}
                 </span>
                 <Badge variant="outline">

@@ -123,7 +123,7 @@ function AlertDialogDescription({
     <AlertDialogPrimitive.Description
       data-slot="alert-dialog-description"
       className={cn(
-        "text-[13px] leading-5 text-muted-foreground [overflow-wrap:anywhere]",
+        "text-ui text-muted-foreground [overflow-wrap:anywhere]",
         className,
       )}
       {...props}

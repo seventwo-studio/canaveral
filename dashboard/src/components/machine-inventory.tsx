@@ -121,7 +121,7 @@ function MachineRow({
         <div className="min-w-0 space-y-1">
           <Button
             variant="link"
-            className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-[13px] font-medium text-foreground [overflow-wrap:anywhere]"
+            className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-ui font-medium text-foreground [overflow-wrap:anywhere]"
             onClick={(e) => onInspect(m.id, e.currentTarget)}
           >
             {m.name}

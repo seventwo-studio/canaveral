@@ -58,10 +58,10 @@ function Pair({
   mono?: boolean;
 }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 space-y-0.5">
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd
-        className={`[overflow-wrap:anywhere] ${mono ? "font-mono text-xs tabular-nums" : "text-sm"}`}
+        className={`[overflow-wrap:anywhere] ${mono ? "font-mono text-xs tabular-nums" : "text-ui"}`}
       >
         {children}
       </dd>
@@ -76,7 +76,7 @@ function Holder({
   return (
     <>
       {subject.applicationName && (
-        <span className="block text-sm">{subject.applicationName}</span>
+        <span className="block text-ui">{subject.applicationName}</span>
       )}
       <a
         className="font-mono text-xs underline-offset-4 hover:underline"
@@ -238,7 +238,7 @@ function QueueSession({
     return <p role="alert">Administrator access is required.</p>;
   const now = clock ? controllerNow(clock) : Date.now();
   return (
-    <div className="min-w-0 space-y-6">
+    <div className="min-w-0 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <p className="max-w-prose text-sm text-muted-foreground">
@@ -332,11 +332,11 @@ function QueueSession({
                       <div className="min-w-0 space-y-3">
                         <div className="min-w-0 space-y-1">
                           <p
-                            className={`font-display text-base font-medium [overflow-wrap:anywhere] ${request.label ? "" : "text-muted-foreground"}`}
+                            className={`text-ui font-medium [overflow-wrap:anywhere] ${request.label ? "" : "text-muted-foreground"}`}
                           >
                             {request.label ?? "No label"}
                           </p>
-                          <p className="text-sm">
+                          <p className="text-ui">
                             {waitingReason(request)}
                             {request.reason && (
                               <>
@@ -559,7 +559,7 @@ function LeaseRow({ lease, now }: { lease: QueueLease; now: number }) {
       </div>
       <div className="min-w-0 space-y-3">
         <p
-          className={`font-display text-base font-medium [overflow-wrap:anywhere] ${lease.name === null ? "text-muted-foreground" : ""}`}
+          className={`text-ui font-medium [overflow-wrap:anywhere] ${lease.name === null ? "text-muted-foreground" : ""}`}
         >
           {lease.name ?? "No label"}
         </p>

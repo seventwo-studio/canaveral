@@ -97,8 +97,8 @@ function BuildRow({ initial }: { initial: Build }) {
     }
   }
   return (
-    <article className="min-w-0 space-y-2 px-3 py-3 text-[13px]">
-      <h3 className="break-all text-sm font-semibold">{row.artifact}</h3>
+    <article className="min-w-0 space-y-2 px-3 py-3 text-ui">
+      <h3 className="[overflow-wrap:anywhere] text-sm font-semibold">{row.artifact}</h3>
       <p className="break-all font-mono text-xs text-muted-foreground">
         {row.imageId} · {row.id}
       </p>
@@ -267,7 +267,7 @@ export function WorkspaceBuilds() {
     }
   }
   return (
-    <section className="min-w-0 space-y-5 text-sm">
+    <section className="min-w-0 space-y-6 text-ui">
       <form
         className="max-w-2xl space-y-3"
         onSubmit={(e) => {
@@ -277,7 +277,7 @@ export function WorkspaceBuilds() {
       >
         <fieldset className="min-w-0" disabled={busy || !!pending}>
           <SettingsRows>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Source directory
               <Input
                 type="file"
@@ -286,7 +286,7 @@ export function WorkspaceBuilds() {
                 onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
               />
             </label>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Approved workspace image
               <NativeSelect
                 value={imageId}
@@ -299,14 +299,14 @@ export function WorkspaceBuilds() {
                 ))}
               </NativeSelect>
             </label>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Command (one argument per line)
               <Textarea
                 value={argv}
                 onChange={(e) => setArgv(e.target.value)}
               />
             </label>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Artifact path
               <Input
                 placeholder="dist/package.tar"

@@ -107,7 +107,7 @@ export function CpuHistory({
           <>
             <div className="grid min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] gap-1">
               <div
-                className="flex h-44 flex-col justify-between text-[10px] text-muted-foreground tabular-nums"
+                className="flex h-44 flex-col justify-between text-xs text-muted-foreground tabular-nums"
                 aria-hidden="true"
               >
                 {[100, 75, 50, 25, 0].map((tick) => (
@@ -155,7 +155,7 @@ export function CpuHistory({
               </svg>
             </div>
             <div
-              className="ml-10 flex min-w-0 justify-between gap-3 text-[10px] text-muted-foreground tabular-nums"
+              className="ml-10 flex min-w-0 justify-between gap-3 text-xs text-muted-foreground tabular-nums"
               aria-hidden="true"
             >
               <time dateTime={iso(first!)} title={fullTime(first!)}>

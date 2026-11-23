@@ -238,10 +238,10 @@ function JobRow({
   }
   return (
     <article
-      className="min-w-0 space-y-2 px-3 py-3 text-[13px]"
+      className="min-w-0 space-y-2 px-3 py-3 text-ui"
       aria-label={"Model job " + row.id}
     >
-      <h3 className="break-all text-sm font-semibold">{row.model}</h3>
+      <h3 className="[overflow-wrap:anywhere] text-sm font-semibold">{row.model}</h3>
       <p className="break-all font-mono text-xs text-muted-foreground">
         {short(row.digest)} · host {row.hostId} · {row.id}
       </p>
@@ -457,7 +457,7 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
     }
   }
   return (
-    <section className="min-w-0 space-y-5 text-sm">
+    <section className="min-w-0 space-y-6 text-ui">
       <form
         className="max-w-2xl space-y-3"
         onSubmit={(e) => {
@@ -467,7 +467,7 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
       >
         <fieldset className="min-w-0" disabled={busy || !!pending}>
           <SettingsRows>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Installed model
               <NativeSelect
                 value={choice}
@@ -483,14 +483,14 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
                 ))}
               </NativeSelect>
             </label>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Prompt
               <Textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
               />
             </label>
-            <label className="text-[13px] font-medium">
+            <label className="text-ui font-medium">
               Maximum output tokens
               <Input
                 type="number"

@@ -161,7 +161,7 @@ export function ScreenWall({
             Devices you can watch{" "}
             <span className="text-muted-foreground">({candidates.length})</span>
           </h2>
-          <details className="max-w-prose text-[13px] text-muted-foreground">
+          <details className="max-w-prose text-ui text-muted-foreground">
             <summary className="w-fit cursor-pointer">
               Capture capacity and limits
             </summary>
