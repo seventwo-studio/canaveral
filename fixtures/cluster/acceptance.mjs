@@ -493,6 +493,16 @@ async function exerciseVm() {
         apparmor: tail('sudo', ['journalctl', '-k', '--no-pager', '-n', '4', '-o', 'cat', '--grep', 'apparmor="DENIED"']),
         daemon: tail('kubectl', ['-n', 'canaverald', 'logs', 'daemonset/canaverald', '--tail=12']),
       });
+      // Expected only while the daemon creates VM storage without group access
+      // for the canaveral-vm QEMU account (docs/cluster-hosts.md, Host libvirt setup).
+      const mode = path => { try { return parseInt(sudo('stat', '-c', '%a', path), 8); } catch { return null; } };
+      const folderMode = mode(storage + '/' + machineId), diskMode = mode(disk);
+      if (machine?.observed === 'unknown' && native && virsh('domstate', machineId) === 'shut off' &&
+          folderMode !== null && diskMode !== null && ((folderMode & 0o050) !== 0o050 || (diskMode & 0o060) !== 0o060)) {
+        throw new ExpectedGap('The domain is defined but cannot start: the daemon created the VM directory ' +
+          (folderMode & 0o7777).toString(8) + ' and disk ' + (diskMode & 0o777).toString(8) +
+          ' without canaveral-vm access and renders no static DAC seclabel. ' + context);
+      }
       throw new Error(error.message + ': ' + context);
     });
     assert.equal(virsh('domstate', machineId), 'running');
@@ -510,7 +520,7 @@ async function exerciseVm() {
       'replace the pod during an administrative VM run',
       'stop the administrative VM and retain its owned disk',
       'drain and uninstall the VM DaemonSet with retained state',
-    ].map(name => ({ name, outcome: 'not_run', reason: 'Requires a running administrative VM.' })));
+    ].map(name => ({ name, outcome: 'not_run', reason: 'Requires a running administrative VM; see the boot step.' })));
     writeFileSync(evidencePath, JSON.stringify(report, null, 2) + '\n');
     return;
   }
