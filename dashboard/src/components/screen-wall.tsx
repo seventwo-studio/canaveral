@@ -1,3 +1,4 @@
+import { Card } from "./ui/card";
 import { useEffect, useRef, useState } from "react";
 import { provider } from "@/lib/api";
 import { ownerLabel } from "@/lib/admin";
@@ -91,14 +92,10 @@ export function ScreenWall({
   return (
     <div className="min-w-0 space-y-6">
       <div className="min-w-0 space-y-1">
-        <h1 className="font-display text-3xl font-medium tracking-tight">
-          Screens
-        </h1>
         <p className="max-w-prose text-sm text-muted-foreground">
-          Watch up to four running mobile devices side by side. The pictures are
-          live and watch-only; open a device's control to act on it. Only
-          devices that belong to an account are offered: a leased device's
-          screen belongs to its lease holder and is never shown here.
+          Watch up to four devices. Open control to interact with a live screen.
+          Only account-owned devices appear here: a leased device's screen
+          belongs to its lease holder and is never shown here.
         </p>
       </div>
       {stale && (
@@ -110,7 +107,7 @@ export function ScreenWall({
       )}
       {selected.length > 0 && (
         <section aria-label="Watched screens" className="min-w-0">
-          <ul className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <ul className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {selected.map((id) => {
               const machine = machines.find((m) => m.id === id);
               return (
@@ -124,31 +121,30 @@ export function ScreenWall({
                       onDenied={onDenied}
                     />
                   ) : (
-                    <article
-                      aria-label={`Screen of ${machine?.name ?? id}`}
-                      className="flex h-full min-w-0 flex-col gap-3 rounded-md border bg-card p-4"
-                    >
-                      <h2 className="font-display text-base font-medium [overflow-wrap:anywhere]">
-                        {machine?.name ?? (
-                          <span className="font-mono text-xs">{id}</span>
-                        )}
-                      </h2>
-                      <p className="text-sm text-muted-foreground">
-                        {!loaded
-                          ? "Loading the device list…"
-                          : machine
-                            ? "This device is not running, or is not an account-owned mobile device. Its screen returns here when it runs again."
-                            : "This device is not in your device list."}
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="mt-auto self-start"
-                        onClick={() => toggle(id)}
-                      >
-                        Remove from the wall
-                      </Button>
-                    </article>
+                    <Card asChild className="h-full gap-3 px-4">
+                      <article aria-label={`Screen of ${machine?.name ?? id}`}>
+                        <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
+                          {machine?.name ?? (
+                            <span className="font-mono text-xs">{id}</span>
+                          )}
+                        </h2>
+                        <p className="text-sm text-muted-foreground">
+                          {!loaded
+                            ? "Loading the device list…"
+                            : machine
+                              ? "This device is not running, or is not an account-owned mobile device. Its screen returns here when it runs again."
+                              : "This device is not in your device list."}
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="mt-auto self-start"
+                          onClick={() => toggle(id)}
+                        >
+                          Remove from the wall
+                        </Button>
+                      </article>
+                    </Card>
                   )}
                 </li>
               );
@@ -158,17 +154,25 @@ export function ScreenWall({
       )}
       <section className="min-w-0 space-y-3" aria-labelledby="wall-devices">
         <div className="space-y-1">
-          <h2 id="wall-devices" className="text-lg font-semibold">
+          <h2
+            id="wall-devices"
+            className="text-base font-semibold tracking-tight"
+          >
             Devices you can watch{" "}
             <span className="text-muted-foreground">({candidates.length})</span>
           </h2>
-          <p className="max-w-prose text-sm text-muted-foreground">
-            Watching a device runs one screen capture on its host for as long as
-            its picture is on screen: one of that host's four video sessions,
-            with one CPU and 256 MiB reserved. A tile that is scrolled away, or
-            a tab in the background, stops renewing its view, and the capture
-            then stops within a minute.
-          </p>
+          <details className="max-w-prose text-ui text-muted-foreground">
+            <summary className="w-fit cursor-pointer">
+              Capture capacity and limits
+            </summary>
+            <p className="mt-1">
+              Watching a device runs one screen capture on its host for as long
+              as its picture is on screen: one of that host's four video
+              sessions, with one CPU and 256 MiB reserved. A tile that is
+              scrolled away, or a tab in the background, stops renewing its
+              view, and the capture then stops within a minute.
+            </p>
+          </details>
         </div>
         {full && (
           <p className="text-sm" role="status">
@@ -177,14 +181,16 @@ export function ScreenWall({
           </p>
         )}
         {!candidates.length ? (
-          <Empty className="border">
+          <Empty showIcon={loaded && !stale}>
             <EmptyHeader>
               <EmptyTitle>
-                {loaded
-                  ? "No running mobile device to watch"
-                  : "Loading the device list…"}
+                {stale
+                  ? "Device inventory is unavailable"
+                  : loaded
+                    ? "No running mobile device to watch"
+                    : "Loading the device list…"}
               </EmptyTitle>
-              {loaded && (
+              {loaded && !stale && (
                 <EmptyDescription>
                   An Android or iOS device appears here while it is running and
                   belongs to {admin ? "an account" : "your account"}. Create or
@@ -197,17 +203,17 @@ export function ScreenWall({
         ) : (
           <ul
             aria-label="Devices you can watch"
-            className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+            className="min-w-0 divide-y border-y bg-card"
           >
             {candidates.map((machine) => {
               const watching = selected.includes(machine.id);
               return (
                 <li
                   key={machine.id}
-                  className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3"
+                  className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-3 py-2.5"
                 >
                   <div className="min-w-0">
-                    <p className="font-display text-base font-medium [overflow-wrap:anywhere]">
+                    <p className="text-sm font-semibold [overflow-wrap:anywhere]">
                       {machine.name}
                     </p>
                     <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
@@ -215,7 +221,7 @@ export function ScreenWall({
                     </p>
                   </div>
                   <Button
-                    variant={watching ? "outline" : "default"}
+                    variant="outline"
                     size="sm"
                     disabled={!watching && full}
                     aria-pressed={watching}
@@ -372,83 +378,89 @@ function ScreenTile({
           : "";
   const controllable = machine.ready;
   return (
-    <article
-      aria-label={`Live screen of ${machine.name}`}
-      className="flex h-full min-w-0 flex-col gap-3 rounded-md border bg-card p-3"
-    >
-      <header className="flex min-w-0 items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h2 className="font-display text-base font-medium [overflow-wrap:anywhere]">
-            {machine.name}
-          </h2>
-          <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
-            {where}
-          </p>
-        </div>
-        <Badge
-          variant="outline"
-          className={`status ${phase === "live" ? "status-ready" : phase === "ended" && !calm ? "status-error" : phase === "ended" ? "" : "status-pending"}`}
+    <Card asChild className="h-full gap-3 px-4">
+      <article aria-label={`Live screen of ${machine.name}`}>
+        <header className="flex min-w-0 items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold [overflow-wrap:anywhere]">
+              {machine.name}
+            </h2>
+            <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+              {where}
+            </p>
+          </div>
+          <Badge
+            variant={
+              phase === "live"
+                ? "success"
+                : phase === "ended"
+                  ? calm
+                    ? "secondary"
+                    : "destructive"
+                  : "warning"
+            }
+          >
+            {status}
+          </Badge>
+        </header>
+        <div
+          ref={frame}
+          className="relative mx-auto flex max-h-[70svh] w-full items-center justify-center overflow-hidden rounded-sm bg-neutral-950"
+          style={{
+            aspectRatio: size ? `${size.width} / ${size.height}` : "9 / 19.5",
+          }}
         >
-          <span className="status-dot" aria-hidden="true" />
-          {status}
-        </Badge>
-      </header>
-      <div
-        ref={frame}
-        className="relative mx-auto flex max-h-[70svh] w-full items-center justify-center overflow-hidden rounded-sm bg-sidebar"
-        style={{
-          aspectRatio: size ? `${size.width} / ${size.height}` : "9 / 19.5",
-        }}
-      >
-        {/* Watch-only: no controls and no input. The device is acted on through its control page. */}
-        <video
-          ref={video}
-          className={`pointer-events-none size-full object-contain ${phase === "live" ? "" : "invisible"}`}
-          aria-label={`Screen of ${machine.name}`}
-          muted
-          playsInline
-          autoPlay
-          disablePictureInPicture
-          tabIndex={-1}
-        />
-        {phase !== "live" && (
-          <p
-            role={phase === "ended" && !calm ? "alert" : "status"}
-            className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-sidebar-foreground"
-          >
-            {detail}
-          </p>
-        )}
-      </div>
-      <footer className="mt-auto flex min-w-0 flex-wrap gap-2">
-        {controllable && (
-          <Button
-            size="sm"
-            aria-label={`Open control of ${machine.name}`}
-            onClick={() => onControl(machine.id)}
-          >
-            Open control
-          </Button>
-        )}
-        {phase === "ended" && !problem && ending?.again !== "no" && (
+          {/* Watch-only: no controls and no input. The device is acted on through its control page. */}
+          <video
+            ref={video}
+            className={`pointer-events-none size-full object-contain ${phase === "live" ? "" : "invisible"}`}
+            aria-label={`Screen of ${machine.name}`}
+            muted
+            playsInline
+            autoPlay
+            disablePictureInPicture
+            tabIndex={-1}
+          />
+          {phase !== "live" && (
+            <p
+              role={phase === "ended" && !calm ? "alert" : "status"}
+              className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-neutral-200"
+            >
+              {detail}
+            </p>
+          )}
+        </div>
+        <footer className="mt-auto flex min-w-0 flex-wrap gap-2">
+          {controllable && (
+            <Button
+              size="sm"
+              variant="outline"
+              aria-label={`Open control of ${machine.name}`}
+              onClick={() => onControl(machine.id)}
+            >
+              Open control
+            </Button>
+          )}
+          {phase === "ended" && !problem && ending?.again !== "no" && (
+            <Button
+              size="sm"
+              variant="outline"
+              aria-label={`Watch ${machine.name} again`}
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              Watch again
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
-            aria-label={`Watch ${machine.name} again`}
-            onClick={() => setAttempt((value) => value + 1)}
+            aria-label={`Stop watching ${machine.name}`}
+            onClick={onRemove}
           >
-            Watch again
+            Stop watching
           </Button>
-        )}
-        <Button
-          size="sm"
-          variant="outline"
-          aria-label={`Stop watching ${machine.name}`}
-          onClick={onRemove}
-        >
-          Stop watching
-        </Button>
-      </footer>
-    </article>
+        </footer>
+      </article>
+    </Card>
   );
 }

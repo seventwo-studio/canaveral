@@ -1,3 +1,6 @@
+import { Card } from "./ui/card";
+import { StatusBadge } from "./ui/badge";
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -186,9 +189,9 @@ export function ImageImport({
             <Button onClick={onClose}>Done</Button>
           </div>
         ) : (
-          <form className="space-y-4" onSubmit={submit}>
+          <form className="@container/import space-y-4" onSubmit={submit}>
             <fieldset disabled={busy} className="space-y-4">
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Image name
                 <Input
                   required
@@ -197,12 +200,12 @@ export function ImageImport({
                   onChange={(e) => setName(e.target.value)}
                 />
               </label>
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Destination host
-                <select
+                <NativeSelect
                   aria-label="Destination host"
                   required
-                  className="h-9 w-full rounded-md border bg-background px-2"
+
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
                 >
@@ -211,9 +214,9 @@ export function ImageImport({
                       {h.name} · {provider(h.platform || h.provider)}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 @sm/import:grid-cols-2">
                 {(
                   [
                     ["Guest OS", os, setOs, ["linux", "windows", "macos"]],
@@ -222,11 +225,14 @@ export function ImageImport({
                     [string, string, (value: string) => void, string[]]
                   >
                 ).map(([label, value, set, options]) => (
-                  <label key={label} className="space-y-2 text-xs">
+                  <label
+                    key={label}
+                    className="grid min-w-0 gap-1.5 text-ui font-medium"
+                  >
                     {label}
-                    <select
+                    <NativeSelect
                       aria-label={label}
-                      className="h-9 w-full rounded-md border bg-background px-2"
+
                       value={value}
                       onChange={(e) => set(e.target.value)}
                     >
@@ -235,16 +241,16 @@ export function ImageImport({
                           {v}
                         </option>
                       ))}
-                    </select>
+                    </NativeSelect>
                   </label>
                 ))}
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="space-y-2 text-xs">
+              <div className="grid gap-3 @sm/import:grid-cols-2">
+                <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                   Media type
-                  <select
+                  <NativeSelect
                     aria-label="Media type"
-                    className="h-9 w-full rounded-md border bg-background px-2"
+
                     value={media}
                     onChange={(e) => {
                       setMedia(
@@ -257,13 +263,13 @@ export function ImageImport({
                   >
                     <option value="disk">Installed boot disk</option>
                     <option value="installer">OS installer</option>
-                  </select>
+                  </NativeSelect>
                 </label>
-                <label className="space-y-2 text-xs">
+                <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                   Format
-                  <select
+                  <NativeSelect
                     aria-label="Format"
-                    className="h-9 w-full rounded-md border bg-background px-2"
+
                     value={format}
                     onChange={(e) => setFormat(e.target.value)}
                   >
@@ -273,12 +279,15 @@ export function ImageImport({
                     ).map((v) => (
                       <option key={v}>{v}</option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </label>
               </div>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid gap-3 @sm/import:grid-cols-3">
                 {resourceFields.map(([key, label]) => (
-                  <label key={key} className="space-y-2 text-xs">
+                  <label
+                    key={key}
+                    className="grid min-w-0 gap-1.5 text-ui font-medium"
+                  >
                     {label}
                     <Input
                       type="number"
@@ -313,7 +322,7 @@ export function ImageImport({
                   </span>
                 </label>
               )}
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Image file
                 <Input
                   type="file"
@@ -487,7 +496,7 @@ export function ImageCapture({
           </div>
         ) : (
           <form className="space-y-4" onSubmit={submit}>
-            <label className="block space-y-2 text-xs">
+            <label className="grid min-w-0 gap-1.5 text-ui font-medium">
               Snapshot name
               <Input
                 required
@@ -545,28 +554,29 @@ export function ImageActivity(_props: { onRefresh: Refresh }) {
   }, []);
   if (!tasks.length && !error) return null;
   return (
-    <section
-      className="space-y-2 rounded-md border p-4"
-      aria-label="Image activity"
-    >
-      <h2 className="text-sm font-medium">Image activity</h2>
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {tasks.slice(0, 8).map((task) => (
-        <div
-          key={task.id}
-          className="flex flex-wrap justify-between gap-2 border-t pt-2 text-xs"
-        >
-          <span className="break-all">
-            {task.name} · {task.kind}
-          </span>
-          <span className="text-muted-foreground">
-            {task.state} · {since(task.updatedAt)}
-          </span>
-          {task.result?.detail && (
-            <p className="w-full text-muted-foreground">{task.result.detail}</p>
-          )}
-        </div>
-      ))}
-    </section>
+    <Card asChild className="gap-2 px-4">
+      <section aria-label="Image activity">
+        <h2 className="text-sm font-semibold">Image activity</h2>
+        {error && <p className="text-xs text-destructive">{error}</p>}
+        {tasks.slice(0, 8).map((task) => (
+          <div
+            key={task.id}
+            className="flex flex-wrap justify-between gap-2 border-t pt-2 text-xs"
+          >
+            <span className="break-all">
+              {task.name} · {task.kind}
+            </span>
+            <span className="inline-flex flex-wrap items-center gap-2 text-muted-foreground">
+              <StatusBadge state={task.state} /> {since(task.updatedAt)}
+            </span>
+            {task.result?.detail && (
+              <p className="w-full text-muted-foreground">
+                {task.result.detail}
+              </p>
+            )}
+          </div>
+        ))}
+      </section>
+    </Card>
   );
 }

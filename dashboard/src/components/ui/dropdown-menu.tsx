@@ -27,8 +27,9 @@ function DropdownMenuContent({
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
+        collisionPadding={8}
         className={cn(
-          "z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-32 overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md outline-none",
+          "z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-36 max-w-(--radix-dropdown-menu-content-available-width) overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-sm outline-none",
           className,
         )}
         {...props}
@@ -44,7 +45,7 @@ function DropdownMenuItem({
     <DropdownMenuPrimitive.Item
       data-slot="dropdown-menu-item"
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none select-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
+        "relative flex min-h-8 cursor-default items-center gap-2 rounded-sm px-2 py-1 text-ui [overflow-wrap:anywhere] pointer-coarse:min-h-10 outline-none select-none aria-[current=page]:bg-muted data-highlighted:bg-accent data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
         className,
       )}
       {...props}
@@ -58,7 +59,10 @@ function DropdownMenuLabel({
   return (
     <DropdownMenuPrimitive.Label
       data-slot="dropdown-menu-label"
-      className={cn("px-2 py-1.5 text-sm font-medium", className)}
+      className={cn(
+        "break-words px-2 py-1.5 text-xs font-medium text-muted-foreground",
+        className,
+      )}
       {...props}
     />
   );

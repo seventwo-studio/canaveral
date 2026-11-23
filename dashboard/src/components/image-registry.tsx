@@ -1,3 +1,5 @@
+import { Card } from "./ui/card";
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { imageTask, registryEntries } from "@/lib/catalogue";
 import type {
@@ -10,7 +12,7 @@ import { Download, ExternalLink } from "lucide-react";
 import { api, memory, errorMessage } from "@/lib/api";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -33,7 +35,7 @@ export function BaseImageRegistry({
   const candidates = hosts.filter(
     (h) => h.online && h.kind !== "orchestrator" && h.provider !== "kubevirt",
   );
-  const [entries, setEntries] = useState<RegistryEntry[]>([]),
+  const [entries, setEntries] = useState<RegistryEntry[] | null>(null),
     [query, setQuery] = useState(""),
     [os, setOs] = useState("all"),
     [arch, setArch] = useState("all");
@@ -117,7 +119,7 @@ export function BaseImageRegistry({
   const pending = !!task && ["queued", "running"].includes(task.state);
   const selectedHost = candidates.find((h) => h.id === host);
   const hostArch = selectedHost?.health?.environment?.arch;
-  const visible = entries.filter(
+  const visible = (entries ?? []).filter(
     (e) =>
       (os === "all" || e.os === os) &&
       (arch === "all" || e.arch === arch) &&
@@ -141,11 +143,11 @@ export function BaseImageRegistry({
           </DialogDescription>
         </DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Import onto host
-            <select
+            <NativeSelect
               aria-label="Registry target host"
-              className="h-9 w-full min-w-0 rounded-md border bg-background px-2"
+
               value={host}
               onChange={(e) => setHost(e.target.value)}
             >
@@ -155,9 +157,9 @@ export function BaseImageRegistry({
                   {h.name}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Search registry
             <Input
               value={query}
@@ -165,30 +167,25 @@ export function BaseImageRegistry({
               placeholder="Ubuntu, macOS, Windows…"
             />
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Operating system
-            <select
-              className="h-9 w-full rounded-md border bg-background px-2"
-              value={os}
-              onChange={(e) => setOs(e.target.value)}
-            >
+            <NativeSelect value={os} onChange={(e) => setOs(e.target.value)}>
               <option value="all">All operating systems</option>
               <option value="linux">Linux</option>
               <option value="macos">macOS</option>
               <option value="windows">Windows</option>
-            </select>
+            </NativeSelect>
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="grid min-w-0 gap-1.5 text-ui font-medium">
             Architecture
-            <select
-              className="h-9 w-full rounded-md border bg-background px-2"
+            <NativeSelect
               value={arch}
               onChange={(e) => setArch(e.target.value)}
             >
               <option value="all">All architectures</option>
               <option value="arm64">ARM64</option>
               <option value="amd64">x86-64</option>
-            </select>
+            </NativeSelect>
           </label>
         </div>
         {error && (
@@ -197,32 +194,32 @@ export function BaseImageRegistry({
           </p>
         )}
         {task && (
-          <section
-            aria-label="Registry import status"
-            className="space-y-2 rounded-md border p-3 text-xs"
-            aria-live="polite"
-          >
-            <p className="font-medium">
-              {task.name} · {task.state}
-            </p>
-            <p className="break-all text-muted-foreground">
-              {task.state === "queued"
-                ? "Resolving the publisher’s current image before reserving storage."
-                : task.state === "running"
-                  ? "Downloading and verifying on the host. You can continue in the background."
-                  : task.state === "succeeded"
-                    ? "Imported and registered. The image is now in your host catalogue."
-                    : task.result?.detail ||
-                      "Inspect the image task before retrying."}
-            </p>
-            <p className="break-all text-muted-foreground">Task {task.id}</p>
-          </section>
+          <Card asChild className="gap-2 px-4 text-xs">
+            <section aria-label="Registry import status" aria-live="polite">
+              <p className="flex flex-wrap items-center gap-2 font-medium">
+                {task.name} <StatusBadge state={task.state} />
+              </p>
+              <p className="break-all text-muted-foreground">
+                {task.state === "queued"
+                  ? "Resolving the publisher’s current image before reserving storage."
+                  : task.state === "running"
+                    ? "Downloading and verifying on the host. You can continue in the background."
+                    : task.state === "succeeded"
+                      ? "Imported and registered. The image is now in your host catalogue."
+                      : task.result?.detail ||
+                        "Inspect the image task before retrying."}
+              </p>
+              <p className="text-muted-foreground">Task <code className="break-all">{task.id}</code></p>
+            </section>
+          </Card>
         )}
         {loading ? (
           <p className="text-xs text-muted-foreground">Loading registry…</p>
-        ) : !visible.length ? (
+        ) : !entries ? null : !visible.length ? (
           <p className="text-xs text-muted-foreground">
-            No images match these filters.
+            {entries.length
+              ? "No images match these filters."
+              : "No images are available in the registry."}
           </p>
         ) : (
           <div className="grid min-w-0 gap-3 md:grid-cols-2">
@@ -263,87 +260,82 @@ export function BaseImageRegistry({
                       ? "This host has no Linux VM runtime."
                       : "";
               return (
-                <article
-                  key={e.id}
-                  aria-label={e.name + " " + e.arch}
-                  className="flex min-w-0 flex-col gap-3 rounded-md border p-4"
-                >
-                  <div className="space-y-2">
-                    <p className="text-[10px] text-muted-foreground">
-                      {e.publisher}
-                    </p>
-                    <h3 className="break-words text-sm font-medium">
-                      {e.name}
-                    </h3>
-                    <div className="flex flex-wrap gap-1">
-                      <Badge variant="outline">
-                        {e.arch === "amd64" ? "x86-64" : "ARM64"}
-                      </Badge>
-                      <Badge variant="outline">
-                        {e.mediaType === "installer"
-                          ? "Installer"
-                          : "Boot disk"}
-                      </Badge>
-                      <Badge variant="outline">{e.format.toUpperCase()}</Badge>
-                      {e.status !== "available" && (
-                        <Badge variant="outline">
-                          {e.status === "unavailable"
-                            ? "Not currently offered"
-                            : "Publisher download"}
+                <Card asChild key={e.id} className="gap-3 px-4">
+                  <article aria-label={e.name + " " + e.arch}>
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">
+                        {e.publisher}
+                      </p>
+                      <h3 className="break-words text-sm font-medium">
+                        {e.name}
+                      </h3>
+                      <div className="flex flex-wrap gap-1">
+                        <Badge>{e.arch === "amd64" ? "x86-64" : "ARM64"}</Badge>
+                        <Badge>
+                          {e.mediaType === "installer"
+                            ? "Installer"
+                            : "Boot disk"}
                         </Badge>
-                      )}
+                        <Badge>{e.format.toUpperCase()}</Badge>
+                        {e.status !== "available" && (
+                          <Badge>
+                            {e.status === "unavailable"
+                              ? "Not currently offered"
+                              : "Publisher download"}
+                          </Badge>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  <p className="break-words text-xs leading-relaxed text-muted-foreground">
-                    {e.note}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {e.resolver === "apple"
-                      ? "Apple restore source; local content hash recorded after download."
-                      : e.resolver
-                        ? "Publisher SHA-256 required before adding to the library."
-                        : "Verify the download with the publisher before importing."}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    Starting size: {e.minimum.cpu} vCPU ·{" "}
-                    {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB disk
-                  </p>
-                  {reason && (
-                    <p className="text-[10px] text-muted-foreground">
-                      {reason}
+                    <p className="break-words text-xs leading-relaxed text-muted-foreground">
+                      {e.note}
                     </p>
-                  )}
-                  <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
-                    {e.resolver ? (
-                      <Button
-                        size="sm"
-                        disabled={busy || pending || !host || !!reason}
-                        onClick={() => importEntry(e)}
-                      >
-                        <Download />
-                        Import to host
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={e.status === "unavailable"}
-                        onClick={() => onImportFile(e)}
-                      >
-                        Import downloaded file
-                      </Button>
+                    <p className="text-xs text-muted-foreground">
+                      {e.resolver === "apple"
+                        ? "Apple restore source; local content hash recorded after download."
+                        : e.resolver
+                          ? "Publisher SHA-256 required before adding to the library."
+                          : "Verify the download with the publisher before importing."}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Starting size: {e.minimum.cpu} vCPU ·{" "}
+                      {memory(e.minimum.memoryMiB)} · {e.minimum.diskGiB} GiB
+                      disk
+                    </p>
+                    {reason && (
+                      <p className="text-xs text-muted-foreground">{reason}</p>
                     )}
-                    <a
-                      href={e.sourcePage}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-4"
-                    >
-                      Official source
-                      <ExternalLink className="size-3" />
-                    </a>
-                  </div>
-                </article>
+                    <div className="mt-auto flex flex-wrap items-center gap-2 border-t pt-3">
+                      {e.resolver ? (
+                        <Button
+                          size="sm"
+                          disabled={busy || pending || !host || !!reason}
+                          onClick={() => importEntry(e)}
+                        >
+                          <Download />
+                          Import to host
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={e.status === "unavailable"}
+                          onClick={() => onImportFile(e)}
+                        >
+                          Import downloaded file
+                        </Button>
+                      )}
+                      <a
+                        href={e.sourcePage}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-4"
+                      >
+                        Official source
+                        <ExternalLink className="size-3" />
+                      </a>
+                    </div>
+                  </article>
+                </Card>
               );
             })}
           </div>

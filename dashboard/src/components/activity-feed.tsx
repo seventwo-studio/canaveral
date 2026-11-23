@@ -1,5 +1,7 @@
+import { FilterChip } from "./ui/filter-chip";
+import { NativeSelect } from "@/components/ui/native-select";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Pause, Play, RefreshCw, X } from "lucide-react";
+import { Pause, Play, RefreshCw } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
 import {
   HELD_LIMIT,
@@ -41,8 +43,6 @@ const denied = (e: unknown) =>
   typeof e === "object" &&
   "status" in e &&
   (e.status === 401 || e.status === 403);
-const select =
-  "h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9";
 /** The subjects with a text field. Request and machine filters come from a link or an event. */
 const typed = ["application", "host", "lease"] as const;
 const labels: Record<SubjectFilter, string> = {
@@ -253,9 +253,6 @@ function ActivitySession({
     <div className="min-w-0 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-display text-3xl font-medium tracking-tight">
-            Activity
-          </h1>
           <p className="max-w-prose text-sm text-muted-foreground">
             The controller's event log, newest first: what changed on leases,
             requests, hosts, machines, operations and updates, written with each
@@ -263,8 +260,9 @@ function ActivitySession({
             results.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           <Button
+            size="sm"
             variant="outline"
             aria-pressed={paused}
             onClick={() => setPaused((value) => !value)}
@@ -278,6 +276,7 @@ function ActivitySession({
           </Button>
           <Button
             variant="outline"
+            size="sm"
             onClick={() => (catalogue ? void follow() : loadKinds())}
           >
             <RefreshCw aria-hidden="true" />
@@ -287,15 +286,15 @@ function ActivitySession({
       </div>
 
       <form
-        className="grid min-w-0 grid-cols-2 gap-3 rounded-md border bg-card p-4 xl:grid-cols-6"
+        className="grid min-w-0 grid-cols-2 items-start gap-2 border-y py-2 md:grid-cols-3 xl:grid-cols-6 [&_[data-slot=field]]:gap-1"
         aria-label="Filter events"
         onSubmit={(event) => event.preventDefault()}
       >
         <Field>
           <FieldLabel htmlFor="activity-family">Family</FieldLabel>
-          <select
+          <NativeSelect
             id="activity-family"
-            className={select}
+            className="h-10 w-full md:h-8"
             value={filter.family}
             disabled={!catalogue}
             onChange={(event) =>
@@ -312,13 +311,13 @@ function ActivitySession({
                 {name}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
         <Field>
           <FieldLabel htmlFor="activity-kind">Kind</FieldLabel>
-          <select
+          <NativeSelect
             id="activity-kind"
-            className={`${select} font-mono`}
+            className="h-10 w-full font-mono md:h-8"
             value={filter.kind}
             disabled={!catalogue}
             onChange={(event) =>
@@ -344,7 +343,7 @@ function ActivitySession({
                   {entry.kind}
                 </option>
               ))}
-          </select>
+          </NativeSelect>
         </Field>
         <Button
           type="button"
@@ -368,7 +367,7 @@ function ActivitySession({
               <FieldLabel htmlFor={`activity-${key}`}>{labels[key]}</FieldLabel>
               <Input
                 id={`activity-${key}`}
-                className="font-mono text-xs"
+                className="h-10 font-mono md:h-8"
                 placeholder="UUID"
                 autoComplete="off"
                 spellCheck={false}
@@ -396,8 +395,8 @@ function ActivitySession({
             </Field>
           );
         })}
-        <div className="col-span-2 flex min-w-0 flex-col justify-end gap-2 md:col-span-1">
-          <label className="flex min-h-10 items-center gap-2 text-sm md:min-h-9">
+        <div className="col-span-2 flex min-w-0 flex-col justify-end gap-2 self-end md:col-span-1">
+          <label className="flex min-h-10 items-center gap-2 text-ui md:min-h-8">
             <input
               type="checkbox"
               className="size-4 accent-primary"
@@ -413,26 +412,26 @@ function ActivitySession({
             Needs attention only
           </label>
         </div>
-        {filtered(filter) && (
-          <div className="col-span-2 flex min-w-0 flex-wrap items-center gap-2 xl:col-span-6">
+        {(filtered(filter) || typed.some((key) => drafts[key] !== "")) && (
+          <div className="col-span-2 flex min-w-0 flex-wrap items-center gap-2 md:col-span-3 xl:col-span-6">
             {(["request", "machine"] as const).map(
               (key) =>
                 filter[key] && (
-                  <Badge key={key} variant="outline" className="max-w-full">
-                    <span>{labels[key]}</span>
-                    <span className="truncate font-mono">{filter[key]}</span>
-                    <button
-                      type="button"
-                      className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      aria-label={`Remove the ${key} filter`}
-                      onClick={() => setSubject(key, "")}
-                    >
-                      <X aria-hidden="true" className="size-3" />
-                    </button>
-                  </Badge>
+                  <FilterChip
+                    key={key}
+                    label={labels[key]}
+                    value={filter[key]!}
+                    onRemove={() => setSubject(key, "")}
+                  />
                 ),
             )}
-            <Button type="button" variant="ghost" size="sm" onClick={clear}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="ml-auto"
+              onClick={clear}
+            >
               Clear filters
             </Button>
           </div>
@@ -503,7 +502,7 @@ function ActivitySession({
         </p>
       )}
       {feed && !feed.events.length && (
-        <Empty className="border">
+        <Empty showIcon>
           <EmptyHeader>
             <EmptyTitle>
               {filtered(filter)
@@ -519,19 +518,28 @@ function ActivitySession({
         </Empty>
       )}
       {feed && feed.events.length > 0 && (
-        <ol
-          aria-label="Events, newest first"
-          className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
-        >
-          {feed.events.map((event) => (
-            <EventRow
-              key={event.sequence}
-              event={event}
-              info={summaries.get(event.kind)}
-              onSubject={setSubject}
-            />
-          ))}
-        </ol>
+        <div>
+          <div
+            aria-hidden="true"
+            className="hidden h-9 items-center gap-4 px-3 text-xs text-muted-foreground lg:grid lg:grid-cols-[13rem_minmax(0,1fr)]"
+          >
+            <span>Time</span>
+            <span>Event</span>
+          </div>
+          <ol
+            aria-label="Events, newest first"
+            className="min-w-0 divide-y border-y bg-card"
+          >
+            {feed.events.map((event) => (
+              <EventRow
+                key={event.sequence}
+                event={event}
+                info={summaries.get(event.kind)}
+                onSubject={setSubject}
+              />
+            ))}
+          </ol>
+        </div>
       )}
       {feed && (
         <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -583,12 +591,12 @@ const EventRow = memo(function EventRow({
 }) {
   const fields = dataFields(event);
   return (
-    <li className="grid min-w-0 gap-2 px-4 py-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-4">
+    <li className="grid min-w-0 gap-2 px-1 py-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-4 lg:px-3">
       <div className="min-w-0 space-y-1">
         <time
           dateTime={event.at}
           title={event.at}
-          className="block font-mono text-xs tabular-nums"
+          className="block text-ui tabular-nums"
         >
           {localTime(event.at)}
         </time>
@@ -598,22 +606,19 @@ const EventRow = memo(function EventRow({
       </div>
       <div className="min-w-0 space-y-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="font-mono text-sm font-medium [overflow-wrap:anywhere]">
+          <span className="font-mono text-ui font-medium [overflow-wrap:anywhere]">
             {event.kind}
           </span>
           {info?.attention && (
-            <Badge variant="outline" className="status status-error">
-              <span className="status-dot" aria-hidden="true" />
-              Needs attention
-            </Badge>
+            <Badge variant="destructive">Needs attention</Badge>
           )}
         </div>
-        {info && <p className="text-sm">{info.summary}</p>}
+        {info && <p className="text-ui">{info.summary}</p>}
         <dl className="grid min-w-0 gap-x-4 gap-y-1 sm:grid-cols-2">
           {subjects.map(
             ([key, label, filter]) =>
               event[key] && (
-                <div key={key} className="min-w-0">
+                <div key={key} className="min-w-0 space-y-0.5">
                   <dt className="text-xs text-muted-foreground">{label}</dt>
                   <dd className="min-w-0">
                     <button

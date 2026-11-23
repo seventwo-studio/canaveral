@@ -1,3 +1,5 @@
+import { WorkspaceHeaderActions } from "./workspace-header-actions";
+import { NativeSelect } from "@/components/ui/native-select";
 import { hostIssue } from "@/lib/fleet";
 import { FleetPulse } from "./fleet-pulse";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,15 +17,8 @@ import {
 import { timestamp, tokenState } from "@/lib/accounts";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import { Alert, AlertDescription } from "./ui/alert";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from "./ui/card";
 import {
   Table,
   TableHeader,
@@ -132,23 +127,8 @@ function ErrorNotice({ children }: { children: string }) {
     </Alert>
   ) : null;
 }
-function Heading({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="space-y-1">
-      <h1 className="font-display text-3xl font-medium tracking-tight">
-        {title}
-      </h1>
-      <p className="text-sm text-muted-foreground">{description}</p>
-    </div>
-  );
-}
 export function AdminOverview({
+  headerActions,
   user,
   inventory,
   loaded,
@@ -158,6 +138,7 @@ export function AdminOverview({
   onInspect,
   onRefresh,
 }: {
+  headerActions?: HTMLElement | null;
   user: User;
   inventory: Inventory;
   loaded: boolean;
@@ -186,10 +167,7 @@ export function AdminOverview({
   ).length;
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="font-display text-3xl font-medium tracking-tight">
-          Overview
-        </h1>
+      <WorkspaceHeaderActions container={headerActions}>
         <Button
           variant="outline"
           disabled={directory.loading || tokens.loading}
@@ -202,7 +180,7 @@ export function AdminOverview({
           <RefreshCw />
           Refresh overview
         </Button>
-      </div>
+      </WorkspaceHeaderActions>
       <ErrorNotice>{stale}</ErrorNotice>
       <ErrorNotice>
         {directory.error
@@ -215,30 +193,26 @@ export function AdminOverview({
           : ""}
       </ErrorNotice>
       {(directory.loading || tokens.loading) && (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="status" className="text-ui text-muted-foreground">
           Refreshing administration…
         </p>
       )}
-      <Card
-        role="region"
-        aria-label="Needs attention"
-        className="min-w-0 gap-3 py-4 shadow-none"
-      >
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <CardTitle>Needs attention</CardTitle>
-            <Badge variant="outline">{loaded ? issueCount : "—"}</Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
+      <section aria-labelledby="overview-attention" className="min-w-0">
+        <div className="flex items-center gap-2 border-b pb-2">
+          <h2 id="overview-attention" className="text-base font-semibold">
+            Needs attention
+          </h2>
+          <Badge variant="secondary">{loaded ? issueCount : "—"}</Badge>
+        </div>
+        <div className="divide-y">
           {!loaded ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="py-3 text-ui text-muted-foreground">
               Inventory unavailable.
             </p>
           ) : (
             <>
               {!issueCount && (
-                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <p className="flex items-center gap-2 py-3 text-ui text-muted-foreground">
                   {!stale && (
                     <CircleCheck
                       className="size-4 shrink-0 text-[color:var(--state-ready)]"
@@ -253,15 +227,12 @@ export function AdminOverview({
               {visibleMachines.map((m) => (
                 <div
                   key={m.id}
-                  className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"
+                  className="flex items-center justify-between gap-3 py-2.5"
                 >
                   <div className="min-w-0">
-                    <p className="break-words text-sm font-medium">{m.name}</p>
+                    <p className="break-words text-ui font-medium">{m.name}</p>
                     <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <Badge variant="outline" className="status status-error">
-                        <span className="status-dot" aria-hidden="true" />
-                        {machineStatus(m)}
-                      </Badge>
+                      <Badge variant="destructive">{machineStatus(m)}</Badge>
                       <span className="[overflow-wrap:anywhere]">
                         {ownerLabel(m, users ?? [])}
                       </span>
@@ -279,10 +250,10 @@ export function AdminOverview({
               {visibleHosts.map((h) => (
                 <div
                   key={h.id}
-                  className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"
+                  className="flex items-center justify-between gap-3 py-2.5"
                 >
                   <div className="min-w-0">
-                    <p className="break-words text-sm font-medium">{h.name}</p>
+                    <p className="break-words text-ui font-medium">{h.name}</p>
                     <p className="text-xs text-muted-foreground">
                       {hostIssue(h)}
                     </p>
@@ -310,49 +281,22 @@ export function AdminOverview({
               )}
             </>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
       <FleetPulse
         inventory={inventory}
         loaded={loaded}
         stale={Boolean(stale)}
         showHosts
       />
-      <Card className="gap-3 py-4 shadow-none">
-        <CardHeader>
-          <CardTitle>Access management</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {(directory.error || tokens.error) && (
-            <p className="text-xs text-destructive">
-              Access counts show the last available snapshot.
-            </p>
-          )}
-          <dl className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 xl:grid-cols-5">
-            {[
-              ["Users", users?.length ?? "—"],
-              [
-                "Active administrators",
-                users?.filter(
-                  (u) => u.role === "admin" && u.status === "active",
-                ).length ?? "—",
-              ],
-              ["Active API tokens", activeTokens ?? "—"],
-              [
-                "Pending invitations",
-                users?.filter((u) => u.status === "pending").length ?? "—",
-              ],
-              [
-                "Disabled accounts",
-                users?.filter((u) => u.status === "disabled").length ?? "—",
-              ],
-            ].map(([label, value]) => (
-              <div key={label}>
-                <dt className="text-muted-foreground">{label}</dt>
-                <dd className="mt-1 font-mono text-xl tabular-nums">{value}</dd>
-              </div>
-            ))}
-          </dl>
+      <section
+        aria-labelledby="overview-access"
+        className="@container space-y-3"
+      >
+        <header className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="overview-access" className="text-base font-semibold">
+            Access management
+          </h2>
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline">
               <a href="#admin/users">Manage users</a>
@@ -361,8 +305,42 @@ export function AdminOverview({
               <a href="#admin/tokens">Review API access</a>
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </header>
+        {(directory.error || tokens.error) && (
+          <p className="text-xs text-destructive">
+            Access counts show the last available snapshot.
+          </p>
+        )}
+        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-sm border bg-border text-xs @2xl:grid-cols-5">
+          {[
+            ["Users", users?.length ?? "—"],
+            [
+              "Active administrators",
+              users?.filter((u) => u.role === "admin" && u.status === "active")
+                .length ?? "—",
+            ],
+            ["Active API tokens", activeTokens ?? "—"],
+            [
+              "Pending invitations",
+              users?.filter((u) => u.status === "pending").length ?? "—",
+            ],
+            [
+              "Disabled accounts",
+              users?.filter((u) => u.status === "disabled").length ?? "—",
+            ],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="flex min-w-0 flex-col justify-between bg-card px-3 py-4 text-center last:col-span-2 @2xl:last:col-span-1"
+            >
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="mt-1 text-xl font-medium tracking-tight tabular-nums">
+                {value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
     </>
   );
 }
@@ -451,10 +429,9 @@ export function AdminTokensPage({
   return (
     <>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <Heading
-          title="API access"
-          description="Review and revoke personal API tokens across all user accounts."
-        />
+        <p className="text-sm text-muted-foreground">
+          Review and revoke personal API tokens across all user accounts.
+        </p>
         <Button
           variant="outline"
           disabled={busy || resource.loading}
@@ -481,21 +458,26 @@ export function AdminTokensPage({
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="grid flex-1 gap-1 text-sm">
+      <div
+        role="group"
+        aria-label="Filter API tokens"
+        className="flex flex-wrap items-end gap-2 border-y py-2"
+      >
+        <label className="grid w-full gap-1 text-ui font-medium sm:w-64">
           Search API tokens
           <Input
             aria-label="Search API tokens"
+            className="h-10 md:h-8"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Name, owner or permission…"
           />
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid w-full gap-1 text-ui font-medium sm:w-40">
           Token status
-          <select
+          <NativeSelect
             aria-label="Token status"
-            className="h-9 rounded-md border bg-background px-3"
+            className="h-10 w-full md:h-8"
             value={state}
             onChange={(e) => setState(e.target.value)}
           >
@@ -506,15 +488,28 @@ export function AdminTokensPage({
                   : s[0]?.toUpperCase() + s.slice(1)}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
+        {(query || state !== "all") && (
+          <Button
+            className="ml-auto"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setQuery("");
+              setState("all");
+            }}
+          >
+            Clear filters
+          </Button>
+        )}
       </div>
-      <div className="min-w-0 overflow-hidden rounded-md border">
-        <Table>
+      <div className="@container min-w-0 border-b">
+        <Table className="block @3xl:table">
           <TableCaption className="sr-only">
             Personal API tokens across all users
           </TableCaption>
-          <TableHeader>
+          <TableHeader className="sr-only @3xl:not-sr-only @3xl:table-header-group">
             <TableRow>
               {[
                 "Token",
@@ -531,40 +526,60 @@ export function AdminTokensPage({
               ))}
             </TableRow>
           </TableHeader>
-          <TableBody>
+          <TableBody className="block @3xl:table-row-group">
             {rows.map((t) => (
-              <TableRow key={t.id}>
+              <TableRow
+                key={t.id}
+                className="grid gap-2 py-3 @3xl:table-row @3xl:py-0 [&>td]:h-auto [&>td]:px-1 [&>td]:py-0 @3xl:[&>td]:px-3 @3xl:[&>td]:py-2"
+              >
                 <TableCell className="max-w-64 !whitespace-normal break-words">
                   <span className="font-medium">{t.name}</span>
                   <span className="block font-mono text-xs text-muted-foreground">
                     {t.prefix}…
                   </span>
-                  <span className="block text-xs text-muted-foreground">
+                  <span className="block text-xs tabular-nums text-muted-foreground">
                     Created {timestamp(t.createdAt)}
                   </span>
                 </TableCell>
-                <TableCell className="max-w-48 !whitespace-normal break-all">
+                <TableCell className="max-w-48 !whitespace-normal [overflow-wrap:anywhere]">
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Owner
+                  </span>
                   {owner(t.userId)}
                 </TableCell>
                 <TableCell className="!whitespace-normal">
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Permissions
+                  </span>
                   <div className="flex flex-wrap gap-1">
                     {t.scopes.map((s) => (
-                      <Badge key={s} variant="outline">
-                        {s}
-                      </Badge>
+                      <Badge key={s}>{s}</Badge>
                     ))}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline">{tokenState(t)}</Badge>
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Status
+                  </span>
+                  <StatusBadge state={tokenState(t)} />
                   {t.revokedAt !== null && (
                     <span className="block text-xs text-muted-foreground">
                       {timestamp(t.revokedAt)}
                     </span>
                   )}
                 </TableCell>
-                <TableCell>{timestamp(t.lastUsedAt)}</TableCell>
-                <TableCell>{timestamp(t.expiresAt)}</TableCell>
+                <TableCell>
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Last used
+                  </span>
+                  {timestamp(t.lastUsedAt)}
+                </TableCell>
+                <TableCell>
+                  <span className="block text-xs text-muted-foreground @3xl:hidden">
+                    Expires
+                  </span>
+                  {timestamp(t.expiresAt)}
+                </TableCell>
                 <TableCell>
                   {t.revokedAt === null && (
                     <Button
@@ -580,10 +595,10 @@ export function AdminTokensPage({
               </TableRow>
             ))}
             {!rows.length && (
-              <TableRow>
+              <TableRow className="block @3xl:table-row">
                 <TableCell
                   colSpan={7}
-                  className="h-32 !whitespace-normal text-center text-muted-foreground"
+                  className="block h-auto py-3 !whitespace-normal text-left text-ui text-muted-foreground @3xl:table-cell"
                 >
                   {resource.loading
                     ? "Loading API access…"
@@ -598,9 +613,6 @@ export function AdminTokensPage({
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground sm:hidden">
-        Swipe across the table to view dates and actions.
-      </p>
       <p className="text-xs text-muted-foreground">
         Token secrets are shown only to their owner when created. Revocation
         blocks new requests and connected access; the record remains here. To
@@ -624,6 +636,7 @@ export function AdminTokensPage({
           <AlertDialogFooter>
             <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               disabled={busy}
               onClick={(e) => {
                 e.preventDefault();

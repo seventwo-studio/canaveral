@@ -31,7 +31,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "./ui/alert-dialog";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 
@@ -58,10 +58,10 @@ function Pair({
   mono?: boolean;
 }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 space-y-0.5">
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd
-        className={`[overflow-wrap:anywhere] ${mono ? "font-mono text-xs tabular-nums" : "text-sm"}`}
+        className={`[overflow-wrap:anywhere] ${mono ? "font-mono text-xs tabular-nums" : "text-ui"}`}
       >
         {children}
       </dd>
@@ -76,7 +76,7 @@ function Holder({
   return (
     <>
       {subject.applicationName && (
-        <span className="block text-sm">{subject.applicationName}</span>
+        <span className="block text-ui">{subject.applicationName}</span>
       )}
       <a
         className="font-mono text-xs underline-offset-4 hover:underline"
@@ -238,12 +238,9 @@ function QueueSession({
     return <p role="alert">Administrator access is required.</p>;
   const now = clock ? controllerNow(clock) : Date.now();
   return (
-    <div className="min-w-0 space-y-6">
+    <div className="min-w-0 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-display text-3xl font-medium tracking-tight">
-            Queue
-          </h1>
           <p className="max-w-prose text-sm text-muted-foreground">
             Requests waiting for a machine, device or runner, in the order the
             controller will try them. Position is an order of attempts, not a
@@ -280,7 +277,7 @@ function QueueSession({
             className="min-w-0 space-y-3"
             aria-labelledby="queue-waiting"
           >
-            <h2 id="queue-waiting" className="text-lg font-semibold">
+            <h2 id="queue-waiting" className="text-base font-semibold">
               Waiting requests
             </h2>
             {view.requests.length < view.waitingTotal && (
@@ -290,7 +287,7 @@ function QueueSession({
               </p>
             )}
             {!view.requests.length ? (
-              <Empty className="border">
+              <Empty showIcon>
                 <EmptyHeader>
                   <EmptyTitle>No requests are waiting</EmptyTitle>
                   <EmptyDescription>
@@ -302,118 +299,131 @@ function QueueSession({
                 </EmptyHeader>
               </Empty>
             ) : (
-              <ol
-                aria-label="Waiting requests in attempt order"
-                className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
-              >
-                {view.requests.map((request) => (
-                  <li
-                    key={`${request.applicationId}:${request.id}`}
-                    className="grid min-w-0 gap-3 px-4 py-4 lg:grid-cols-[5.5rem_minmax(0,1fr)_auto] lg:items-start"
-                  >
-                    <div className="min-w-0">
-                      {request.position === null ? (
-                        <Badge variant="outline">No position</Badge>
-                      ) : (
-                        <p
-                          className="font-mono text-2xl font-medium tabular-nums"
-                          aria-label={`Position ${request.position}`}
-                        >
-                          #{request.position}
-                        </p>
-                      )}
-                    </div>
-                    <div className="min-w-0 space-y-3">
-                      <div className="min-w-0 space-y-1">
-                        <p
-                          className={`font-display text-base font-medium [overflow-wrap:anywhere] ${request.label ? "" : "text-muted-foreground"}`}
-                        >
-                          {request.label ?? "No label"}
-                        </p>
-                        <p className="text-sm">
-                          {waitingReason(request)}
-                          {request.reason && (
-                            <>
-                              {" "}
-                              <span className="font-mono text-xs text-muted-foreground">
-                                {request.reason}
-                              </span>
-                            </>
-                          )}
-                        </p>
-                        {request.position === null && (
-                          <p className="text-sm text-muted-foreground">
-                            {unorderedReason(request, now)}
+              <div>
+                <div
+                  aria-hidden="true"
+                  className="hidden h-9 items-center gap-3 px-3 text-xs text-muted-foreground lg:grid lg:grid-cols-[5.5rem_minmax(0,1fr)_7rem]"
+                >
+                  <span>Position</span>
+                  <span>Request</span>
+                  <span>Actions</span>
+                </div>
+                <ol
+                  aria-label="Waiting requests in attempt order"
+                  className="min-w-0 divide-y border-y bg-card"
+                >
+                  {view.requests.map((request) => (
+                    <li
+                      key={`${request.applicationId}:${request.id}`}
+                      className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:px-3 lg:grid-cols-[5.5rem_minmax(0,1fr)_7rem] lg:items-start"
+                    >
+                      <div className="min-w-0">
+                        {request.position === null ? (
+                          <Badge>No position</Badge>
+                        ) : (
+                          <p
+                            className="text-base font-semibold tabular-nums"
+                            aria-label={`Position ${request.position}`}
+                          >
+                            #{request.position}
                           </p>
                         )}
                       </div>
-                      <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 xl:grid-cols-5">
-                        <Pair label="Kind">{kindLabels[request.kind]}</Pair>
-                        <Pair
-                          label={
-                            request.kind === "model-job" ? "Model" : "Template"
-                          }
-                        >
-                          <What subject={request} />
-                        </Pair>
-                        <Pair label="Priority" mono>
-                          {request.priority}
-                        </Pair>
-                        <Pair label="Waiting for" mono>
-                          <span
-                            title={`Submitted ${localTime(request.createdAt)}`}
+                      <div className="min-w-0 space-y-3">
+                        <div className="min-w-0 space-y-1">
+                          <p
+                            className={`text-ui font-medium [overflow-wrap:anywhere] ${request.label ? "" : "text-muted-foreground"}`}
                           >
-                            {duration(
-                              (now - Date.parse(request.createdAt)) / 1000,
+                            {request.label ?? "No label"}
+                          </p>
+                          <p className="text-ui">
+                            {waitingReason(request)}
+                            {request.reason && (
+                              <>
+                                {" "}
+                                <span className="font-mono text-xs text-muted-foreground">
+                                  {request.reason}
+                                </span>
+                              </>
                             )}
-                          </span>
-                        </Pair>
-                        <Pair label="Deadline" mono>
-                          {request.deadline === null ? (
-                            "None"
-                          ) : (
-                            <span title={localTime(request.deadline)}>
-                              {Date.parse(request.deadline) > now
-                                ? `in ${duration((Date.parse(request.deadline) - now) / 1000)}`
-                                : "passed"}
-                            </span>
+                          </p>
+                          {request.position === null && (
+                            <p className="text-sm text-muted-foreground">
+                              {unorderedReason(request, now)}
+                            </p>
                           )}
-                        </Pair>
-                      </dl>
-                      <dl className="grid min-w-0 gap-x-4 gap-y-3 sm:grid-cols-2">
-                        <Pair label="Application">
-                          <Holder subject={request} />
-                        </Pair>
-                        <Pair label="Request" mono>
-                          <a
-                            className="underline-offset-4 hover:underline"
-                            href={`#activity/request/${request.id}`}
-                            aria-label={`Activity of request ${request.id}`}
+                        </div>
+                        <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 xl:grid-cols-5">
+                          <Pair label="Kind">{kindLabels[request.kind]}</Pair>
+                          <Pair
+                            label={
+                              request.kind === "model-job"
+                                ? "Model"
+                                : "Template"
+                            }
                           >
-                            {request.id}
-                          </a>
-                        </Pair>
-                      </dl>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!!intent || !!error}
-                      aria-label={`Cancel request ${name(request)}`}
-                      onClick={() => {
-                        setUncertain(false);
-                        setNotice("");
-                        setIntent({
-                          target: request,
-                          requestId: crypto.randomUUID(),
-                        });
-                      }}
-                    >
-                      Cancel request
-                    </Button>
-                  </li>
-                ))}
-              </ol>
+                            <What subject={request} />
+                          </Pair>
+                          <Pair label="Priority" mono>
+                            {request.priority}
+                          </Pair>
+                          <Pair label="Waiting for" mono>
+                            <span
+                              title={`Submitted ${localTime(request.createdAt)}`}
+                            >
+                              {duration(
+                                (now - Date.parse(request.createdAt)) / 1000,
+                              )}
+                            </span>
+                          </Pair>
+                          <Pair label="Deadline" mono>
+                            {request.deadline === null ? (
+                              "None"
+                            ) : (
+                              <span title={localTime(request.deadline)}>
+                                {Date.parse(request.deadline) > now
+                                  ? `in ${duration((Date.parse(request.deadline) - now) / 1000)}`
+                                  : "passed"}
+                              </span>
+                            )}
+                          </Pair>
+                        </dl>
+                        <dl className="grid min-w-0 gap-x-4 gap-y-3 sm:grid-cols-2">
+                          <Pair label="Application">
+                            <Holder subject={request} />
+                          </Pair>
+                          <Pair label="Request" mono>
+                            <a
+                              className="underline-offset-4 hover:underline"
+                              href={`#activity/request/${request.id}`}
+                              aria-label={`Activity of request ${request.id}`}
+                            >
+                              {request.id}
+                            </a>
+                          </Pair>
+                        </dl>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="justify-self-start"
+                        disabled={!!intent || !!error}
+                        aria-label={`Cancel request ${name(request)}`}
+                        onClick={() => {
+                          setUncertain(false);
+                          setNotice("");
+                          setIntent({
+                            target: request,
+                            requestId: crypto.randomUUID(),
+                          });
+                        }}
+                      >
+                        Cancel request
+                      </Button>
+                    </li>
+                  ))}
+                </ol>
+              </div>
             )}
           </section>
           <ActiveLeases view={view} now={now} />
@@ -442,15 +452,18 @@ function QueueSession({
                   the controller admitted it since this page last refreshed,
                   cancelling releases its lease instead and cleanup follows the
                   lease rules.
-                  <br />
-                  Request: <span className="font-mono">{intent.target.id}</span>
-                  <br />
-                  Application:{" "}
-                  {intent.target.applicationName
-                    ? `${intent.target.applicationName} · `
-                    : ""}
-                  <span className="font-mono">
-                    {intent.target.applicationId}
+                  <span className="mt-3 block text-xs">
+                    Request:{" "}
+                    <span className="font-mono">{intent.target.id}</span>
+                  </span>
+                  <span className="mt-1 block text-xs">
+                    Application:{" "}
+                    {intent.target.applicationName
+                      ? `${intent.target.applicationName} · `
+                      : ""}
+                    <span className="font-mono">
+                      {intent.target.applicationId}
+                    </span>
                   </span>
                 </>
               )}
@@ -471,7 +484,11 @@ function QueueSession({
             <AlertDialogCancel disabled={busy || uncertain}>
               Keep waiting
             </AlertDialogCancel>
-            <Button disabled={busy} onClick={() => void cancel()}>
+            <Button
+              variant="destructive"
+              disabled={busy}
+              onClick={() => void cancel()}
+            >
               {busy
                 ? "Waiting…"
                 : uncertain
@@ -489,7 +506,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
   return (
     <section className="min-w-0 space-y-3" aria-labelledby="queue-leases">
       <div className="space-y-1">
-        <h2 id="queue-leases" className="text-lg font-semibold">
+        <h2 id="queue-leases" className="text-base font-semibold">
           Leases holding capacity
         </h2>
         <p className="max-w-prose text-sm text-muted-foreground">
@@ -510,7 +527,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
         </p>
       )}
       {!view.leases.length ? (
-        <Empty className="border">
+        <Empty showIcon>
           <EmptyHeader>
             <EmptyTitle>No lease holds capacity</EmptyTitle>
             <EmptyDescription>
@@ -523,7 +540,7 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
       ) : (
         <ul
           aria-label="Leases holding capacity"
-          className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+          className="min-w-0 divide-y border-y bg-card"
         >
           {view.leases.map((lease) => (
             <LeaseRow key={lease.id} lease={lease} now={now} />
@@ -536,13 +553,13 @@ function ActiveLeases({ view, now }: { view: QueueView; now: number }) {
 function LeaseRow({ lease, now }: { lease: QueueLease; now: number }) {
   const remaining = (Date.parse(lease.expiresAt) - now) / 1000;
   return (
-    <li className="grid min-w-0 gap-3 px-4 py-4 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
+    <li className="grid min-w-0 gap-2 px-1 py-3 lg:gap-3 lg:px-3 lg:grid-cols-[5.5rem_minmax(0,1fr)] lg:items-start">
       <div className="min-w-0">
-        <Badge variant="outline">{lease.state}</Badge>
+        <StatusBadge state={lease.state} />
       </div>
       <div className="min-w-0 space-y-3">
         <p
-          className={`font-display text-base font-medium [overflow-wrap:anywhere] ${lease.name === null ? "text-muted-foreground" : ""}`}
+          className={`text-ui font-medium [overflow-wrap:anywhere] ${lease.name === null ? "text-muted-foreground" : ""}`}
         >
           {lease.name ?? "No label"}
         </p>

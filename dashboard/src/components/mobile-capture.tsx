@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { errorMessage } from "@/lib/api";
 import {
@@ -193,10 +194,10 @@ export function MobileCapture({ machine }: { machine: Machine }) {
   }
 
   return (
-    <section className="grid gap-3" aria-label="Capture">
+    <section className="grid gap-3 border-t pt-3" aria-label="Capture">
       <h3 className="text-sm font-medium">Capture</h3>
       <div className="grid gap-2">
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-ui font-medium">
           Screenshot name
           <Input
             value={shotName}
@@ -228,7 +229,7 @@ export function MobileCapture({ machine }: { machine: Machine }) {
         )}
       </div>
       <div className="grid gap-2">
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-ui font-medium">
           Recording name
           <Input
             value={clipName}
@@ -237,10 +238,9 @@ export function MobileCapture({ machine }: { machine: Machine }) {
             onChange={(e) => setClipName(e.target.value)}
           />
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-ui font-medium">
           Recording length
-          <select
-            className="h-8 rounded-sm border bg-transparent px-2 text-sm"
+          <NativeSelect
             value={duration}
             disabled={recording}
             onChange={(e) => setDuration(Number(e.target.value))}
@@ -254,7 +254,7 @@ export function MobileCapture({ machine }: { machine: Machine }) {
                     : `${s / 60} minutes`}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <div className="flex gap-2">
           <Button disabled={recording} onClick={record}>

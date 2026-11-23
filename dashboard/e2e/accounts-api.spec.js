@@ -203,7 +203,9 @@ test.describe("real account controller and gateway", () => {
         .getByRole("button", { name: "Refresh tokens", exact: true })
         .click();
       await expect(
-        alice.getByText("Read only · Revoked", { exact: true }),
+        alice
+          .getByRole("region", { name: "Token Read only", exact: true })
+          .getByText("Revoked", { exact: true }),
       ).toBeVisible();
       if (process.env.CANAVERAL_DASHBOARD_SCREENSHOTS) {
         await page.screenshot({

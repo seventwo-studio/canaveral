@@ -1,3 +1,5 @@
+import { destinations } from "./workspace-sidebar";
+import { NativeSelect } from "./ui/native-select";
 import {
   useEffect,
   useRef,
@@ -22,6 +24,7 @@ import {
   Field,
   FieldLabel,
   FieldGroup,
+  SettingsRows,
   FieldSet,
   FieldError,
 } from "./ui/field";
@@ -32,7 +35,7 @@ import {
   CardDescription,
   CardContent,
 } from "./ui/card";
-import { Badge } from "./ui/badge";
+import { StatusBadge } from "./ui/badge";
 import {
   Select,
   SelectContent,
@@ -60,14 +63,43 @@ import {
 } from "./ui/alert-dialog";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "./ui/empty";
 
-function Panel({ title, children }: { title: string; children: ReactNode }) {
+function PersonalSettings({
+  page,
+  children,
+}: {
+  page: "account" | "tokens";
+  children: ReactNode;
+}) {
   return (
-    <Card className="max-w-3xl">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-5">{children}</CardContent>
-    </Card>
+    <div className="@container min-w-0">
+      <div className="grid items-start gap-5 @3xl:grid-cols-[10rem_minmax(0,1fr)] @3xl:gap-6">
+        <nav
+          aria-label="Personal settings"
+          className="flex gap-1 border-b pb-2 @3xl:flex-col @3xl:border-0 @3xl:pb-0"
+        >
+          {(["account", "tokens"] as const).map((key) => {
+            const { href, label, icon: Icon } = destinations[key];
+            return (
+              <a
+                key={key}
+                href={href}
+                aria-current={page === key ? "page" : undefined}
+                className="inline-flex min-h-8 items-center gap-2 rounded-sm px-2 text-ui hover:bg-muted aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-medium"
+              >
+                <Icon aria-hidden="true" className="size-4" />
+                {label}
+              </a>
+            );
+          })}
+        </nav>
+        <section className="mx-auto w-full min-w-0 max-w-2xl space-y-5">
+          <h1 className="text-xl font-semibold tracking-tight">
+            {destinations[page].label}
+          </h1>
+          {children}
+        </section>
+      </div>
+    </div>
   );
 }
 function TextField({
@@ -129,7 +161,10 @@ export function Secret({
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   return (
-    <section className="space-y-3 border p-4" aria-label={label}>
+    <section
+      className="space-y-3 rounded-md border bg-muted/30 p-4"
+      aria-label={label}
+    >
       <p>{label}. Save it now; it will not be shown again.</p>
       <Input aria-label={label} value={value} readOnly autoComplete="off" />
       <div className="flex flex-wrap gap-2">
@@ -193,19 +228,21 @@ export function AccountPage({
     }
   }
   return (
-    <Panel title="Account">
-      <p>
+    <PersonalSettings page="account">
+      <p className="text-sm text-muted-foreground">
         {user.username} · {user.role === "admin" ? "Administrator" : "User"} ·{" "}
         {user.status}
       </p>
-      <h2>Change password</h2>
-      <p>
-        Choose a password for Canaveral only. Changing it signs you out of all
-        sessions and revokes your API tokens.
-      </p>
+      <div className="space-y-1.5 border-t pt-4">
+        <h2 className="text-sm font-semibold">Change password</h2>
+        <p className="max-w-prose text-ui text-muted-foreground">
+          Choose a password for Canaveral only. Changing it signs you out of all
+          sessions and revokes your API tokens.
+        </p>
+      </div>
       <form onSubmit={submit}>
         <FieldSet disabled={busy || uncertain}>
-          <FieldGroup>
+          <SettingsRows>
             <TextField
               name="currentPassword"
               label="Current password"
@@ -213,14 +250,14 @@ export function AccountPage({
             />
             <TextField name="password" label="New password" password />
             <TextField name="confirmation" label="Confirm password" password />
-            <Button type="submit">
-              {busy ? "Saving…" : "Change password"}
-            </Button>
-          </FieldGroup>
+          </SettingsRows>
+          <Button type="submit" className="self-end">
+            {busy ? "Saving…" : "Change password"}
+          </Button>
         </FieldSet>
       </form>
       {error && <FieldError>{error}</FieldError>}
-    </Panel>
+    </PersonalSettings>
   );
 }
 export function TokensPage({ user }: { user: User }) {
@@ -335,8 +372,8 @@ export function TokensPage({ user }: { user: User }) {
     }
   }
   return (
-    <Panel title="API tokens">
-      <p>
+    <PersonalSettings page="tokens">
+      <p className="max-w-prose text-ui text-muted-foreground">
         Tokens grant access to your account. Save each secret when you create
         it.
       </p>
@@ -349,22 +386,21 @@ export function TokensPage({ user }: { user: User }) {
       )}
       <form onSubmit={create}>
         <FieldSet disabled={busy || !!uncertain || !!secret}>
-          <FieldGroup>
+          <SettingsRows>
             <TextField name="name" label="Token name" />
             <Field>
               <FieldLabel htmlFor="scopes">Permissions</FieldLabel>
-              <select
+              <NativeSelect
                 id="scopes"
                 value={preset}
                 onChange={(e) => setPreset(e.target.value)}
-                className="border bg-background p-2"
               >
                 <option value="read">Read my machines</option>
                 <option value="manage">Manage my machines</option>
                 {user.role === "admin" && (
                   <option value="admin">Administrator access</option>
                 )}
-              </select>
+              </NativeSelect>
             </Field>
             <Field>
               <FieldLabel htmlFor="days">Expires in days</FieldLabel>
@@ -379,15 +415,18 @@ export function TokensPage({ user }: { user: User }) {
                 required
               />
             </Field>
-            <Button type="submit">Create token</Button>
-          </FieldGroup>
+          </SettingsRows>
+          <Button type="submit" className="self-end">
+            Create token
+          </Button>
         </FieldSet>
       </form>
       {error && <FieldError>{error}</FieldError>}
       {uncertain && (
         <div className="space-y-2">
-          <p>
-            Token: {uncertain.name} · {uncertain.id}
+          <p className="text-ui [overflow-wrap:anywhere]">
+            Token: {uncertain.name} ·{" "}
+            <span className="font-mono text-xs">{uncertain.id}</span>
           </p>
           <Button
             variant="outline"
@@ -398,38 +437,59 @@ export function TokensPage({ user }: { user: User }) {
           </Button>
         </div>
       )}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => load().catch((e) => setError(errorMessage(e)))}
+      <section
+        aria-labelledby="personal-tokens-title"
+        className="divide-y border-t"
       >
-        Refresh tokens
-      </Button>
-      {tokens.map((t) => (
-        <section key={t.id} className="space-y-2 border-t pt-4">
-          <h2>
-            {t.name} · {tokenState(t)}
+        <div className="flex items-center justify-between gap-3 py-3">
+          <h2 id="personal-tokens-title" className="text-sm font-semibold">
+            Your tokens
           </h2>
-          <p className="break-all">
-            {t.prefix} · {t.scopes.join(", ")}
-          </p>
-          <p className="text-sm">
-            Created: {timestamp(t.createdAt)} · Expires:{" "}
-            {timestamp(t.expiresAt)} · Last used: {timestamp(t.lastUsedAt)} ·
-            Revoked: {timestamp(t.revokedAt)}
-          </p>
-          {t.revokedAt === null && (
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => revoke(t.id)}
-            >
-              Revoke {t.name}
-            </Button>
-          )}
-        </section>
-      ))}
-    </Panel>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => load().catch((e) => setError(errorMessage(e)))}
+          >
+            Refresh tokens
+          </Button>
+        </div>
+        {tokens.map((t) => (
+          <section
+            key={t.id}
+            aria-label={`Token ${t.name}`}
+            className="space-y-1.5 py-3"
+          >
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <h3 className="text-ui font-medium [overflow-wrap:anywhere]">
+                  {t.name}
+                </h3>
+                <StatusBadge state={tokenState(t)} />
+              </div>
+              {t.revokedAt === null && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label={`Revoke ${t.name}`}
+                  disabled={busy}
+                  onClick={() => revoke(t.id)}
+                >
+                  Revoke
+                </Button>
+              )}
+            </div>
+            <p className="break-all font-mono text-xs">
+              {t.prefix} · {t.scopes.join(", ")}
+            </p>
+            <p className="text-xs text-muted-foreground tabular-nums">
+              Created: {timestamp(t.createdAt)} · Expires:{" "}
+              {timestamp(t.expiresAt)} · Last used: {timestamp(t.lastUsedAt)} ·
+              Revoked: {timestamp(t.revokedAt)}
+            </p>
+          </section>
+        ))}
+      </section>
+    </PersonalSettings>
   );
 }
 interface UserMutation {
@@ -683,18 +743,9 @@ export function UsersPage({
     (u) => u.role === "admin" && u.status === "active",
   ).length;
   return (
-    <section
-      className="@container min-w-0 space-y-6"
-      aria-labelledby="users-heading"
-    >
+    <section className="@container min-w-0 space-y-6" aria-label="Users">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
-          <h1
-            id="users-heading"
-            className="font-display text-2xl font-semibold"
-          >
-            Users
-          </h1>
           <p className="max-w-2xl text-sm text-muted-foreground">
             Invite people and manage account access. Users can access only their
             own machines.
@@ -727,7 +778,7 @@ export function UsersPage({
           </p>
         </div>
       )}
-      <Card>
+      <Card className="gap-3 sm:grid sm:grid-cols-[minmax(12rem,1fr)_minmax(0,2fr)] sm:items-end">
         <CardHeader>
           <CardTitle>
             <h2>New user</h2>
@@ -750,21 +801,28 @@ export function UsersPage({
           </form>
         </CardContent>
       </Card>
-      <FieldGroup className="gap-3 sm:flex-row sm:items-end">
-        <Field>
+      <FieldGroup
+        aria-label="Filter users"
+        className="gap-2 border-y py-2 sm:flex-row sm:flex-wrap sm:items-end [&_[data-slot=field]]:gap-1"
+      >
+        <Field className="sm:max-w-64">
           <FieldLabel htmlFor="users-search">Search users</FieldLabel>
           <Input
             id="users-search"
+            className="h-10 md:h-8"
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Username or user ID"
           />
         </Field>
-        <Field className="sm:max-w-48">
+        <Field className="sm:max-w-40">
           <FieldLabel htmlFor="users-status">User status</FieldLabel>
           <Select value={status} onValueChange={setStatus}>
-            <SelectTrigger id="users-status" className="w-full">
+            <SelectTrigger
+              id="users-status"
+              className="w-full data-[size=default]:h-10 md:data-[size=default]:h-8"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -775,6 +833,19 @@ export function UsersPage({
             </SelectContent>
           </Select>
         </Field>
+        {(query || status !== "all") && (
+          <Button
+            className="self-end sm:ml-auto"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setQuery("");
+              setStatus("all");
+            }}
+          >
+            Clear filters
+          </Button>
+        )}
       </FieldGroup>
       {loading && (
         <p role="status" className="text-sm text-muted-foreground">
@@ -782,7 +853,7 @@ export function UsersPage({
         </p>
       )}
       {loaded && visible && filtered.length === 0 && (
-        <Empty>
+        <Empty showIcon>
           <EmptyHeader>
             <EmptyTitle>
               {users.length ? "No users match" : "No users available"}
@@ -817,34 +888,35 @@ export function UsersPage({
                 className="block py-3 @2xl:table-row @2xl:py-0"
                 aria-label={`${u.username} account`}
               >
-                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
-                  <span className="block break-all font-medium">
+                <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
+                  <span className="block font-medium [overflow-wrap:anywhere]">
                     {u.username}
                     {u.id === user?.id && (
                       <span className="text-muted-foreground"> (you)</span>
                     )}
                   </span>
-                  <span className="mt-1 block break-all text-xs text-muted-foreground">
+                  <span
+                    title={u.id}
+                    className="mt-1 block break-all font-mono text-xs text-muted-foreground @2xl:truncate"
+                  >
                     {u.id}
                   </span>
                 </TableCell>
-                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
-                  <span className="mb-2 block text-sm">
-                    {u.role === "admin" ? "Administrator" : "User"}
-                  </span>
-                  <Badge variant="outline" className="capitalize">
-                    {u.status}
-                  </Badge>
+                <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span>{u.role === "admin" ? "Administrator" : "User"}</span>
+                    <StatusBadge state={u.status} className="capitalize" />
+                  </div>
                   {u.role === "admin" &&
                     u.status === "active" &&
                     activeAdmins === 1 && (
-                      <p className="mt-2 text-xs text-muted-foreground">
+                      <p className="mt-1 text-xs text-muted-foreground">
                         Last active administrator
                       </p>
                     )}
                 </TableCell>
                 {machines !== undefined && (
-                  <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                  <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                     <span className="@2xl:hidden">Machines: </span>
                     {
                       machines.filter(
@@ -853,7 +925,7 @@ export function UsersPage({
                     }
                   </TableCell>
                 )}
-                <TableCell className="block whitespace-normal align-top @2xl:table-cell">
+                <TableCell className="block h-auto whitespace-normal align-top @2xl:table-cell">
                   <div className="flex flex-wrap gap-2">
                     {u.status === "pending" && (
                       <>

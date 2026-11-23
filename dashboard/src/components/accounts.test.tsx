@@ -186,7 +186,8 @@ it("limits token presets and shows secrets once without persisting them", async 
       : { tokens: [token] };
   const actor = userEvent.setup();
   render(<TokensPage user={account} />);
-  await screen.findByText(/Automation · Active/);
+  await screen.findByRole("heading", { name: "Automation" });
+  expect(screen.getByText("Active", { exact: true })).toBeTruthy();
   expect(
     screen.queryByRole("option", { name: "Administrator access" }),
   ).toBeNull();

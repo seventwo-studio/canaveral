@@ -90,7 +90,7 @@ test.each(["static", "command"])(
       ),
     );
     fireEvent.click(screen.getByText("Release"));
-    await screen.findByText(/ · stopped/);
+    await screen.findByText("stopped");
     expect(screen.queryByText("Open preview")).toBeNull();
   },
 );
@@ -133,11 +133,11 @@ test("shows a waiting preview's queue state and cancels it", async () => {
     }),
   );
   render(<WorkspacePreviews />);
-  await screen.findByText(/ · waiting for capacity/);
+  await screen.findByText("waiting for capacity");
   screen.getByText(/Queued at priority 3 · last check: capacity_unavailable/);
   expect(screen.queryByText("Open preview")).toBeNull();
   fireEvent.click(await screen.findByText("Cancel waiting preview"));
-  await screen.findByText(/ · stopped/);
+  await screen.findByText("stopped");
   screen.getByText("Request cancelled (consumer_cancelled)");
   expect(methods).toEqual(["DELETE"]);
 });

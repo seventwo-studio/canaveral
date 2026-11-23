@@ -110,9 +110,20 @@ export function ClaimScreen({
   }
   return (
     <AccountLayout>
-      <h1 className="font-display text-3xl">Choose your Canaveral password</h1>
-      <p>Use a new password for Canaveral only. Choose 12–1024 characters.</p>
-      {info?.username && <p>Account: {info.username}</p>}
+      <h1 className="text-xl font-semibold tracking-tight">
+        Choose your Canaveral password
+      </h1>
+      <p
+        id="claim-password-guidance"
+        className="text-ui text-muted-foreground"
+      >
+        Use a new password for Canaveral only. Choose 12–1024 characters.
+      </p>
+      {info?.username && (
+        <p className="break-all text-ui font-medium">
+          Account: {info.username}
+        </p>
+      )}
       <form onSubmit={submit}>
         <FieldSet disabled={!info || busy || spent}>
           <FieldGroup>
@@ -139,6 +150,7 @@ export function ClaimScreen({
                   name={name}
                   type="password"
                   autoComplete="new-password"
+                  aria-describedby="claim-password-guidance"
                   required
                   minLength={12}
                   maxLength={1024}
@@ -152,7 +164,7 @@ export function ClaimScreen({
         </FieldSet>
       </form>
       {error && <FieldError>{error}</FieldError>}
-      <Button variant="outline" onClick={onDone}>
+      <Button variant="outline" className="w-full" onClick={onDone}>
         Go to sign in
       </Button>
     </AccountLayout>

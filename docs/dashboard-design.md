@@ -8,6 +8,87 @@ The Agents page keeps the same rail and header while the recent runs section mov
 
 The supplied release link requires a Mobbin login in the shared browser. The connector supplied individual Browserbase screens. Their membership in that specific release and the full release screen count are unverified. [Requested release](https://mobbin.com/apps/browserbase-web-1605b46c-b3e7-46e3-a6bb-eb0a74433f48/d24cfac2-0619-4e87-a964-946cf423d3cb/screens)
 
+## Navigation and page headers
+
+The desktop rail pairs a compact identity row with a 48px destination header. Align the title with the content below. Keep the collapse control with the identity and the current page visible as a flat gray row. Administration sits above the account when space allows. In short windows the destination list scrolls while the account remains reachable. On phones the header opens a drawer with a visible close control. [Browserbase Overview](https://mobbin.com/screens/654392d0-9063-4db4-8987-6b7fc6742537)
+
+Give each destination one page heading. The workspace header carries this heading on operational pages. Put its creation action at the far right. For nested resources, show a muted parent link, a slash and the resource name; a long name can truncate while the parent remains available. [Session detail](https://mobbin.com/screens/619c4cff-d4e2-4d15-8feb-3ea24843f373) · [Agents](https://mobbin.com/screens/91fff3d4-82a6-4d59-95bd-0da39f7d3d51)
+
+Account and API tokens share the Settings header. A secondary navigation column identifies the active section beside its form. When the content area is narrow, the links move above the form. [Browserbase Preferences](https://mobbin.com/screens/b8124a12-8111-4ed7-8bfa-4f217b03a98c)
+
+## Typography, icons and spacing
+
+Use the system sans face for interface text and Geist Mono for identifiers, code and terminal output. Controls, row names and regular values use 13px type on a 20px line. Secondary labels, timestamps and chart ticks use 12px on 16px. Keep editable phone fields at 16px. Let names wrap at spaces, and allow long identifiers to break within the available column. [Browserbase session detail](https://mobbin.com/screens/67179442-fde1-4b51-9a93-8f9f0d553a18)
+
+Standard controls and navigation use 16px Lucide icons with a 1.75-unit outline. Small controls and disclosure arrows use 14px glyphs, and the smallest indicators use 12px. Control size governs the hit area independently. Desktop content starts 24px inside the workspace, with 24px between major sections. A settings list uses 12px row padding and a single divider between records. Keep row actions beside the record and include its name in the accessible label. [Browserbase Preferences](https://mobbin.com/screens/b8124a12-8111-4ed7-8bfa-4f217b03a98c)
+
+## Cards, charts and badges
+
+Use a white card with a 1px border, 4px corners and 16px insets for standalone resources. In Overview, a group of related totals shares one outline. A fine rule separates adjacent cells. Center the short label above its value, use tabular numerals, and keep supplementary units and sample counts smaller. Section lists can use horizontal rules without an enclosing card. [Overview metrics](https://mobbin.com/screens/654392d0-9063-4db4-8987-6b7fc6742537)
+
+The analytics reference uses dark marks, pale dashed guides and captions close to the plot. Canaveral’s CPU history uses separate dots at the reported timestamps, so missing measurements leave a gap. The solid baseline marks zero. Reservation bars share one panel and retain a written value for each category and a limit marker when allocations exceed capacity. [Browserbase analytics](https://mobbin.com/screens/a46ff01a-ec77-472b-b013-45ad476c0166)
+
+Session states use short text labels on softly tinted pills. Use green for success, amber for waits, red for failure, and gray for metadata or unrecognized states. Keep dots in chart legends and freshness indicators. The state name carries the meaning inside a badge. [Browserbase session states](https://mobbin.com/screens/7f018244-22df-44fb-832a-4f883773bb49)
+
+## Reading the reference
+
+The Sessions list puts search in the header and filters directly above the results. Its column labels are small, quiet and left aligned. White rows have horizontal separators and no vertical grid. Pale green pills identify completed sessions, so a reader can scan the status column without reading every ID. The empty space below a short result set stays white. [Filtered sessions](https://mobbin.com/screens/c7cff77e-7495-45ca-9eac-5031fddb1650)
+
+Overview uses enclosure selectively. Related metrics share an outline and internal dividers. Chart titles sit above their plots, which use dark marks and faint dashed guides. Routine actions such as Refresh are white, lightly outlined rectangles with small corner radii. The orange logo occupies a fraction of the screen. The selected navigation row uses gray. [Overview](https://mobbin.com/screens/5999d971-3c12-4486-9f23-8ff1098139bc) · [Analytics detail](https://mobbin.com/screens/8570db55-e4a2-477e-b541-0702b05e0649)
+
+Settings narrows the reading width inside the same shell. In Preferences the label column stays still as field widths and values change. Usage groups four measurements in a two-by-two panel. Projects uses separate groups for the project and its plan, with whitespace between headings and light rules within each group. [Preferences](https://mobbin.com/screens/afed0e5d-556b-4298-a286-e8cf31a331de) · [Project usage](https://mobbin.com/screens/915737bd-69f9-46f2-9832-313521874332) · [Projects](https://mobbin.com/screens/47c2c738-eafa-44d4-8f0b-dcdcab087b40)
+
+The invite dialog sits on a light, blurred backdrop. Its fields and section titles align left, and its primary action fills the available width. Canaveral uses a darker orange for positive form submissions to keep small white labels legible, and preserves distinct Cancel and destructive actions where an operation needs confirmation. [Invite members](https://mobbin.com/screens/34f504f8-87cd-4dcf-b5b6-9459cd121b39)
+
+Filter menus open beside their trigger with a fine outline, short rows and a soft shadow. Gray marks the highlighted row; the access picker also marks the selected value with an orange check. [Session filter](https://mobbin.com/screens/b633730a-9656-4a4e-8721-76845ed05684) · [Access picker](https://mobbin.com/screens/1e700e78-6640-4f99-80a6-48f56ddb6f15)
+
+Recent Runs centers a bare inbox icon and a short caption in an empty section. Invocations keeps its column labels and places the empty message along the left edge of the list. Use the section treatment for first use and the inline treatment for a filtered list. Show loading and failed reads separately. [Recent Runs](https://mobbin.com/screens/d3576662-8006-471e-bd1b-7d48e938e2a8) · [Invocations](https://mobbin.com/screens/1ca1bac4-ad5b-4dc6-b7e0-71b41470c5fe)
+
+## Canaveral implementation specification
+
+These dimensions and colors are Canaveral implementation values chosen from visual comparison. The reference captures do not expose Browserbase’s CSS.
+
+| Element | Treatment |
+| --- | --- |
+| Shell | Desktop rail 256px wide, collapsed rail 48px, sticky header 48px high. The rail meets the canvas at a single vertical hairline. Use 16px horizontal content padding on phones and 24px on desktop. |
+| Surface and ink | White canvas and panels, #f8f8f8 shell, #202020 main text, #666666 supporting text. Group content with whitespace first, then a single #e3e3e3 rule when adjacent regions need a boundary. |
+| Identity and selection | Orange marks the product, the checked option in a picker, and a primary create or submit action. Active navigation has a flat #eaeaea fill with dark text. Use a 4px radius for the selected row. The top bar names the destination once; detail pages add a link back to the parent. |
+| Typography | Use system sans for navigation, controls, table headers and prose. Use Geist Mono for machine IDs, code and technical values. The header title is 13px medium. In Settings, the section heading above the form is 20px semibold. Draw attention with weight and position before increasing size. |
+| Spacing | Use the 4px spacing scale. Keep an icon close to its label, give neighboring actions more space, and leave 16–24px between independent content groups. Allow narrow toolbars to wrap in reading order. |
+| Controls | Keep button and field silhouettes rectangular with softly rounded corners. Use orange for the primary creation action in the page header and for positive dialog submissions. Use a light border for ordinary commands and a ghost treatment for low-emphasis row actions. Use a visible focus outline with clearance around the control. |
+| Tables and metrics | Place muted column names on white, align names with their values and separate rows with 1px rules. Use tabular figures for comparable numbers. Put related summary values inside one divided strip and allow them to wrap on phones. |
+| Status and danger | Use small tinted pills with readable state names. Keep success green, waiting amber and failure red. Reserve destructive action styling for commands that warrant confirmation. |
+| Sheets and dialogs | Keep the title, affected resource and decision in the same panel. Give overlays more elevation than inline panels. Constrain tall content to the viewport, preserve keyboard focus and expose controls at narrow widths. |
+
+The Sessions list puts status first and separates rows with fine horizontal rules. On wide screens Machines follows that order. On phones the machine name leads each labeled record. Active search, state and owner filters are individually removable, and the inventory count appears once beneath the results. [Filtered Sessions](https://mobbin.com/screens/c7cff77e-7495-45ca-9eac-5031fddb1650)
+
+For settings, keep related field labels and controls within one divided group. Put help text beside its field and keep it available to assistive technology. Native pickers use the same border, height and focus treatment as adjacent inputs. [Project settings](https://mobbin.com/screens/e984b51b-6945-46cf-8459-fbafff41fd52)
+
+### Shared shadcn dimensions
+
+| Primitive | Size and detail |
+| --- | --- |
+| Button | 24px extra-small, 28px small, 32px default and 40px large. Default horizontal padding is 12px or 10px with an icon. Use 13px medium-weight labels, 16px icons and 6px corners. |
+| Input, select, toggle | Default height 32px. Editable text is 16px on small screens and 13px on desktop. Use a white selected segment on a neutral track with 2px padding. |
+| Card | 16px padding and section gaps. Titles are 14px semibold, descriptions 13px with 20px line height. A 1px outline separates flat panels on white. |
+| Table | 36px header, 44px minimum data rows, 12px horizontal padding. Set muted headings at 12px and data at 13px. Allow multiline resource details to increase row height. |
+| Badge | A pill with a 20px minimum height and 6px horizontal padding. Keep neutral labels quiet and pair domain color with a written state. |
+
+### Page layouts
+
+The Machines and Orchestrators lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area. Editable settings share one outlined group with horizontal row dividers. At a form width of 512px, each row puts its label and control in equal columns. Narrower groups stack each label above its control. Place the submit action beneath the group at its trailing edge.
+
+| Other destinations | Layout |
+| --- | --- |
+| Activity, queue and system | Put filters and refresh near the list. Use horizontal rules between events, requests and leases. Keep the position or state visible beside the record; allow identifiers to wrap separately. |
+| Usage and host resources | Group related totals in a divided panel. Neutral chart segments have matching labels and values. Reservations and measured usage have separate sections. |
+| Hosts, images and blueprints | On wide screens place catalogue entries in full-width rows with aligned actions. Use cards at narrower widths. Within a host, use ruled lists for machines, images and reservations. Align form controls in import, setup and maintenance dialogs with the shared input height. |
+| Users, API access and configuration | Keep filters with their results. Group the feature and action selectors above operation fields. Separate confirmation controls from the operation summary with a rule. |
+| Builds, previews and models | Group launch controls together. Give queue entries and results distinct sections, with technical identifiers and output in monospace. |
+| Screen wall and machine control | Keep device labels and actions beside their viewports. Use compact headers for files, terminal and inspection tools. Preserve the usable area of live displays and keep session controls accessible on phones. |
+
+Forms use 16px between fields and 6px between a label and its control. Dialog headings align left. A horizontal rule and 12px of top padding separate footer actions from content. The overlay darkens the workspace while leaving its context visible.
+
 ## Canaveral screen map
 
 | Entry | Destination | Next steps |
@@ -34,7 +115,7 @@ The image library also accepts `#templates`, user administration accepts `#users
 ## Design principles
 
 - Give the operator a stable location. Keep resource families in the rail, account actions at its foot and the current destination in the sticky header. On small screens the rail becomes a drawer. Changing destinations scrolls to the top and moves keyboard focus to the workspace.
-- Use warm paper for the work area and graphite for navigation. Reserve burnt orange for emphasis and use monospace for identifiers and measurements. Keep the launch photograph on the account entry screens.
+- Use a white work area and a pale neutral navigation rail. Use orange sparingly for identity and action, and use monospace for identifiers and measurements. Keep the launch photograph on the account entry screens.
 - Give each machine an action appropriate to its state. Keep its name and status visible while the operator inspects details. On narrow screens, pair each value with its label.
 - Keep fleet health compact so search, filters and the first machine are visible together on a narrow phone. Use a full-width search input and a native state picker on phones. Keep host reservations expandable and label fleet counts as applying before filters.
 - Lead Overview with up to four actionable exceptions. When machines and connections both need attention, include at least one of each in the preview. Put fleet and host health before account administration, with one refresh action for the whole overview.

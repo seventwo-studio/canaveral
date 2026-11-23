@@ -7,6 +7,8 @@ import {
   Dialog,
   DialogTrigger,
   DialogContent,
+  DialogHeader,
+  DialogFooter,
   DialogTitle,
   DialogDescription,
   DialogClose,
@@ -144,11 +146,8 @@ export function Maintenance({ host }: { host: string }) {
     !status.blockers.length &&
     status.safeToPowerOff;
   return (
-    <section
-      aria-label="Host maintenance"
-      className="space-y-3 rounded-md border p-4"
-    >
-      <h2 className="font-semibold">Planned maintenance</h2>
+    <section aria-label="Host maintenance" className="space-y-3 border-t pt-4">
+      <h2 className="text-sm font-semibold">Planned maintenance</h2>
       <div aria-live="polite" className="space-y-1 text-sm">
         {status === undefined ? (
           <p>{readError || "Checking maintenance status…"}</p>
@@ -192,12 +191,14 @@ export function Maintenance({ host }: { host: string }) {
           </Button>
         </DialogTrigger>
         <DialogContent>
-          <DialogTitle>Begin maintenance?</DialogTitle>
-          <DialogDescription>
-            Close admission for new work on this host. Existing work can finish.
-            Resume admission after reconciliation.
-          </DialogDescription>
-          <label>
+          <DialogHeader>
+            <DialogTitle>Begin maintenance?</DialogTitle>
+            <DialogDescription>
+              Close admission for new work on this host. Existing work can
+              finish. Resume admission after reconciliation.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="grid gap-1.5 text-ui font-medium">
             Reason (optional)
             <Input
               maxLength={500}
@@ -207,15 +208,17 @@ export function Maintenance({ host }: { host: string }) {
             />
           </label>
           {error && <p role="alert">{error}</p>}
-          <DialogClose asChild>
-            <Button variant="outline">Cancel</Button>
-          </DialogClose>
-          <Button
-            disabled={busy || status?.phase === "draining"}
-            onClick={() => submit(true)}
-          >
-            Begin maintenance
-          </Button>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button
+              disabled={busy || status?.phase === "draining"}
+              onClick={() => submit(true)}
+            >
+              Begin maintenance
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>{" "}
       <Button

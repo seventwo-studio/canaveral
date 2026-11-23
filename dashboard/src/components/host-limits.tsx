@@ -6,6 +6,7 @@ import type { Refresh, ResourceInput } from "@/lib/catalogue";
 import { hostLimitReceipt } from "@/lib/infrastructure";
 import type { Host } from "@/lib/infrastructure";
 import { Button } from "./ui/button";
+import { SettingsRows } from "./ui/field";
 import { Input } from "./ui/input";
 
 export function HostLimits({
@@ -56,16 +57,16 @@ export function HostLimits({
     <form
       onSubmit={save}
       aria-label="Canaveral host limits"
-      className="space-y-3 border-t pt-6"
+      className="max-w-2xl space-y-3 border-t pt-4"
     >
-      <h2 className="text-sm font-medium">Canaveral host limits</h2>
+      <h2 className="text-sm font-semibold">Canaveral host limits</h2>
       <p className="text-xs text-muted-foreground">
         Allocation budget across this host’s runtimes. Host capacity still
         applies.
       </p>
-      <div className="grid gap-3 sm:grid-cols-3">
+      <SettingsRows>
         {resourceFields.map(([key, label]) => (
-          <label key={key} className="space-y-2 text-xs">
+          <label key={key} className="text-ui font-medium">
             {label}
             <Input
               type="number"
@@ -88,7 +89,7 @@ export function HostLimits({
             />
           </label>
         ))}
-      </div>
+      </SettingsRows>
       <p className="text-xs text-muted-foreground">
         Lower limits keep existing workloads and block allocations over budget.
         Limits affect scheduling, not measured usage.
@@ -103,7 +104,7 @@ export function HostLimits({
           {message}
         </p>
       )}
-      <Button type="submit" size="sm" disabled={busy || !dirty}>
+      <Button className="ml-auto flex" type="submit" disabled={busy || !dirty}>
         {busy ? "Saving…" : "Save host limits"}
       </Button>
     </form>

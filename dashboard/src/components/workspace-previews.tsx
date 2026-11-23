@@ -1,3 +1,7 @@
+import { StatusBadge } from "./ui/badge";
+import { SettingsRows } from "./ui/field";
+import { NativeSelect } from "./ui/native-select";
+import { Empty, EmptyDescription } from "./ui/empty";
 import { readFile } from "@/lib/workspace-file";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
@@ -215,98 +219,125 @@ export function WorkspacePreviews() {
     }
   }
   return (
-    <section className="space-y-6">
-      <h1 className="font-display text-3xl">Workspace previews</h1>
+    <section className="min-w-0 space-y-6 text-ui">
       <form
-        className="space-y-4 rounded-lg border p-4"
+        className="max-w-2xl space-y-3"
         onSubmit={(e) => {
           e.preventDefault();
           void act("launch");
         }}
       >
-        <p>New previews use the operator-configured pinned image.</p>
-        <fieldset disabled={busy || !!pending} className="grid gap-3">
-          <label>
-            Preview type{" "}
-            <select
-              value={mode}
-              onChange={(e) => {
-                setMode(e.target.value);
-                setFiles([]);
-              }}
-            >
-              <option value="static">Static site</option>
-              <option value="command">Dynamic app</option>
-            </select>
-          </label>
-          <label>
-            Workspace directory
-            <Input
-              key={mode}
-              type="file"
-              multiple
-              {...{ webkitdirectory: "" }}
-              onChange={(e) => setFiles(Array.from(e.target.files || []))}
-            />
-          </label>
-          {files.length > 0 && <p>{files.length} files selected</p>}
-          {mode === "command" && (
-            <>
-              <label>
-                Foreground command and arguments (one per line)
-                <Textarea
-                  required
-                  value={argv}
-                  onChange={(e) => setArgv(e.target.value)}
-                />
-              </label>
-              <label>
-                HTTP port
-                <Input
-                  type="number"
-                  min="1"
-                  max="65535"
-                  required
-                  value={port}
-                  onChange={(e) => setPort(e.target.value)}
-                />
-              </label>
-            </>
-          )}
+        <p className="text-ui text-muted-foreground">
+          New previews use the operator-configured pinned image.
+        </p>
+        <fieldset disabled={busy || !!pending} className="min-w-0">
+          <SettingsRows>
+            <label className="text-ui font-medium">
+              Preview type{" "}
+              <NativeSelect
+                value={mode}
+                onChange={(e) => {
+                  setMode(e.target.value);
+                  setFiles([]);
+                }}
+              >
+                <option value="static">Static site</option>
+                <option value="command">Dynamic app</option>
+              </NativeSelect>
+            </label>
+            <label className="text-ui font-medium">
+              Workspace directory
+              <Input
+                key={mode}
+                type="file"
+                multiple
+                {...{ webkitdirectory: "" }}
+                onChange={(e) => setFiles(Array.from(e.target.files || []))}
+              />
+            </label>
+            {mode === "command" && (
+              <>
+                <label className="text-ui font-medium">
+                  Foreground command and arguments (one per line)
+                  <Textarea
+                    required
+                    value={argv}
+                    onChange={(e) => setArgv(e.target.value)}
+                  />
+                </label>
+                <label className="text-ui font-medium">
+                  HTTP port
+                  <Input
+                    type="number"
+                    min="1"
+                    max="65535"
+                    required
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                  />
+                </label>
+              </>
+            )}
+          </SettingsRows>
         </fieldset>
+        {files.length > 0 && (
+          <p className="text-right text-xs text-muted-foreground" role="status">
+            {files.length} files selected
+          </p>
+        )}
         {pending && (
           <p>
             Launch request <code>{pending.id}</code>
           </p>
         )}
-        <Button disabled={busy}>
+        <Button className="ml-auto flex" disabled={busy}>
           {pending ? "Retry same launch" : "Launch preview"}
         </Button>
       </form>
-      {error && <p role="alert">{error}</p>}
-      <h2 className="text-xl">Your previews</h2>
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => setRefresh((v) => v + 1)}
-      >
-        Refresh previews
-      </Button>
-      {loadError && <p role="alert">{loadError}</p>}
-      {!loadError && !rows.length && (
-        <p role="status">{loaded ? "No previews yet." : "Loading previews…"}</p>
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
       )}
-      <ul aria-live="polite" className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold tracking-tight">
+          Your previews
+        </h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setRefresh((v) => v + 1)}
+        >
+          Refresh previews
+        </Button>
+      </div>
+      {loadError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadError}
+        </p>
+      )}
+      {!loadError && !rows.length && (
+        <Empty showIcon={loaded} role="status">
+          <EmptyDescription>
+            {loaded ? "No previews yet." : "Loading previews…"}
+          </EmptyDescription>
+        </Empty>
+      )}
+      <ul aria-live="polite" className="divide-y border-y empty:hidden">
         {rows.map((p) => {
           const waiting =
             p.state === "provisioning" && p.request?.state === "waiting";
           return (
-            <li key={p.id} className="space-y-2 rounded-lg border p-4">
-              <p>
-                {p.mode === "command" ? "Dynamic app" : "Static site"} ·{" "}
-                {waiting ? "waiting for capacity" : p.state}
+            <li key={p.id} className="space-y-2 px-3 py-3 text-ui">
+              <p className="flex flex-wrap items-center gap-2">
+                {p.mode === "command" ? "Dynamic app" : "Static site"}
+                <StatusBadge
+                  state={waiting ? "waiting for capacity" : p.state}
+                />
               </p>
-              <code>{p.id}</code>
+              <code className="break-all text-xs text-muted-foreground">
+                {p.id}
+              </code>
               {p.request && !waiting && p.request.state !== "admitted" && (
                 <p>
                   Request {p.request.state}

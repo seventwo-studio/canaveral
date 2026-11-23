@@ -1,3 +1,7 @@
+import { StatusBadge } from "./ui/badge";
+import { SettingsRows } from "./ui/field";
+import { NativeSelect } from "./ui/native-select";
+import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { record } from "@/lib/types";
@@ -93,12 +97,14 @@ function BuildRow({ initial }: { initial: Build }) {
     }
   }
   return (
-    <article className="min-w-0 space-y-3 rounded-lg border p-4">
-      <h3 className="break-all font-semibold">{row.artifact}</h3>
-      <p className="break-all">
+    <article className="min-w-0 space-y-2 px-3 py-3 text-ui">
+      <h3 className="[overflow-wrap:anywhere] text-sm font-semibold">{row.artifact}</h3>
+      <p className="break-all font-mono text-xs text-muted-foreground">
         {row.imageId} · {row.id}
       </p>
-      <p role="status">{row.state}</p>
+      <p role="status">
+        <StatusBadge state={row.state} />
+      </p>
       {row.result && (
         <>
           <p>
@@ -110,12 +116,20 @@ function BuildRow({ initial }: { initial: Build }) {
             {row.result.truncated ? " · Output truncated" : ""}
           </p>
           <h4>Standard output</h4>
-          <pre className="overflow-auto">{output(row.result.stdoutBase64)}</pre>
+          <pre className="overflow-auto rounded-sm bg-muted p-3 font-mono text-xs">
+            {output(row.result.stdoutBase64)}
+          </pre>
           <h4>Standard error</h4>
-          <pre className="overflow-auto">{output(row.result.stderrBase64)}</pre>
+          <pre className="overflow-auto rounded-sm bg-muted p-3 font-mono text-xs">
+            {output(row.result.stderrBase64)}
+          </pre>
         </>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         {error && (
           <Button variant="outline" onClick={() => setRefresh((n) => n + 1)}>
@@ -253,77 +267,103 @@ export function WorkspaceBuilds() {
     }
   }
   return (
-    <section className="min-w-0 space-y-6">
-      <h1 className="font-display text-3xl">Linux builds</h1>
+    <section className="min-w-0 space-y-6 text-ui">
       <form
-        className="space-y-4 rounded-lg border p-4"
+        className="max-w-2xl space-y-3"
         onSubmit={(e) => {
           e.preventDefault();
           void launch();
         }}
       >
-        <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label>
-            Source directory
-            <Input
-              type="file"
-              multiple
-              {...{ webkitdirectory: "" }}
-              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-            />
-          </label>
-          <label>
-            Approved workspace image
-            <select
-              className="block w-full"
-              value={imageId}
-              onChange={(e) => setImageId(e.target.value)}
-            >
-              {images.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Command (one argument per line)
-            <Textarea value={argv} onChange={(e) => setArgv(e.target.value)} />
-          </label>
-          <label>
-            Artifact path
-            <Input
-              placeholder="dist/package.tar"
-              value={artifact}
-              onChange={(e) => setArtifact(e.target.value)}
-            />
-          </label>
+        <fieldset className="min-w-0" disabled={busy || !!pending}>
+          <SettingsRows>
+            <label className="text-ui font-medium">
+              Source directory
+              <Input
+                type="file"
+                multiple
+                {...{ webkitdirectory: "" }}
+                onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+              />
+            </label>
+            <label className="text-ui font-medium">
+              Approved workspace image
+              <NativeSelect
+                value={imageId}
+                onChange={(e) => setImageId(e.target.value)}
+              >
+                {images.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </label>
+            <label className="text-ui font-medium">
+              Command (one argument per line)
+              <Textarea
+                value={argv}
+                onChange={(e) => setArgv(e.target.value)}
+              />
+            </label>
+            <label className="text-ui font-medium">
+              Artifact path
+              <Input
+                placeholder="dist/package.tar"
+                value={artifact}
+                onChange={(e) => setArtifact(e.target.value)}
+              />
+            </label>
+          </SettingsRows>
         </fieldset>
-        {error && <p role="alert">{error}</p>}
+        {error && (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        )}
         {pending && (
           <p>
             Launch request <code>{pending.id}</code>
           </p>
         )}
-        <Button disabled={busy || (!pending && !imageId)}>
+        <Button
+          className="ml-auto flex"
+          disabled={busy || (!pending && !imageId)}
+        >
           {pending ? "Retry same launch" : "Launch build"}
         </Button>
       </form>
-      <h2 className="text-xl">Your builds</h2>
-      {imageError && <p role="alert">Build images unavailable: {imageError}</p>}
-      {loadError && <p role="alert">{loadError}</p>}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => setRefresh((n) => n + 1)}
-      >
-        Refresh builds
-      </Button>
-      {rows?.map((row) => (
-        <BuildRow key={row.id} initial={row} />
-      ))}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold tracking-tight">Your builds</h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setRefresh((n) => n + 1)}
+        >
+          Refresh builds
+        </Button>
+      </div>
+      {imageError && (
+        <p className="text-sm text-destructive" role="alert">
+          Build images unavailable: {imageError}
+        </p>
+      )}
+      {loadError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadError}
+        </p>
+      )}
+      <div className="divide-y border-y empty:hidden">
+        {rows?.map((row) => (
+          <BuildRow key={row.id} initial={row} />
+        ))}
+      </div>
       {!rows?.length && !loadError && (
-        <p role="status">{rows ? "No builds yet." : "Loading builds…"}</p>
+        <Empty showIcon={!!rows} role="status">
+          <EmptyDescription>
+            {rows ? "No builds yet." : "Loading builds…"}
+          </EmptyDescription>
+        </Empty>
       )}
     </section>
   );

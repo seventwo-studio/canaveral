@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { Maintenance } from "./maintenance";
 import { BrowserLaunch } from "./browser-launch";
 import type { FormEvent, ReactNode } from "react";
@@ -93,14 +94,26 @@ const Metric = ({
   children: ReactNode;
 }) => (
   <div className="min-w-0">
-    <dt className="text-[10px] text-muted-foreground">{label}</dt>
+    <dt className="text-xs text-muted-foreground">{label}</dt>
     <dd className="mt-1 break-words text-xs">{children}</dd>
   </div>
 );
 function Health({ host }: { host: Host }) {
   const health = host.health;
   return (
-    <Badge variant="outline">
+    <Badge
+      variant={
+        !health
+          ? "secondary"
+          : !health.fresh || health.status === "warning"
+            ? "warning"
+            : health.status === "passed"
+              ? "success"
+              : health.status === "checking"
+                ? "secondary"
+                : "destructive"
+      }
+    >
       {!health
         ? "Checks not reported"
         : !health.fresh
@@ -136,7 +149,7 @@ function Usage({ host }: { host: Host }) {
           ? new Date(0).toLocaleString()
           : since(u.receivedAt)}
       </p>
-      <dl className="grid min-w-0 grid-cols-1 gap-3 min-[420px]:grid-cols-3 opacity-90">
+      <dl className="grid min-w-0 grid-cols-1 gap-px overflow-hidden rounded-sm border bg-border min-[420px]:grid-cols-3 [&>div]:bg-card [&>div]:p-3 [&_dd]:text-sm [&_dd]:font-medium [&_dd]:tabular-nums">
         <Metric label="CPU busy">
           {u.cpuPercent == null ? "Unavailable" : `${number(u.cpuPercent)}%`}
         </Metric>
@@ -155,7 +168,7 @@ function Usage({ host }: { host: Host }) {
         className="space-y-2 border-t pt-3"
         aria-label="Canaveral measured usage"
       >
-        <h3 className="text-xs font-medium">Canaveral measured usage</h3>
+        <h3 className="text-ui font-medium">Canaveral measured usage</h3>
         {u.canaveral ? (
           u.canaveral.categories.map((g) => (
             <div
@@ -218,92 +231,96 @@ export function NamespaceResources({
       value,
     );
   return (
-    <section className="space-y-2 rounded-md border p-3 text-xs">
-      <h3 className="font-medium">Namespace {cluster.namespace}</h3>
-      <p className="text-muted-foreground">
-        Includes all workloads in the namespace · sampled{" "}
-        {since(cluster.sampledAt)}
-      </p>
-      <p>
-        {metrics.status === "available"
-          ? `${cores(metrics.cpuCores)} CPU cores · ${memory(metrics.memoryMiB)} · ${metrics.podCount} measured pods`
-          : "Namespace usage unavailable. Check metrics-server, pod inventory and API permissions."}
-      </p>
-      {metrics.coverage && (
+    <Card asChild className="gap-2 px-4 text-xs">
+      <section>
+        <h3 className="text-sm font-semibold [overflow-wrap:anywhere]">
+          Namespace {cluster.namespace}
+        </h3>
         <p className="text-muted-foreground">
-          {metrics.coverage.status === "unavailable"
-            ? "Measurement coverage unavailable."
-            : `${metrics.coverage.measuredPods} of ${metrics.coverage.activePods} active pods have fresh complete measurements.`}
-          {metrics.status === "available" && metrics.sampledAt
-            ? ` Oldest measurement ${since(metrics.sampledAt)}.`
-            : " Incomplete measurements are not shown as namespace totals."}
+          Includes all workloads in the namespace · sampled{" "}
+          {since(cluster.sampledAt)}
         </p>
-      )}
-      <section
-        aria-label="Canaveral VM workload usage"
-        className="space-y-1 border-t pt-2"
-      >
-        <h4 className="font-medium">Canaveral VM workloads</h4>
-        {cluster.canaveral?.ownership.status === "complete" &&
-        cluster.canaveral?.metrics.status === "available" ? (
-          <>
-            <p>
-              {cores(cluster.canaveral.metrics.cpuCores)} CPU cores ·{" "}
-              {memory(cluster.canaveral.metrics.memoryMiB)} ·{" "}
-              {cluster.canaveral.metrics.podCount} measured pods
-            </p>
-            <p className="text-muted-foreground">
-              Verified for {cluster.canaveral.ownership.verifiedMachines}{" "}
-              assigned machine
-              {cluster.canaveral.ownership.verifiedMachines === 1 ? "" : "s"}.
-              Oldest measurement {since(cluster.canaveral.metrics.sampledAt)}.
-            </p>
-          </>
-        ) : (
+        <p>
+          {metrics.status === "available"
+            ? `${cores(metrics.cpuCores)} CPU cores · ${memory(metrics.memoryMiB)} · ${metrics.podCount} measured pods`
+            : "Namespace usage unavailable. Check metrics-server, pod inventory and API permissions."}
+        </p>
+        {metrics.coverage && (
           <p className="text-muted-foreground">
-            Canaveral VM usage unavailable. Ownership or measurements are
-            incomplete.
+            {metrics.coverage.status === "unavailable"
+              ? "Measurement coverage unavailable."
+              : `${metrics.coverage.measuredPods} of ${metrics.coverage.activePods} active pods have fresh complete measurements.`}
+            {metrics.status === "available" && metrics.sampledAt
+              ? ` Oldest measurement ${since(metrics.sampledAt)}.`
+              : " Incomplete measurements are not shown as namespace totals."}
           </p>
         )}
+        <section
+          aria-label="Canaveral VM workload usage"
+          className="space-y-1 border-t pt-2"
+        >
+          <h4 className="font-medium">Canaveral VM workloads</h4>
+          {cluster.canaveral?.ownership.status === "complete" &&
+          cluster.canaveral?.metrics.status === "available" ? (
+            <>
+              <p>
+                {cores(cluster.canaveral.metrics.cpuCores)} CPU cores ·{" "}
+                {memory(cluster.canaveral.metrics.memoryMiB)} ·{" "}
+                {cluster.canaveral.metrics.podCount} measured pods
+              </p>
+              <p className="text-muted-foreground">
+                Verified for {cluster.canaveral.ownership.verifiedMachines}{" "}
+                assigned machine
+                {cluster.canaveral.ownership.verifiedMachines === 1 ? "" : "s"}.
+                Oldest measurement {since(cluster.canaveral.metrics.sampledAt)}.
+              </p>
+            </>
+          ) : (
+            <p className="text-muted-foreground">
+              Canaveral VM usage unavailable. Ownership or measurements are
+              incomplete.
+            </p>
+          )}
+          <p className="text-muted-foreground">
+            Assigned VM pods and their support pods. This usage is included in
+            the namespace total.
+          </p>
+        </section>
+        {quotas.status === "unavailable" ? (
+          <p className="text-muted-foreground">
+            Namespace quotas unavailable. Check resourcequota read permissions.
+          </p>
+        ) : !quotas.items.length ? (
+          <p className="text-muted-foreground">
+            No namespace resource quotas configured.
+          </p>
+        ) : (
+          quotas.items.map((q) => (
+            <div key={q.name} className="space-y-1 border-t pt-2">
+              <p className="font-medium">Quota: {q.name}</p>
+              {Object.entries(q.hard).map(([key, limit]) => (
+                <p key={key} className="break-words text-muted-foreground">
+                  {key}:{" "}
+                  {q.used[key] == null ? "Unavailable" : number(q.used[key])} /{" "}
+                  {number(limit)}{" "}
+                  {key.includes("memory")
+                    ? "MiB"
+                    : key.includes("storage")
+                      ? "GiB"
+                      : key.includes("cpu")
+                        ? "cores"
+                        : "claims"}
+                </p>
+              ))}
+            </div>
+          ))
+        )}
         <p className="text-muted-foreground">
-          Assigned VM pods and their support pods. This usage is included in the
-          namespace total.
+          Kubernetes quota and live usage are observations; Canaveral host
+          limits constrain placement reservations.
         </p>
       </section>
-      {quotas.status === "unavailable" ? (
-        <p className="text-muted-foreground">
-          Namespace quotas unavailable. Check resourcequota read permissions.
-        </p>
-      ) : !quotas.items.length ? (
-        <p className="text-muted-foreground">
-          No namespace resource quotas configured.
-        </p>
-      ) : (
-        quotas.items.map((q) => (
-          <div key={q.name} className="space-y-1 border-t pt-2">
-            <p className="font-medium">Quota: {q.name}</p>
-            {Object.entries(q.hard).map(([key, limit]) => (
-              <p key={key} className="break-words text-muted-foreground">
-                {key}:{" "}
-                {q.used[key] == null ? "Unavailable" : number(q.used[key])} /{" "}
-                {number(limit)}{" "}
-                {key.includes("memory")
-                  ? "MiB"
-                  : key.includes("storage")
-                    ? "GiB"
-                    : key.includes("cpu")
-                      ? "cores"
-                      : "claims"}
-              </p>
-            ))}
-          </div>
-        ))
-      )}
-      <p className="text-muted-foreground">
-        Kubernetes quota and live usage are observations; Canaveral host limits
-        constrain placement reservations.
-      </p>
-    </section>
+    </Card>
   );
 }
 function ReservationMeters({
@@ -313,12 +330,14 @@ function ReservationMeters({
   host: Host;
   expanded?: boolean;
 }) {
-  if (!host.reserved)
+  const reserved = host.reserved;
+  if (!reserved)
     return (
       <p className="text-xs text-muted-foreground">
         Reservation details unavailable.
       </p>
     );
+  const limits = allocationLimits(host);
   return (
     <div
       className={expanded ? "grid min-w-0 gap-4 sm:grid-cols-3" : "space-y-3"}
@@ -329,24 +348,32 @@ function ReservationMeters({
           ["memoryMiB", "Memory", null],
           ["diskGiB", "Storage", "GiB"],
         ] as const
-      ).map(([key, label, unit]) => (
-        <div key={key}>
-          <div className="mb-1 flex flex-wrap justify-between gap-1 text-xs">
-            <span>{label}</span>
-            <span>
-              {unit
-                ? `${number(host.reserved?.[key] || 0)} / ${number(allocationLimits(host)[key])} ${unit}`
-                : `${memory(host.reserved?.[key] || 0)} / ${memory(allocationLimits(host)[key])}`}
-            </span>
+      ).map(([key, label, unit]) => {
+        const used = reserved[key];
+        const limit = limits[key];
+        const amount = unit
+          ? `${number(used)} / ${number(limit)} ${unit}`
+          : `${memory(used)} / ${memory(limit)}`;
+        return (
+          <div key={key}>
+            <div className="mb-1 flex flex-wrap justify-between gap-1 text-xs">
+              <span>{label}</span>
+              <span
+                className={`tabular-nums ${used > limit ? "text-destructive" : "text-muted-foreground"}`}
+              >
+                {amount}
+              </span>
+            </div>
+            <meter
+              min="0"
+              max={Math.max(1, used, limit)}
+              value={used}
+              aria-label={`${label} reserved`}
+              aria-valuetext={amount}
+            />
           </div>
-          <meter
-            min="0"
-            max={Math.max(1, allocationLimits(host)[key])}
-            value={host.reserved?.[key] || 0}
-            aria-label={`${label} reserved`}
-          />
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -357,11 +384,11 @@ type AcceptingProps = {
 };
 function AcceptingToggle({ host, busy, mutate }: AcceptingProps) {
   return (
-    <div className="flex items-center gap-2 text-sm">
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       <span>Legacy placement switch</span>{" "}
       <Button
         size="sm"
-        variant="ghost"
+        variant="outline"
         disabled={busy}
         onClick={() =>
           mutate(
@@ -399,30 +426,39 @@ export function InfrastructureCard({
 }) {
   const orchestrator = kind(host) === "orchestrator";
   const Icon = orchestrator ? Orbit : Server;
+  const availability = !host.online
+    ? "Offline"
+    : !host.enabled
+      ? "Draining"
+      : host.placementReady === false
+        ? "Needs attention"
+        : "Online";
   return (
-    <Card className="min-w-0 rounded-md shadow-none">
+    <Card className="min-w-0">
       <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Icon className="size-5 text-muted-foreground" />
-          <Badge variant="outline">
-            {!host.online
-              ? "Offline"
-              : !host.enabled
-                ? "Draining"
-                : host.placementReady === false
-                  ? "Needs attention"
-                  : "Online"}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Icon className="size-4 shrink-0 text-muted-foreground" />
+          <CardTitle className="min-w-0 flex-1 break-words">
+            <a
+              href={resourcesHref}
+              className="underline-offset-4 hover:underline"
+              aria-label={`${host.name} overview`}
+            >
+              {host.name}
+            </a>
+          </CardTitle>
+          <Badge
+            variant={
+              availability === "Online"
+                ? "success"
+                : availability === "Offline"
+                  ? "secondary"
+                  : "warning"
+            }
+          >
+            {availability}
           </Badge>
         </div>
-        <CardTitle className="break-words text-xl">
-          <a
-            href={resourcesHref}
-            className="underline-offset-4 hover:underline"
-            aria-label={`${host.name} overview`}
-          >
-            {host.name}
-          </a>
-        </CardTitle>
         <CardDescription>
           {provider(host.platform || host.provider)} ·{" "}
           {orchestrator ? "Orchestrator pool" : "Direct host"}
@@ -432,8 +468,10 @@ export function InfrastructureCard({
             {host.runtimes.map(provider).join(" · ")}
           </p>
         )}
-        <div>
-          {host.maintenance?.phase === "draining" && <Badge>Maintenance</Badge>}
+        <div className="flex flex-wrap gap-1.5">
+          {host.maintenance?.phase === "draining" && (
+            <Badge variant="warning">Maintenance</Badge>
+          )}
           <Health host={host} />
         </div>
       </CardHeader>
@@ -459,9 +497,12 @@ export function InfrastructureCard({
           )}
         </a>
       </CardContent>
-      <CardFooter className="flex flex-wrap gap-2">
+      <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
         <AcceptingToggle host={host} busy={busy} mutate={mutate} />
-        <a className="text-sm underline" href={resourcesHref}>
+        <a
+          className="text-xs font-medium underline-offset-4 hover:underline"
+          href={resourcesHref}
+        >
           Manage maintenance
         </a>
       </CardFooter>
@@ -530,7 +571,7 @@ export function InfrastructureDetails({
     }
   }
   return (
-    <div className="min-w-0 space-y-6" aria-label={`${host.name} overview`}>
+    <div className="min-w-0 space-y-5" aria-label={`${host.name} overview`}>
       {error && (
         <div
           role="alert"
@@ -563,7 +604,7 @@ export function InfrastructureDetails({
           await onRefresh();
         }}
       />
-      <div className="grid min-w-0 gap-6 border-t pt-6 xl:grid-cols-2">
+      <div className="grid min-w-0 gap-4 border-t pt-4 xl:grid-cols-2">
         <HostMachines
           host={host}
           machines={machines}
@@ -581,10 +622,10 @@ export function InfrastructureDetails({
           }
         />
       </div>
-      <div className="grid min-w-0 gap-8 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <div className="min-w-0 space-y-6">
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-5">
           <section className="min-w-0 space-y-3">
-            <h2 className="text-sm font-medium">Observed resources</h2>
+            <h2 className="text-sm font-semibold">Observed resources</h2>
             <Usage host={host} />
             {host.usage?.cluster && (
               <NamespaceResources cluster={host.usage.cluster} />
@@ -609,12 +650,12 @@ export function InfrastructureDetails({
           </section>
         </div>
         <aside
-          className="min-w-0 space-y-6"
+          className="min-w-0 space-y-5"
           aria-label="Environment and capabilities"
         >
           <section className="space-y-3">
             <div className="flex flex-wrap justify-between gap-2">
-              <h2 className="text-sm font-medium">Environment checks</h2>
+              <h2 className="text-sm font-semibold">Environment checks</h2>
               <Button
                 size="sm"
                 variant="outline"
@@ -637,16 +678,16 @@ export function InfrastructureDetails({
                 enable diagnostics.
               </p>
             )}
-            <ul className="space-y-2">
+            <ul className="divide-y border-y">
               {host.health?.checks?.map((c) => (
-                <li key={c.id} className="rounded-md border p-3">
+                <li key={c.id} className="py-3">
                   <div className="flex items-center gap-2 text-xs">
                     {c.status === "passed" ? (
                       <Check className="size-3 text-[var(--state-ready)]" />
                     ) : (
                       <AlertTriangle className="size-3 text-[var(--state-pending)]" />
                     )}
-                    <span className="font-medium">{c.label}</span>
+                    <span className="text-ui font-medium">{c.label}</span>
                     <span className="ml-auto text-muted-foreground">
                       {c.status}
                     </span>
@@ -677,7 +718,7 @@ export function InfrastructureDetails({
             </dl>
           </section>
           <section className="space-y-3 border-t pt-4">
-            <h2 className="text-sm font-medium">Configured capabilities</h2>
+            <h2 className="text-sm font-semibold">Configured capabilities</h2>
             <div className="flex flex-wrap gap-2">
               {Object.entries(host.health?.capabilities || {}).map(
                 ([key, value]) => (
@@ -910,13 +951,13 @@ export function ConnectionSetup({
           </p>
         )}
         {!issued ? (
-          <form onSubmit={issue} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <label className="space-y-2 text-xs">
+          <form onSubmit={issue} className="@container/setup space-y-4">
+            <div className="grid gap-4 @sm/setup:grid-cols-2">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Connection type
-                <select
+                <NativeSelect
                   aria-label="Connection type"
-                  className="h-9 w-full rounded-md border bg-background px-2"
+
                   value={type}
                   onChange={(e) => {
                     setType(
@@ -931,17 +972,17 @@ export function ConnectionSetup({
                 >
                   <option value="host">Direct host</option>
                   <option value="orchestrator">External orchestrator</option>
-                </select>
+                </NativeSelect>
               </label>
-              <label className="space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 {type === "orchestrator" ? "Provider" : "Host operating system"}
-                <select
+                <NativeSelect
                   aria-label={
                     type === "orchestrator"
                       ? "Provider"
                       : "Host operating system"
                   }
-                  className="h-9 w-full rounded-md border bg-background px-2"
+
                   value={backend}
                   onChange={(e) => change(e.target.value)}
                 >
@@ -953,10 +994,10 @@ export function ConnectionSetup({
                       {provider(p)}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
             </div>
-            <label className="block space-y-2 text-xs">
+            <label className="grid min-w-0 gap-1.5 text-ui font-medium">
               Connection name
               <Input
                 required
@@ -966,27 +1007,40 @@ export function ConnectionSetup({
                 placeholder="Build Mac or development cluster"
               />
             </label>
-            <label className="block space-y-2 text-xs">
-              Controller URL
+            <div className="grid min-w-0 gap-1.5">
+              <label
+                htmlFor="runner-controller-url"
+                className="text-ui font-medium"
+              >
+                Controller URL
+              </label>
               <Input
+                id="runner-controller-url"
                 type="url"
+                aria-describedby="runner-controller-hint"
                 required
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 placeholder="https://canaveral.example.com"
               />
-              <p className="text-muted-foreground">
+              <span
+                id="runner-controller-hint"
+                className="text-xs font-normal text-muted-foreground"
+              >
                 Use an address reachable from this runner. Localhost only works
                 on the controller machine.
-              </p>
-            </label>
+              </span>
+            </div>
             <fieldset className="space-y-2">
               <legend className="text-xs font-medium">
                 Canaveral host limits
               </legend>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid gap-3 @sm/setup:grid-cols-3">
                 {resourceFields.map(([key, label]) => (
-                  <label key={key} className="space-y-2 text-xs">
+                  <label
+                    key={key}
+                    className="grid min-w-0 gap-1.5 text-ui font-medium"
+                  >
                     {label}
                     <Input
                       type="number"
@@ -1011,9 +1065,12 @@ export function ConnectionSetup({
                 pool.
               </p>
             </fieldset>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 @sm/setup:grid-cols-2">
               {fields.map(([key, label]) => (
-                <label key={key} className="block space-y-2 text-xs">
+                <label
+                  key={key}
+                  className="grid min-w-0 gap-1.5 text-ui font-medium"
+                >
                   {label}
                   <Input
                     required
@@ -1051,7 +1108,7 @@ export function ConnectionSetup({
                       Object.entries(runtimeDefaults(name)).map(([key]) => (
                         <label
                           key={key}
-                          className="block space-y-2 pl-5 text-xs"
+                          className="grid min-w-0 gap-1.5 pl-5 text-ui font-medium"
                         >
                           {provider(name)} {key}
                           <Input
@@ -1077,7 +1134,7 @@ export function ConnectionSetup({
               <summary className="cursor-pointer text-xs font-medium">
                 Advanced configuration and images
               </summary>
-              <label className="block space-y-2 text-xs">
+              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
                 Runner configuration
                 <Textarea
                   className="min-h-44 font-mono text-xs"
@@ -1124,14 +1181,14 @@ export function ConnectionSetup({
               <li>
                 Place the private setup file on that machine and check its
                 environment:
-                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border p-3">
+                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-3 font-mono text-xs">
                   canaveral host --setup-file ./canaveral-setup.json --state
                   ./state/runner --check
                 </pre>
               </li>
               <li>
                 Connect the runner:
-                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border p-3">
+                <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-3 font-mono text-xs">
                   canaveral host --setup-file ./canaveral-setup.json --state
                   ./state/runner
                 </pre>
@@ -1153,7 +1210,7 @@ export function ConnectionSetup({
         )}
         {activity.some((s) => s.state === "pending") && (
           <section className="space-y-2 border-t pt-4">
-            <h2 className="text-xs font-medium">Pending setup credentials</h2>
+            <h2 className="text-sm font-semibold">Pending setup credentials</h2>
             {activity
               .filter((s) => s.state === "pending")
               .map((s) => (

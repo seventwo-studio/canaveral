@@ -13,7 +13,6 @@ import {
   CardDescription,
   CardContent,
 } from "./ui/card";
-import { Badge } from "./ui/badge";
 
 const states = [
   "Ready",
@@ -29,12 +28,12 @@ const stateColor = (state: string) =>
   ["Error", "Unknown", "Setup failed"].includes(state)
     ? "var(--destructive)"
     : state === "Ready"
-      ? "var(--state-ready)"
+      ? "var(--foreground)"
       : ["Preparing", "Pending"].includes(state)
         ? "var(--state-pending)"
         : state === "Running"
-          ? "var(--foreground)"
-          : "var(--muted-foreground)";
+          ? "var(--muted-foreground)"
+          : "color-mix(in srgb, var(--foreground) 40%, var(--background))";
 
 /** Each machine appears once; preserve new controller states rather than hiding them. */
 export function machineDistribution(inventory: Inventory) {
@@ -83,21 +82,23 @@ export function FleetPulse({
   return (
     <section
       aria-label="Fleet pulse"
-      className={`grid min-w-0 items-start gap-2 md:gap-3 ${showHosts ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]" : ""}`}
+      className={`grid min-w-0 overflow-hidden rounded-md border bg-card ${showHosts ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]" : ""}`}
     >
-      <Card className="min-w-0 gap-2 py-3 shadow-none md:gap-3 md:py-4">
+      <Card className="min-w-0 gap-2 rounded-none border-0 py-3 shadow-none md:gap-3 md:py-4">
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="font-display text-base">
-              Fleet status
-            </CardTitle>
-            <Badge variant="outline">
+            <CardTitle className="text-sm">Fleet status</CardTitle>
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span
+                aria-hidden="true"
+                className={`size-1.5 rounded-full ${!loaded ? "bg-muted-foreground" : stale ? "bg-[var(--state-pending)]" : "bg-[var(--state-ready)]"}`}
+              />
               {!loaded
                 ? "Unavailable"
                 : stale
                   ? "Last snapshot"
                   : "Current snapshot"}
-            </Badge>
+            </span>
           </div>
           <CardDescription>
             {loaded
@@ -107,7 +108,7 @@ export function FleetPulse({
         </CardHeader>
         <CardContent>
           {!loaded || !total ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-ui text-muted-foreground">
               {loaded ? "No machines yet" : "Waiting for inventory…"}
             </p>
           ) : (
@@ -115,13 +116,16 @@ export function FleetPulse({
               <div
                 role="img"
                 aria-label={`${total} machines by state`}
-                className="flex h-1.5 gap-0.5 overflow-hidden rounded-full"
+                className="flex h-2 overflow-hidden rounded-[2px] bg-muted"
               >
                 {distribution.map(({ label, count }) => (
                   <span
                     key={label}
-                    className="min-w-0.5"
-                    style={{ flex: count, backgroundColor: stateColor(label) }}
+                    className="min-w-0 border-r border-background last:border-0"
+                    style={{
+                      width: `${(count / total) * 100}%`,
+                      backgroundColor: stateColor(label),
+                    }}
                   />
                 ))}
               </div>
@@ -138,7 +142,7 @@ export function FleetPulse({
                         aria-hidden="true"
                       />
                       <span>{label}</span>
-                      <span className="font-mono text-muted-foreground">
+                      <span className="tabular-nums text-muted-foreground">
                         {count}
                       </span>
                     </>
@@ -186,12 +190,10 @@ export function FleetPulse({
         </CardContent>
       </Card>
       {showHosts && (
-        <Card className="min-w-0 gap-3 py-3 shadow-none md:py-4">
+        <Card className="min-w-0 gap-3 rounded-none border-0 border-t py-3 shadow-none md:py-4 xl:border-t-0 xl:border-l">
           <CardHeader className="md:has-data-[slot=card-action]:grid-cols-1">
             <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-              <CardTitle className="font-display text-base">
-                Host reservations
-              </CardTitle>
+              <CardTitle className="text-sm">Host reservations</CardTitle>
               {loaded && (
                 <span className="text-xs text-muted-foreground">
                   {inventory.hosts.filter((h) => h.online).length}/
@@ -222,7 +224,7 @@ export function FleetPulse({
             className={mobileReservations ? "" : "hidden md:block"}
           >
             {!loaded || !inventory.hosts.length ? (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-ui text-muted-foreground">
                 {loaded ? "No hosts connected" : "Inventory unavailable"}
               </p>
             ) : (
@@ -237,7 +239,7 @@ export function FleetPulse({
                     >
                       <div className="min-w-0 space-y-1">
                         <a
-                          className="block break-words text-sm underline-offset-4 hover:underline"
+                          className="block break-words text-ui font-medium underline-offset-4 hover:underline"
                           href={`#${host.kind === "orchestrator" || host.provider === "kubevirt" ? "orchestrators" : "hosts"}/${encodeURIComponent(host.id)}/resources`}
                         >
                           {host.name}
@@ -286,7 +288,7 @@ export function FleetPulse({
                                     high={limit || undefined}
                                   />
                                   <p
-                                    className={`break-words font-mono tabular-nums ${used > limit ? "text-destructive" : ""}`}
+                                    className={`break-words text-ui tabular-nums ${used > limit ? "text-destructive" : ""}`}
                                   >
                                     {format(used)} / {format(limit)}
                                     {used > limit && (

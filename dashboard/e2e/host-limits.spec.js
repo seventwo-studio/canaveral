@@ -64,6 +64,11 @@ for (const width of [320, 1440])
       .click();
     const form = page.getByRole("form", { name: "Canaveral host limits" });
     await expect(form.getByLabel("vCPUs", { exact: true })).toHaveValue("4");
+    if (process.env.CANAVERAL_SCREENSHOT_DIR) {
+      await form.screenshot({
+        path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/host-limit-form-${width}.png`,
+      });
+    }
     await form.getByLabel("vCPUs", { exact: true }).fill("3");
     await form.getByLabel("Memory (MiB)", { exact: true }).fill("3072");
     await form.getByLabel("Disk (GiB)", { exact: true }).fill("40");

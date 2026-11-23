@@ -5,15 +5,16 @@ import { cn } from "@/lib/utils";
 import { Slot } from "radix-ui";
 
 const badgeVariants = cva(
-  "inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-transparent px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3",
+  "inline-flex min-h-5 w-fit max-w-full items-center justify-center gap-1 rounded-full border border-transparent px-1.5 py-px text-xs leading-4 font-normal [overflow-wrap:anywhere] transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3",
   {
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground [a&]:hover:bg-primary/90",
-        secondary:
-          "bg-secondary text-secondary-foreground [a&]:hover:bg-secondary/90",
+        secondary: "bg-muted text-muted-foreground [a&]:hover:bg-accent",
+        success: "bg-[#edf6e6] text-[#456b2f]",
+        warning: "bg-[#fbf2db] text-[var(--state-pending)]",
         destructive:
-          "bg-destructive text-white focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40 [a&]:hover:bg-destructive/90",
+          "bg-[#fcecea] text-destructive focus-visible:ring-destructive/20 dark:bg-destructive/15 dark:focus-visible:ring-destructive/40 [a&]:hover:bg-destructive/15",
         outline:
           "border-border text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
         ghost: "[a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
@@ -21,14 +22,43 @@ const badgeVariants = cva(
       },
     },
     defaultVariants: {
-      variant: "default",
+      variant: "secondary",
     },
   },
 );
 
+// Unknown controller states retain their label and neutral treatment.
+export function statusBadgeVariant(state: string) {
+  switch (state.toLowerCase()) {
+    case "ready":
+    case "online":
+    case "active":
+    case "completed":
+    case "succeeded":
+      return "success";
+    case "waiting for capacity":
+    case "waiting for resources":
+    case "provisioning":
+    case "preparing":
+    case "pending":
+    case "draining":
+    case "waiting":
+    case "queued":
+    case "deleting":
+      return "warning";
+    case "error":
+    case "failed":
+    case "setup failed":
+    case "deletion blocked":
+      return "destructive";
+    default:
+      return "secondary";
+  }
+}
+
 function Badge({
   className,
-  variant = "default",
+  variant = "secondary",
   asChild = false,
   ...props
 }: React.ComponentProps<"span"> &
@@ -45,4 +75,17 @@ function Badge({
   );
 }
 
-export { Badge, badgeVariants };
+function StatusBadge({
+  state,
+  ...props
+}: Omit<React.ComponentProps<typeof Badge>, "variant" | "children"> & {
+  state: string;
+}) {
+  return (
+    <Badge variant={statusBadgeVariant(state)} {...props}>
+      {state}
+    </Badge>
+  );
+}
+
+export { Badge, badgeVariants, StatusBadge };

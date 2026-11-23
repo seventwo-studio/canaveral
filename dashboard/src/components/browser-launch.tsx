@@ -1,3 +1,4 @@
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import type { Host } from "@/lib/infrastructure";
@@ -113,10 +114,10 @@ export function BrowserLaunch({ host }: { host: Host }) {
   return (
     <section aria-label="Browser session" className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 text-sm">
+        <label className="flex min-w-0 flex-wrap items-center gap-2 text-ui font-medium">
           Browser engine
-          <select
-            className="h-9 rounded-md border bg-background px-2"
+          <NativeSelect
+            className="w-auto"
             value={engine}
             disabled={busy || Boolean(id)}
             onChange={(event) => setEngine(event.target.value as Engine)}
@@ -126,7 +127,7 @@ export function BrowserLaunch({ host }: { host: Host }) {
                 {label}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         {eligible && !receipt && (
           <Button disabled={busy} onClick={() => run("launch")}>
@@ -152,9 +153,13 @@ export function BrowserLaunch({ host }: { host: Host }) {
           </>
         )}
       </div>
-      {id && <p className="break-all text-xs">Browser ID {id}</p>}
+      {id && (
+        <p className="text-xs text-muted-foreground">
+          Browser ID <code className="break-all text-foreground">{id}</code>
+        </p>
+      )}
       {receipt && (
-        <dl className="break-all text-sm">
+        <dl className="grid min-w-0 gap-x-4 gap-y-1 border-y py-3 text-ui sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-y-2 [&_dt]:text-muted-foreground [&_dd]:break-all">
           <dt>Playwright endpoint</dt>
           <dd>
             <code>{receipt.endpoint}</code>
@@ -169,7 +174,11 @@ export function BrowserLaunch({ host }: { host: Host }) {
           </dd>
         </dl>
       )}
-      {message && <p role="status">{message}</p>}
+      {message && (
+        <p role="status" className="text-sm">
+          {message}
+        </p>
+      )}
     </section>
   );
 }

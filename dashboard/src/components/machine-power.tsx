@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -84,20 +85,20 @@ export function MachinePowerOff({
               Power-off request: {result.state}. Resources stay reserved until
               the host confirms that the VM and disk handles are closed.
             </p>
-            <p className="break-all text-muted-foreground">
+            <p className="break-all font-mono text-muted-foreground">
               Request {result.id}
             </p>
             <Button onClick={onClose}>Close</Button>
           </div>
         ) : (
-          <div className="flex flex-wrap justify-end gap-2">
+          <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>
             <Button variant="destructive" disabled={busy} onClick={submit}>
               {busy ? "Requesting…" : "Power off VM"}
             </Button>
-          </div>
+          </DialogFooter>
         )}
       </DialogContent>
     </Dialog>

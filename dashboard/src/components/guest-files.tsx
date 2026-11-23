@@ -218,7 +218,7 @@ export function GuestFiles({
       className="flex h-full min-h-0 min-w-0 flex-col bg-background"
       aria-label="Guest file browser"
     >
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b p-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted px-3 py-2">
         <Button
           size="icon-sm"
           variant="ghost"
@@ -337,7 +337,7 @@ export function GuestFiles({
       )}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
             <span className="text-xs text-muted-foreground">
               {loaded ? `${visible.length} items` : "Choose a directory"}
             </span>
@@ -349,31 +349,31 @@ export function GuestFiles({
               onChange={(e) => setFilter(e.target.value)}
             />
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="grid grid-cols-[minmax(0,1fr)_5rem] gap-3 border-b bg-muted/30 px-4 py-2 text-[10px] uppercase text-muted-foreground sm:grid-cols-[minmax(0,1fr)_5rem_9rem]">
+          <div className="@container/files min-h-0 flex-1 overflow-y-auto">
+            <div className="grid grid-cols-[minmax(0,1fr)_5rem] h-9 items-center gap-3 border-b bg-background px-3 text-xs text-muted-foreground @lg/files:grid-cols-[minmax(0,1fr)_5rem_9rem]">
               <span>Name</span>
               <span>Size</span>
-              <span className="hidden sm:block">Modified</span>
+              <span className="hidden @lg/files:block">Modified</span>
             </div>
             {visible.map((entry) => (
               <button
                 key={entry.name}
                 disabled={busy}
                 onClick={() => action(() => inspect(entry))}
-                className={`grid w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b px-4 py-3 text-left text-xs hover:bg-muted sm:grid-cols-[minmax(0,1fr)_5rem_9rem] ${selected?.name === entry.name ? "bg-muted" : ""}`}
+                className={`grid min-h-11 w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b px-3 py-2 text-left text-ui hover:bg-muted @lg/files:grid-cols-[minmax(0,1fr)_5rem_9rem] ${selected?.name === entry.name ? "bg-muted" : ""}`}
               >
                 <span className="flex min-w-0 items-center gap-3">
                   {entry.kind === "directory" ? (
-                    <Folder className="size-4 shrink-0 text-primary" />
+                    <Folder className="size-4 shrink-0 text-muted-foreground" />
                   ) : (
                     <File className="size-4 shrink-0 text-muted-foreground" />
                   )}
-                  <span className="min-w-0 break-all">{entry.name}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{entry.name}</span>
                 </span>
-                <span className="text-muted-foreground">
+                <span className="tabular-nums text-muted-foreground">
                   {entry.kind === "directory" ? "Folder" : size(entry.size)}
                 </span>
-                <span className="hidden text-muted-foreground sm:block">
+                <span className="hidden tabular-nums text-muted-foreground @lg/files:block">
                   {entry.modifiedAt
                     ? new Date(entry.modifiedAt * 1000).toLocaleString()
                     : "—"}
@@ -381,9 +381,8 @@ export function GuestFiles({
               </button>
             ))}
             {!visible.length && (
-              <div className="flex flex-col items-center gap-3 p-12 text-center text-muted-foreground">
-                <Folder className="size-8" />
-                <p className="text-sm">
+              <div className="px-3 py-3 text-ui text-muted-foreground">
+                <p>
                   {busy
                     ? "Loading files…"
                     : !loaded
@@ -401,7 +400,7 @@ export function GuestFiles({
             className="flex min-h-48 min-w-0 flex-col border-t md:w-[42%] md:border-l md:border-t-0"
             aria-label="File preview"
           >
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b p-3">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-muted px-3 py-2">
               <span className="min-w-0 break-all text-xs font-medium">
                 {selected.name}
               </span>
@@ -448,7 +447,7 @@ export function GuestFiles({
           </section>
         )}
       </div>
-      <footer className="shrink-0 border-t px-4 py-2 text-[10px] text-muted-foreground">
+      <footer className="shrink-0 border-t bg-muted px-4 py-2 text-xs text-muted-foreground">
         Guest filesystem · Uploading replaces a file with the same name
       </footer>
     </div>

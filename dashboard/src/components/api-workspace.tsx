@@ -153,11 +153,8 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
   }
   const features = [...new Set(apiActions.map((item) => item.feature))];
   return (
-    <div className="min-w-0 space-y-6">
+    <div className="mx-auto w-full min-w-0 max-w-3xl space-y-6">
       <div className="space-y-1">
-        <h1 className="font-display text-3xl font-medium tracking-tight">
-          API controls
-        </h1>
         <p className="text-sm text-muted-foreground">
           Configure applications, execution permissions and managed updates.
           Runtime consumer and runner protocols retain their scoped credentials.
@@ -165,51 +162,59 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
       </div>
       <Card>
         <CardHeader>
-          <CardTitle>Configuration</CardTitle>
+          <CardTitle>API operation</CardTitle>
         </CardHeader>
         <CardContent>
           <FieldSet disabled={busy}>
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="api-feature">Feature</FieldLabel>
-                <Select
-                  value={action.feature}
-                  onValueChange={(feature) =>
-                    choose(
-                      apiActions.find((item) => item.feature === feature)!.id,
-                    )
-                  }
-                >
-                  <SelectTrigger id="api-feature" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {features.map((feature) => (
-                      <SelectItem key={feature} value={feature}>
-                        {feature}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="api-action">Action</FieldLabel>
-                <Select value={selected} onValueChange={choose}>
-                  <SelectTrigger id="api-action" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {apiActions
-                      .filter((item) => item.feature === action.feature)
-                      .map((item) => (
-                        <SelectItem key={item.id} value={item.id}>
-                          {item.label}
+            <FieldGroup className="gap-4">
+              <div className="grid min-w-0 items-start gap-3 border-b pb-4 sm:grid-cols-2">
+                <Field className="min-w-0">
+                  <FieldLabel htmlFor="api-feature">Feature</FieldLabel>
+                  <Select
+                    value={action.feature}
+                    onValueChange={(feature) =>
+                      choose(
+                        apiActions.find((item) => item.feature === feature)!.id,
+                      )
+                    }
+                  >
+                    <SelectTrigger id="api-feature" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {features.map((feature) => (
+                        <SelectItem key={feature} value={feature}>
+                          {feature}
                         </SelectItem>
                       ))}
-                  </SelectContent>
-                </Select>
-                <FieldDescription>{action.help}</FieldDescription>
-              </Field>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="api-action">Action</FieldLabel>
+                  <Select value={selected} onValueChange={choose}>
+                    <SelectTrigger
+                      id="api-action"
+                      aria-describedby="api-action-help"
+                      className="w-full"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {apiActions
+                        .filter((item) => item.feature === action.feature)
+                        .map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription id="api-action-help">
+                    {action.help}
+                  </FieldDescription>
+                </Field>
+              </div>
               {action.identifier && (
                 <Field>
                   <FieldLabel htmlFor="api-identifier">
@@ -252,9 +257,10 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
                   </FieldLabel>
                   <Textarea
                     id="api-configuration"
+                    aria-describedby="api-configuration-help"
                     autoComplete="off"
                     spellCheck={false}
-                    className="min-h-64 font-mono text-xs"
+                    className="min-h-48 font-mono sm:min-h-64"
                     value={configuration}
                     onChange={(event) => {
                       setConfiguration(event.target.value);
@@ -262,7 +268,7 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
                       setResult(undefined);
                     }}
                   />
-                  <FieldDescription>
+                  <FieldDescription id="api-configuration-help">
                     Examples require your actual resource identities and
                     verified digests. Request IDs and configuration remain
                     unchanged until you edit or select another action.
@@ -311,7 +317,7 @@ function Workspace({ onDenied }: { onDenied: () => void }) {
             </p>
             <pre
               aria-label="API response"
-              className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all text-xs"
+              className="max-h-[36rem] overflow-auto rounded-md border bg-muted/40 p-3 whitespace-pre-wrap break-all font-mono text-xs"
             >
               {JSON.stringify(result, null, 2)}
             </pre>

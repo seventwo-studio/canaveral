@@ -1,3 +1,5 @@
+import { FilterChip } from "@/components/ui/filter-chip";
+import { NativeSelect } from "@/components/ui/native-select";
 import { matchesMachineState } from "./lib/fleet";
 import {
   MobileInstall,
@@ -87,7 +89,6 @@ const statusCode = (error: unknown) =>
     : undefined;
 import { useEffect, useRef, useState } from "react";
 import {
-  Rocket,
   ArrowUpRight,
   Plus,
   Search,
@@ -98,7 +99,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -150,7 +151,6 @@ import {
   SidebarInset,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
 import {
   Breadcrumb,
   BreadcrumbList,
@@ -174,6 +174,7 @@ import {
 } from "@/components/ui/input-group";
 import {
   Empty,
+  FilteredEmpty,
   EmptyHeader,
   EmptyMedia,
   EmptyTitle,
@@ -287,17 +288,7 @@ function Notice({
     </Alert>
   ) : null;
 }
-function Status({ text }: { text: string }) {
-  return (
-    <Badge
-      variant="outline"
-      className={`status status-${text.toLowerCase().replaceAll(" ", "-")}`}
-    >
-      <span className="status-dot" />
-      {text}
-    </Badge>
-  );
-}
+
 export function App() {
   const [claim, setClaim] = useState(takeClaim);
   const identity = useRef<User | null>(null);
@@ -665,9 +656,21 @@ export function App() {
   const resourceHost = infrastructureHosts.find(
     (host) => host.id === infrastructureId,
   );
+  const [headerActionContainer, setHeaderActionContainer] =
+    useState<HTMLDivElement | null>(null);
+  const resourceLabel = resourceHost?.name || infrastructureId;
+  const destinationLabel = destinations[view].label;
+  const personalSettings = view === "account" || view === "tokens";
   const locationLabel = resourcePage
-    ? `${resourceHost?.name || "Overview"} · ${destinations[view].label}`
-    : destinations[view].label;
+    ? `${resourceLabel} · ${destinationLabel}`
+    : destinationLabel;
+  const inventoryPage =
+    isInfrastructure || view === "machines" || view === "templates";
+  const headerLabel = personalSettings ? "Settings" : destinationLabel;
+  // These pages use the inventory or directory refreshed by this header action.
+  const showInventoryRefresh =
+    inventoryPage ||
+    ["blueprints", "screens", "users", "api-access"].includes(view);
   const routeKey = infrastructureId ? `${view}/${infrastructureId}` : view;
   const previousRoute = useRef(routeKey);
   useEffect(() => {
@@ -787,60 +790,51 @@ export function App() {
         user={user}
         onSignOut={() => signOut()}
       />
-      <SidebarInset className="min-w-0 md:rounded-sm">
-        <header
-          className={`sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b px-4 lg:px-6 ${view === "hosts" && !resourcePage ? "min-h-14 flex-wrap py-2" : "h-14"}`}
-        >
-          <SidebarTrigger className="-ml-1" />
-          <Separator
-            orientation="vertical"
-            className="mx-2 data-[orientation=vertical]:h-4"
-          />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem className="hidden sm:block">
-                {destinations[view].group}
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden sm:block" />
-              <BreadcrumbItem>
-                {resourcePage ? (
-                  <BreadcrumbLink href={destinations[view].href}>
-                    {destinations[view].label}
-                  </BreadcrumbLink>
-                ) : (
-                  <BreadcrumbPage>{destinations[view].label}</BreadcrumbPage>
-                )}
-              </BreadcrumbItem>
+      <SidebarInset className="min-w-0">
+        <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-1 border-b px-2 md:gap-3 md:px-4 lg:px-6">
+          <SidebarTrigger className="shrink-0 md:hidden" />
+          <Breadcrumb className="min-w-0 flex-1">
+            <BreadcrumbList className="flex-nowrap gap-1.5 text-ui sm:gap-2">
               {resourcePage && (
                 <>
-                  <BreadcrumbSeparator />
-                  <BreadcrumbItem>
-                    <BreadcrumbPage className="block max-w-[28vw] truncate">
-                      {resourceHost?.name || "Overview"}
-                    </BreadcrumbPage>
+                  <BreadcrumbItem className="shrink-0">
+                    <BreadcrumbLink
+                      href={destinations[view].href}
+                      aria-label={`Back to ${view}`}
+                    >
+                      {destinationLabel}
+                    </BreadcrumbLink>
                   </BreadcrumbItem>
+                  <BreadcrumbSeparator className="font-normal text-muted-foreground">
+                    /
+                  </BreadcrumbSeparator>
                 </>
               )}
+              <BreadcrumbItem className="min-w-0">
+                {!personalSettings ? (
+                  <h1 className="min-w-0">
+                    <BreadcrumbPage
+                      className="block truncate font-medium"
+                      title={
+                        resourcePage ? (resourceLabel ?? undefined) : undefined
+                      }
+                    >
+                      {resourcePage ? resourceLabel : headerLabel}
+                    </BreadcrumbPage>
+                  </h1>
+                ) : (
+                  <BreadcrumbPage className="truncate font-medium">
+                    {headerLabel}
+                  </BreadcrumbPage>
+                )}
+              </BreadcrumbItem>
             </BreadcrumbList>
           </Breadcrumb>
-          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
-            {view === "hosts" && !resourcePage && (
-              <>
-                <Button
-                  size="sm"
-                  onClick={() => setConnectionSetup("host")}
-                  disabled={busy}
-                >
-                  <Plus />
-                  Add host
-                </Button>
-              </>
-            )}
-            {view !== "admin" && (
+          <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+            {showInventoryRefresh && (
               <Button
-                variant="ghost"
-                size="icon-sm"
-                className="size-11 md:size-8"
+                variant="outline"
+                size="icon"
                 aria-label={stale ? "Retry connection" : "Refresh"}
                 title={stale ? "Retry connection" : "Refresh"}
                 onClick={() => {
@@ -851,12 +845,59 @@ export function App() {
                 <RefreshCw />
               </Button>
             )}
+            {view === "machines" && (
+              <>
+                <Button
+                  variant="outline"
+                  className="max-sm:size-8 max-sm:px-0"
+                  title="Launch desktop"
+                  onClick={() => openCreate(undefined, true)}
+                  disabled={busy}
+                >
+                  <Monitor />
+                  <span className="max-sm:sr-only">Launch desktop</span>
+                </Button>
+                <Button
+                  data-header-primary
+                  onClick={() => openCreate()}
+                  disabled={busy}
+                >
+                  <Plus />
+                  Create<span className="max-sm:sr-only"> machine</span>
+                </Button>
+              </>
+            )}
+            {isInfrastructure && !resourcePage && (
+              <Button
+                data-header-primary
+                onClick={() =>
+                  setConnectionSetup(view === "hosts" ? "host" : "orchestrator")
+                }
+                disabled={busy}
+              >
+                <Plus />
+                Add
+                <span className="max-sm:sr-only">
+                  {view === "hosts" ? " host" : " orchestrator"}
+                </span>
+              </Button>
+            )}
+            {view === "templates" && user.role === "admin" && (
+              <Button data-header-primary onClick={() => setImageImport(true)}>
+                <Plus />
+                Import<span className="max-sm:sr-only"> image</span>
+              </Button>
+            )}
+            <div
+              ref={setHeaderActionContainer}
+              className="flex shrink-0 items-center gap-1 empty:hidden sm:gap-2"
+            />
           </div>
         </header>
         <div
           id="workspace-content"
           tabIndex={-1}
-          className="flex min-w-0 flex-1 flex-col gap-3 px-4 py-4 outline-none md:gap-4 md:py-5 lg:gap-5 lg:px-6"
+          className="flex min-w-0 flex-1 flex-col gap-3 px-4 py-4 outline-none md:gap-4 md:py-5 lg:gap-6 lg:px-6 lg:py-6"
         >
           {view === "system" && user.role === "admin" ? (
             <SystemControl
@@ -911,6 +952,7 @@ export function App() {
             />
           ) : view === "admin" && user.role === "admin" ? (
             <AdminOverview
+              headerActions={headerActionContainer}
               key={user.id}
               user={user}
               inventory={inventory}
@@ -992,6 +1034,7 @@ export function App() {
             <>
               <Notice error>{stale}</Notice>
               <MachineBlueprints
+                headerActions={headerActionContainer}
                 key={user.id}
                 sources={templates}
                 admin={user.role === "admin"}
@@ -1001,22 +1044,13 @@ export function App() {
             </>
           ) : resourcePage ? (
             <>
-              <div className="min-w-0 space-y-2">
-                <a
-                  href={`#${view}`}
-                  className="text-xs text-muted-foreground underline-offset-4 hover:underline"
-                >
-                  Back to {view}
-                </a>
-                <h1 className="break-words font-display text-3xl font-medium tracking-tight">
-                  {resourceHost?.name || "Resources"}
-                </h1>
+              {resourceHost && (
                 <p className="text-sm text-muted-foreground">
-                  {resourceHost
-                    ? `${provider(resourceHost.platform || resourceHost.provider)} · ${(resourceHost.runtimes || []).map(provider).join(" · ") || (view === "hosts" ? "Direct host" : "Orchestrator pool")}`
-                    : "Host overview"}
+                  {provider(resourceHost.platform || resourceHost.provider)} ·{" "}
+                  {(resourceHost.runtimes || []).map(provider).join(" · ") ||
+                    (view === "hosts" ? "Direct host" : "Orchestrator pool")}
                 </p>
-              </div>
+              )}
               <Notice error>{stale}</Notice>
               <Notice>{message}</Notice>
               <Notice error>{actionError}</Notice>
@@ -1045,99 +1079,32 @@ export function App() {
                     <EmptyDescription>
                       {loaded
                         ? "This connection is no longer in the inventory."
-                        : "Fetching the current host inventory."}
+                        : `Fetching the current ${view === "hosts" ? "host" : "orchestrator"} inventory.`}
                     </EmptyDescription>
                   </EmptyHeader>
-                  <EmptyContent>
-                    <Button asChild variant="outline">
-                      <a href={`#${view}`}>Back to {view}</a>
-                    </Button>
-                  </EmptyContent>
                 </Empty>
               )}
             </>
           ) : (
             <>
-              {view === "hosts" ? (
-                <h1 className="sr-only">Hosts</h1>
-              ) : (
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="space-y-1">
-                    <h1 className="font-display text-3xl font-medium tracking-tight">
-                      {title(view)}
-                    </h1>
-                    <p className="sr-only">
-                      {view === "machines"
-                        ? user.role === "admin"
-                          ? "Manage every user's machines and their lifecycle."
-                          : "Manage your machines and their lifecycle."
-                        : isInfrastructure
-                          ? "Connect infrastructure, verify capabilities and track resources."
-                          : "Downloaded OS originals, separate from prepared machine snapshots."}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {view === "machines" && (
-                      <Button
-                        variant="outline"
-                        className="max-sm:size-8 max-sm:px-0"
-                        onClick={() => openCreate(undefined, true)}
-                        disabled={busy}
-                      >
-                        <Monitor />
-                        <span className="max-sm:sr-only">Launch desktop</span>
-                      </Button>
-                    )}
-                    {view === "templates" && user.role === "admin" && (
-                      <Button
-                        variant="outline"
-                        onClick={() => setRegistryOpen(true)}
-                      >
-                        Base image registry
-                      </Button>
-                    )}
-                    {view === "templates" && user.role === "admin" && (
-                      <Button onClick={() => setImageImport(true)}>
-                        Import image
-                      </Button>
-                    )}
+              {view === "templates" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {user.role === "admin" && (
                     <Button
-                      variant={view === "templates" ? "ghost" : "default"}
-                      className={
-                        view === "machines"
-                          ? "max-sm:px-2.5 max-sm:text-xs"
-                          : undefined
-                      }
-                      onClick={() =>
-                        isInfrastructure
-                          ? setConnectionSetup(
-                              view === "orchestrators"
-                                ? "orchestrator"
-                                : "host",
-                            )
-                          : view === "templates"
-                            ? (location.hash = "blueprints")
-                            : openCreate()
-                      }
-                      disabled={busy}
+                      variant="outline"
+                      onClick={() => setRegistryOpen(true)}
                     >
-                      {view === "templates" ? <ArrowUpRight /> : <Plus />}
-                      {isInfrastructure ? (
-                        view === "orchestrators" ? (
-                          "Add orchestrator"
-                        ) : (
-                          "Add host"
-                        )
-                      ) : view === "templates" ? (
-                        "Machine blueprints"
-                      ) : (
-                        <>
-                          Create
-                          <span className="max-sm:sr-only"> machine</span>
-                        </>
-                      )}
+                      Base image registry
                     </Button>
-                  </div>
+                  )}
+                  <Button
+                    variant="ghost"
+                    onClick={() => (location.hash = "blueprints")}
+                    disabled={busy}
+                  >
+                    <ArrowUpRight />
+                    Machine blueprints
+                  </Button>
                 </div>
               )}
               <Notice error>{stale}</Notice>
@@ -1167,9 +1134,13 @@ export function App() {
                 />
               )}
               {view !== "templates" && (
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="grid w-full min-w-0 grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap">
-                    <InputGroup className="col-span-2 h-10 w-full bg-card md:h-9 md:w-56 xl:w-64">
+                <div
+                  role="group"
+                  aria-label={`Filter ${view}`}
+                  className="flex min-w-0 flex-wrap items-center gap-2 border-b pb-2"
+                >
+                  <div className="grid w-full min-w-0 grid-cols-1 gap-2 min-[360px]:grid-cols-2 md:flex md:w-auto md:flex-wrap">
+                    <InputGroup className="col-span-full h-10 w-full bg-card md:h-8 md:w-64">
                       <InputGroupInput
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
@@ -1181,9 +1152,9 @@ export function App() {
                       </InputGroupAddon>
                     </InputGroup>
                     {view === "machines" && (
-                      <select
+                      <NativeSelect
                         aria-label="Machine state"
-                        className="h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:hidden"
+                        className="h-10 w-full md:hidden"
                         value={filter}
                         onChange={(e) => setFilter(e.target.value)}
                       >
@@ -1192,12 +1163,12 @@ export function App() {
                             {value === "all" ? "All states" : label}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     )}
                     {view === "machines" && user.role === "admin" && (
-                      <select
+                      <NativeSelect
                         aria-label="Machine owner"
-                        className="h-10 min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9 md:max-w-44"
+                        className="h-10 w-full md:h-8 md:w-40"
                         value={owner}
                         onChange={(e) => setOwner(e.target.value)}
                       >
@@ -1208,23 +1179,23 @@ export function App() {
                             {u.username}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     )}
                   </div>
                   <ToggleGroup
-                    className={`max-w-full flex-wrap rounded-md border bg-muted p-0.5 ${view === "machines" ? "hidden md:flex" : ""}`}
+                    className={`max-w-full flex-wrap rounded-md border bg-muted p-0.5 md:ml-auto ${view === "machines" ? "hidden md:flex" : ""}`}
                     type="single"
                     value={filter}
                     onValueChange={(value) => {
                       if (value) setFilter(value);
                     }}
                     size="sm"
-                    spacing={1}
+                    spacing={0}
                     aria-label="Filter inventory"
                   >
                     {filters.map(({ value, label }) => (
                       <ToggleGroupItem
-                        className="rounded-md text-muted-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-xs"
+                        className="px-2 text-muted-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-xs"
                         key={value}
                         value={value}
                       >
@@ -1235,25 +1206,48 @@ export function App() {
                 </div>
               )}
               {view !== "templates" &&
-                items.length > 0 &&
                 (query || filter !== "all" || owner !== "all") && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <span className="text-muted-foreground" role="status">
-                      {items.length} of {total} {view} ·{" "}
-                      {filter === "all" ? "All states" : filterLabel(filter)}
-                      {query ? ` · “${query}”` : ""}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setQuery("");
-                        setFilter("all");
-                        setOwner("all");
-                      }}
-                    >
-                      Clear filters
-                    </Button>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                    {query && (
+                      <FilterChip
+                        label="Search"
+                        value={query}
+                        onRemove={() => setQuery("")}
+                      />
+                    )}
+                    {filter !== "all" && (
+                      <FilterChip
+                        label="State"
+                        value={filterLabel(filter)}
+                        onRemove={() => setFilter("all")}
+                      />
+                    )}
+                    {owner !== "all" && (
+                      <FilterChip
+                        label="Owner"
+                        value={
+                          owner === "none"
+                            ? "No user owner"
+                            : (directory.data?.find((u) => u.id === owner)
+                                ?.username ?? owner)
+                        }
+                        onRemove={() => setOwner("all")}
+                      />
+                    )}
+                    {items.length > 0 && (
+                      <Button
+                        className="ml-auto"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setQuery("");
+                          setFilter("all");
+                          setOwner("all");
+                        }}
+                      >
+                        Clear filters
+                      </Button>
+                    )}
                   </div>
                 )}
               {view === "templates" && user.role === "admin" && (
@@ -1261,9 +1255,7 @@ export function App() {
               )}
               <section
                 className={
-                  !items.length
-                    ? "min-w-0 overflow-hidden rounded-md border bg-card"
-                    : "min-w-0"
+                  !items.length ? "min-w-0 border-y bg-card" : "min-w-0"
                 }
                 aria-label={`${title(view)} inventory`}
               >
@@ -1275,16 +1267,12 @@ export function App() {
                     onBlueprint={setBlueprintSource}
                   />
                 ) : !loaded ? (
-                  <Empty className="min-h-80">
+                  <Empty className="min-h-48 sm:min-h-56">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
                         <Orbit />
                       </EmptyMedia>
-                      <EmptyTitle
-                        className="font-display text-xl font-medium"
-                        role="heading"
-                        aria-level={2}
-                      >
+                      <EmptyTitle role="heading" aria-level={2}>
                         {stale
                           ? "Awaiting connection"
                           : "Contacting your control plane…"}
@@ -1296,44 +1284,29 @@ export function App() {
                       </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
+                ) : !items.length && total > 0 ? (
+                  <FilteredEmpty
+                    title={`No matching ${view}`}
+                    action="Clear filters"
+                    onClear={() => {
+                      setQuery("");
+                      setFilter("all");
+                      setOwner("all");
+                    }}
+                  />
                 ) : !items.length ? (
-                  <Empty className="min-h-80">
+                  <Empty showIcon className="min-h-48 sm:min-h-56">
                     <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <Rocket />
-                      </EmptyMedia>
-                      <EmptyTitle
-                        className="font-display text-xl font-medium"
-                        role="heading"
-                        aria-level={2}
-                      >
-                        {total ? `No matching ${view}` : `No ${view} yet`}
+                      <EmptyTitle role="heading" aria-level={2}>
+                        No {view} yet
                       </EmptyTitle>
                       <EmptyDescription>
-                        {total
-                          ? "Try a different filter or search term."
-                          : view === "machines"
-                            ? "Create a machine from an image available on one of your hosts."
-                            : isInfrastructure
-                              ? "Add a connection setup, run its environment checks, then connect the runner."
-                              : "Install a base image on a host, then register it with Canaveral."}
+                        {view === "machines"
+                          ? "Create a machine from an image available on one of your hosts."
+                          : "Add a connection setup, run its environment checks, then connect the runner."}
                       </EmptyDescription>
                     </EmptyHeader>
-                    {total > 0 && (
-                      <EmptyContent>
-                        <Button
-                          variant="outline"
-                          onClick={() => {
-                            setQuery("");
-                            setFilter("all");
-                            setOwner("all");
-                          }}
-                        >
-                          Clear filters
-                        </Button>
-                      </EmptyContent>
-                    )}
-                    {view === "machines" && !total && (
+                    {view === "machines" && (
                       <EmptyContent>
                         <Button
                           variant="outline"
@@ -1506,7 +1479,6 @@ export function App() {
         }}
       >
         <DialogContent
-          className="max-h-[calc(100svh-2rem)] overflow-y-auto"
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             focus(detailTrigger.current);
@@ -1523,7 +1495,7 @@ export function App() {
               <dl className="grid divide-y">
                 {(
                   [
-                    ["State", <Status text={machineStatus(detail)} />],
+                    ["State", <StatusBadge state={machineStatus(detail)} />],
                     ["Requested", title(detail.desired)],
                     ["Preparation", detail.preparation.state],
                     ["Host", hostName(detail.hostId)],
@@ -1545,10 +1517,18 @@ export function App() {
                 ).map(([k, v]) => (
                   <div
                     key={k}
-                    className="grid grid-cols-[6rem_1fr] gap-4 py-3 text-sm"
+                    className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-2 text-ui"
                   >
-                    <dt className="text-muted-foreground">{k}</dt>
-                    <dd className="min-w-0 break-words">{v}</dd>
+                    <dt className="self-baseline text-xs text-muted-foreground">{k}</dt>
+                    <dd
+                      className={
+                        k === "Machine ID"
+                          ? "break-all font-mono text-xs"
+                          : "min-w-0 break-words"
+                      }
+                    >
+                      {v}
+                    </dd>
                   </div>
                 ))}
               </dl>
@@ -1729,7 +1709,6 @@ function CreateMachine({
       }}
     >
       <DialogContent
-        className="max-h-[calc(100svh-2rem)] overflow-y-auto"
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           focus(config.returnFocus);
@@ -1751,7 +1730,7 @@ function CreateMachine({
               : "Choose a source, resources and placement."}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} onChange={changed} className="space-y-6">
+        <form onSubmit={submit} onChange={changed} className="space-y-4">
           <FieldSet disabled={busy}>
             <FieldGroup>
               <Field>
@@ -1825,7 +1804,7 @@ function CreateMachine({
               {template ? (
                 <>
                   <FieldGroup
-                    className="grid grid-cols-1 gap-4 sm:grid-cols-3"
+                    className="grid grid-cols-1 gap-3 border-y py-4 sm:grid-cols-3"
                     key={index}
                   >
                     {(

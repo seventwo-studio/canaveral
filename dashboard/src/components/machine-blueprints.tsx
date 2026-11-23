@@ -1,3 +1,5 @@
+import { WorkspaceHeaderActions } from "./workspace-header-actions";
+import { NativeSelect } from "./ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Search, RefreshCw } from "lucide-react";
@@ -26,6 +28,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -33,6 +36,7 @@ import {
 import { Field, FieldLabel, FieldDescription, FieldGroup } from "./ui/field";
 import {
   Empty,
+  FilteredEmpty,
   EmptyHeader,
   EmptyTitle,
   EmptyDescription,
@@ -91,28 +95,37 @@ function CatalogueToolbar({
   onRefresh: () => void;
 }) {
   return (
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
-        <InputGroup className="w-full sm:w-72">
-          <InputGroupInput
-            aria-label={label}
-            placeholder={placeholder}
-            value={query}
-            onChange={(e) => onQuery(e.target.value)}
-          />
-          <InputGroupAddon>
-            <Search aria-hidden="true" />
-          </InputGroupAddon>
-        </InputGroup>
-        {loaded && (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {count} of {total}
-          </span>
-        )}
-      </div>
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b pb-2 sm:flex sm:flex-wrap">
+      <InputGroup className="h-10 w-full sm:max-w-64 md:h-8">
+        <InputGroupInput
+          aria-label={label}
+          placeholder={placeholder}
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+        />
+        <InputGroupAddon>
+          <Search aria-hidden="true" />
+        </InputGroupAddon>
+      </InputGroup>
+      {loaded && (
+        <span className="col-start-1 row-start-2 text-xs text-muted-foreground tabular-nums">
+          {count} of {total}
+        </span>
+      )}
+      {query && count > 0 && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="col-start-2 row-start-2 justify-self-end sm:ml-auto"
+          onClick={() => onQuery("")}
+        >
+          Clear search
+        </Button>
+      )}
       <Button
+        className={`col-start-2 row-start-1 ${query && count > 0 ? "" : "sm:ml-auto"}`}
         variant="outline"
-        size="sm"
+        size="default"
         disabled={refreshing}
         aria-label={`Refresh ${label.replace(/^Search /, "")}`}
         onClick={onRefresh}
@@ -123,6 +136,10 @@ function CatalogueToolbar({
     </div>
   );
 }
+
+// Wide catalogues align identity, specifications and actions across each row.
+const catalogueRow =
+  "min-w-0 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)_minmax(12rem,0.8fr)] xl:items-start xl:gap-6 xl:rounded-none xl:border-0 xl:px-3 xl:shadow-none";
 
 export function ImageLibrary({
   sources,
@@ -192,7 +209,7 @@ export function ImageLibrary({
         onRefresh={() => setReload((v) => v + 1)}
       />
       {!loaded ? (
-        <Empty className="min-h-60 border">
+        <Empty className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role={error ? undefined : "status"}>
               {error ? "Image library unavailable" : "Loading image library…"}
@@ -215,16 +232,20 @@ export function ImageLibrary({
             </EmptyContent>
           )}
         </Empty>
+      ) : !visible.length && images.length > 0 ? (
+        <FilteredEmpty
+          title="No matching images"
+          action="Clear search"
+          onClear={() => setQuery("")}
+        />
       ) : !visible.length ? (
-        <Empty className="min-h-60 border">
+        <Empty showIcon className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role="heading" aria-level={2}>
-              {images.length ? "No matching images" : "No downloaded images"}
+              No downloaded images
             </EmptyTitle>
             <EmptyDescription>
-              {images.length
-                ? "Try another name, OS or architecture."
-                : "Download an original from the registry or import a publisher file."}
+              Download an original from the registry or import a publisher file.
             </EmptyDescription>
           </EmptyHeader>
           {query && (
@@ -236,26 +257,27 @@ export function ImageLibrary({
           )}
         </Empty>
       ) : (
-        <div className="grid min-w-0 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-1 xl:gap-0 xl:divide-y xl:border-y">
           {visible.map((i) => {
             const source = sources.find((s) => s.id === i.id);
             const available = source?.hosts.some(
               (h) => h.id === i.hostId && h.online && h.accepting,
             );
             return (
-              <Card key={i.id} className="min-w-0 gap-4 shadow-none">
-                <CardHeader className="min-w-0">
-                  <CardTitle className="break-words font-display text-xl font-medium">
-                    {i.name}
-                  </CardTitle>
+              <Card key={i.id} className={catalogueRow}>
+                <CardHeader className="min-w-0 xl:px-0">
+                  <CardTitle className="break-words">{i.name}</CardTitle>
                   <CardDescription>
                     {provider(i.os)} · {i.arch} · {i.format.toUpperCase()}
                   </CardDescription>
-                  <Badge variant="outline" className="mt-1">
+                  <Badge
+                    variant={available ? "success" : "warning"}
+                    className="mt-1"
+                  >
                     {available ? "Available on host" : "Awaiting host"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="min-w-0 space-y-3 text-xs">
+                <CardContent className="min-w-0 space-y-3 text-xs xl:px-0">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-muted-foreground">
                       {i.mediaType === "installer" ? "Installer" : "Boot disk"}
@@ -282,7 +304,7 @@ export function ImageLibrary({
                     <dl className="mt-3 space-y-2">
                       <div>
                         <dt className="text-muted-foreground">SHA-256</dt>
-                        <dd className="mt-1 break-all">{i.sha256}</dd>
+                        <dd className="mt-1 break-all font-mono">{i.sha256}</dd>
                       </div>
                       <div>
                         <dt className="text-muted-foreground">Size</dt>
@@ -302,7 +324,7 @@ export function ImageLibrary({
                   </details>
                 </CardContent>
                 {admin && (
-                  <CardFooter className="mt-auto">
+                  <CardFooter className="mt-auto xl:mt-0 xl:justify-end xl:px-0">
                     <Button
                       variant="outline"
                       disabled={!source || !!error}
@@ -324,11 +346,13 @@ export function ImageLibrary({
 }
 
 export function MachineBlueprints({
+  headerActions,
   sources,
   admin,
   onCreate,
   inventoryAvailable = true,
 }: {
+  headerActions?: HTMLElement | null;
   sources: GroupedImage[];
   admin: boolean;
   onCreate: (offer: GroupedImage) => void;
@@ -374,14 +398,13 @@ export function MachineBlueprints({
   );
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="font-display text-3xl font-medium">
-          Machine blueprints
-        </h1>
-        {admin && (
-          <Button onClick={() => setEditing("new")}>New blueprint</Button>
-        )}
-      </div>
+      {admin && (
+        <WorkspaceHeaderActions container={headerActions}>
+          <Button data-header-primary onClick={() => setEditing("new")}>
+            New<span className="max-sm:sr-only"> blueprint</span>
+          </Button>
+        </WorkspaceHeaderActions>
+      )}
       <CatalogueNotice error={error} loaded={loaded} name="Blueprints" />
       {!inventoryAvailable && (
         <Alert role="status">
@@ -405,7 +428,7 @@ export function MachineBlueprints({
         }}
       />
       {!loaded ? (
-        <Empty className="min-h-60 border">
+        <Empty className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role={error ? undefined : "status"}>
               {error ? "Blueprints unavailable" : "Loading blueprints…"}
@@ -430,18 +453,21 @@ export function MachineBlueprints({
             </EmptyContent>
           )}
         </Empty>
+      ) : !visible.length && items.length > 0 ? (
+        <FilteredEmpty
+          title="No matching blueprints"
+          action="Clear search"
+          onClear={() => setQuery("")}
+        />
       ) : !visible.length ? (
-        <Empty className="min-h-60 border">
+        <Empty showIcon className="min-h-44 flex-none">
           <EmptyHeader>
             <EmptyTitle role="heading" aria-level={2}>
-              {items.length
-                ? "No matching blueprints"
-                : "No machine blueprints"}
+              No machine blueprints
             </EmptyTitle>
             <EmptyDescription>
-              {items.length
-                ? "Try another name, OS or architecture."
-                : "Save resource settings for a downloaded image or prepared snapshot."}
+              Save resource settings for a downloaded image or prepared
+              snapshot.
             </EmptyDescription>
           </EmptyHeader>
           {query && (
@@ -453,7 +479,7 @@ export function MachineBlueprints({
           )}
         </Empty>
       ) : (
-        <div className="grid min-w-0 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2 xl:grid-cols-1 xl:gap-0 xl:divide-y xl:border-y">
           {visible.map((b) => {
             const offered = blueprintOffer(b, sources),
               available =
@@ -462,19 +488,23 @@ export function MachineBlueprints({
             return (
               <Card
                 key={JSON.stringify([b.id, b.revision])}
-                className="min-w-0 gap-4 shadow-none"
+                className={catalogueRow}
               >
-                <CardHeader className="min-w-0">
-                  <CardTitle className="break-words font-display text-xl font-medium">
-                    {b.name}
-                  </CardTitle>
+                <CardHeader className="min-w-0 xl:px-0">
+                  <CardTitle className="break-words">{b.name}</CardTitle>
                   <CardDescription>
                     Revision {b.revision} · {provider(b.image.os)} ·{" "}
                     {b.image.arch}
                   </CardDescription>
                   <Badge
-                    variant="outline"
-                    className="mt-1 max-w-full whitespace-normal"
+                    variant={
+                      !inventoryAvailable
+                        ? "secondary"
+                        : available
+                          ? "success"
+                          : "warning"
+                    }
+                    className="mt-1"
                   >
                     {!inventoryAvailable
                       ? "Host availability unavailable"
@@ -483,7 +513,7 @@ export function MachineBlueprints({
                         : "Awaiting host"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="min-w-0 space-y-3 text-xs">
+                <CardContent className="min-w-0 space-y-3 text-xs xl:px-0">
                   <dl className="grid grid-cols-3 gap-3">
                     <div>
                       <dt className="text-muted-foreground">CPU</dt>
@@ -516,7 +546,7 @@ export function MachineBlueprints({
                     </p>
                   )}
                 </CardContent>
-                <CardFooter className="mt-auto flex flex-wrap gap-2">
+                <CardFooter className="mt-auto flex flex-wrap gap-2 xl:mt-0 xl:justify-end xl:px-0">
                   <Button
                     disabled={!available || !!error}
                     onClick={() => onCreate(offered)}
@@ -636,7 +666,7 @@ export function BlueprintEditor({
             writable disk.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="space-y-4">
+        <form onSubmit={submit} className="@container/blueprint space-y-4">
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor="blueprint-name">Blueprint name</FieldLabel>
@@ -652,12 +682,13 @@ export function BlueprintEditor({
               <FieldLabel htmlFor="blueprint-revision">Revision</FieldLabel>
               <Input
                 id="blueprint-revision"
+                aria-describedby="blueprint-revision-hint"
                 name="revision"
                 defaultValue={previous ? "" : "1"}
                 required
                 disabled={busy}
               />
-              <FieldDescription>
+              <FieldDescription id="blueprint-revision-hint">
                 Saved revisions are immutable.
               </FieldDescription>
             </Field>
@@ -665,12 +696,11 @@ export function BlueprintEditor({
               <FieldLabel htmlFor="blueprint-source">
                 Source image or prepared snapshot
               </FieldLabel>
-              <select
+              <NativeSelect
                 id="blueprint-source"
                 value={selected}
                 disabled={busy}
                 onChange={(e) => setSelected(e.target.value)}
-                className="h-9 w-full min-w-0 rounded-md border bg-background px-2 text-sm"
               >
                 {!source && (
                   <option value={selected} disabled>
@@ -686,12 +716,12 @@ export function BlueprintEditor({
                     {s.imageKind === "derived" ? " · Prepared snapshot" : ""}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
             {source ? (
               <div
                 key={JSON.stringify([source.id, source.revision, source.arch])}
-                className="grid grid-cols-3 gap-3"
+                className="grid gap-3 @sm/blueprint:grid-cols-3"
               >
                 {(["cpu", "memoryMiB", "diskGiB"] as const).map((k) => (
                   <Field key={k}>
@@ -728,7 +758,7 @@ export function BlueprintEditor({
               </p>
             )}
           </FieldGroup>
-          <div className="flex justify-end gap-2">
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"
@@ -740,7 +770,7 @@ export function BlueprintEditor({
             <Button type="submit" disabled={busy || !source}>
               {busy ? "Saving…" : "Save blueprint"}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

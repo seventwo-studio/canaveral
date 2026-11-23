@@ -1,3 +1,7 @@
+import { Badge, statusBadgeVariant } from "./ui/badge";
+import { SettingsRows } from "./ui/field";
+import { NativeSelect } from "./ui/native-select";
+import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { ModelQueue } from "./model-queue";
@@ -234,18 +238,26 @@ function JobRow({
   }
   return (
     <article
-      className="min-w-0 space-y-3 rounded-lg border p-4"
+      className="min-w-0 space-y-2 px-3 py-3 text-ui"
       aria-label={"Model job " + row.id}
     >
-      <h3 className="break-all font-semibold">{row.model}</h3>
-      <p className="break-all text-sm text-muted-foreground">
+      <h3 className="[overflow-wrap:anywhere] text-sm font-semibold">{row.model}</h3>
+      <p className="break-all font-mono text-xs text-muted-foreground">
         {short(row.digest)} · host {row.hostId} · {row.id}
       </p>
       <p role={follow ? "status" : undefined}>
-        {stateLabels[row.state]}
-        {row.cancelRequested && !terminal.includes(row.state)
-          ? " · Cancellation requested"
-          : ""}
+        <Badge
+          variant={
+            row.cancelRequested && !terminal.includes(row.state)
+              ? "warning"
+              : statusBadgeVariant(stateLabels[row.state] ?? row.state)
+          }
+        >
+          {stateLabels[row.state] ?? row.state}
+          {row.cancelRequested && !terminal.includes(row.state)
+            ? " · Cancellation requested"
+            : ""}
+        </Badge>
       </p>
       {row.detail && <p className="break-words">{row.detail}</p>}
       <p>
@@ -256,7 +268,7 @@ function JobRow({
       {row.output && (
         <>
           <h4>Output</h4>
-          <pre className="overflow-auto whitespace-pre-wrap break-words">
+          <pre className="overflow-auto whitespace-pre-wrap break-words rounded-sm bg-muted p-3 font-mono text-xs">
             {row.output.text}
           </pre>
           <p className="text-sm text-muted-foreground">
@@ -265,7 +277,11 @@ function JobRow({
           </p>
         </>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         {!inspect && row.state === "succeeded" && (
           <Button variant="outline" onClick={() => setInspect(true)}>
@@ -441,52 +457,56 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
     }
   }
   return (
-    <section className="min-w-0 space-y-6">
-      <h1 className="font-display text-3xl">Models</h1>
+    <section className="min-w-0 space-y-6 text-ui">
       <form
-        className="space-y-4 rounded-lg border p-4"
+        className="max-w-2xl space-y-3"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
       >
-        <fieldset className="grid min-w-0 gap-3" disabled={busy || !!pending}>
-          <label>
-            Installed model
-            <select
-              className="block w-full"
-              value={choice}
-              onChange={(e) => setChoice(e.target.value)}
-            >
-              {choices.map((c) => (
-                <option key={key(c)} value={key(c)} disabled={!c.ready}>
-                  {c.id} · {short(c.digest)} ·{" "}
-                  {c.ready
-                    ? `${c.ready} ready host${c.ready === 1 ? "" : "s"}`
-                    : "no ready host"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Prompt
-            <Textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </label>
-          <label>
-            Maximum output tokens
-            <Input
-              type="number"
-              min={1}
-              max={4096}
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(e.target.value)}
-            />
-          </label>
+        <fieldset className="min-w-0" disabled={busy || !!pending}>
+          <SettingsRows>
+            <label className="text-ui font-medium">
+              Installed model
+              <NativeSelect
+                value={choice}
+                onChange={(e) => setChoice(e.target.value)}
+              >
+                {choices.map((c) => (
+                  <option key={key(c)} value={key(c)} disabled={!c.ready}>
+                    {c.id} · {short(c.digest)} ·{" "}
+                    {c.ready
+                      ? `${c.ready} ready host${c.ready === 1 ? "" : "s"}`
+                      : "no ready host"}
+                  </option>
+                ))}
+              </NativeSelect>
+            </label>
+            <label className="text-ui font-medium">
+              Prompt
+              <Textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+              />
+            </label>
+            <label className="text-ui font-medium">
+              Maximum output tokens
+              <Input
+                type="number"
+                min={1}
+                max={4096}
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(e.target.value)}
+              />
+            </label>
+          </SettingsRows>
         </fieldset>
-        {error && <p role="alert">{error}</p>}
+        {error && (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        )}
         {pending && (
           <p>
             Request <code>{pending.id}</code> may already have started. Retry
@@ -501,33 +521,54 @@ export function ModelRuns({ onDenied }: { onDenied: () => void }) {
             </Button>
           </p>
         )}
-        <Button disabled={busy || (!pending && !choice)}>
+        <Button
+          className="ml-auto flex"
+          disabled={busy || (!pending && !choice)}
+        >
           {pending ? "Retry same request" : "Run model"}
         </Button>
       </form>
-      <h2 className="text-xl">Recent model jobs</h2>
-      {offerError && <p role="alert">Model offers unavailable: {offerError}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold tracking-tight">
+          Recent model jobs
+        </h2>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setRefresh((n) => n + 1)}
+        >
+          Refresh models and jobs
+        </Button>
+      </div>
+      {offerError && (
+        <p className="text-sm text-destructive" role="alert">
+          Model offers unavailable: {offerError}
+        </p>
+      )}
       {offers && !offers.length && !offerError && (
         <p role="status">No host offers an installed model.</p>
       )}
-      {loadError && <p role="alert">{loadError}</p>}
-      <Button
-        variant="outline"
-        disabled={busy}
-        onClick={() => setRefresh((n) => n + 1)}
-      >
-        Refresh models and jobs
-      </Button>
-      {rows?.map((row) => (
-        <JobRow
-          key={row.id}
-          initial={row}
-          follow={followed.includes(row.id)}
-          onDenied={onDenied}
-        />
-      ))}
+      {loadError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadError}
+        </p>
+      )}
+      <div className="divide-y border-y empty:hidden">
+        {rows?.map((row) => (
+          <JobRow
+            key={row.id}
+            initial={row}
+            follow={followed.includes(row.id)}
+            onDenied={onDenied}
+          />
+        ))}
+      </div>
       {!rows?.length && !loadError && (
-        <p role="status">{rows ? "No model jobs yet." : "Loading jobs…"}</p>
+        <Empty showIcon={!!rows} role="status">
+          <EmptyDescription>
+            {rows ? "No model jobs yet." : "Loading jobs…"}
+          </EmptyDescription>
+        </Empty>
       )}
       <ModelQueue onDenied={onDenied} />
     </section>

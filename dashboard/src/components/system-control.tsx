@@ -17,8 +17,9 @@ import {
   type SystemRecord,
   type SystemSnapshot,
 } from "@/lib/system-control";
+import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import {
   Card,
   CardHeader,
@@ -36,7 +37,6 @@ import {
   AlertDialogFooter,
   AlertDialogCancel,
 } from "./ui/alert-dialog";
-import { Empty, EmptyHeader, EmptyTitle } from "./ui/empty";
 
 interface Intent {
   collection: SystemCollection;
@@ -301,10 +301,9 @@ function SystemControlPage({
   if (user.role !== "admin")
     return <p role="alert">Administrator access is required.</p>;
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold">System control</h1>
           <p className="text-sm text-muted-foreground">
             Application activity, execution and access connections
           </p>
@@ -314,10 +313,12 @@ function SystemControlPage({
         </Button>
       </div>
       {error && (
-        <p role="alert">
-          {snapshot ? "System data is stale. " : ""}
-          {error}
-        </p>
+        <Alert variant="destructive" role="alert">
+          <AlertDescription>
+            {snapshot ? "System data is stale. " : ""}
+            {error}
+          </AlertDescription>
+        </Alert>
       )}
       {observedAt !== null && (
         <p className="text-xs text-muted-foreground">
@@ -338,7 +339,7 @@ function SystemControlPage({
         >
           Previous page
         </Button>
-        <span className="text-sm">Page {page + 1}</span>
+        <span className="text-ui tabular-nums">Page {page + 1}</span>
         <Button
           variant="outline"
           disabled={
@@ -358,44 +359,42 @@ function SystemControlPage({
             className="space-y-3"
             aria-label={collection}
           >
-            <h2 className="text-lg font-semibold capitalize">
+            <h2 className="text-base font-semibold capitalize">
               {collection}{" "}
               <span className="text-muted-foreground">
                 ({snapshot[collection].length})
               </span>
             </h2>
             {!snapshot[collection].length ? (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>No {collection} on this page</EmptyTitle>
-                </EmptyHeader>
-              </Empty>
+              <p className="border-t px-1 py-3 text-ui text-muted-foreground">
+                No {collection} on this page
+              </p>
             ) : (
-              <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+              <div className="divide-y border-y">
                 {snapshot[collection].map((item) => {
                   const action = actionFor(collection, item);
                   return (
                     <Card
                       key={`${item.family}:${item.id}:${item.applicationId ?? ""}`}
-                      className="min-w-0"
+                      className="grid min-w-0 gap-3 rounded-none border-0 px-1 py-3 shadow-none lg:grid-cols-[minmax(10rem,1fr)_minmax(0,3fr)_auto] lg:items-start"
                     >
-                      <CardHeader>
-                        <CardTitle className="break-all">
+                      <CardHeader className="min-w-0 px-0">
+                        <CardTitle className="text-ui font-medium [overflow-wrap:anywhere]">
                           {item.name || item.id}
                         </CardTitle>
-                        <CardDescription className="break-all">
+                        <CardDescription className="text-xs [overflow-wrap:anywhere]">
                           {item.family}
                           {item.name ? ` · ${item.id}` : ""}
                         </CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-3">
-                        <Badge variant="outline">{item.state}</Badge>
+                      <CardContent className="min-w-0 space-y-2 px-0">
+                        <StatusBadge state={item.state} />
                         {item.cleanup === "blocked" && (
                           <Badge variant="destructive">
                             Cleanup blocked · reservations retained
                           </Badge>
                         )}
-                        <dl className="grid grid-cols-1 gap-2 text-sm">
+                        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs xl:grid-cols-3">
                           {(
                             [
                               // A lease's `name` is the label its holder gave it.
@@ -474,11 +473,16 @@ function SystemControlPage({
                           ).map(
                             ([label, value]) =>
                               value !== undefined && (
-                                <div key={label} className="min-w-0">
+                                <div
+                                  key={label}
+                                  className="min-w-0 space-y-0.5"
+                                >
                                   <dt className="text-muted-foreground">
                                     {label}
                                   </dt>
-                                  <dd className="break-all">{value}</dd>
+                                  <dd className="text-ui [overflow-wrap:anywhere]">
+                                    {value}
+                                  </dd>
                                 </div>
                               ),
                           )}
@@ -501,7 +505,7 @@ function SystemControlPage({
                           ))}
                         </dl>
                         <details>
-                          <summary className="cursor-pointer text-sm">
+                          <summary className="cursor-pointer text-ui">
                             Record details
                           </summary>
                           <pre className="mt-2 whitespace-pre-wrap break-all text-xs">
@@ -510,7 +514,7 @@ function SystemControlPage({
                         </details>
                       </CardContent>
                       {action && (
-                        <CardFooter>
+                        <CardFooter className="px-0">
                           <Button
                             variant="outline"
                             disabled={!!intent || !!error}

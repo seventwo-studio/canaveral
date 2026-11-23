@@ -1,3 +1,4 @@
+import { NativeSelect } from "@/components/ui/native-select";
 import { useEffect, useRef, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
@@ -33,17 +34,21 @@ const denied = (e: unknown) =>
   typeof e === "object" &&
   "status" in e &&
   (e.status === 401 || e.status === 403);
-const select =
-  "h-10 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm md:h-9";
-const figure = "font-mono tabular-nums";
+const figure = "tabular-nums";
 
 /** p50 and p95 with the number of samples behind them, so a percentile over three leases reads as one. */
-function Percentiles({ value }: { value: Distribution }) {
+function Percentiles({
+  value,
+  valueClass,
+}: {
+  value: Distribution;
+  valueClass: string;
+}) {
   if (!value.samples)
     return <span className="text-muted-foreground">No samples</span>;
   return (
     <>
-      <span className={figure}>
+      <span className={valueClass}>
         {seconds(value.p50)} · {seconds(value.p95)}
       </span>
       <span className="block text-xs text-muted-foreground">
@@ -61,21 +66,30 @@ function Pair({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 space-y-1">
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-sm [overflow-wrap:anywhere]">{children}</dd>
+      <dd className="text-ui [overflow-wrap:anywhere]">{children}</dd>
     </div>
   );
 }
 function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
   const part = share(row.leases.deviceSeconds, total.leases.deviceSeconds);
   const failed = failures(row);
+  const valueClass =
+    row === total ? "text-lg font-medium tracking-tight tabular-nums" : figure;
   return (
-    <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4">
+    <dl
+      className={
+        row === total
+          ? "grid min-w-0 grid-cols-2 gap-px overflow-hidden rounded-sm border bg-border lg:grid-cols-4 [&>div]:bg-card [&>div]:p-3 [&>div]:text-center [&>div:last-child]:col-span-2"
+          : "grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4"
+      }
+    >
       <Pair label="Requests by outcome">
         {row.requests ? (
           <>
-            <span className={figure}>{row.requests.submitted}</span> submitted
+            <span className={valueClass}>{row.requests.submitted}</span>{" "}
+            submitted
             <span className="block text-xs text-muted-foreground">
               <span className={figure}>{row.requests.admitted}</span> admitted ·{" "}
               <span className={figure}>{row.requests.cancelled}</span> cancelled
@@ -91,13 +105,16 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
       </Pair>
       <Pair label="Wait until admitted">
         {row.requests ? (
-          <Percentiles value={row.requests.waitSeconds} />
+          <Percentiles
+            value={row.requests.waitSeconds}
+            valueClass={valueClass}
+          />
         ) : (
           <span className="text-muted-foreground">Not counted by host</span>
         )}
       </Pair>
       <Pair label="Leases">
-        <span className={figure}>{row.leases.admitted}</span> admitted
+        <span className={valueClass}>{row.leases.admitted}</span> admitted
         <span className="block text-xs text-muted-foreground">
           <span className={figure}>{row.leases.ready}</span> became ready ·{" "}
           <span className={figure}>{row.leases.released}</span> released ·{" "}
@@ -106,7 +123,9 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
         </span>
       </Pair>
       <Pair label="Device time held">
-        <span className={figure}>{deviceTime(row.leases.deviceSeconds)}</span>
+        <span className={valueClass}>
+          {deviceTime(row.leases.deviceSeconds)}
+        </span>
         {row !== total && part !== null && (
           <>
             <meter
@@ -123,13 +142,16 @@ function Figures({ row, total }: { row: UsageRow; total: UsageRow }) {
         )}
       </Pair>
       <Pair label="Time to ready">
-        <Percentiles value={row.leases.timeToReadySeconds} />
+        <Percentiles
+          value={row.leases.timeToReadySeconds}
+          valueClass={valueClass}
+        />
       </Pair>
       <Pair label="Hold time">
-        <Percentiles value={row.leases.holdSeconds} />
+        <Percentiles value={row.leases.holdSeconds} valueClass={valueClass} />
       </Pair>
       <Pair label="Failures">
-        <span className={`${figure} ${failed ? "text-destructive" : ""}`}>
+        <span className={`${valueClass} ${failed ? "text-destructive" : ""}`}>
           {failed}
         </span>
         <span className="block text-xs text-muted-foreground">
@@ -270,9 +292,6 @@ function UsageSession({
     <div className="min-w-0 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-display text-3xl font-medium tracking-tight">
-            Usage
-          </h1>
           <p className="max-w-prose text-sm text-muted-foreground">
             What applications requested, what the controller admitted and how
             long leases were held. These are the controller's records. Device
@@ -301,15 +320,15 @@ function UsageSession({
       </div>
 
       <form
-        className="grid min-w-0 gap-3 rounded-md border bg-card p-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid min-w-0 grid-cols-2 items-start gap-2 border-y py-2 sm:grid-cols-[repeat(2,minmax(0,11rem))] lg:grid-cols-[repeat(2,minmax(0,11rem))_repeat(2,minmax(0,14rem))] [&_[data-slot=field]]:gap-1"
         aria-label="Choose a usage report"
         onSubmit={(event) => event.preventDefault()}
       >
         <Field>
           <FieldLabel htmlFor="usage-range">Range</FieldLabel>
-          <select
+          <NativeSelect
             id="usage-range"
-            className={select}
+            className="h-10 w-full md:h-8"
             value={choice}
             onChange={(event) => setChoice(event.target.value as RangeChoice)}
           >
@@ -319,13 +338,13 @@ function UsageSession({
               </option>
             ))}
             <option value="custom">Custom range</option>
-          </select>
+          </NativeSelect>
         </Field>
         <Field>
           <FieldLabel htmlFor="usage-group">Group by</FieldLabel>
-          <select
+          <NativeSelect
             id="usage-group"
-            className={select}
+            className="h-10 w-full md:h-8"
             value={groupBy}
             onChange={(event) => setGroupBy(event.target.value as UsageGroup)}
           >
@@ -334,16 +353,16 @@ function UsageSession({
                 {groupLabels[key]}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
         {choice === "custom" && (
           <>
-            <Field>
+            <Field className="col-span-2 sm:col-span-1">
               <FieldLabel htmlFor="usage-from">From (local time)</FieldLabel>
               <Input
                 id="usage-from"
                 type="datetime-local"
-                className="font-mono text-xs"
+                className="h-10 font-mono md:h-8"
                 value={custom.from}
                 onChange={(event) =>
                   setCustom((current) => ({
@@ -353,12 +372,15 @@ function UsageSession({
                 }
               />
             </Field>
-            <Field data-invalid={!!rangeError || undefined}>
+            <Field
+              className="col-span-2 sm:col-span-1"
+              data-invalid={!!rangeError || undefined}
+            >
               <FieldLabel htmlFor="usage-to">To (local time)</FieldLabel>
               <Input
                 id="usage-to"
                 type="datetime-local"
-                className="font-mono text-xs"
+                className="h-10 font-mono md:h-8"
                 aria-invalid={!!rangeError || undefined}
                 aria-describedby={rangeError ? "usage-range-error" : undefined}
                 value={custom.to}
@@ -425,24 +447,21 @@ function UsageSession({
               its resource domain is bound to.
             </p>
           )}
-          <section
-            className="min-w-0 space-y-3 rounded-md border bg-card p-4"
-            aria-labelledby="usage-totals"
-          >
-            <h2 id="usage-totals" className="text-lg font-semibold">
+          <section className="min-w-0 space-y-3" aria-labelledby="usage-totals">
+            <h2 id="usage-totals" className="text-base font-semibold">
               Total for the range
             </h2>
             <Figures row={report.totals} total={report.totals} />
           </section>
           <section className="min-w-0 space-y-3" aria-labelledby="usage-groups">
-            <h2 id="usage-groups" className="text-lg font-semibold">
+            <h2 id="usage-groups" className="text-base font-semibold">
               By {groupLabels[report.groupBy].toLowerCase()}{" "}
               <span className="text-muted-foreground">
                 ({report.rows.length})
               </span>
             </h2>
             {!report.rows.length ? (
-              <Empty className="border">
+              <Empty showIcon>
                 <EmptyHeader>
                   <EmptyTitle>Nothing recorded in this range</EmptyTitle>
                   <EmptyDescription>
@@ -457,18 +476,18 @@ function UsageSession({
             ) : (
               <ul
                 aria-label={`Usage by ${groupLabels[report.groupBy].toLowerCase()}`}
-                className="min-w-0 divide-y overflow-hidden rounded-md border bg-card"
+                className="min-w-0 divide-y border-y bg-card"
               >
                 {report.rows.map((row) => (
-                  <li key={row.key} className="min-w-0 space-y-3 px-4 py-4">
+                  <li key={row.key} className="min-w-0 space-y-3 px-1 py-3">
                     <div className="min-w-0">
                       {row.label && (
-                        <p className="font-display text-base font-medium [overflow-wrap:anywhere]">
+                        <p className="text-ui font-medium [overflow-wrap:anywhere]">
                           {row.label}
                         </p>
                       )}
                       <p
-                        className={`[overflow-wrap:anywhere] ${row.label ? "font-mono text-xs text-muted-foreground" : "font-mono text-sm font-medium"}`}
+                        className={`[overflow-wrap:anywhere] ${row.label ? "font-mono text-xs text-muted-foreground" : "font-mono text-ui font-medium"}`}
                       >
                         {row.key}
                       </p>

@@ -122,6 +122,14 @@ const m = {
 for (const width of [1440, 1133, 390, 320])
   test(`production dashboard at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 1000 });
+    async function captureSurface(name) {
+      if (process.env.CANAVERAL_SCREENSHOT_DIR) {
+        await page.screenshot({
+          path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/${name}-${width}.png`,
+        });
+      }
+    }
+
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     page.on("console", (msg) => {
@@ -143,9 +151,27 @@ for (const width of [1440, 1133, 390, 320])
             ? { hosts: [h] }
             : path === "machines"
               ? { machines: [m] }
-              : path === "templates"
-                ? { templates: [t] }
-                : {};
+              : path === "users"
+                ? { users: [adminUser] }
+                : path === "auth/tokens"
+                  ? {
+                      tokens: [
+                        "Release automation",
+                        "Build workspace " + "x".repeat(55),
+                      ].map((name, i) => ({
+                        id: "fixture-" + i,
+                        name,
+                        prefix: "cv_fixture_" + i,
+                        scopes: ["machines:read"],
+                        createdAt: 100,
+                        expiresAt: 9999999999,
+                        lastUsedAt: null,
+                        revokedAt: null,
+                      })),
+                    }
+                  : path === "templates"
+                    ? { templates: [t] }
+                    : {};
       await route.fulfill({ json: value });
     });
     const response = await page.goto("/");
@@ -153,6 +179,12 @@ for (const width of [1440, 1133, 390, 320])
       "script-src 'self'",
     );
     await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();
+    const signInMark = page.locator(".lucide-rocket").first();
+    await expect(signInMark).toHaveCSS("width", "28px");
+    await expect(page.getByLabel("Username")).toHaveCSS(
+      "font-size",
+      width >= 768 ? "13px" : "16px",
+    );
     await page.evaluate(() => document.fonts.load('14px "Geist Mono"'));
     expect(
       await page.evaluate(() => document.fonts.check('14px "Geist Mono"')),
@@ -192,6 +224,52 @@ for (const width of [1440, 1133, 390, 320])
       page.getByRole("button", { name: "Voyager", exact: true }),
     ).toBeVisible();
     await expect(page.getByLabel("Password", { exact: true })).toHaveCount(0);
+    const toggle = page.getByRole("button", { name: "Toggle Sidebar" });
+    const createButton = page.getByRole("button", {
+      name: "Create machine",
+      exact: true,
+    });
+    await expect(createButton).toHaveCSS("font-size", "13px");
+    await expect(createButton).toHaveCSS("line-height", "20px");
+    await expect(createButton.locator("svg")).toHaveCSS(
+      "stroke-width",
+      "1.75px",
+    );
+    await captureSurface("workspace-navigation");
+    if (width >= 768) {
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(
+        page.getByRole("link", { name: "Machines", exact: true }),
+      ).toHaveAttribute("aria-current", "page");
+      const rail = page.locator('[data-slot="sidebar-container"]');
+      await expect(rail).toHaveCSS("width", "48px");
+      if (width === 1133) {
+        await page.setViewportSize({ width, height: 350 });
+        const config = rail.getByRole("link", { name: "Configuration" });
+        await config.focus();
+        await expect(config).toBeInViewport({ ratio: 1 });
+        await expect(
+          rail.getByRole("button", { name: "Account menu" }),
+        ).toBeInViewport({ ratio: 1 });
+        await page.setViewportSize({ width, height: 1000 });
+      }
+      await captureSurface("collapsed-navigation");
+      await toggle.click();
+    } else {
+      await toggle.click();
+      const drawer = page.getByRole("dialog", { name: "Sidebar" });
+      await expect(
+        drawer.getByRole("link", { name: "Machines", exact: true }),
+      ).toHaveAttribute("aria-current", "page");
+      await captureSurface("navigation-drawer");
+      await drawer.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(drawer).toHaveCount(0);
+      await expect(toggle).toBeFocused();
+      await toggle.click();
+      await drawer.getByRole("button", { name: "Close" }).press("Escape");
+      await expect(toggle).toBeFocused();
+    }
     await page.screenshot({
       path: testInfo.outputPath("machines.png"),
       fullPage: true,
@@ -215,6 +293,7 @@ for (const width of [1440, 1133, 390, 320])
     await expect(
       page.getByRole("heading", { name: "No matching machines" }),
     ).toBeVisible();
+    await captureSurface("filtered-empty");
     if (width < 768) {
       await expect(state).toHaveValue("stopped");
       await state.selectOption("all");
@@ -252,6 +331,15 @@ for (const width of [1440, 1133, 390, 320])
     await create.click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await page.getByRole("combobox", { name: "Placement" }).click();
+    const listbox = page.getByRole("listbox");
+    await expect(listbox).toBeInViewport({ ratio: 1 });
+    await captureSurface("placement-options");
+    await page.keyboard.press("Escape");
+    await expect(listbox).toHaveCount(0);
+    await expect(
+      page.getByRole("combobox", { name: "Placement" }),
+    ).toBeFocused();
+    await page.keyboard.press("ArrowDown");
     await page.getByRole("option", { name: "Arctic" }).click();
     await expect(page.getByRole("combobox", { name: "Placement" })).toHaveText(
       "Arctic",
@@ -260,6 +348,18 @@ for (const width of [1440, 1133, 390, 320])
       path: testInfo.outputPath("create.png"),
       fullPage: true,
     });
+    if (width === 1133) {
+      await page.setViewportSize({ width, height: 350 });
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeInViewport({ ratio: 1 });
+      const submit = dialog.getByRole("button", {
+        name: "Create machine",
+        exact: true,
+      });
+      await submit.scrollIntoViewIfNeeded();
+      await expect(submit).toBeInViewport({ ratio: 1 });
+      await page.setViewportSize({ width, height: 1000 });
+    }
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
     await expect(create).toBeFocused();
@@ -304,6 +404,39 @@ for (const width of [1440, 1133, 390, 320])
     await expect(
       page.getByRole("menuitem", { name: "Sign out" }),
     ).toBeVisible();
+    await expect(page.getByRole("menu")).toBeInViewport({ ratio: 1 });
+    await captureSurface("account-menu");
+    await page.getByRole("menuitem", { name: "Account", exact: true }).click();
+    const settingsNav = page.getByRole("navigation", {
+      name: "Personal settings",
+    });
+    await expect(
+      settingsNav.getByRole("link", { name: "Account" }),
+    ).toHaveAttribute("aria-current", "page");
+    await captureSurface("settings-navigation");
+    await settingsNav.getByRole("link", { name: "API tokens" }).click();
+    await expect(
+      settingsNav.getByRole("link", { name: "API tokens" }),
+    ).toHaveAttribute("aria-current", "page");
+    const tokens = page.getByRole("region", {
+      name: "Your tokens",
+      exact: true,
+    });
+    await expect(tokens.getByRole("heading", { level: 3 })).toHaveCount(2);
+    const longTokenAction = tokens.getByRole("button", {
+      name: /^Revoke Build workspace /,
+    });
+    await expect(longTokenAction).toHaveText("Revoke");
+    await expect(longTokenAction).toHaveCSS("height", "28px");
+    expect(
+      await tokens.evaluate((el) => el.scrollWidth <= el.clientWidth),
+    ).toBe(true);
+    if (process.env.CANAVERAL_SCREENSHOT_DIR)
+      await tokens.screenshot({
+        path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/token-type-${width}.png`,
+      });
+    if (width < 768) await toggle.click();
+    await page.getByRole("button", { name: "Account menu" }).click();
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await expect(
       page.getByRole("button", { name: "Sign in", exact: true }),

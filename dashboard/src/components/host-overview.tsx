@@ -8,17 +8,17 @@ import type {
 import type { Resources } from "@/lib/catalogue";
 import { useState } from "react";
 import { memory, number, provider, title } from "@/lib/api";
-import { Badge } from "./ui/badge";
+import { Badge, statusBadgeVariant } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
 const fills: Record<string, string> = {
-  virtualMachines: "var(--primary)",
-  simulators: "var(--foreground)",
-  retainedDisks: "var(--muted-foreground)",
+  virtualMachines: "var(--foreground)",
+  simulators: "color-mix(in srgb, var(--foreground) 80%, var(--background))",
+  retainedDisks: "color-mix(in srgb, var(--foreground) 65%, var(--background))",
   images: "color-mix(in srgb, var(--foreground) 35%, var(--background))",
-  imageTasks: "color-mix(in srgb, var(--primary) 45%, var(--background))",
-  inference: "var(--secondary-foreground)",
+  imageTasks: "color-mix(in srgb, var(--foreground) 50%, var(--background))",
+  inference: "color-mix(in srgb, var(--foreground) 25%, var(--background))",
 };
 const amount = (key: keyof Resources, value: number) =>
   key === "memoryMiB"
@@ -42,7 +42,7 @@ export function StackedResources({
   return (
     <section className="min-w-0 space-y-5" aria-label="Resources by category">
       <div>
-        <h2 className="text-base font-medium">Resources</h2>
+        <h2 className="text-sm font-semibold">Resources</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           Reserved capacity against this host’s limit. Measured usage is shown
           separately below.
@@ -56,7 +56,7 @@ export function StackedResources({
         </p>
       ) : (
         <>
-          <div className="grid min-w-0 gap-5 lg:grid-cols-3">
+          <div className="grid min-w-0 gap-px overflow-hidden rounded-sm border bg-border sm:grid-cols-3">
             {(
               [
                 ["cpu", "CPU"],
@@ -73,16 +73,17 @@ export function StackedResources({
                 free = Math.max(0, capacity - total);
               let offset = 0;
               return (
-                <div key={key} className="min-w-0 space-y-2">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
-                    <h3 className="font-medium">{label}</h3>
-                    <span>
+                <div key={key} className="min-w-0 space-y-2 bg-card p-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 text-xs">
+                    <h3 className="text-ui font-medium">{label}</h3>
+                    <span className="tabular-nums">
                       {amount(key, total)} / {amount(key, capacity)}
                     </span>
                   </div>
                   <svg
                     viewBox="0 0 1000 24"
-                    className="h-6 w-full"
+                    preserveAspectRatio="none"
+                    className="block h-2 w-full overflow-hidden rounded-[2px]"
                     role="img"
                     aria-label={`${label} reservations by category`}
                   >
@@ -108,7 +109,8 @@ export function StackedResources({
                           height="24"
                           fill={fills[item.id] || "var(--muted-foreground)"}
                           stroke="var(--background)"
-                          strokeWidth="1"
+                          vectorEffect="non-scaling-stroke"
+                          strokeWidth={item[key] > 0 ? 0.5 : 0}
                         >
                           <title>
                             {item.label}: {amount(key, item[key])}
@@ -123,7 +125,8 @@ export function StackedResources({
                         y1="0"
                         y2="24"
                         stroke="var(--destructive)"
-                        strokeWidth="3"
+                        vectorEffect="non-scaling-stroke"
+                        strokeWidth="2"
                       />
                     )}
                   </svg>
@@ -139,25 +142,21 @@ export function StackedResources({
             })}
           </div>
           <section aria-label="Canaveral reservations by category">
-            <dl className="divide-y rounded-md border px-3">
+            <dl className="divide-y border-y">
               {categories.map((item) => (
                 <div
                   key={item.id}
                   className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2 text-xs"
                 >
                   <dt className="flex min-w-0 items-center gap-2">
-                    <svg
-                      width="10"
-                      height="10"
-                      className="shrink-0"
+                    <span
                       aria-hidden="true"
-                    >
-                      <rect
-                        width="10"
-                        height="10"
-                        fill={fills[item.id] || "var(--muted-foreground)"}
-                      />
-                    </svg>
+                      className="size-2 shrink-0 rounded-full"
+                      style={{
+                        backgroundColor:
+                          fills[item.id] || "var(--muted-foreground)",
+                      }}
+                    />
                     <span className="break-words">{item.label}</span>
                   </dt>
                   <dd className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
@@ -213,7 +212,7 @@ export function HostMachines({
   return (
     <section className="min-w-0 space-y-3" aria-label="Host machines">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-base font-medium">Machines</h2>
+        <h2 className="text-sm font-semibold">Machines</h2>
         <span className="text-xs text-muted-foreground">
           {host.online ? `${running} running` : "Runtime unknown"} ·{" "}
           {members.length} assigned
@@ -225,6 +224,7 @@ export function HostMachines({
         size="sm"
         value={filter}
         onValueChange={(value) => value && setFilter(value)}
+        className="max-w-full flex-wrap border"
         aria-label="Host machine filter"
       >
         <ToggleGroupItem value="all">All machines</ToggleGroupItem>
@@ -233,14 +233,20 @@ export function HostMachines({
         </ToggleGroupItem>
       </ToggleGroup>
       {visible.length ? (
-        <ul className="divide-y rounded-md border px-3">
+        <ul className="divide-y border-y">
           {visible.map((machine) => (
-            <li key={machine.id} className="min-w-0 space-y-2 py-3">
+            <li key={machine.id} className="min-w-0 space-y-1.5 py-3">
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                <span className="min-w-0 break-words text-sm font-medium">
+                <span className="min-w-0 break-words text-ui font-medium">
                   {machine.name}
                 </span>
-                <Badge variant="outline">
+                <Badge
+                  variant={
+                    host.online
+                      ? statusBadgeVariant(machine.observed)
+                      : "secondary"
+                  }
+                >
                   {host.online ? title(machine.observed) : "Host offline"}
                 </Badge>
               </div>
@@ -256,7 +262,7 @@ export function HostMachines({
                 {number(machine.resources.diskGiB)} GiB disk
               </p>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[10px] text-muted-foreground">
+                <span className="text-xs text-muted-foreground">
                   {machine.computeReserved === false
                     ? "Disk retained"
                     : "Compute and disk reserved"}
@@ -314,7 +320,7 @@ export function HostImages({
   return (
     <section className="min-w-0 space-y-3" aria-label="Installed images">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-base font-medium">Installed images</h2>
+        <h2 className="text-sm font-semibold">Installed images</h2>
         <span className="text-xs text-muted-foreground">
           {!loading &&
             !unavailable &&
@@ -328,14 +334,14 @@ export function HostImages({
             : "Loading installed images…"}
         </p>
       ) : images.length ? (
-        <ul className="divide-y rounded-md border px-3">
+        <ul className="divide-y border-y">
           {images.map((image) => (
             <li
               key={`${image.id}:${image.revision}:${image.arch}`}
-              className="min-w-0 space-y-2 py-3"
+              className="min-w-0 space-y-1.5 py-3"
             >
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                <span className="min-w-0 break-words text-sm font-medium">
+                <span className="min-w-0 break-words text-ui font-medium">
                   {image.name || image.id}
                 </span>
                 <Badge variant="outline">

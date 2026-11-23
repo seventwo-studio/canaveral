@@ -123,6 +123,21 @@ for (const width of [320, 768, 1440]) {
     await expect(
       inventory.getByRole("button", { name: "Workspace 4", exact: true }),
     ).toBeVisible();
+    const search = page.getByRole("textbox", { name: "Search machines" });
+    await search.fill("Workspace");
+    await expect(
+      page.getByRole("button", { name: "Remove the state filter" }),
+    ).toBeVisible();
+    if (process.env.CANAVERAL_SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${process.env.CANAVERAL_SCREENSHOT_DIR}/inventory-filters-${width}.png`,
+      });
+    }
+    await page
+      .getByRole("button", { name: "Remove the search filter" })
+      .click();
+    await expect(search).toHaveValue("");
+    await expect(inventory.locator("[data-machine-id]")).toHaveCount(1);
     const more = inventory.getByRole("button", {
       name: "More actions for Workspace 4",
     });

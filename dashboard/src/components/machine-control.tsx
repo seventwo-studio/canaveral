@@ -128,9 +128,9 @@ export function MachineControl({
       <DialogContent
         showCloseButton={false}
         onEscapeKeyDown={(event) => event.preventDefault()}
-        className="fixed inset-0 top-0 left-0 flex h-svh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:max-w-none"
+        className="fixed inset-0 top-0 left-0 flex h-dvh max-h-none w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:max-w-none"
       >
-        <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b px-4 py-3 text-left">
+        <DialogHeader className="flex-row flex-wrap items-center justify-between gap-3 border-b bg-muted px-3 py-2 sm:px-4 text-left">
           <div className="flex min-w-0 items-center gap-3">
             <Button
               variant="ghost"
@@ -142,23 +142,25 @@ export function MachineControl({
               <ArrowLeft />
             </Button>
             <div className="min-w-0">
-              <DialogTitle className="break-all text-sm">
+              <DialogTitle className="[overflow-wrap:anywhere] text-sm">
                 {machine.name}
               </DialogTitle>
-              <DialogDescription className="mt-1 text-[10px]">
+              <DialogDescription className="mt-0.5 text-xs">
                 {machine.template.os} · {machine.template.arch} ·{" "}
                 {machine.ready ? "Ready" : machine.observed}
               </DialogDescription>
             </div>
           </div>
           <div
-            className="flex flex-wrap items-center gap-1"
+            className="flex flex-wrap items-center gap-1 rounded-md bg-muted p-0.5"
+            role="group"
             aria-label="Workspace views"
           >
             {views.map(([key, label, Icon]) => (
               <Button
                 size="sm"
-                variant={view === key ? "secondary" : "ghost"}
+                variant="ghost"
+                className="aria-pressed:bg-card aria-pressed:shadow-xs"
                 key={key}
                 onClick={() => setView(key)}
                 aria-pressed={view === key}
@@ -173,7 +175,8 @@ export function MachineControl({
             {accessibilitySupported && (
               <Button
                 size="sm"
-                variant={inspect ? "secondary" : "ghost"}
+                variant="ghost"
+                className="aria-pressed:bg-card aria-pressed:shadow-xs"
                 aria-pressed={inspect}
                 onClick={() => setInspect(!inspect)}
               >
@@ -232,15 +235,16 @@ export function MachineControl({
                       : "hidden"
                   }
                 >
-                  <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-3 py-2">
+                  <div className="flex shrink-0 flex-wrap items-center gap-1 border-b bg-muted px-3 py-1.5">
                     {sessions.map((s) => (
                       <div
                         key={s.id}
-                        className={`flex items-center rounded-sm border ${selected === s.id ? "bg-muted" : ""}`}
+                        className={`flex items-center rounded-md border ${selected === s.id ? "border-input bg-background" : "border-transparent"}`}
                       >
                         <Button
                           size="sm"
                           variant="ghost"
+                          aria-pressed={selected === s.id}
                           onClick={() => setSelected(s.id)}
                         >
                           {s.name}
@@ -265,7 +269,7 @@ export function MachineControl({
                       <Plus />
                       New shell
                     </Button>
-                    <span className="ml-auto text-[10px] text-muted-foreground">
+                    <span className="ml-auto text-xs text-muted-foreground">
                       {sessions.length} sessions
                     </span>
                   </div>

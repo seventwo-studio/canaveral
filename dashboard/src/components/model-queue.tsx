@@ -1,3 +1,4 @@
+import { Empty, EmptyDescription } from "./ui/empty";
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { systemReceipt } from "@/lib/system-control";
@@ -14,7 +15,13 @@ const jobStates = [
   "unknown",
   ...terminal,
 ];
-const requestStates = ["waiting", "admitted", "cancelled", "expired", "rejected"];
+const requestStates = [
+  "waiting",
+  "admitted",
+  "cancelled",
+  "expired",
+  "rejected",
+];
 const stateLabels: Record<string, string> = {
   queued: "Queued",
   waitingForResources: "Waiting for resources",
@@ -177,11 +184,11 @@ function QueueRow({
   const queue = job.queue;
   return (
     <article
-      className="min-w-0 space-y-2 rounded-lg border p-4"
+      className="min-w-0 space-y-2 px-3 py-3 text-ui"
       aria-label={"Application model job " + job.id}
     >
-      <h3 className="break-all font-semibold">{job.model}</h3>
-      <p className="break-all text-sm text-muted-foreground">
+      <h3 className="[overflow-wrap:anywhere] text-sm font-semibold">{job.model}</h3>
+      <p className="break-all font-mono text-xs text-muted-foreground">
         {job.digest.slice(0, 19)} · application {job.applicationId} · {job.id}
       </p>
       <p>
@@ -212,7 +219,11 @@ function QueueRow({
             : "No capacity reserved"}
       </p>
       {notice && <p role="status">{notice}</p>}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
       {!terminal.includes(job.state) && !job.cancelRequested && (
         <Button disabled={busy} variant="outline" onClick={cancel}>
           {requestId
@@ -261,9 +272,14 @@ export function ModelQueue({ onDenied }: { onDenied: () => void }) {
   const queued = rows?.filter(waiting).length ?? 0;
   return (
     <section className="min-w-0 space-y-4" aria-labelledby="model-queue">
-      <h2 id="model-queue" className="text-xl">
-        Application model queue
-      </h2>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 id="model-queue" className="text-base font-semibold tracking-tight">
+          Application model queue
+        </h2>
+        <Button variant="outline" onClick={() => setRefresh((n) => n + 1)}>
+          Refresh queue
+        </Button>
+      </div>
       <p className="text-sm text-muted-foreground">
         Model calls submitted by applications wait here until an approved runner
         has capacity. Waiting never takes capacity from running work.
@@ -273,19 +289,26 @@ export function ModelQueue({ onDenied }: { onDenied: () => void }) {
           {queued} waiting · {rows.length - queued} admitted or finished
         </p>
       )}
-      {error && <p role="alert">{error}</p>}
-      <Button variant="outline" onClick={() => setRefresh((n) => n + 1)}>
-        Refresh queue
-      </Button>
-      {rows?.map((row) => (
-        <QueueRow
-          key={row.id + row.applicationId}
-          job={row}
-          onChanged={() => setRefresh((n) => n + 1)}
-          onDenied={onDenied}
-        />
-      ))}
-      {rows && !rows.length && !error && <p>No application model jobs.</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="divide-y border-y empty:hidden">
+        {rows?.map((row) => (
+          <QueueRow
+            key={row.id + row.applicationId}
+            job={row}
+            onChanged={() => setRefresh((n) => n + 1)}
+            onDenied={onDenied}
+          />
+        ))}
+      </div>
+      {rows && !rows.length && !error && (
+        <Empty showIcon role="status">
+          <EmptyDescription>No application model jobs.</EmptyDescription>
+        </Empty>
+      )}
     </section>
   );
 }
