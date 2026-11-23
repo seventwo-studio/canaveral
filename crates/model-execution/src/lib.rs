@@ -448,21 +448,36 @@ impl Executor {
         self.directory.check()?;
         Ok(staged)
     }
-    fn verify_staged_executable(&self, path: &Path) -> Result<()> {
+    fn verify_staged_executable(
+        &self,
+        path: &Path,
+        check_progress: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
         if let Some(package) = runtime_package::select(&self.config.runtime_packages)? {
             return runtime_package::verify_executable(
                 path,
                 &package.files[&package.entrypoint],
                 &self.directory,
+                check_progress,
             );
         }
         if self.config.executable.as_os_str().is_empty() {
             let pin = runtime_archive::host_pin(self.config.backend)
                 .ok_or("no runtime package for this host")?;
             let digest = runtime_archive::pinned_entrypoint_digest(pin, &self.directory)?;
-            return runtime_package::verify_executable(path, &digest, &self.directory);
+            return runtime_package::verify_executable(
+                path,
+                &digest,
+                &self.directory,
+                check_progress,
+            );
         }
-        runtime_package::verify_executable(path, &self.config.executable_sha256, &self.directory)
+        runtime_package::verify_executable(
+            path,
+            &self.config.executable_sha256,
+            &self.directory,
+            check_progress,
+        )
     }
 
     fn generate<F: FnMut() -> Control>(
@@ -510,7 +525,8 @@ impl Executor {
         self.config
             .backend
             .configure(&mut cmd, &self.config, model, port, &key, &key_file)?;
-        self.verify_staged_executable(staged)?;
+        // Large entrypoints must not starve controller supervision while hashing.
+        self.verify_staged_executable(staged, || check(control))?;
         check(control)?;
         drop(listener);
         let start = clock::Clock::now();

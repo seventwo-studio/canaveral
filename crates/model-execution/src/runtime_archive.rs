@@ -1313,7 +1313,10 @@ mod tests {
                     fs::write(&installed, b"tampered").unwrap();
                     fs::set_permissions(&installed, fs::Permissions::from_mode(0o500)).unwrap();
                     let expected = pinned_entrypoint_digest(&pin, &state).unwrap();
-                    assert!(package::verify_executable(&installed, &expected, &state).is_err());
+                    assert!(
+                        package::verify_executable(&installed, &expected, &state, || Ok(()))
+                            .is_err()
+                    );
                     assert!(stage(&pin, &state, &path, &Default::default(), true).is_err());
                 } else {
                     assert_eq!(
