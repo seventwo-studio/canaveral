@@ -55,7 +55,7 @@ import type { PressureGates, PressureReport, PressureSample } from "./pressure.t
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
 import { kubernetesDeployment, requireKubernetesBackends, requireManagedUpdates } from "./host-deployment.ts";
-import { enrollKubernetesHost } from "./host-bootstrap.ts";
+import { cleanupKubernetesEnrollment, enrollKubernetesHost } from "./host-bootstrap.ts";
 
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
@@ -523,8 +523,9 @@ export class HostRunner {
       const value = readRecord(path);
       if (value.orchestrator !== orchestrator) throw new ServiceError("Host identity belongs to another controller; use separate state.", 409);
       this.identity = { id: identifier(value.id), credential: secret(value.credential), orchestrator };
+      if (this.kubernetes) cleanupKubernetesEnrollment(this.state, this.identity, this.log);
     } else if (this.kubernetes) {
-      this.identity = await enrollKubernetesHost(this.state, orchestrator, this.offer, this.transport, this.stopController.signal);
+      this.identity = await enrollKubernetesHost(this.state, orchestrator, this.offer, this.transport, this.stopController.signal, this.log);
     } else {
       if (!this.config.enrollmentToken) throw new ServiceError("A new host needs an enrollment credential.", 400);
       this.identity = { id: randomUUID(), credential: randomBytes(32).toString("base64url"), orchestrator }; saveRecord(path, this.identity);
