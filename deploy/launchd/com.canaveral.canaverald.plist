@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.canaveral.canaverald</string>
+  <key>UserName</key>
+  <string>canaveral</string>
+  <key>WorkingDirectory</key>
+  <string>/opt/canaveral</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/opt/canaveral/coordination/dist/src/canaverald.js</string>
+    <string>--config</string>
+    <string>/etc/canaveral/host.json</string>
+    <string>--state</string>
+    <string>/var/lib/canaveral/agent</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CANAVERAL_URL</key>
+    <string>https://canaveral.example.internal</string>
+    <key>CANAVERAL_ENROLLMENT_TOKEN_FILE</key>
+    <string>/etc/canaveral/enrollment.token</string>
+    <key>NODE_OPTIONS</key>
+    <string></string>
+    <key>NODE_PATH</key>
+    <string></string>
+  </dict>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
