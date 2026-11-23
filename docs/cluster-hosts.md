@@ -50,7 +50,7 @@ See [connection setups](infrastructure.md#connection-setups).
 sudo bash script/provision_cluster_node.sh < /protected/per-node-token
 kubectl label node NODE canaveral.dev/host-profile=cpu
 kubectl apply -k SITE_OVERLAY
-kubectl -n canaverald rollout status daemonset/canaverald
+kubectl -n canaverald get pods -l app.kubernetes.io/name=canaverald
 kubectl -n canaverald exec daemonset/canaverald -- canaverald runtimes status \
   --config /etc/canaverald/host.json --state /var/lib/canaverald --json
 ```
@@ -96,7 +96,7 @@ maintenance drain and wait for `safeToPowerOff`. Delete that pod, confirm the
 replacement reports the same ID and fresh heartbeats, and resume the drain once
 the controller indicates it is safe. Use the same drain before cordoning or
 draining a node for infrastructure work. Kubernetes owns daemon updates in this
-profile. The pod gives SIGTERM handling up to 120 seconds before Kubernetes
+profile. The daemon has a 90-second shutdown budget. The pod allows 120 seconds before Kubernetes
 forcibly terminates it.
 
 Keep the original state for interrupted claims, crash recovery and uncertain

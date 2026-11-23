@@ -5,6 +5,6 @@
     "name": "canaverald-config"
   },
   "data": {
-    "host.json": "{\n  \"deployment\": \"kubernetes\",\n  \"name\": \"kubernetes-vm\",\n  \"provider\": \"libvirt\",\n  \"templates\": [],\n  \"capacity\": {\n    \"cpu\": 1,\n    \"memoryMiB\": 1024,\n    \"diskGiB\": 2\n  },\n  \"uri\": \"qemu:///system\",\n  \"storage\": \"/var/lib/libvirt/images/canaveral\"\n}\n"
+    "host.json": "{\n  \"deployment\": \"kubernetes\",\n  \"name\": \"kubernetes-vm\",\n  \"provider\": \"libvirt\",\n  \"templates\": [],\n  \"capacity\": {\n    \"cpu\": 1,\n    \"memoryMiB\": 1024,\n    \"diskGiB\": 2\n  },\n  \"uri\": \"qemu:///system\",\n  \"storage\": \"/var/lib/libvirt/images/canaveral\",\n  \"shutdownGraceSeconds\": 90\n}\n"
   }
 }

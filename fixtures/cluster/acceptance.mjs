@@ -51,6 +51,12 @@ function command(bin, args, { input, timeout = 190_000 } = {}) {
 }
 const kubectl = (...args) => command('kubectl', args);
 const daemon = (...args) => kubectl('-n', 'canaverald', ...args);
+const daemonPods = () => JSON.parse(daemon('get', 'pods', '-l', 'app.kubernetes.io/name=canaverald', '-o', 'json')).items;
+const waitForDaemon = async (previousUid) => eventually('ready daemon Pod', () => {
+  const pods = daemonPods();
+  return pods.length === 1 && pods[0].metadata.uid !== previousUid &&
+    pods[0].status.conditions?.some(condition => condition.type === 'Ready' && condition.status === 'True') && pods[0];
+});
 const inPod = (...args) => daemon('exec', 'daemonset/canaverald', '--', ...args);
 const sudo = (...args) => command('sudo', args);
 async function request(path, body, token = admin) {
@@ -102,7 +108,7 @@ if (ready) {
     daemon('create', 'configmap', 'canaveral-controller-ca', '--from-file=ca.crt=' + work + '/ca.crt');
     kubectl('label', node, 'canaveral.dev/host-profile=cpu');
     kubectl('apply', '-k', 'deploy/kubernetes/canaverald');
-    daemon('rollout', 'status', 'daemonset/canaverald', '--timeout=150s');
+    await waitForDaemon();
     const claim = (await call('/v1/connection-setups')).setups.find(row => row.id === id);
     assert.equal(claim.state, 'connected');
     const get = async () => (await call('/v1/hosts')).hosts.find(row => row.id === claim.hostId);
@@ -149,7 +155,7 @@ if (host) {
     await call('/v1/resource-domains', { id: domainId, name: 'disposable cluster model fixture', capacity: resources });
     await call('/v1/model-runner-approvals', { binding, domainId, models: [{ model: model.model, digest }] });
     const config = {
-      controller: internal, binding, credentialFile: dir + '/credential', caFile: '/run/controller-ca/ca.crt',
+      controller: internal, binding, credentialFile: dir + '/credential', caFile: dir + '/ca.crt',
       execution: {
         backend: 'llama.cpp', acceleration: 'cpu', modelsDir: dir + '/models', stateDir: dir + '/state',
         inventory: { [model.model]: digest }, modelFiles: { [model.model]: { path: model.file, files: { [model.file]: model.sha256 } } },
@@ -157,7 +163,7 @@ if (host) {
       },
     };
     for (const [name, value] of Object.entries({
-      credential, 'runner.json': JSON.stringify(config),
+      credential, 'ca.crt': readFileSync(work + '/ca.crt'), 'runner.json': JSON.stringify(config),
       'host.json': JSON.stringify({ ...setup, modelExecutor: { binary: '/usr/local/bin/canaveral-model-execution', config: dir + '/runner.json' } }),
     })) {
       const path = work + '/' + name;
@@ -194,19 +200,17 @@ if (host) {
     const id = randomUUID();
     await call(maintenance, { id, reason: 'disposable cluster acceptance' });
     await eventually('independent safe-to-power-off proof', async () => (await call(maintenance)).safeToPowerOff);
-    const old = JSON.parse(daemon('get', 'pods', '-l', 'app.kubernetes.io/name=canaverald', '-o', 'json')).items;
+    const old = daemonPods();
     assert.equal(old.length, 1);
     daemon('delete', 'pod', old[0].metadata.name, '--timeout=150s');
-    await eventually('replacement Pod', () => JSON.parse(daemon('get', 'pods', '-l',
-      'app.kubernetes.io/name=canaverald', '-o', 'json')).items.some(pod => pod.metadata.uid !== old[0].metadata.uid));
-    daemon('rollout', 'status', 'daemonset/canaverald', '--timeout=150s');
+    await waitForDaemon(old[0].metadata.uid);
     const after = await eventually('same identity heartbeating', async () => {
       const { hosts } = await call('/v1/hosts');
       assert.equal(hosts.length, 1);
       return hosts[0].id === host.id && hosts[0].lastSeen > host.lastSeen && hosts[0];
     });
     const status = JSON.parse(inPod('canaverald', 'runtimes', 'status', '--config', '/etc/canaverald/host.json', '--state', state, '--json'));
-    assert(status.some(row => row.id === 'containerd'));
+    assert(status.some(row => row.id === 'containerd' && row.blocker?.code === 'kubernetes_containerd_disabled'));
     return { id, hostId: after.id, runtimeIds: status.map(row => row.id) };
   });
   if (drain) {
