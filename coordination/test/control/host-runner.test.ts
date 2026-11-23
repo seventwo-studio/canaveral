@@ -573,3 +573,29 @@ test("owner display sessions attach once, only for unleased desktop assignments"
   sessions = []; await runner.poll(); await runner.step();
   assert.equal(attempts.size, 0, "attempts are forgotten once the controller drops the session");
 });
+
+test("a finished recording whose receipt the runner repeats does not hold back the device's live capture", async t => {
+  const { config, image, clock } = setup(t);
+  const m = machine(image), finished = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "ready" }, queued = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "pending" };
+  // The controller's list trails the recording that just ended here: it is still `ready`.
+  let videoSessions: RecordValue[] = [finished], receipts = 0, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  const transport: HostTransport = { request: async (_method, path) => {
+    if (path.endsWith("heartbeat")) return { machines: [m], videoSessions };
+    // Hold the repeated receipt, so its `video:` work stays active.
+    if (path.endsWith(`/video-sessions/${finished.id}/finish`)) { receipts++; await held; }
+    return {};
+  } };
+  const runner = new HostRunner(config, { clock, transport, providerFactory });
+  t.after(() => runner.close().catch(() => {}));
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  saveRecord(join(config.stateDir, "work", "video", `${finished.id}.json`), { generation: finished.generation, machineId: m.id, state: "finished", cleaned: true });
+  const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean; active: Map<string, unknown>; liveRecordings: Map<string, unknown> };
+  internals.stepVideo(); await drain();
+  assert.equal(receipts, 1); assert.ok(internals.active.has(`video:${finished.id}`), "the receipt repeat is in flight");
+  assert.equal(internals.recordingPending(String(m.id)), false, "a recording that ended here does not stop the device's live epoch");
+  // A recording the runner has not started yet still keeps live capture off the device.
+  videoSessions = [finished, queued]; await runner.poll(); internals.liveRecordings.clear();
+  assert.equal(internals.recordingPending(String(m.id)), true);
+});

@@ -357,6 +357,9 @@ export class HostRunner {
   private readonly liveAttempts = new Set<string>();
   private readonly liveAuthority = new Map<string, { at: number; value: boolean }>();
   private readonly liveRecordings = new Map<string, { at: number; value: boolean }>();
+  /** Recordings whose native capture this runner runs now: from their journal until the capture is
+   * stopped. A finished recording's repeated receipt also runs under its `video:` key, and is not one. */
+  private readonly recordingCaptures = new Set<string>();
   private liveCaptures: LiveCaptureHub | undefined;
   /** One shared native capture per watched device (live-capture.ts). Its journal lives beside
    * the recording journals; its cleanup receipt uses the recording's finish route. */
@@ -1225,12 +1228,14 @@ export class HostRunner {
   }
   /** A recording of this device that the controller still lists and that has not finished here:
    * running, or not yet started. No live epoch starts meanwhile, so the recording finds the
-   * device free. Evaluated at most once per 250 ms per device, like the authority above. */
+   * device free. The controller's list can trail a recording that ended here, while this runner
+   * repeats its receipt; that is neither. Evaluated at most once per 250 ms per device, like the
+   * authority above. */
   private recordingPending(machineId: string): boolean {
     const now = performance.now(), cached = this.liveRecordings.get(machineId);
     if (cached && now - cached.at < 250) return cached.value;
     const value = (this.queues.video ?? []).some(job => job.machineId === machineId && ['pending', 'attaching', 'ready'].includes(String(job.state)) &&
-      (this.active.has(`video:${String(job.id)}`) || !present(join(this.state, 'work', 'video', `${identifier(job.id)}.json`))));
+      (this.recordingCaptures.has(identifier(job.id)) || !present(join(this.state, 'work', 'video', `${identifier(job.id)}.json`))));
     this.liveRecordings.set(machineId, { at: now, value }); return value;
   }
   private liveSource(machine: RecordValue): LiveCaptureSource | undefined {
@@ -1472,6 +1477,7 @@ export class HostRunner {
     let tap: Awaited<ReturnType<LiveCaptureHub['beginRecording']>> | undefined;
     const leased = machine.lease != null;
     saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
+    const recordingId = identifier(job.id); this.recordingCaptures.add(recordingId);
     try {
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/${identifier(job.generation)}`, identity.credential,
         { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
@@ -1506,6 +1512,7 @@ export class HostRunner {
       try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
     } finally {
       channel?.close();
+      this.recordingCaptures.delete(recordingId);
       // Live viewers may resume their own capture only after this one is proven stopped.
       tap?.end(cleaned);
       const hostOnly = !cleaned && leased && hostCleaned;
