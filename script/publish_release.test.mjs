@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { main, capture, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure, RegistryUnavailable, publishedManifest, publicationFailure } from './publish_release.mjs';
+import { main, bundle, checkDaemonGrace, STAGES, capture, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure, RegistryUnavailable, publishedManifest, publicationFailure } from './publish_release.mjs';
 const sha='a'.repeat(40),other='b'.repeat(40),tag='v0.4.0',version='0.4.0';
 const lock={version,packages:{'':{version}}};
 const draft={id:1,tag_name:tag,draft:true,target_commitish:sha};
@@ -55,9 +55,13 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
 }
 test('prepare creates draft and missing artifacts; retry reuses digests; finalize alone publishes',async t=>{
  const f=fixture(t,{existing:[],missing:true});await main(false,f);
- assert.equal(f.calls.filter(c=>c[0]==='docker').length,2);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
+ assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
+ assert.ok(f.calls.some(c=>c[0]==='docker' && c.includes('--target') && c[c.indexOf('--target')+1]==='canaverald'));
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
  assert.ok(!f.calls.some(c=>c[0]==='gh' && ['upload','edit'].includes(c[2])));
+ const prepared=JSON.parse(readFileSync(join(f.root,'dist/release.json'),'utf8'));
+ assert.equal(prepared.images.canaverald,IMAGES.canaverald+':'+version+'@sha256:'+'c'.repeat(64));
+ for(const overlay of ['canaverald','canaverald/vm'])assert.ok(f.calls.some(c=>c[0]==='kubectl' && c[2].endsWith('/bundle/'+overlay)));
  f.calls.length=0;await main(false,f);assert.ok(!f.calls.some(c=>c[0]==='docker'||c[0]==='flux'&&c[1]!=='diff'));
  await main(true,f);assert.equal(f.calls.filter(c=>c[0]==='gh' && c[2]==='edit').length,1);
  assert.ok(f.calls.findIndex(c=>c[0]==='cosign')<f.calls.findIndex(c=>c[0]==='flux'&&c[1]==='tag'));
@@ -76,8 +80,8 @@ test('post-push readback tolerates absence without rebuilding or promoting',asyn
   return n<3?null:found;
  }});
  await main(false,f);
- assert.equal(waits,6);
- assert.equal(f.calls.filter(c=>c[0]==='docker').length,2);
+ assert.equal(waits,8);
+ assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);
  assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
 });
@@ -104,6 +108,43 @@ test('finalization rejects missing artifacts and changed prepared metadata witho
  const f=fixture(t,{missing:true});await assert.rejects(main(true,f),/missing image/);await main(false,f);
  writeFileSync(join(f.root,'dist/release.json'),'{}');await assert.rejects(main(true,f),/metadata differs/);
  assert.ok(!f.calls.some(c=>c[0]==='gh' && ['upload','edit'].includes(c[2])));
+});
+test('finalization refuses a canaverald digest that differs from prepared metadata',async t=>{
+ const f=fixture(t);await main(false,f);
+ const [found]=f.manifests.get(IMAGES.canaverald);f.manifests.set(IMAGES.canaverald,[found,'sha256:'+'e'.repeat(64)]);
+ await assert.rejects(main(true,f),/metadata differs/);
+ assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='flux'&&c[1]==='tag'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+});
+const images=Object.fromEntries(Object.entries(IMAGES).map(([stage,name])=>[stage,name+':'+version+'@sha256:'+'c'.repeat(64)]));
+test('the bundle pins the canaverald image in its declared overlays',t=>{
+ const output=mkdtempSync(join(tmpdir(),'canaveral-bundle-'));t.after(()=>rmSync(output,{recursive:true,force:true}));
+ const result=bundle(version,sha,images,output);
+ assert.deepEqual(result.images,images);
+ const daemon=JSON.parse(readFileSync(join(output,'canaverald/base/daemonset.json'),'utf8'));
+ assert.equal(daemon.spec.template.spec.containers[0].image,images.canaverald);
+ assert.equal(daemon.spec.template.metadata.labels['app.kubernetes.io/version'],version);
+ for(const name of STAGES.canaverald.files)assert.ok(readFileSync(join(output,'canaverald',name),'utf8'));
+ const policy=JSON.parse(readFileSync(join(output,'canaverald/base/admission-policy.json'),'utf8'));
+ assert.equal(policy.kind,'ValidatingAdmissionPolicy');
+ assert.throws(()=>bundle(version,sha,{orchestrator:images.orchestrator,dashboard:images.dashboard},mkdtempSync(join(tmpdir(),'canaveral-bundle-'))),/canaverald images are required/);
+});
+test('the bundle refuses undeclared daemon sources and an unsafe shutdown budget',t=>{
+ const root=mkdtempSync(join(tmpdir(),'canaveral-bundle-source-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const repository=new URL('..',import.meta.url).pathname;
+ for(const {source} of Object.values(STAGES))cpSync(join(repository,source),join(root,source),{recursive:true});
+ const attempt=()=>{const output=mkdtempSync(join(root,'out-'));try{return bundle(version,sha,images,join(output,'bundle'),root);}finally{rmSync(output,{recursive:true,force:true});}};
+ attempt();
+ writeFileSync(join(root,STAGES.canaverald.source,'vm/extra.json'),'{}');
+ assert.throws(attempt,/Only declared deployment sources/);
+ rmSync(join(root,STAGES.canaverald.source,'vm/extra.json'));
+ const path=join(root,STAGES.canaverald.source,'vm/configmap.json'),config=JSON.parse(readFileSync(path,'utf8'));
+ config.data['host.json']=JSON.stringify({...JSON.parse(config.data['host.json']),shutdownGraceSeconds:121});
+ writeFileSync(path,JSON.stringify(config));
+ assert.throws(attempt,/terminationGracePeriodSeconds minus 30/);
+ const daemonSet={spec:{template:{spec:{terminationGracePeriodSeconds:150}}}},host=value=>({data:{'host.json':JSON.stringify(value)}});
+ checkDaemonGrace(daemonSet,[host({}),host({shutdownGraceSeconds:120})]);
+ assert.throws(()=>checkDaemonGrace({spec:{template:{spec:{}}}},[host({})]),/must set terminationGracePeriodSeconds/);
+ assert.throws(()=>checkDaemonGrace({spec:{template:{spec:{terminationGracePeriodSeconds:120}}}},[host({})]),/minus 30/);
 });
 test('unverified or substituted candidate content never enters the stable feed',async t=>{
  for(const options of [{failContent:true},{failSignature:true}])await t.test(JSON.stringify(options),async t=>{
@@ -139,6 +180,8 @@ test('workflow keeps tag identity, signing and provenance ahead of final publica
  assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,4);
  const daemon=w.slice(w.indexOf('Attest canaverald provenance'),w.indexOf('Attest deploy provenance'));
  assert.match(daemon,/subject-name: ghcr\.io\/seventwo-studio\/canaveral\/canaverald\n/);
- assert.match(daemon,/subject-digest: \$\{\{ steps\.daemon\.outputs\.digest \}\}/);
+ assert.match(daemon,/subject-digest: \$\{\{ steps\.digests\.outputs\.canaverald \}\}/);
+ assert.match(w,/canaverald: digest\(r\.images\.canaverald\)/);
+ assert.ok(!w.includes('--target canaverald') && !w.includes("'--target', 'canaverald'"));
  assert.match(daemon,/push-to-registry: true/);
 });

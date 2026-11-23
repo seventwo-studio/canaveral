@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -75,7 +75,7 @@ test('draft discovery requires one exact reviewed unfinished target',()=>{
 });
 test('release bundle preserves optional stage, protected storage and scoped pod permissions',t=>{
  const root=directory(t),metadata=bundle('0.1.0','c'.repeat(40),images(),root);
- assert.deepEqual(metadata.images,images());assert.equal(metadata.source,SOURCE);assert.deepEqual(readdirSync(root).sort(),['app-release.json','dashboard','orchestrator']);
+ assert.deepEqual(metadata.images,images());assert.equal(metadata.source,SOURCE);assert.deepEqual(readdirSync(root).sort(),['app-release.json','canaverald','dashboard','orchestrator']);
  for(const stage of ['orchestrator','dashboard']) for(const name of readdirSync(join(root,stage)).filter(n=>n.endsWith('.json'))) {
   const value=JSON.parse(readFileSync(join(root,stage,name)));assert.equal(value.metadata.namespace,undefined);assert.ok(!['Secret','Namespace'].includes(value.kind));
   if(value.kind==='Deployment') {
@@ -93,6 +93,8 @@ test('release refuses mutable, wrong-package and wrong-version images plus occup
 });
 test('release rejects undeclared or symlinked deployment inputs',t=>{
  const root=directory(t);for(const stage of ['orchestrator','dashboard']) {const d=join(root,'deploy',stage);mkdirSync(d,{recursive:true});for(const name of readdirSync(new URL('../deploy/'+stage+'/',import.meta.url)))copyFileSync(new URL('../deploy/'+stage+'/'+name,import.meta.url),join(d,name));}
+ cpSync(new URL('../deploy/kubernetes/canaverald/',import.meta.url),join(root,'deploy/kubernetes/canaverald'),{recursive:true});
+ bundle('0.1.0','c'.repeat(40),images(),join(root,'reviewed'),root);
  writeFileSync(join(root,'deploy/dashboard/extra'),'unreviewed');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),join(root,'out'),root));
 });
 test('publication identity checks source, version, revision, both architectures and Flux layer',()=>{
@@ -173,7 +175,7 @@ test('controller stages Secret credentials as private regular files',()=>{
 test('Kubernetes namespaces and release identities stay pinned',()=>{
  const namespaces=JSON.parse(readFileSync(new URL('../deploy/kubernetes/namespaces/namespaces.json',import.meta.url))).items;
  assert.ok(namespaces.every(n=>n.metadata.labels['pod-security.kubernetes.io/enforce']==='restricted'));
- assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(NAMESPACE,'ghcr.io/seventwo-studio/canaveral');assert.deepEqual(IMAGES,{orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard'});assert.equal(DEPLOYMENT,NAMESPACE+'/deploy');
+ assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(NAMESPACE,'ghcr.io/seventwo-studio/canaveral');assert.deepEqual(IMAGES,{orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',canaverald:NAMESPACE+'/canaverald'});assert.equal(DEPLOYMENT,NAMESPACE+'/deploy');
 });
 test('registry failures report status, path and registry codes without credentials',()=>{
  const url=new URL('https://ghcr.io/v2/seventwo-studio/canaveral/manifests/0.3.1?token=secret');
