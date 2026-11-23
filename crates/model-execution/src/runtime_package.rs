@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
+    fs::{File, Metadata},
     io::{Read, Seek, SeekFrom, Write},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
@@ -241,7 +241,6 @@ fn copy_hashed(
     expected: &str,
     total: &mut u64,
     deadline: Instant,
-    mut check_progress: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let mut hash = Sha256::new();
     let mut copied = 0u64;
@@ -250,7 +249,6 @@ fn copy_hashed(
         if Instant::now() >= deadline {
             return Err("runtime installation deadline");
         }
-        check_progress()?;
         let n = input
             .read(&mut buffer)
             .map_err(|_| "runtime package asset unavailable")?;
@@ -272,30 +270,66 @@ fn copy_hashed(
     }
     Ok(())
 }
-pub(super) fn verify_executable(
-    path: &Path,
-    expected: &str,
-    state: &private::Directory,
-    check_progress: impl FnMut() -> Result<()>,
-) -> Result<()> {
-    let parent = path.parent().ok_or_else(invalid)?;
-    let name = private::name(path.file_name().ok_or_else(invalid)?)?;
-    let mut file = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
-    trusted(&file, false)?;
-    let metadata = file.metadata().map_err(|_| invalid())?;
-    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o500 {
-        return Err("unsafe staged runtime executable");
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+    uid: u32,
+    ctime: (i64, i64),
+    mtime: (i64, i64),
+}
+
+impl ExecutableIdentity {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+        }
     }
-    let deadline = Instant::now() + Duration::from_secs(600);
-    copy_hashed(&mut file, None, expected, &mut 0, deadline, check_progress)?;
-    let current = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
-    trusted(&current, false)?;
-    private::same_inode(&file, &current)?;
-    let after = current.metadata().map_err(|_| invalid())?;
-    if (metadata.ctime(), metadata.ctime_nsec()) != (after.ctime(), after.ctime_nsec()) {
-        return Err("staged runtime executable changed during verification");
+}
+
+pub(super) type Executables = BTreeMap<String, ExecutableIdentity>;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct StagedRuntime {
+    pub entrypoint: PathBuf,
+    root: PathBuf,
+    executables: Executables,
+}
+
+impl StagedRuntime {
+    pub fn new(root: PathBuf, entrypoint: &str, executables: Executables) -> Self {
+        Self {
+            entrypoint: root.join(entrypoint),
+            root,
+            executables,
+        }
     }
-    state.check()
+
+    pub fn verify_executables(&self, state: &private::Directory) -> Result<()> {
+        for (relative, expected) in &self.executables {
+            let path = self.root.join(relative);
+            let parent = path.parent().ok_or_else(invalid)?;
+            let name = private::name(path.file_name().ok_or_else(invalid)?)?;
+            let file = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
+            trusted(&file, false)?;
+            let metadata = file.metadata().map_err(|_| invalid())?;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o500 {
+                return Err("unsafe staged runtime executable");
+            }
+            if &ExecutableIdentity::from_metadata(&metadata) != expected {
+                return Err("staged runtime executable changed after verification");
+            }
+        }
+        state.check()
+    }
 }
 
 pub(super) fn verify_cache(
@@ -303,7 +337,7 @@ pub(super) fn verify_cache(
     root: &File,
     deadline: Instant,
     archive_manifest: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<Executables> {
     let mut expected = BTreeMap::new();
     for path in package.files.keys() {
         expected.insert(path.clone(), false);
@@ -319,6 +353,7 @@ pub(super) fn verify_cache(
         expected: &mut BTreeMap<String, bool>,
         total: &mut u64,
         deadline: Instant,
+        executables: &mut Executables,
     ) -> Result<()> {
         trusted(dir, true)?;
         let meta = dir.metadata().map_err(|_| invalid())?;
@@ -342,6 +377,7 @@ pub(super) fn verify_cache(
                     expected,
                     total,
                     deadline,
+                    executables,
                 )?,
                 false => {
                     let mut file =
@@ -368,15 +404,16 @@ pub(super) fn verify_cache(
                         }
                         file.seek(SeekFrom::Start(0)).map_err(|_| invalid())?;
                     }
-                    copy_hashed(
-                        &mut file,
-                        None,
-                        &package.files[&path],
-                        total,
-                        deadline,
-                        || Ok(()),
-                    )?;
+                    copy_hashed(&mut file, None, &package.files[&path], total, deadline)?;
                     trusted(&file, false)?;
+                    if mode == 0o500 {
+                        let identity = ExecutableIdentity::from_metadata(&m);
+                        let after = file.metadata().map_err(|_| invalid())?;
+                        if identity != ExecutableIdentity::from_metadata(&after) {
+                            return Err("staged runtime executable changed during verification");
+                        }
+                        executables.insert(path, identity);
+                    }
                 }
             }
         }
@@ -397,18 +434,27 @@ pub(super) fn verify_cache(
     } else {
         package
     };
-    visit(package, root, "", &mut expected, &mut 0, deadline)?;
+    let mut executables = Executables::new();
+    visit(
+        package,
+        root,
+        "",
+        &mut expected,
+        &mut 0,
+        deadline,
+        &mut executables,
+    )?;
     if !expected.is_empty() {
         return Err("incomplete installed runtime package");
     }
-    Ok(())
+    Ok(executables)
 }
 pub(super) fn stage(
     package: &RuntimePackage,
     state: &private::Directory,
     state_path: &Path,
     references: &crate::PackageReferences,
-) -> Result<PathBuf> {
+) -> Result<StagedRuntime> {
     stage_inner(package, state, state_path, false, references)
 }
 fn stage_inner(
@@ -417,20 +463,24 @@ fn stage_inner(
     state_path: &Path,
     test_loopback: bool,
     references: &crate::PackageReferences,
-) -> Result<PathBuf> {
+) -> Result<StagedRuntime> {
     validate_package(package, test_loopback)?;
     state.check()?;
     let cache = identity(package)?;
-    let installed_path = state_path.join(&cache).join(&package.entrypoint);
+    let installed_path = state_path.join(&cache);
     let deadline = Instant::now() + Duration::from_secs(600);
     if let Some(installed) = state.cached_package(&cache)? {
         // Tampering is an error, never an instruction to overwrite evidence.
-        verify_cache(package, &installed, deadline, None)?;
+        let executables = verify_cache(package, &installed, deadline, None)?;
         state.check()?;
         state.prune_packages(&cache, references, |_, root| {
             matches!(crate::runtime_archive::manifest_bytes(root), Ok(None))
         })?;
-        return Ok(installed_path);
+        return Ok(StagedRuntime::new(
+            installed_path,
+            &package.entrypoint,
+            executables,
+        ));
     }
     let source = if package.base_url.is_none() {
         let source = private::walk(&package.root)?;
@@ -472,7 +522,6 @@ fn stage_inner(
                 expected,
                 &mut total,
                 deadline,
-                || Ok(()),
             )?;
             trusted(&input, false)?;
         } else {
@@ -511,7 +560,6 @@ fn stage_inner(
                 expected,
                 &mut total,
                 deadline,
-                || Ok(()),
             )?;
         }
         let mode = if executable(package, path) {
@@ -525,11 +573,15 @@ fn stage_inner(
         target.sync_all().map_err(|_| invalid())?;
         dst.sync_all().map_err(|_| invalid())?;
     }
-    publish(package, state, &output, &cache, deadline, None)?;
+    let executables = publish(package, state, &output, &cache, deadline, None)?;
     state.prune_packages(&cache, references, |_, root| {
         matches!(crate::runtime_archive::manifest_bytes(root), Ok(None))
     })?;
-    Ok(installed_path)
+    Ok(StagedRuntime::new(
+        installed_path,
+        &package.entrypoint,
+        executables,
+    ))
 }
 
 pub(super) fn download_client(
@@ -552,10 +604,11 @@ pub(super) fn publish(
     cache: &str,
     deadline: Instant,
     archive_manifest: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<Executables> {
     output.sync_all().map_err(|_| invalid())?;
-    verify_cache(package, output, deadline, archive_manifest)?;
-    state.publish_package(cache, output)
+    let executables = verify_cache(package, output, deadline, archive_manifest)?;
+    state.publish_package(cache, output)?;
+    Ok(executables)
 }
 
 #[cfg(test)]
@@ -618,29 +671,6 @@ mod tests {
         });
         (url, count, task)
     }
-    #[test]
-    fn executable_verification_checks_control_between_reads() {
-        let tmp = root();
-        let path = tmp.path().join("state");
-        let state = private::Directory::open(&path).unwrap();
-        let executable = path.join("runtime");
-        let bytes = vec![42; 128 * 1024];
-        state.runtime_output().unwrap().write_all(&bytes).unwrap();
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        let mut checks = 0;
-        let result = verify_executable(&executable, &digest, &state, || {
-            checks += 1;
-            if checks == 2 {
-                Err("cancelled")
-            } else {
-                Ok(())
-            }
-        });
-        assert_eq!(result, Err("cancelled"));
-        assert_eq!(checks, 2);
-        verify_executable(&executable, &digest, &state, || Ok(())).unwrap();
-    }
-
     #[test]
     fn host_selection_fails_without_one_exact_match() {
         let p = package(PathBuf::from("/private/runtime"));
@@ -758,9 +788,9 @@ mod tests {
         let installed = stage_inner(&p, &state, &state_path, true, &Default::default()).unwrap();
         task.join().unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 2);
-        assert_eq!(fs::read(&installed).unwrap(), RUNTIME_BYTES);
+        assert_eq!(fs::read(&installed.entrypoint).unwrap(), RUNTIME_BYTES);
         assert_eq!(
-            fs::metadata(installed.with_file_name("helper"))
+            fs::metadata(installed.entrypoint.with_file_name("helper"))
                 .unwrap()
                 .mode()
                 & 0o777,
@@ -772,11 +802,17 @@ mod tests {
         );
         assert_eq!(count.load(Ordering::SeqCst), 2); // Listener is closed: cached work needs no network.
         assert!(!state_path.join("claim.json").exists());
-        fs::set_permissions(&installed, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(&installed, b"tampered").unwrap();
-        fs::set_permissions(&installed, fs::Permissions::from_mode(0o500)).unwrap();
+        installed.verify_executables(&state).unwrap();
+        let helper = installed.entrypoint.with_file_name("helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&helper, b"mutate fixture").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(
+            installed.verify_executables(&state),
+            Err("staged runtime executable changed after verification")
+        );
         assert!(stage_inner(&p, &state, &state_path, true, &Default::default()).is_err());
-        assert_eq!(fs::read(&installed).unwrap(), b"tampered"); // Preserve evidence; no repair download.
+        assert_eq!(fs::read(&helper).unwrap(), b"mutate fixture"); // Preserve evidence; no repair download.
     }
     #[test]
     fn failed_download_and_redirect_never_publish_or_create_claim() {
@@ -820,12 +856,16 @@ mod tests {
                 installed
             );
             match mode {
-                "extra" => fs::write(installed.with_file_name("extra"), b"stale").unwrap(),
-                "symlink" => {
-                    fs::remove_file(&installed).unwrap();
-                    symlink("/does-not-exist", &installed).unwrap();
+                "extra" => {
+                    fs::write(installed.entrypoint.with_file_name("extra"), b"stale").unwrap()
                 }
-                "hardlink" => fs::hard_link(&installed, temp.path().join("hardlink")).unwrap(),
+                "symlink" => {
+                    fs::remove_file(&installed.entrypoint).unwrap();
+                    symlink("/does-not-exist", &installed.entrypoint).unwrap();
+                }
+                "hardlink" => {
+                    fs::hard_link(&installed.entrypoint, temp.path().join("hardlink")).unwrap()
+                }
                 _ => unreachable!(),
             }
             assert!(
@@ -857,10 +897,11 @@ mod tests {
             format!("{:x}", Sha256::digest(b"new version")),
         );
         assert!(stage(&p, &state, &path, &Default::default()).is_err()); // Missing new source: old version remains usable.
-        assert!(old.exists());
+        assert!(old.entrypoint.exists());
         fs::create_dir(source.join("data")).unwrap();
         fs::write(source.join("data/new"), b"new version").unwrap();
         let old_cache = old
+            .entrypoint
             .parent()
             .unwrap()
             .parent()
@@ -875,15 +916,16 @@ mod tests {
             digests: [old_cache.to_owned()].into_iter().collect(),
         };
         let installed = stage(&p, &state, &path, &referenced).unwrap();
-        assert!(old.exists());
+        assert!(old.entrypoint.exists());
         assert_eq!(
             stage(&p, &state, &path, &Default::default()).unwrap(),
             installed
         );
-        assert!(!old.exists());
-        assert!(installed.exists());
+        assert!(!old.entrypoint.exists());
+        assert!(installed.entrypoint.exists());
         assert!(!next.exists());
         assert!(!installed
+            .entrypoint
             .parent()
             .unwrap()
             .parent()
