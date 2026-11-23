@@ -92,9 +92,12 @@ checks fail:
 - The run is attempt 1. The artifacts API does not say which attempt produced an
   artifact, so the tool refuses re-run attempts. Dispatch a fresh run instead.
 - For a run on `main`, GitHub's comparison API shows that the commit is
-  reachable from `main`. The check does not use the local checkout.
+  reachable from the SHA of `refs/heads/main`, and no tag named `main`
+  exists. The check does not use the local checkout.
 - GitHub reports a digest for each artifact, and the downloaded archive matches
   it. Each archive contains a single JSON file.
+- The run is unchanged after its artifacts are read. A re-run that starts
+  meanwhile changes its attempt or update time.
 - Each evidence file names the run commit, has a runner image version and maps to
   a job in the same attempt on the expected runner label.
 - The engine, model and containerd digests in the evidence equal the pins in the
@@ -144,15 +147,42 @@ qualified. To promote a pin:
 - The review or limitations are missing.
 - Two entries share a scope.
 
-On pull requests, `verify` compares every record that a new or changed
-promotion cites with the GitHub API. It fetches the run and requires the
-repository, a non-fork head, a trusted event, the `main` branch, attempt 1, the
-backend's workflow and the commit. It also requires that the commit is
-reachable from `main`. It then fetches the artifact, checks that the artifact
-belongs to the run and matches its digest, and rebuilds the record from the
-evidence and the job. The rebuilt record must equal the committed record
-exactly. `verify` needs the artifact, so promote within the 90-day retention
-window.
+`verify` first runs `check`, including the citation digests. It then compares
+records with the GitHub API. `verify --all` covers every promoted record.
+`verify --base SHA` covers only the records that promotions changed since
+that commit.
+
+For each record, `verify` fetches the run and checks:
+
+- the repository and a non-fork head
+- a trusted event on `main`, with no tag named `main`
+- attempt 1, the backend's workflow and the commit
+- that the commit is reachable from `refs/heads/main`
+
+It then fetches the artifact and checks that it belongs to the run, with the
+recorded name and digest. It rebuilds the record from the evidence and the job,
+and the result must equal the committed record exactly. Finally, it re-reads
+the run to rule out a concurrent re-run.
+
+After GitHub expires an artifact (90 days), `verify` can only compare the run,
+job and artifact digest metadata. It reports those records as notes. Promote
+while the artifact still exists so the full rebuild runs at least once.
+
+### Trust anchors
+
+A pull request supplies both the workflow and the verifier, so verification on
+a pull request (`verify (advisory)`) is advisory only. The trusted checks run
+code that is already on `main` or in a release tag:
+
+- `verify all promotions` in [`qualification.yaml`](../.github/workflows/qualification.yaml)
+  runs on every push to `main` and nightly.
+- The `qualification` job in [`release.yaml`](../.github/workflows/release.yaml)
+  runs `check` and `verify --all` before the release job builds or publishes
+  any image.
+
+Both use only the job's `GITHUB_TOKEN`, with `contents: read` and
+`actions: read`. Reviewers should still require code-owner review for
+qualification changes. See the proposed CODEOWNERS entry below.
 
 ## Derivation
 
@@ -180,29 +210,44 @@ edit them.
   - Libvirt and Apple Virtualization never qualify for now.
 
 Host config, the CLI and environment variables cannot change either table.
-Two build checks catch stale or hand-edited tables:
+Two build checks catch stale or hand-edited tables. Both fail closed when their
+inputs are missing; there is no skip flag.
 
-- The executor's build script fails unless every model-engine entry names an
-  exact catalog pin with a correct `pinId`. In a source checkout, it also
-  requires the table to match `promotions.json`.
-- `script/package_checks.mjs` runs `check` when it loads. CLI preparation,
+- The executor's build script requires `qualification/promotions.json`. It
+  fails unless the table matches the promotions exactly and every
+  model-engine entry names an exact catalog pin with a correct `pinId`.
+- `script/package_checks.mjs` runs a check when it loads. CLI preparation,
   runtime releases and guest bundles all import it, so a failed check stops
-  each of them.
+  each of them. In a source checkout it runs the full `check`. A build stage
+  that holds only the promotions file and the tool gets a narrower check: the
+  daemon's table must match the promotions. Without the promotions file and
+  the tool, packaging stops.
 
-The container image build copies neither `qualification/` nor the tool. That
-build relies on the executor's catalog check and on CI having passed for the
-commit.
+The container image build copies `qualification/promotions.json` into its Node
+and Rust stages, and `script/qualification.mjs` into the Node stage, so both
+checks run there too. The release gate validates the records themselves.
 
 ## Continuous checks
 
-[`qualification.yaml`](../.github/workflows/qualification.yaml) runs two jobs
-on pull requests that touch records, promotions, pins or generated tables:
+[`qualification.yaml`](../.github/workflows/qualification.yaml) runs these jobs:
 
-- The tool's tests and `node script/qualification.mjs check`. This job also
-  lists records whose pin no longer matches the tree as stale, without failing.
-- `node script/qualification.mjs verify` against the base branch's promotions.
-  This job has `contents: read` and `actions: read` and uses only the job's
-  token.
+- **Every run:** the tool's tests and `node script/qualification.mjs check`.
+  Records whose pin no longer matches the tree are listed as stale; they do
+  not fail the check.
+- **Pull requests that touch qualification inputs:** `verify --base`, run
+  against the pull request's immutable base SHA. This job is advisory.
+- **Pushes to `main`, nightly and manual dispatch:** `verify --all`, which is
+  trusted.
+
+The repository has no CODEOWNERS file. The proposed entry is:
+
+```text
+/qualification/                                    @seventwo-studio/maintainers
+/script/qualification*.mjs                         @seventwo-studio/maintainers
+/.github/workflows/qualification.yaml              @seventwo-studio/maintainers
+/crates/model-execution/src/runtime-qualified.json @seventwo-studio/maintainers
+/coordination/src/host-runtimes/qualified-pins.ts  @seventwo-studio/maintainers
+```
 
 `npm run test:tools` in the validation workflow also runs the tool's tests,
 including `check` against the committed state.

@@ -271,14 +271,22 @@ export function verifyRun(run, repository = REPOSITORY) {
 }
 
 // A run can support a promotion only if it ran on main and its commit is on main.
-// compareStatus is GitHub's status for main...<commit>.
-export function promotableRun(run, compareStatus) {
+// compareStatus is GitHub's status for <refs/heads/main SHA>...<commit>. A tag
+// named main would make the branch name in run metadata ambiguous.
+export function promotableRun(run, compareStatus, mainTagExists = false) {
   const problems = [];
+  if (mainTagExists) problems.push(`a tag named ${DEFAULT_BRANCH} exists, so the run ref is ambiguous`);
   if (run.head_branch !== DEFAULT_BRANCH) problems.push(`run is on ${run.head_branch}, not ${DEFAULT_BRANCH}`);
   if (!TRUSTED_EVENTS.includes(run.event)) problems.push(`event ${run.event} is not trusted for qualification`);
   if (run.run_attempt !== 1) problems.push(`run attempt ${run.run_attempt} is not 1`);
   if (!['identical', 'behind'].includes(compareStatus)) problems.push(`commit ${run.head_sha} is not reachable from ${DEFAULT_BRANCH} (${compareStatus})`);
   return problems;
+}
+
+// Guards against a re-run starting between reading the run and its artifacts.
+export function runUnchanged(before, after) {
+  return after.run_attempt === before.run_attempt && after.status === 'completed'
+    && after.updated_at === before.updated_at && after.head_sha === before.head_sha ? [] : ['the run changed while its artifacts were read; retry'];
 }
 
 // Pure conversion from verified run metadata and downloaded evidence to records.
@@ -531,7 +539,12 @@ export function ghClient(repository = REPOSITORY) {
     jobs: (id, attempt) => api(`repos/${repository}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`).jobs,
     artifacts: id => api(`repos/${repository}/actions/runs/${id}/artifacts?per_page=100`).artifacts,
     artifact: id => api(`repos/${repository}/actions/artifacts/${id}`),
-    compare: sha => api(`repos/${repository}/compare/${DEFAULT_BRANCH}...${sha}`).status,
+    // Resolve refs/heads/main to a SHA first so a tag named main cannot shadow it.
+    compare: sha => api(`repos/${repository}/compare/${api(`repos/${repository}/branches/${DEFAULT_BRANCH}`).commit.sha}...${sha}`).status,
+    mainTagExists: () => {
+      try { api(`repos/${repository}/git/ref/tags/${DEFAULT_BRANCH}`); return true; }
+      catch (error) { if (/HTTP 404/.test(String(error.stderr ?? error.message))) return false; throw error; }
+    },
     download: (artifact, file) => writeFileSync(file, gh(['api', `repos/${repository}/actions/artifacts/${artifact.id}/zip`])),
   };
 }
@@ -569,11 +582,13 @@ function record(runId, { repository, root, dryRun }) {
   // A run labelled main must really be a promotable run of main.
   const promotable = run.head_branch === DEFAULT_BRANCH;
   if (promotable) {
-    const problems = promotableRun(run, client.compare(run.head_sha));
+    const problems = promotableRun(run, client.compare(run.head_sha), client.mainTagExists());
     if (problems.length) throw new Error(`run ${runId} refused:\n  ${problems.join('\n  ')}`);
   }
   withScratch(scratch => {
     const artifacts = fetchEvidence(client, client.artifacts(runId), scratch);
+    const changed = runUnchanged(run, client.run(runId));
+    if (changed.length) throw new Error(`run ${runId} refused: ${changed[0]}`);
     const { records, problems } = buildRecords({ run, jobs: client.jobs(runId, run.run_attempt), artifacts, tree: loadTree(root), repository });
     if (problems.length) throw new Error(`run ${runId} evidence does not match the tree:\n  ${problems.join('\n  ')}`);
     for (const { path, record } of records) {
@@ -586,28 +601,44 @@ function record(runId, { repository, root, dryRun }) {
 }
 
 // Re-derives a committed record from its run and artifact through the GitHub
-// API and requires an exact match. Returns problems.
-export function verifyRecord(committed, client, tree, scratch) {
+// API and requires an exact match. Returns problems. Once GitHub has expired the
+// artifact, only its metadata (digest, run and job) can be compared; such records
+// are added to `notes`.
+export function verifyRecord(committed, client, tree, scratch, notes = []) {
   const source = committed.source;
   const run = client.run(source.runId);
-  const problems = [...verifyRun(run), ...promotableRun(run, client.compare(run.head_sha))];
+  const problems = [...verifyRun(run), ...promotableRun(run, client.compare(run.head_sha), client.mainTagExists())];
   if (run.path !== BACKENDS[committed.backend]?.suite) problems.push(`run workflow ${run.path} is not the ${committed.backend} suite`);
   if (run.head_sha !== source.commit || run.run_attempt !== source.runAttempt) problems.push('run commit or attempt differs from the record');
   if (problems.length) return problems;
   const artifact = client.artifact(source.artifact.id);
   if (artifact.workflow_run?.id !== run.id || artifact.workflow_run?.head_sha !== run.head_sha) return ['artifact does not belong to the run'];
+  if (artifact.name !== source.artifact.name || artifact.digest !== source.artifact.digest) return ['artifact name or digest differs from the record'];
+  if (artifact.expired) {
+    const job = client.jobs(run.id, run.run_attempt).find(entry => entry.id === source.job.id);
+    if (!job || job.name !== source.job.name || job.conclusion !== source.job.conclusion) return ['job differs from the record'];
+    notes.push('artifact expired; verified run, job and artifact digest metadata only');
+    return [];
+  }
   const fetched = fetchEvidence(client, [artifact], scratch);
+  const changed = runUnchanged(run, client.run(source.runId));
+  if (changed.length) return changed;
   const { records, problems: built } = buildRecords({ run, jobs: client.jobs(run.id, run.run_attempt), artifacts: fetched, tree });
   if (built.length) return built;
   if (records.length !== 1 || !same(records[0].record, committed)) return ['committed record differs from the record derived from the run artifact'];
   return [];
 }
 
-// Verifies every record cited by a promotion that is new or changed since `base`.
-export function verify({ root = ROOT, client = ghClient(), base } = {}) {
+// Runs the offline check (including citation digests), then verifies against
+// GitHub every record cited by a promotion: all of them with `all`, otherwise
+// those cited by promotions that are new or changed since the `base` commit.
+export function verify({ root = ROOT, client = ghClient(), base, all = false } = {}) {
+  const offline = check(root);
+  if (offline.errors.length) return { errors: offline.errors, verified: 0 };
   const promotions = JSON.parse(read(root, PATHS.promotions)).promotions;
   let previous = [];
-  if (base) {
+  if (!all) {
+    if (!/^[0-9a-f]{40}$/.test(base ?? '')) throw new Error('verify needs --all or --base with a full commit SHA');
     try { previous = JSON.parse(execFileSync('git', ['show', `${base}:${PATHS.promotions}`], { cwd: root, encoding: 'utf8' })).promotions; }
     catch { previous = []; }
   }
@@ -615,23 +646,25 @@ export function verify({ root = ROOT, client = ghClient(), base } = {}) {
   const paths = [...new Set(changed.flatMap(entry => [...entry.records, ...entry.supporting].map(ref => ref.path)))];
   const entries = new Map(loadRecords(root).map(entry => [entry.path, entry]));
   const tree = loadTree(root);
-  const errors = [];
+  const errors = [], notes = [];
   withScratch(scratch => {
     for (const path of paths) {
       const entry = entries.get(path);
       if (!entry?.record) { errors.push(`records/${path}: missing or unreadable`); continue; }
-      try { errors.push(...verifyRecord(entry.record, client, tree, scratch).map(p => `records/${path}: ${p}`)); }
+      const recordNotes = [];
+      try { errors.push(...verifyRecord(entry.record, client, tree, scratch, recordNotes).map(p => `records/${path}: ${p}`)); }
       catch (error) { errors.push(`records/${path}: ${error.message}`); }
+      notes.push(...recordNotes.map(note => `records/${path}: ${note}`));
     }
   });
-  return { errors, verified: paths.length };
+  return { errors, notes, verified: paths.length };
 }
 
 function usage() {
   return `usage:
   node script/qualification.mjs record --run RUN_ID [--repo OWNER/NAME] [--dry-run]
   node script/qualification.mjs check
-  node script/qualification.mjs verify [--base GIT_REF]
+  node script/qualification.mjs verify (--all | --base COMMIT_SHA)
   node script/qualification.mjs sync`;
 }
 
@@ -652,7 +685,8 @@ export function main(argv, root = ROOT) {
     return result.errors.length ? 1 : 0;
   }
   if (command === 'verify') {
-    const result = verify({ root, base: option('--base') });
+    const result = verify({ root, base: option('--base'), all: rest.includes('--all') });
+    for (const note of result.notes ?? []) console.log(`note: ${note}`);
     for (const error of result.errors) console.error(`error: ${error}`);
     console.log(`verified ${result.verified} promoted records, ${result.errors.length} errors`);
     return result.errors.length ? 1 : 0;

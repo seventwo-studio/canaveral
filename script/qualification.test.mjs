@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import {
   BACKENDS, buildRecords, canonical, check, checkPromotions, checkRecords, fetchEvidence, generated, loadTree, packageDigest,
   parseContainerdPins, PATHS, pinId, promotableRun, recordEntry, recordPath, REPOSITORY, ROOT, schemaErrors, treeIdentity,
-  verifyRecord, verifyRun,
+  runUnchanged, verify, verifyRecord, verifyRun,
 } from './qualification.mjs';
 
 const tree = loadTree();
@@ -84,6 +86,7 @@ test('refuses untrusted runs and limits promotion to first attempts of main', ()
   assert.match(promotableRun(run(path), 'ahead').join(), /not reachable from main/);
   assert.match(promotableRun(run(path, { head_branch: 'feature' }), 'behind').join(), /not main/);
   assert.match(promotableRun(run(path, { event: 'pull_request' }), 'behind').join(), /not trusted/);
+  assert.match(promotableRun(run(path), 'behind', true).join(), /tag named main exists/);
 });
 
 test('requires the artifact digest GitHub reports', () => {
@@ -202,6 +205,7 @@ test('verify re-derives promoted records from the GitHub API', () => {
   const client = (overrides = {}) => ({
     run: () => run('.github/workflows/model-acceptance.yaml'),
     compare: () => 'behind',
+    mainTagExists: () => false,
     artifact: () => ({ id: 3, name: 'model-acceptance-ubuntu-24.04-llama.cpp', digest: 'sha256:' + 'd'.repeat(64), workflow_run: { id: 1, head_sha: SHA } }),
     jobs: () => [job('ubuntu-24.04 / llama.cpp', 'ubuntu-24.04')],
     ...overrides,
@@ -217,10 +221,49 @@ test('verify re-derives promoted records from the GitHub API', () => {
   assert.match(derive(client({ artifact: () => ({ workflow_run: { id: 9, head_sha: SHA } }) })).join(), /does not belong to the run/);
   assert.match(derive(client({ run: () => run('.github/workflows/host-acceptance.yaml') })).join(), /not the llama.cpp suite/);
   assert.match(derive(client(), { ...record, source: { ...record.source, commit: 'f'.repeat(40) } }).join(), /commit or attempt differs/);
+  assert.match(derive(client({ mainTagExists: () => true })).join(), /tag named main exists/);
+  assert.match(derive(client({ artifact: () => ({ id: 3, name: 'other', digest: record.source.artifact.digest, workflow_run: { id: 1, head_sha: SHA } }) })).join(), /name or digest differs/);
+  // Expired artifacts are verified from run, job and digest metadata, and reported.
+  const expired = client({ artifact: () => ({ ...record.source.artifact, expired: true, workflow_run: { id: 1, head_sha: SHA } }),
+    jobs: () => [{ ...job('ubuntu-24.04 / llama.cpp', 'ubuntu-24.04'), id: record.source.job.id }] });
+  const notes = [];
+  assert.deepEqual(verifyRecord(record, expired, tree, ROOT, notes), []);
+  assert.match(notes.join(), /artifact expired/);
+  assert.match(derive({ ...expired, jobs: () => [] }).join(), /job differs/);
   assert.ok(evidence);
 });
 
-test('packaging checks gate on the qualification state', async () => {
+test('verify runs the offline check first and needs an explicit scope', () => {
+  const offline = { run: () => assert.fail('no API calls without promotions') };
+  assert.deepEqual(verify({ root: ROOT, client: offline, all: true }), { errors: [], notes: [], verified: 0 });
+  assert.throws(() => verify({ root: ROOT, client: offline }), /--all or --base/);
+  assert.throws(() => verify({ root: ROOT, client: offline, base: 'main' }), /full commit SHA/);
+});
+
+test('a run that changes while artifacts are read is refused', () => {
+  const before = run('.github/workflows/model-acceptance.yaml', { updated_at: '2026-11-23T01:00:00Z' });
+  assert.deepEqual(runUnchanged(before, before), []);
+  assert.match(runUnchanged(before, { ...before, run_attempt: 2 }).join(), /changed/);
+  assert.match(runUnchanged(before, { ...before, status: 'in_progress' }).join(), /changed/);
+  assert.match(runUnchanged(before, { ...before, updated_at: '2026-11-23T02:00:00Z' }).join(), /changed/);
+});
+
+test('packaging checks gate on the qualification state and fail closed', async () => {
   const { checkQualification } = await import('./package_checks.mjs');
-  assert.equal(await checkQualification(), true);
+  assert.equal(await checkQualification(), 'full');
+  const dir = mkdtempSync(join(tmpdir(), 'qualification-package-'));
+  try {
+    const root = pathToFileURL(dir + '/');
+    await assert.rejects(checkQualification(root), /inputs are missing/);
+    // A container build stage carries only the promotions, the tool and the table.
+    for (const path of [PATHS.promotions, 'script/qualification.mjs', PATHS.tsTable]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      copyFileSync(join(ROOT, path), join(dir, path));
+    }
+    assert.equal(await checkQualification(root), 'table');
+    writeFileSync(join(dir, PATHS.tsTable), '// edited\n');
+    await assert.rejects(checkQualification(root), /does not match/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
