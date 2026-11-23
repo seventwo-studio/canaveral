@@ -142,27 +142,39 @@ test("a view lives while its viewer renews it, expires when it does not, and clo
 test("a live view ends with its lease at expiry, and its capture is released only after the lease proves the emulator gone", { skip, timeout: 120000 }, async t => {
   const h = await harness(t, 1, { extra: { cpu: 1, memoryMiB: 256 }, encoder: "fragments" }), app = await h.application();
   const a = await acquire(h, app, 12), name = `cvm-${a.machineId}`, lease = client(h, a);
-  const viewer = await watching(h, a);
-  await until(() => media(viewer.got).length >= 3, "live segments");
-  assert.deepEqual(await h.reserved(), WITH_CAPTURE);
-  const view = await lease.live.inspect(viewer.id);
-  // The lease expires while the view is watched: the stream ends, and says why.
-  await viewer.got.done;
-  assert.equal(viewer.got.failure(), undefined);
-  assert.ok(["lease_expired", "lease_failed"].includes(viewer.stream.ended!.reason), JSON.stringify(viewer.stream.ended));
-  t.diagnostic(`stream end at expiry: ${JSON.stringify(viewer.stream.ended)}`);
-  assert.ok(ordered(viewer.got.segments));
-  await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease");
-  assert.ok(Date.now() - h.media.recorders.get(name)!.started < 30000, "the capture ended with the lease, not at its time limit");
-  // The runner's encoder exited; the fenced guest's recorder is proven gone only by the lease's cleanup.
-  await until(async () => (await lease.video.inspect(view.captureId)).hostCleaned === true, "host encoder cleanup", 30000);
-  assert.equal(h.media.encodersOpen, 0);
-  await cleaned(h, app, a.id);
-  await until(async () => (await lease.video.inspect(view.captureId)).cleaned === true, "capture settled by lease cleanup");
-  assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
-  // The ended lease reads its view but cannot watch again.
-  assert.equal((await lease.live.inspect(viewer.id)).state, "ended");
-  assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "primary" }, a.key)).status, 410);
+  const provider = h.provider(), stop = provider.stopForCleanup.bind(provider);
+  let releaseProof!: () => void;
+  const proof = new Promise<void>(resolve => { releaseProof = resolve; });
+  t.mock.method(provider, "stopForCleanup", async (...args: Parameters<typeof stop>) => {
+    await proof;
+    return stop(...args);
+  });
+  try {
+    const viewer = await watching(h, a);
+    await until(() => media(viewer.got).length >= 3, "live segments");
+    assert.deepEqual(await h.reserved(), WITH_CAPTURE);
+    const view = await lease.live.inspect(viewer.id);
+    // The lease expires while the view is watched: the stream ends, and says why.
+    await viewer.got.done;
+    assert.equal(viewer.got.failure(), undefined);
+    assert.ok(["lease_expired", "lease_failed"].includes(viewer.stream.ended!.reason), JSON.stringify(viewer.stream.ended));
+    t.diagnostic(`stream end at expiry: ${JSON.stringify(viewer.stream.ended)}`);
+    assert.ok(ordered(viewer.got.segments));
+    await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease");
+    assert.ok(Date.now() - h.media.recorders.get(name)!.started < 30000, "the capture ended with the lease, not at its time limit");
+    // The runner's encoder exited; the fenced guest's recorder is proven gone only by the lease's cleanup.
+    await until(async () => (await lease.video.inspect(view.captureId)).hostCleaned === true, "host encoder cleanup", 30000);
+    assert.equal(h.media.encodersOpen, 0);
+    assert.equal((await lease.video.inspect(view.captureId)).cleaned, false);
+    assert.deepEqual(await h.reserved(), WITH_CAPTURE);
+    releaseProof();
+    await cleaned(h, app, a.id);
+    await until(async () => (await lease.video.inspect(view.captureId)).cleaned === true, "capture settled by lease cleanup");
+    assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
+    // The ended lease reads its view but cannot watch again.
+    await until(async () => (await lease.live.inspect(viewer.id)).state === "ended", "settled view");
+    assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "primary" }, a.key)).status, 410);
+  } finally { releaseProof(); }
 });
 
 test("key rotation and release each end a live view; the runner's exact-recorder proof or the lease's cleanup releases its capture", { skip, timeout: 120000 }, async t => {
@@ -249,24 +261,37 @@ test("a wedged encoder keeps the live capture reserved, blocks another capture o
 });
 
 test("a recording takes the device's one native capture and feeds the live viewers: both are complete and no second recorder ever runs", { skip, timeout: 180000 }, async t => {
-  const h = await harness(t, 1, { extra: { cpu: 2, memoryMiB: 512 }, encoder: "fragments" }), app = await h.application();
+  let viewerSawRecording = false;
+  const h = await harness(t, 1, {
+    extra: { cpu: 2, memoryMiB: 512 }, encoder: "fragments",
+    allowRecorderEof: run => run !== 2 || viewerSawRecording,
+  }), app = await h.application();
   const a = await acquire(h, app, 300), name = `cvm-${a.machineId}`, lease = client(h, a);
   const inits = (got: ReturnType<typeof collect>) => got.segments.filter(s => s.kind === "init").map(s => s.epoch);
   // A viewer is watching its own live capture when a recording starts.
   const viewer = await watching(h, a);
   await until(() => media(viewer.got).length >= 4, "live segments");
   const out = sink(), recording = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 3, ...VIDEO }, out, { timeoutMs: 30000 });
-  await until(() => h.media.started.get(name)!.length === 2, "the recording's own capture");
-  // The live view and the recording share the capture reservation.
-  assert.deepEqual(await h.reserved(), { cpu: 3, memoryMiB: 2304, diskGiB: 8 });
-  assert.equal(h.media.started.get(name)!.filter(recorder => recorder.running).length, 1);
+  const recordingSegments = () => media(viewer.got).filter(s => s.epoch === inits(viewer.got)[1]);
+  try {
+    // Hold the fake recorder's EOF until the viewer has actually consumed the tee.
+    await Promise.race([
+      until(() => recordingSegments().length >= 3, "the viewer's recording segments"),
+      recording.then(() => assert.fail("the recording ended before the handover was observed")),
+    ]);
+    assert.equal(h.media.started.get(name)!.length, 2);
+    assert.deepEqual(await h.reserved(), WITH_CAPTURE);
+    assert.equal(h.media.started.get(name)!.filter(recorder => recorder.running).length, 1);
+  } finally {
+    viewerSawRecording = true;
+  }
   const finish = await recording, recorded = Buffer.concat(out.chunks);
   // The recording is exactly what it would have been alone: verified bytes, digest and cleanup.
   assert.deepEqual(finish, { type: "finish", bytes: recorded.length, sha256: createHash("sha256").update(recorded).digest("hex"), cleaned: true });
   // The viewer stayed attached: its own capture, then the recording's stream, then its own again.
   await until(() => inits(viewer.got).length >= 3 && media(viewer.got).filter(s => s.epoch === inits(viewer.got)[2]).length >= 2, "the viewer's capture resumed");
   assert.equal(viewer.stream.ended, undefined); assert.ok(ordered(viewer.got.segments));
-  const during = media(viewer.got).filter(s => s.epoch === inits(viewer.got)[1]);
+  const during = recordingSegments();
   assert.ok(during.length >= 3, "the viewer watched the recording's stream");
   for (const segment of during) assert.ok(recorded.includes(segment.data), "a viewer segment is a fragment of the recording");
   assert.equal(h.media.started.get(name)!.length, 3); assert.equal(h.media.peak, 1);
@@ -275,7 +300,10 @@ test("a recording takes the device's one native capture and feeds the live viewe
   viewer.stream.close(); await viewer.got.done;
   await until(async () => (await h.reserved()).cpu === 2, "the live capture's reservation released");
   const second = sink(), long = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 20, ...VIDEO }, second, { timeoutMs: 45000 });
-  await until(() => h.media.started.get(name)!.length === 4 && second.chunks.length > 0, "a recording in progress");
+  await Promise.race([
+    until(() => h.media.started.get(name)!.length === 4 && second.chunks.length > 0, "a recording in progress"),
+    long.then(() => assert.fail("the recording ended before the viewer could join")),
+  ]);
   const late = await watching(h, a);
   await until(() => media(late.got).length >= 3, "segments from the recording in progress");
   assert.equal(h.media.started.get(name)!.length, 4, "the viewer started no capture of its own");
