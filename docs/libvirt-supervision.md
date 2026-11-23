@@ -2,21 +2,37 @@
 
 ## Production adapter design
 
-Use a Linux Node-API shared library and a dedicated Node child. Node-API lets
-the child use the existing TypeScript ownership and journal checks with
-libvirt's C API. It also exposes the existing fatal kernel deadline, native
-`CLOCK_BOOTTIME`, and Linux file leases without a second RPC process holding
-the libvirt connection. Build the addon from reviewed source and load it from
-the checked artifact descriptor. The daemon uses the same addon for stopped
-observation and storage fencing. Its observation connections never start VMs.
+A Linux Rust guardian supervises one transient domain. It starts a dedicated
+connection worker and arms `PR_SET_PDEATHSIG` in that worker's pre-exec hook,
+with a parent identity recheck. The guardian observes daemon exit through a
+pidfd. It can remain alive after service restart to finish fencing and record
+the outcome. The TypeScript daemon publishes assignment, launch and deadline
+authorization before any native create attempt. Blocking libvirt calls run
+outside the daemon and outside the guardian's deadline loop.
 
-The child owns the connection from paused creation through resume and
-execution. The kernel closes it when the child exits, even while the child
-is blocked in libvirt. The deadline continues independently of the daemon's
-event loop. Daemon death kills the child immediately through the parent-death
-guard. A daemon restart reconciles the original assignment and cannot adopt or
-restart that child. Kubernetes uses the mounted local libvirt socket and the
-same ownership and cleanup checks on node-local storage.
+The connection worker uses `virDomainCreateXML` with
+`PAUSED | AUTODESTROY` and holds that local connection. It runs the libvirt
+event loop with keepalive and treats connection loss as a fence. The guardian
+uses `CLOCK_BOOTTIME` to bound the worker independently of its RPCs.
+A lease domain has no persistent start definition or autostart registration.
+
+If the connection is lost, the guardian first ends the original worker.
+A fresh connection may then destroy a still-live domain only when its UUID
+and the per-launch random nonce in its ownership metadata match the durable
+launch. The libvirt domain ID must match once recorded. Bare-metal recovery
+also checks the recorded QEMU process birth from the host process namespace.
+Kubernetes has no host PID view. Its mounted-socket proof uses the UUID and
+nonce under the assumption that all principals with access to the local
+libvirt socket are trusted with host administration. A guest has no access to
+that socket or the journal. Uncertain proof retains the reservation for
+inspection. The node-local journal survives pod replacement.
+
+The helper must be root-owned and immutable to the daemon account. The
+operator pins its SHA-256 from the release or image manifest. Each native
+launch verifies the artifact before execution. System QEMU configuration must
+keep owned overlay, NVRAM and TPM files accessible to and owned by the daemon
+account. A host with incompatible ownership or file leases cannot claim
+cleanup.
 
 Administrative VMs keep their persistent definition and ordinary
 `virsh start` on both deployment types. Their lifecycle is operator-owned
