@@ -66,9 +66,14 @@ assigns work through the runner's outbound connection.
 Run `canaverald --setup-file ./canaveral-setup.json --state ./state/runner --inventory`
 to print a versioned JSON inventory. It includes CPU and memory, free space on
 the state filesystem, installed image definitions, the configured workload offer
-and runtime check results. A KubeVirt runner reports the machine running the
-adapter. The inventory uses the same provider probes as `--check` and can run
-without a controller connection or enrollment. Capacity and workload offers come
+and runtime check results.
+
+The [host runtime registry](host-runtimes.md) adds local backend status. Run
+`canaverald runtimes status --config FILE --state DIR` for this section alone.
+
+A KubeVirt runner reports the machine running the adapter. The inventory uses
+the same provider probes as `--check` and can run without a controller connection
+or enrollment. Capacity and workload offers come
 from operator configuration. Local hardware readings and passing prerequisite
 checks do not grant placement or establish native acceptance.
 

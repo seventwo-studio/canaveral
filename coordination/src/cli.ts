@@ -17,6 +17,9 @@ const DAEMON_HELP = `canaverald host daemon
 Usage: canaverald [--url ORIGIN] [--allow-http] --config FILE --state DIR [options]
        canaverald --setup-file FILE --state DIR [options]
 
+       canaverald runtimes list|status --config FILE --state DIR [--json]
+       canaverald runtimes install|verify|remove BACKEND --config FILE --state DIR [--version V] [--dry-run] [--json]
+
 --check                       Probe runtime prerequisites without enrolling
 --inventory                   Print hardware, configured offers and runtime checks as JSON
 --ca-file FILE                Trust the controller's private CA
@@ -607,6 +610,42 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
   io.stdout(JSON.stringify(metadata(result), null, 2) + "\n");
 }
 
+async function daemonRuntimes(argv: string[], io: CliIO): Promise<number> {
+  const { backendIds, isModel, mutateRuntime, runtimeInventory, runtimeTable, version } = await import("./host-runtimes/index.ts");
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
+    config: { type: "string" }, state: { type: "string" }, version: { type: "string" },
+    "dry-run": { type: "boolean" }, json: { type: "boolean" },
+  } });
+  const [action, backend] = positionals;
+  if (!values.config || !values.state) throw new CliError("Specify --config FILE and --state DIR.");
+  const inventory = action === "list" || action === "status";
+  if (inventory) {
+    if (positionals.length !== 1 || values.version !== undefined || values["dry-run"]) throw new CliError("Use runtimes list or status with --config, --state and optional --json.");
+    const config = await jsonFile(resolve(expandPath(values.config)), HOST_CONFIG_BYTES);
+    const backends = await runtimeInventory(config);
+    io.stdout(values.json ? JSON.stringify(backends, null, 2) + "\n" : runtimeTable(backends));
+    return 0;
+  }
+  const id = backendIds.find(value => value === backend);
+  if ((action !== "install" && action !== "verify" && action !== "remove") || positionals.length !== 2 || !id) {
+    throw new CliError("Use runtimes install, verify or remove with a known backend.");
+  }
+  const managed = isModel(id);
+  if ((values.version !== undefined && (action !== "remove" || !version(values.version)))
+    || (managed && action === "remove" && !values.version) || (values["dry-run"] && action === "verify")) {
+    throw new CliError("Model runtime removal requires --version. Only install and remove accept --dry-run.");
+  }
+  const config = await jsonFile(resolve(expandPath(values.config)), HOST_CONFIG_BYTES);
+  const report = await mutateRuntime(config, action, id, values["dry-run"] === true, values.version);
+  if (values.json) io.stdout(JSON.stringify(report, null, 2) + "\n");
+  else {
+    io.stdout(runtimeTable(report.backends));
+    if (report.plan) io.stdout(`Planned download: ${report.plan.downloadBytes} bytes\n`);
+    if (report.result) io.stdout(`Outcome: ${report.result.state}${report.result.code ? " (" + report.result.code + ")" : ""}\n`);
+  }
+  return report.result?.state === "succeeded" ? 0 : 1;
+}
+
 /** Execute without exiting the embedding process. Returns a conventional exit status. */
 export async function main(argv = process.argv.slice(2), overrides: Partial<CliIO> = {}, program: "canaveral" | "canaverald" = "canaveral"): Promise<number> {
   const daemon = program === "canaverald";
@@ -622,6 +661,9 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       if (flag === "--allow-http") boundary++;
       else if (flag === "--url" || flag === "--token-file") boundary += arg.includes("=") ? 1 : 2;
       else break;
+    }
+    if (daemon && argv[boundary] === "runtimes" && !argv.includes("--help") && !argv.includes("-h")) {
+      return await daemonRuntimes(argv.slice(boundary + 1), io);
     }
     if (daemon) argv = [...argv.slice(0, boundary), "host", ...argv.slice(boundary)];
     if (argv[boundary] === "updates") {

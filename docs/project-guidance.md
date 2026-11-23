@@ -37,6 +37,7 @@ interpreter dependency to the controller, host or SDK; see
 - [TypeScript Linux lease controller slice](linux-lease-controller.md)
 - [Bounded Linux command operations](linux-command-operations.md)
 - [infrastructure](infrastructure.md)
+- [Host runtime backends](host-runtimes.md) (local inventory and model package management)
 - [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
 - [leases](leases.md)
