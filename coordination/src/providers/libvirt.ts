@@ -228,9 +228,21 @@ export class LibvirtProvider {
       const dir=fs.openSync(path,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW);try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}
       const receipt=this.journal(folder);try{receipt.write({...b.identity(),phase:"prepared"});}finally{receipt.close();}
       this.assertStorage(b,spec);validateDomainXML(xml,b);
-      // The driver receives the validated bytes; it cannot reopen a replaced XML path.
-      await this.command(["virsh","--connect",this.uri(),"define","/dev/stdin"],30000,xml);
+      await this.definePrepared(j,b,spec);
     }finally{j.close();}
+  }
+  private async definePrepared(j:SupervisorJournal,b:LibvirtLeaseBinding,s:ExecutionSpec):Promise<void>{
+    if (!this.location(b,s)) refuse("The prepared domain namespace changed.");
+    this.assertStorage(b,s);
+    const source=join(dirname(b.disk),"domain.xml");
+    const bytes=snapshotFile(source,1048576);validateDomainXML(bytes.toString("utf8"),b);
+    // Node uses a Unix socket for child stdin on Linux. virsh needs a reopenable file.
+    const path=join(j.folder,`temporary-${randomUUID()}.xml`);
+    const fd=fs.openSync(path,"wx",0o600);
+    try {
+      fs.writeFileSync(fd,bytes);fs.fsyncSync(fd);
+      await this.virsh("define",path);
+    }finally{fs.closeSync(fd);fs.unlinkSync(path);}
   }
   async reconcile(machine:RecordValue,image:RecordValue,folder:string):Promise<RecordValue>{
     uuid(machine.id);if(!["running","stopped"].includes(String(machine.desired)))refuse("Invalid desired state.");domainXML(machine,image,join(this.storagePath(machine),"disk.qcow2"));
@@ -241,6 +253,13 @@ export class LibvirtProvider {
         await this.prepare(machine,image,folder,leased);current=this.inspect(machine,folder);if(!current)refuse("Preparation outcome is unknown.");
       }
       const{binding:b,spec:s,execution,launch}=current;if(!this.location(b,s)){if(leased)this.publish(machine,image,folder,true);return{state:"unknown",leaseFenced:leased,detail:"Runtime location changed; no native namespace was adopted."};}
+      if(!leased&&machine.desired==="running"&&execution.phase==="prepared"){
+        const ids=(await this.virsh("list","--all","--uuid")).toLowerCase().split(/\r?\n/);
+        if(!ids.includes(b.machine_id)){
+          if((await this.virsh("list","--all","--name")).split(/\r?\n/).includes(`cvm-${b.machine_id}`))refuse("The prepared domain name is occupied.");
+          await this.definePrepared(gate,b,s);
+        }
+      }
       if(leased){const auth=this.publish(machine,image,folder,machine.desired==="stopped"||execution.phase==="fenced");if(auth.fenced===true){const stopped=this.confirmExecutionStopped(machine,folder);return{state:stopped?"stopped":"stopping",leaseFenced:true,detail:"Storage handles and erasure remain unverified."};}}
       const id=uuid(machine.id);const xml=await this.virsh("dumpxml",id);validateDomainXML(xml,b);if((await this.virsh("domuuid",id)).toLowerCase()!==id)refuse("Native UUID differs.");this.assertStorage(b,s);
       const state=(await this.virsh("domstate",id)).toLowerCase();

@@ -138,10 +138,15 @@ export function validateDomainXML(xml: string,binding:LibvirtLeaseBinding): void
   if(root.children.some(n=>n.uri)||devices.children.some(n=>n.uri)) refuse("Namespaced native extensions are not owned.");
   if(nodes(devices,"filesystem").length||nodes(devices,"hostdev").length) refuse("Passthrough ownership is unsupported.");
   const disks=nodes(devices,"disk"), primary=disks.filter(d=>d.attrs.device==="disk");
-  if(primary.length!==1||primary[0]!.attrs.type!=="file"||nodes(primary[0]!,"readonly").length||!attrsEqual(one(primary[0]!,"source"),{file:binding.disk})) refuse("Native writable disk is not owned.");
+  // Libvirt adds a block graph index to a live disk source.
+  const diskSource=(source:Element,path:string):boolean=>{
+    const index=source.attrs.index;
+    return index===undefined?attrsEqual(source,{file:path}):/^[1-9][0-9]*$/.test(index)&&attrsEqual(source,{file:path,index});
+  };
+  if(primary.length!==1||primary[0]!.attrs.type!=="file"||nodes(primary[0]!,"readonly").length||!diskSource(one(primary[0]!,"source"),binding.disk)) refuse("Native writable disk is not owned.");
   for(const disk of disks) if(disk!==primary[0]) {
     const source=one(disk,"source"); const path=source.attrs.file;
-    if(disk.attrs.device!=="cdrom"||disk.attrs.type!=="file"||nodes(disk,"readonly").length!==1||!path||absolute(path)!==path||dirname(path)!==dirname(binding.disk)||!attrsEqual(source,{file:path})) refuse("Additional media is not an owned read-only CD-ROM.");
+    if(disk.attrs.device!=="cdrom"||disk.attrs.type!=="file"||nodes(disk,"readonly").length!==1||!path||absolute(path)!==path||dirname(path)!==dirname(binding.disk)||!diskSource(source,path)) refuse("Additional media is not an owned read-only CD-ROM.");
   }
   const systems=nodes(root,"os"); if(systems.length>1) refuse("Ambiguous domain firmware.");
   if(systems[0]) {
