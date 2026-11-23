@@ -310,6 +310,14 @@ export function hostOffer(config: RecordValue, platform: NodeJS.Platform = proce
   return offer;
 }
 
+const KUBEVIRT_STOPPED_RECHECK_SECONDS = 5;
+
+function idleKubevirtStopKey(machine: RecordValue): string | undefined {
+  if (machine.desired !== "stopped" || machine.observed !== "stopped" || machine.lease || machine.leaseFenced ||
+      machine.warm || machine.deletion || machine.leaseCleanup || machine.powerOffRequest) return;
+  return legacyDigest({ templateId: machine.templateId, fingerprint: assignmentFingerprint(machine) });
+}
+
 export class HostRunner {
   readonly config: HostConfig;
   readonly state: string;
@@ -322,6 +330,7 @@ export class HostRunner {
   readonly clock: ExecutionClock;
   readonly processes = new ProcessSupervisor();
   readonly reports = new Map<string, RecordValue>();
+  private readonly idleKubevirtStops = new Map<string, { key: string; nextCheck: number }>();
   readonly deviceReports = new Map<string, RecordValue>();
   readonly inferenceReports = new Map<string, RecordValue>();
   readonly imageReports = new Map<string, RecordValue>();
@@ -746,6 +755,14 @@ export class HostRunner {
     for (const machine of machines) this.updateAssignments.set(String(machine.id), structuredClone(machine));
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
+    if (this.idleKubevirtStops.size) {
+      // Invalidate even if a changed assignment is replaced again before the next step.
+      const current = new Map(machines.map(machine => [String(machine.id), machine]));
+      for (const [id, check] of this.idleKubevirtStops) {
+        const machine = current.get(id);
+        if (!this.fresh() || !machine || idleKubevirtStopKey(machine) !== check.key) this.idleKubevirtStops.delete(id);
+      }
+    }
     this.assignments = machines; this.queues = queues; this.lastContact = sent;
     // Delivered: work that ended before this heartbeat has now been counted as activity.
     for (const id of reportedBusy) this.recentlyBusy.delete(id);
@@ -1099,6 +1116,14 @@ export class HostRunner {
       if (this.deviceMachines.has(id) || machine.desired === 'running' && this.reports.get(id)?.state === 'running' && this.queues.device?.some(o => o.machineId === id && !TERMINAL.has(String(this.deviceReports.get(String(o.id))?.state)))) continue;
       if (machineSlots <= 0 || this.active.has(key) || !this.fresh() && !machine.leaseFenced) continue;
       if (machine.desired === "running" && ["checking", "failed"].includes(String(this.health.status))) continue;
+      const idleKey = this.config.provider === "kubevirt" ? idleKubevirtStopKey(machine) : undefined;
+      const previousCheck = this.idleKubevirtStops.get(id);
+      if (idleKey && idleKey === previousCheck?.key && this.reports.get(id)?.state === "stopped" &&
+          this.clock.now() < previousCheck.nextCheck) continue;
+      // A check in flight can only defer later work if no heartbeat invalidated it.
+      const check = idleKey ? { key: idleKey, nextCheck: 0 } : undefined;
+      if (check) this.idleKubevirtStops.set(id, check);
+      else this.idleKubevirtStops.delete(id);
       slots--; machineSlots--; this.machineCursor = (machines.indexOf(machine) + 1) % machines.length;
       const authorized = (): boolean => machine.desired === "stopped" || machine.leaseFenced === true ? !this.closed : this.machineAuthorized(id);
       this.launch(key, authorized, async context => {
@@ -1109,6 +1134,10 @@ export class HostRunner {
         if (machine.powerOffRequest) report.powerOffId = machine.powerOffRequest;
         if (context.signal.aborted && machine.desired === "running" && report.state === "running") report = { state: "unknown", detail: "Reconciliation ended after authorization; positive native stop evidence is required." };
         this.publish(this.reports, id, report);
+        if (check && this.idleKubevirtStops.get(id) === check) {
+          if (report.state === "stopped") check.nextCheck = this.clock.now() + KUBEVIRT_STOPPED_RECHECK_SECONDS;
+          else this.idleKubevirtStops.delete(id);
+        }
       });
     }
     if (!this.fresh()) return;

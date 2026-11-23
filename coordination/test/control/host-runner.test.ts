@@ -29,6 +29,151 @@ function fakeTransport(reply: () => RecordValue = () => ({ machines: [] })): Hos
 const providerFactory: NonNullable<HostDependencies["providerFactory"]> = () => ({ kind: "libvirt", check: async () => ({}), reconcile: async m => ({ state: m.desired }) });
 async function drain(): Promise<void> { await new Promise(r => setTimeout(r, 20)); }
 
+async function kubevirtStopFixture(t: Parameters<typeof setup>[0], count = 1) {
+  const { config, image, clock } = setup(t);
+  const namespace = "guests", provider = new KubevirtProvider({ namespace }, config.stateDir);
+  const machines = Array.from({ length: count }, () => ({ ...machine(image), desired: "stopped", observed: "stopped" } as RecordValue));
+  const vms = new Map<string, RecordValue>();
+  for (const m of machines) {
+    const folder = join(config.stateDir, "machines", String(m.id));
+    const creation = beginCreation(m, namespace, folder);
+    const vm = manifest(m, { ...image, pvc: "base" }, namespace);
+    Object.assign(vm.metadata as RecordValue, { uid: randomUUID(), annotations: creationAnnotations(creation) });
+    rememberCreation(m, namespace, folder, vm);
+    vms.set(provider.name(m), vm);
+  }
+  const commands: string[][] = [];
+  provider.kubectl = async args => {
+    commands.push(args);
+    const vm = vms.get(args[2]!);
+    if (args[0] === "patch" && vm) {
+      (vm.spec as RecordValue).runStrategy = JSON.parse(args.at(-1)!).at(-1).value;
+      return "";
+    }
+    assert.equal(args[0], "get");
+    if (args[1] === "virtualmachine") return vm ? JSON.stringify(vm) : "";
+    assert.equal(args[1], "virtualmachineinstance");
+    return "";
+  };
+  let assigned = machines;
+  const runner = new HostRunner({ ...config, provider: "kubevirt", concurrency: 3 }, {
+    clock, transport: fakeTransport(() => ({ machines: structuredClone(assigned) })), providerFactory: () => provider,
+  });
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  runner.health = { status: "passed" };
+  return {
+    runner, provider, machines, vms, commands, clock,
+    async assign(next: RecordValue[]) { assigned = next; await runner.poll(); },
+    async step() { await runner.step(); await new Promise<void>(resolve => setImmediate(resolve)); },
+  };
+}
+
+test("stopped KubeVirt assignments make no kubectl calls between idle rechecks", async t => {
+  const f = await kubevirtStopFixture(t, 3);
+  await f.step();
+  assert.equal(f.commands.length, 6);
+  f.commands.length = 0;
+  for (let tick = 1; tick <= 70; tick++) {
+    f.clock.mono = 10 + tick / 10;
+    await f.step();
+  }
+  t.diagnostic(`${f.commands.length} named GETs in 7 seconds after initial stop confirmation`);
+  assert.equal(f.commands.length, 6);
+  for (const m of f.machines) {
+    assert.deepEqual(f.commands.filter(args => args[2] === f.provider.name(m)).map(args => args.slice(0, 2)),
+      [["get", "virtualmachine"], ["get", "virtualmachineinstance"]]);
+  }
+});
+
+test("KubeVirt stop cadence yields to desired changes, explicit power-off and retained fencing", async t => {
+  const f = await kubevirtStopFixture(t), m = f.machines[0]!, id = String(m.id);
+  await f.step();
+  f.commands.length = 0;
+  await f.assign([{ ...m, desired: "running" }]); await f.step();
+  assert.ok(f.commands.some(args => args[0] === "patch"));
+  f.commands.length = 0;
+  await f.assign([m]); await f.step();
+  assert.ok(f.commands.some(args => args[0] === "patch"));
+  assert.equal(f.runner.reports.get(id)?.state, "stopped");
+
+  f.commands.length = 0;
+  const request = randomUUID();
+  await f.assign([{ ...m, powerOffRequest: request }]); await f.step();
+  assert.equal(f.commands.length, 2);
+  assert.deepEqual(f.runner.reports.get(id), { state: "stopped", powerOffId: request });
+  await f.assign([m]); await f.step();
+  assert.equal(f.commands.length, 4);
+
+  const lease = { id: randomUUID(), revision: 1, state: "ready", controllerNow: 1000, authorizationDeadline: 1060 };
+  const leased = { ...m, lease };
+  const folder = f.runner.context(m).folder;
+  saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(m), leaseId: lease.id });
+  // Simulate an unresolved leased creation without a pinned VM UID.
+  f.vms.clear();
+  rmSync(join(folder, "kubevirt-owner.json"));
+  rmSync(join(folder, "kubevirt-create.json"));
+  beginCreation(leased, "guests", folder);
+  f.commands.length = 0;
+  await f.assign([leased]); await f.step();
+  assert.equal(f.commands.length, 1);
+  assert.equal(f.runner.reports.get(id)?.state, "unknown");
+  rmSync(join(folder, "kubevirt-create.json"));
+  await f.assign([]); await f.step(); await f.step();
+  assert.equal(f.commands.length, 5);
+  assert.deepEqual(f.runner.reports.get(id), { state: "stopped", leaseFenced: true });
+});
+
+test("KubeVirt idle rechecks detect drift and retry transient failures without cooldown", async t => {
+  const f = await kubevirtStopFixture(t), m = f.machines[0]!, id = String(m.id);
+  const kubectl = f.provider.kubectl;
+  const vm = f.vms.get(f.provider.name(m))!;
+  const vmi = JSON.stringify({ metadata: { namespace: "guests", name: f.provider.name(m), ownerReferences: [
+    { controller: true, uid: (vm.metadata as RecordValue).uid, name: f.provider.name(m), kind: "VirtualMachine", apiVersion: "kubevirt.io/v1" },
+  ] } });
+  let instance = "", fail = false;
+  f.provider.kubectl = async args => {
+    const result = await kubectl(args);
+    if (args[1] !== "virtualmachineinstance") return result;
+    if (fail) throw new Error("temporary API failure");
+    return instance;
+  };
+  await f.step();
+  instance = vmi;
+  f.clock.mono = 14.9; await f.step();
+  assert.equal(f.commands.length, 2);
+  f.clock.mono = 15; await f.step();
+  assert.equal(f.runner.reports.get(id)?.state, "stopping");
+  fail = true;
+  f.clock.mono = 15.1; await f.step();
+  assert.equal(f.runner.reports.get(id)?.state, "unknown");
+  instance = ""; fail = false;
+  f.clock.mono = 15.2; await f.step();
+  assert.equal(f.runner.reports.get(id)?.state, "stopped");
+  assert.equal(f.commands.length, 8);
+
+  await f.assign([{ ...m, desired: "running" }]); await f.assign([m]); await f.step();
+  assert.equal(f.commands.length, 10);
+  await f.assign([]); await f.assign([m]); await f.step();
+  assert.equal(f.commands.length, 12);
+});
+
+test("an in-flight KubeVirt stop check cannot defer work after assignment replacement", async t => {
+  const f = await kubevirtStopFixture(t), m = f.machines[0]!;
+  const kubectl = f.provider.kubectl;
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  f.provider.kubectl = async args => { await promise; return kubectl(args); };
+  try {
+    await f.step();
+    await f.assign([{ ...m, desired: "running" }]); await f.assign([m]);
+  } finally { release(); }
+  await new Promise<void>(settled => setImmediate(settled));
+  assert.equal(f.commands.length, 2);
+  await f.step();
+  assert.equal(f.commands.length, 4);
+});
+
 function maintenanceReplies() {
   const drainId = randomUUID();
   let response: RecordValue = { machines: [] }, challenge = 0, lastChallenge: string | undefined;

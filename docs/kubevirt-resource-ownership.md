@@ -27,6 +27,18 @@ do not create a new ownership receipt or qualify their usage. Observation never
 adopts a VM or writes ownership evidence. Existing unknown identities need
 separate review; restarting a runner does not establish measured ownership.
 
+## Stopped assignment checks
+
+After the worker confirms an ordinary KubeVirt assignment is stopped and the
+controller reports it as stopped, background reconciliation defers its next
+VM and VMI reads for five seconds. The periodic check detects out-of-band
+changes, such as a VMI appearing for a stopped assignment, when a worker slot
+is available. Assignment changes and explicit power-off requests are eligible
+on the next reconciliation tick.
+Leases, fencing and cleanup use their existing checks. Failed or inconclusive
+reads are eligible for retry on the next tick. Maintenance inspection still
+requires its own stop evidence.
+
 ## Owned pod graph
 
 The collector requires matching local assignment and VM ownership receipts,
