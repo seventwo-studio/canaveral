@@ -49,6 +49,7 @@ import { TunnelMappingError, tunnelStorageProblem } from './providers/android-tu
 import type { TunnelEndpoint, TunnelSpec } from './providers/android-tunnels.ts';
 import { WORKER_MESSAGES } from './control/session-protocol.ts';
 import { PressureMonitor, pressureConfig, readMemorySignal } from "./pressure.ts";
+import { modelConfig, runtimeInventory } from "./host-runtimes/index.ts";
 import type { PressureGates, PressureReport, PressureSample } from "./pressure.ts";
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
@@ -1940,6 +1941,7 @@ export class HostRunner {
   }
   async start(): Promise<this> {
     if (this.started || this.closed) throw new ServiceError("Host runner cannot be started twice.", 409);
+    modelConfig(this.config);
     this.lock = new StateLock(join(this.state, "host-runner.sqlite")); this.started = true;
     try {
       for (const image of this.config.templates as RecordValue[]) if (image.source && !image.catalogueImageId) {
@@ -2085,6 +2087,7 @@ export async function checkHost(config: HostConfig, dependencies: HostDependenci
         stateFilesystemAvailableBytes: filesystem.bavail * filesystem.bsize,
       },
       offer: runner.offer,
+      runtimes: await runtimeInventory(runner.config, { platform: dependencies.platform ?? process.platform }),
       installedImages: (runner.config.templates as RecordValue[]).map(normalizeTemplate),
       checks,
     };
