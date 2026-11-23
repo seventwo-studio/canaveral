@@ -52,8 +52,23 @@ and receipt identities; replacing the executable does not establish migration sa
 
 ## Kubernetes node bootstrap
 
-Create one legacy connection setup per node, using its configured host name,
-provider and capacity. Write the setup token alone to
+Create one legacy connection setup per node with the operator credential.
+Use provider `native` for an inference-only node or `libvirt` for a dedicated
+VM node. The controller scopes the setup to the node's configured name,
+provider and capacity. Claim each setup within 30 minutes.
+
+```sh
+canaveral --url "$controller" --token-file "$operator_token_file" \
+  connection-setups create --config host.json --id "$setup_uuid" \
+  --output-file enrollment-token
+```
+
+The command writes the token to a new private file. If issuance was
+interrupted before the file was saved, inspect `connection-setups list` and
+revoke the lost setup by its UUID before issuing a replacement. The same
+operation is available through `POST /v1/connection-setups`.
+
+Provision the token file at
 `/var/lib/canaverald/bootstrap/enrollment-token`. Give the daemon UID ownership
 of both paths, mode `0700` on the bootstrap directory and mode `0600` on the
 regular token file. The daemon rejects symlinks, hard links and files larger
