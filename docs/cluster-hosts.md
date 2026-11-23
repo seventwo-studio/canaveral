@@ -162,13 +162,16 @@ changes, which you can apply through configuration management instead:
 | Host account `canaverald` | UID `10001`, primary group `canaverald` (GID `10001`), no home, `nologin`, no supplementary groups | Gives polkit a name for the pod's UID |
 | QEMU account | Distribution default (`libvirt-qemu` on Debian and Ubuntu, `qemu` on Fedora; `CANAVERAL_QEMU_USER`) added to `canaveral-vm` | QEMU keeps its own UID and gains only VM storage |
 | `/etc/systemd/system/libvirtd.socket.d/canaveral.conf` | `[Socket]` `SocketGroup=canaveral-libvirt`, `SocketMode=0660` | Socket `root:canaveral-libvirt` `0660` |
-| `/etc/polkit-1/rules.d/60-canaveral-libvirt.rules` | Grants `org.libvirt.unix.manage` to user `canaverald` only | Keeps libvirtd's default `auth_unix_rw = "polkit"` |
+| `/etc/polkit-1/rules.d/60-canaveral-libvirt.rules` | Grants `org.libvirt.unix.manage` to user `canaverald` only | Used where the distribution keeps `auth_unix_rw = "polkit"` |
 | VM storage `/var/lib/libvirt/images/canaveral` | Owner `10001:canaveral-vm`, mode `2750` (`CANAVERAL_VM_STORAGE`) | Daemon owns it; new entries inherit the group |
 
 The script leaves `/etc/libvirt/qemu.conf` (`user`, `group`,
 `dynamic_ownership`), `/etc/libvirt/libvirtd.conf` (`auth_unix_rw`) and
-`/dev/kvm` at their distribution defaults, and refuses to continue if
-`qemu.conf` or `libvirtd.conf` overrides them. It restarts the libvirtd
+`/dev/kvm` at their distribution defaults. It refuses to continue if
+`qemu.conf` overrides `user`, `group` or `dynamic_ownership`, or if
+`auth_unix_rw` is anything other than `polkit` or `none`, and it prints the
+effective `auth_unix_rw`. The acceptance run also checks with `dpkg --verify`
+that both files are unmodified. It restarts the libvirtd
 sockets only when the socket or group settings change; running QEMU
 processes survive that. Restart the canaverald pod afterwards, because its bind
 mount still refers to the replaced socket. It finally checks that UID 10001
@@ -176,10 +179,19 @@ with group `canaveral-libvirt` can run `virsh domcapabilities --virttype kvm`,
 that the QEMU account can read VM storage and that it cannot enter
 `/var/lib/canaverald`.
 
-Both the kernel and polkit authorize the pod. The socket mode admits only
-processes in `canaveral-libvirt`, which the pod receives from its manifest.
-Polkit resolves the connecting UID through the host account database, not the
-process's supplemental groups, so the rule names the `canaverald` account. If
+The socket mode admits only processes in `canaveral-libvirt`, which the pod
+receives from its manifest. What happens next depends on the distribution's
+`auth_unix_rw`. With `polkit` (upstream, Debian, Fedora), polkit also has to
+allow the connection. It resolves the connecting UID through the host account
+database, not the process's supplemental groups, so the rule names the
+`canaverald` account. Ubuntu's packaged `libvirtd.conf` sets
+`auth_unix_rw = "none"`; the hosted acceptance run on Ubuntu 24.04 uses that
+default. Then the socket's owner, group and `0660` mode are the entire
+authorization: any host process or pod with `canaveral-libvirt` gets full
+libvirt authority, without a second check by account. Keep that group to the
+canaverald pod and root, and keep the admission policy and the namespace's RBAC
+limited, because a Pod that can mount the socket and add the group has the same
+authority. Canaveral does not change this setting. If
 you choose other GIDs, set the same values in the VM overlay's
 `supplementalGroups` and pass them to the script.
 

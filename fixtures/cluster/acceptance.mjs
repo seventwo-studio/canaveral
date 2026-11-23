@@ -177,11 +177,15 @@ if (host) {
       return JSON.stringify({ apiVersion: 'v1', kind: 'Pod', metadata: { name, namespace }, spec });
     };
     const dryRun = ['create', '--dry-run=server', '-o', 'name', '-f', '-'];
-    const privileged = spec => { spec.containers[0].securityContext.privileged = true; return spec; };
+    // The API itself rejects privileged with allowPrivilegeEscalation false.
+    const privileged = spec => {
+      spec.containers[0].securityContext = { privileged: true, capabilities: { drop: ['ALL'] } };
+      return spec;
+    };
     // The apiserver loads a new policy asynchronously; wait until it denies.
     await eventually('policy enforcement', () => {
-      try { command('kubectl', dryRun, { input: pod('admission-wait', privileged) }); return false; }
-      catch { return true; }
+      try { command('kubectl', dryRun, { input: pod('admission-wait', privileged), reveal: true }); return false; }
+      catch (error) { if (/canaverald-pod-security/.test(error.message)) return true; throw error; }
     }, 30);
     command('kubectl', dryRun, { input: pod('admission-allowed'), reveal: true });
     command('kubectl', dryRun, { input: pod('admission-other-namespace', privileged, 'default'), reveal: true });
@@ -386,12 +390,18 @@ async function exerciseVm() {
   const enrollment = await step('enroll the VM overlay and verify the mounted socket', async () => {
     // Configure the host exactly as docs/cluster-hosts.md "Host libvirt setup" instructs.
     const prepared = command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000, reveal: true });
-    assert.match(prepared, /^libvirt host ready: QEMU account libvirt-qemu in canaveral-vm \(GID 10002\); socket group canaveral-libvirt \(GID 10003\)/);
+    const auth = /^libvirt host ready: QEMU account libvirt-qemu in canaveral-vm \(GID 10002\); socket group canaveral-libvirt \(GID 10003\); auth_unix_rw (polkit|none);/.exec(prepared)?.[1];
+    assert(auth, prepared);
     assert.equal(sudo('stat', '-c', '%U:%G:%a', '/run/libvirt/libvirt-sock'), 'root:canaveral-libvirt:660');
     assert.equal(sudo('stat', '-c', '%U:%G:%a', storage), 'canaverald:canaveral-vm:2750');
-    for (const [file, setting] of [['/etc/libvirt/qemu.conf', /^\s*(user|group|dynamic_ownership)\s*=/m], ['/etc/libvirt/libvirtd.conf', /^\s*auth_unix_rw\s*=/m]]) {
-      assert.doesNotMatch(sudo('cat', file), setting, file + ' keeps its distribution default');
-    }
+    assert.doesNotMatch(sudo('cat', '/etc/libvirt/qemu.conf'), /^\s*(user|group|dynamic_ownership)\s*=/m);
+    // dpkg lists modified conffiles; both libvirt configurations stay as packaged.
+    const owners = command('dpkg-query', ['-S', '/etc/libvirt/libvirtd.conf', '/etc/libvirt/qemu.conf'])
+      .split('\n').map(line => line.split(':')[0]);
+    let modified;
+    try { modified = execFileSync('dpkg', ['--verify', ...new Set(owners)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (error) { modified = String(error.stdout ?? ''); }
+    assert.doesNotMatch(modified, /\/etc\/libvirt\/(libvirtd|qemu)\.conf/, modified);
     assert(command('id', ['-nG', 'libvirt-qemu']).split(' ').includes('canaveral-vm'));
     assert.equal(command('id', ['-nG', 'canaverald']), 'canaverald');
     assert.notEqual(sudo('stat', '-c', '%g', '/dev/kvm'), '10001');
@@ -451,7 +461,7 @@ async function exerciseVm() {
     const libvirt = status.find(row => row.id === 'libvirt');
     assert.equal(libvirt?.state, 'verified', JSON.stringify(libvirt));
     assert.equal(libvirt.qualified, false);
-    return { hostId: view.id, libvirt: libvirt.version, qualified: libvirt.qualified, kvmProbe: 'domcapabilities over the mounted socket',
+    return { hostId: view.id, libvirt: libvirt.version, qualified: libvirt.qualified, kvmProbe: 'domcapabilities over the mounted socket', socketAuth: auth,
       socket: 'root:canaveral-libvirt:660', storage: 'canaverald:canaveral-vm:2750', replacedUnclaimedToken: true };
   });
   if (!enrollment) return;

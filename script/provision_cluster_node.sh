@@ -140,10 +140,14 @@ libvirt_host() {
   if grep -Eq '^[[:space:]]*(user|group|dynamic_ownership)[[:space:]]*=' /etc/libvirt/qemu.conf 2>/dev/null; then
     fail "/etc/libvirt/qemu.conf overrides user, group or dynamic_ownership. Restore the distribution defaults; Canaveral domains set their DAC label per domain."
   fi
-  if grep -Eq '^[[:space:]]*auth_unix_rw[[:space:]]*=' /etc/libvirt/libvirtd.conf 2>/dev/null &&
-     ! grep -Eq '^[[:space:]]*auth_unix_rw[[:space:]]*=[[:space:]]*"polkit"' /etc/libvirt/libvirtd.conf; then
-    fail "/etc/libvirt/libvirtd.conf overrides auth_unix_rw. Restore the polkit default."
-  fi
+  # Keep the distribution's socket authentication. Debian and Fedora use polkit
+  # (the rule below applies); Ubuntu ships auth_unix_rw = "none", where the
+  # socket's group and mode are the whole authorization boundary.
+  local auth
+  auth=$(sed -nE 's/^[[:space:]]*auth_unix_rw[[:space:]]*=[[:space:]]*"([a-z]+)".*/\1/p' /etc/libvirt/libvirtd.conf 2>/dev/null | tail -n 1)
+  auth=${auth:-polkit}
+  [[ "$auth" == polkit || "$auth" == none ]] ||
+    fail "/etc/libvirt/libvirtd.conf sets auth_unix_rw = \"$auth\"; use the distribution default (polkit or none)."
 
   local changed=0 entry
   ensure_group "$vm_group" "$vm_gid"
@@ -205,8 +209,8 @@ libvirt_host() {
   if [[ -d "$state" ]] && setpriv --reuid "$qemu_uid" --regid "$(id -g -- "$qemu_user")" --init-groups test -x "$state"; then
     fail "$qemu_user can enter $state; the daemon state directory must stay 0700."
   fi
-  printf 'libvirt host ready: QEMU account %s in %s (GID %s); socket group %s (GID %s); storage %s.\n' \
-    "$qemu_user" "$vm_group" "$vm_gid" "$socket_group" "$socket_gid" "$storage"
+  printf 'libvirt host ready: QEMU account %s in %s (GID %s); socket group %s (GID %s); auth_unix_rw %s; storage %s.\n' \
+    "$qemu_user" "$vm_group" "$vm_gid" "$socket_group" "$socket_gid" "$auth" "$storage"
 }
 
 case "$mode" in
