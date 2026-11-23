@@ -136,5 +136,9 @@ test('workflow keeps tag identity, signing and provenance ahead of final publica
  assert.ok(w.indexOf('Attest deploy provenance')<w.indexOf('cosign sign'));
  assert.ok(w.indexOf('cosign sign')<w.indexOf('node script/publish_release.mjs --finalize'));
  assert.ok(!w.slice(w.indexOf('env:'),w.indexOf('concurrency:')).includes('GITHUB_TOKEN'));
- assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,3);
+ assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,4);
+ const daemon=w.slice(w.indexOf('Attest canaverald provenance'),w.indexOf('Attest deploy provenance'));
+ assert.match(daemon,/subject-name: ghcr\.io\/seventwo-studio\/canaveral\/canaverald\n/);
+ assert.match(daemon,/subject-digest: \$\{\{ steps\.daemon\.outputs\.digest \}\}/);
+ assert.match(daemon,/push-to-registry: true/);
 });
