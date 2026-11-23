@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
-import { InfrastructureStore } from "../../src/control/infrastructure.ts";
+import { createModule, InfrastructureStore } from "../../src/control/infrastructure.ts";
+import { legacyDigest } from "../../src/control/templates.ts";
+import { ServiceError } from "../../src/errors.ts";
+import { cleanupKubernetesEnrollment } from "../../src/host-bootstrap.ts";
 import { MachineStore } from "../../src/control/machines.ts";
 import { HostRunner } from "../../src/host.ts";
 import type { HostConfig, HostTransport } from "../../src/host.ts";
@@ -169,4 +172,155 @@ test("termination during enrollment keeps the pending claim and releases its loc
   assert.equal(existsSync(intent), true);
   assert.equal(existsSync(path), true);
   new StateLock(join(config.stateDir, "host-runner.sqlite")).close();
+});
+
+function leftover(f: ReturnType<typeof fixture>, token = "t".repeat(43)) {
+  const id = randomUUID(), credential = "c".repeat(43), orchestrator = f.config.url;
+  saveRecord(f.identity, { id, credential, orchestrator });
+  saveRecord(f.intent, { version: 1, tokenDigest: legacyDigest(token), id, credential, orchestrator, offer: {} });
+  writeFileSync(f.path, token, { mode: 0o600 });
+  return { id, credential, orchestrator, token };
+}
+const refuse: HostTransport = { request: async () => assert.fail("Existing identity must skip enrollment") };
+
+test("Kubernetes start with an existing identity removes the matching leftover claim and token", async t => {
+  const f = fixture(t);
+  const saved = leftover(f);
+  const logs: string[] = [];
+  const runner = new HostRunner(f.config, { transport: refuse, log: message => logs.push(message) });
+  await runner.connect();
+  assert.equal(runner.identity?.id, saved.id);
+  assert.equal(existsSync(f.intent), false);
+  assert.equal(existsSync(f.path), false);
+  assert.deepEqual(logs, []);
+});
+
+test("Kubernetes start keeps leftovers that do not match the identity or claim", async t => {
+  const f = fixture(t);
+  for (const mismatch of [{ id: randomUUID() }, { credential: "d".repeat(43) }, { orchestrator: "https://other.example.test" }]) {
+    const saved = leftover(f);
+    saveRecord(f.intent, { version: 1, tokenDigest: legacyDigest(saved.token), id: saved.id, credential: saved.credential, orchestrator: saved.orchestrator, offer: {}, ...mismatch });
+    await new HostRunner(f.config, { transport: refuse }).connect();
+    assert.equal(existsSync(f.intent), true);
+    assert.equal(existsSync(f.path), true);
+    rmSync(f.intent); rmSync(f.path);
+  }
+  // A token that is not the claim's token stays; the matching claim itself is retired.
+  leftover(f);
+  writeFileSync(f.path, "u".repeat(43), { mode: 0o600 });
+  await new HostRunner(f.config, { transport: refuse }).connect();
+  assert.equal(existsSync(f.intent), false);
+  assert.equal(readFileSync(f.path, "utf8"), "u".repeat(43));
+  rmSync(f.path);
+  // Unsafe claim files are never trusted: link and broad mode.
+  for (const unsafe of [() => chmodSync(f.intent, 0o644), () => { rmSync(f.intent); symlinkSync(f.identity, f.intent); }]) {
+    leftover(f);
+    unsafe();
+    await new HostRunner(f.config, { transport: refuse }).connect();
+    assert.equal(existsSync(f.path), true);
+    assert.equal(existsSync(f.intent), true);
+    rmSync(f.intent); rmSync(f.path);
+  }
+});
+
+test("Kubernetes cleanup failures after the identity commit are logged and never fail startup", async t => {
+  const f = fixture(t);
+  const token = "t".repeat(43);
+  writeFileSync(f.path, token, { mode: 0o600 });
+  const logs: string[] = [];
+  // Crash between steps: removal of the token fails because the bootstrap directory became unsafe.
+  const transport: HostTransport = { request: async (_method, _endpoint, body) => { chmodSync(dirname(f.path), 0o500); return { id: body.id }; } };
+  const first = new HostRunner(f.config, { transport, log: message => logs.push(message) });
+  try { await first.connect(); } finally { chmodSync(dirname(f.path), 0o700); }
+  assert.equal(first.identity?.id, readRecord(f.identity).id);
+  assert.equal(existsSync(f.path), true);
+  assert.equal(existsSync(f.intent), true);
+  assert.equal(logs.length, 1);
+  assert.equal(JSON.stringify(logs).includes(token), false);
+  // Next start finishes the cleanup without contacting the controller.
+  await new HostRunner(f.config, { transport: refuse }).connect();
+  assert.equal(existsSync(f.path), false);
+  assert.equal(existsSync(f.intent), false);
+});
+
+test("Kubernetes cleanup keeps the claim when removing the token fails and tolerates failing removal", t => {
+  const f = fixture(t), saved = leftover(f), logs: string[] = [];
+  const failing = (): never => { throw new Error("EIO"); };
+  assert.doesNotThrow(() => cleanupKubernetesEnrollment(f.config.stateDir, saved, message => logs.push(message), failing));
+  assert.equal(existsSync(f.intent), true);
+  assert.equal(existsSync(f.path), true);
+  assert.equal(logs.length, 1);
+  assert.doesNotThrow(() => cleanupKubernetesEnrollment(f.config.stateDir, saved, () => { throw new Error("log failed"); }, failing));
+  // Token already gone, intent removal fails: still log-only.
+  rmSync(f.path);
+  assert.doesNotThrow(() => cleanupKubernetesEnrollment(f.config.stateDir, saved, message => logs.push(message), failing));
+  assert.equal(existsSync(f.intent), true);
+  cleanupKubernetesEnrollment(f.config.stateDir, saved);
+  assert.equal(existsSync(f.intent), false);
+});
+
+test("a rejected claim reports an explicit recoverable code and keeps the intent", async t => {
+  const f = fixture(t), first = "k".repeat(43), second = "m".repeat(43);
+  writeFileSync(f.path, first, { mode: 0o600 });
+  const calls: string[] = [];
+  const transport: HostTransport = { request: async (_method, _endpoint, body, bearer) => {
+    calls.push(bearer);
+    if (bearer === first) throw new ServiceError("Setup credential is expired, revoked or already used.", 401);
+    return { id: body.id };
+  } };
+  const runner = new HostRunner(f.config, { transport });
+  await assert.rejects(runner.connect(), (error: ServiceError) => error.code === "kubernetes_bootstrap_intent_rejected" && error.status === 409 && /enrollment-intent\.json/.test(error.message));
+  const saved = readRecord(f.intent);
+  // A replacement token alone is refused: the saved claim may correspond to a lost success.
+  writeFileSync(f.path, second, { mode: 0o600 });
+  await assert.rejects(runner.connect(), { code: "kubernetes_bootstrap_recovery_required" });
+  assert.deepEqual(readRecord(f.intent), saved);
+  assert.deepEqual(calls, [first]);
+  // Operator recovery: no host was enrolled for that id, so retire the intent and provide the new token.
+  rmSync(f.intent);
+  await runner.connect();
+  assert.equal(runner.identity?.id === saved.id, false);
+  assert.deepEqual(calls, [first, second]);
+  assert.equal(existsSync(f.intent), false);
+  assert.equal(existsSync(f.path), false);
+  // A malformed reply is not a rejection.
+  const f2 = fixture(t);
+  writeFileSync(f2.path, first, { mode: 0o600 });
+  await assert.rejects(new HostRunner(f2.config, { transport: { request: async () => ({ id: randomUUID() }) } }).connect(), { code: "kubernetes_bootstrap_recovery_required" });
+});
+
+test("native setup tokens stay admin-minted, single-claim, 30-minute and bound on the legacy enrollment route", t => {
+  const f = fixture(t), now = { value: 1000 };
+  const db = new SqliteStore(join(f.root, "legacy.sqlite"), () => now.value);
+  const global = "g".repeat(43);
+  const machines = new MachineStore(db, { adminToken: "a".repeat(43), enrollmentToken: global, controllerId: randomUUID() });
+  const setups = new InfrastructureStore(db);
+  const spec = { name: "native-host", provider: "native", capacity: { cpu: 2, memoryMiB: 1024, diskGiB: 10 } };
+  const issued = setups.createSetup({ id: randomUUID(), ...spec });
+  const token = String(issued.enrollmentToken);
+  assert.equal(issued.expiresAt, now.value + 1800);
+  const offer = { ...spec, templates: [] };
+  const host = randomUUID(), credential = "h".repeat(43);
+  const legacy = (bearer: string, body: RecordValue) => machines.handle({
+    method: "POST", path: "/v1/hosts/enroll", parts: ["v1", "hosts", "enroll"], query: new URLSearchParams(),
+    token: bearer, body, principal: () => assert.fail("A setup token has no operator authority"),
+  })!.body as RecordValue;
+  // Minting is admin-only: setup tokens cannot mint more setups.
+  const module = createModule(db, { adminToken: "a".repeat(43), controllerId: randomUUID() });
+  assert.throws(() => module.handle({ method: "POST", path: "/v1/connection-setups", parts: ["v1", "connection-setups"], query: new URLSearchParams(), token, body: { id: randomUUID(), ...spec }, principal: () => { throw new Error("Not an account credential."); } }));
+  // Bound to name, provider and capacity.
+  for (const changed of [{ name: "renamed" }, { provider: "libvirt" }, { capacity: { cpu: 4, memoryMiB: 1024, diskGiB: 10 } }]) {
+    assert.throws(() => legacy(token, { id: host, credential, offer: { ...offer, ...changed } }), { status: 403 });
+  }
+  // Single claim by one host identity, retried idempotently; another identity is refused.
+  assert.deepEqual(legacy(token, { id: host, credential, offer }), { id: host });
+  assert.deepEqual(legacy(token, { id: host, credential, offer }), { id: host });
+  assert.throws(() => legacy(token, { id: randomUUID(), credential, offer }), { status: 401 });
+  // Expiry applies only before the claim; revocation applies always.
+  const second = setups.createSetup({ id: randomUUID(), ...spec });
+  now.value += 1801;
+  assert.throws(() => legacy(String(second.enrollmentToken), { id: randomUUID(), credential, offer }), { status: 401 });
+  const third = setups.createSetup({ id: randomUUID(), ...spec });
+  setups.revokeSetup(String(third.id));
+  assert.throws(() => legacy(String(third.enrollmentToken), { id: randomUUID(), credential, offer }), { status: 401 });
 });
