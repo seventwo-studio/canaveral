@@ -399,7 +399,8 @@ async function exerciseVm() {
     const owners = command('dpkg-query', ['-S', '/etc/libvirt/libvirtd.conf', '/etc/libvirt/qemu.conf'])
       .split('\n').map(line => line.split(':')[0]);
     let modified;
-    try { modified = execFileSync('dpkg', ['--verify', ...new Set(owners)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
+    // Root can read the private conffiles; an unreadable file would print '?' fields.
+    try { modified = execFileSync('sudo', ['dpkg', '--verify', ...new Set(owners)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (error) { modified = String(error.stdout ?? ''); }
     assert.doesNotMatch(modified, /\/etc\/libvirt\/(libvirtd|qemu)\.conf/, modified);
     assert(command('id', ['-nG', 'libvirt-qemu']).split(' ').includes('canaveral-vm'));
@@ -479,40 +480,17 @@ async function exerciseVm() {
       machine = await call(route);
       return machine.observed === 'running' && machine.ready;
     }).catch(error => {
+      // Host-side state only: modes, libvirt state and the domain's QEMU log tail.
       const native = virsh('list', '--all', '--uuid').split('\n').includes(machineId);
-      const nativeState = native ? virsh('domstate', machineId) : 'undefined';
-      const xml = native ? virsh('dumpxml', machineId) : '';
-      const diskSource = xml.match(/<source file=['"][^'"]*disk\.qcow2['"]([^>]*)>/)?.[1];
-      const detail = String(machine?.detail ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 180);
-      const preparation = JSON.parse(inPod('node', '-e', `
-        const { readFileSync, lstatSync } = require('node:fs');
-        const { spawnSync } = require('node:child_process');
-        const { dirname } = require('node:path');
-        const [state, machine, disk] = process.argv.slice(1);
-        const folder = state + '/machines/' + machine;
-        const check = path => {
-          try { return lstatSync(path).size; }
-          catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
-        };
-        const journal = folder + '/libvirt-execution.json';
-        const probe = spawnSync('cat', ['/dev/stdin'], { input: 'cluster-acceptance', encoding: 'utf8' });
-        console.log(JSON.stringify({
-          assignment: check(folder + '/assignment.json') !== null,
-          phase: check(journal) === null ? null : JSON.parse(readFileSync(journal, 'utf8')).phase,
-          binding: check(folder + '/libvirt-binding.json') !== null,
-          diskBytes: check(disk), definition: check(dirname(disk) + '/domain.xml') !== null,
-          reopenChildStdin: probe.status === 0 && probe.stdout === 'cluster-acceptance',
-          stdinError: probe.status === 0 ? undefined : probe.stderr.trim(),
-        }));
-      `, state, machineId, disk));
+      const tail = (bin, args) => { try { return command(bin, args).replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(-600); } catch (failure) { return failure.message; } };
       const context = JSON.stringify({
-        observed: machine?.observed, detail, nativeState, diskSourceHasIndex: diskSource?.includes('index='), preparation,
+        observed: machine?.observed,
+        detail: String(machine?.detail ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 300),
+        nativeState: native ? virsh('domstate', machineId) : 'undefined',
+        modes: tail('sudo', ['stat', '-c', '%n %U:%G %a', storage, storage + '/' + machineId, disk, template.image]),
+        qemuLog: tail('sudo', ['tail', '-n', '8', '/var/log/libvirt/qemu/cvm-' + machineId + '.log']),
+        libvirtd: tail('sudo', ['journalctl', '-u', 'libvirtd', '--no-pager', '-n', '8', '-o', 'cat']),
       });
-      if (machine?.observed === 'unknown' && !native && preparation.assignment && preparation.binding &&
-          preparation.phase === 'prepared' && preparation.diskBytes > 0 && preparation.definition &&
-          !preparation.reopenChildStdin && preparation.stdinError === 'cat: /dev/stdin: No such device or address') {
-        throw new ExpectedGap('Libvirt definition is blocked by virsh define /dev/stdin on the Node child pipe. Retained preparation was not replayed. ' + context);
-      }
       throw new Error(error.message + ': ' + context);
     });
     assert.equal(virsh('domstate', machineId), 'running');
