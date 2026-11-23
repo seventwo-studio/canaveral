@@ -1,5 +1,28 @@
 # Libvirt lease supervision component
 
+## Production adapter design
+
+Use a Linux Node-API shared library and a dedicated Node child. Node-API lets
+the child use the existing TypeScript ownership and journal checks with
+libvirt's C API. It also exposes the existing fatal kernel deadline, native
+`CLOCK_BOOTTIME`, and Linux file leases without a second RPC process holding
+the libvirt connection. Build the addon from reviewed source and load it from
+the checked artifact descriptor. The daemon uses the same addon for stopped
+observation and storage fencing. Its observation connections never start VMs.
+
+The child owns the connection from paused creation through resume and
+execution. The kernel closes it when the child exits, even while the child
+is blocked in libvirt. The deadline continues independently of the daemon's
+event loop. Daemon death kills the child immediately through the parent-death
+guard. A daemon restart reconciles the original assignment and cannot adopt or
+restart that child. Kubernetes uses the mounted local libvirt socket and the
+same ownership and cleanup checks on node-local storage.
+
+Administrative VMs keep their persistent definition and ordinary
+`virsh start` on both deployment types. Their lifecycle is operator-owned
+across daemon restarts and pod replacement. Consumer lease expiry and
+connection loss apply only to lease-owned domains.
+
 `coordination/src/providers/libvirt.ts` implements a one-use deadline supervisor,
 domain ownership validation, private execution journals and a dedicated native
 libvirt connection. A companion C source implements Linux kernel deadlines.
