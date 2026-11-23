@@ -21,6 +21,7 @@ import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { enabledRuntimes, hostProvider, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
 import { credential, sshPreparation, userData } from "./control/preparation.ts";
+import { localLibvirtUri } from "./providers/libvirt.ts";
 import { createProvider } from "./providers/index.ts";
 import type { NativeProvider } from "./providers/index.ts";
 import { ImageLibrary, prepareImage, specification } from "./control/images.ts";
@@ -53,7 +54,7 @@ import { modelConfig, runtimeInventory } from "./host-runtimes/index.ts";
 import type { PressureGates, PressureReport, PressureSample } from "./pressure.ts";
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
-import { clusterContainerdCode, kubernetesDeployment, requireManagedUpdates } from "./host-deployment.ts";
+import { kubernetesDeployment, requireKubernetesBackends, requireManagedUpdates } from "./host-deployment.ts";
 import { enrollKubernetesHost } from "./host-bootstrap.ts";
 
 export interface HostConfig extends RecordValue {
@@ -324,7 +325,8 @@ export class HostRunner {
   imageAdapter: HostImageAdapter;
   private inferenceAdapter: HostTaskAdapter | undefined;
   private sessionAdapter: HostTaskAdapter | undefined;
-  readonly guard: LeaseGuard;
+  private leaseGuard: LeaseGuard | undefined;
+  get guard(): LeaseGuard { return this.leaseGuard ??= new LeaseGuard(this.state, this.clock); }
   readonly clock: ExecutionClock;
   readonly processes = new ProcessSupervisor();
   readonly reports = new Map<string, RecordValue>();
@@ -458,12 +460,15 @@ export class HostRunner {
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
     this.kubernetes = kubernetesDeployment(config);
     if (this.kubernetes) {
-      if (config.provider === "containerd" || (Array.isArray(config.runtimes)
-        ? config.runtimes.includes("containerd") : Object.hasOwn(object(config.runtimes ?? {}), "containerd"))) {
-        throw new ServiceError("containerd is disabled in Kubernetes.", 409, { code: clusterContainerdCode });
-      }
+      requireKubernetesBackends(config);
       if (config.enrollmentToken !== undefined) throw new ServiceError("Kubernetes enrollment requires the state bootstrap token file.", 409, { code: "kubernetes_bootstrap_token_invalid" });
       if (config.updates !== undefined) requireManagedUpdates(config);
+      const runtimes = config.provider === "linux" ? enabledRuntimes(config) : {};
+      const libvirt = config.provider === "libvirt" ? config : runtimes.libvirt;
+      if ((!libvirt && config.provider !== "native") || Object.keys(runtimes).length > 1) {
+        throw new ServiceError("Kubernetes hosts support native inference and libvirt runtimes.", 400);
+      }
+      if (libvirt) localLibvirtUri({ ...config, ...libvirt, deployment: config.deployment });
     }
     hostProvider(config.provider);
     // Validate trust before writing identity, even with an injected transport.
@@ -491,7 +496,6 @@ export class HostRunner {
     this.concurrency = Number(config.concurrency ?? 2);
     if (!Number.isFinite(this.pollInterval) || this.pollInterval < .25 || this.pollInterval > 5 || !Number.isSafeInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 32) throw new ServiceError("Invalid host poll interval or concurrency.", 400);
     this.clock = clock;
-    this.guard = new LeaseGuard(this.state, this.clock);
     this.idlePolicy = upkeepPolicy(config.upkeep, (this.config.templates as RecordValue[]).map(template => String(template.id)));
     const pressure = pressureConfig(config.pressure);
     this.pressureGates = pressure.gates;
@@ -533,7 +537,7 @@ export class HostRunner {
     // Leased Android guests must not reach the controller's port on this host; the probe needs only the number.
     try { const controller = new URL(String(this.config.url)); clean.leaseControllerPort = Number(controller.port || (controller.protocol === "https:" ? 443 : 80)); } catch { /* no controller URL */ }
     if (Object.hasOwn(HOST_RUNTIMES, provider)) {
-      for (const [kind, options] of Object.entries(enabledRuntimes(this.config))) this.runtimes.set(kind, await factory({ ...clean, ...options, provider: kind,
+      for (const [kind, options] of Object.entries(enabledRuntimes(this.config))) this.runtimes.set(kind, await factory({ ...clean, ...options, provider: kind, deployment: clean.deployment,
         storage: options.storage ?? join(String(clean.storage), kind), templates: (clean.templates as RecordValue[]).filter(i => runtimeFor(this.config, i) === kind) }, String(options.stateDirectory ?? this.state)));
     } else if (provider !== "native") this.runtimes.set(provider, await factory(clean, this.state));
     if (!this.guest && (this.config.templates as RecordValue[]).some(t => t.guestAccess)) this.guest = createGuestAccess(clean, this.state);
@@ -885,7 +889,7 @@ export class HostRunner {
   private cancelUnauthorized(): void { for (const item of this.active.values()) if (!item.authorized()) item.controller.abort(); }
   private publish(target: Map<string, RecordValue>, id: string, report: RecordValue): void { target.set(id, report); this.saveReports(); }
   private launch(key: string, authorized: () => boolean, work: (context: HostWorkContext) => Promise<void>): void {
-    if (this.active.has(key)) return;
+    if (this.closed || this.active.has(key)) return;
     this.updateEpoch++;
     const controller = new AbortController();
     const context = { signal: controller.signal, authorized, processes: this.processes };
@@ -1637,21 +1641,24 @@ export class HostRunner {
     }
     return this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
   }
-  async updateIdle(): Promise<IdleReceipt> {
+  async updateIdle(readOnly = false): Promise<IdleReceipt> {
     if (!this.idleEligible()) return NOT_IDLE;
     const epoch = this.updateEpoch;
     const retained = new Map(this.updateAssignments);
     for (const machine of this.guard.assignments(this.assignments)) retained.set(String(machine.id), machine);
+    if (this.kubernetes && [...retained.values()].some(machine => machine.leaseCleanup || machine.deletion)) return NOT_IDLE;
     try {
       // Unknown older local assignment directories cannot be inferred stopped from an empty heartbeat.
       for (const root of this.machineRoots()) {
         noLinks(root);
         if (present(root) && readdirSync(root).some(id => !retained.has(id) && !this.guard.records.get(id)?.retired)) return NOT_IDLE;
       }
-      if (!(await this.inspectStopped(retained)).workloadsStopped) return NOT_IDLE;
-      // Only stopped assignments reach helper closure; a live VM is never closed for an update.
-      await this.sweepAccess(new Set());
-      for (const machine of retained.values()) await this.context(machine).runtime.closeShells?.(machine);
+      if (!(await this.inspectStopped(retained, readOnly)).workloadsStopped) return NOT_IDLE;
+      if (!readOnly) {
+        // Only stopped assignments reach helper closure; a live VM is never closed for an update.
+        await this.sweepAccess(new Set());
+        for (const machine of retained.values()) await this.context(machine).runtime.closeShells?.(machine);
+      }
     } catch { return NOT_IDLE; }
     return epoch === this.updateEpoch && this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
   }
@@ -1981,6 +1988,9 @@ export class HostRunner {
     modelConfig(this.config);
     this.lock = new StateLock(join(this.state, "host-runner.sqlite")); this.started = true;
     try {
+      // Load the lease checkpoint under the state lock before enrollment can publish a new identity.
+      this.leaseGuard ??= new LeaseGuard(this.state, this.clock);
+      if (this.kubernetes) await this.connect();
       for (const image of this.config.templates as RecordValue[]) if (image.source && !image.catalogueImageId) {
         const runtimeConfig = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? enabledRuntimes(this.config)[runtimeFor(this.config, image)] : undefined;
         const cache = runtimeConfig?.imageCache ?? this.config.imageCache;
@@ -1991,7 +2001,7 @@ export class HostRunner {
       await this.initializeProviders();
       this.stopController.signal.throwIfAborted();
       this.refreshBaselines();
-      try { await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
+      try { if (!this.kubernetes) await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
       this.stopController.signal.throwIfAborted();
       if (this.updateAdmissionBlocked) { await this.poll(); if (!this.fresh()) throw unknownOutcome("Managed startup needs fresh authenticated controller contact."); }
       this.loops.push(this.loop(async () => { try { await this.poll(); } catch { this.log("Host heartbeat failed; enforcing retained execution deadlines."); } }, this.pollInterval * 1000));
@@ -2015,13 +2025,25 @@ export class HostRunner {
     return this.shutdown ??= this.kubernetes && this.started ? this.closeKubernetes() : this.closeWorkers();
   }
   private get shutdownGraceMs(): number { return (this.config.shutdownGraceSeconds ?? DEFAULT_SHUTDOWN_GRACE_SECONDS) * 1000; }
+  private async awaitQuiescence(signal: AbortSignal): Promise<boolean> {
+    while (!signal.aborted) {
+      if ((await this.updateIdle(true)).workloadsStopped) return !signal.aborted;
+      await delay(100, signal);
+    }
+    return false;
+  }
   private async closeKubernetes(): Promise<void> {
     this.fenceUpdateAdmission();
+    const quiescence = new AbortController();
+    const proof = this.awaitQuiescence(quiescence.signal).catch(() => false);
     try {
       await bounded((async () => {
-        const proof = await this.updateIdle();
-        await this.closeWorkers();
-        if (!proof.workloadsStopped) throw new Error("Workload stop was unconfirmed.");
+        // Set aside time for worker teardown even if a stop probe is slow.
+        const budget = this.shutdownGraceMs - Math.min(20_000, Math.floor(this.shutdownGraceMs / 2));
+        const stopped = await bounded(proof, budget).catch(() => false);
+        quiescence.abort();
+        await this.closeWorkers([proof]);
+        if (!stopped) throw shutdownIncomplete();
       })(), this.shutdownGraceMs);
     } catch {
       this.stopController.abort();
@@ -2029,27 +2051,34 @@ export class HostRunner {
       throw shutdownIncomplete();
     }
   }
-  private async closeWorkers(): Promise<void> {
+  private async closeWorkers(quiescence: Promise<unknown>[] = []): Promise<void> {
     if (this.closed) return; this.closed = true;
     // Live captures stop first, while this runner still holds the authority to stop and prove
     // each guest recorder; afterwards a capture could only be left unknown. With no capture
     // running this is immediate, so a runner without viewers stops as promptly as before.
-    if (this.liveCaptures) await bounded(this.liveCaptures.close(), 20000).catch(() => this.log("Live capture cleanup was not confirmed; its reservation is retained."));
+    let failed = false;
+    const pending: Promise<unknown>[] = [];
+    const cleanup = async (work: () => Promise<unknown>, timeout = 5000): Promise<void> => {
+      try {
+        const operation = work();
+        pending.push(operation);
+        await bounded(operation, timeout);
+      } catch { failed = true; this.log("Host cleanup was not confirmed; inspect retained state."); }
+    };
+    if (this.liveCaptures) await cleanup(() => this.liveCaptures!.close(), 20_000);
     this.stopController.abort();
     for (const work of this.active.values()) work.controller.abort();
-    let failed = false;
-    const cleanup = async (work: () => Promise<unknown>): Promise<void> => { try { await bounded(work(), 5000); } catch { failed = true; this.log("Host cleanup was not confirmed; inspect retained state."); } };
     await cleanup(() => this.processes.close());
     await cleanup(() => this.sweepAccess(new Set()));
-    for (const machine of this.guard.assignments(this.assignments)) await cleanup(() => this.closeAccessShells(machine));
+    for (const machine of this.leaseGuard?.assignments(this.assignments) ?? []) await cleanup(() => this.closeAccessShells(machine));
     if (this.outboundSessions) await cleanup(() => this.outboundSessions!.close());
     if (this.displayControls) await cleanup(async () => this.displayControls!.close());
     for (const adapter of [this.guest, this.inferenceAdapter, this.imageAdapter, this.sessionAdapter, ...new Set([...this.runtimes.values(), ...this.retainedAccess])]) if (adapter?.close) await cleanup(() => adapter.close!());
-    await cleanup(() => Promise.all([...this.loops, ...[...this.active.values()].map(w => w.promise)]));
+    await cleanup(() => Promise.allSettled([...quiescence, ...this.loops, ...[...this.active.values()].map(w => w.promise)]));
     // A still-running in-process adapter could mutate state. Keep the lock until
     // that work settles; do not let another host adopt it after a timeout.
     if (!failed) { this.lock?.close(); this.lock = undefined; }
-    else { void Promise.allSettled([...this.loops, ...[...this.active.values()].map(w => w.promise)]).then(() => { this.lock?.close(); this.lock = undefined; }); throw shutdownIncomplete(); }
+    else { void Promise.allSettled(pending).then(() => { this.lock?.close(); this.lock = undefined; }); throw shutdownIncomplete(); }
   }
 }
 function shutdownIncomplete(): ServiceError {
