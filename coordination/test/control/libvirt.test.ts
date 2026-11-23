@@ -151,10 +151,10 @@ for(const lost of [false,true])test(`fresh preparation persists binding before d
   const f=fixture(t);for(const n of ["libvirt-binding.json","libvirt-execution.json"])fs.unlinkSync(join(f.folder,n));fs.rmSync(f.storage,{recursive:true});let creates=0,defines=0,launches=0;let definition="";
   f.adapters.childExecutable="/fixture/child";f.adapters.childArguments=()=>["child"];
   const child:ProcessBirth={pid:12345,createdAt:80,parentPid:process.pid,uid:process.getuid!(),executable:"/fixture/child",argv:["child"],zombie:false};f.adapters.processBirth=()=>child;f.adapters.launch=()=>{launches++;return{pid:child.pid,createdAt:child.createdAt};};
-  f.adapters.run=async(argv,options)=>{
+  f.adapters.run=async(argv)=>{
     if(argv[0]==="qemu-img"&&argv[1]==="info")return JSON.stringify({"virtual-size":1024,format:"raw"});
     if(argv[0]==="qemu-img"&&argv[1]==="create"){creates++;return"";}
-    if(argv[3]==="define"){defines++;assert.equal(argv[4],"/dev/stdin");definition=options.input!;assert.ok(definition.includes("<metadata>"));assert.ok(fs.existsSync(join(f.folder,"libvirt-binding.json")));assert.equal(JSON.parse(fs.readFileSync(join(f.folder,"libvirt-execution.json"),"utf8")).phase,"prepared");if(lost)throw Error("lost define ack");return"";}
+    if(argv[3]==="define"){defines++;assert.match(argv[4]!,/temporary-.*\.xml$/);assert.equal(fs.statSync(argv[4]!).mode&0o777,0o600);definition=fs.readFileSync(argv[4]!,"utf8");assert.ok(definition.includes("<metadata>"));assert.ok(fs.existsSync(join(f.folder,"libvirt-binding.json")));assert.equal(JSON.parse(fs.readFileSync(join(f.folder,"libvirt-execution.json"),"utf8")).phase,"prepared");if(lost)throw Error("lost define ack");return"";}
     if(argv[3]==="dumpxml")return definition;if(argv[3]==="domuuid")return f.machine.id as string;if(argv[3]==="domstate")return"shut off";return"";
   };
   if(lost)await assert.rejects(f.provider.reconcile(f.machine,f.image,f.folder),e=>(e as {outcome:string}).outcome==="unknown");
@@ -268,4 +268,40 @@ test("Kubernetes administrative drain verifies the owned VM is stopped through t
   assert.equal(await other.updateStopped(f.machine, f.image, f.folder, true), false);
   assert.equal(f.commands.length, commands);
   assert.ok(fs.existsSync(f.disk));
+});
+
+test("administrative definition retries only the identical owned XML after definite absence",async t=>{
+  const f=fixture(t);
+  delete f.machine.lease;
+  save(join(f.folder,"assignment.json"),{fingerprint:fingerprint(f.machine)});
+  for(const name of ["libvirt-binding.json","libvirt-execution.json"]) fs.unlinkSync(join(f.folder,name));
+  fs.rmSync(f.storage,{recursive:true});
+  let creates=0,starts=0,defines=0;
+  let definition="",seen="",defined=false;
+  const files:string[]=[];
+  f.adapters.run=async(argv,options)=>{
+    const action=argv[3];
+    if(argv[0]==="qemu-img"){
+      if(argv[1]==="info")return JSON.stringify({"virtual-size":1024,format:"raw"});
+      creates++;return "";
+    }
+    if(action==="list")return defined?(argv.includes("--uuid")?String(f.machine.id):"cvm-"+f.machine.id):"";
+    if(action==="define"){
+      assert.equal(options.input,undefined);
+      const path=argv[4]!;files.push(path);
+      assert.equal(fs.statSync(path).mode&0o777,0o600);
+      definition=fs.readFileSync(path,"utf8");
+      if(++defines===1){seen=definition;throw Error("ENXIO fixture");}
+      assert.equal(definition,seen);defined=true;return "";
+    }
+    if(action==="dumpxml")return definition;
+    if(action==="domuuid")return String(f.machine.id);
+    if(action==="domstate")return "shut off";
+    if(action==="start"){starts++;return "";}
+    throw Error("Unexpected operation");
+  };
+  await assert.rejects(f.provider.reconcile(f.machine,f.image,f.folder));
+  assert.equal((await f.provider.reconcile(f.machine,f.image,f.folder)).state,"starting");
+  assert.deepEqual([creates,defines,starts],[1,2,1]);
+  assert.ok(files.every(file=>!fs.existsSync(file)));
 });
