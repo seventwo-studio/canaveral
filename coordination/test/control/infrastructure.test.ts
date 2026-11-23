@@ -219,3 +219,17 @@ test("mapped host resources include held runner reservations in category totals"
   assert.equal(categories.find(c => c.id === "physicalShared")!.cpu, size.cpu);
   for (const key of ["cpu", "memoryMiB", "diskGiB"] as const) assert.equal(categories.reduce((sum, c) => sum + c[key], 0), (report.reserved as typeof size)[key]);
 });
+
+test("native inference setup tokens have the same scoped single-claim and expiry rules as libvirt", t => {
+  const f = fixture(t), setupOffer = { ...offer(), provider: "native", templates: [] };
+  const issued = f.infrastructure.createSetup({ id: randomUUID(), ...setupOffer });
+  const token = String(issued.enrollmentToken);
+  assert.equal(issued.expiresAt, f.now() + 1800);
+  assert.throws(() => f.enroll(token, f.host, f.credential, offer()));
+  f.enroll(token, f.host, f.credential, setupOffer);
+  assert.throws(() => f.enroll(token, randomUUID(), f.credential, setupOffer));
+  f.tick(1801);
+  f.enroll(token, f.host, f.credential, setupOffer);
+  f.infrastructure.revokeSetup(String(issued.id));
+  assert.throws(() => f.enroll(token, f.host, f.credential, setupOffer));
+});
