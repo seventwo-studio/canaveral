@@ -427,9 +427,15 @@ async function exerciseVm() {
           stdinError: probe.status === 0 ? undefined : probe.stderr.trim(),
         }));
       `, state, machineId, disk));
-      throw new Error(error.message + ': ' + JSON.stringify({
+      const context = JSON.stringify({
         observed: machine?.observed, detail, nativeState, diskSourceHasIndex: diskSource?.includes('index='), preparation,
-      }));
+      });
+      if (machine?.observed === 'unknown' && !native && preparation.assignment && preparation.binding &&
+          preparation.phase === 'prepared' && preparation.diskBytes > 0 && preparation.definition &&
+          !preparation.reopenChildStdin && preparation.stdinError === 'cat: /dev/stdin: No such device or address') {
+        throw new ExpectedGap('Libvirt definition is blocked by virsh define /dev/stdin on the Node child pipe. Retained preparation was not replayed. ' + context);
+      }
+      throw new Error(error.message + ': ' + context);
     });
     assert.equal(virsh('domstate', machineId), 'running');
     const ip = await eventually('guest DHCP and SSH service', async () => {
@@ -441,7 +447,15 @@ async function exerciseVm() {
     assert.match(domainId, /^\d+$/);
     return { machineId, domainId, guestBoot: 'SSH banner on private libvirt network', guestIp: ip };
   });
-  if (!started) return;
+  if (!started) {
+    report.steps.push(...[
+      'replace the pod during an administrative VM run',
+      'stop the administrative VM and retain its owned disk',
+      'drain and uninstall the VM DaemonSet with retained state',
+    ].map(name => ({ name, outcome: 'not_run', reason: 'Requires a running administrative VM.' })));
+    writeFileSync(evidencePath, JSON.stringify(report, null, 2) + '\n');
+    return;
+  }
 
   await step('replace the pod during an administrative VM run', async () => {
     const [old] = daemonPods();

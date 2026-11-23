@@ -10,6 +10,10 @@ and [runner enrollment](runner-enrollment.md). The VM profile mounts host libvir
 KVM and VM storage for administrative machines. Consumer libvirt leases require
 a production native connection, supervisor and owned-storage adapters. The
 controller's bound Linux lease API currently admits Apple Virtualization.
+Native acceptance of administrative VM startup remains open. The hosted test
+reached a durable prepared state, but the definition command could not reopen
+the Node child process's standard input. Keep the owned state for inspection if
+the controller reports an unknown assignment.
 Containerd operations, Android and GPU execution are outside this deployment.
 
 ## Select and prepare nodes
