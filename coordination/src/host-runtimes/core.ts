@@ -3,6 +3,7 @@ import { accessSync, constants, lstatSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { dirname, isAbsolute, normalize } from "node:path";
 import { ServiceError } from "../errors.ts";
+import type { QualifiedPin } from "./qualification.ts";
 
 export const modelIds = ["ollama", "llama.cpp", "vllm", "mlx-lm"] as const;
 export const backendIds = ["apple-virtualization", "libvirt", "containerd", ...modelIds] as const;
@@ -105,6 +106,8 @@ export interface Environment {
   lstat: (path: string) => Pick<Stats, "isCharacterDevice">;
   modelStat?: ModelPathStat;
   receipt: () => unknown;
+  // Test seam only. Production code uses the table generated from the trusted tree.
+  qualifiedPins?: readonly QualifiedPin[];
 }
 export async function probe(env: Environment, argv: readonly string[]): Promise<string> {
   const result = await env.run(argv, 5_000, 64 * 1024);

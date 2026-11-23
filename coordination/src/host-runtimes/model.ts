@@ -1,5 +1,6 @@
 import { blocker, digest, modelConfig, modelIds, object, ProbeError, record, states, version } from "./core.ts";
 import type { BackendRecord, Blocker, Environment, HostConfigData, ModelId, RuntimePackageRecord, State } from "./core.ts";
+import { promoted, promotionRules } from "./qualification.ts";
 
 type Request = { operation: "status" } | {
   operation: "prepare" | "verify" | "remove"; backend: ModelId; dryRun: boolean; version?: string;
@@ -51,9 +52,14 @@ function parseBackend(value: unknown, env: Environment): BackendRecord {
   const id = backend as ModelId;
   const compatible = supported(id, env);
   requireReport((id !== "mlx-lm" && id !== "vllm" && compatible) || !available);
-  requireReport(!qualified || (available && catalogVersion !== undefined));
+  // Ollama, vLLM and MLX-LM have no promotable scope, so the executor must never report them qualified.
+  requireReport(!qualified || (available && catalogVersion !== undefined && promotionRules[id] !== undefined));
+  // The daemon reports qualified only when its own embedded table also promotes the
+  // catalog pin and any active package is that exact pin.
+  const confirmed = qualified && promoted(id, env, identity => identity.version === catalogVersion
+    && (active === undefined || packages.some(pkg => pkg.version === active && pkg.verified && pkg.packageDigest === identity.packageDigest)));
   return { ...record(id, compatible, state as State, message, active ?? catalogVersion),
-    qualified, installed: packages, ...(catalogVersion ? { catalogVersion } : {}), ...(active ? { active } : {}) };
+    qualified: confirmed, installed: packages, ...(catalogVersion ? { catalogVersion } : {}), ...(active ? { active } : {}) };
 }
 
 function parsePlan(value: unknown): Plan {

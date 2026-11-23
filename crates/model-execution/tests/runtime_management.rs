@@ -129,7 +129,12 @@ fn management_contract_is_local_and_dry_runs_do_not_create_state() {
     assert_eq!(backends.len(), 4);
     assert!(backends
         .iter()
-        .all(|item| item["qualified"] == false && item["installed"] == json!([])));
+        .all(|item| item["qualified"].is_boolean() && item["installed"] == json!([])));
+    // Ollama, vLLM and MLX-LM have no promotable scope.
+    assert!(backends
+        .iter()
+        .filter(|item| item["backend"] != "llama.cpp")
+        .all(|item| item["qualified"] == false));
     assert_eq!(backends[2]["backend"], "vllm");
     assert_eq!(backends[3]["backend"], "mlx-lm");
     assert_eq!(backends[3]["state"], "unavailable");

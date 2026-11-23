@@ -197,7 +197,7 @@ fn report_backend(backend: Backend, installed: &[Installed], unknown: bool) -> V
     };
     let mut report = json!({
         "backend": name(backend), "available": pin.is_some(), "state": state,
-        "qualified": pin.is_some_and(|pin| pin.qualified),
+        "qualified": pin.is_some_and(|pin| pin.qualified()),
         "installed": installed.iter().map(|entry| json!({
             "version": entry.version,
             "packageDigest": entry.cache.trim_start_matches("runtime-package."),

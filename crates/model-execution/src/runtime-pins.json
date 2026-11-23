@@ -17,7 +17,6 @@
       ],
       "materializeLinks": true,
       "treeSha256": "22f4df8f4637825471853e3d1c5dc7a99667b11bcbc0751f626369710eee8978",
-      "qualified": false,
       "retrieved": "2026-11-23"
     },
     {
@@ -37,7 +36,6 @@
       ],
       "materializeLinks": true,
       "treeSha256": "807c37847715ed9a9cf96502c3229e253bd89f1a0bf1f8e6b097c385c736141d",
-      "qualified": false,
       "retrieved": "2026-11-23",
       "omitPrefixes": [
         "lib/ollama/cuda_v12",
@@ -61,7 +59,6 @@
       ],
       "materializeLinks": true,
       "treeSha256": "2f2f45e48cf038c5fbb942d80f441d26bfa81105922bab797385b17c633049f6",
-      "qualified": false,
       "retrieved": "2026-11-23",
       "omitPrefixes": [
         "lib/ollama/cuda_v12",
@@ -85,7 +82,6 @@
       ],
       "materializeLinks": true,
       "treeSha256": "6b41e2d33ea833181df066e3174e1a2335a26778cc835ab0b8a04353e7dab506",
-      "qualified": false,
       "retrieved": "2026-11-23",
       "stripPrefix": "llama-b12359"
     },
@@ -105,7 +101,6 @@
       ],
       "materializeLinks": true,
       "treeSha256": "3fe648c9faef09f5d7c331862a43359573369f1ee0b40a602134604b5309668b",
-      "qualified": false,
       "retrieved": "2026-11-23",
       "stripPrefix": "llama-b12359"
     },
@@ -125,7 +120,6 @@
       ],
       "materializeLinks": true,
       "treeSha256": "30d1a3ba1b7eeb878730613d9bc076c35ff5544b44dd8a9c8a27ba5c0c0b26bf",
-      "qualified": false,
       "retrieved": "2026-11-23",
       "stripPrefix": "llama-b12359"
     }
