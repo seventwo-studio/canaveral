@@ -25,8 +25,18 @@ function supported(id: ModelId, env: Environment): boolean {
   return id !== "vllm" && env.platform === "darwin" && env.arch === "arm64";
 }
 
+const pinFields = ["version", "url", "sha256", "treeSha256", "packageDigest"] as const;
+type CatalogPin = Record<typeof pinFields[number], string>;
+function parsePin(value: unknown, catalogVersion: unknown): CatalogPin {
+  const pin = object(value);
+  requireReport(Object.keys(pin).length === pinFields.length && version(pin.version) && pin.version === catalogVersion
+    && cleanText(pin.url) && URL.parse(pin.url)?.protocol === "https:"
+    && digest(pin.sha256) && digest(pin.treeSha256) && digest(pin.packageDigest));
+  return Object.fromEntries(pinFields.map(key => [key, pin[key] as string])) as CatalogPin;
+}
+
 function parseBackend(value: unknown, env: Environment): BackendRecord {
-  const { backend, catalogVersion, available, state, installed, active, qualified, blocker: reason } = object(value);
+  const { backend, catalogVersion, catalogPin, available, state, installed, active, qualified, blocker: reason } = object(value);
   requireReport(modelIds.some(id => id === backend) && typeof available === "boolean"
     && states.some(s => s === state) && typeof qualified === "boolean" && Array.isArray(installed)
     && (catalogVersion === undefined || version(catalogVersion))
@@ -52,12 +62,14 @@ function parseBackend(value: unknown, env: Environment): BackendRecord {
   const id = backend as ModelId;
   const compatible = supported(id, env);
   requireReport((id !== "mlx-lm" && id !== "vllm" && compatible) || !available);
+  const pin = catalogPin === undefined ? undefined : parsePin(catalogPin, catalogVersion);
   // Ollama, vLLM and MLX-LM have no promotable scope, so the executor must never report them qualified.
-  requireReport(!qualified || (available && catalogVersion !== undefined && promotionRules[id] !== undefined));
-  // The daemon reports qualified only when its own embedded table also promotes the
-  // catalog pin and any active package is that exact pin.
-  const confirmed = qualified && promoted(id, env, identity => identity.version === catalogVersion
-    && (active === undefined || packages.some(pkg => pkg.version === active && pkg.verified && pkg.packageDigest === identity.packageDigest)));
+  requireReport(!qualified || (available && pin !== undefined && promotionRules[id] !== undefined));
+  // The daemon reports qualified only when its own embedded table promotes the
+  // executor's full catalog pin identity, and any active package is that exact pin.
+  const confirmed = qualified && pin !== undefined && promoted(id, env, identity =>
+    Object.keys(identity).length === pinFields.length && pinFields.every(key => identity[key] === pin[key])
+    && (active === undefined || packages.some(pkg => pkg.version === active && pkg.verified && pkg.packageDigest === pin.packageDigest)));
   return { ...record(id, compatible, state as State, message, active ?? catalogVersion),
     qualified: confirmed, installed: packages, ...(catalogVersion ? { catalogVersion } : {}), ...(active ? { active } : {}) };
 }

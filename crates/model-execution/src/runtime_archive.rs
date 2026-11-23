@@ -166,17 +166,22 @@ impl Pin {
         self.qualified_in(&QUALIFIED.pins)
     }
 
-    fn qualified_in(&self, table: &[QualifiedPin]) -> bool {
-        if self.backend != Backend::LlamaCpp {
-            return false;
-        }
-        let identity = serde_json::json!({
+    /// The exact catalog pin identity that promotions and reports compare.
+    pub fn identity(&self) -> serde_json::Value {
+        serde_json::json!({
             "version": self.version,
             "url": self.url,
             "sha256": self.sha256,
             "treeSha256": self.tree_sha256,
             "packageDigest": self.cache().trim_start_matches("runtime-package."),
-        });
+        })
+    }
+
+    fn qualified_in(&self, table: &[QualifiedPin]) -> bool {
+        if self.backend != Backend::LlamaCpp {
+            return false;
+        }
+        let identity = self.identity();
         table.iter().any(|pin| {
             pin.backend == self.backend.adapter()
                 && pin.os == self.os

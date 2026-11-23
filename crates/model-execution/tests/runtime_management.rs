@@ -202,6 +202,19 @@ fn remove_preserves_referenced_versions_and_verify_reports_damage() {
         "{:x}",
         Sha256::digest(format!("archive-v1\nllama.cpp\n{version}\n{tree}"))
     );
+    let status = fixture.report("--runtime-status", &[], 0);
+    let row = status["backends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["backend"] == "llama.cpp")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        row["catalogPin"],
+        json!({"version": version, "url": catalog["url"], "sha256": catalog["sha256"],
+            "treeSha256": tree, "packageDigest": digest})
+    );
     let cache = fixture.state.join(format!("runtime-package.{digest}"));
     fs::create_dir(&fixture.state).unwrap();
     fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o700)).unwrap();

@@ -11,9 +11,10 @@ import type { QualifiedPin } from "../src/host-runtimes/qualification.ts";
 import { qualifiedPins } from "../src/host-runtimes/qualified-pins.ts";
 
 const digest = "a".repeat(64);
+const catalogPin = { version: "1.2.3", url: "https://example.invalid/llama.tgz", sha256: "b".repeat(64), treeSha256: "c".repeat(64), packageDigest: digest };
 const llama = (overrides: Partial<QualifiedPin> = {}): QualifiedPin => ({
   backend: "llama.cpp", os: "linux", arch: "x86_64", acceleration: "cpu", executionMode: "cpu-generation",
-  pinId: "1.2.3-000000000000", identity: { version: "1.2.3", packageDigest: digest }, ...overrides,
+  pinId: "1.2.3-000000000000000000000000", identity: catalogPin, ...overrides,
 });
 const host = { platform: "linux" as const, arch: "x64" };
 
@@ -27,6 +28,8 @@ test("embedded qualified pins only use promotable scopes", () => {
   assert.equal(promotionRules.ollama, undefined);
   assert.equal(promotionRules.vllm, undefined);
   assert.equal(promotionRules["mlx-lm"], undefined);
+  assert.equal(promotionRules.libvirt, undefined);
+  assert.equal(promotionRules["apple-virtualization"], undefined);
 });
 
 test("promotion requires the backend, host OS, architecture, scope and identity to match", () => {
@@ -46,7 +49,7 @@ test("promotion requires the backend, host OS, architecture, scope and identity 
 test("containerd promotion compares every receipt asset", () => {
   const assets = [{ name: "containerd", version: "2.4.2", sha256: digest }, { name: "runc", version: "1.5.3", sha256: digest }];
   const pin: QualifiedPin = { backend: "containerd", os: "linux", arch: "x86_64", acceleration: "none", executionMode: "root-lifecycle",
-    pinId: "2.4.2-000000000000", identity: { version: "2.4.2", assets: assets.map(asset => ({ ...asset, url: "https://example.invalid", bytes: 1 })) } };
+    pinId: "2.4.2-000000000000000000000000", identity: { version: "2.4.2", assets: assets.map(asset => ({ ...asset, url: "https://example.invalid", bytes: 1 })) } };
   const env = { ...host, qualifiedPins: [pin] };
   assert.equal(containerdPromoted(env, assets), true);
   assert.equal(containerdPromoted({ ...host, qualifiedPins: [] }, assets), false);
@@ -60,12 +63,13 @@ test("model engines are qualified only when the executor and the embedded table 
   const binary = join(root, "executor"), config = join(root, "config", "executor.json");
   mkdirSync(join(root, "config"));
   writeFileSync(config, "{}");
-  const report = (qualified: boolean) => ({
+  const report = (qualified: boolean, pin: unknown = catalogPin, active = true) => ({
     type: "canaveral-runtime-report", version: 1, operation: "status", platform: "linux", arch: "x86_64", dryRun: false,
     backends: modelIds.map((backend, index) => ({
       backend, catalogVersion: "1.2.3", available: index < 2, state: index === 1 ? "verified" : index < 2 ? "absent" : "unavailable",
-      installed: index === 1 ? [{ version: "1.2.3", packageDigest: digest, verified: true, referenced: false }] : [],
-      qualified: index === 1 && qualified, ...(index === 1 ? { active: "1.2.3" } : {}),
+      installed: index === 1 && active ? [{ version: "1.2.3", packageDigest: digest, verified: true, referenced: false }] : [],
+      qualified: index === 1 && qualified, ...(index === 1 && active ? { active: "1.2.3" } : {}),
+      ...(index === 1 && pin !== null ? { catalogPin: pin } : {}),
     })),
   });
   const script = (value: unknown) => writeFileSync(binary, `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(value))});`, { mode: 0o755 });
@@ -77,18 +81,26 @@ test("model engines are qualified only when the executor and the embedded table 
       : { uid: 0, mode: 0o755, nlink: 1, isFile: () => false, isDirectory: () => true, isSymbolicLink: () => false },
   };
   const settings = { modelExecutor: { binary, config } };
-  const llamaRow = async (reported: boolean, pins: QualifiedPin[]) => {
-    script(report(reported));
+  const llamaRow = async (reported: boolean, pins: QualifiedPin[], pin: unknown = catalogPin, active = true) => {
+    script(report(reported, pin, active));
     return (await runtimeInventory(settings, { ...env, qualifiedPins: pins })).find(row => row.id === "llama.cpp");
   };
   assert.equal((await llamaRow(true, [llama()]))?.qualified, true);
   assert.equal((await llamaRow(false, [llama()]))?.qualified, false);
   assert.equal((await llamaRow(true, []))?.qualified, false);
-  assert.equal((await llamaRow(true, [llama({ identity: { version: "1.2.3", packageDigest: "b".repeat(64) } })]))?.qualified, false);
+  assert.equal((await llamaRow(true, [llama({ identity: { ...catalogPin, packageDigest: "b".repeat(64) } })]))?.qualified, false);
   assert.equal((await llamaRow(true, [llama({ arch: "aarch64" })]))?.qualified, false);
+  // With no active package, a promotion must still match the full pin, never the version alone.
+  assert.equal((await llamaRow(true, [llama()], catalogPin, false))?.qualified, true);
+  assert.equal((await llamaRow(true, [llama({ identity: { ...catalogPin, sha256: "d".repeat(64) } })], catalogPin, false))?.qualified, false);
+  assert.equal((await llamaRow(true, [llama({ identity: { version: "1.2.3" } })], catalogPin, false))?.qualified, false);
+  // A qualified claim without the full catalog pin, or with an inconsistent one, violates the contract.
+  assert.equal((await llamaRow(true, [llama()], null))?.blocker?.code, "model_executor_invalid_report");
+  assert.equal((await llamaRow(true, [llama()], { ...catalogPin, version: "9.9.9" }))?.blocker?.code, "model_executor_invalid_report");
+  assert.equal((await llamaRow(false, [llama()], { ...catalogPin, extra: "x" }))?.blocker?.code, "model_executor_invalid_report");
 });
 
-test("detected backends qualify only for a promoted detected version", async () => {
+test("VM backends stay unqualified even with a matching table entry", async () => {
   const libvirtEnv = (pins: QualifiedPin[]): Partial<Environment> => ({
     ...host, receipt: () => undefined, qualifiedPins: pins,
     lstat: path => {
@@ -98,14 +110,14 @@ test("detected backends qualify only for a promoted detected version", async () 
     run: async () => ({ stdout: "version 10.0.0", exit: 0 }),
   });
   const libvirt: QualifiedPin = { backend: "libvirt", os: "linux", arch: "x86_64", acceleration: "kvm", executionMode: "vm-boot",
-    pinId: "10.0.0-000000000000", identity: { version: "10.0.0", source: "host-packages" } };
-  assert.equal((await runtimeInventory({}, libvirtEnv([libvirt])))[1]?.qualified, true);
-  assert.equal((await runtimeInventory({}, libvirtEnv([{ ...libvirt, identity: { version: "10.0.1" } }])))[1]?.qualified, false);
-  assert.equal((await runtimeInventory({}, libvirtEnv([{ ...libvirt, executionMode: "detect-only" }])))[1]?.qualified, false);
+    pinId: "10.0.0-000000000000000000000000", identity: { version: "10.0.0", source: "host-packages" } };
+  const verified = (await runtimeInventory({}, libvirtEnv([libvirt])))[1];
+  assert.equal(verified?.state, "verified");
+  assert.equal(verified?.qualified, false);
 
   const runner = "/opt/canaveral/CanaveralVMRunner";
   const apple: QualifiedPin = { backend: "apple-virtualization", os: "macos", arch: "aarch64", acceleration: "vz", executionMode: "vm-boot",
-    pinId: "26.1-000000000000", identity: { version: "26.1", source: "host-os" } };
+    pinId: "26.1-000000000000000000000000", identity: { version: "26.1", source: "host-os" } };
   const appleEnv = (pins: QualifiedPin[]): Partial<Environment> => ({
     platform: "darwin", arch: "arm64", qualifiedPins: pins, lstat: () => ({ isCharacterDevice: () => false }),
     run: async argv => {
@@ -115,6 +127,7 @@ test("detected backends qualify only for a promoted detected version", async () 
     },
   });
   const config = { runtimes: { apple: { runner } } };
-  assert.equal((await runtimeInventory(config, appleEnv([apple])))[0]?.qualified, true);
-  assert.equal((await runtimeInventory(config, appleEnv([])))[0]?.qualified, false);
+  const appleRow = (await runtimeInventory(config, appleEnv([apple])))[0];
+  assert.equal(appleRow?.state, "verified");
+  assert.equal(appleRow?.qualified, false);
 });

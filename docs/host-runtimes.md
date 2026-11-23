@@ -100,9 +100,11 @@ fixture coverage only.
 Artifacts expire after 90 days. Copy evidence from trusted runs into the
 committed records described in [runtime qualification](runtime-qualification.md).
 A backend reports `qualified` only for an exact pin and scope that a reviewed
-entry in `qualification/promotions.json` promotes. The executor and the daemon
-compile that promotion in at build time. No pin is currently promoted. Ollama
-remains blocked until hosts enforce isolation.
+entry in `qualification/promotions.json` promotes. Promotions cite
+digest-bound records from first-attempt runs of `main`. The executor and the
+daemon compile those promotions in at build time. No pin is currently promoted.
+Ollama remains blocked until hosts enforce isolation. Libvirt and Apple
+Virtualization remain blocked until guest-boot evidence binds their components.
 
 ## Local blocker codes
 

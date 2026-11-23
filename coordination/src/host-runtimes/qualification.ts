@@ -14,12 +14,12 @@ export interface QualifiedPin {
 }
 
 // The only scope each backend can report as qualified. Backends without a rule
-// cannot qualify: Ollama lacks host isolation; vLLM and MLX-LM lack packages.
+// cannot qualify: Ollama lacks host isolation, vLLM and MLX-LM lack packages,
+// and libvirt and Apple Virtualization records do not yet bind the QEMU,
+// libvirt or runner components a guest boot would use.
 export const promotionRules: Readonly<Partial<Record<BackendId, { executionMode: string; acceleration: string }>>> = {
   "llama.cpp": { executionMode: "cpu-generation", acceleration: "cpu" },
   containerd: { executionMode: "root-lifecycle", acceleration: "none" },
-  libvirt: { executionMode: "vm-boot", acceleration: "kvm" },
-  "apple-virtualization": { executionMode: "vm-boot", acceleration: "vz" },
 };
 
 type Host = Pick<Environment, "platform" | "arch" | "qualifiedPins">;

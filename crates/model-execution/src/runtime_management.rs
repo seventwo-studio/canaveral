@@ -207,6 +207,10 @@ fn report_backend(backend: Backend, installed: &[Installed], unknown: bool) -> V
     if let Some(version) = archive::catalog_version(backend) {
         report["catalogVersion"] = json!(version);
     }
+    if let Some(pin) = pin {
+        // The full host pin lets canaverald compare promotions by identity, not version.
+        report["catalogPin"] = pin.identity();
+    }
     if let Some(entry) = active.filter(|entry| entry.verification.is_ok()) {
         report["active"] = json!(entry.version);
     }
