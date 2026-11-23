@@ -241,6 +241,7 @@ fn copy_hashed(
     expected: &str,
     total: &mut u64,
     deadline: Instant,
+    mut check_progress: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let mut hash = Sha256::new();
     let mut copied = 0u64;
@@ -249,6 +250,7 @@ fn copy_hashed(
         if Instant::now() >= deadline {
             return Err("runtime installation deadline");
         }
+        check_progress()?;
         let n = input
             .read(&mut buffer)
             .map_err(|_| "runtime package asset unavailable")?;
@@ -274,6 +276,7 @@ pub(super) fn verify_executable(
     path: &Path,
     expected: &str,
     state: &private::Directory,
+    check_progress: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let parent = path.parent().ok_or_else(invalid)?;
     let name = private::name(path.file_name().ok_or_else(invalid)?)?;
@@ -284,7 +287,7 @@ pub(super) fn verify_executable(
         return Err("unsafe staged runtime executable");
     }
     let deadline = Instant::now() + Duration::from_secs(600);
-    copy_hashed(&mut file, None, expected, &mut 0, deadline)?;
+    copy_hashed(&mut file, None, expected, &mut 0, deadline, check_progress)?;
     let current = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
     trusted(&current, false)?;
     private::same_inode(&file, &current)?;
@@ -365,7 +368,14 @@ pub(super) fn verify_cache(
                         }
                         file.seek(SeekFrom::Start(0)).map_err(|_| invalid())?;
                     }
-                    copy_hashed(&mut file, None, &package.files[&path], total, deadline)?;
+                    copy_hashed(
+                        &mut file,
+                        None,
+                        &package.files[&path],
+                        total,
+                        deadline,
+                        || Ok(()),
+                    )?;
                     trusted(&file, false)?;
                 }
             }
@@ -462,6 +472,7 @@ fn stage_inner(
                 expected,
                 &mut total,
                 deadline,
+                || Ok(()),
             )?;
             trusted(&input, false)?;
         } else {
@@ -500,6 +511,7 @@ fn stage_inner(
                 expected,
                 &mut total,
                 deadline,
+                || Ok(()),
             )?;
         }
         let mode = if executable(package, path) {
@@ -606,6 +618,29 @@ mod tests {
         });
         (url, count, task)
     }
+    #[test]
+    fn executable_verification_checks_control_between_reads() {
+        let tmp = root();
+        let path = tmp.path().join("state");
+        let state = private::Directory::open(&path).unwrap();
+        let executable = path.join("runtime");
+        let bytes = vec![42; 128 * 1024];
+        state.runtime_output().unwrap().write_all(&bytes).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let mut checks = 0;
+        let result = verify_executable(&executable, &digest, &state, || {
+            checks += 1;
+            if checks == 2 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 2);
+        verify_executable(&executable, &digest, &state, || Ok(())).unwrap();
+    }
+
     #[test]
     fn host_selection_fails_without_one_exact_match() {
         let p = package(PathBuf::from("/private/runtime"));
