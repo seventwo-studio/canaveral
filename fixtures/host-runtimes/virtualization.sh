@@ -72,7 +72,7 @@ else
   if [[ "$release" == 26.* ]]; then
     begin "Observe Virtualization framework support"
     # Observe the framework directly. The registry still requires its signed runner.
-    supported=$(swift -e 'import Virtualization; print(VZVirtualMachine.isSupported)')
+    supported=$(swift "$(dirname "$0")/vz-supported.swift")
     echo "VZVirtualMachine.isSupported=$supported"
     update_evidence --arg supported "$supported" '.frameworkSupport = $supported'
     [[ "$supported" == true || "$supported" == false ]]
