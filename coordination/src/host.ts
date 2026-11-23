@@ -53,8 +53,12 @@ import { modelConfig, runtimeInventory } from "./host-runtimes/index.ts";
 import type { PressureGates, PressureReport, PressureSample } from "./pressure.ts";
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
+import { clusterContainerdCode, kubernetesDeployment, requireManagedUpdates } from "./host-deployment.ts";
+import { enrollKubernetesHost } from "./host-bootstrap.ts";
+
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
+  deployment?: "kubernetes"; shutdownGraceSeconds?: number;
   enrollmentToken?: string; allowHTTP?: boolean; caFile?: string;
 }
 export interface HostTransport { request(method: string, path: string, body: RecordValue, token: string, signal?: AbortSignal): Promise<RecordValue> }
@@ -145,6 +149,7 @@ interface MaintenanceProof extends MaintenanceFence {
 }
 type IdleReceipt = Pick<MaintenanceProof, "idle" | "workloadsStopped">;
 const NOT_IDLE = { idle: false, workloadsStopped: false };
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 120;
 const MAX_HOST_MESSAGE = 8 * 1_048_576;
 const TERMINAL = new Set(["succeeded", "failed", "unknown", "cancelled"]);
 const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile", "leaseClockHelper"]);
@@ -311,6 +316,8 @@ export function hostOffer(config: RecordValue, platform: NodeJS.Platform = proce
 
 export class HostRunner {
   readonly config: HostConfig;
+  readonly kubernetes: boolean;
+  private shutdown: Promise<void> | undefined;
   readonly state: string;
   readonly offer: RecordValue;
   readonly library: ImageLibrary;
@@ -449,13 +456,29 @@ export class HostRunner {
   private updateExternalWork = 0;
   private updateAssignments = new Map<string, RecordValue>();
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
+    this.kubernetes = kubernetesDeployment(config);
+    if (this.kubernetes) {
+      if (config.provider === "containerd" || (Array.isArray(config.runtimes)
+        ? config.runtimes.includes("containerd") : Object.hasOwn(object(config.runtimes ?? {}), "containerd"))) {
+        throw new ServiceError("containerd is disabled in Kubernetes.", 409, { code: clusterContainerdCode });
+      }
+      if (config.enrollmentToken !== undefined) throw new ServiceError("Kubernetes enrollment requires the state bootstrap token file.", 409, { code: "kubernetes_bootstrap_token_invalid" });
+      if (config.updates !== undefined) requireManagedUpdates(config);
+    }
     hostProvider(config.provider);
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config), platform = dependencies.platform ?? process.platform;
     leaseOffer(config, platform);
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
     this.config = structuredClone(config);
-    this.state = resolve(config.stateDir); privateDirectory(this.state);
+    this.state = resolve(config.stateDir);
+    if (this.kubernetes) {
+      noLinks(this.state);
+      const info = present(this.state) ? lstatSync(this.state) : undefined;
+      if (!info?.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o7777) !== 0o700) {
+        throw new ServiceError("Pre-provision Kubernetes host state as an owned 0700 directory.", 409);
+      }
+    } else privateDirectory(this.state);
     this.library = new ImageLibrary(this.state);
     this.config.templates = [...recordsWithoutIds(config.templates), ...this.library.definitions()];
     this.offer = hostOffer(this.config, platform);
@@ -496,6 +519,8 @@ export class HostRunner {
       const value = readRecord(path);
       if (value.orchestrator !== orchestrator) throw new ServiceError("Host identity belongs to another controller; use separate state.", 409);
       this.identity = { id: identifier(value.id), credential: secret(value.credential), orchestrator };
+    } else if (this.kubernetes) {
+      this.identity = await enrollKubernetesHost(this.state, orchestrator, this.offer, this.transport, this.stopController.signal);
     } else {
       if (!this.config.enrollmentToken) throw new ServiceError("A new host needs an enrollment credential.", 400);
       this.identity = { id: randomUUID(), credential: randomBytes(32).toString("base64url"), orchestrator }; saveRecord(path, this.identity);
@@ -1924,11 +1949,34 @@ export class HostRunner {
     } catch { return undefined; }
   }
   async quiesceForUpdate(): Promise<{ idle: boolean; workloadsStopped: boolean; quiesced: boolean }> {
+    requireManagedUpdates(this.config);
     this.fenceUpdateAdmission();
     const receipt = await this.updateIdle();
     return { ...receipt, quiesced: receipt.idle && receipt.workloadsStopped };
   }
-  async start(): Promise<this> {
+  async start(signal?: AbortSignal): Promise<this> {
+    if (!this.kubernetes || !signal) return this.startWorkers();
+    signal.throwIfAborted();
+    const startup = this.startWorkers();
+    let stop: (() => void) | undefined;
+    const interrupted = new Promise<never>((_, reject) => {
+      stop = () => {
+        this.fenceUpdateAdmission();
+        this.stopController.abort();
+        const fail = () => reject(shutdownIncomplete());
+        void bounded(startup, this.shutdownGraceMs).then(fail, fail);
+      };
+      signal.addEventListener("abort", stop, { once: true });
+    });
+    try {
+      const started = await Promise.race([startup, interrupted]);
+      return signal.aborted ? await interrupted : started;
+    } catch (error) {
+      if (signal.aborted) return await interrupted;
+      throw error;
+    } finally { if (stop) signal.removeEventListener("abort", stop); }
+  }
+  private async startWorkers(): Promise<this> {
     if (this.started || this.closed) throw new ServiceError("Host runner cannot be started twice.", 409);
     modelConfig(this.config);
     this.lock = new StateLock(join(this.state, "host-runner.sqlite")); this.started = true;
@@ -1939,9 +1987,12 @@ export class HostRunner {
         if (typeof cache !== "string") throw new ServiceError("Configure imageCache for verified base sources.", 400);
         image.image = await prepareImage(image.source, cache);
       }
+      this.stopController.signal.throwIfAborted();
       await this.initializeProviders();
+      this.stopController.signal.throwIfAborted();
       this.refreshBaselines();
       try { await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
+      this.stopController.signal.throwIfAborted();
       if (this.updateAdmissionBlocked) { await this.poll(); if (!this.fresh()) throw unknownOutcome("Managed startup needs fresh authenticated controller contact."); }
       this.loops.push(this.loop(async () => { try { await this.poll(); } catch { this.log("Host heartbeat failed; enforcing retained execution deadlines."); } }, this.pollInterval * 1000));
       this.loops.push(this.loop(() => this.step(), 100));
@@ -1951,7 +2002,7 @@ export class HostRunner {
       this.loops.push(this.loop(() => this.samplePressure(), 5000));
       this.loops.push(this.loop(async () => { if (this.checkRequested || this.clock.wall() >= this.nextCheck) { this.checkRequested = false; this.nextCheck = this.clock.wall() + 60; await this.checkEnvironment(); } }, 1000));
       return this;
-    } catch (error) { try { await this.close(); } catch { this.log("Host startup cleanup was not fully confirmed."); } throw error; }
+    } catch (error) { try { await this.closeWorkers(); } catch { this.log("Host startup cleanup was not fully confirmed."); } throw error; }
   }
   private async loop(work: () => Promise<void>, interval: number): Promise<void> {
     while (!this.stopController.signal.aborted) {
@@ -1960,7 +2011,25 @@ export class HostRunner {
     }
   }
   async wait(): Promise<void> { await Promise.all(this.loops); }
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    return this.shutdown ??= this.kubernetes && this.started ? this.closeKubernetes() : this.closeWorkers();
+  }
+  private get shutdownGraceMs(): number { return (this.config.shutdownGraceSeconds ?? DEFAULT_SHUTDOWN_GRACE_SECONDS) * 1000; }
+  private async closeKubernetes(): Promise<void> {
+    this.fenceUpdateAdmission();
+    try {
+      await bounded((async () => {
+        const proof = await this.updateIdle();
+        await this.closeWorkers();
+        if (!proof.workloadsStopped) throw new Error("Workload stop was unconfirmed.");
+      })(), this.shutdownGraceMs);
+    } catch {
+      this.stopController.abort();
+      for (const work of this.active.values()) work.controller.abort();
+      throw shutdownIncomplete();
+    }
+  }
+  private async closeWorkers(): Promise<void> {
     if (this.closed) return; this.closed = true;
     // Live captures stop first, while this runner still holds the authority to stop and prove
     // each guest recorder; afterwards a capture could only be left unknown. With no capture
@@ -1980,8 +2049,11 @@ export class HostRunner {
     // A still-running in-process adapter could mutate state. Keep the lock until
     // that work settles; do not let another host adopt it after a timeout.
     if (!failed) { this.lock?.close(); this.lock = undefined; }
-    else { void Promise.allSettled([...this.loops, ...[...this.active.values()].map(w => w.promise)]).then(() => { this.lock?.close(); this.lock = undefined; }); throw new ServiceError("Host shutdown was not fully confirmed.", 409, { code: "host_shutdown_incomplete", retryable: false, outcome: "unknown" }); }
+    else { void Promise.allSettled([...this.loops, ...[...this.active.values()].map(w => w.promise)]).then(() => { this.lock?.close(); this.lock = undefined; }); throw shutdownIncomplete(); }
   }
+}
+function shutdownIncomplete(): ServiceError {
+  return new ServiceError("Host shutdown was not fully confirmed.", 409, { code: "host_shutdown_incomplete", retryable: false, outcome: "unknown" });
 }
 function maintenanceResponse(value: unknown): MaintenanceFence | null {
   const envelope = object(value);
@@ -2052,7 +2124,10 @@ function firstReport(reports: Map<string, RecordValue>, terminalOnly = false): R
 function delay(ms: number, signal: AbortSignal): Promise<void> { return new Promise(r => { if (signal.aborted) { r(); return; } const done = (): void => { clearTimeout(timer); signal.removeEventListener("abort", done); r(); }; const timer = setTimeout(done, ms); signal.addEventListener("abort", done, { once: true }); }); }
 async function bounded<T>(work: Promise<T>, ms: number): Promise<T> { let timer: NodeJS.Timeout | undefined; try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(unknownOutcome()), ms); })]); } finally { if (timer) clearTimeout(timer); } }
 /** Start outbound workers. The caller owns signals and awaits close() on shutdown. */
-export async function startHost(config: HostConfig, dependencies: HostDependencies = {}): Promise<HostRunner> { return new HostRunner(config, dependencies).start(); }
+export async function startHost(config: HostConfig, dependencies: HostDependencies = {}, signal?: AbortSignal): Promise<HostRunner> {
+  const runner = new HostRunner(config, dependencies);
+  return runner.start(signal);
+}
 export async function checkHost(config: HostConfig, dependencies: HostDependencies = {}, inventory = false): Promise<RecordValue> {
   const runner = new HostRunner(config, dependencies);
   try {
@@ -2096,8 +2171,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const local = setup ? object(setup.config) : loadHostConfig(String(options["--config"]));
   const token = options["--enrollment-token-file"] ? readFileSync(String(options["--enrollment-token-file"]), "utf8").trim() : setup?.enrollmentToken;
   const config: HostConfig = { ...local, url: text(setup?.controllerUrl ?? options["--url"], "controller URL", 8000), stateDir: String(options["--state"]), allowHTTP: options["--allow-http"] === true, ...(token ? { enrollmentToken: secret(token) } : {}), ...(options["--ca-file"] ? { caFile: String(options["--ca-file"]) } : {}) };
-  const runner = await startHost(config);
-  const stop = (): void => { void runner.close().catch(() => { process.exitCode = 1; }); };
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
-  try { await runner.wait(); } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); await runner.close(); }
+  try {
+    const runner = await startHost(config, {}, controller.signal);
+    if (!controller.signal.aborted) await new Promise<void>(done => controller.signal.addEventListener("abort", () => done(), { once: true }));
+    await runner.close();
+  } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
 }

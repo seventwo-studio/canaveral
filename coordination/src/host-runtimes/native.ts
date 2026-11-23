@@ -1,3 +1,4 @@
+import { clusterContainerdCode, kubernetesDeployment } from "../host-deployment.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { open } from "node:fs/promises";
@@ -200,6 +201,8 @@ async function libvirt(config: HostConfigData, env: Environment): Promise<Backen
 }
 
 export async function nativeRecord(id: Exclude<BackendId, "ollama" | "llama.cpp" | "vllm" | "mlx-lm">, config: HostConfigData, env: Environment): Promise<BackendRecord> {
+  const kubernetes = kubernetesDeployment(config);
+  if (id === "containerd" && kubernetes) return record(id, false, "unavailable", blocker(clusterContainerdCode, "containerd is disabled in Kubernetes."));
   const supported = id === "apple-virtualization" ? env.platform === "darwin" && env.arch === "arm64"
     : env.platform === "linux" && ["arm64", "x64"].includes(env.arch);
   if (!supported) return record(id, false, "unavailable", blocker("runtime_platform_unsupported", "This backend does not support the host platform and architecture."));

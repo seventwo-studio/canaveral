@@ -196,3 +196,23 @@ Provision writable PVC/emptyDir ownership and readable mounted keys for the
 assigned group, and verify private-state ownership checks under that UID. Otherwise
 use a dedicated narrowly scoped SCC permitting 10001. Neither route has native
 OpenShift acceptance here; do not grant privileged access to the Canaveral pods.
+
+## Run canaverald in Kubernetes
+
+Set `"deployment": "kubernetes"` in the host JSON mounted at
+`/etc/canaverald/host.json`. Start the daemon with
+`--config /etc/canaverald/host.json --state /var/lib/canaverald --url <controller>`.
+Pre-provision `/var/lib/canaverald` on each selected node with mode `0700` and
+the pod's daemon UID as owner. Enroll each node using its
+[bootstrap token file](runner-enrollment.md#kubernetes-node-bootstrap).
+Change the DaemonSet image digest to update the daemon. Managed daemon updates
+and the containerd backend are disabled in this mode.
+
+Drain the host in Canaveral and wait for its cleanup proofs before replacing
+the pod. SIGTERM fences local admission and gives the daemon up to
+`shutdownGraceSeconds` to confirm quiescence and close its workers. The field
+accepts 1–300 seconds and defaults to 120. Set `terminationGracePeriodSeconds`
+above this value and allow time for any preStop hook. A daemon exits with
+status 0 after confirmed shutdown and status 1 when it could not confirm
+shutdown. Keep the node state for reconciliation with the same identity.
+Pod termination does not establish stop evidence or release reservations.

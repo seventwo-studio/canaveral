@@ -49,3 +49,24 @@ database. An older endpoint may not check bound runner identities; sharing writa
 state could admit a colliding UUID. Cutover requires schema compatibility checks and
 explicit fencing of the previous credential authority. Preserve historical bindings
 and receipt identities; replacing the executable does not establish migration safety.
+
+## Kubernetes node bootstrap
+
+Create one legacy connection setup per node, using its configured host name,
+provider and capacity. Write the setup token alone to
+`/var/lib/canaverald/bootstrap/enrollment-token`. Give the daemon UID ownership
+of both paths, mode `0700` on the bootstrap directory and mode `0600` on the
+regular token file. The daemon rejects symlinks, hard links and files larger
+than 256 bytes. Supply no setup file or enrollment-token argument.
+
+The daemon records the exact claim in its private state before contacting the
+controller. It retries with the same host ID, credential and offer even when
+the setup token has already been claimed by that ID. After confirmation it
+persists `identity.json` and deletes the token. A daemon with an existing
+identity ignores any stale bootstrap token, which the operator can remove.
+
+If the daemon reports `kubernetes_bootstrap_recovery_required`, retain the
+state and restore the original token file if possible. If exact retry cannot
+succeed, inspect and retire any identity from that claim on the controller
+before reprovisioning. Keep the node out of service until prior assignments
+and reservations have been reconciled.

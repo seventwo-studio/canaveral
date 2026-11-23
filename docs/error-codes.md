@@ -278,3 +278,12 @@ The test does not catch:
 The two files that hold the doctor's finding codes are read against
 [doctor](doctor.md) instead, and the event stream's end codes against
 [events](events.md).
+
+## Kubernetes daemon
+
+| Code | Status | Meaning | Recovery |
+| --- | --- | --- | --- |
+| `kubernetes_bootstrap_token_invalid` | 409 | The node bootstrap file is missing, unsafe, invalid or replaced, or another credential source was supplied | Provision the private bootstrap token file in the node state |
+| `kubernetes_bootstrap_recovery_required` | 409 | The saved single-claim enrollment cannot be confirmed with the available token and controller | Restore the original token and retain the state. Inspect and retire the prior controller identity before reprovisioning if recovery fails |
+| `kubernetes_managed_updates_disabled` | 409 | Kubernetes owns daemon updates | Update the DaemonSet image after draining the host |
+| `kubernetes_containerd_disabled` | 409 / local runtime outcome | The containerd backend is unavailable in Kubernetes mode | Choose a supported in-cluster backend |
