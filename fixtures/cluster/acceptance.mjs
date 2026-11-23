@@ -114,9 +114,11 @@ if (ready) {
     const get = async () => (await call('/v1/hosts')).hosts.find(row => row.id === claim.hostId);
     const first = await eventually('host offer', async () => {
       const candidate = await get();
-      return candidate?.online && candidate;
+      return candidate?.online && candidate.health?.fresh && candidate;
     });
     assert.equal(first.provider, provider);
+    assert.deepEqual(first.capacity, capacity);
+    assert.deepEqual(first.templates, []);
     const next = await eventually('heartbeat progression', async () => {
       const candidate = await get();
       return candidate?.lastSeen > first.lastSeen && candidate;
@@ -203,11 +205,12 @@ if (host) {
     const old = daemonPods();
     assert.equal(old.length, 1);
     daemon('delete', 'pod', old[0].metadata.name, '--timeout=150s');
+    const deletedAt = Date.now() / 1000;
     await waitForDaemon(old[0].metadata.uid);
     const after = await eventually('same identity heartbeating', async () => {
       const { hosts } = await call('/v1/hosts');
       assert.equal(hosts.length, 1);
-      return hosts[0].id === host.id && hosts[0].lastSeen > host.lastSeen && hosts[0];
+      return hosts[0].id === host.id && hosts[0].lastSeen > deletedAt && hosts[0];
     });
     const status = JSON.parse(inPod('canaverald', 'runtimes', 'status', '--config', '/etc/canaverald/host.json', '--state', state, '--json'));
     assert(status.some(row => row.id === 'containerd' && row.blocker?.code === 'kubernetes_containerd_disabled'));
@@ -223,6 +226,14 @@ if (host) {
       return { state: 'retained', hostId: identity };
     });
   }
+}
+
+if (!host) {
+  report.steps.push(...['install pinned llama.cpp and generate through public API',
+    'Canaveral drain and same-node pod replacement', 'uninstall and verify explicitly retained state'].map(name => ({
+    name, outcome: 'not_run', reason: 'Requires an enrolled daemon with advancing heartbeats.',
+  })));
+  writeFileSync(evidencePath, JSON.stringify(report, null, 2) + '\n');
 }
 
 if (ready) {

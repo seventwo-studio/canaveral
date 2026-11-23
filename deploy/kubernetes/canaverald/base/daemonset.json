@@ -85,7 +85,7 @@
                 "command": [
                   "/bin/sh",
                   "-ec",
-                  "test -s /var/lib/canaverald/identity.json && test ! -e /var/lib/canaverald/bootstrap/enrollment-token"
+                  "test -s /var/lib/canaverald/identity.json"
                 ]
               },
               "periodSeconds": 3

@@ -21,12 +21,23 @@ printf '%s  %s\n' ec8958fe1363a32d50e028b5e3411c04b0dbd0316fab33524e8094352b78f6
 sudo install -m 0755 "$CLUSTER_WORK/k3s" /usr/local/bin/k3s
 sudo systemd-run --unit canaveral-k3s --property Delegate=yes \
   /usr/local/bin/k3s server --disable traefik --disable servicelb --disable metrics-server
-for attempt in {1..60}; do
+for _ in {1..60}; do
   sudo test -s /etc/rancher/k3s/k3s.yaml && break
   sleep 2
 done
+# shellcheck disable=SC2024 # Keep the disposable copy owned by the workflow user.
 sudo cat /etc/rancher/k3s/k3s.yaml > "$KUBECONFIG"
-kubectl wait --for=condition=Ready node --all --timeout=180s
+node=
+for _ in {1..60}; do
+  node=$(kubectl --request-timeout=5s get nodes -o name 2>/dev/null) && [[ -n "$node" ]] && break
+  sleep 2
+done
+if [[ -z "$node" ]]; then
+  sudo journalctl -u canaveral-k3s --no-pager -n 50
+  echo "k3s failed to register the hosted runner as a node." >&2
+  exit 1
+fi
+kubectl wait --for=condition=Ready "$node" --timeout=180s
 record passed
 
 step='build and import node and controller images'

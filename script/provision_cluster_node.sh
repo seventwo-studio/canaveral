@@ -18,6 +18,7 @@ fi
   exit 1
 }
 
+# shellcheck disable=SC2016 # Expand paths in the unprivileged process.
 printf '%s\n' "$token" | setpriv --reuid 10001 --regid 10001 --clear-groups bash -euc '
   umask 077
   state=/var/lib/canaverald
