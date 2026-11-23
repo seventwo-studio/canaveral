@@ -254,6 +254,19 @@ fn rejection_bounds_and_stop() {
                 }
             ));
         }
+        if mode == "cancel" || mode == "contact" {
+            let expected = if mode == "cancel" {
+                State::Cancelled
+            } else {
+                State::Failed
+            };
+            drop(e);
+            let reopened = Executor::open(cfg.clone()).unwrap();
+            assert!(matches!(
+                reopened.journal().unwrap().receipt.message,
+                Message::Receipt { state, result: None, .. } if state == expected
+            ));
+        }
         assert!(!cfg.state_dir.join("workspace").exists());
     }
 }

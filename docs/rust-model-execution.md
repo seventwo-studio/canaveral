@@ -356,9 +356,10 @@ one parallel request and a fresh `127.0.0.1` port. In Ollama v0.40.17,
 `OLLAMA_NO_CLOUD=1` disables cloud features, `OLLAMA_REMOTES` excludes remote
 inference hosts and `OLLAMA_NOPRUNE=1` disables startup blob pruning. Both
 HTTP and HTTPS proxy settings point to an unavailable loopback port, with
-only the child endpoint listed in `NO_PROXY`. This blocks outbound registry
-traffic that uses Go's default HTTP transport to non-loopback destinations.
-Go bypasses the proxy for loopback traffic.
+only the child endpoint listed in `NO_PROXY`. The deny proxy covers only
+non-loopback registry traffic. Go's default HTTP transport bypasses proxies
+for localhost and loopback addresses on every port, so a local caller can
+use Ollama's unauthenticated registry API to reach other loopback services.
 [Ollama v0.40.17 environment settings](https://github.com/ollama/ollama/blob/v0.40.17/envconfig/config.go)
 and [registry transport](https://github.com/ollama/ollama/blob/v0.40.17/server/images.go#L1649-L1710).
 
@@ -510,10 +511,9 @@ Native execution remains a separately authorized evidence gate.
 Use Ollama only on trusted single-tenant hosts with operator-controlled
 inventory. The unauthenticated loopback API allows other local principals to
 submit work or mutate the store. Socket ownership verifies the server's identity.
-Proxy settings restrict clients that honor them, and store verification detects
-persistent changes to the pinned model. Ollama remains unqualified until the
-host enforces ingress, egress and filesystem isolation and operators verify
-resource fit.
+Store verification detects persistent changes to the pinned model. Ollama
+remains unqualified until the host enforces ingress, egress and filesystem
+isolation and operators verify resource fit.
 
 Upstream MLX-LM also lacks an API-key boundary in this integration. vLLM's bearer
 key protects the `/v1` routes used here, but other same-listener endpoints can

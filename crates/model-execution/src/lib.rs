@@ -683,6 +683,11 @@ impl Executor {
                 e
             }
         })?;
+        self.directory.check()?;
+        check(control)?;
+        if began.elapsed() >= Duration::from_millis(timeout) {
+            return Err("generation deadline");
+        }
         let r = backend.result(job, runtime_model, &v)?;
         if import.is_some() {
             if !scope.as_mut().unwrap().stop(self.config.stop_ms, true) {
@@ -761,7 +766,10 @@ impl<F: FnMut() -> Control> Startup<'_, F> {
                 server.check_running()?;
             }
             match response.recv_timeout(Duration::from_millis(20)) {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    self.check()?;
+                    return Ok(value);
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     return Err("runtime startup request lost");
@@ -951,4 +959,44 @@ fn validate_models(path: &Path) -> Result<()> {
         Ok(())
     }
     visit(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn verification_result_cannot_pass_a_control_change_during_receive() {
+        let root = tempfile::tempdir().unwrap();
+        let directory =
+            private::Directory::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+
+        for (stop, expected) in [
+            (Control::Cancel, "cancelled"),
+            (Control::Fence, "controller contact deadline"),
+        ] {
+            let (sender, receiver) = sync_channel(0);
+            let mut sender = Some(sender);
+            let mut worker = None;
+            let mut control = || {
+                if let Some(sender) = sender.take() {
+                    // Release the result only after the pre-receive control check starts.
+                    worker = Some(std::thread::spawn(move || sender.send("verified manifest")));
+                    Control::Continue
+                } else {
+                    stop
+                }
+            };
+            let mut verification = Startup {
+                directory: &directory,
+                start: clock::Clock::now(),
+                budget: Duration::from_secs(5),
+                control: &mut control,
+            };
+            assert_eq!(verification.wait(None, &receiver), Err(expected));
+            drop(receiver);
+            worker.unwrap().join().unwrap().unwrap();
+        }
+    }
 }

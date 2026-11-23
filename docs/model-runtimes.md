@@ -61,8 +61,11 @@ retrieved on 2026-11-23 and checked against the
 MLX-LM and vLLM remain unavailable pending qualified hermetic packages. Every
 catalog entry remains unqualified for native operation. Use Ollama only on
 trusted single-tenant hosts. The importer and server expose an unauthenticated
-loopback API. Proxy settings and model verification reduce exposure.
-Qualification requires host-enforced ingress, egress and filesystem isolation.
+loopback API. The deny proxy covers only non-loopback registry traffic. Go's
+default HTTP transport bypasses proxies for localhost and loopback addresses
+on every port, so a local caller can use Ollama's unauthenticated registry API
+to reach other loopback services. Ollama remains unqualified until the host
+enforces ingress, egress and filesystem isolation.
 
 The executor verifies compressed size and SHA-256 before opening an archive and
 publishes only a complete verified tree. Installation preserves relative
