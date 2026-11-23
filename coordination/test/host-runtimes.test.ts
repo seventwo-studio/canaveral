@@ -21,7 +21,11 @@ const digest = "1".repeat(64);
 const receipt = {
   type: "canaveral-host-installer-receipt", version: 1, component: "containerd", installedAt: 1,
   assets: ["containerd", "runc"].map(name => ({ name, version: "1.2.3", sha256: digest })),
-  files: [{ path: "/opt/canaveral/bin/containerd", sha256: digest }],
+  files: [
+    "/etc/systemd/system/canaveral-containerd.service",
+    "/etc/canaveral-containerd/config.toml",
+    ...["containerd", "containerd-shim-runc-v2", "ctr", "runc"].map(name => `/opt/canaveral-containerd/1.2.3/bin/${name}`),
+  ].map(path => ({ path, sha256: digest })),
   unit: "/etc/systemd/system/canaveral-containerd.service", socket: "/run/canaveral-containerd/containerd.sock",
 };
 const absent = () => { throw Object.assign(new Error("Missing fixture path"), { code: "ENOENT" }); };
@@ -268,6 +272,23 @@ test("native mutation refusals preserve detected state and reject unsupported pl
       assert.equal(unsupported.result?.code, "runtime_platform_unsupported");
     }
   }
+});
+
+test("containerd mutations preserve unknown receipt-backed status when a system path is unreadable", async t => {
+  const env: Partial<Environment> = {
+    ...linux, receipt: () => receipt,
+    lstat: () => { throw Object.assign(new Error("Permission denied"), { code: "EACCES" }); },
+  };
+  const status = (await runtimeInventory({}, env)).find(backend => backend.id === "containerd");
+  assert.equal(status?.state, "unknown");
+  assert.equal(status.blocker?.code, "runtime_probe_failed");
+  const run = t.mock.fn(async () => assert.fail("containerd mutation invoked a command"));
+  for (const action of ["install", "verify", "remove"] as const) {
+    const response = await mutateRuntime({}, action, "containerd", false, undefined, { ...env, run });
+    assert.deepEqual(response.backends, [status]);
+    assert.deepEqual(response.result, { state: "failed", code: "containerd_root_installer_required" });
+  }
+  assert.equal(run.mock.callCount(), 0);
 });
 
 test("daemon CLI and inventory expose the registry without contacting the controller", async t => {
