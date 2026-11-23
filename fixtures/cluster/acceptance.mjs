@@ -406,8 +406,29 @@ async function exerciseVm() {
       const xml = native ? virsh('dumpxml', machineId) : '';
       const diskSource = xml.match(/<source file=['"][^'"]*disk\.qcow2['"]([^>]*)>/)?.[1];
       const detail = String(machine?.detail ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 180);
+      const preparation = JSON.parse(inPod('node', '-e', `
+        const { readFileSync, lstatSync } = require('node:fs');
+        const { spawnSync } = require('node:child_process');
+        const { dirname } = require('node:path');
+        const [state, machine, disk] = process.argv.slice(1);
+        const folder = state + '/machines/' + machine;
+        const check = path => {
+          try { return lstatSync(path).size; }
+          catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
+        };
+        const journal = folder + '/libvirt-execution.json';
+        const probe = spawnSync('cat', ['/dev/stdin'], { input: 'cluster-acceptance', encoding: 'utf8' });
+        console.log(JSON.stringify({
+          assignment: check(folder + '/assignment.json') !== null,
+          phase: check(journal) === null ? null : JSON.parse(readFileSync(journal, 'utf8')).phase,
+          binding: check(folder + '/libvirt-binding.json') !== null,
+          diskBytes: check(disk), definition: check(dirname(disk) + '/domain.xml') !== null,
+          reopenChildStdin: probe.status === 0 && probe.stdout === 'cluster-acceptance',
+          stdinError: probe.status === 0 ? undefined : probe.stderr.trim(),
+        }));
+      `, state, machineId, disk));
       throw new Error(error.message + ': ' + JSON.stringify({
-        observed: machine?.observed, detail, nativeState, diskSourceHasIndex: diskSource?.includes('index='),
+        observed: machine?.observed, detail, nativeState, diskSourceHasIndex: diskSource?.includes('index='), preparation,
       }));
     });
     assert.equal(virsh('domstate', machineId), 'running');
