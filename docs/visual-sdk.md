@@ -67,6 +67,8 @@ The writer implements `write(bytes): number | Promise<number>` and may accept
 partial writes. `record()` writes the same MP4 bytes received from the host,
 checks their SHA-256 digest and complete MP4 box envelope, and acknowledges the
 host's completion. The receipt contains `bytes`, `sha256` and `cleaned: true`.
+Once that acknowledgement is sent, the connection ending, or being reset as the
+broker closes it, completes the recording.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 

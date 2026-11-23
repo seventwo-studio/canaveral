@@ -33,6 +33,9 @@ function session(value: unknown): VideoSession {
       typeof value.attachBefore !== 'string' || !Number.isFinite(Date.parse(value.attachBefore)) || typeof value.authorizationDeadline !== 'string' || !Number.isFinite(Date.parse(value.authorizationDeadline))) throw new ConsumerConfigurationError('Invalid video session metadata.');
   return value as unknown as VideoSession;
 }
+/** A failure of the session connection itself: it ended, was reset or could not be written. A
+ * worker's error control is not one; `checked` throws that from a received message. */
+const transportFailure = (error: unknown): boolean => error instanceof SessionError && ['session_disconnected', 'session_incomplete'].includes(error.code);
 function bounded<T>(work: () => Promise<T>, options: VideoReceiveOptions, close: () => void): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -80,7 +83,9 @@ export class VideoClient {
           const ended = await bounded(() => this.connection.receive(this.options.timeoutMs ?? 30000), this.options, () => this.close());
           if (ended !== null) throw new SessionError('Unexpected data after completed video.', 'video_incomplete');
         } catch (error) {
-          if (!(error instanceof SessionError) || error.code !== 'session_disconnected') throw error;
+          // The broker closes both sockets once the host has the ACK. A heartbeat pong that crosses
+          // that close draws a reset instead of an orderly end; it is the same ending.
+          if (!transportFailure(error)) throw error;
         }
         this.finish = value as unknown as VideoFinish; return this.finish;
       }
@@ -215,9 +220,6 @@ function ttl(value: unknown): Record<string, number> {
 /** Controller findings that the view's own authority ended, as opposed to its capture. */
 const DEVICE_ENDED = ['device_stopped', 'host_unavailable'];
 const AUTHORITY_ENDED = ['lease_expired', 'lease_released', 'lease_failed', 'key_rotated', 'application_revoked', 'access_revoked', ...DEVICE_ENDED];
-/** A failure of the session connection itself: it ended, was reset or could not be written. A
- * worker's error control is not one; `checked` throws that from a received message. */
-const transportFailure = (error: unknown): boolean => error instanceof SessionError && ['session_disconnected', 'session_incomplete'].includes(error.code);
 const count = (value: unknown, maximum: number, minimum = 0): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
