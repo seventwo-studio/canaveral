@@ -55,3 +55,33 @@ test("a containerd receipt cannot select arbitrary files or omit managed files",
   assert.equal(result.state, "unknown");
   assert.equal(result.blocker?.code, "containerd_receipt_invalid");
 });
+
+test("virtualization detection keeps explicit hosted prerequisites", async () => {
+  const missing = () => { throw Object.assign(new Error("Missing fixture path"), { code: "ENOENT" }); };
+  const env: Environment = {
+    platform: "linux", arch: "arm64", receipt: () => undefined, lstat: missing,
+    run: async argv => {
+      assert.ok(["virsh", "qemu-img", "qemu-system-aarch64"].includes(argv[0]!));
+      assert.deepEqual(argv.slice(1), ["--version"]);
+      return { stdout: "version 11.0.0", exit: 0 };
+    },
+  };
+  const libvirt = await nativeRecord("libvirt", {}, env);
+  assert.equal(libvirt.state, "installed");
+  assert.equal(libvirt.blocker?.code, "libvirt_kvm_missing");
+  for (const [release, state, code] of [
+    ["15.7", "unavailable", "apple_os_unsupported"],
+    ["26.1", "absent", "apple_runner_missing"],
+  ]) {
+    const apple = await nativeRecord("apple-virtualization", {}, {
+      ...env, platform: "darwin",
+      run: async argv => {
+        assert.deepEqual(argv, ["/usr/bin/sw_vers", "-productVersion"]);
+        return { stdout: release!, exit: 0 };
+      },
+    });
+    assert.equal(apple.state, state);
+    assert.equal(apple.blocker?.code, code);
+    assert.equal(apple.qualified, false);
+  }
+});

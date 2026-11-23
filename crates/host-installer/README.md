@@ -95,6 +95,22 @@ the command returned a result, including diagnostic states from `status`.
 Exit 1 indicates a refused or failed operation. Exit 2 indicates invalid
 usage or an unsupported platform or architecture.
 
-Fixture tests exercise the lifecycle with in-memory downloads and
-simulated systemd and ctr. Native root and systemd acceptance remains
-outstanding on Linux.
+Fixture tests exercise the lifecycle with in-memory downloads and simulated
+systemd and ctr. The host acceptance workflow exercises the real lifecycle
+on disposable Ubuntu 24.04 amd64 and arm64 runners: foreign-install refusal,
+cold download, systemd and private socket health, an OCI task pinned by a
+multi-architecture index digest, busy refusal, same-pin reuse and removal.
+It also checks receipt file hashes through the unprivileged daemon registry.
+The registry's `verified` state confirms those file checks, not service or
+socket health; use the root installer for health checks.
+
+Each native cell uploads JSON evidence with its commit, runner image,
+architecture, package pins and step outcomes. A passing hosted smoke does
+not qualify the package for production hosts. Consult the run for the exact
+commit being evaluated.
+
+Crash recovery remains fixture-covered. Downloads finish before the durable
+journal is published, and the remaining journal/write/stop boundaries have
+no deterministic external pause. Killing the installer on a timer would
+not prove which boundary was reached. No release CLI flag or environment
+variable bypasses ownership or pauses a privileged operation for testing.

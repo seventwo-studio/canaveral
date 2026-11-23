@@ -89,6 +89,15 @@ for executable in docker dockerd containerd ctr runc podman; do
 done
 echo "::endgroup::"
 
+begin "Prepare a root-owned installation ancestor"
+# Hosted images let the runner write /opt. Keep production ownership checks intact.
+opt_identity=$(stat -c '%U:%G:%a' /opt)
+update_evidence --arg identity "$opt_identity" '.runnerOptBefore = $identity'
+sudo chown root:root /opt
+sudo chmod 0755 /opt
+test "$(stat -c '%U:%G:%a' /opt)" = root:root:755
+echo "::endgroup::"
+
 begin "Cold install and privileged health check"
 install_report install "$work/install.json"
 jq -e '.result.code == "installed"' "$work/install.json"
