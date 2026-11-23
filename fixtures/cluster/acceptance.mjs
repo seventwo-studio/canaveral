@@ -95,8 +95,8 @@ async function call(path, body, token) {
   assert(result.status >= 200 && result.status < 300, `${path} returned ${rejection(result)}`);
   return result.body;
 }
-async function eventually(label, check) {
-  for (let attempt = 0; attempt < 60; attempt++) {
+async function eventually(label, check, attempts = 60) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const result = await check();
     if (result) return result;
     await delay(2000);
@@ -323,6 +323,8 @@ async function exerciseVm() {
     sudo('systemctl', 'stop', 'libvirtd.service', 'libvirtd.socket', 'libvirtd-ro.socket', 'libvirtd-admin.socket');
     sudo('groupadd', '--gid', '10001', 'canaveral-ci');
     sudo('useradd', '--uid', '10001', '--gid', '10001', '--no-create-home', 'canaveral-ci');
+    sudo('chgrp', 'canaveral-ci', '/dev/kvm');
+    sudo('chmod', '0660', '/dev/kvm');
     sudo('install', '-d', '-m', '0755', '/etc/systemd/system/libvirtd.socket.d');
     command('sudo', ['tee', '/etc/systemd/system/libvirtd.socket.d/canaveral-ci.conf'], {
       input: '[Socket]\nSocketGroup=libvirt\nSocketMode=0660\n',
@@ -361,9 +363,17 @@ async function exerciseVm() {
     const claim = (await call('/v1/connection-setups')).setups.find(row => row.id === id);
     assert.equal(claim.state, 'connected');
     assert.notEqual(claim.hostId, cpuRetained.hostId);
-    const view = await eventually('libvirt offer with the CirrOS template', async () => {
-      const candidate = (await call('/v1/hosts')).hosts.find(row => row.id === claim.hostId);
-      return candidate?.online && candidate.provider === 'libvirt' && candidate.templates.some(image => image.id === template.id) && candidate;
+    let candidate;
+    const view = await eventually('placement-ready libvirt offer with the CirrOS template', async () => {
+      candidate = (await call('/v1/hosts')).hosts.find(row => row.id === claim.hostId);
+      return candidate?.placementReady && candidate.provider === 'libvirt' &&
+        candidate.templates.some(image => image.id === template.id && image.revision === template.revision) && candidate;
+    }).catch(error => {
+      const health = candidate?.health;
+      const summary = { online: candidate?.online, enabled: candidate?.enabled, health: health?.status,
+        checks: health?.checks?.map(check => ({ id: check.id, status: check.status })),
+        available: candidate?.available };
+      throw new Error(error.message + ': ' + JSON.stringify(summary));
     });
     inPod('test', '-c', '/dev/kvm');
     inPod('test', '-w', storage);
@@ -383,16 +393,21 @@ async function exerciseVm() {
       id: machineId, name: 'disposable CirrOS guest', hostId: enrollment.hostId,
       templateId: template.id, templateRevision: template.revision, arch: template.arch, resources: template.minimum,
     });
+    let machine;
     await eventually('controller-observed running state', async () => {
-      const machine = await call(route);
+      machine = await call(route);
       return machine.observed === 'running' && machine.ready;
+    }).catch(error => {
+      const native = virsh('list', '--all', '--uuid').split('\n').includes(machineId);
+      const state = native ? virsh('domstate', machineId) : 'undefined';
+      throw new Error(error.message + `; provider reports ${machine?.observed}: ${machine?.detail ?? ''}; libvirt domain state: ${state}`);
     });
     assert.equal(virsh('domstate', machineId), 'running');
     const ip = await eventually('guest DHCP and SSH service', async () => {
       const address = virsh('domifaddr', machineId, '--source', 'lease')
         .match(/\b(192\.168\.122\.\d{1,3})\/\d+\b/)?.[1];
       return address && await sshBanner(address) && address;
-    });
+    }, 125);
     const domainId = virsh('domid', machineId);
     assert.match(domainId, /^\d+$/);
     return { machineId, domainId, guestBoot: 'SSH banner on private libvirt network', guestIp: ip };
@@ -409,7 +424,10 @@ async function exerciseVm() {
       assert.equal(hosts.filter(row => row.provider === 'libvirt').length, 1);
       return hosts.some(row => row.id === enrollment.hostId && row.online && row.lastSeen > deletedAt);
     });
-    const machine = await call(route);
+    const machine = await eventually('fresh machine report from the replacement daemon', async () => {
+      const view = await call(route);
+      return view.updatedAt > deletedAt && view.observed === 'running' && view;
+    });
     assert.equal(machine.hostId, enrollment.hostId);
     assert.equal(machine.observed, 'running');
     assert.equal(virsh('domid', machineId), started.domainId);
