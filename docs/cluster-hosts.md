@@ -7,11 +7,10 @@ uses that state. Use the host's native service manager for macOS.
 The CPU profile stages CPU inference. The Rust model executor has its own bound
 runner enrollment and application grants. See [model runtimes](model-runtimes.md)
 and [runner enrollment](runner-enrollment.md). The VM profile mounts host libvirt,
-KVM and VM storage. Keep VM capacity disabled until the controller supports the
-libvirt lease backend and native acceptance proves boot, connection-bound
-teardown and reservation reconciliation. The current controller admits bound
-Linux leases for Apple Virtualization. Containerd operations, Android and GPU
-execution are outside this Kubernetes deployment.
+KVM and VM storage for administrative machines. Consumer libvirt leases require
+a production native connection, supervisor and owned-storage adapters. The
+controller's bound Linux lease API currently admits Apple Virtualization.
+Containerd operations, Android and GPU execution are outside this deployment.
 
 ## Select and prepare nodes
 
@@ -92,6 +91,12 @@ digest-verified templates at the configured paths. A process that can connect to
 the writable system libvirt socket has host-level libvirt authority even with a
 read-only bind mount. Delegate that authority only on dedicated, trusted nodes.
 QEMU runs on the host, so account for its resources independently of pod limits.
+Administrative starts use host libvirtd and can keep running through pod
+replacement. Verify the same host ID, domain and owned disk when the pod returns.
+Stop an administrative machine through Canaveral and confirm the observed stop
+before maintenance. A stop retains the disk and its reservation. Verified
+administrative deletion and connection-bound AUTODESTROY require native adapters
+that the current daemon does not ship.
 
 ## Upgrades, recovery and removal
 
@@ -104,8 +109,16 @@ draining a node for infrastructure work. Kubernetes owns daemon updates in this
 profile. The daemon has a 90-second shutdown budget. The pod allows 120 seconds before Kubernetes
 forcibly terminates it.
 
+A `kubernetes_bootstrap_token_invalid` response calls for checking token file
+ownership, mode and links. With `kubernetes_bootstrap_recovery_required`, restore
+the original token and preserve the identity and enrollment intent. The daemon
+returns `kubernetes_managed_updates_disabled` for direct self-updates and
+`kubernetes_containerd_disabled` for containerd operations.
+`libvirt_runtime_not_configured` is expected on a CPU-profile pod.
+
 Keep the original state for interrupted claims, crash recovery and uncertain
-operations. A replacement node needs its own enrollment after fencing and
+operations. If the daemon exits with `host_shutdown_incomplete`, verify
+workload and storage state independently before resuming admission. A replacement node needs its own enrollment after fencing and
 retiring the old host. After a hard termination, check the controller
 reservations and establish independent stop and cleanup proof before clearing
 any state. For a failed claim, inspect the setup and preserve the staged identity,

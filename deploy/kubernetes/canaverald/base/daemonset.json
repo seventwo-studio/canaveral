@@ -41,12 +41,12 @@
             "image": "canaverald:local",
             "imagePullPolicy": "IfNotPresent",
             "args": [
+              "--url",
+              "$(CONTROLLER_URL)",
               "--config",
               "/etc/canaverald/host.json",
               "--state",
               "/var/lib/canaverald",
-              "--url",
-              "$(CONTROLLER_URL)",
               "--ca-file",
               "/run/controller-ca/ca.crt"
             ],

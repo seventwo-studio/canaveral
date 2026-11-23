@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { request as httpsRequest } from 'node:https';
+import { createConnection } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const work = process.env.CLUSTER_WORK;
@@ -21,6 +23,7 @@ report.engine = { backend: 'llama.cpp', acceleration: 'cpu', version: engine.ver
   archiveSha256: engine.sha256, treeSha256: engine.treeSha256 };
 
 class Blocked extends Error {}
+class ExpectedGap extends Blocked {}
 async function step(name, task) {
   const entry = { name, outcome: 'running' };
   report.steps.push(entry);
@@ -33,9 +36,9 @@ async function step(name, task) {
     return entry.result;
   } catch (error) {
     entry.outcome = error instanceof Blocked ? 'blocked' : 'failed';
-    if (error instanceof Blocked) entry.reason = error.message;
+    entry.reason = error.message;
     console.error(name, error.message);
-    process.exitCode = 1;
+    if (!(error instanceof ExpectedGap)) process.exitCode = 1;
   } finally {
     entry.durationMs = Math.round(performance.now() - start);
     save();
@@ -60,18 +63,36 @@ const waitForDaemon = async (previousUid) => eventually('ready daemon Pod', () =
 });
 const inPod = (...args) => daemon('exec', 'daemonset/canaverald', '--', ...args);
 const sudo = (...args) => command('sudo', args);
-async function request(path, body, token = admin) {
-  const reply = await fetch(origin + path, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(5_000),
+const virsh = (...args) => sudo('virsh', '--connect', 'qemu:///system', ...args);
+function request(path, body, token = admin) {
+  const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const conn = httpsRequest(origin + path, {
+      agent: false,
+      method: data ? 'POST' : 'GET',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        ...(data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {}),
+      },
+      signal: AbortSignal.timeout(5000),
+    }, async reply => {
+      try {
+        const chunks = [];
+        for await (const chunk of reply) chunks.push(chunk);
+        resolve({ status: reply.statusCode, body: JSON.parse(Buffer.concat(chunks)) });
+      } catch (error) { reject(error); }
+    });
+    conn.on('error', reject);
+    conn.end(data);
   });
-  return { status: reply.status, body: await reply.json() };
+}
+function rejection(result) {
+  const summary = String(result.body.message ?? result.body.error ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 180);
+  return `HTTP ${result.status} ${summary}`.trim();
 }
 async function call(path, body, token) {
   const result = await request(path, body, token);
-  assert(result.status >= 200 && result.status < 300, `${path} returned HTTP ${result.status}`);
+  assert(result.status >= 200 && result.status < 300, `${path} returned ${rejection(result)}`);
   return result.body;
 }
 async function eventually(label, check) {
@@ -96,6 +117,7 @@ const ready = await step('controller TLS and k3s node', async () => {
 });
 
 let host;
+let cpuRetained;
 if (ready) {
   host = await step('single-claim enrollment and heartbeats', async () => {
     const id = randomUUID(), { name, provider, capacity } = setup;
@@ -103,7 +125,7 @@ if (ready) {
     if (issued.status === 400 && issued.body.error === 'Choose a VM or simulator provider.') {
       throw new Blocked('POST /v1/connection-setups returned HTTP 400 for the CPU native offer: Choose a VM or simulator provider.');
     }
-    assert.equal(issued.status, 200);
+    assert.equal(issued.status, 200, rejection(issued));
     command('sudo', ['bash', 'script/provision_cluster_node.sh'], { input: issued.body.enrollmentToken + '\n' });
     kubectl('apply', '-f', 'deploy/kubernetes/canaverald/base/namespace.json');
     daemon('create', 'configmap', 'canaveral-controller-ca', '--from-file=ca.crt=' + work + '/ca.crt');
@@ -218,7 +240,7 @@ if (host) {
     return { id, hostId: after.id, runtimeIds: status.map(row => row.id) };
   });
   if (drain) {
-    await step('uninstall and verify explicitly retained state', async () => {
+    cpuRetained = await step('uninstall and verify explicitly retained state', async () => {
       await eventually('renewed safe-to-power-off proof', async () => (await call(maintenance)).safeToPowerOff);
       kubectl('delete', '-k', 'deploy/kubernetes/canaverald', '--timeout=150s');
       const identity = sudo('jq', '-r', '.id', state + '/identity.json');
@@ -241,7 +263,8 @@ if (ready) {
   const capability = await step('host libvirt and KVM capability', () => {
     command('sudo', ['apt-get', 'update'], { timeout: 240_000 });
     command('sudo', ['env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends',
-      'libvirt-daemon-system', 'libvirt-daemon-driver-qemu', 'libvirt-clients', 'qemu-system-x86', 'qemu-utils'], { timeout: 360_000 });
+      'libvirt-daemon-system', 'libvirt-daemon-driver-qemu', 'libvirt-daemon-config-network',
+      'libvirt-clients', 'qemu-system-x86', 'qemu-utils', 'ovmf', 'dnsmasq-base'], { timeout: 360_000 });
     try { sudo('test', '-c', '/dev/kvm'); }
     catch { throw new Blocked('The hosted runner has no /dev/kvm character device after installing host QEMU and libvirt.'); }
     sudo('systemctl', 'start', 'libvirtd.socket');
@@ -249,7 +272,7 @@ if (ready) {
     return { kvm: true, libvirt: sudo('virsh', '--version') };
   });
   if (capability) {
-    await step('verify the pinned VM guest disk', () => {
+    const guestDisk = await step('verify the pinned VM guest disk', () => {
       const disk = work + '/guest.qcow2';
       command('curl', ['--fail', '--silent', '--show-error', '--location', '--proto', '=https', '--proto-redir', '=https',
         '--max-time', '120', '--max-filesize', String(guest.maxBytes), '--output', disk, guest.url]);
@@ -260,16 +283,169 @@ if (ready) {
       assert(!info['backing-filename'], 'Guest template must be self-contained.');
       return { sha256: guest.sha256, format: info.format, bytes: bytes.length };
     });
-  }
-  await step('VM boot, lease cleanup, and active-lease pod replacement', async () => {
-    const reply = await request('/v1/linux-lease-images', {
-      id: 'cluster-libvirt-trial', revision: '1', arch: 'amd64', os: 'linux', mode: 'headless',
-      backend: 'libvirt', digest: 'sha256:' + guest.sha256, resources, capabilities: [],
-    });
-    if (reply.status === 400 && reply.body.error === 'Backend must be appleVirtualization.') {
-      throw new Blocked('POST /v1/linux-lease-images returned HTTP 400: Backend must be appleVirtualization. No VM lease, AUTODESTROY or reservation reconciliation was exercised.');
+    if (cpuRetained && guestDisk) await exerciseVm();
+    else {
+      report.steps.push({ name: 'administrative VM lifecycle', outcome: 'not_run', reason: 'Requires the staged guest and successful CPU-profile uninstall.' });
+      writeFileSync(evidencePath, JSON.stringify(report, null, 2) + '\n');
     }
-    assert(capability, 'Host KVM and libvirt capability is required for VM acceptance.');
-    throw new Error(`Unexpected HTTP ${reply.status} from libvirt catalogue probe. A real VM lease acceptance fixture is required before enabling this backend.`);
+  }
+  await step('consumer libvirt lease admission and reservation reconciliation', async () => {
+    const image = {
+      id: 'cluster-catalogue-control', revision: '1', arch: 'amd64', os: 'linux', mode: 'headless',
+      digest: 'sha256:' + guest.sha256, resources, capabilities: ['command'],
+    };
+    const refused = await request('/v1/linux-lease-images', { ...image, backend: 'libvirt' });
+    assert.equal(refused.status, 400, rejection(refused));
+    assert.equal(refused.body.code, 'invalid_request');
+    const control = await call('/v1/linux-lease-images', { ...image, backend: 'appleVirtualization' });
+    assert.equal(control.backend, 'appleVirtualization');
+    throw new ExpectedGap('The API refused only the libvirt catalogue request (HTTP 400 invalid_request). The libvirt lease path lacks a production OwnedNativeConnection, supervisor and owned storage adapter.');
+  });
+  await step('libvirt AUTODESTROY on connection loss', () => {
+    throw new ExpectedGap('Administrative start uses one-shot virsh start. PAUSED|AUTODESTROY is available only to the lease supervisor, whose OwnedNativeConnection has no production adapter.');
+  });
+  await step('verified administrative libvirt deletion', () => {
+    throw new ExpectedGap('Verified removal requires the unavailable native connection, file lease and protected removal adapters. The administrative lifecycle retains the definition, owned disk and disk reservation.');
+  });
+}
+
+async function exerciseVm() {
+  const storage = '/var/lib/libvirt/images/canaveral';
+  const template = {
+    id: 'cluster-cirros', revision: '0.6.3', os: 'linux', arch: 'amd64', mode: 'headless',
+    image: storage + '/cirros.qcow2', network: 'default',
+    minimum: { cpu: 1, memoryMiB: 512, diskGiB: 1 },
+  };
+  const enrollment = await step('enroll the VM overlay and verify the mounted socket', async () => {
+    // Stop the service before applying the socket group and fixture QEMU identity.
+    const group = Number(command('getent', ['group', 'libvirt']).split(':')[2]);
+    assert(Number.isSafeInteger(group) && group > 0);
+    sudo('systemctl', 'stop', 'libvirtd.service', 'libvirtd.socket', 'libvirtd-ro.socket', 'libvirtd-admin.socket');
+    sudo('groupadd', '--gid', '10001', 'canaveral-ci');
+    sudo('useradd', '--uid', '10001', '--gid', '10001', '--no-create-home', 'canaveral-ci');
+    sudo('install', '-d', '-m', '0755', '/etc/systemd/system/libvirtd.socket.d');
+    command('sudo', ['tee', '/etc/systemd/system/libvirtd.socket.d/canaveral-ci.conf'], {
+      input: '[Socket]\nSocketGroup=libvirt\nSocketMode=0660\n',
+    });
+    command('sudo', ['tee', '-a', '/etc/libvirt/libvirtd.conf'], { input: '\nauth_unix_rw = "none"\n' });
+    // CI uses a disposable QEMU account with the same UID so libvirtd does
+    // not change ownership of the files the daemon must continue to validate.
+    command('sudo', ['tee', '-a', '/etc/libvirt/qemu.conf'], {
+      input: '\nuser = "canaveral-ci"\ngroup = "canaveral-ci"\ndynamic_ownership = 0\n',
+    });
+    sudo('systemctl', 'daemon-reload');
+    sudo('systemctl', 'start', 'libvirtd.socket');
+    sudo('test', '-S', '/var/run/libvirt/libvirt-sock');
+    if (!virsh('net-list', '--name').split('\n').includes('default')) virsh('net-start', 'default');
+
+    // The CPU uninstall already verified state retention. Keep that state
+    // aside on this one-node runner so the VM profile gets its own identity.
+    sudo('mv', '-T', state, state + '-cpu-acceptance');
+    sudo('install', '-d', '-m', '0700', '-o', '10001', '-g', '10001', storage);
+    sudo('install', '-m', '0600', '-o', '10001', '-g', '10001', work + '/guest.qcow2', template.image);
+    kubectl('apply', '-f', 'deploy/kubernetes/canaverald/base/namespace.json');
+    daemon('create', 'configmap', 'canaveral-controller-ca', '--from-file=ca.crt=' + work + '/ca.crt');
+    const overlay = JSON.parse(kubectl('apply', '-k', 'deploy/kubernetes/canaverald/vm', '--dry-run=client', '-o', 'json'));
+    const config = overlay.items.find(item => item.kind === 'ConfigMap');
+    const vm = JSON.parse(config.data['host.json']);
+    vm.templates = [template];
+    config.data['host.json'] = JSON.stringify(vm);
+    const daemonSet = overlay.items.find(item => item.kind === 'DaemonSet');
+    daemonSet.spec.template.spec.securityContext.supplementalGroups = [group];
+    const id = randomUUID();
+    const issued = await call('/v1/connection-setups', { id, name: vm.name, provider: vm.provider, capacity: vm.capacity });
+    command('sudo', ['bash', 'script/provision_cluster_node.sh'], { input: issued.enrollmentToken + '\n' });
+    kubectl('label', '--overwrite', node, 'canaveral.dev/host-profile=vm');
+    command('kubectl', ['apply', '-f', '-'], { input: JSON.stringify(overlay) });
+    await waitForDaemon();
+    const claim = (await call('/v1/connection-setups')).setups.find(row => row.id === id);
+    assert.equal(claim.state, 'connected');
+    assert.notEqual(claim.hostId, cpuRetained.hostId);
+    const view = await eventually('libvirt offer with the CirrOS template', async () => {
+      const candidate = (await call('/v1/hosts')).hosts.find(row => row.id === claim.hostId);
+      return candidate?.online && candidate.provider === 'libvirt' && candidate.templates.some(image => image.id === template.id) && candidate;
+    });
+    inPod('test', '-c', '/dev/kvm');
+    inPod('test', '-w', storage);
+    const status = JSON.parse(inPod('canaverald', 'runtimes', 'status', '--config', '/etc/canaverald/host.json', '--state', state, '--json'));
+    const libvirt = status.find(row => row.id === 'libvirt');
+    assert.equal(libvirt?.state, 'verified', JSON.stringify(libvirt));
+    assert.equal(libvirt.qualified, false);
+    return { hostId: view.id, libvirt: libvirt.version, qualified: libvirt.qualified };
+  });
+  if (!enrollment) return;
+
+  const machineId = randomUUID();
+  const route = '/v1/machines/' + machineId;
+  const disk = storage + '/' + machineId + '/disk.qcow2';
+  const started = await step('boot the pinned guest through the administrative API', async () => {
+    await call('/v1/machines', {
+      id: machineId, name: 'disposable CirrOS guest', hostId: enrollment.hostId,
+      templateId: template.id, templateRevision: template.revision, arch: template.arch, resources: template.minimum,
+    });
+    await eventually('controller-observed running state', async () => {
+      const machine = await call(route);
+      return machine.observed === 'running' && machine.ready;
+    });
+    assert.equal(virsh('domstate', machineId), 'running');
+    const ip = await eventually('guest DHCP and SSH service', async () => {
+      const address = virsh('domifaddr', machineId, '--source', 'lease')
+        .match(/\b(192\.168\.122\.\d{1,3})\/\d+\b/)?.[1];
+      return address && await sshBanner(address) && address;
+    });
+    const domainId = virsh('domid', machineId);
+    assert.match(domainId, /^\d+$/);
+    return { machineId, domainId, guestBoot: 'SSH banner on private libvirt network', guestIp: ip };
+  });
+  if (!started) return;
+
+  await step('replace the pod during an administrative VM run', async () => {
+    const [old] = daemonPods();
+    daemon('delete', 'pod', old.metadata.name, '--timeout=150s');
+    const deletedAt = Date.now() / 1000;
+    await waitForDaemon(old.metadata.uid);
+    await eventually('same VM host identity with a fresh heartbeat', async () => {
+      const { hosts } = await call('/v1/hosts');
+      assert.equal(hosts.filter(row => row.provider === 'libvirt').length, 1);
+      return hosts.some(row => row.id === enrollment.hostId && row.online && row.lastSeen > deletedAt);
+    });
+    const machine = await call(route);
+    assert.equal(machine.hostId, enrollment.hostId);
+    assert.equal(machine.observed, 'running');
+    assert.equal(virsh('domid', machineId), started.domainId);
+    assert.deepEqual(virsh('list', '--all', '--uuid').split('\n'), [machineId]);
+    return { hostId: machine.hostId, machineId, domainId: started.domainId, duplicateDomains: 0 };
+  });
+
+  const stopped = await step('stop the administrative VM and retain its owned disk', async () => {
+    const before = sudo('stat', '-c', '%d:%i', disk);
+    await call(route + '/desired', { state: 'stopped' });
+    await eventually('controller-observed VM stop', async () => (await call(route)).observed === 'stopped');
+    assert.equal(virsh('domstate', machineId), 'shut off');
+    assert.equal(sudo('stat', '-c', '%d:%i', disk), before);
+    const usage = await call('/v1/hosts/' + enrollment.hostId + '/resources');
+    assert(usage.reserved.diskGiB >= template.minimum.diskGiB);
+    return { machineId, disk: 'retained', reservedDiskGiB: usage.reserved.diskGiB };
+  });
+  if (stopped) await step('drain and uninstall the VM DaemonSet with retained state', async () => {
+    const maintenance = '/v1/hosts/' + enrollment.hostId + '/maintenance';
+    await call(maintenance, { id: randomUUID(), reason: 'disposable VM node teardown' });
+    await eventually('safe-to-power-off proof for VM host', async () => (await call(maintenance)).safeToPowerOff);
+    kubectl('delete', '-k', 'deploy/kubernetes/canaverald/vm', '--timeout=150s');
+    assert.equal(sudo('jq', '-r', '.id', state + '/identity.json'), enrollment.hostId);
+    assert.equal(sudo('jq', '-r', '.id', state + '-cpu-acceptance/identity.json'), cpuRetained.hostId);
+    sudo('test', '-f', disk);
+    return { vmState: 'retained', cpuState: 'retained' };
+  });
+}
+
+function sshBanner(hostname) {
+  return new Promise(resolve => {
+    const socket = createConnection({ host: hostname, port: 22 });
+    socket.setTimeout(1200);
+    socket.once('data', bytes => { resolve(bytes.toString().startsWith('SSH-2.0-')); socket.destroy(); });
+    socket.once('error', () => resolve(false));
+    socket.once('timeout', () => { socket.destroy(); resolve(false); });
+    socket.once('close', () => resolve(false));
   });
 }
