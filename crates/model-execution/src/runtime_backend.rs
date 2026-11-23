@@ -61,36 +61,38 @@ impl Backend {
         {
             return Err("backend requires a managed runtime package");
         }
-        if self == Self::Ollama {
-            if !config.model_files.is_empty() {
-                return Err("Ollama uses manifest inventory");
-            }
-        } else if config.inventory.len() != config.model_files.len()
-            || config
-                .inventory
-                .keys()
-                .any(|key| !config.model_files.contains_key(key))
+        if (self != Self::Ollama || !config.model_files.is_empty())
+            && (config.inventory.len() != config.model_files.len()
+                || config
+                    .inventory
+                    .keys()
+                    .any(|key| !config.model_files.contains_key(key)))
         {
             return Err("every backend model requires a pinned local artifact");
+        }
+        if self == Self::Ollama
+            && !config.model_files.is_empty()
+            && (!config.executable.as_os_str().is_empty()
+                || !config.runtime_packages.is_empty()
+                || crate::runtime_archive::host_pin(self).is_none())
+        {
+            return Err("GGUF import requires the catalog Ollama package");
         }
         Ok(())
     }
     pub fn verify_models(self, config: &Config) -> Result<()> {
-        if self == Self::Ollama {
-            return Ok(());
-        }
         for (label, artifact) in &config.model_files {
             relative(&artifact.path)?;
             if artifact.files.is_empty() || artifact.files.len() > 100_000 {
                 return Err("invalid model manifest");
             }
             let root = config.models_dir.join(&artifact.path);
-            if self == Self::LlamaCpp {
+            if matches!(self, Self::LlamaCpp | Self::Ollama) {
                 if artifact.files.len() != 1
                     || !artifact.files.contains_key(&artifact.path)
                     || !artifact.path.ends_with(".gguf")
                 {
-                    return Err("llama.cpp requires one pinned GGUF file");
+                    return Err("backend requires one pinned GGUF file");
                 }
                 let expected = &artifact.files[&artifact.path];
                 verify_file(&root, expected)?;
@@ -169,7 +171,7 @@ impl Backend {
                             .args(["--parallel", "1", "--no-webui", "--api-key-file"])
                             .arg(key_file);
                         if config.acceleration == Acceleration::Cpu {
-                            cmd.args(["--n-gpu-layers", "0"]);
+                            cmd.args(["--device", "none", "--n-gpu-layers", "0"]);
                         }
                     }
                     Self::Vllm => {
@@ -217,7 +219,7 @@ impl Backend {
             "/v1/completions"
         }
     }
-    fn alias(self, model: &str) -> &str {
+    pub(super) fn alias(self, model: &str) -> &str {
         if self == Self::Mlx {
             "default_model"
         } else {
@@ -263,30 +265,37 @@ impl Backend {
                     .any(|v| v.get("id").and_then(|v| v.as_str()) == expected.as_deref())
             })
     }
-    pub fn request(self, config: &Config, job: &ModelJob) -> Result<serde_json::Value> {
+    pub(super) fn request(
+        self,
+        config: &Config,
+        job: &ModelJob,
+        runtime_model: &str,
+    ) -> Result<serde_json::Value> {
         let Message::Submit {
-            model,
-            prompt,
-            max_tokens,
-            ..
+            prompt, max_tokens, ..
         } = &job.message
         else {
             return Err("submission required");
         };
         Ok(if self == Self::Ollama {
-            serde_json::json!({"model":model,"prompt":prompt,"stream":false,"keep_alive":0,"options":config.acceleration.options(config.context_tokens,*max_tokens)})
+            serde_json::json!({"model":runtime_model,"prompt":prompt,"stream":false,"keep_alive":0,"options":config.acceleration.options(config.context_tokens,*max_tokens)})
         } else {
-            serde_json::json!({"model":self.alias(model),"prompt":prompt,"max_tokens":max_tokens,"stream":false,"n":1})
+            serde_json::json!({"model":runtime_model,"prompt":prompt,"max_tokens":max_tokens,"stream":false,"n":1})
         })
     }
-    pub fn result(self, job: &ModelJob, value: &serde_json::Value) -> Result<GenerationResult> {
+    pub(super) fn result(
+        self,
+        job: &ModelJob,
+        runtime_model: &str,
+        value: &serde_json::Value,
+    ) -> Result<GenerationResult> {
         let Message::Submit {
             model, max_tokens, ..
         } = &job.message
         else {
             return Err("submission required");
         };
-        if value.get("model").and_then(|v| v.as_str()) != Some(self.alias(model)) {
+        if value.get("model").and_then(|v| v.as_str()) != Some(runtime_model) {
             return Err("invalid generation identity");
         }
         let (text, usage, input, output) = if self == Self::Ollama {
@@ -355,23 +364,28 @@ fn relative(value: &str) -> Result<()> {
     }
     Ok(())
 }
-fn hash_file(path: &Path) -> Result<String> {
+pub(super) fn open_model_file(path: &Path) -> Result<fs::File> {
     // Resolve trusted parents, then refuse a linked final component. The operator
     // must still keep the inventory immutable throughout the owned runtime's use.
     crate::private::walk(path.parent().ok_or("model parent unavailable")?)?;
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
         .map_err(|_| "model unavailable")?;
-    let before = file.metadata().map_err(|_| "model unavailable")?;
-    if !before.is_file()
-        || before.nlink() != 1
-        || before.mode() & 0o022 != 0
-        || !(before.uid() == 0 || before.uid() == unsafe { libc::geteuid() })
+    let metadata = file.metadata().map_err(|_| "model unavailable")?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o022 != 0
+        || !(metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() })
     {
         return Err("unsafe model file");
     }
+    Ok(file)
+}
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = open_model_file(path)?;
+    let before = file.metadata().map_err(|_| "model unavailable")?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
@@ -392,7 +406,7 @@ fn hash_file(path: &Path) -> Result<String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
-fn verify_file(path: &Path, expected: &str) -> Result<()> {
+pub(super) fn verify_file(path: &Path, expected: &str) -> Result<()> {
     if !crate::runtime_package::hash_valid(expected) || hash_file(path)? != expected {
         return Err("model file integrity mismatch");
     }

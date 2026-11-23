@@ -67,6 +67,10 @@ library and helper paths. The upstream library aliases that these releases
 require become regular files. Published versions remain available while a
 live or unresolved journal references them. For older journals without a
 package identity, the executor retains every version until reconciliation.
+Install and verify from the updated executor to select a new catalog pin. The
+registry reports installed versions and references in JSON. Reinstall an
+unreferenced current pin to repair integrity failures. See
+[runtime management](rust-model-execution.md#runtime-management) for recovery.
 
 Model artifacts remain separately pinned. GGUF models and model snapshot
 directories require explicit local artifact identities; a public label is never
@@ -84,11 +88,16 @@ an unresolved execution's artifacts or receipts.
 ## Verification boundary
 
 Portable owned-runtime fixtures verify protocol, provisioning and lifecycle
-behavior. They load no model weights and do not qualify the distributed engines.
-Real runtime releases, native library loading, process topology, accelerator use,
-model quality, resource fit and ingress/inventory isolation need separate native
-acceptance. Keep release pins and [third-party notices](../THIRD_PARTY_NOTICES.md) current.
+behavior. The [native acceptance workflow](../.github/workflows/model-acceptance.yaml)
+exercises CPU generation through the public job API, using a
+[pinned Apache-2.0 GGUF](../fixtures/model-execution/real-model.json), and
+checks package installation, verification, cleanup and removal. Full runs also
+exercise repair and interrupted archive transport. Use its per-cell JSON
+artifacts to identify the tested runner image and package and model digests.
 Host qualification remains a separate gate for offering model capacity.
+Accelerator use, resource fit and isolation from untrusted local callers
+require separate evidence. Keep release pins and
+[third-party notices](../THIRD_PARTY_NOTICES.md) current.
 
 Implementation details: [Rust execution](rust-model-execution.md),
 [model job wire contract](model-job-contract.md) and

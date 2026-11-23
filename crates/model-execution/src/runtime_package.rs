@@ -313,6 +313,20 @@ impl StagedRuntime {
         }
     }
 
+    pub fn configure_loader(&self, command: &mut std::process::Command) -> Result<()> {
+        // Release archives place libraries beside the executable or under lib/ollama.
+        let paths = [self.root.clone(), self.root.join("lib/ollama")];
+        let path = std::env::join_paths(paths.iter().filter(|path| path.is_dir()))
+            .map_err(|_| "invalid runtime library search path")?;
+        let variable = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        command.env(variable, path);
+        Ok(())
+    }
+
     pub fn verify_executables(&self, state: &private::Directory) -> Result<()> {
         for (relative, expected) in &self.executables {
             let path = self.root.join(relative);

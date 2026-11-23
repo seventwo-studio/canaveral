@@ -108,7 +108,7 @@ function executor(t: TestContext) {
   const script = (body: string) => writeFileSync(binary, "#!" + process.execPath + "\n" + body, { mode: 0o755 });
   const rows = modelIds.map((backend, index) => ({
     backend, catalogVersion: "1.2.3", available: index < 2, state: ["verified", "absent", "unavailable", "unavailable"][index],
-    installed: index === 0 ? [{ version: "1.2.3", packageDigest: digest, verified: true, referenced: false }] : [],
+    installed: index === 0 ? [{ version: "1.2.3", packageDigest: digest, verified: true, referenced: true }] : [],
     qualified: false,
   }));
   const plan = { downloadBytes: 4, assets: [{ url: "https://example.invalid/model", bytes: 4, sha256: digest }] };
@@ -138,6 +138,7 @@ console.log(${JSON.stringify(JSON.stringify(report))}); process.exitCode = ${act
     const observed = await mutateRuntime(f.settings, action, "ollama", dryRun, selected, { ...linux, run: f.invoke, modelStat: f.modelStat });
     assert.deepEqual(observed.result, result);
     assert.equal(observed.backends[0]?.state, "verified");
+    assert.deepEqual(observed.backends[0]?.installed, report.backends[0]?.installed);
     assert.deepEqual(observed.plan, plan.plan);
   }
 });
@@ -157,8 +158,15 @@ test("bounded executor rejects timeout, oversize output and contract violations"
     assert.equal(rows[3]?.state, "unknown");
     assert.equal(rows[3]?.blocker?.code, "model_executor_invalid_report");
   }
-  f.script(`console.log(${JSON.stringify(JSON.stringify(status))});`);
-  assert.equal((await runtimeInventory(f.settings, env))[3]?.state, "verified");
+  const qualified = { ...status, backends: status.backends.map(row => row.backend === "ollama"
+    ? { ...row, qualified: true, active: "1.2.3" } : row) };
+  f.script(`console.log(${JSON.stringify(JSON.stringify(qualified))});`);
+  const installed = (await runtimeInventory(f.settings, env))[3];
+  assert.equal(installed?.state, "verified");
+  assert.equal(installed?.active, "1.2.3");
+  assert.equal(installed?.catalogVersion, "1.2.3");
+  assert.equal(installed?.qualified, true);
+  assert.deepEqual(installed?.installed, status.backends[0]?.installed);
   const linked = join(f.root, "linked");
   symlinkSync(f.binary, linked);
   assert.throws(() => modelConfig({ modelExecutor: { ...f.settings.modelExecutor, binary: linked } }, f.modelStat), /without links/);

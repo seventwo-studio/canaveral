@@ -192,12 +192,30 @@ canaveral-model-execution --runtime-remove --config /absolute/private/runner.jso
 ```
 
 Management backend names are `ollama`, `llama.cpp`, `vllm` and `mlx-lm`.
-`prepare` downloads an absent pin and reuses a verified installation.
+`prepare` downloads an absent pin and reuses a verified installation. It
+repairs an unreferenced damaged package by verifying a fresh tree before
+replacing the damaged one.
 `verify` checks the current installed pin. `remove` accepts `--dry-run`, as
 does `prepare`. Dry runs leave disk state untouched. Removal and pruning
 hold the execution lock and retain packages referenced by live or unresolved
 journals. An explicit removal of a referenced version returns `runtime_in_use`.
 An older unresolved journal without a package digest protects the entire cache.
+
+Upgrade the executor to a trusted Canaveral release with the new catalog pin.
+On the same runner config and state directory, run `canaverald runtimes
+install BACKEND`, then `canaverald runtimes verify BACKEND --json`, with the
+usual host config and state flags. Status shows `catalogVersion`, the verified
+`active` version when present, and `installed` entries with each package digest,
+verification result and `referenced` flag. Once a new tree is installed, older
+versions of the same backend remain only while referenced or when their
+ownership cannot be established for pruning.
+
+After a failed or interrupted install, inspect `runtimes status --json`.
+For an unreferenced missing or damaged catalog package, rerun install and
+verify. If the executor reports `runtime_in_use` or `runtime_state_unknown`,
+check whether the executor still owns the state lock and reconcile outstanding
+work before retrying. Preserve the state directory and journal throughout
+recovery.
 
 Each invocation writes one `canaveral-runtime-report` JSON line. Exit 0 means
 success, exit 1 reports a failed or unknown operation in JSON, and exit 2
@@ -325,20 +343,37 @@ Upstream protocol references: [llama.cpp server](https://github.com/ggml-org/lla
 
 Each child has a cleared environment, private HOME/TMPDIR, one model/parallel
 request, cloud disabled, `OLLAMA_NOPRUNE=1` and a fresh IPv4 loopback port.
-The no-prune switch disables startup blob pruning in [upstream Ollama](https://github.com/ollama/ollama/blob/main/envconfig/config.go).
-The adapter never deletes operator model inventory. Before claim, the model tree
+The no-prune switch disables startup blob pruning.
+
+With the catalog Ollama engine, `modelFiles` can identify one local GGUF
+per inventory label using the same shape as for llama.cpp. In this mode the
+inventory SHA-256 identifies the GGUF itself. The executor verifies the source
+before claiming work, uploads by digest to an owned importer using a fresh
+private store, and stops the importer. It verifies the manifest and every
+referenced blob, including the single model layer whose digest must match the
+GGUF pin. A fresh server uses the same store. The executor checks its inventory
+and requests generation by the verified manifest digest. The store is removed
+with the workspace after the runtime group has stopped.
+
+Existing Ollama configs that omit `modelFiles` use operator-provisioned
+manifest inventory. Before claim, the model tree
 must contain only regular single-linked files and directories, owned by root or
 the effective user, with no symlinks or group/other write permission. The operator
 must keep that trusted inventory stable throughout execution. Kernel socket ownership
 is checked before inventory and generation requests. The exact submitted tag
-and manifest digest must match both operator inventory and `/api/tags`; no pull endpoint
-is called. This pins reported manifest identity only. Blob bytes are not hashed
-and content integrity of the installed weights is not established. Generation uses `stream: false`, explicit `num_predict` and `num_ctx`,
+and manifest digest must match both operator inventory and `/api/tags`. This
+legacy mode verifies the reported manifest identity. Neither mode pulls from
+a registry. Generation uses `stream: false`, explicit `num_predict` and `num_ctx`,
 and no warm retention. Results require `done`, matching model identity, text
 within the canonical contract, and measured input/output token counts. Output
 tokens cannot exceed the submitted limit. Context does not promise preservation
 of the complete prompt under Ollama's tokenizer. CPU/RAM hard containment and
 model-specific fit are not established by these protocol budgets.
+
+`startupMs` covers listener readiness and model identity checks, including
+the importer when used. llama.cpp must pass `/health` before inventory is
+checked. `executionMs` includes Ollama's first model load as part of generation.
+Set both budgets explicitly for the model and host.
 
 Runtime stdout/stderr are discarded. Errors contain fixed codes, never prompt,
 result, controller response text, credentials or local paths. HTTP bodies are
@@ -455,14 +490,11 @@ Native execution remains a separately authorized evidence gate.
 
 The Ollama loopback API has no authentication. Other local principals can reach its
 mutation and generation endpoints; socket ownership checks do not prevent this.
-`OLLAMA_NOPRUNE` prevents startup pruning but is not a read-only model-store or
-network-isolation boundary. A local caller could replace a manifest or request
-additional work between inventory verification and generation. This adapter is
-not qualified for native operation with untrusted local callers or concurrently
-writable inventory. Native acceptance must prove an isolated ingress boundary and
-immutable/read-only model inventory (including installed blob integrity), in
-addition to runtime distribution and resource fit. Those enforcement mechanisms
-are not implemented here; loopback fixtures do not close this gate.
+`OLLAMA_NOPRUNE` prevents startup pruning. A local caller could still request
+additional work or mutate the store, including replacing the tag used by legacy
+manifest inventory. Run the adapter on a host with trusted local callers and
+operator-controlled inventory. Production qualification still requires isolated
+ingress, immutable serving inventory and measured resource fit.
 
 Upstream MLX-LM also lacks an API-key boundary in this integration. vLLM's bearer
 key protects the `/v1` routes used here, but other same-listener endpoints can

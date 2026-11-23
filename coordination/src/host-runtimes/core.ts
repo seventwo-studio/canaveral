@@ -11,6 +11,12 @@ export type ModelId = typeof modelIds[number];
 export type BackendId = typeof backendIds[number];
 export type State = typeof states[number];
 export interface Blocker { code: string; detail: string; action?: string }
+export interface RuntimePackageRecord {
+  version: string;
+  packageDigest: string;
+  verified: boolean;
+  referenced: boolean;
+}
 export interface BackendRecord {
   id: BackendId;
   kind: "virtualization" | "container" | "model-engine";
@@ -19,6 +25,9 @@ export interface BackendRecord {
   state: State;
   qualified: boolean;
   version?: string;
+  catalogVersion?: string;
+  active?: string;
+  installed?: RuntimePackageRecord[];
   blocker?: Blocker;
 }
 export type HostConfigData = Record<string, unknown>;
