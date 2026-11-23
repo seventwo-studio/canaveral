@@ -243,7 +243,7 @@ test("executor files and both parent chains require trusted owners, modes and ty
 });
 
 test("native mutation refusals preserve detected state and reject unsupported platforms", async () => {
-  const env = { ...linux, receipt: () => receipt };
+  const env = { ...linux, receipt: () => undefined };
   const status = await runtimeInventory({}, env);
   for (const action of ["install", "verify", "remove"] as const) {
     const container = await mutateRuntime({}, action, "containerd", false, undefined, env);
