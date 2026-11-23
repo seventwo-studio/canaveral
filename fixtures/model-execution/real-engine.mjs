@@ -176,10 +176,13 @@ export async function runRealEngine({ dir, origin, call, controllerId, runner })
   await step('generate through public API', async () => {
     const id = randomUUID();
     const { applicationId, credential } = client;
+    // llama.cpp receives a raw completion prompt. Ollama supplies the chat template.
+    const prompt = backend === 'llama.cpp'
+      ? "<|im_start|>user\nComplete this sentence: The Moon is Earth's natural ...<|im_end|>\n<|im_start|>assistant\nThe Moon is Earth's natural"
+      : 'Write one short sentence about the moon.';
     await call('/v1/model-jobs', {
       version: 1, applicationId, id,
-      message: { type: 'submit', adapter: backend, model: name, digest,
-        prompt: 'Write one short sentence about the moon.', maxTokens: 32 },
+      message: { type: 'submit', adapter: backend, model: name, digest, prompt, maxTokens: 32 },
     }, credential);
     let diagnostics;
     try {
