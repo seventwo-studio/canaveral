@@ -80,7 +80,7 @@ node coordination/dist/src/cli.js --token-file ./secrets/admin.token machines
 Choose a new UUID for each computer; keep the same UUID and specification when
 retrying that creation. Inspect the inventory before starting another request.
 Run the controller and runner under your service manager for unattended use;
-`deploy/systemd/canaveral-host.service` is a host-service example.
+`deploy/systemd/canaverald.service` is a host-service example.
 
 ### Docker on the same server
 

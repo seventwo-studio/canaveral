@@ -1182,14 +1182,14 @@ export function ConnectionSetup({
                 Place the private setup file on that machine and check its
                 environment:
                 <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-3 font-mono text-xs">
-                  canaveral host --setup-file ./canaveral-setup.json --state
+                  canaverald --setup-file ./canaveral-setup.json --state
                   ./state/runner --check
                 </pre>
               </li>
               <li>
                 Connect the runner:
                 <pre className="mt-2 whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-3 font-mono text-xs">
-                  canaveral host --setup-file ./canaveral-setup.json --state
+                  canaverald --setup-file ./canaveral-setup.json --state
                   ./state/runner
                 </pre>
               </li>

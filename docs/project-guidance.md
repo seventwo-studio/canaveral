@@ -1,6 +1,6 @@
 # Technical guide
 
-These documents define the TypeScript controller, TypeScript host and SDK, Rust execution components and native bridge contracts. Node.js 24 or later is required for the controller and host. No Python runtime is required by Canaveral services. Swift and C platform bridges remain intentional native dependencies. Native acceptance, provider binding and recovery limits remain explicit; a portable fixture or successful build does not establish platform parity.
+These documents define the TypeScript controller, `canaverald` host daemon and SDK, Rust execution components and native bridge contracts. Node.js 24 or later is required for the controller and host. No Python runtime is required by Canaveral services. Swift and C platform bridges remain intentional native dependencies. Native acceptance, provider binding and recovery limits remain explicit; a portable fixture or successful build does not establish platform parity.
 
 Optional Python-based model engines require Canaveral-managed hermetic runtime
 packages with their interpreter and dependencies. They add no user-installed

@@ -23,7 +23,7 @@ export function prepareCli(file) {
   chmodSync(file,0o755);
 }
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  prepareCli(new URL('../coordination/dist/src/cli.js',import.meta.url));
+  for (const name of ['cli', 'canaverald']) prepareCli(new URL('../coordination/dist/src/' + name + '.js', import.meta.url));
   const windows = new URL('../coordination/dist/src/guest/windows/',import.meta.url);
   mkdirSync(windows,{recursive:true});
   for(const name of ['native.ps1','native.cs']) copyFileSync(new URL('../coordination/src/guest/windows/'+name,import.meta.url),new URL(name,windows));

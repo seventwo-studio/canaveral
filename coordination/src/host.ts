@@ -34,7 +34,7 @@ import { SqliteStore } from "./sqlite.ts";
 import { DisplayControls, DisplayEndpoint } from "./guest/display.ts";
 import type { DisplayConnection } from "./guest/display.ts";
 import type { ByteReader, VerifiedDownload } from "./control/transfers.ts";
-import { cpus, freemem, hostname, totalmem } from "node:os";
+import { availableParallelism, cpus, freemem, hostname, release, totalmem } from "node:os";
 import { statfsSync } from "node:fs";
 import { ProcessUsageCollector, validateSample } from "./control/infrastructure.ts";
 import type { ProcessObservation, UsageCategory } from "./control/infrastructure.ts";
@@ -2063,10 +2063,32 @@ function delay(ms: number, signal: AbortSignal): Promise<void> { return new Prom
 async function bounded<T>(work: Promise<T>, ms: number): Promise<T> { let timer: NodeJS.Timeout | undefined; try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(unknownOutcome()), ms); })]); } finally { if (timer) clearTimeout(timer); } }
 /** Start outbound workers. The caller owns signals and awaits close() on shutdown. */
 export async function startHost(config: HostConfig, dependencies: HostDependencies = {}): Promise<HostRunner> { return new HostRunner(config, dependencies).start(); }
-export async function checkHost(config: HostConfig, dependencies: HostDependencies = {}): Promise<RecordValue> {
+export async function checkHost(config: HostConfig, dependencies: HostDependencies = {}, inventory = false): Promise<RecordValue> {
   const runner = new HostRunner(config, dependencies);
-  try { await runner.initializeProviders(); await runner.checkEnvironment(); return runner.health; }
-  finally { await runner.close(); }
+  try {
+    await runner.initializeProviders();
+    await runner.checkEnvironment();
+    if (!inventory) return runner.health;
+
+    const filesystem = statfsSync(runner.state);
+    const { status, checkedAt, checks } = runner.health;
+    return {
+      version: 1, status, checkedAt,
+      machine: {
+        scope: config.provider === "kubevirt" ? "runner" : "host",
+        platform: process.platform,
+        architecture: process.arch,
+        osRelease: release(),
+        logicalCpuCount: cpus().length,
+        availableParallelism: availableParallelism(),
+        memoryTotalMiB: Math.floor(totalmem() / 2 ** 20),
+        stateFilesystemAvailableBytes: filesystem.bavail * filesystem.bsize,
+      },
+      offer: runner.offer,
+      installedImages: (runner.config.templates as RecordValue[]).map(normalizeTemplate),
+      checks,
+    };
+  } finally { await runner.close(); }
 }
 /** CLI-compatible entry point, invoked by the main CLI rather than import side effects. */
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {

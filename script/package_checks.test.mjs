@@ -50,6 +50,26 @@ test('actual emitted npm and signed release trees close imports and ship helper 
   if (process.platform !== 'win32') run(process.execPath, ['smoke.mjs'], installed);
   installerHelp(installed);
   assert.match(run(process.execPath, [join(installed, manifest.bin.canaveral), '--help'], root), /Canaveral/);
+  const daemon = join(installed, manifest.bin.canaverald);
+  assert.ok(lstatSync(daemon).mode & 0o111);
+  assert.match(run(process.execPath, [daemon, '--help'], root), /^canaverald host daemon/);
+  const setup = join(root, 'setup.json'), state = join(root, 'runner');
+  const enrollmentToken = 'x'.repeat(43);
+  writeFileSync(setup, JSON.stringify({
+    schemaVersion: 1, controllerUrl: 'https://offline.invalid', enrollmentToken,
+    config: { name: 'portable inventory', provider: 'native', capacity: { cpu: 1, memoryMiB: 1024, diskGiB: 1 }, templates: [] },
+  }), { mode: 0o600 });
+  const output = run(process.execPath, [daemon, '--setup-file', setup, '--state', state, '--inventory'], root);
+  const inventory = JSON.parse(output);
+  assert.equal(inventory.version, 1);
+  assert.equal(inventory.status, 'passed');
+  assert.equal(inventory.machine.platform, process.platform);
+  assert.ok(inventory.machine.availableParallelism >= 1);
+  assert.equal(inventory.offer.provider, 'native');
+  assert.deepEqual(inventory.installedImages, []);
+  assert.ok(!output.includes(enrollmentToken));
+  assert.ok(!existsSync(join(state, 'identity.json')));
+  assert.ok(!existsSync(join(state, 'host-config.json')));
   for (const name of ['native.ps1', 'native.cs']) assert.ok(files.has('coordination/dist/src/guest/windows/' + name));
   const native = JSON.parse(readFileSync(join(installed, 'native/runtime.json')));
   for (const item of Object.values(native.artifacts)) { const bytes = readFileSync(join(installed, 'native', item.file)); assert.equal(bytes.length, item.bytes); assert.equal(createHash('sha256').update(bytes).digest('hex'), item.sha256); }

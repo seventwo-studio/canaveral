@@ -505,7 +505,7 @@ fails the lease. Consumer operations and sessions for such an assignment are ref
 
 Run the host so that stopping or restarting it does not kill the detached lease
 supervisors. On Linux, add the drop-in
-`deploy/systemd/canaveral-host.service.d/android-leases.conf` (`KillMode=process`)
+`deploy/systemd/canaverald.service.d/android-leases.conf` (`KillMode=process`)
 to the example unit on hosts that lease Android emulators; the default
 `control-group` mode would kill every supervisor and emulator on a service restart.
 The base unit keeps `control-group`, so hosts without Android leases still clean up
