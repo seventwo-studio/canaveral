@@ -8,6 +8,9 @@ ledger. The central Canaveral controller is distinct from these connections.
 
 ## Connect a runner
 
+This is the existing-host helper flow. See [host installation paths](host-installation-paths.md)
+for the planned Canaveral OS installer and update ownership.
+
 Open **Hosts → Add host** or **Orchestrators → Add orchestrator**. Select the
 host operating system and enabled runtimes (or external orchestrator provider),
 name, controller origin reachable from that runner and its Canaveral
