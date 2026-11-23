@@ -1,3 +1,4 @@
+import { kubernetesDeployment } from "./host-deployment.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants, promises as fs, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -319,7 +320,7 @@ const defaults: CliRuntime = {
       const { startManagedHost } = await import("./updates/runtime.ts");
       return startManagedHost(config);
     }
-    return startHost(config);
+    return startHost(config, {}, options.signal);
   },
   async checkHost(options) {
     const { loadHost } = await import("./control/templates.ts");
@@ -393,6 +394,9 @@ async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<Hos
   const managed = process.env.CANAVERAL_UPDATE_CANDIDATE === "1";
   if (managed && typeof config.url === "string") url = config.url;
   const enrollmentFile = args.options["enrollment-token-file"] ?? process.env.CANAVERAL_ENROLLMENT_TOKEN_FILE;
+  if (kubernetesDeployment(args.options["setup-file"] ? record(config.config) : config) && (enrollmentFile !== undefined || args.options["setup-file"])) {
+    throw new ServiceError("Kubernetes enrollment requires bootstrap/enrollment-token in host state.", 409, { code: "kubernetes_bootstrap_token_invalid" });
+  }
   let enrollment = typeof enrollmentFile === "string" ? await privateInput(enrollmentFile) : undefined;
   if (args.options["setup-file"]) {
     config = await jsonFile(file, HOST_CONFIG_BYTES);
@@ -719,7 +723,8 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
   } catch (error) {
     if (error instanceof CliError) {
       io.stderr(program + ": " + error.message + (error.outcome ? " outcome=unknown; no automatic retry." : "") + (error.requestId ? " requestId=" + error.requestId : "") + "\n");
-    } else if (error instanceof ServiceError) io.stderr(`${program}: Command refused (HTTP ${error.status}, ${error.code.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}). Inspect configuration or state before retrying.${error.outcome ? " outcome=unknown; no automatic retry." : ""}\n`);
+    } else if (error instanceof ServiceError && error.code.startsWith("kubernetes_")) io.stderr(`${program}: ${error.code}: ${error.message}\n`);
+    else if (error instanceof ServiceError) io.stderr(`${program}: Command refused (HTTP ${error.status}, ${error.code.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}). Inspect configuration or state before retrying.${error.outcome ? " outcome=unknown; no automatic retry." : ""}\n`);
     else if (error instanceof Error && error.name.startsWith("ERR_PARSE_ARGS")) io.stderr(program + ": Invalid command arguments.\n");
     else if ((error as NodeJS.ErrnoException)?.code) io.stderr(program + ": Local file or command input failed (" + String((error as NodeJS.ErrnoException).code).replace(/[^A-Z0-9_]/g, "").slice(0, 60) + ").\n");
     else io.stderr(program + ": Command failed. Inspect state before retrying; no credentials were printed.\n");

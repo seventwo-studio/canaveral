@@ -327,11 +327,12 @@ export class MachineStore implements ControlModule {
       return { id, provider: proposed.provider };
     });
   }
-  enroll(value: Json, token: string): Json {
+  enroll(value: Json, token: string, setupOnly = false): Json {
     const id = machineIdentifier(value.id), credential = machineDigest(secret(value.credential)), offer = validateOffer(value.offer);
     return this.transaction(db => {
       const global = this.options.enrollmentToken !== undefined && secureEqual(token, this.options.enrollmentToken);
-      if (!global && !this.hooks.some(hook => hook.claimSetup?.(db, token, id, offer))) claimSetup(db, token, id, offer, this.store.clock());
+      if (setupOnly) claimSetup(db, token, id, offer, this.store.clock());
+      else if (!global && !this.hooks.some(hook => hook.claimSetup?.(db, token, id, offer))) claimSetup(db, token, id, offer, this.store.clock());
       // New fenced identities and retired runtime aliases cannot be adopted by legacy enrollment.
       if ((table(db, "runner_bindings") && db.prepare("SELECT 1 FROM runner_bindings WHERE runner=?").get(id)) || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(id))) failure("Host identity is already fenced or retired.", 403);
       const old = db.prepare("SELECT credential FROM hosts WHERE id=?").get(id);
@@ -620,6 +621,7 @@ export class MachineStore implements ControlModule {
     const maintenance = this.maintenance.handle(req, operation => this.transaction(operation));
     if (maintenance) return maintenance;
     if (method === "POST" && req.path === "/v1/hosts/enroll") return { body: this.enroll(body, token) };
+    if (method === "POST" && req.path === "/v1/hosts/enroll/setup") return { body: this.enroll(body, token, true) };
     if (parts.length === 4 && parts[0] === "v1" && parts[1] === "hosts" && method === "POST") {
       if (parts[3] === "physical-domain") return { body: this.transaction(db => {
         requireAdmin(req); fields(body, ["domainId"]);
