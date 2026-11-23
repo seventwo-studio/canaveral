@@ -423,6 +423,25 @@ test("stopped assignments with unmaterialized storage permit explicit resume", t
   assert.deepEqual(status.blockers, []);
 });
 
+test("a drained host with a partial supported saved offer can resume, while a retired provider keeps the unsupported blocker", t => {
+  const f = fixture(t, "linux", "libvirt"), m = f.create(), reports = { [m.id]: { state: "stopped" } };
+  f.desired(m.id, "stopped");
+  f.begin();
+  f.beat(reports, proof(f.beat(reports).maintenance, [inventory(m.id, "notMaterialized")]));
+  const saveOffer = (offer: string) => f.store.transaction(db => db.prepare("UPDATE hosts SET offer=? WHERE id=?").run(offer, f.host));
+  saveOffer(JSON.stringify({ provider: "libvirt" }));
+  let status = f.state();
+  assert.equal(status.readyToResume, true);
+  assert.equal(blocked(status, "unsupportedHost", f.host), false);
+  for (const offer of [JSON.stringify({ provider: "kubevirt" }), "{not json"]) {
+    saveOffer(offer);
+    status = f.state();
+    assert.equal(status.readyToResume, false);
+    const blocker = status.blockers.find((b: Json) => b.kind === "unsupportedHost");
+    assert.deepEqual([blocker.id, blocker.state, blocker.blocks], [f.host, "unsupported", ["powerOff", "resume"]]);
+  }
+});
+
 test("trusted mapping fences Linux reservations and requires unsupported peer proof only for power-off", t => {
   const f = fixture(t), domain = randomUUID(), runners = f.leases.linux.runners!;
   const binding = { controllerId: f.options.controllerId, runnerId: randomUUID(), generation: 1, incarnationId: randomUUID() };
