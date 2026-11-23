@@ -23,3 +23,12 @@ retain license and notice files for the installed components.
   build tag. [llama.cpp license](https://github.com/ggml-org/llama.cpp/blob/v1.0.0/LICENSE)
 
 The model executor decodes Zstandard archives with [ruzstd 0.9.1](https://crates.io/crates/ruzstd/0.9.1) (MIT).
+
+## Canaveral host installer
+
+The installer downloads Linux executables from the upstream releases of
+[containerd](https://github.com/containerd/containerd/blob/v2.4.2/LICENSE)
+and [runc](https://github.com/opencontainers/runc/blob/v1.5.3/LICENSE).
+Both projects are licensed under the Apache License, Version 2.0. See the
+[containerd notices](https://github.com/containerd/containerd/blob/v2.4.2/NOTICE)
+and [runc notices](https://github.com/opencontainers/runc/blob/v1.5.3/NOTICE).
