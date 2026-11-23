@@ -45,15 +45,18 @@ async function step(name, task) {
   }
 }
 
-function command(bin, args, { input, timeout = 190_000 } = {}) {
+function command(bin, args, { input, timeout = 190_000, reveal = false } = {}) {
   try {
     return execFileSync(bin, args, { encoding: 'utf8', timeout, input, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
   } catch (error) {
-    // Command output may contain credentials or private host journals.
-    throw new Error(`${bin} failed (${error.signal ?? error.status ?? error.code})`);
+    // Command output may contain credentials or private host journals. Only
+    // callers whose diagnostics are known to be safe reveal a redacted tail.
+    const detail = reveal ? ': ' + String(error.stderr ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').trim().slice(-400) : '';
+    throw new Error(`${bin} failed (${error.signal ?? error.status ?? error.code})${detail}`);
   }
 }
 const kubectl = (...args) => command('kubectl', args);
+const admission = (...args) => command('kubectl', args, { reveal: true });
 // Run a command that must fail, returning its stderr for an exact refusal check.
 function refusal(bin, args, input) {
   try { execFileSync(bin, args, { encoding: 'utf8', timeout: 60_000, input, stdio: ['pipe', 'pipe', 'pipe'] }); }
@@ -157,7 +160,7 @@ if (ready) {
 if (host) {
   await step('admission policy rejects forbidden canaverald pods', async () => {
     const policy = await eventually('type-checked admission policy', () => {
-      const value = JSON.parse(kubectl('get', 'validatingadmissionpolicy', 'canaverald-pod-security', '-o', 'json'));
+      const value = JSON.parse(admission('get', 'validatingadmissionpolicy', 'canaverald-pod-security', '-o', 'json'));
       return value.status?.observedGeneration === value.metadata.generation && value;
     });
     assert.deepEqual(policy.status.typeChecking?.expressionWarnings ?? [], []);
@@ -180,8 +183,8 @@ if (host) {
       try { command('kubectl', dryRun, { input: pod('admission-wait', privileged) }); return false; }
       catch { return true; }
     }, 30);
-    command('kubectl', dryRun, { input: pod('admission-allowed') });
-    command('kubectl', dryRun, { input: pod('admission-other-namespace', privileged, 'default') });
+    command('kubectl', dryRun, { input: pod('admission-allowed'), reveal: true });
+    command('kubectl', dryRun, { input: pod('admission-other-namespace', privileged, 'default'), reveal: true });
     const forbidden = {
       privileged: [privileged, /must not be privileged/],
       'extra-host-path': [spec => { spec.volumes.push({ name: 'etc', hostPath: { path: '/etc', type: 'Directory' } }); return spec; }, /hostPath volumes are limited/],
@@ -382,7 +385,7 @@ async function exerciseVm() {
   };
   const enrollment = await step('enroll the VM overlay and verify the mounted socket', async () => {
     // Configure the host exactly as docs/cluster-hosts.md "Host libvirt setup" instructs.
-    const prepared = command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000 });
+    const prepared = command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000, reveal: true });
     assert.match(prepared, /^libvirt host ready: QEMU account libvirt-qemu in canaveral-vm \(GID 10002\); socket group canaveral-libvirt \(GID 10003\)/);
     assert.equal(sudo('stat', '-c', '%U:%G:%a', '/run/libvirt/libvirt-sock'), 'root:canaveral-libvirt:660');
     assert.equal(sudo('stat', '-c', '%U:%G:%a', storage), 'canaverald:canaveral-vm:2750');
@@ -393,7 +396,7 @@ async function exerciseVm() {
     assert.equal(command('id', ['-nG', 'canaverald']), 'canaverald');
     assert.notEqual(sudo('stat', '-c', '%g', '/dev/kvm'), '10001');
     // A second run changes nothing and keeps every check.
-    command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000 });
+    command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000, reveal: true });
     if (!virsh('net-list', '--name').split('\n').includes('default')) virsh('net-start', 'default');
 
     // The CPU uninstall already verified state retention. Keep that state
@@ -417,11 +420,11 @@ async function exerciseVm() {
     };
     const provisioning = mode => ['bash', 'script/provision_cluster_node.sh', mode];
     const first = await setup(), { id, token } = await setup();
-    command('sudo', provisioning('token'), { input: first.token + '\n' });
+    command('sudo', provisioning('token'), { input: first.token + '\n', reveal: true });
     assert.match(refusal('sudo', provisioning('token'), token + '\n'), /already provisioned.*Use replace-token/);
     assert.match(refusal('sudo', provisioning('replace-token'), 'not-a-token\n'), /setup token on stdin is malformed/);
     await call('/v1/connection-setups/' + first.id + '/revoke', {});
-    command('sudo', provisioning('replace-token'), { input: token + '\n' });
+    command('sudo', provisioning('replace-token'), { input: token + '\n', reveal: true });
     assert.equal(sudo('stat', '-c', '%u:%g:%a:%h', state + '/bootstrap/enrollment-token'), '10001:10001:600:1');
     kubectl('label', '--overwrite', node, 'canaveral.dev/host-profile=vm');
     command('kubectl', ['apply', '-f', '-'], { input: JSON.stringify(overlay) });
