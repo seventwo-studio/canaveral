@@ -129,6 +129,10 @@ test('promotions need exact tree pins, passing records, service evidence and rev
   assert.match(errors([{ ...entry, identity: drifted, pinId: pinId(drifted) }]), /not the exact pin the tree ships/);
   assert.match(errors([{ ...entry, review: { ...entry.review, pullRequest: 'https://example.com/pull/1' } }]), /pullRequest/);
   assert.match(errors([{ ...entry, limitations: [] }]), /limitations/);
+  const branch = { ...runtime, record: { ...runtime.record, source: { ...runtime.record.source, ref: 'feat/runtime-acceptance' } } };
+  assert.match(checkPromotions(promotions([entry]), [branch, entries[1]], tree, promotionsSchema).join(), /feat\/runtime-acceptance, not a run of main/);
+  const branchService = { ...entries[1], record: { ...entries[1].record, source: { ...entries[1].record.source, ref: 'feature' } } };
+  assert.match(checkPromotions(promotions([entry]), [runtime, branchService], tree, promotionsSchema).join(), /supporting record .* not a run of main/);
   const failing = { ...runtime, record: { ...runtime.record, outcome: 'failed', blockers: [{ code: 'acceptance_failed', detail: 'x' }] } };
   assert.match(checkPromotions(promotions([entry]), [failing, entries[1]], tree, promotionsSchema).join(), /not a passing runtime record/);
 

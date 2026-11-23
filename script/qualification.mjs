@@ -33,6 +33,9 @@ export const WORKFLOWS = {
 };
 // Pull request runs execute only smoke checks and may carry fork code.
 export const TRUSTED_EVENTS = ['push', 'schedule', 'workflow_dispatch'];
+// Branch runs may be recorded for information, but only runs of the default
+// branch can support a promotion.
+export const DEFAULT_BRANCH = 'main';
 
 // Promotion rules per backend. A rule names the only execution mode and
 // acceleration that can be promoted. A blocker makes the backend unpromotable.
@@ -431,12 +434,18 @@ export function checkPromotions(promotions, entries, tree, schema) {
         errors.push(`${at}: record ${path} covers a different pin or scope`);
       }
       if (!TRUSTED_EVENTS.includes(record.source.event)) errors.push(`${at}: record ${path} comes from an untrusted event`);
+      if (record.source.ref !== DEFAULT_BRANCH || record.source.repository !== REPOSITORY) {
+        errors.push(`${at}: record ${path} comes from ${record.source.ref}, not a run of ${DEFAULT_BRANCH}`);
+      }
     }
     for (const path of entry.supporting) {
       const record = byPath.get(path);
       if (!record) { errors.push(`${at}: supporting record ${path} does not exist`); continue; }
       if (record.kind !== 'service' || record.outcome !== 'passed' || record.scope.os !== os || record.scope.arch !== arch) {
         errors.push(`${at}: supporting record ${path} is not a passing service record for ${os}/${arch}`);
+      }
+      if (record.source.ref !== DEFAULT_BRANCH || !TRUSTED_EVENTS.includes(record.source.event)) {
+        errors.push(`${at}: supporting record ${path} comes from ${record.source.ref}, not a run of ${DEFAULT_BRANCH}`);
       }
     }
   });
@@ -526,7 +535,8 @@ function record(runId, { repository, root, dryRun }) {
     for (const { path, record } of records) {
       const file = join(root, PATHS.records, path);
       if (!dryRun) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, json(record)); }
-      console.log(`${dryRun ? 'would write' : 'wrote'} ${PATHS.records}/${path} (${record.outcome})`);
+      const note = record.source.ref === DEFAULT_BRANCH ? '' : `, ${record.source.ref} run: informational, not promotable`;
+      console.log(`${dryRun ? 'would write' : 'wrote'} ${PATHS.records}/${path} (${record.outcome}${note})`);
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true });

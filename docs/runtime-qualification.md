@@ -90,6 +90,11 @@ checks fail:
 - The engine, model and containerd digests in the evidence equal the pins in the
   checked-out tree.
 
+Each record keeps its run's branch in `source.ref`. Any trusted run can be
+recorded, but only runs of the default branch `main` can support a promotion.
+Records from other branches are informational only. The tool reports them as
+not promotable.
+
 A record for a later run of the same pin and scope replaces the earlier file.
 Git history keeps the old one. Failed cells produce `failed` records. These
 break any promotion that cites the path until a maintainer reviews the failure.
@@ -99,8 +104,8 @@ break any promotion that cites the path until a maintainer reviews the failure.
 [`promotions.json`](../qualification/promotions.json) is empty, so nothing is
 qualified. To promote a pin:
 
-1. Find a trusted run on a commit in `main`'s history, preferably a scheduled or
-   dispatched run of `main`, and record it.
+1. Record a push, scheduled or dispatched run of `main` from this repository.
+   Branch runs cannot support a promotion.
 2. Add an entry with `backend`, `pinId`, `identity` and `scope` copied from the
    record. List the record paths in `records`, and at least one passing
    `canaverald` service record for the same OS and architecture in
@@ -120,9 +125,9 @@ The validator rejects an entry in any of these cases:
 - The scope is not the backend's promotable scope.
 - The identity differs from the exact pin the tree ships for that OS and
   architecture.
-- A cited record is missing, not `passed`, from an untrusted event, or covers a
-  different pin or scope.
-- The entry has no passing service record.
+- A cited record is missing, not `passed`, from an untrusted event, from a
+  branch other than `main`, or covers a different pin or scope.
+- The entry has no passing service record from a run of `main`.
 - The review or limitations are missing.
 - Two entries share a scope.
 
@@ -171,7 +176,8 @@ The run IDs are
 [model 45231181336](https://github.com/seventwo-studio/canaveral/actions/runs/45231181336),
 [host 45231181163](https://github.com/seventwo-studio/canaveral/actions/runs/45231181163)
 and [daemon 45231181144](https://github.com/seventwo-studio/canaveral/actions/runs/45231181144).
-All engine, model and containerd digests match the current tree.
+All engine, model and containerd digests match the current tree. These are
+branch runs, so the records are informational and cannot support a promotion.
 
 | Backend | Scopes | Outcome |
 | --- | --- | --- |
@@ -188,4 +194,4 @@ Nothing is promoted.
 These records cover hosted runners only. They do not establish production
 hardware, accelerators, resource fit or isolation from untrusted callers.
 Records bind evidence to a pin, not to later executor or daemon code. Prefer
-recent scheduled runs on `main` when promoting.
+recent scheduled runs of `main` when promoting.
