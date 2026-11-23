@@ -22,7 +22,7 @@ Only install and remove accept `--dry-run`.
 | --- | --- |
 | Apple Virtualization | Apple silicon, macOS 26 or later, and the executable Swift runner. It checks the runner signature, virtualization entitlement and native Virtualization framework support. The runner ships through managed updates. |
 | libvirt | Linux KVM device, versions of virsh, qemu-img and QEMU, and KVM capabilities through the local libvirt URI. The version column shows the virsh version. Operators install the system packages. |
-| containerd | The root installer's receipt and common system paths for existing containerd or Docker installations. The receipt establishes a recorded installation. |
+| containerd | The root installer's receipt and common system paths for existing containerd or Docker installations. Verification checks the installed files against the receipt. |
 | Ollama and llama.cpp | The Rust model executor reports compatibility, installation and package verification. Install prepares the bundled catalog version, and remove requires a specific version. The executor protects versions referenced by live or unresolved work. |
 | vLLM and MLX-LM | Reserved entries with unavailable packages pending qualification of their hermetic builds. |
 
@@ -33,11 +33,12 @@ inspect the pinned assets and paths. Use the standalone root-owned installer
 for installation and removal. It verifies installed files, manages a private
 systemd service and socket, and checks every namespace for tasks and container
 records before upgrade or removal. `canaverald` reads the receipt to report
-the recorded installation. Native qualification remains pending. Follow the
+the installation status. A `verified` result confirms trusted receipt ownership
+and matching SHA-256 digests, ownership and permissions for four binaries, the
+configuration and the systemd unit. Use the root installer to check service and
+socket health. Follow the
 [installer README](../crates/host-installer/README.md) to install the binary as
 root, then run `sudo canaveral-host-installer containerd install`.
-
-Linux Ollama catalog pins are being added in [PR #98](https://github.com/seventwo-studio/canaveral/pull/98).
 
 To enable model runtime management, put this block in the host config and
 substitute the actual paths.
@@ -54,6 +55,17 @@ own both files and every ancestor directory. Group and other users must have
 no write access. The binary must be executable and the config readable. The executor enforces its private config rules and
 owns the runtime store, catalog and package validation.
 
+Model runtime status and verification show the catalog version, the verified
+active version, and each installed package's digest, verification result and
+`referenced` flag. Run install with an updated executor to select a new catalog
+pin. Reinstall to repair an unreferenced package. Reconcile retained work
+before removing a referenced version.
+
+The executor quarantines unsafe cache entries (`runtime_cache_entry_unsafe`)
+and refuses unsafe loader paths (`runtime_loader_path_unsafe`). Use Ollama
+only on trusted single-tenant hosts. Its loopback API is unauthenticated and
+Go bypasses proxies for loopback destinations. See [Rust model execution](rust-model-execution.md).
+
 - `absent` means the required installation was not found.
 - `installed` means tools or a receipt indicate installation.
 - `verified` means the backend passed its local checks or the executor reports a verified package.
@@ -62,10 +74,28 @@ owns the runtime store, catalog and package validation.
 - `unknown` means the daemon could not establish status or confirm the outcome. Inspect status before retrying a mutation.
 
 Native qualification is a separate catalog decision. Local checks cannot
-establish it or grant controller placement. The containerd receipt check
-does not validate installed file contents or service health. The controller's
+establish it or grant controller placement. The controller's
 `canaveral runtimes` command continues to manage mobile runtimes through the
 controller.
+
+## Native acceptance
+
+Linux and macOS are the supported `canaverald` host platforms for this milestone.
+
+| Suite | Full matrix |
+| --- | --- |
+| [Model acceptance](../.github/workflows/model-acceptance.yaml) | llama.cpp and Ollama install, verification, generation, repair and removal on Ubuntu 24.04 x64 and ARM64 and macOS 15. |
+| [Host acceptance](../.github/workflows/host-acceptance.yaml) | containerd lifecycle and libvirt detection on Ubuntu 24.04 x64 and ARM64. Apple Virtualization detection on macOS 15 and 26. |
+| [Daemon acceptance](../.github/workflows/daemon-acceptance.yaml) | Service enrollment, inventory, restart with the saved identity and shutdown under systemd on Ubuntu 24.04 x64 and ARM64 and launchd on macOS 15. |
+
+Pull requests run path-filtered smoke checks. The full suites run on pushes to
+`feat/runtime-acceptance*`, nightly and by manual dispatch. Each cell uploads
+a JSON evidence record identifying the commit and runner image.
+
+Hosted ARM Ubuntu lacks KVM. Hosted macOS lacks nested virtualization, so the
+Apple detection cells assert blockers only. Containerd crash recovery has
+fixture coverage only. Qualification requires a reviewed follow-up that cites
+the evidence and promotes exact pins. No pin is currently `qualified`.
 
 ## Local blocker codes
 
@@ -75,6 +105,7 @@ controller.
 | `apple_os_unsupported` | local | The host runs a macOS version earlier than 26. | Upgrade macOS before using the runner. |
 | `apple_runner_missing` | local | The host has no Swift runner at the configured absolute path. | Set the path to the signed runner. |
 | `containerd_foreign_install` | local | An existing system containerd or Docker installation was found. | Review ownership and service conflicts before installing. |
+| `containerd_receipt_file_mismatch` | local | An installed file differs from its receipt. | Inspect the reported drift before repairing with the root installer. |
 | `containerd_receipt_invalid` | local | The installer's receipt could not be trusted or parsed. | Check receipt ownership, mode, paths and format. |
 | `containerd_root_installer_required` | local | This operation belongs to the dedicated root installer. | Use the root-owned `canaveral-host-installer containerd` command. |
 | `libvirt_kvm_missing` | local | The host has no KVM character device at /dev/kvm. | Enable KVM on the host. |
