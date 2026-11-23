@@ -132,12 +132,13 @@ own reconciliation, credentials, backups and runtime acceptance.
 The `dashboard/` stage is optional. Follow the concrete namespace, credential,
 TLS and persistent-storage steps in [running.md](running.md#kubernetes).
 
-The ordered setup creates both namespaces, runs `init` once, creates
+The ordered setup creates the `canaveral` namespace, runs `init` once, creates
 `canaveral-credentials`, then `canaveral-controller-tls`, then
 `canaveral-controller-ca` in the controller namespace before applying workloads. Certificate SANs must
 cover `orchestrator`, `orchestrator.canaveral`, `orchestrator.canaveral.svc` and any
 external ingress name. Use your PKI or optional cert-manager. See the same guide
-for private TLS ingress, optional NetworkPolicies and OpenShift limits.
+for private TLS ingress, optional NetworkPolicies and OpenShift limits. Existing clusters
+may delete the now-unused `canaveral-guests` namespace after reconciling any leftover KubeVirt resources.
 
 ## Add other machines
 

@@ -10,8 +10,8 @@ import { requireAdmin } from "./contracts.ts";
 import { installAttemptClean } from "./install-cleanup.ts";
 import type { InstallAttempt } from "./install-cleanup.ts";
 import type { ControlRequest } from "./contracts.ts";
-import { persistedOffer } from "./machines.ts";
 import type { MachineHooks } from "./machines.ts";
+import { supportedStoredHostOffer } from "./templates.ts";
 
 type Owner = "manual" | "update" | "legacy";
 type Row = Record<string, string | number | null>;
@@ -251,7 +251,7 @@ export class HostMaintenance {
         age < 0 || age >= proofLifetime ? "stale" : row.ack_fingerprint !== fingerprint(data) ? "ledgerChanged" : null;
       if (ackState) block("acknowledgement", row.id, ackState, "A current maintenance acknowledgement is required.", true);
       if (!capability?.supported) block("agentUnsupported", row.host, "unsupported", "Host agent has not advertised maintenance v1.", true);
-      if (!persistedOffer(db.prepare("SELECT offer FROM hosts WHERE id=?").get(row.host)?.offer)) block("unsupportedHost", row.host, "unsupported", "Host offer is unsupported. Review outstanding resources before cleanup.", true);
+      if (!supportedStoredHostOffer(db.prepare("SELECT offer FROM hosts WHERE id=?").get(row.host)?.offer)) block("unsupportedHost", row.host, "unsupported", "Host offer is unsupported. Review outstanding resources before cleanup.", true);
       const report = !ackState && row.ack_report ? JSON.parse(row.ack_report) as Proof : undefined;
       const inventory = new Map(report?.inventory.assignments.map(item => [item.id, item]));
       const expected = new Set(data.assignments.map(item => item.id));
