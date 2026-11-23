@@ -12,7 +12,7 @@ export const SOURCE='https://github.com/seventwo-studio/canaveral';
 // Repo-scoped names: packages first pushed by this repository's GITHUB_TOKEN are linked to it
 // and grant its workflows write access. The older top-level packages are not used.
 export const NAMESPACE='ghcr.io/seventwo-studio/canaveral';
-export const IMAGES={orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',kubevirt:NAMESPACE+'/kubevirt'};
+export const IMAGES={orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard'};
 export const DEPLOYMENT=NAMESPACE+'/deploy';
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
 class PublicationFailure extends Error {}
@@ -88,7 +88,7 @@ export function checkIdentity(manifest,version,revision,artifact=false) {
 }
 export function bundle(version,revision,images,output,sourceRoot=ROOT) {
   if(!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error('Semantic version and full source revision required.');
-  if(Object.keys(images).sort().join(',')!==Object.keys(IMAGES).sort().join(',')) throw new Error('Controller, dashboard and KubeVirt worker images are required.');
+  if(Object.keys(images).sort().join(',')!==Object.keys(IMAGES).sort().join(',')) throw new Error('Controller and dashboard images are required.');
   for(const [stage,packageName] of Object.entries(IMAGES)) {
     const prefix=packageName+':'+version+'@';
     if(typeof images[stage]!=='string' || !images[stage].startsWith(prefix) || !DIGEST.test(images[stage].slice(prefix.length))) throw new Error('Images must pin their own version and digest.');
@@ -96,18 +96,18 @@ export function bundle(version,revision,images,output,sourceRoot=ROOT) {
   if(existsSync(output) && (lstatSync(output).isSymbolicLink() || readdirSync(output).length)) throw new Error('Release output must be empty.');
   // Validate every input before producing any release files.
   const sources={};
-  for(const stage of ['orchestrator','dashboard','kubevirt']) {
-    const source=join(sourceRoot,'deploy',stage), expected=stage==='kubevirt' ? ['serviceaccount.json','role.json','rolebinding.json','configmap.json','service.json','statefulset.json','kustomization.yaml'] : ['deployment.json','service.json','kustomization.yaml'];
+  for(const stage of ['orchestrator','dashboard']) {
+    const source=join(sourceRoot,'deploy',stage), expected=['deployment.json','service.json','kustomization.yaml'];
     if(stage==='orchestrator') expected.push('persistentvolumeclaim.json');
     if(lstatSync(source).isSymbolicLink() || readdirSync(source).sort().join(',')!==expected.sort().join(',') || expected.some(name=>!lstatSync(join(source,name)).isFile() || lstatSync(join(source,name)).isSymbolicLink())) throw new Error('Only declared deployment sources may enter the artifact.');
     sources[stage]=Object.fromEntries(expected.map(name=>[name,readFileSync(join(source,name),'utf8')]));
   }
   mkdirSync(output,{recursive:true});
-  for(const stage of ['orchestrator','dashboard','kubevirt']) {
+  for(const stage of ['orchestrator','dashboard']) {
     const directory=join(output,stage);mkdirSync(directory);
     for(const [name,source] of Object.entries(sources[stage])) {
       let text=source;
-      if(name==='deployment.json' || name==='statefulset.json') {
+      if(name==='deployment.json') {
         const data=uniqueJSON(text), containers=data.spec.template.spec.containers;
         if(containers.length!==1) throw new Error('Expected one runtime per stage.');
         containers[0].image=images[stage];
@@ -185,7 +185,7 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   const temporary=mkdtempSync(join(tmpdir(),'canaveral-release-'));const metadata=join(dist,'release.json');
   try {
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,output);
-    for(const stage of ['orchestrator','dashboard','kubevirt']) run('kubectl',['kustomize',join(output,stage)]);
+    for(const stage of ['orchestrator','dashboard']) run('kubectl',['kustomize',join(output,stage)]);
     const registry=await connect(DEPLOYMENT), candidate='candidate-'+version+'-'+revision;
     let artifact=await registry.manifest(candidate);
     const stable=await registry.manifest(version);

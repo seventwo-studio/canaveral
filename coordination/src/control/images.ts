@@ -1,3 +1,4 @@
+import { persistedOffer } from "./machines.ts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, ftruncateSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
@@ -202,7 +203,7 @@ export class ImagesController {
   }
   private online(db: DatabaseSync, hostId: string): Json {
     const host = db.prepare("SELECT * FROM hosts WHERE id=? AND id NOT IN (SELECT id FROM retired_runners)").get(hostId);
-    if (!host || this.store.clock() - Number(host.seen) >= this.leaseSeconds) throw new ServiceError("Image host must be online.");
+    if (!host || !persistedOffer(host.offer) || this.store.clock() - Number(host.seen) >= this.leaseSeconds) throw new ServiceError("Image host must be online.");
     return host;
   }
   reserveImageImport(hostId: string, value: unknown, size: number): Json {
@@ -279,7 +280,6 @@ export class ImagesController {
       }
       requireHostAdmission(db, hostId);
       const offer = object(JSON.parse(String(this.online(db, hostId).offer)));
-      if (offer.provider === "kubevirt") throw new ServiceError("Registry imports require a direct host.");
       if (entry.os === "macos" && !["macos", "apple"].includes(String(offer.provider))) throw new ServiceError("macOS restore images require a Mac host.");
       db.prepare("INSERT INTO image_tasks VALUES (?,?,NULL,?,'queued',NULL,?,?,0)").run(id, hostId, JSON.stringify(intent), this.store.clock(), this.store.clock());
       return taskView(taskRow(db, id)!);
@@ -288,10 +288,11 @@ export class ImagesController {
   resolveRegistryImport(hostId: string, credential: string, id: string, value: unknown): Json {
     hostId = identifier(hostId);
     return this.store.transaction(db => {
-      const host = db.prepare("SELECT credential FROM hosts WHERE id=? AND id NOT IN (SELECT id FROM retired_runners)").get(hostId);
+      const host = db.prepare("SELECT credential,offer FROM hosts WHERE id=? AND id NOT IN (SELECT id FROM retired_runners)").get(hostId);
       // Python stores SHA256(json.dumps(token)), including the JSON string quotes.
       const expected = host ? String(host.credential) : "", digest = legacyDigest(credential);
       if (!expected || expected.length !== digest.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(digest))) throw new ServiceError("Host credential rejected.", 401);
+      if (!persistedOffer(host?.offer)) throw new ServiceError("Image host must be online.");
       const row = taskRow(db, id);
       if (!row || row.host !== hostId) throw new ServiceError("Unknown owned image task.", 404);
       const request = object(JSON.parse(row.request));

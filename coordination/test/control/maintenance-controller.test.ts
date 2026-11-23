@@ -10,6 +10,8 @@ import type { ControlRequest, ControlResponse, Principal } from "../../src/contr
 import { createModule as devicesModule } from "../../src/control/devices.ts";
 import { createModule as lifecycleModule } from "../../src/control/lifecycle.ts";
 import { MachineStore } from "../../src/control/machines.ts";
+import { InfrastructureStore } from "../../src/control/infrastructure.ts";
+import { LegacyLeases } from "../../src/control/leases.ts";
 import { ModelJobs } from "../../src/model-jobs.ts";
 import { initializeUpdates } from "../../src/control/updates.ts";
 import { PhysicalDomains } from "../../src/physical-domains.ts";
@@ -396,7 +398,7 @@ test("a completed update requires a new maintenance heartbeat", t => {
 });
 
 test("unsupported backing storage permits resume; absent and unknown storage block it", t => {
-  const f = fixture(t, "linux", "kubevirt"), m = f.create(), reports = { [m.id]: { state: "stopped" } };
+  const f = fixture(t, "linux", "libvirt"), m = f.create(), reports = { [m.id]: { state: "stopped" } };
   f.desired(m.id, "stopped");
   f.begin();
   let challenge = f.beat(reports).maintenance;
@@ -412,24 +414,13 @@ test("unsupported backing storage permits resume; absent and unknown storage blo
 });
 
 test("stopped assignments with unmaterialized storage permit explicit resume", t => {
-  const f = fixture(t, "linux", "kubevirt"), m = f.create(), reports = { [m.id]: { state: "stopped" } };
+  const f = fixture(t, "linux", "libvirt"), m = f.create(), reports = { [m.id]: { state: "stopped" } };
   f.desired(m.id, "stopped");
   f.begin();
   f.beat(reports, proof(f.beat(reports).maintenance, [inventory(m.id, "notMaterialized")]));
   const status = f.state();
   assert.equal(status.readyToResume, true);
-  assert.deepEqual(status.blockers.map((b: Json) => b.kind), ["poolScope"]);
-});
-
-test("KubeVirt offers have a pool-scope blocker and never report safe to power off", t => {
-  const f = fixture(t, "linux", "kubevirt");
-  f.begin();
-  f.beat({}, proof(f.beat().maintenance));
-  const state = f.state();
-  assert.equal(state.scope, "pool");
-  assert.equal(state.safeToPowerOff, false);
-  assert.equal(state.readyToResume, true);
-  assert.deepEqual(state.blockers.map((b: Json) => [b.kind, b.blocks]), [["poolScope", ["powerOff"]]]);
+  assert.deepEqual(status.blockers, []);
 });
 
 test("trusted mapping fences Linux reservations and requires unsupported peer proof only for power-off", t => {
@@ -438,7 +429,7 @@ test("trusted mapping fences Linux reservations and requires unsupported peer pr
   const id = randomUUID(), credential = key();
   const issued = runners.issue({ id, ...binding, ttlSeconds: 60 }) as { enrollmentToken: string };
   runners.consume(issued.enrollmentToken, { id, ...binding, credential });
-  const image = { id: "runner-linux", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "kubevirt",
+  const image = { id: "runner-linux", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "appleVirtualization",
     digest: "sha256:" + "ab".repeat(32), resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, capabilities: ["command"] };
   f.leases.linux.image(image);
   f.leases.linux.grant({ applicationId: f.app.id, imageId: image.id, revision: "1", arch: "amd64", digest: image.digest });
@@ -446,7 +437,7 @@ test("trusted mapping fences Linux reservations and requires unsupported peer pr
     f.leases.linux.domains.define(db, { id: domain, name: "fixture", capacity: image.resources }, f.now());
     new PhysicalDomains().map(db, f.host, domain);
   });
-  f.leases.linux.approve({ binding, domainId: domain, backend: "kubevirt", images: [{ id: image.id, revision: "1", arch: "amd64", digest: image.digest }] });
+  f.leases.linux.approve({ binding, domainId: domain, backend: "appleVirtualization", images: [{ id: image.id, revision: "1", arch: "amd64", digest: image.digest }] });
   const drain = f.begin().body.id;
   assert.throws(() => f.leases.linux.acquire(f.app.credential, { id: randomUUID(), templateId: image.id, templateRevision: "1", arch: "amd64" }),
     failure(503, "capacity_unavailable"));
@@ -468,14 +459,14 @@ test("revoked mapped model and Linux assignments block maintenance resume", asyn
   const { enrollmentToken } = runners.issue({ id, ...binding, ttlSeconds: 60 }) as { enrollmentToken: string };
   runners.consume(enrollmentToken, { id, ...binding, credential });
   const resources = { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, digest = "sha256:" + "ab".repeat(32), model = "fixture-model:1";
-  const image = { id: "runner-linux", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "kubevirt", digest, resources, capabilities: ["command"] };
+  const image = { id: "runner-linux", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "appleVirtualization", digest, resources, capabilities: ["command"] };
   f.store.transaction(db => {
     linux.domains.define(db, { id: domain, name: "fixture", capacity: f.offer().capacity }, f.now());
     new PhysicalDomains().map(db, f.host, domain);
   });
   linux.image(image);
   linux.grant({ applicationId: f.app.id, imageId: image.id, revision: "1", arch: "amd64", digest });
-  linux.approve({ binding, domainId: domain, backend: "kubevirt", images: [{ id: image.id, revision: "1", arch: "amd64", digest }] });
+  linux.approve({ binding, domainId: domain, backend: "appleVirtualization", images: [{ id: image.id, revision: "1", arch: "amd64", digest }] });
   const leaseId = randomUUID();
   linux.acquire(f.app.credential, { id: leaseId, templateId: image.id, templateRevision: "1", arch: "amd64" });
   const { assignment: lease } = linux.claim(credential, { binding, claimId: randomUUID() }) as Json;
@@ -625,4 +616,32 @@ test("attached image imports require authorization before admission", async t =>
   await assert.rejects(async () => connector.write({ hostId: f.host, metadata, size: 512, authorized: async () => false,
     reader: { async read() { return assert.fail("Import must not read with expired authority"); } } as never }), { status: 403 });
   assert.equal(f.store.transaction(db => db.prepare("SELECT state FROM image_tasks WHERE id=?").get(id)), undefined);
+});
+
+test("a persisted retired provider stays offline and keeps its lease cleanup reservation across restart", async t => {
+  const f = fixture(t);
+  const lease = await f.request("POST", "/v1/leases", f.acquire());
+  const machineId = lease.members[0].machineId;
+  f.ready(lease);
+  const retiredImage = { ...f.image, runtime: "kubevirt" };
+  const retiredOffer = { ...f.offer(), provider: "kubevirt", templates: [retiredImage] };
+  assert.throws(() => f.leases.machines.enroll({ id: randomUUID(), credential: key(), offer: retiredOffer }, f.options.enrollmentToken), failure(400, "unsupported_host_provider"));
+  f.store.transaction(db => {
+    db.prepare("UPDATE hosts SET offer=? WHERE id=?").run(JSON.stringify(retiredOffer), f.host);
+    db.prepare("UPDATE machines SET template=? WHERE id=?").run(JSON.stringify(retiredImage), machineId);
+    db.prepare("UPDATE templates SET definition=? WHERE id=?").run(JSON.stringify(retiredImage), f.image.id);
+  });
+  const restarted = new SqliteStore(f.store.path, f.now);
+  const leases = new LegacyLeases(restarted, f.options);
+  const host = leases.machines.hosts({ principal: () => operator }).find(h => h.id === f.host)!;
+  assert.deepEqual([host.online, host.placementReady, host.invalidOffer], [false, false, true]);
+  assert.equal(host.reserved.diskGiB, f.image.minimum.diskGiB);
+  assert.throws(() => leases.machines.heartbeat(f.host, f.hostToken, { offer: retiredOffer }), failure(400, "unsupported_host_provider"));
+  new ImagesController(restarted);
+  restarted.transaction(initializeInference);
+  const resources = new InfrastructureStore(restarted).hostResources(f.host);
+  assert.equal((resources.allocations as Json[])[0]!.observed, "unknown");
+  const current = await f.request("GET", `/v1/leases/${lease.id}`);
+  assert.deepEqual([current.state, current.members[0].state, current.cleanup.state], ["failed", "unknown", "pending"]);
+  assert.equal(restarted.transaction(db => db.prepare("SELECT template FROM machines WHERE id=?").get(machineId)?.template), JSON.stringify(retiredImage));
 });

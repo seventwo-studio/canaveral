@@ -47,18 +47,6 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends libvirt-clients qemu-utils genisoimage openssh-client && rm -rf /var/lib/apt/lists/*
 USER 10001:10001
 
-FROM base AS kubevirt
-COPY --from=rust-build /source/target/release/canaveral-mobile-native /app/native/canaveral-mobile-native
-USER root
-ARG KUBECTL_VERSION=v1.36.2
-ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssh-client && \
-    curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
-    curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" && \
-    echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check && \
-    chmod 755 /usr/local/bin/kubectl && rm -rf /var/lib/apt/lists/* /tmp/kubectl.sha256
-USER 10001:10001
-
 FROM debian:bookworm-slim AS native
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* && \
     groupadd --gid 10001 canaveral && useradd --uid 10001 --gid 10001 --create-home canaveral

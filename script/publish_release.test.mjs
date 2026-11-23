@@ -55,7 +55,7 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
 }
 test('prepare creates draft and missing artifacts; retry reuses digests; finalize alone publishes',async t=>{
  const f=fixture(t,{existing:[],missing:true});await main(false,f);
- assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
+ assert.equal(f.calls.filter(c=>c[0]==='docker').length,2);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
  assert.ok(!f.calls.some(c=>c[0]==='gh' && ['upload','edit'].includes(c[2])));
  f.calls.length=0;await main(false,f);assert.ok(!f.calls.some(c=>c[0]==='docker'||c[0]==='flux'&&c[1]!=='diff'));
@@ -76,8 +76,8 @@ test('post-push readback tolerates absence without rebuilding or promoting',asyn
   return n<3?null:found;
  }});
  await main(false,f);
- assert.equal(waits,8);
- assert.equal(f.calls.filter(c=>c[0]==='docker').length,3);
+ assert.equal(waits,6);
+ assert.equal(f.calls.filter(c=>c[0]==='docker').length,2);
  assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
 });
@@ -136,5 +136,5 @@ test('workflow keeps tag identity, signing and provenance ahead of final publica
  assert.ok(w.indexOf('Attest deploy provenance')<w.indexOf('cosign sign'));
  assert.ok(w.indexOf('cosign sign')<w.indexOf('node script/publish_release.mjs --finalize'));
  assert.ok(!w.slice(w.indexOf('env:'),w.indexOf('concurrency:')).includes('GITHUB_TOKEN'));
- assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,4);
+ assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,3);
 });

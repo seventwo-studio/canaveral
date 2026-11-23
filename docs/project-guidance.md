@@ -38,7 +38,6 @@ interpreter dependency to the controller, host or SDK; see
 - [Bounded Linux command operations](linux-command-operations.md)
 - [infrastructure](infrastructure.md)
 - [Host runtime backends](host-runtimes.md) (local inventory, model package management and native acceptance suites)
-- [kubevirt resource ownership](kubevirt-resource-ownership.md)
 - [lease eligibility](lease-eligibility.md)
 - [leases](leases.md)
 - [durable waiting requests](requests.md)
@@ -71,8 +70,6 @@ interpreter dependency to the controller, host or SDK; see
 - [windows guest display](windows-guest-display.md)
 - [windows guest files](windows-guest-files.md)
 - [windows guest terminals](windows-guest-terminals.md)
-
-- [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
 
 - [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core, deterministic local bundle/initrd assembly, read-only digest preflight and bootstrap source; satellite readiness and consumer commands fixture-covered; kernel/rootfs construction and native acceptance remain outstanding)
 

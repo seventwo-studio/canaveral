@@ -135,7 +135,7 @@ test("the system inventory carries lease labels on both ledgers and the controll
     db.prepare("INSERT INTO resource_domains VALUES (?,?,?,?)").run(domain, "fixture", JSON.stringify({ cpu: 8, memoryMiB: 8192, diskGiB: 80 }), f.now());
     for (const [id, request] of [[linux, { name: "ci-workspace" }], [unnamed, { name: null }]] as const) {
       const reservation = randomUUID();
-      const row: Record<string, string | number | null> = { id, application: f.app.id, request: JSON.stringify(request), image_id: "fixture-linux", image_revision: "1", arch: "amd64", backend: "kubevirt", digest: "sha256:" + "ab".repeat(32),
+      const row: Record<string, string | number | null> = { id, application: f.app.id, request: JSON.stringify(request), image_id: "fixture-linux", image_revision: "1", arch: "amd64", backend: "appleVirtualization", digest: "sha256:" + "ab".repeat(32),
         resources: JSON.stringify({ cpu: 1, memoryMiB: 1024, diskGiB: 4 }), capabilities: "[]", required: "[]", member: randomUUID(), domain, reservation, state: "ready", runtime: "running", cleanup: "notRequested",
         cleanup_id: null, revision: 1, created: f.now(), expires: f.now() + 60, max_expires: f.now() + 7200, provision_deadline: f.now() + 60, credential: null };
       db.prepare(`INSERT INTO linux_leases (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row));

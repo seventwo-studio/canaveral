@@ -51,7 +51,6 @@ it("retries an interrupted begin with the same intent", async () => {
 it("renders the returned resume refusal and disables resume", async () => {
   const blocked = {
     ...status,
-    scope: "pool",
     readyToResume: false,
     safeToPowerOff: false,
     blockers: [
@@ -84,7 +83,6 @@ it("renders the returned resume refusal and disables resume", async () => {
     ),
   );
   expect(button.hasAttribute("disabled")).toBe(true);
-  expect(screen.getByText(/physical nodes/)).toBeTruthy();
   expect(screen.getByText(/Storage missing/).textContent).toContain(
     "power off and resume",
   );

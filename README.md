@@ -18,7 +18,7 @@ Coding agents and CI jobs lease devices through the [agent surfaces](docs/agent-
 
 For installation boundaries, use the [target matrix](docs/running.md#installation-and-target-boundaries); keep [operator acceptance](docs/runtime-updates.md#operator-acceptance-prepare-only-separate-authorization-required) separate from portable fixtures.
 
-Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). The CLI source is `coordination/src/cli.ts`; the controller modules are in `coordination/src/control`. The [consumer SDK](docs/consumer-sdk.md) and its terminal, visual and accessibility clients are TypeScript. Rust workspace components cover execution ownership, runner identity, model execution, Apple supervision, KubeVirt and the guest wire protocol.
+Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). The CLI source is `coordination/src/cli.ts`; the controller modules are in `coordination/src/control`. The [consumer SDK](docs/consumer-sdk.md) and its terminal, visual and accessibility clients are TypeScript. Rust workspace components cover execution ownership, runner identity, model execution, Apple supervision and the guest wire protocol.
 
 Portable checks:
 

@@ -1,7 +1,6 @@
 import { ServiceError } from "../errors.ts";
 import { AppleProvider } from "./apple.ts";
 import { HypervProvider } from "./hyperv.ts";
-import { KubevirtProvider } from "./kubevirt.ts";
 import { LibvirtProvider } from "./libvirt.ts";
 import { AndroidProvider } from "./android.ts";
 import { IosProvider } from "./ios.ts";
@@ -18,7 +17,6 @@ export function createProvider(config: ProviderRecord, state: string): NativePro
   switch (config.provider) {
     case "apple": return new AppleProvider(config, state);
     case "hyperv": return new HypervProvider(config, state);
-    case "kubevirt": return new KubevirtProvider(config, state);
     case "libvirt": return new LibvirtProvider(config, state);
     case "android": return new AndroidProvider(config, state);
     case "ios": return new IosProvider(config, state);

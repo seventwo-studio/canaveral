@@ -92,10 +92,10 @@ test("queue cannot overspend mapped host and runner capacity",async t=>{
   const binding={controllerId:f.options.controllerId,runnerId:randomUUID(),generation:1,incarnationId:randomUUID()}, id=randomUUID(), credential=key();
   const issued=runners.issue({id,...binding,ttlSeconds:60});
   runners.consume((issued as {enrollmentToken:string}).enrollmentToken,{id,...binding,credential});
-  const image={id:"runner-linux",revision:"1",arch:"amd64",os:"linux",mode:"headless",backend:"kubevirt",digest:"sha256:"+"ab".repeat(32),resources:{cpu:1,memoryMiB:1024,diskGiB:4},capabilities:["command"]};
+  const image={id:"runner-linux",revision:"1",arch:"amd64",os:"linux",mode:"headless",backend:"appleVirtualization",digest:"sha256:"+"ab".repeat(32),resources:{cpu:1,memoryMiB:1024,diskGiB:4},capabilities:["command"]};
   f.leases.linux.image(image);f.leases.linux.grant({applicationId:f.app.id,imageId:image.id,revision:"1",arch:"amd64",digest:image.digest});
   f.store.transaction(db=>{f.leases.linux.domains.define(db,{id:domain,name:"fixture",capacity:image.resources},f.now());new PhysicalDomains().map(db,f.host,domain);});
-  f.leases.linux.approve({binding,domainId:domain,backend:"kubevirt",images:[{id:image.id,revision:"1",arch:"amd64",digest:image.digest}]});
+  f.leases.linux.approve({binding,domainId:domain,backend:"appleVirtualization",images:[{id:image.id,revision:"1",arch:"amd64",digest:image.digest}]});
   const generic=await f.request("POST","/v1/requests",envelope(f));assert.equal(generic.state,"admitted");
   const runner=await f.request("POST","/v1/requests",{id:randomUUID(),kind:"linux-lease",intent:{templateId:image.id,templateRevision:"1",arch:"amd64"}});
   assert.equal(runner.state,"waiting");

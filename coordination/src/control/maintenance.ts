@@ -10,6 +10,7 @@ import { requireAdmin } from "./contracts.ts";
 import { installAttemptClean } from "./install-cleanup.ts";
 import type { InstallAttempt } from "./install-cleanup.ts";
 import type { ControlRequest } from "./contracts.ts";
+import { persistedOffer } from "./machines.ts";
 import type { MachineHooks } from "./machines.ts";
 
 type Owner = "manual" | "update" | "legacy";
@@ -239,7 +240,6 @@ export class HostMaintenance {
   private status(db: DatabaseSync, row: Drain) {
     const { closed, owners } = hostAdmissionClosed(db, row.host);
     const data = ledger(db, row.host, this.browserHosts, row.created_at);
-    const scope = data.provider === "kubevirt" ? "pool" : "directHost";
     const now = this.store.clock(), blockers: Blocker[] = [];
     function block(kind: string, id: string, state: string, detail: string, resume = false) {
       blockers.push({ kind, id, state, detail, blocks: resume ? ["powerOff", "resume"] : ["powerOff"] });
@@ -251,7 +251,7 @@ export class HostMaintenance {
         age < 0 || age >= proofLifetime ? "stale" : row.ack_fingerprint !== fingerprint(data) ? "ledgerChanged" : null;
       if (ackState) block("acknowledgement", row.id, ackState, "A current maintenance acknowledgement is required.", true);
       if (!capability?.supported) block("agentUnsupported", row.host, "unsupported", "Host agent has not advertised maintenance v1.", true);
-      if (scope === "pool") block("poolScope", row.host, "pool", "A pool cannot prove its underlying nodes safe to power off.");
+      if (!persistedOffer(db.prepare("SELECT offer FROM hosts WHERE id=?").get(row.host)?.offer)) block("unsupportedHost", row.host, "unsupported", "Host offer is unsupported. Review outstanding resources before cleanup.", true);
       const report = !ackState && row.ack_report ? JSON.parse(row.ack_report) as Proof : undefined;
       const inventory = new Map(report?.inventory.assignments.map(item => [item.id, item]));
       const expected = new Set(data.assignments.map(item => item.id));
@@ -281,7 +281,7 @@ export class HostMaintenance {
         block(uncertain ? "uncertainOperation" : kind, id, state, detail, uncertain || kind === "unknownState");
       }
     }
-    return { id: row.id, hostId: row.host, scope, phase: row.phase, createdAt: row.created_at, reason: row.reason,
+    return { id: row.id, hostId: row.host, scope: "directHost", phase: row.phase, createdAt: row.created_at, reason: row.reason,
       admissionClosed: closed, owners, safeToPowerOff: row.phase === "draining" && !blockers.length,
       readyToResume: row.phase === "draining" && !blockers.some(b => b.blocks.length === 2), lastRunnerConfirmedAt: row.ack_at, blockers };
   }

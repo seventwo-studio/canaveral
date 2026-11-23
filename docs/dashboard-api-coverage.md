@@ -31,7 +31,7 @@ store; browser storage is not used.
 | --- | --- |
 | Account setup, invitations, sign-in, password, sessions | Sign-in, Account and Users |
 | Personal API tokens and administrator token revocation | API tokens and API access |
-| Hosts, external orchestrators, setup, diagnostics and limits | Hosts and Orchestrators |
+| Hosts, setup, diagnostics and limits | Hosts |
 | Templates, image registry/library, import/capture receipts | Image library and host overview |
 | Immutable machine blueprints | Machine blueprints |
 | Administrative machine creation, desired state, power off and deletion | Machines and machine details |
