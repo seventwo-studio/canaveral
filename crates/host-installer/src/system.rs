@@ -1,9 +1,14 @@
-use crate::installer::{Failure, Host, Result, Unit, BINARIES, SOCKET, UNIT_NAME};
+use crate::installer::{
+    Enablement, Failure, Host, LinkIdentity, Result, Unit, BINARIES, ENABLEMENT, INSTALLER_STATE,
+    SOCKET, UNIT, UNIT_NAME,
+};
 use crate::pins::Pin;
 use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{
+    symlink, DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -24,7 +29,15 @@ fn unsafe_path(path: &Path) -> Failure {
 }
 
 fn trusted(meta: &Metadata) -> bool {
-    meta.uid() == 0 && meta.mode() & 0o7022 == 0
+    meta.uid() == 0 && trusted_mode(meta.mode())
+}
+
+fn trusted_mode(mode: u32) -> bool {
+    mode & 0o7022 == 0
+}
+
+fn directory_mode(mode: u32, world_traversable: bool) -> bool {
+    trusted_mode(mode) && (!world_traversable || mode & 0o001 != 0)
 }
 
 fn metadata(path: &Path) -> Result<Option<Metadata>> {
@@ -50,28 +63,103 @@ fn open_directory(path: &Path) -> Result<File> {
 // Every ancestor has to be trusted before descending into it. The
 // validated tree cannot be renamed or traversed via links by other users.
 fn directory(path: &Path, create: bool) -> Result<bool> {
+    directory_with_access(path, create, false)
+}
+
+fn directory_with_access(path: &Path, create: bool, world_traversable: bool) -> Result<bool> {
     let ancestors: Vec<_> = path.ancestors().collect();
     for ancestor in ancestors.into_iter().rev() {
         match metadata(ancestor)? {
-            Some(meta) if meta.is_dir() && trusted(&meta) => {}
+            Some(meta)
+                if meta.is_dir()
+                    && meta.uid() == 0
+                    && directory_mode(meta.mode(), world_traversable) => {}
             Some(_) => return Err(unsafe_path(ancestor)),
             None if !create => return Ok(false),
             None => {
                 let parent = ancestor.parent().expect("system root exists");
                 let parent_fd = open_directory(parent)?;
-                DirBuilder::new()
-                    .mode(0o700)
-                    .create(ancestor)
-                    .map_err(|e| fs_error(ancestor, e))?;
+                let created = match DirBuilder::new().mode(0o755).create(ancestor) {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+                    Err(error) => return Err(fs_error(ancestor, error)),
+                };
                 let fd = open_directory(ancestor)?;
-                fd.set_permissions(fs::Permissions::from_mode(0o755))
-                    .and_then(|()| fd.sync_all())
-                    .and_then(|()| parent_fd.sync_all())
-                    .map_err(|e| fs_error(ancestor, e))?;
+                if created {
+                    fd.set_permissions(fs::Permissions::from_mode(0o755))
+                        .and_then(|()| fd.sync_all())
+                        .and_then(|()| parent_fd.sync_all())
+                        .map_err(|e| fs_error(ancestor, e))?;
+                } else if !directory_mode(
+                    fd.metadata().map_err(|e| fs_error(ancestor, e))?.mode(),
+                    world_traversable,
+                ) {
+                    return Err(unsafe_path(ancestor));
+                }
             }
         }
     }
     Ok(true)
+}
+
+fn private_directory(path: &Path) -> Result<()> {
+    let parent = path.parent().expect("absolute private directory path");
+    directory(parent, true)?;
+    let parent_fd = open_directory(parent)?;
+    match DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => parent_fd.sync_all().map_err(|e| fs_error(parent, e))?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(fs_error(path, error)),
+    }
+    let dir = open_directory(path)?;
+    let meta = dir.metadata().map_err(|e| fs_error(path, e))?;
+    if meta.gid() != 0 || meta.mode() & 0o7777 != 0o700 {
+        return Err(unsafe_path(path));
+    }
+    Ok(())
+}
+
+// The caller validates the private parent. The owner arguments also allow
+// unprivileged tests to check the same file and descriptor rules.
+fn lock_file(path: &Path, uid: u32, gid: u32) -> Result<File> {
+    let safe = |meta: &Metadata| {
+        meta.is_file()
+            && meta.uid() == uid
+            && meta.gid() == gid
+            && meta.nlink() == 1
+            && meta.mode() & 0o7777 == 0o600
+    };
+    if metadata(path)?.is_some_and(|entry| !safe(&entry)) {
+        return Err(unsafe_path(path));
+    }
+    let fd = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| fs_error(path, e))?;
+    let opened = fd.metadata().map_err(|e| fs_error(path, e))?;
+    if !safe(&opened)
+        || !metadata(path)?.is_some_and(|entry| {
+            safe(&entry) && (entry.dev(), entry.ino()) == (opened.dev(), opened.ino())
+        })
+    {
+        return Err(unsafe_path(path));
+    }
+    if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 {
+        return Err(Failure::new(
+            "installer_busy",
+            format!(
+                "Could not lock {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ),
+        ));
+    }
+    Ok(fd)
 }
 
 fn executable(path: &Path) -> Result<()> {
@@ -231,16 +319,11 @@ impl Host for Linux {
     }
 
     fn lock(&self) -> Result<File> {
-        let path = Path::new("/var/lib");
-        directory(path, false)?;
-        let fd = open_directory(path)?;
-        if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 {
-            return Err(Failure::new(
-                "installer_busy",
-                format!("Could not lock /var/lib: {}", io::Error::last_os_error()),
-            ));
-        }
-        Ok(fd)
+        let directory = Path::new(INSTALLER_STATE)
+            .parent()
+            .expect("absolute installer state path");
+        private_directory(directory)?;
+        lock_file(&directory.join(".lock"), 0, 0)
     }
 
     fn exists(&self, path: &str) -> Result<bool> {
@@ -257,6 +340,12 @@ impl Host for Linux {
                 return Err(unsafe_path(path));
             }
         }
+        Ok(())
+    }
+
+    fn check_receipt_directory(&self, path: &str, create: bool) -> Result<()> {
+        let parent = Path::new(path).parent().expect("absolute receipt path");
+        directory_with_access(parent, create, true)?;
         Ok(())
     }
 
@@ -351,6 +440,42 @@ impl Host for Linux {
             Ok(()) => dir.sync_all().map_err(|e| fs_error(parent, e)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(fs_error(path, error)),
+        }
+    }
+
+    fn enablement(&self) -> Result<Enablement> {
+        let path = Path::new(ENABLEMENT);
+        if !directory(path.parent().expect("absolute enablement path"), false)? {
+            return Ok(Enablement::Missing);
+        }
+        let Some(meta) = metadata(path)? else {
+            return Ok(Enablement::Missing);
+        };
+        if !meta.is_symlink() || meta.uid() != 0 {
+            return Ok(Enablement::Other);
+        }
+        let target = fs::read_link(path).map_err(|e| fs_error(path, e))?;
+        if target != Path::new(UNIT) && target != Path::new("../").join(UNIT_NAME) {
+            return Ok(Enablement::Other);
+        }
+        Ok(Enablement::Matching(LinkIdentity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+        }))
+    }
+
+    fn create_enablement(&self) -> Result<LinkIdentity> {
+        let path = Path::new(ENABLEMENT);
+        let parent = path.parent().expect("absolute enablement path");
+        directory(parent, true)?;
+        let parent_fd = open_directory(parent)?;
+        symlink(UNIT, path).map_err(|e| fs_error(path, e))?;
+        parent_fd.sync_all().map_err(|e| fs_error(parent, e))?;
+        match self.enablement()? {
+            Enablement::Matching(identity) => Ok(identity),
+            _ => Err(unsafe_path(path)),
         }
     }
 
@@ -472,10 +597,97 @@ impl Host for Linux {
             .map_err(|_| Failure::new("command_failed", "ctr did not return UTF-8"))
     }
 
+    fn verify_stopped_tasks(&self, shim: &str) -> Result<()> {
+        // The unit may remove its runtime directory at stop. Inspect any
+        // retained task bundles, then independently check surviving shims.
+        let tasks = Path::new("/run/canaveral-containerd/io.containerd.runtime.v2.task");
+        if directory(tasks, false)? {
+            for entry in fs::read_dir(tasks).map_err(|e| fs_error(tasks, e))? {
+                let namespace = entry.map_err(|e| fs_error(tasks, e))?.path();
+                open_directory(&namespace)?;
+                if let Some(entry) = fs::read_dir(&namespace)
+                    .map_err(|e| fs_error(&namespace, e))?
+                    .next()
+                {
+                    let task = entry.map_err(|e| fs_error(&namespace, e))?.path();
+                    return Err(Failure::new(
+                        "runtime_in_use",
+                        format!("Containerd task state remains at {}", task.display()),
+                    ));
+                }
+            }
+        }
+        let proc = Path::new("/proc");
+        let deleted = format!("{shim} (deleted)");
+        for entry in fs::read_dir(proc).map_err(|e| fs_error(proc, e))? {
+            let entry = entry.map_err(|e| fs_error(proc, e))?;
+            if !entry.file_name().to_str().is_some_and(|name| {
+                !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                continue;
+            }
+            let exe = entry.path().join("exe");
+            match fs::read_link(&exe) {
+                Ok(target) if target == Path::new(shim) || target == Path::new(&deleted) => {
+                    return Err(Failure::new(
+                        "runtime_in_use",
+                        format!("A managed containerd shim remains at {}", exe.display()),
+                    ));
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(fs_error(&exe, error));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn now(&self) -> Result<u64> {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .map_err(|error| Failure::new("clock_error", error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_is_independent_of_its_parent_and_excludes_other_installers() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = File::open(dir.path()).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let path = dir.path().join(".lock");
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let held = lock_file(&path, uid, gid).unwrap();
+        assert!(format!("{:?}", lock_file(&path, uid, gid).unwrap_err()).contains("installer_busy"));
+        drop(held);
+        lock_file(&path, uid, gid).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(lock_file(&path, uid, gid).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("link");
+        fs::hard_link(&path, &link).unwrap();
+        assert!(lock_file(&path, uid, gid).is_err());
+        fs::remove_file(&link).unwrap();
+        symlink(&path, &link).unwrap();
+        assert!(lock_file(&link, uid, gid).is_err());
+    }
+
+    #[test]
+    fn receipt_ancestor_mode_requires_world_traversal_and_trusted_writes() {
+        assert!(directory_mode(0o755, true));
+        assert!(directory_mode(0o711, true));
+        assert!(directory_mode(0o700, false));
+        for mode in [0o700, 0o750, 0o775, 0o757, 0o2755] {
+            assert!(!directory_mode(mode, true), "{mode:o}");
+        }
     }
 }

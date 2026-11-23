@@ -7,11 +7,15 @@ use std::io::{self, Read};
 
 pub(crate) const UNIT_NAME: &str = "canaveral-containerd.service";
 pub(crate) const UNIT: &str = "/etc/systemd/system/canaveral-containerd.service";
+pub(crate) const ENABLEMENT: &str =
+    "/etc/systemd/system/multi-user.target.wants/canaveral-containerd.service";
 const CONFIG: &str = "/etc/canaveral-containerd/config.toml";
 pub(crate) const SOCKET: &str = "/run/canaveral-containerd/containerd.sock";
 const STATE: &str = "/var/lib/canaveral-containerd";
 const RECEIPT: &str = "/var/lib/canaveral-host-installer/receipts/containerd.json";
 const PENDING: &str = "/var/lib/canaveral-host-installer/receipts/containerd.pending.json";
+pub(crate) const INSTALLER_STATE: &str =
+    "/var/lib/canaveral-host-installer/private/containerd.json";
 const KIND: &str = "canaveral-host-installer-receipt";
 pub(crate) const BINARIES: [&str; 4] = ["containerd", "containerd-shim-runc-v2", "ctr", "runc"];
 const MAX_BINARY: usize = 64 * 1024 * 1024;
@@ -58,6 +62,21 @@ pub(crate) struct Unit {
     pub pid: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LinkIdentity {
+    pub dev: u64,
+    pub ino: u64,
+    pub ctime: i64,
+    pub ctime_nsec: i64,
+}
+
+pub(crate) enum Enablement {
+    Missing,
+    Matching(LinkIdentity),
+    Other,
+}
+
 /// The production implementation binds every effect to the local Linux host.
 /// Fixture implementations can substitute files, downloads and service state.
 pub(crate) trait Host {
@@ -66,16 +85,20 @@ pub(crate) trait Host {
     fn lock(&self) -> Result<Self::Lock>;
     fn exists(&self, path: &str) -> Result<bool>;
     fn check_directory(&self, path: &str, private: bool) -> Result<()>;
+    fn check_receipt_directory(&self, path: &str, create: bool) -> Result<()>;
     fn check_bin(&self, path: &str) -> Result<()>;
     fn read(&self, path: &str, mode: u32, limit: usize) -> Result<Option<Vec<u8>>>;
     fn write(&self, path: &str, mode: u32, bytes: &[u8]) -> Result<()>;
     fn unlink(&self, path: &str) -> Result<()>;
+    fn enablement(&self) -> Result<Enablement>;
+    fn create_enablement(&self) -> Result<LinkIdentity>;
     fn fetch(&self, pins: &[Pin; 2]) -> Result<[Vec<u8>; 2]>;
     fn unit(&self, name: &str) -> Result<Unit>;
     fn systemctl(&self, args: &[&str]) -> Result<()>;
     fn is_active(&self) -> Result<bool>;
     fn owns_socket(&self, pid: u32, executable: &str) -> Result<bool>;
     fn ctr(&self, executable: &str, args: &[&str]) -> Result<String>;
+    fn verify_stopped_tasks(&self, shim: &str) -> Result<()>;
     fn now(&self) -> Result<u64>;
 }
 
@@ -131,6 +154,14 @@ impl Receipt {
         &self.assets[0].version
     }
 
+    fn matches_generated(&self, generated: &BTreeMap<String, Vec<u8>>) -> bool {
+        self.files.iter().all(|file| {
+            generated
+                .get(&file.path)
+                .is_none_or(|bytes| file.sha256 == sha256(bytes))
+        })
+    }
+
     fn valid(&self) -> bool {
         let valid_version = |version: &str| {
             version.len() <= 32
@@ -177,6 +208,8 @@ impl Receipt {
 struct Pending {
     previous: Option<Receipt>,
     next: Option<Receipt>,
+    #[serde(default)]
+    stop_verified: bool,
 }
 
 impl Pending {
@@ -185,8 +218,16 @@ impl Pending {
     }
 
     fn valid(&self) -> bool {
-        self.receipts().next().is_some() && self.receipts().all(Receipt::valid)
+        self.receipts().next().is_some()
+            && self.receipts().all(Receipt::valid)
+            && (!self.stop_verified || self.previous.is_some())
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallerState {
+    enablement: Option<LinkIdentity>,
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -217,6 +258,13 @@ fn unit_file(version: &str) -> String {
          [Install]\nWantedBy=multi-user.target\n",
         bin(version, "containerd"), bin_dir(version)
     )
+}
+
+fn generated_files(version: &str) -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([
+        (CONFIG.into(), config(version).into_bytes()),
+        (UNIT.into(), unit_file(version).into_bytes()),
+    ])
 }
 
 fn mode(path: &str) -> u32 {
@@ -318,8 +366,7 @@ fn prepare(
         .into_iter()
         .map(|(name, bytes)| (bin(version, &name), bytes))
         .collect();
-    files.insert(CONFIG.into(), config(version).into_bytes());
-    files.insert(UNIT.into(), unit_file(version).into_bytes());
+    files.extend(generated_files(version));
     let receipt = Receipt {
         kind: KIND.into(),
         version: 1,
@@ -339,8 +386,12 @@ fn prepare(
     Ok((receipt, files))
 }
 
-fn document<T: for<'de> Deserialize<'de>>(host: &impl Host, path: &str) -> Result<Option<T>> {
-    host.read(path, 0o644, MAX_DOCUMENT)?
+fn document<T: for<'de> Deserialize<'de>>(
+    host: &impl Host,
+    path: &str,
+    mode: u32,
+) -> Result<Option<T>> {
+    host.read(path, mode, MAX_DOCUMENT)?
         .map(|bytes| {
             serde_json::from_slice(&bytes)
                 .map_err(|_| Failure::new("invalid_receipt", format!("Cannot parse {path}")))
@@ -349,13 +400,24 @@ fn document<T: for<'de> Deserialize<'de>>(host: &impl Host, path: &str) -> Resul
 }
 
 fn publish(host: &impl Host, path: &str, value: &impl Serialize) -> Result<()> {
+    if path == RECEIPT {
+        host.check_receipt_directory(path, true)?;
+    }
     let bytes = serde_json::to_vec(value)
         .map_err(|error| Failure::new("serialization_failed", error.to_string()))?;
-    host.write(path, 0o644, &bytes)
+    host.write(
+        path,
+        if path == INSTALLER_STATE {
+            0o600
+        } else {
+            0o644
+        },
+        &bytes,
+    )
 }
 
 fn receipt(host: &impl Host) -> Result<Option<Receipt>> {
-    let receipt = document::<Receipt>(host, RECEIPT)?;
+    let receipt = document::<Receipt>(host, RECEIPT, 0o644)?;
     if receipt.as_ref().is_some_and(|r| !r.valid()) {
         return Err(Failure::new(
             "invalid_receipt",
@@ -384,6 +446,7 @@ fn foreign(host: &impl Host) -> Result<()> {
             "dockerd",
             "docker",
             "k3s",
+            "rke2",
         ] {
             refuse_existing(host, &format!("{directory}/{name}"))?;
         }
@@ -391,8 +454,11 @@ fn foreign(host: &impl Host) -> Result<()> {
     for path in [
         "/run/containerd/containerd.sock",
         "/run/docker.sock",
+        "/run/podman/podman.sock",
         "/etc/containerd",
         "/run/k3s",
+        "/var/lib/rancher/rke2",
+        "/etc/rancher/rke2",
         "/opt/cni/bin",
     ] {
         refuse_existing(host, path)?;
@@ -403,6 +469,10 @@ fn foreign(host: &impl Host) -> Result<()> {
         "docker.socket",
         "k3s.service",
         "k3s-agent.service",
+        "podman.service",
+        "podman.socket",
+        "rke2-server.service",
+        "rke2-agent.service",
     ] {
         for directory in UNIT_DIRS.into_iter().chain(["/run/systemd/generator.late"]) {
             refuse_existing(host, &format!("{directory}/{name}"))?;
@@ -533,16 +603,14 @@ fn running<'a>(
     ))
 }
 
-fn idle(host: &impl Host, active: Option<&Receipt>, previously_checked: bool) -> Result<()> {
-    let Some(receipt) = active else {
-        if previously_checked {
-            return Ok(());
-        }
-        return Err(Failure::new(
-            "idle_unproven",
-            "Start the verified service to establish that it has no tasks or containers",
-        ));
-    };
+fn idle_unproven() -> Failure {
+    Failure::new(
+        "idle_unproven",
+        "Start the verified service to establish that it has no tasks or containers",
+    )
+}
+
+fn idle(host: &impl Host, receipt: &Receipt) -> Result<()> {
     let executable = bin(receipt.version(), "ctr");
     let query = |args: &[&str]| {
         host.ctr(&executable, args)
@@ -578,13 +646,49 @@ fn idle(host: &impl Host, active: Option<&Receipt>, previously_checked: bool) ->
     Ok(())
 }
 
-fn stop(host: &impl Host) -> Result<()> {
-    host.systemctl(&["disable", "--now", UNIT_NAME])?;
-    if host.is_active()? || host.exists(SOCKET)? {
+fn check_stopped(host: &impl Host) -> Result<()> {
+    let unit = inspect_unit(host, true)?;
+    if unit.active || unit.pid != 0 || host.is_active()? || host.exists(SOCKET)? {
         return Err(Failure::new(
             "service_state_unknown",
             "The service or socket remains after stopping",
         ));
+    }
+    Ok(())
+}
+
+// The caller holds the installer lock throughout maintenance. A pending
+// transaction alone is never evidence that a previous stop was safe.
+fn maintain(
+    host: &impl Host,
+    tx: &mut Pending,
+    active: Option<&Receipt>,
+    new_transaction: bool,
+) -> Result<()> {
+    let previous = tx
+        .previous
+        .as_ref()
+        .expect("maintaining a recorded installation");
+    let shim = bin(previous.version(), "containerd-shim-runc-v2");
+    if let Some(active) = active {
+        if active != previous {
+            return Err(idle_unproven());
+        }
+        idle(host, previous)?;
+        if new_transaction || tx.stop_verified {
+            tx.stop_verified = false;
+            publish(host, PENDING, tx)?;
+        }
+        host.systemctl(&["stop", UNIT_NAME])?;
+    } else if !tx.stop_verified {
+        return Err(idle_unproven());
+    }
+    check_stopped(host)?;
+    host.verify_stopped_tasks(&shim)?;
+    check_stopped(host)?;
+    if !tx.stop_verified {
+        tx.stop_verified = true;
+        publish(host, PENDING, tx)?;
     }
     Ok(())
 }
@@ -608,12 +712,52 @@ impl Operation {
     }
 }
 
+fn reconcile_enablement(host: &impl Host, recorded: Option<InstallerState>) -> Result<()> {
+    let enablement = match host.enablement()? {
+        Enablement::Missing => Some(host.create_enablement()?),
+        Enablement::Matching(identity) => recorded
+            .and_then(|state| state.enablement)
+            .filter(|owned| *owned == identity),
+        Enablement::Other => return Err(enablement_conflict()),
+    };
+    let state = InstallerState { enablement };
+    if recorded != Some(state) {
+        publish(host, INSTALLER_STATE, &state)?;
+    }
+    Ok(())
+}
+
+fn enablement_conflict() -> Failure {
+    Failure::new(
+        "foreign_install",
+        format!("Existing path needs operator review: {ENABLEMENT}"),
+    )
+}
+
+fn remove_enablement(host: &impl Host, state: Option<InstallerState>) -> Result<()> {
+    if let Some(owned) = state.and_then(|state| state.enablement) {
+        if matches!(host.enablement()?, Enablement::Matching(found) if found == owned) {
+            host.unlink(ENABLEMENT)?;
+        }
+    }
+    Ok(())
+}
+
 fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static str> {
     host.authorize()?;
     let _lock = host.lock()?;
     foreign(host)?;
+    if op == Operation::Install {
+        host.check_receipt_directory(RECEIPT, false)?;
+        if matches!(host.enablement()?, Enablement::Other) {
+            return Err(enablement_conflict());
+        }
+    }
+    let state = document::<InstallerState>(host, INSTALLER_STATE, 0o600)?;
     let current = receipt(host)?;
-    let pending = document::<Pending>(host, PENDING)?;
+    let pending = document::<Pending>(host, PENDING, 0o644)?;
+    let assets = pins.each_ref().map(Asset::from);
+    let generated = generated_files(pins[0].version);
     if pending.as_ref().is_some_and(|tx| {
         !tx.valid()
             || (current != tx.previous && current != tx.next)
@@ -621,7 +765,7 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
             || tx
                 .next
                 .as_ref()
-                .is_some_and(|next| next.assets != pins.each_ref().map(Asset::from))
+                .is_some_and(|next| next.assets != assets || !next.matches_generated(&generated))
     }) {
         return Err(Failure::new(
             "recovery_required",
@@ -631,6 +775,7 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
     let mut tx = pending.clone().unwrap_or_else(|| Pending {
         previous: current.clone(),
         next: None,
+        stop_verified: false,
     });
     let disk = inspect_files(host, &tx, pins[0].version, pending.is_some())?;
     let unit = inspect_unit(host, disk.contains_key(UNIT) || pending.is_some())?;
@@ -638,31 +783,34 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
     let active = active.as_ref();
 
     if op == Operation::Remove {
-        let Some(previous) = tx.previous.as_ref() else {
+        if tx.previous.is_none() {
             return Ok("absent");
-        };
-        idle(host, active, pending.is_some())?;
-        if pending.is_none() {
-            publish(host, PENDING, &tx)?;
         }
-        if unit.loaded && disk.contains_key(UNIT) {
-            stop(host)?;
-        }
+        maintain(host, &mut tx, active, pending.is_none())?;
+        let previous = tx
+            .previous
+            .as_ref()
+            .expect("removing a recorded installation");
+        remove_enablement(host, state)?;
         for file in &previous.files {
             if disk.contains_key(&file.path) {
                 host.unlink(&file.path)?;
             }
         }
         host.systemctl(&["daemon-reload"])?;
+        host.unlink(INSTALLER_STATE)?;
         host.unlink(RECEIPT)?;
         host.unlink(PENDING)?;
         return Ok("removed");
     }
 
-    let assets = pins.each_ref().map(Asset::from);
-    if pending.is_none() && current.as_ref().is_some_and(|r| r.assets == assets) {
+    if let Some(existing) = current
+        .as_ref()
+        .filter(|r| pending.is_none() && r.assets == assets && r.matches_generated(&generated))
+    {
+        reconcile_enablement(host, state)?;
         if active.is_none() {
-            start(host, current.as_ref().expect("matching receipt"))?;
+            start(host, existing)?;
         }
         return Ok("installed");
     }
@@ -672,46 +820,60 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
             format!("Inspect and move the existing state directory before installing: {STATE}"),
         ));
     }
+    if tx.previous.is_some() && !tx.stop_verified && active != tx.previous.as_ref() {
+        return Err(idle_unproven());
+    }
+    if let Some(previous) =
+        active.filter(|r| Some(*r) == tx.previous.as_ref() && r.assets != assets)
+    {
+        idle(host, previous)?;
+    }
 
-    let upgrading = tx.previous.is_some();
-    let stop_previous = upgrading && active == tx.previous.as_ref();
-    if stop_previous || (upgrading && pending.is_none()) {
-        idle(host, active, false)?;
-    }
-    let (next, files) = match &tx.next {
-        Some(next)
-            if next
-                .files
-                .iter()
-                .all(|f| disk.get(&f.path) == Some(&f.sha256)) =>
-        {
-            (next.clone(), BTreeMap::new())
-        }
-        Some(expected) => {
-            let (next, files) = prepare(host, pins, expected.installed_at)?;
-            if expected != &next {
-                return Err(Failure::new(
-                    "recovery_required",
-                    "Prepared files differ from the recorded transaction",
-                ));
+    let next = tx.next.as_ref();
+    let pinned = tx.previous.as_ref().filter(|r| {
+        r.assets == assets
+            && r.files.iter().all(|file| {
+                generated.contains_key(&file.path) || disk.get(&file.path) == Some(&file.sha256)
+            })
+    });
+    let (next, files) = if let Some(next) =
+        next.filter(|r| r.files.iter().all(|f| disk.get(&f.path) == Some(&f.sha256)))
+    {
+        (next.clone(), BTreeMap::new())
+    } else {
+        let installed_at = match next {
+            Some(next) => next.installed_at,
+            None => host.now()?,
+        };
+        let (prepared, files) = match pinned {
+            Some(previous) => {
+                let mut prepared = previous.clone();
+                prepared.installed_at = installed_at;
+                for record in &mut prepared.files {
+                    if let Some(bytes) = generated.get(&record.path) {
+                        record.sha256 = sha256(bytes);
+                    }
+                }
+                (prepared, generated)
             }
-            (next, files)
+            None => prepare(host, pins, installed_at)?,
+        };
+        if next.is_some_and(|expected| expected != &prepared) {
+            return Err(Failure::new(
+                "recovery_required",
+                "Prepared files differ from the recorded transaction",
+            ));
         }
-        None => prepare(host, pins, host.now()?)?,
+        (prepared, files)
     };
-    if stop_previous {
-        idle(host, active, false)?;
-    }
-    if pending.is_none() {
-        tx.next = Some(next.clone());
+    tx.next = Some(next.clone());
+    if tx.previous.is_some() && active != Some(&next) {
+        maintain(host, &mut tx, active, pending.is_none())?;
+    } else if pending.is_none() {
         publish(host, PENDING, &tx)?;
     }
 
-    if stop_previous {
-        stop(host)?;
-    }
-    // Publish the unit last among the files so a loaded unit always points
-    // at complete binaries and config.
+    // Publish the unit last so a loaded unit points at complete binaries and config.
     for (path, contents) in files
         .iter()
         .filter(|(path, _)| path.as_str() != UNIT)
@@ -721,7 +883,8 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
             host.write(path, mode(path), contents)?;
         }
     }
-    if stop_previous || active != Some(&next) {
+    reconcile_enablement(host, state)?;
+    if active != Some(&next) {
         start(host, &next)?;
     }
     if let Some(previous) = tx
@@ -749,7 +912,7 @@ fn start(host: &impl Host, receipt: &Receipt) -> Result<()> {
             "Could not confirm the new unit is loaded and stopped",
         ));
     }
-    host.systemctl(&["enable", "--now", UNIT_NAME])?;
+    host.systemctl(&["start", UNIT_NAME])?;
     host.check_directory("/run/canaveral-containerd", true)?;
     let unit = inspect_unit(host, true)?;
     if !unit.active

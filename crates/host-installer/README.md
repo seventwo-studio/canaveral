@@ -20,15 +20,20 @@ service account only reads the receipt.
 - `install` verifies pinned tarball and executable bytes before unpacking.
   It installs the binaries under `/opt/canaveral-containerd/<version>/bin`,
   enables and starts the unit, checks its socket, then publishes the receipt
-  at `/var/lib/canaveral-host-installer/receipts/containerd.json`. A repeat
-  with matching files and pins reuses the installation.
+  at `/var/lib/canaveral-host-installer/receipts/containerd.json`. All
+  receipt ancestors must be root-owned, traversable by other users, and
+  writable only by root. The installer creates missing ancestors with mode
+  `0755`. A repeat reuses matching pins, generated config and unit, and
+  reconciles missing enablement state. Changes to generated files require
+  idle maintenance even when the pins match.
 - `status` reports the receipt, per-file digests, systemd activity and socket
   presence. Indeterminate probes are `null` in JSON. Read the `result.code`
   field for drift, inactivity and pending recovery. Use root to inspect the
   socket through its private runtime directory.
 - `remove` verifies the installation, checks tasks and container records in
-  every namespace, disables and stops the service, and removes matching
-  files. It keeps `/var/lib/canaveral-containerd` and directory scaffolding.
+  every namespace, stops the service, and removes matching files and the
+  boot enablement link if it still matches the installer's ownership record.
+  It keeps `/var/lib/canaveral-containerd` and directory scaffolding.
   Inspect and move retained state before a fresh install.
 
 The unit keeps the socket inside a root-owned `0700` runtime directory and
@@ -46,20 +51,37 @@ environment and absolute executable paths to its child commands. Invoke it
 from a trusted root context because the operating system loads the executable
 before these checks can run.
 
-The installer refuses existing Docker, containerd, k3s or CNI files at
-known system locations, foreign service definitions, drop-ins, unexpected
-files in the pinned binary directory, mismatched recorded files and a
-socket it cannot tie to the managed service. It uses the service's main PID,
-executable and Unix peer credentials to verify socket ownership. If an
-upgrade or removal cannot establish idleness, start the verified service
-and check its tasks and container records. Keep other root callers away from
-the socket throughout the operation so they cannot submit work while it is
-being stopped.
+The installer refuses existing Docker, containerd, k3s, RKE2, rootful Podman
+or CNI files at known system locations, foreign service definitions,
+drop-ins, unexpected files in the pinned binary directory, mismatched
+recorded files and a socket it cannot tie to the managed service. It uses
+the service's main PID, executable and Unix peer credentials to verify
+socket ownership.
+
+Install and remove share a `0600` lock file in the root-only
+`/var/lib/canaveral-host-installer/private` directory. The installer creates
+one boot link under `multi-user.target.wants` and records its identity in
+`private/containerd.json`. Upgrade retains that link. Removal preserves
+operator-created links, including replacements at the same path. A
+preexisting link, or one left by an interruption before its identity was
+recorded, may need manual cleanup after removal.
+
+Before replacing or removing files, the installer checks all namespaces
+for tasks and container records, stops the service to close the socket,
+then looks for remaining task bundles and managed shim processes. The
+offline check can see task bundles only when systemd leaves the runtime
+directory in place. Pause other root clients throughout maintenance. They
+can submit work before the socket closes, and the installer lock only
+serializes installer processes.
 
 The installer records the operation and expected file digests before
-publishing installation files or stopping a service for removal. An
-interrupted first install can leave files and a pending transaction
-without a receipt. Rerun the same operation with the same installer release.
+publishing installation files or stopping a service. It records stop
+verification separately, after checking the stopped service and remaining
+task state. If a retry finds the service stopped without that record,
+restart the verified service and check its tasks and container records before
+retrying. An interrupted first install can leave files and a pending
+transaction without a receipt. Rerun the same operation with the same
+installer release.
 A retry checks any surviving files against the journal, redownloads assets
 if needed, and completes the transaction. It refuses changed or unrecorded
 files. Downloads always use a newly created staging directory. A forced

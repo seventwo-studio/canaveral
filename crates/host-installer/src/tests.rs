@@ -12,6 +12,11 @@ struct Fixture {
     root_user: Cell<bool>,
     foreign_socket: Cell<bool>,
     busy: Cell<bool>,
+    stopped_tasks: Cell<bool>,
+    unsafe_receipt_ancestor: Cell<bool>,
+    foreign_unit: Cell<Option<&'static str>>,
+    link: Cell<Option<LinkIdentity>>,
+    link_serial: Cell<u64>,
     broken_ctr: Cell<bool>,
     fail_at: Cell<Option<&'static str>>,
 }
@@ -26,6 +31,11 @@ impl Fixture {
             root_user: Cell::new(true),
             foreign_socket: Cell::default(),
             busy: Cell::default(),
+            stopped_tasks: Cell::default(),
+            unsafe_receipt_ancestor: Cell::default(),
+            foreign_unit: Cell::default(),
+            link: Cell::default(),
+            link_serial: Cell::default(),
             broken_ctr: Cell::default(),
             fail_at: Cell::default(),
         }
@@ -59,6 +69,19 @@ impl Fixture {
         }
         pins
     }
+
+    fn link(&self) -> LinkIdentity {
+        let ino = self.link_serial.get() + 1;
+        self.link_serial.set(ino);
+        let link = LinkIdentity {
+            dev: 1,
+            ino,
+            ctime: 0,
+            ctime_nsec: 0,
+        };
+        self.link.set(Some(link));
+        link
+    }
 }
 
 impl Host for Fixture {
@@ -83,6 +106,13 @@ impl Host for Fixture {
     fn check_directory(&self, _: &str, _: bool) -> Result<()> {
         Ok(())
     }
+    fn check_receipt_directory(&self, path: &str, _: bool) -> Result<()> {
+        assert_eq!(path, RECEIPT);
+        if self.unsafe_receipt_ancestor.get() {
+            return Err(Failure::new("unsafe_path", "receipt ancestor lacks o+x"));
+        }
+        Ok(())
+    }
     fn check_bin(&self, _: &str) -> Result<()> {
         Ok(())
     }
@@ -99,10 +129,30 @@ impl Host for Fixture {
 
     fn unlink(&self, path: &str) -> Result<()> {
         self.event(&format!("unlink {path}"))?;
+        if path == ENABLEMENT {
+            self.link.set(None);
+        }
         if self.path(path).exists() {
             fs::remove_file(self.path(path)).unwrap();
         }
         Ok(())
+    }
+
+    fn enablement(&self) -> Result<Enablement> {
+        if self.path(ENABLEMENT).exists() {
+            Ok(Enablement::Other)
+        } else {
+            Ok(self
+                .link
+                .get()
+                .map_or(Enablement::Missing, Enablement::Matching))
+        }
+    }
+
+    fn create_enablement(&self) -> Result<LinkIdentity> {
+        self.event("create enablement")?;
+        assert!(self.link.get().is_none());
+        Ok(self.link())
     }
 
     fn fetch(&self, _: &[Pin; 2]) -> Result<[Vec<u8>; 2]> {
@@ -111,6 +161,12 @@ impl Host for Fixture {
     }
 
     fn unit(&self, name: &str) -> Result<Unit> {
+        if self.foreign_unit.get() == Some(name) {
+            return Ok(Unit {
+                loaded: true,
+                ..Unit::default()
+            });
+        }
         let loaded = name == UNIT_NAME && self.path(UNIT).exists();
         Ok(Unit {
             loaded,
@@ -125,11 +181,11 @@ impl Host for Fixture {
     fn systemctl(&self, args: &[&str]) -> Result<()> {
         self.event(args[0])?;
         match args {
-            ["enable", "--now", UNIT_NAME] => {
+            ["start", UNIT_NAME] => {
                 self.active.set(true);
                 self.put(SOCKET, b"socket");
             }
-            ["disable", "--now", UNIT_NAME] => {
+            ["stop", UNIT_NAME] => {
                 self.active.set(false);
                 if self.path(SOCKET).exists() {
                     fs::remove_file(self.path(SOCKET)).unwrap();
@@ -163,6 +219,17 @@ impl Host for Fixture {
 
     fn now(&self) -> Result<u64> {
         Ok(1_790_000_000)
+    }
+
+    fn verify_stopped_tasks(&self, shim: &str) -> Result<()> {
+        assert!(!self.active.get());
+        assert!(!self.exists(SOCKET)?);
+        assert!(shim.ends_with("/bin/containerd-shim-runc-v2"));
+        self.event("verify stopped tasks")?;
+        if self.stopped_tasks.get() {
+            return Err(Failure::new("runtime_in_use", "fixture task survived stop"));
+        }
+        Ok(())
     }
 }
 
@@ -281,7 +348,7 @@ fn publishes_contract_receipt_after_start_and_repeats_without_writing() {
     let events = host.events.take();
     assert_eq!(
         &events[events.len() - 3..],
-        ["enable", RECEIPT, &format!("unlink {PENDING}")]
+        ["start", RECEIPT, &format!("unlink {PENDING}")]
     );
     let report = operation(&host, Operation::Status, "aarch64").unwrap();
     assert_eq!(report["code"], "installed");
@@ -304,7 +371,7 @@ fn publishes_contract_receipt_after_start_and_repeats_without_writing() {
 fn interrupted_install_requires_matching_files_and_resumes() {
     let host = Fixture::new();
     let pins = host.pins("2.4.2");
-    host.fail_at.set(Some("enable"));
+    host.fail_at.set(Some("start"));
     assert_eq!(
         mutate(&host, &pins, Operation::Install).unwrap_err().code,
         "interrupted"
@@ -401,4 +468,168 @@ fn ownership_and_idle_checks_guard_mutations_and_upgrade_removes_old_binaries() 
     assert!(!host.path(&bin("2.4.1", "ctr")).exists());
     assert!(host.path(&bin("2.4.2", "ctr")).exists());
     assert_eq!(mutate(&host, &new, Operation::Remove).unwrap(), "removed");
+}
+
+#[test]
+fn detects_rootful_podman_and_stopped_rke2() {
+    for path in [
+        "/run/podman/podman.sock",
+        "/usr/local/bin/rke2",
+        "/usr/bin/rke2",
+        "/var/lib/rancher/rke2",
+        "/etc/rancher/rke2",
+        "/etc/systemd/system/rke2-agent.service",
+    ] {
+        let host = Fixture::new();
+        host.put(path, b"");
+        assert_eq!(
+            foreign(&host).unwrap_err().code,
+            "foreign_install",
+            "{path}"
+        );
+    }
+    for name in [
+        "podman.service",
+        "podman.socket",
+        "rke2-server.service",
+        "rke2-agent.service",
+    ] {
+        let host = Fixture::new();
+        host.foreign_unit.set(Some(name));
+        assert_eq!(
+            foreign(&host).unwrap_err().code,
+            "foreign_install",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn refuses_inaccessible_receipt_ancestry_before_installing() {
+    let host = Fixture::new();
+    host.unsafe_receipt_ancestor.set(true);
+    let pins = host.pins("2.4.2");
+    assert_eq!(
+        mutate(&host, &pins, Operation::Install).unwrap_err().code,
+        "unsafe_path"
+    );
+    assert!(host.events.borrow().is_empty());
+    assert!(!host.exists(RECEIPT).unwrap());
+}
+
+#[test]
+fn removes_only_the_recorded_enablement_link() {
+    for replace in [false, true] {
+        let host = Fixture::new();
+        let pins = host.pins("2.4.2");
+        let operator_link =
+            "/etc/systemd/system/operator.target.wants/canaveral-containerd.service";
+        host.put(operator_link, UNIT.as_bytes());
+        mutate(&host, &pins, Operation::Install).unwrap();
+        let link = if replace {
+            host.link()
+        } else {
+            host.link.get().unwrap()
+        };
+        assert_eq!(mutate(&host, &pins, Operation::Remove).unwrap(), "removed");
+        assert_eq!(host.link.get(), replace.then_some(link));
+        assert!(host.exists(operator_link).unwrap());
+    }
+}
+
+#[test]
+fn preserves_enablement_when_ownership_was_never_recorded() {
+    let host = Fixture::new();
+    let pins = host.pins("2.4.2");
+    host.fail_at.set(Some(INSTALLER_STATE));
+    assert_eq!(
+        mutate(&host, &pins, Operation::Install).unwrap_err().code,
+        "interrupted"
+    );
+    let link = host.link.get().unwrap();
+    mutate(&host, &pins, Operation::Install).unwrap();
+    assert_eq!(
+        document::<InstallerState>(&host, INSTALLER_STATE, 0o600)
+            .unwrap()
+            .unwrap()
+            .enablement,
+        None
+    );
+    mutate(&host, &pins, Operation::Remove).unwrap();
+    assert_eq!(host.link.get(), Some(link));
+}
+
+#[test]
+fn pending_stop_does_not_authorize_upgrade_or_removal() {
+    for op in [Operation::Install, Operation::Remove] {
+        let host = Fixture::new();
+        let old = host.pins("2.4.1");
+        let new = host.pins("2.4.2");
+        mutate(&host, &old, Operation::Install).unwrap();
+        let owned_link = host.link.get();
+        host.stopped_tasks.set(true);
+        assert_eq!(mutate(&host, &new, op).unwrap_err().code, "runtime_in_use");
+        assert!(!host.active.get());
+        assert!(
+            !document::<Pending>(&host, PENDING, 0o644)
+                .unwrap()
+                .unwrap()
+                .stop_verified
+        );
+        assert_eq!(receipt(&host).unwrap().unwrap().version(), "2.4.1");
+        assert!(host.exists(&bin("2.4.1", "ctr")).unwrap());
+        assert_eq!(host.link.get(), owned_link);
+        host.stopped_tasks.set(false);
+        assert_eq!(mutate(&host, &new, op).unwrap_err().code, "idle_unproven");
+        host.systemctl(&["start", UNIT_NAME]).unwrap();
+        mutate(&host, &new, op).unwrap();
+    }
+}
+
+#[test]
+fn matching_pins_refresh_generated_files_and_missing_installer_state() {
+    let host = Fixture::new();
+    let pins = host.pins("2.4.2");
+    mutate(&host, &pins, Operation::Install).unwrap();
+    host.unlink(INSTALLER_STATE).unwrap();
+    let original_link = host.link.get();
+    host.events.take();
+    mutate(&host, &pins, Operation::Install).unwrap();
+    assert_eq!(&*host.events.borrow(), &[INSTALLER_STATE]);
+    assert_eq!(host.link.get(), original_link);
+
+    let mut installed = receipt(&host).unwrap().unwrap();
+    for record in &mut installed.files {
+        if [CONFIG, UNIT].contains(&record.path.as_str()) {
+            host.put(&record.path, b"old generated content");
+            record.sha256 = sha256(b"old generated content");
+        }
+    }
+    publish(&host, RECEIPT, &installed).unwrap();
+    host.events.take();
+    host.busy.set(true);
+    assert_eq!(
+        mutate(&host, &pins, Operation::Install).unwrap_err().code,
+        "runtime_in_use"
+    );
+    assert!(host.events.borrow().is_empty());
+    host.busy.set(false);
+    mutate(&host, &pins, Operation::Install).unwrap();
+    assert!(receipt(&host)
+        .unwrap()
+        .unwrap()
+        .matches_generated(&generated_files("2.4.2")));
+    let events = host.events.take();
+    assert!(!events.iter().any(|event| event == "fetch"));
+    assert!(
+        events.iter().position(|e| e == "stop").unwrap()
+            < events.iter().position(|e| e == CONFIG).unwrap()
+    );
+    assert!(
+        events.iter().position(|e| e == UNIT).unwrap()
+            < events.iter().position(|e| e == "start").unwrap()
+    );
+    assert_eq!(host.link.get(), original_link);
+    mutate(&host, &pins, Operation::Install).unwrap();
+    assert!(host.events.borrow().is_empty());
 }
