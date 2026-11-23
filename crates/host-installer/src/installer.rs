@@ -669,7 +669,6 @@ fn maintain(
         .previous
         .as_ref()
         .expect("maintaining a recorded installation");
-    let shim = bin(previous.version(), "containerd-shim-runc-v2");
     if let Some(active) = active {
         if active != previous {
             return Err(idle_unproven());
@@ -684,7 +683,10 @@ fn maintain(
         return Err(idle_unproven());
     }
     check_stopped(host)?;
-    host.verify_stopped_tasks(&shim)?;
+    let versions: BTreeSet<_> = tx.receipts().map(Receipt::version).collect();
+    for version in versions {
+        host.verify_stopped_tasks(&bin(version, "containerd-shim-runc-v2"))?;
+    }
     check_stopped(host)?;
     if !tx.stop_verified {
         tx.stop_verified = true;
@@ -756,6 +758,12 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
     let state = document::<InstallerState>(host, INSTALLER_STATE, 0o600)?;
     let current = receipt(host)?;
     let pending = document::<Pending>(host, PENDING, 0o644)?;
+    if op == Operation::Remove && pending.as_ref().is_some_and(|tx| tx.next.is_some()) {
+        return Err(Failure::new(
+            "recovery_required",
+            "Complete the interrupted install with the same installer release before removing",
+        ));
+    }
     let assets = pins.each_ref().map(Asset::from);
     let generated = generated_files(pins[0].version);
     if pending.as_ref().is_some_and(|tx| {
@@ -820,7 +828,7 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
             format!("Inspect and move the existing state directory before installing: {STATE}"),
         ));
     }
-    if tx.previous.is_some() && !tx.stop_verified && active != tx.previous.as_ref() {
+    if tx.previous.is_some() && !tx.stop_verified && active.is_none() {
         return Err(idle_unproven());
     }
     if let Some(previous) =
@@ -885,6 +893,10 @@ fn mutate(host: &impl Host, pins: &[Pin; 2], op: Operation) -> Result<&'static s
     }
     reconcile_enablement(host, state)?;
     if active != Some(&next) {
+        if tx.stop_verified {
+            tx.stop_verified = false;
+            publish(host, PENDING, &tx)?;
+        }
         start(host, &next)?;
     }
     if let Some(previous) = tx

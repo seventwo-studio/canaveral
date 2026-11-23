@@ -24,8 +24,9 @@ service account only reads the receipt.
   receipt ancestors must be root-owned, traversable by other users, and
   writable only by root. The installer creates missing ancestors with mode
   `0755`. A repeat reuses matching pins, generated config and unit, and
-  reconciles missing enablement state. Changes to generated files require
-  idle maintenance even when the pins match.
+  recreates the boot enablement link if it is missing, including after an
+  operator disables the unit. Changes to generated files require idle
+  maintenance even when the pins match.
 - `status` reports the receipt, per-file digests, systemd activity and socket
   presence. Indeterminate probes are `null` in JSON. Read the `result.code`
   field for drift, inactivity and pending recovery. Use root to inspect the
@@ -77,11 +78,12 @@ serializes installer processes.
 The installer records the operation and expected file digests before
 publishing installation files or stopping a service. It records stop
 verification separately, after checking the stopped service and remaining
-task state. If a retry finds the service stopped without that record,
-restart the verified service and check its tasks and container records before
-retrying. An interrupted first install can leave files and a pending
-transaction without a receipt. Rerun the same operation with the same
-installer release.
+task state and clears it before starting the service. If a retry finds the
+service stopped without that record, restart the verified service and check
+its tasks and container records before retrying. An interrupted first
+install can leave files and a pending transaction without a receipt. Rerun
+the same operation with the same installer release. During an interrupted
+install, `remove` returns `recovery_required` until the install completes.
 A retry checks any surviving files against the journal, redownloads assets
 if needed, and completes the transaction. It refuses changed or unrecorded
 files. Downloads always use a newly created staging directory. A forced

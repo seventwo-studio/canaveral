@@ -13,6 +13,7 @@ struct Fixture {
     foreign_socket: Cell<bool>,
     busy: Cell<bool>,
     stopped_tasks: Cell<bool>,
+    surviving_shim: Cell<Option<&'static str>>,
     unsafe_receipt_ancestor: Cell<bool>,
     foreign_unit: Cell<Option<&'static str>>,
     link: Cell<Option<LinkIdentity>>,
@@ -32,6 +33,7 @@ impl Fixture {
             foreign_socket: Cell::default(),
             busy: Cell::default(),
             stopped_tasks: Cell::default(),
+            surviving_shim: Cell::default(),
             unsafe_receipt_ancestor: Cell::default(),
             foreign_unit: Cell::default(),
             link: Cell::default(),
@@ -226,7 +228,7 @@ impl Host for Fixture {
         assert!(!self.exists(SOCKET)?);
         assert!(shim.ends_with("/bin/containerd-shim-runc-v2"));
         self.event("verify stopped tasks")?;
-        if self.stopped_tasks.get() {
+        if self.stopped_tasks.get() || self.surviving_shim.get() == Some(shim) {
             return Err(Failure::new("runtime_in_use", "fixture task survived stop"));
         }
         Ok(())
@@ -584,6 +586,61 @@ fn pending_stop_does_not_authorize_upgrade_or_removal() {
         host.systemctl(&["start", UNIT_NAME]).unwrap();
         mutate(&host, &new, op).unwrap();
     }
+}
+
+#[test]
+fn interrupted_upgrade_requires_recovery_before_removal() {
+    let host = Fixture::new();
+    let old = host.pins("2.4.1");
+    let new = host.pins("2.4.2");
+    mutate(&host, &old, Operation::Install).unwrap();
+    host.fail_at.set(Some(RECEIPT));
+    assert_eq!(
+        mutate(&host, &new, Operation::Install).unwrap_err().code,
+        "interrupted"
+    );
+    assert!(host.active.get());
+    let mut tx = document::<Pending>(&host, PENDING, 0o644).unwrap().unwrap();
+    assert!(!tx.stop_verified);
+    host.busy.set(true);
+    host.systemctl(&["stop", UNIT_NAME]).unwrap();
+    host.surviving_shim.set(Some(
+        "/opt/canaveral-containerd/2.4.2/bin/containerd-shim-runc-v2",
+    ));
+    host.events.take();
+    assert_eq!(
+        mutate(&host, &new, Operation::Remove).unwrap_err().code,
+        "recovery_required"
+    );
+    assert_eq!(
+        mutate(&host, &new, Operation::Install).unwrap_err().code,
+        "idle_unproven"
+    );
+    assert!(host.events.borrow().is_empty());
+    assert_eq!(receipt(&host).unwrap().unwrap().version(), "2.4.1");
+    assert!(host.exists(PENDING).unwrap());
+    assert!(host.exists(&bin("2.4.2", "ctr")).unwrap());
+
+    // Older installers could leave stop verification set after starting.
+    tx.stop_verified = true;
+    publish(&host, PENDING, &tx).unwrap();
+    assert_eq!(
+        mutate(&host, &new, Operation::Install).unwrap_err().code,
+        "runtime_in_use"
+    );
+
+    tx.stop_verified = false;
+    publish(&host, PENDING, &tx).unwrap();
+    host.systemctl(&["start", UNIT_NAME]).unwrap();
+    assert_eq!(
+        mutate(&host, &new, Operation::Install).unwrap(),
+        "installed"
+    );
+    assert_eq!(receipt(&host).unwrap().unwrap().version(), "2.4.2");
+    assert_eq!(
+        mutate(&host, &new, Operation::Remove).unwrap_err().code,
+        "runtime_in_use"
+    );
 }
 
 #[test]
