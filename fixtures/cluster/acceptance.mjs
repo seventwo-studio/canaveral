@@ -13,6 +13,7 @@ const admin = readFileSync(work + '/admin.token', 'utf8').trim();
 const controllerId = readFileSync(work + '/controller-id', 'utf8').trim();
 const report = JSON.parse(readFileSync(evidencePath, 'utf8'));
 const model = JSON.parse(readFileSync(new URL('../model-execution/real-model.json', import.meta.url)));
+const guest = JSON.parse(readFileSync(new URL('./guest-image.json', import.meta.url)));
 const { pins } = JSON.parse(readFileSync(new URL('../../crates/model-execution/src/runtime-pins.json', import.meta.url)));
 const engine = pins.find(pin => pin.os === 'linux' && pin.arch === 'x86_64' && pin.backend === 'llama.cpp');
 report.model = { name: model.model, sha256: model.sha256 };
@@ -240,17 +241,30 @@ if (ready) {
   const capability = await step('host libvirt and KVM capability', () => {
     command('sudo', ['apt-get', 'update'], { timeout: 240_000 });
     command('sudo', ['env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends',
-      'libvirt-daemon-system', 'libvirt-daemon-driver-qemu', 'libvirt-clients', 'qemu-system-x86'], { timeout: 360_000 });
+      'libvirt-daemon-system', 'libvirt-daemon-driver-qemu', 'libvirt-clients', 'qemu-system-x86', 'qemu-utils'], { timeout: 360_000 });
     try { sudo('test', '-c', '/dev/kvm'); }
     catch { throw new Blocked('The hosted runner has no /dev/kvm character device after installing host QEMU and libvirt.'); }
     sudo('systemctl', 'start', 'libvirtd.socket');
     sudo('virsh', '--connect', 'qemu:///system', 'domcapabilities', '--virttype', 'kvm');
     return { kvm: true, libvirt: sudo('virsh', '--version') };
   });
+  if (capability) {
+    await step('verify the pinned VM guest disk', () => {
+      const disk = work + '/guest.qcow2';
+      command('curl', ['--fail', '--silent', '--show-error', '--location', '--proto', '=https', '--proto-redir', '=https',
+        '--max-time', '120', '--max-filesize', String(guest.maxBytes), '--output', disk, guest.url]);
+      const bytes = readFileSync(disk);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), guest.sha256);
+      const info = JSON.parse(command('qemu-img', ['info', '-f', guest.format, '--output=json', disk]));
+      assert.equal(info.format, guest.format);
+      assert(!info['backing-filename'], 'Guest template must be self-contained.');
+      return { sha256: guest.sha256, format: info.format, bytes: bytes.length };
+    });
+  }
   await step('VM boot, lease cleanup, and active-lease pod replacement', async () => {
     const reply = await request('/v1/linux-lease-images', {
       id: 'cluster-libvirt-trial', revision: '1', arch: 'amd64', os: 'linux', mode: 'headless',
-      backend: 'libvirt', digest: 'sha256:' + '0'.repeat(64), resources, capabilities: [],
+      backend: 'libvirt', digest: 'sha256:' + guest.sha256, resources, capabilities: [],
     });
     if (reply.status === 400 && reply.body.error === 'Backend must be appleVirtualization.') {
       throw new Blocked('POST /v1/linux-lease-images returned HTTP 400: Backend must be appleVirtualization. No VM lease, AUTODESTROY or reservation reconciliation was exercised.');

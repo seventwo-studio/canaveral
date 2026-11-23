@@ -37,14 +37,19 @@ enrollment, and reserve enough CPU, memory and node storage for both the daemon
 and its workloads. Use separate configurations where nodes require different
 offers.
 
-Create a separate single-claim connection setup for each node in the dashboard
-or with the authenticated `POST /v1/connection-setups` API. Provide a new UUID,
-the configured host name, provider and capacity. The API currently refuses
-`native` connection setups, which blocks first-time enrollment of the CPU
-overlay against that controller. The setup token is available only in the
-creation response. Deliver it to the intended node through protected input,
-then write it to the private state directory before attaching the node label.
-See [connection setups](infrastructure.md#connection-setups).
+Create a separate single-claim connection setup for each node. Run the CLI
+with operator credentials and the exact host configuration for that node. A setup
+expires after 30 minutes if it has yet to be claimed.
+
+```sh
+NODE_EXTRA_CA_CERTS=/protected/ca.crt canaveral --url "$controller" \
+  --token-file "$operator_token_file" connection-setups create \
+  --config host.json --id "$setup_uuid" --output-file /protected/per-node-token
+```
+
+Deliver the token to the intended node through protected input, then write it
+to the private state directory before attaching the node label.
+See [runner enrollment](runner-enrollment.md#kubernetes-node-bootstrap).
 
 ```sh
 sudo bash script/provision_cluster_node.sh < /protected/per-node-token

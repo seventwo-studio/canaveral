@@ -58,10 +58,11 @@ USER 10001:10001
 # Each native executable keeps its own strict configuration and acceptance gates.
 ENTRYPOINT ["/usr/local/bin/canaveral-model-execution"]
 
-FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS canaverald
+# The pinned ARM64 llama.cpp release uses Ubuntu 24.04 and GCC 14.
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS canaverald
 WORKDIR /app
 ENV NODE_ENV=production HOME=/tmp
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libvirt-clients qemu-utils genisoimage &&     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 canaverald &&     useradd --uid 10001 --gid 10001 --no-create-home canaverald
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 libssl3t64 libvirt-clients qemu-utils genisoimage &&     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 canaverald &&     useradd --uid 10001 --gid 10001 --no-create-home canaverald
 COPY --from=node-build /app/coordination/dist/src ./coordination/dist/src
 COPY coordination/package.json ./coordination/package.json
 COPY canaveral/schemas ./canaveral/schemas
