@@ -1,4 +1,3 @@
-import { persistedOffer } from "./machines.ts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, ftruncateSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
@@ -12,7 +11,7 @@ import { hostAdmissionClosed, requireHostAdmission } from "./maintenance.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import { owns, requireAdmin, requireScope } from "./contracts.ts";
 import type { ControlModule, ControlOptions, ControlRequest } from "./contracts.ts";
-import { legacyDigest, legacyJson, normalizeTemplate, source as imageSource } from "./templates.ts";
+import { legacyDigest, legacyJson, normalizeTemplate, source as imageSource, supportedStoredHostOffer } from "./templates.ts";
 
 type Json = Record<string, unknown>;
 const GiB = 1_073_741_824, chunkSize = 1_048_576;
@@ -203,7 +202,7 @@ export class ImagesController {
   }
   private online(db: DatabaseSync, hostId: string): Json {
     const host = db.prepare("SELECT * FROM hosts WHERE id=? AND id NOT IN (SELECT id FROM retired_runners)").get(hostId);
-    if (!host || !persistedOffer(host.offer) || this.store.clock() - Number(host.seen) >= this.leaseSeconds) throw new ServiceError("Image host must be online.");
+    if (!host || !supportedStoredHostOffer(host.offer) || this.store.clock() - Number(host.seen) >= this.leaseSeconds) throw new ServiceError("Image host must be online.");
     return host;
   }
   reserveImageImport(hostId: string, value: unknown, size: number): Json {
@@ -292,7 +291,7 @@ export class ImagesController {
       // Python stores SHA256(json.dumps(token)), including the JSON string quotes.
       const expected = host ? String(host.credential) : "", digest = legacyDigest(credential);
       if (!expected || expected.length !== digest.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(digest))) throw new ServiceError("Host credential rejected.", 401);
-      if (!persistedOffer(host?.offer)) throw new ServiceError("Image host must be online.");
+      if (!supportedStoredHostOffer(host?.offer)) throw new ServiceError("Image host must be online.");
       const row = taskRow(db, id);
       if (!row || row.host !== hostId) throw new ServiceError("Unknown owned image task.", 404);
       const request = object(JSON.parse(row.request));

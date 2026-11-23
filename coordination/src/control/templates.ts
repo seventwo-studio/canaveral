@@ -157,10 +157,18 @@ function normalizeDefinition(value: unknown, operatorBundle: boolean): Template 
   }
   return result;
 }
-export const HOST_PROVIDERS: readonly string[] = ["macos", "linux", "windows", "apple", "libvirt", "hyperv", "android", "ios", "native"];
+const HOST_PROVIDERS: readonly string[] = ["macos", "linux", "windows", "apple", "libvirt", "hyperv", "android", "ios", "native"];
 export function hostProvider(value: unknown): string {
   if (typeof value !== "string" || !HOST_PROVIDERS.includes(value)) throw new ServiceError("Unsupported host provider. Configure a supported canaverald host provider.", 400, { code: "unsupported_host_provider" });
   return value;
+}
+/** Historical ledgers can use a partial host offer. Preserve its exact template identities. */
+export function supportedStoredHostOffer(value: unknown): Record<string, unknown> | undefined {
+  try {
+    const offer = object(typeof value === "string" ? JSON.parse(value) : value);
+    hostProvider(offer.provider);
+    return offer;
+  } catch (error) { if (error instanceof ServiceError || error instanceof SyntaxError) return undefined; throw error; }
 }
 export const HOST_RUNTIMES: Readonly<Record<string, readonly string[]>> = { macos: ["apple", "android", "ios"], linux: ["libvirt", "android"], windows: ["hyperv"] };
 export function enabledRuntimes(config: Record<string, unknown>): Record<string, Record<string, unknown>> {

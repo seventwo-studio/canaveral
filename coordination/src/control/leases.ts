@@ -11,6 +11,7 @@ import { object, secret, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import type { ControlModule, ControlOptions, ControlRequest, ControlResponse } from "./contracts.ts";
 import { MachineStore, SHARED_HOST_ISOLATION, leaseImageReference, machineDigest, machineIdentifier, registerMachineHooks, validateMachineRequest, persistedOffer, validateTemplate } from "./machines.ts";
+import { supportedStoredHostOffer } from "./templates.ts";
 import { cleanupView, computeReserved, ensureLeaseCleanup, initializeLifecycle, isDeleted, leaseCleanup, refreshLeaseCleanup } from "./lifecycle.ts";
 import { createModule as operationModule, initializeConsumerOperations, refreshConsumerOperations } from "./consumer-operations.ts";
 import { applicationArtifactDisk, releaseLeaseArtifacts } from "./install-cleanup.ts";
@@ -62,7 +63,11 @@ export function leaseIsolation(image: Record<string, unknown>): typeof SHARED_HO
   return image.os === "ios" ? SHARED_HOST_ISOLATION : undefined;
 }
 function availableTemplate(value: unknown): Record<string, unknown> | undefined {
-  try { return validateTemplate(JSON.parse(String(value))); }
+  try {
+    const image = object(JSON.parse(String(value)));
+    validateTemplate(image);
+    return image;
+  }
   catch (error) { if (error instanceof ServiceError || error instanceof SyntaxError) return undefined; throw error; }
 }
 function template(row: LegacyMachineRow): Record<string, unknown> { return object(typeof row.template === "string" ? JSON.parse(row.template) : row.template); }
@@ -75,7 +80,7 @@ function observedReady(db: DatabaseSync, row: LegacyMachineRow, now: number): bo
 }
 /** SQL input: m.*, h.seen, h.enabled, h.offer AS host_offer. */
 export function legacyMachineReady(db: DatabaseSync, row: LegacyMachineRow, now: number): boolean {
-  const offer = persistedOffer(row.host_offer ?? row.offer);
+  const offer = supportedStoredHostOffer(row.host_offer ?? row.offer);
   return Boolean(row.enabled) && row.desired === "running" && observedReady(db, row, now) &&
     !!offer && leaseEligible(offer, template(row));
 }
@@ -131,7 +136,7 @@ export function refreshLegacyLeases(db: DatabaseSync, now: number): void {
     if (!consumer || consumer.revoked) { endLegacyLease(db, row, "released", now); continue; }
     if (now >= row.expires) { endLegacyLease(db, row, "expired", now); continue; }
     const members = db.prepare("SELECT m.*,h.seen,h.offer AS host_offer FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=?").all(row.id);
-    if (members.some(m => !persistedOffer(m.host_offer) || m.observed === "error" || m.preparation_state === "failed") || (row.state === "provisioning" && now >= row.provision_deadline)) { endLegacyLease(db, row, "failed", now); continue; }
+    if (members.some(m => !supportedStoredHostOffer(m.host_offer) || m.observed === "error" || m.preparation_state === "failed") || (row.state === "provisioning" && now >= row.provision_deadline)) { endLegacyLease(db, row, "failed", now); continue; }
     if (row.state === "provisioning" && members.length && members.every(m => observedReady(db, m, now))) db.prepare("UPDATE leases SET state='ready',revision=revision+1 WHERE id=?").run(row.id);
   }
   refreshLeaseCleanup(db, now);
@@ -148,7 +153,7 @@ export function legacyLeaseAssignment<T extends { id: string }>(db: DatabaseSync
 export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: number) {
   const members = db.prepare("SELECT m.*,h.seen,h.offer AS host_offer,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
     const cleanup = leaseCleanup(db, String(m.id)), source = memberSource(db, String(m.id)), isolation = leaseIsolation(template(m));
-    const online = !!persistedOffer(m.host_offer) && now - Number(m.seen) < 30;
+    const online = !!supportedStoredHostOffer(m.host_offer) && now - Number(m.seen) < 30;
     return { name: String(m.member_name), machineId: String(m.id), state: online ? String(m.observed) : "unknown",
       ready: online && ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
       // Whether this device was taken from the warm pool or booted for the lease. Absent while a

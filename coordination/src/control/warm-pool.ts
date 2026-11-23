@@ -22,8 +22,9 @@ import type { ControlModule, ControlRequest, ControlResponse } from "./contracts
 import { healthReady } from "./infrastructure.ts";
 import { isDeleted } from "./lifecycle.ts";
 import { hostAdmissionClosed } from "./maintenance.ts";
-import { machineDigest, machineLeaseEligible, persistedOffer, placementSize, validateMachineRequest } from "./machines.ts";
+import { machineDigest, machineLeaseEligible, placementSize, validateMachineRequest } from "./machines.ts";
 import type { MachineStore, Resources } from "./machines.ts";
+import { supportedStoredHostOffer } from "./templates.ts";
 import { baselineUsable } from "./pool-ledger.ts";
 
 type Json = Record<string, any>;
@@ -79,7 +80,7 @@ function adoptable(db: DatabaseSync, row: WarmRow, now: number): boolean {
   const machine = db.prepare("SELECT observed,access_ready FROM machines WHERE id=?").get(row.machine);
   return machine?.observed === "running" && !!machine.access_ready;
 }
-function offerOf(host: Json): Json | undefined { return persistedOffer(host.offer); }
+function offerOf(host: Json): Json | undefined { return supportedStoredHostOffer(host.offer); }
 /** Online, accepting, healthy and not draining: the same gate as lease placement. */
 function hostReady(db: DatabaseSync, host: Json, now: number): boolean {
   return !!host.enabled && now - Number(host.seen) < HOST_LEASE_SECONDS && !hostAdmissionClosed(db, String(host.id)).closed && healthReady(db, String(host.id), now) && !pressureAdmission(db, String(host.id), now).blocked &&
