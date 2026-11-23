@@ -26,10 +26,18 @@ Only install and remove accept `--dry-run`.
 | Ollama and llama.cpp | The Rust model executor reports compatibility, installation and package verification. Install prepares the bundled catalog version, and remove requires a specific version. The executor protects versions referenced by live or unresolved work. |
 | vLLM and MLX-LM | Reserved entries with unavailable packages pending qualification of their hermetic builds. |
 
-Apple Virtualization and libvirt support detection only. The containerd
-installer is pending. Use the dedicated root-owned Canaveral host installer
-for containerd when it becomes available. Running the daemon with elevated
-privileges is unnecessary.
+Apple Virtualization and libvirt support detection only.
+
+On Linux amd64 and arm64, run `canaveral-host-installer containerd plan` to
+inspect the pinned assets and paths. Use the standalone root-owned installer
+for installation and removal. It verifies installed files, manages a private
+systemd service and socket, and checks every namespace for tasks and container
+records before upgrade or removal. `canaverald` reads the receipt to report
+the recorded installation. Native qualification remains pending. Follow the
+[installer README](../crates/host-installer/README.md) to install the binary as
+root, then run `sudo canaveral-host-installer containerd install`.
+
+Linux Ollama catalog pins are being added in [PR #98](https://github.com/seventwo-studio/canaveral/pull/98).
 
 To enable model runtime management, put this block in the host config and
 substitute the actual paths.
@@ -41,8 +49,9 @@ substitute the actual paths.
 }
 ```
 
-Both paths must be absolute and free of links. The binary must be executable
-and the config readable. The executor enforces its private config rules and
+Both paths must be absolute and free of links. Root or the daemon account must
+own both files and every ancestor directory. Group and other users must have
+no write access. The binary must be executable and the config readable. The executor enforces its private config rules and
 owns the runtime store, catalog and package validation.
 
 - `absent` means the required installation was not found.
@@ -67,7 +76,7 @@ controller.
 | `apple_runner_missing` | local | The host has no Swift runner at the configured absolute path. | Set the path to the signed runner. |
 | `containerd_foreign_install` | local | An existing system containerd or Docker installation was found. | Review ownership and service conflicts before installing. |
 | `containerd_receipt_invalid` | local | The installer's receipt could not be trusted or parsed. | Check receipt ownership, mode, paths and format. |
-| `containerd_root_installer_required` | local | This operation belongs to the dedicated root installer. | Wait for the root installer to become available. |
+| `containerd_root_installer_required` | local | This operation belongs to the dedicated root installer. | Use the root-owned `canaveral-host-installer containerd` command. |
 | `libvirt_kvm_missing` | local | The host has no KVM character device at /dev/kvm. | Enable KVM on the host. |
 | `libvirt_kvm_probe_failed` | local | The local libvirt KVM capability check did not pass. | Check KVM and libvirt access as the service account. |
 | `libvirt_tools_missing` | local | At least one of virsh, qemu-img and QEMU is missing. | Install the missing system tools. |

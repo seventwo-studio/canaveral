@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { main } from "../src/cli.ts";
@@ -9,7 +9,7 @@ import { checkHost } from "../src/host.ts";
 import { backendIds, modelConfig, mutateRuntime, runtimeInventory } from "../src/host-runtimes/index.ts";
 import { modelIds, ProbeError, run } from "../src/host-runtimes/core.ts";
 import type { Environment } from "../src/host-runtimes/core.ts";
-import { installerInstruction, readReceipt } from "../src/host-runtimes/native.ts";
+import { readReceipt } from "../src/host-runtimes/native.ts";
 
 function directory(t: TestContext): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "host-runtimes-")));
@@ -101,7 +101,8 @@ test("Apple probes OS, signature, entitlement and the existing runner check", as
 
 function executor(t: TestContext) {
   const root = directory(t);
-  const binary = join(root, "executor"), config = join(root, "executor.json");
+    const binary = join(root, "executor"), config = join(root, "config", "executor.json");
+  mkdirSync(dirname(config));
   writeFileSync(config, "{}");
   const settings = { modelExecutor: { binary, config } };
   const script = (body: string) => writeFileSync(binary, "#!" + process.execPath + "\n" + body, { mode: 0o755 });
@@ -113,7 +114,12 @@ function executor(t: TestContext) {
   const plan = { downloadBytes: 4, assets: [{ url: "https://example.invalid/model", bytes: 4, sha256: digest }] };
   const report = { type: "canaveral-runtime-report", version: 1, platform: "linux", arch: "x86_64", dryRun: false, backends: rows };
   const invoke: Environment["run"] = (argv, timeout, max) => argv[0] === binary ? run(argv, timeout, max) : linux.run!(argv, timeout, max);
-  return { settings, binary, root, script, report, plan, invoke };
+  const modelStat: NonNullable<Environment["modelStat"]> = path => {
+    if (path === root || path.startsWith(root + "/")) return lstatSync(path);
+    // The test harness uses a system temporary directory.
+    return { uid: 0, mode: 0o755, nlink: 1, isFile: () => false, isDirectory: () => true, isSymbolicLink: () => false };
+  };
+  return { settings, binary, root, script, report, plan, invoke, modelStat };
 }
 
 test("executor uses fixed argv and returns plans, verification and retained-version failures", async t => {
@@ -126,10 +132,10 @@ test("executor uses fixed argv and returns plans, verification and retained-vers
   ] as const) {
     const result = action === "remove" ? { state: "failed", code: "runtime_in_use" } : { state: "succeeded" };
     const plan = action === "verify" ? {} : { plan: f.plan };
-    const report = { ...f.report, operation, dryRun, ...plan, result };
+    const report = { ...f.report, operation, dryRun, backends: f.report.backends.slice(0, 1), ...plan, result };
     f.script(`if (JSON.stringify(process.argv.slice(2)) !== ${JSON.stringify(JSON.stringify(args))}) process.exit(2);
 console.log(${JSON.stringify(JSON.stringify(report))}); process.exitCode = ${action === "remove" ? 1 : 0};`);
-    const observed = await mutateRuntime(f.settings, action, "ollama", dryRun, selected, { ...linux, run: f.invoke });
+    const observed = await mutateRuntime(f.settings, action, "ollama", dryRun, selected, { ...linux, run: f.invoke, modelStat: f.modelStat });
     assert.deepEqual(observed.result, result);
     assert.equal(observed.backends[0]?.state, "verified");
     assert.deepEqual(observed.plan, plan.plan);
@@ -138,7 +144,7 @@ console.log(${JSON.stringify(JSON.stringify(report))}); process.exitCode = ${act
 
 test("bounded executor rejects timeout, oversize output and contract violations", async t => {
   const f = executor(t);
-  const env = { ...linux, run: (argv: readonly string[], _timeout: number, max: number) => f.invoke(argv, 1_000, max) };
+  const env = { ...linux, modelStat: f.modelStat, run: (argv: readonly string[], _timeout: number, max: number) => f.invoke(argv, 1_000, max) };
   f.script("setInterval(() => {}, 1000);");
   assert.equal((await runtimeInventory(f.settings, env))[3]?.blocker?.code, "runtime_probe_timeout");
   f.script('console.log("a".repeat(300000));');
@@ -155,8 +161,105 @@ test("bounded executor rejects timeout, oversize output and contract violations"
   assert.equal((await runtimeInventory(f.settings, env))[3]?.state, "verified");
   const linked = join(f.root, "linked");
   symlinkSync(f.binary, linked);
-  assert.throws(() => modelConfig({ modelExecutor: { ...f.settings.modelExecutor, binary: linked } }), /without links/);
+  assert.throws(() => modelConfig({ modelExecutor: { ...f.settings.modelExecutor, binary: linked } }, f.modelStat), /without links/);
   assert.throws(() => modelConfig({ modelExecutor: { ...f.settings.modelExecutor, binary: "executor" } }), /absolute paths/);
+});
+
+// Captured from canaveral-model-execution at f7b0d6c on macOS arm64.
+const executorReports = {
+  status: { exit: 0, stdout: "{\"arch\":\"aarch64\",\"backends\":[{\"available\":true,\"backend\":\"ollama\",\"catalogVersion\":\"0.40.17\",\"installed\":[],\"qualified\":false,\"state\":\"absent\"},{\"available\":true,\"backend\":\"llama.cpp\",\"catalogVersion\":\"1.0.0\",\"installed\":[],\"qualified\":false,\"state\":\"absent\"},{\"available\":false,\"backend\":\"vllm\",\"blocker\":{\"code\":\"runtime_unavailable\",\"detail\":\"Hermetic package not yet qualified.\"},\"installed\":[],\"qualified\":false,\"state\":\"unavailable\"},{\"available\":false,\"backend\":\"mlx-lm\",\"blocker\":{\"code\":\"runtime_unavailable\",\"detail\":\"Hermetic package not yet qualified.\"},\"installed\":[],\"qualified\":false,\"state\":\"unavailable\"}],\"dryRun\":false,\"operation\":\"status\",\"platform\":\"macos\",\"type\":\"canaveral-runtime-report\",\"version\":1}\n" },
+  prepare: { exit: 0, stdout: "{\"arch\":\"aarch64\",\"backends\":[{\"available\":true,\"backend\":\"ollama\",\"catalogVersion\":\"0.40.17\",\"installed\":[],\"qualified\":false,\"state\":\"absent\"}],\"dryRun\":true,\"operation\":\"prepare\",\"plan\":{\"assets\":[{\"bytes\":187626746,\"sha256\":\"4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653\",\"url\":\"https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-darwin.tgz\"}],\"downloadBytes\":187626746},\"platform\":\"macos\",\"result\":{\"state\":\"succeeded\"},\"type\":\"canaveral-runtime-report\",\"version\":1}\n" },
+  remove: { exit: 0, stdout: "{\"arch\":\"aarch64\",\"backends\":[{\"available\":true,\"backend\":\"ollama\",\"catalogVersion\":\"0.40.17\",\"installed\":[],\"qualified\":false,\"state\":\"absent\"}],\"dryRun\":true,\"operation\":\"remove\",\"plan\":{\"assets\":[],\"downloadBytes\":0},\"platform\":\"macos\",\"result\":{\"state\":\"succeeded\"},\"type\":\"canaveral-runtime-report\",\"version\":1}\n" },
+  verify: { exit: 1, stdout: "{\"arch\":\"aarch64\",\"backends\":[{\"available\":true,\"backend\":\"ollama\",\"catalogVersion\":\"0.40.17\",\"installed\":[],\"qualified\":false,\"state\":\"absent\"}],\"dryRun\":false,\"operation\":\"verify\",\"platform\":\"macos\",\"type\":\"canaveral-runtime-report\",\"version\":1}\n" },
+};
+
+test("registry accepts captured Rust reports for status, dry-run mutations and absent verify", async t => {
+  const f = executor(t);
+  f.script("");
+  const env: Partial<Environment> = {
+    ...linux, platform: "darwin", arch: "arm64", modelStat: f.modelStat,
+    run: (argv, timeout, max) => {
+      if (argv[0] !== f.binary) return f.invoke(argv, timeout, max);
+      const operation = argv[1]?.slice("--runtime-".length) as keyof typeof executorReports;
+      return Promise.resolve(executorReports[operation]);
+    },
+  };
+  const inventory = await runtimeInventory(f.settings, env);
+  assert.deepEqual(inventory.slice(3).map(b => b.state), ["absent", "absent", "unavailable", "unavailable"]);
+  assert.equal(inventory[5]?.blocker?.code, "runtime_unavailable");
+
+  const prepare = await mutateRuntime(f.settings, "install", "ollama", true, undefined, env);
+  assert.equal(prepare.result?.state, "succeeded");
+  assert.equal(prepare.plan?.downloadBytes, 187626746);
+  const remove = await mutateRuntime(f.settings, "remove", "ollama", true, "0.40.17", env);
+  assert.equal(remove.result?.state, "succeeded");
+  assert.deepEqual(remove.plan, { assets: [], downloadBytes: 0 });
+  const verify = await mutateRuntime(f.settings, "verify", "ollama", false, undefined, env);
+  assert.deepEqual(verify.result, { state: "failed" });
+  assert.equal(verify.backends[0]?.state, "absent");
+  assert.equal(verify.plan, undefined);
+
+  // Rust retains a damaged current package in inventory with verified=false and omits active.
+  const status = JSON.parse(executorReports.status.stdout);
+  const integrity = {
+    code: "runtime_integrity_failed", detail: "The installed runtime failed verification.",
+    action: "Remove the unused package version and prepare it again.",
+  };
+  Object.assign(status.backends[0], {
+    state: "failed", blocker: integrity,
+    installed: [{ version: "0.40.17", packageDigest: digest, verified: false, referenced: false }],
+  });
+  const damaged = await runtimeInventory(f.settings, {
+    ...env, run: (argv, timeout, max) => argv[0] === f.binary
+      ? Promise.resolve({ stdout: JSON.stringify(status) + "\n", exit: 1 }) : f.invoke(argv, timeout, max),
+  });
+  assert.equal(damaged[3]?.state, "failed");
+  assert.deepEqual(damaged[3]?.blocker, integrity);
+  assert.deepEqual(damaged.slice(4), inventory.slice(4));
+});
+
+test("executor files and both parent chains require trusted owners, modes and types", t => {
+  const f = executor(t);
+  f.script("");
+  const { binary, config } = f.settings.modelExecutor;
+  const owner = lstatSync(binary).uid;
+  assert.deepEqual(modelConfig(f.settings, f.modelStat), f.settings.modelExecutor);
+  for (const [target, unsafe] of [
+    [binary, { uid: owner + 1 }],
+    [config, { mode: 0o640 | 0o002 }],
+    [config, { nlink: 2 }],
+    [f.root, { mode: 0o775 }],
+    [dirname(config), { uid: owner + 1 }],
+    [dirname(f.root), { mode: 0o1777 }],
+    [dirname(f.root), { uid: owner + 1 }],
+    [dirname(f.root), { isSymbolicLink: () => true }],
+    ["/", { mode: 0o757 }],
+  ] as const) {
+    assert.throws(() => modelConfig(f.settings, path => {
+      const info = f.modelStat(path);
+      return path === target ? Object.assign(info, unsafe) : info;
+    }), /owned by root or the daemon user/);
+  }
+});
+
+test("native mutation refusals preserve detected state and reject unsupported platforms", async () => {
+  const env = { ...linux, receipt: () => receipt };
+  const status = await runtimeInventory({}, env);
+  for (const action of ["install", "verify", "remove"] as const) {
+    const container = await mutateRuntime({}, action, "containerd", false, undefined, env);
+    assert.deepEqual(container.backends, [status[2]]);
+    assert.equal(container.result?.code, "containerd_root_installer_required");
+    assert.match(container.backends[0]?.blocker?.detail ?? "", /sudo canaveral-host-installer containerd install/);
+    const libvirt = await mutateRuntime({}, action, "libvirt", false, undefined, env);
+    assert.deepEqual(libvirt.backends, [status[1]]);
+    assert.equal(libvirt.result?.code, "runtime_detect_only");
+    for (const id of ["apple-virtualization", "containerd", "libvirt"] as const) {
+      const unsupported = await mutateRuntime({}, action, id, false, undefined, { ...linux, arch: "ia32" });
+      assert.equal(unsupported.backends[0]?.state, "unavailable");
+      assert.equal(unsupported.backends[0]?.blocker?.code, "runtime_platform_unsupported");
+      assert.equal(unsupported.result?.code, "runtime_platform_unsupported");
+    }
+  }
 });
 
 test("daemon CLI and inventory expose the registry without contacting the controller", async t => {
@@ -170,11 +273,12 @@ test("daemon CLI and inventory expose the registry without contacting the contro
   assert.deepEqual(JSON.parse(output).map((entry: { id: string }) => entry.id), backendIds);
   output = "";
   assert.equal(await main(["runtimes", "install", "containerd", ...flags], io, "canaverald"), 1);
-  assert.ok(output.includes(installerInstruction));
+  const linuxHost = process.platform === "linux" && ["x64", "arm64"].includes(process.arch);
+  assert.ok(output.includes(linuxHost ? "containerd_root_installer_required" : "runtime_platform_unsupported"));
   assert.equal(errors, "");
   output = "";
   assert.equal(await main(["runtimes", "verify", "libvirt", ...flags, "--json"], io, "canaverald"), 1);
-  assert.equal(JSON.parse(output).result.code, "runtime_detect_only");
+  assert.equal(JSON.parse(output).result.code, linuxHost ? "runtime_detect_only" : "runtime_platform_unsupported");
   assert.throws(() => lstatSync(state), /ENOENT/);
   const inventory = await checkHost({ ...config, stateDir: state, url: "https://offline.invalid" }, {
     platform: "linux",

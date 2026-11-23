@@ -1,5 +1,5 @@
 import { lstatSync } from "node:fs";
-import { backendIds, blocker, isModel, record, run } from "./core.ts";
+import { backendIds, blocker, isModel, run } from "./core.ts";
 import type { BackendId, BackendRecord, Environment, HostConfigData } from "./core.ts";
 import { modelRecords } from "./model.ts";
 import type { ModelResponse } from "./model.ts";
@@ -25,10 +25,10 @@ export async function mutateRuntime(config: HostConfigData, action: "install" | 
   if (!isModel(id)) {
     const container = id === "containerd";
     const code = container ? "containerd_root_installer_required" : "runtime_detect_only";
-    const supported = container || id === "libvirt" ? env.platform === "linux" && ["arm64", "x64"].includes(env.arch)
-      : env.platform === "darwin" && env.arch === "arm64";
-    return { backends: [record(id, supported, "unknown", blocker(code, container ? installerInstruction : "Use runtimes status to inspect this backend."))],
-      result: { state: "failed", code } };
+    const backend = await nativeRecord(id, config, env);
+    if (!backend.supported) return { backends: [backend], result: { state: "failed", code: "runtime_platform_unsupported" } };
+    backend.blocker ??= blocker(code, container ? installerInstruction : "Use runtimes status to inspect this backend.");
+    return { backends: [backend], result: { state: "failed", code } };
   }
   return modelRecords(config, env, { operation: action === "install" ? "prepare" : action, backend: id, dryRun, ...(version ? { version } : {}) });
 }

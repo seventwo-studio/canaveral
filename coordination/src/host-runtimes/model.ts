@@ -31,11 +31,13 @@ function parseBackend(value: unknown, env: Environment): BackendRecord {
     && (catalogVersion === undefined || version(catalogVersion))
     && (active === undefined || version(active)));
   const versions = new Set<string>();
+  const digests = new Set<string>();
   for (const item of installed) {
     const pkg = object(item);
     requireReport(version(pkg.version) && digest(pkg.packageDigest) && typeof pkg.verified === "boolean"
-      && typeof pkg.referenced === "boolean" && !versions.has(pkg.version));
+      && typeof pkg.referenced === "boolean" && !digests.has(pkg.packageDigest));
     versions.add(pkg.version);
+    digests.add(pkg.packageDigest);
   }
   requireReport(active === undefined || versions.has(active));
   let message: Blocker | undefined;
@@ -76,17 +78,25 @@ function parseReport(stdout: string, exit: number, request: Request, env: Enviro
   const ids = new Set(backends.map(entry => entry.id));
   requireReport(ids.size === backends.length);
   if (status) {
-    requireReport(exit === 0 && modelIds.every(id => ids.has(id)) && r.plan === undefined && r.result === undefined);
+    requireReport((exit === 0 || exit === 1) && modelIds.every(id => ids.has(id)) && r.plan === undefined && r.result === undefined);
     return { backends };
   }
-  requireReport(ids.has(request.backend));
+  const [backend] = backends;
+  requireReport(backends.length === 1 && backend?.id === request.backend);
+  const verify = request.operation === "verify";
+  if (verify) {
+    requireReport(r.plan === undefined && (exit === 0 || exit === 1));
+    if (r.result === undefined) {
+      const state = exit === 0 ? "succeeded" : backend.state === "unknown" ? "unknown" : "failed";
+      const reason = exit === 1 ? backend.blocker?.code : undefined;
+      return { backends, result: { state, ...(reason ? { code: reason } : {}) } };
+    }
+  }
   const { state, code: resultCode } = object(r.result);
   requireReport((state === "succeeded" || state === "failed" || state === "unknown")
     && (resultCode === undefined || code(resultCode)) && exit === (state === "succeeded" ? 0 : 1));
-  const planned = request.operation === "prepare" || request.operation === "remove";
-  requireReport(planned || r.plan === undefined);
-  const plan = planned ? parsePlan(r.plan) : undefined;
-  return { backends: backends.filter(entry => entry.id === request.backend), ...(plan ? { plan } : {}),
+  const plan = verify ? undefined : parsePlan(r.plan);
+  return { backends, ...(plan ? { plan } : {}),
     result: { state, ...(resultCode ? { code: resultCode } : {}) } };
 }
 
@@ -97,7 +107,7 @@ export async function modelRecords(config: HostConfigData, env: Environment, req
     ...(request.operation === "status" ? {} : { result: { state: state === "unknown" ? "unknown" : "failed", code: reason.code } }),
   });
   try {
-    const settings = modelConfig(config);
+    const settings = modelConfig(config, env.modelStat);
     if (!settings) {
       return unavailable("unavailable", blocker("model_executor_not_configured", "Configure modelExecutor in the host config."));
     }

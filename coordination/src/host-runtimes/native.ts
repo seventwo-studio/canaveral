@@ -6,7 +6,7 @@ import { absolute, blocker, digest, missing, object, probe, ProbeError, record }
 import type { BackendId, BackendRecord, Environment, HostConfigData } from "./core.ts";
 
 export const receiptPath = "/var/lib/canaveral-host-installer/receipts/containerd.json";
-export const installerInstruction = "Use the dedicated root-owned Canaveral host installer for containerd when it becomes available.";
+export const installerInstruction = "Install canaveral-host-installer as root per its README, then run sudo canaveral-host-installer containerd install.";
 const unit = "/etc/systemd/system/canaveral-containerd.service";
 const socket = "/run/canaveral-containerd/containerd.sock";
 const receiptLimit = 64 * 1024;

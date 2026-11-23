@@ -1,9 +1,8 @@
 import { execFile } from "node:child_process";
 import { accessSync, constants, lstatSync } from "node:fs";
 import type { Stats } from "node:fs";
-import { isAbsolute, normalize } from "node:path";
+import { dirname, isAbsolute, normalize } from "node:path";
 import { ServiceError } from "../errors.ts";
-import { noLinks } from "../runtime-process.ts";
 
 export const modelIds = ["ollama", "llama.cpp", "vllm", "mlx-lm"] as const;
 export const backendIds = ["apple-virtualization", "libvirt", "containerd", ...modelIds] as const;
@@ -32,22 +31,29 @@ export const digest = (value: unknown): value is string => typeof value === "str
 export const version = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(value);
 
-export function modelConfig(config: HostConfigData): { binary: string; config: string } | undefined {
+type ModelPathStat = (path: string) => Pick<Stats, "uid" | "mode" | "nlink" | "isFile" | "isDirectory" | "isSymbolicLink">;
+
+function trustedModelPath(path: string, stat: ModelPathStat, uid: number | undefined, file: boolean): void {
+  const parent = dirname(path);
+  if (parent !== path) trustedModelPath(parent, stat, uid, false);
+  const info = stat(path);
+  if (info.isSymbolicLink() || (info.uid !== 0 && info.uid !== uid) || (info.mode & 0o022) !== 0
+    || (file ? !info.isFile() || info.nlink !== 1 : !info.isDirectory())) throw new Error();
+}
+
+export function modelConfig(config: HostConfigData, stat: ModelPathStat = lstatSync): { binary: string; config: string } | undefined {
   if (!Object.hasOwn(config, "modelExecutor")) return undefined;
   const entry = object(config.modelExecutor);
   const { binary, config: file } = entry;
   try {
     if (Object.keys(entry).length !== 2 || !absolute(binary) || !absolute(file)) throw new Error();
-    for (const path of [binary, file]) {
-      noLinks(path);
-      const info = lstatSync(path);
-      if (!info.isFile() || info.nlink !== 1) throw new Error();
-    }
+    const uid = process.getuid?.();
+    for (const path of [binary, file]) trustedModelPath(path, stat, uid, true);
     accessSync(binary, constants.X_OK);
     accessSync(file, constants.R_OK);
     return { binary, config: file };
   } catch {
-    throw new ServiceError("modelExecutor requires absolute paths to an executable and a readable config, without links.", 400, { code: "model_executor_config_invalid" });
+    throw new ServiceError("modelExecutor requires absolute paths to an executable and a readable config, without links. Both files and their parent directories must be owned by root or the daemon user and must not be group- or world-writable.", 400, { code: "model_executor_config_invalid" });
   }
 }
 
@@ -88,6 +94,7 @@ export interface Environment {
   arch: string;
   run: Run;
   lstat: (path: string) => Pick<Stats, "isCharacterDevice">;
+  modelStat?: ModelPathStat;
   receipt: () => unknown;
 }
 export async function probe(env: Environment, argv: readonly string[]): Promise<string> {

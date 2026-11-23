@@ -635,7 +635,7 @@ async function daemonRuntimes(argv: string[], io: CliIO): Promise<number> {
     || (managed && action === "remove" && !values.version) || (values["dry-run"] && action === "verify")) {
     throw new CliError("Model runtime removal requires --version. Only install and remove accept --dry-run.");
   }
-  const config = managed ? await jsonFile(resolve(expandPath(values.config)), HOST_CONFIG_BYTES) : {};
+  const config = await jsonFile(resolve(expandPath(values.config)), HOST_CONFIG_BYTES);
   const report = await mutateRuntime(config, action, id, values["dry-run"] === true, values.version);
   if (values.json) io.stdout(JSON.stringify(report, null, 2) + "\n");
   else {
