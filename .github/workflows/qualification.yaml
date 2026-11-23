@@ -41,6 +41,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      # The tests exercise the packaging gate in script/package_checks.mjs, which
+      # loads TypeScript from the coordination dependencies.
+      - name: Install coordination dependencies
+        run: npm --prefix coordination ci --ignore-scripts
       - name: Test the qualification tool
         run: node --test script/qualification.test.mjs
       - name: Check records, promotions and embedded tables
