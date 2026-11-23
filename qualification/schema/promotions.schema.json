@@ -17,7 +17,7 @@
         "required": ["backend", "pinId", "identity", "scope", "records", "supporting", "review", "limitations"],
         "properties": {
           "backend": { "enum": ["llama.cpp", "ollama", "vllm", "mlx-lm", "containerd", "libvirt", "apple-virtualization"] },
-          "pinId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}-[0-9a-f]{12}$" },
+          "pinId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}-[0-9a-f]{24}$" },
           "identity": {
             "oneOf": [
               { "$ref": "#/$defs/modelIdentity" },
@@ -36,8 +36,8 @@
               "executionMode": { "enum": ["cpu-generation", "root-lifecycle", "detect-only", "vm-boot"] }
             }
           },
-          "records": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/recordPath" } },
-          "supporting": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/recordPath" } },
+          "records": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/citation" } },
+          "supporting": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/citation" } },
           "review": {
             "type": "object",
             "additionalProperties": false,
@@ -56,7 +56,16 @@
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}$" },
-    "recordPath": { "type": "string", "pattern": "^[a-z0-9.-]+/[A-Za-z0-9.+_-]+/[a-z0-9_-]+\\.json$" },
+    "citation": {
+      "description": "A record path under qualification/records and the SHA-256 of its exact bytes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^[a-z0-9.-]+/[A-Za-z0-9.+_-]+/[a-z0-9_-]+\\.json$" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
     "modelIdentity": {
       "type": "object",
       "additionalProperties": false,

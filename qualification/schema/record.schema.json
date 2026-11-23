@@ -11,7 +11,7 @@
     "version": { "const": 1 },
     "kind": { "enum": ["runtime", "service"] },
     "backend": { "enum": ["llama.cpp", "ollama", "vllm", "mlx-lm", "containerd", "libvirt", "apple-virtualization", "canaverald"] },
-    "pinId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}-[0-9a-f]{12}$" },
+    "pinId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}-[0-9a-f]{24}$" },
     "identity": {
       "oneOf": [
         { "$ref": "#/$defs/modelIdentity" },
@@ -81,7 +81,7 @@
         "runAttempt": { "type": "integer", "minimum": 1 },
         "runUrl": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+$" },
         "event": { "enum": ["push", "schedule", "workflow_dispatch"] },
-        "ref": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$" },
         "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "job": {
           "type": "object",

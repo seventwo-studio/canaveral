@@ -20,7 +20,7 @@ export const PATHS = {
   recordSchema: 'qualification/schema/record.schema.json',
   promotionsSchema: 'qualification/schema/promotions.schema.json',
   runtimePins: 'crates/model-execution/src/runtime-pins.json',
-  containerdPins: 'crates/host-installer/src/pins.rs',
+  containerdPins: 'crates/host-installer/src/pins.json',
   realModel: 'fixtures/model-execution/real-model.json',
   rustTable: 'crates/model-execution/src/runtime-qualified.json',
   tsTable: 'coordination/src/host-runtimes/qualified-pins.ts',
@@ -36,24 +36,33 @@ export const TRUSTED_EVENTS = ['push', 'schedule', 'workflow_dispatch'];
 // Branch runs may be recorded for information, but only runs of the default
 // branch can support a promotion.
 export const DEFAULT_BRANCH = 'main';
+export const DEFAULT_REF = `refs/heads/${DEFAULT_BRANCH}`;
 
 // Promotion rules per backend. A rule names the only execution mode and
 // acceleration that can be promoted. A blocker makes the backend unpromotable.
+const MODEL_SUITE = '.github/workflows/model-acceptance.yaml';
+const HOST_SUITE = '.github/workflows/host-acceptance.yaml';
+const DAEMON_SUITE = '.github/workflows/daemon-acceptance.yaml';
+const VM_BLOCKER = {
+  code: 'vm_components_unbound',
+  detail: 'No workflow boots a guest, and records do not yet bind the QEMU, libvirt or Swift runner components that a boot would use.',
+};
 export const BACKENDS = {
-  'llama.cpp': { identity: 'model', promotable: { executionMode: 'cpu-generation', acceleration: 'cpu' } },
+  'llama.cpp': { identity: 'model', suite: MODEL_SUITE, promotable: { executionMode: 'cpu-generation', acceleration: 'cpu' } },
   ollama: {
     identity: 'model',
+    suite: MODEL_SUITE,
     blocker: {
       code: 'ollama_host_isolation_missing',
       detail: 'Ollama serves an unauthenticated loopback API. Promotion requires host ingress, egress and filesystem isolation that Canaveral does not enforce yet.',
     },
   },
-  vllm: { identity: 'model', blocker: { code: 'runtime_package_unavailable', detail: 'No hermetic vLLM package is pinned.' } },
-  'mlx-lm': { identity: 'model', blocker: { code: 'runtime_package_unavailable', detail: 'No hermetic MLX-LM package is pinned.' } },
-  containerd: { identity: 'containerd', promotable: { executionMode: 'root-lifecycle', acceleration: 'none' } },
-  // No workflow boots a guest yet, so detection records cannot satisfy these rules.
-  libvirt: { identity: 'detected', promotable: { executionMode: 'vm-boot', acceleration: 'kvm' } },
-  'apple-virtualization': { identity: 'detected', promotable: { executionMode: 'vm-boot', acceleration: 'vz' } },
+  vllm: { identity: 'model', suite: MODEL_SUITE, blocker: { code: 'runtime_package_unavailable', detail: 'No hermetic vLLM package is pinned.' } },
+  'mlx-lm': { identity: 'model', suite: MODEL_SUITE, blocker: { code: 'runtime_package_unavailable', detail: 'No hermetic MLX-LM package is pinned.' } },
+  containerd: { identity: 'containerd', suite: HOST_SUITE, promotable: { executionMode: 'root-lifecycle', acceleration: 'none' } },
+  libvirt: { identity: 'detected', suite: HOST_SUITE, blocker: VM_BLOCKER },
+  'apple-virtualization': { identity: 'detected', suite: HOST_SUITE, blocker: VM_BLOCKER },
+  canaverald: { identity: 'service', suite: DAEMON_SUITE },
 };
 
 const OS = { linux: 'linux', Linux: 'linux', darwin: 'macos', macOS: 'macos', macos: 'macos' };
@@ -70,7 +79,8 @@ export function canonical(value) {
   return JSON.stringify(value);
 }
 export const same = (a, b) => canonical(a) === canonical(b);
-export const pinId = identity => `${identity.version}-${sha256(canonical(identity)).slice(0, 12)}`;
+// 24 hex digits (96 bits) of the canonical identity digest.
+export const pinId = identity => `${identity.version}-${sha256(canonical(identity)).slice(0, 24)}`;
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const read = (root, path) => readFileSync(join(root, path), 'utf8');
 
@@ -78,20 +88,14 @@ const read = (root, path) => readFileSync(join(root, path), 'utf8');
 // Pins in the tree
 
 export function parseContainerdPins(source) {
-  const version = name => new RegExp(`name:\\s*"${name}",\\s*version:\\s*"([^"]+)"`).exec(source)?.[1];
-  const containerdUrl = /name:\s*"containerd",[\s\S]*?url:\s*concat!\(\s*"([^"]+)",\s*\$arch,\s*"([^"]+)"\s*,?\s*\)/.exec(source);
-  const runcUrl = /name:\s*"runc",[\s\S]*?url:\s*concat!\(\s*"([^"]+)",\s*\$arch\s*\)/.exec(source);
-  const versions = { containerd: version('containerd'), runc: version('runc') };
-  if (!versions.containerd || !versions.runc || !containerdUrl || !runcUrl) throw new Error(`${PATHS.containerdPins}: unrecognized pin layout`);
-  const pins = {};
-  const block = /"(x86_64|aarch64)"\s*=>\s*Some\(pins!\(\s*"(\w+)",\s*([\d_]+),\s*"([0-9a-f]{64})",\s*([\d_]+),\s*"([0-9a-f]{64})"\s*\)\)/g;
-  for (const [, arch, asset, cBytes, cSha, rBytes, rSha] of source.matchAll(block)) {
-    pins[arch] = [
-      { name: 'containerd', version: versions.containerd, url: containerdUrl[1] + asset + containerdUrl[2], bytes: Number(cBytes.replaceAll('_', '')), sha256: cSha },
-      { name: 'runc', version: versions.runc, url: runcUrl[1] + asset, bytes: Number(rBytes.replaceAll('_', '')), sha256: rSha },
-    ];
+  const catalog = JSON.parse(source);
+  const pins = { x86_64: catalog.x86_64, aarch64: catalog.aarch64 };
+  for (const [arch, assets] of Object.entries(pins)) {
+    if (!Array.isArray(assets) || assets.map(a => a?.name).join() !== 'containerd,runc') {
+      throw new Error(`${PATHS.containerdPins}: ${arch} needs containerd and runc pins`);
+    }
+    pins[arch] = assets.map(({ name, version, url, bytes, sha256: digest }) => ({ name, version, url, bytes, sha256: digest }));
   }
-  if (!pins.x86_64 || !pins.aarch64) throw new Error(`${PATHS.containerdPins}: expected x86_64 and aarch64 pins`);
   return pins;
 }
 
@@ -253,7 +257,7 @@ function daemonRecord(ev, _target, _tree, problems) {
 
 const builders = { model: modelRecord, host: hostRecord, daemon: daemonRecord };
 
-export function verifyRun(run, repository, isAncestor) {
+export function verifyRun(run, repository = REPOSITORY) {
   const problems = [];
   if (run.repository?.full_name !== repository) problems.push(`run belongs to ${run.repository?.full_name}, not ${repository}`);
   if (run.head_repository?.full_name !== repository) problems.push(`run head comes from ${run.head_repository?.full_name}`);
@@ -261,7 +265,19 @@ export function verifyRun(run, repository, isAncestor) {
   if (run.status !== 'completed') problems.push(`run status is ${run.status}`);
   if (!WORKFLOWS[run.path]) problems.push(`workflow ${run.path} is not an acceptance suite`);
   if (!/^[0-9a-f]{40}$/.test(run.head_sha ?? '')) problems.push('run has no commit SHA');
-  else if (!isAncestor(run.head_sha)) problems.push(`commit ${run.head_sha} is not in the checked-out history`);
+  // The artifacts API does not say which attempt produced an artifact.
+  if (run.run_attempt !== 1) problems.push(`run attempt ${run.run_attempt} cannot be bound to its artifacts; record a fresh run`);
+  return problems;
+}
+
+// A run can support a promotion only if it ran on main and its commit is on main.
+// compareStatus is GitHub's status for main...<commit>.
+export function promotableRun(run, compareStatus) {
+  const problems = [];
+  if (run.head_branch !== DEFAULT_BRANCH) problems.push(`run is on ${run.head_branch}, not ${DEFAULT_BRANCH}`);
+  if (!TRUSTED_EVENTS.includes(run.event)) problems.push(`event ${run.event} is not trusted for qualification`);
+  if (run.run_attempt !== 1) problems.push(`run attempt ${run.run_attempt} is not 1`);
+  if (!['identical', 'behind'].includes(compareStatus)) problems.push(`commit ${run.head_sha} is not reachable from ${DEFAULT_BRANCH} (${compareStatus})`);
   return problems;
 }
 
@@ -273,6 +289,7 @@ export function buildRecords({ run, jobs, artifacts, tree, repository = REPOSITO
   for (const artifact of artifacts) {
     const target = artifactTarget(suite, artifact.name);
     if (!target) { problems.push(`${artifact.name}: unrecognized artifact`); continue; }
+    if (BACKENDS[target.backend]?.suite !== run.path) { problems.push(`${artifact.name}: ${target.backend} evidence must come from ${BACKENDS[target.backend]?.suite}`); continue; }
     const job = jobs.find(j => j.name === target.job && j.run_attempt === run.run_attempt);
     if (!job) { problems.push(`${artifact.name}: no job ${target.job} in attempt ${run.run_attempt}`); continue; }
     if (!(job.labels ?? []).includes(target.label)) problems.push(`${artifact.name}: job runs on ${job.labels}, not ${target.label}`);
@@ -300,14 +317,14 @@ export function buildRecords({ run, jobs, artifacts, tree, repository = REPOSITO
       evidence: { ...(built.model ? { model: built.model } : {}), steps: built.steps, observations: built.observations },
       source: {
         repository, workflow: run.path, workflowName: run.name, runId: run.id, runAttempt: run.run_attempt,
-        runUrl: run.html_url, event: run.event, ref: run.head_branch, commit: run.head_sha,
+        runUrl: run.html_url, event: run.event, ref: `refs/heads/${run.head_branch}`, commit: run.head_sha,
         job: { id: job.id, name: job.name, conclusion: job.conclusion, url: job.html_url },
         artifact: { id: artifact.id, name: artifact.name, digest: artifact.digest },
         evidenceSha256: artifact.evidenceSha256,
       },
       runner,
       limitations: [hostedLimitation(runner), ...built.limitations],
-      recorded: String(run.updated_at).slice(0, 10),
+      recorded: String(run.run_started_at).slice(0, 10),
     };
     if (outcome === 'failed' && !record.blockers.length) {
       record.blockers = [{ code: 'acceptance_failed', detail: `Job ${job.conclusion}; see the run for the failing step.` }];
@@ -372,11 +389,16 @@ function listJson(dir) {
   });
 }
 
+// A record entry as loaded from disk. Promotions bind records by the SHA-256 of
+// these exact bytes, so replacing evidence requires a new reviewed promotion.
+export const recordEntry = (path, record, bytes = json(record)) => ({ path, record, sha256: sha256(bytes) });
+
 export function loadRecords(root = ROOT) {
   const base = join(root, PATHS.records);
   return listJson(base).sort().map(file => {
     const path = relative(base, file).split(sep).join('/');
-    try { return { path, record: JSON.parse(readFileSync(file, 'utf8')) }; }
+    const bytes = readFileSync(file);
+    try { return recordEntry(path, JSON.parse(bytes.toString('utf8')), bytes); }
     catch (error) { return { path, error: error.message }; }
   });
 }
@@ -390,6 +412,7 @@ export function checkRecords(entries, tree, schema) {
     if (recordPath(record) !== path) errors.push(`records/${path}: content belongs at records/${recordPath(record)}`);
     if (record.kind === 'runtime' && record.pinId !== pinId(record.identity)) errors.push(`records/${path}: pinId does not match identity`);
     if ((record.kind === 'service') !== (record.backend === 'canaverald')) errors.push(`records/${path}: kind and backend disagree`);
+    if (record.source.workflow !== BACKENDS[record.backend].suite) errors.push(`records/${path}: ${record.backend} evidence must come from ${BACKENDS[record.backend].suite}`);
     if (record.source.repository !== REPOSITORY) errors.push(`records/${path}: evidence from another repository`);
     if (record.outcome === 'passed') {
       if (record.blockers.length) errors.push(`records/${path}: passed record lists blockers`);
@@ -404,18 +427,38 @@ export function checkRecords(entries, tree, schema) {
   return { errors, stale };
 }
 
+// Offline promotability: the record claims a first-attempt trusted run of main
+// in this repository. `verify` confirms the claim against the GitHub API.
+function citedRecordProblems(record) {
+  const problems = [];
+  if (record.source.repository !== REPOSITORY) problems.push('comes from another repository');
+  if (record.source.ref !== DEFAULT_REF) problems.push(`comes from ${record.source.ref}, not ${DEFAULT_REF}`);
+  if (!TRUSTED_EVENTS.includes(record.source.event)) problems.push(`comes from an untrusted ${record.source.event} event`);
+  if (record.source.runAttempt !== 1) problems.push(`comes from run attempt ${record.source.runAttempt}`);
+  if (record.source.workflow !== BACKENDS[record.backend]?.suite) problems.push(`does not come from the ${record.backend} suite`);
+  return problems;
+}
+
 const scopeKey = entry => [entry.backend, entry.scope.os, entry.scope.arch, entry.scope.acceleration, entry.scope.executionMode].join(' ');
 
 export function checkPromotions(promotions, entries, tree, schema) {
   const errors = schemaErrors(schema, promotions).map(p => `promotions: ${p}`);
   if (errors.length) return errors;
-  const byPath = new Map(entries.filter(entry => entry.record).map(entry => [entry.path, entry.record]));
+  const byPath = new Map(entries.filter(entry => entry.record).map(entry => [entry.path, entry]));
   const keys = new Set();
+  const cited = (at, label, ref) => {
+    const entry = byPath.get(ref.path);
+    if (!entry) { errors.push(`${at}: ${label} ${ref.path} does not exist`); return undefined; }
+    if (entry.sha256 !== ref.sha256) errors.push(`${at}: ${label} ${ref.path} changed since promotion (sha256 ${entry.sha256})`);
+    for (const problem of citedRecordProblems(entry.record)) errors.push(`${at}: ${label} ${ref.path} ${problem}`);
+    return entry.record;
+  };
   promotions.promotions.forEach((entry, index) => {
     const at = `promotions[${index}] ${entry.backend} ${entry.pinId}`;
     const rule = BACKENDS[entry.backend];
     if (!rule) { errors.push(`${at}: unknown backend`); return; }
     if (rule.blocker) { errors.push(`${at}: ${rule.blocker.code}: ${rule.blocker.detail}`); return; }
+    if (!rule.promotable) { errors.push(`${at}: ${entry.backend} cannot be promoted`); return; }
     const { os, arch, acceleration, executionMode } = entry.scope;
     if (executionMode !== rule.promotable.executionMode || acceleration !== rule.promotable.acceleration) {
       errors.push(`${at}: ${entry.backend} promotes only ${rule.promotable.executionMode} with ${rule.promotable.acceleration} acceleration`);
@@ -423,29 +466,21 @@ export function checkPromotions(promotions, entries, tree, schema) {
     if (keys.has(scopeKey(entry))) errors.push(`${at}: duplicate scope ${scopeKey(entry)}`);
     keys.add(scopeKey(entry));
     if (entry.pinId !== pinId(entry.identity)) errors.push(`${at}: pinId does not match identity`);
-    if (rule.identity !== 'detected' && !same(treeIdentity(tree, entry.backend, os, arch), entry.identity)) {
+    if (!same(treeIdentity(tree, entry.backend, os, arch), entry.identity)) {
       errors.push(`${at}: identity is not the exact pin the tree ships for ${os}/${arch}`);
     }
-    for (const path of entry.records) {
-      const record = byPath.get(path);
-      if (!record) { errors.push(`${at}: record ${path} does not exist`); continue; }
-      if (record.kind !== 'runtime' || record.outcome !== 'passed') errors.push(`${at}: record ${path} is not a passing runtime record`);
+    for (const ref of entry.records) {
+      const record = cited(at, 'record', ref);
+      if (!record) continue;
+      if (record.kind !== 'runtime' || record.outcome !== 'passed') errors.push(`${at}: record ${ref.path} is not a passing runtime record`);
       if (record.backend !== entry.backend || record.pinId !== entry.pinId || !same(record.identity, entry.identity) || !same(record.scope, entry.scope)) {
-        errors.push(`${at}: record ${path} covers a different pin or scope`);
-      }
-      if (!TRUSTED_EVENTS.includes(record.source.event)) errors.push(`${at}: record ${path} comes from an untrusted event`);
-      if (record.source.ref !== DEFAULT_BRANCH || record.source.repository !== REPOSITORY) {
-        errors.push(`${at}: record ${path} comes from ${record.source.ref}, not a run of ${DEFAULT_BRANCH}`);
+        errors.push(`${at}: record ${ref.path} covers a different pin or scope`);
       }
     }
-    for (const path of entry.supporting) {
-      const record = byPath.get(path);
-      if (!record) { errors.push(`${at}: supporting record ${path} does not exist`); continue; }
-      if (record.kind !== 'service' || record.outcome !== 'passed' || record.scope.os !== os || record.scope.arch !== arch) {
-        errors.push(`${at}: supporting record ${path} is not a passing service record for ${os}/${arch}`);
-      }
-      if (record.source.ref !== DEFAULT_BRANCH || !TRUSTED_EVENTS.includes(record.source.event)) {
-        errors.push(`${at}: supporting record ${path} comes from ${record.source.ref}, not a run of ${DEFAULT_BRANCH}`);
+    for (const ref of entry.supporting) {
+      const record = cited(at, 'supporting record', ref);
+      if (record && (record.kind !== 'service' || record.outcome !== 'passed' || record.scope.os !== os || record.scope.arch !== arch)) {
+        errors.push(`${at}: supporting record ${ref.path} is not a passing service record for ${os}/${arch}`);
       }
     }
   });
@@ -486,67 +521,117 @@ export function check(root = ROOT) {
 }
 
 // ---------------------------------------------------------------------------
-// GitHub access through gh (read-only)
+// GitHub access through gh (read-only). In Actions, gh reads GH_TOKEN.
 
-export function ghClient(repository) {
+export function ghClient(repository = REPOSITORY) {
   const gh = (args, options = {}) => execFileSync('gh', args, { maxBuffer: 64 * 1024 * 1024, ...options });
   const api = path => JSON.parse(gh(['api', path], { encoding: 'utf8' }));
   return {
     run: id => api(`repos/${repository}/actions/runs/${id}`),
     jobs: (id, attempt) => api(`repos/${repository}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`).jobs,
     artifacts: id => api(`repos/${repository}/actions/runs/${id}/artifacts?per_page=100`).artifacts,
+    artifact: id => api(`repos/${repository}/actions/artifacts/${id}`),
+    compare: sha => api(`repos/${repository}/compare/${DEFAULT_BRANCH}...${sha}`).status,
     download: (artifact, file) => writeFileSync(file, gh(['api', `repos/${repository}/actions/artifacts/${artifact.id}/zip`])),
   };
 }
 
-// Downloads each artifact archive, checks its digest and extracts the single
-// evidence file. Archives are untrusted data and are only JSON-parsed.
-export function fetchEvidence(client, runId, scratch) {
-  const out = [];
-  for (const artifact of client.artifacts(runId)) {
+// Downloads each artifact archive, checks it against the digest GitHub reports
+// and extracts the single evidence file. Archives are untrusted data and are
+// only JSON-parsed.
+export function fetchEvidence(client, artifacts, scratch) {
+  return artifacts.map(artifact => {
     if (artifact.expired) throw new Error(`${artifact.name}: artifact expired`);
+    if (!/^sha256:[0-9a-f]{64}$/.test(artifact.digest ?? '')) throw new Error(`${artifact.name}: GitHub reports no artifact digest`);
     const dir = mkdtempSync(join(scratch, 'artifact-'));
     const zip = join(dir, 'artifact.zip');
     client.download(artifact, zip);
     const digest = `sha256:${sha256(readFileSync(zip))}`;
-    if (artifact.digest && artifact.digest !== digest) throw new Error(`${artifact.name}: archive digest ${digest} differs from ${artifact.digest}`);
+    if (artifact.digest !== digest) throw new Error(`${artifact.name}: archive digest ${digest} differs from ${artifact.digest}`);
     const members = execFileSync('unzip', ['-Z1', zip], { encoding: 'utf8' }).split('\n').filter(Boolean);
     if (members.length !== 1 || !members[0].endsWith('.json')) throw new Error(`${artifact.name}: expected one JSON evidence file`);
     const bytes = execFileSync('unzip', ['-p', zip, members[0]], { maxBuffer: MAX_EVIDENCE_BYTES });
-    out.push({ id: artifact.id, name: artifact.name, digest, evidenceSha256: sha256(bytes), evidence: JSON.parse(bytes.toString('utf8')) });
-  }
-  return out;
+    return { id: artifact.id, name: artifact.name, digest, evidenceSha256: sha256(bytes), evidence: JSON.parse(bytes.toString('utf8')) };
+  });
+}
+
+function withScratch(work) {
+  const scratch = mkdtempSync(join(tmpdir(), 'canaveral-qualification-'));
+  try { return work(scratch); }
+  finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
 function record(runId, { repository, root, dryRun }) {
   const client = ghClient(repository);
   const run = client.run(runId);
-  const isAncestor = sha => {
-    try { execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: root, stdio: 'ignore' }); return true; }
-    catch { return false; }
-  };
-  const refused = verifyRun(run, repository, isAncestor);
+  const refused = verifyRun(run, repository);
   if (refused.length) throw new Error(`run ${runId} refused:\n  ${refused.join('\n  ')}`);
-  const scratch = mkdtempSync(join(tmpdir(), 'canaveral-qualification-'));
-  try {
-    const artifacts = fetchEvidence(client, runId, scratch);
+  // A run labelled main must really be a promotable run of main.
+  const promotable = run.head_branch === DEFAULT_BRANCH;
+  if (promotable) {
+    const problems = promotableRun(run, client.compare(run.head_sha));
+    if (problems.length) throw new Error(`run ${runId} refused:\n  ${problems.join('\n  ')}`);
+  }
+  withScratch(scratch => {
+    const artifacts = fetchEvidence(client, client.artifacts(runId), scratch);
     const { records, problems } = buildRecords({ run, jobs: client.jobs(runId, run.run_attempt), artifacts, tree: loadTree(root), repository });
     if (problems.length) throw new Error(`run ${runId} evidence does not match the tree:\n  ${problems.join('\n  ')}`);
     for (const { path, record } of records) {
       const file = join(root, PATHS.records, path);
       if (!dryRun) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, json(record)); }
-      const note = record.source.ref === DEFAULT_BRANCH ? '' : `, ${record.source.ref} run: informational, not promotable`;
-      console.log(`${dryRun ? 'would write' : 'wrote'} ${PATHS.records}/${path} (${record.outcome}${note})`);
+      const note = promotable ? '' : `, ${run.head_branch} run: informational, not promotable`;
+      console.log(`${dryRun ? 'would write' : 'wrote'} ${PATHS.records}/${path} (${record.outcome}${note}) sha256 ${sha256(json(record))}`);
     }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
+  });
+}
+
+// Re-derives a committed record from its run and artifact through the GitHub
+// API and requires an exact match. Returns problems.
+export function verifyRecord(committed, client, tree, scratch) {
+  const source = committed.source;
+  const run = client.run(source.runId);
+  const problems = [...verifyRun(run), ...promotableRun(run, client.compare(run.head_sha))];
+  if (run.path !== BACKENDS[committed.backend]?.suite) problems.push(`run workflow ${run.path} is not the ${committed.backend} suite`);
+  if (run.head_sha !== source.commit || run.run_attempt !== source.runAttempt) problems.push('run commit or attempt differs from the record');
+  if (problems.length) return problems;
+  const artifact = client.artifact(source.artifact.id);
+  if (artifact.workflow_run?.id !== run.id || artifact.workflow_run?.head_sha !== run.head_sha) return ['artifact does not belong to the run'];
+  const fetched = fetchEvidence(client, [artifact], scratch);
+  const { records, problems: built } = buildRecords({ run, jobs: client.jobs(run.id, run.run_attempt), artifacts: fetched, tree });
+  if (built.length) return built;
+  if (records.length !== 1 || !same(records[0].record, committed)) return ['committed record differs from the record derived from the run artifact'];
+  return [];
+}
+
+// Verifies every record cited by a promotion that is new or changed since `base`.
+export function verify({ root = ROOT, client = ghClient(), base } = {}) {
+  const promotions = JSON.parse(read(root, PATHS.promotions)).promotions;
+  let previous = [];
+  if (base) {
+    try { previous = JSON.parse(execFileSync('git', ['show', `${base}:${PATHS.promotions}`], { cwd: root, encoding: 'utf8' })).promotions; }
+    catch { previous = []; }
   }
+  const changed = promotions.filter(entry => !previous.some(old => same(old, entry)));
+  const paths = [...new Set(changed.flatMap(entry => [...entry.records, ...entry.supporting].map(ref => ref.path)))];
+  const entries = new Map(loadRecords(root).map(entry => [entry.path, entry]));
+  const tree = loadTree(root);
+  const errors = [];
+  withScratch(scratch => {
+    for (const path of paths) {
+      const entry = entries.get(path);
+      if (!entry?.record) { errors.push(`records/${path}: missing or unreadable`); continue; }
+      try { errors.push(...verifyRecord(entry.record, client, tree, scratch).map(p => `records/${path}: ${p}`)); }
+      catch (error) { errors.push(`records/${path}: ${error.message}`); }
+    }
+  });
+  return { errors, verified: paths.length };
 }
 
 function usage() {
   return `usage:
   node script/qualification.mjs record --run RUN_ID [--repo OWNER/NAME] [--dry-run]
   node script/qualification.mjs check
+  node script/qualification.mjs verify [--base GIT_REF]
   node script/qualification.mjs sync`;
 }
 
@@ -564,6 +649,12 @@ export function main(argv, root = ROOT) {
     for (const path of result.stale) console.log(`stale (pin changed since recording): ${path}`);
     for (const error of result.errors) console.error(`error: ${error}`);
     console.log(`${result.records} records, ${result.promotions} promotions, ${result.errors.length} errors`);
+    return result.errors.length ? 1 : 0;
+  }
+  if (command === 'verify') {
+    const result = verify({ root, base: option('--base') });
+    for (const error of result.errors) console.error(`error: ${error}`);
+    console.log(`verified ${result.verified} promoted records, ${result.errors.length} errors`);
     return result.errors.length ? 1 : 0;
   }
   if (command === 'sync') {

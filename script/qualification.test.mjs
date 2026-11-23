@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
-  BACKENDS, buildRecords, canonical, check, checkPromotions, checkRecords, generated, loadTree, packageDigest,
-  parseContainerdPins, PATHS, pinId, recordPath, REPOSITORY, ROOT, schemaErrors, treeIdentity, verifyRun,
+  BACKENDS, buildRecords, canonical, check, checkPromotions, checkRecords, fetchEvidence, generated, loadTree, packageDigest,
+  parseContainerdPins, PATHS, pinId, promotableRun, recordEntry, recordPath, REPOSITORY, ROOT, schemaErrors, treeIdentity,
+  verifyRecord, verifyRun,
 } from './qualification.mjs';
 
 const tree = loadTree();
@@ -17,7 +18,7 @@ const repo = { full_name: REPOSITORY };
 function run(path, overrides = {}) {
   return {
     id: 1, name: 'suite', path, event: 'push', status: 'completed', run_attempt: 1, head_sha: SHA, head_branch: 'main',
-    html_url: `https://github.com/${REPOSITORY}/actions/runs/1`, updated_at: '2026-11-23T00:00:00Z',
+    html_url: `https://github.com/${REPOSITORY}/actions/runs/1`, run_started_at: '2026-11-23T00:00:00Z',
     repository: repo, head_repository: repo, ...overrides,
   };
 }
@@ -58,10 +59,11 @@ const serviceRecord = () => buildRecords({
 
 test('reads the exact containerd and model engine pins from the tree', () => {
   const pins = parseContainerdPins(readFileSync(join(ROOT, PATHS.containerdPins), 'utf8'));
+  assert.equal(PATHS.containerdPins, 'crates/host-installer/src/pins.json');
   assert.deepEqual(pins.x86_64.map(a => a.name), ['containerd', 'runc']);
   assert.match(pins.aarch64[0].url, /containerd-static-.*-linux-arm64\.tar\.gz$/);
   assert.ok(pins.x86_64.every(a => /^[0-9a-f]{64}$/.test(a.sha256) && a.bytes > 0));
-  assert.throws(() => parseContainerdPins('fn main() {}'), /unrecognized pin layout/);
+  assert.throws(() => parseContainerdPins('{"x86_64":[],"aarch64":[]}'), /needs containerd and runc pins/);
   // Matches the package digest the Rust executor reported in run 45231181336.
   assert.equal(packageDigest('ollama', '0.40.17', '2f2f45e48cf038c5fbb942d80f441d26bfa81105922bab797385b17c633049f6'),
     '1dd5a215eac3b9d83b61400b4d64b8b1df95450cf6c090f3645ff684a3f3a9ef');
@@ -69,14 +71,33 @@ test('reads the exact containerd and model engine pins from the tree', () => {
   assert.equal(canonical({ b: 1, a: [{ d: 2, c: 3 }] }), '{"a":[{"c":3,"d":2}],"b":1}');
 });
 
-test('refuses untrusted runs', () => {
+test('refuses untrusted runs and limits promotion to first attempts of main', () => {
   const path = '.github/workflows/model-acceptance.yaml';
-  assert.deepEqual(verifyRun(run(path), REPOSITORY, () => true), []);
-  assert.match(verifyRun(run(path, { event: 'pull_request' }), REPOSITORY, () => true).join(), /not trusted/);
-  assert.match(verifyRun(run(path, { head_repository: { full_name: 'fork/canaveral' } }), REPOSITORY, () => true).join(), /head comes from/);
-  assert.match(verifyRun(run(path, { status: 'in_progress' }), REPOSITORY, () => true).join(), /status/);
-  assert.match(verifyRun(run('.github/workflows/validate.yaml'), REPOSITORY, () => true).join(), /not an acceptance suite/);
-  assert.match(verifyRun(run(path), REPOSITORY, () => false).join(), /not in the checked-out history/);
+  assert.deepEqual(verifyRun(run(path)), []);
+  assert.match(verifyRun(run(path, { event: 'pull_request' })).join(), /not trusted/);
+  assert.match(verifyRun(run(path, { head_repository: { full_name: 'fork/canaveral' } })).join(), /head comes from/);
+  assert.match(verifyRun(run(path, { status: 'in_progress' })).join(), /status/);
+  assert.match(verifyRun(run('.github/workflows/validate.yaml')).join(), /not an acceptance suite/);
+  assert.match(verifyRun(run(path, { run_attempt: 2 })).join(), /cannot be bound to its artifacts/);
+  assert.deepEqual(promotableRun(run(path), 'behind'), []);
+  assert.deepEqual(promotableRun(run(path), 'identical'), []);
+  assert.match(promotableRun(run(path), 'ahead').join(), /not reachable from main/);
+  assert.match(promotableRun(run(path, { head_branch: 'feature' }), 'behind').join(), /not main/);
+  assert.match(promotableRun(run(path, { event: 'pull_request' }), 'behind').join(), /not trusted/);
+});
+
+test('requires the artifact digest GitHub reports', () => {
+  assert.throws(() => fetchEvidence({ download: () => assert.fail('downloaded') }, [{ id: 1, name: 'a' }], ROOT), /no artifact digest/);
+  assert.throws(() => fetchEvidence({}, [{ id: 1, name: 'a', expired: true }], ROOT), /expired/);
+});
+
+test('backends can only record evidence from their own acceptance suite', () => {
+  const { problems } = buildRecords({
+    run: run('.github/workflows/host-acceptance.yaml'), jobs: [job('ubuntu-24.04 / llama.cpp', 'ubuntu-24.04')],
+    artifacts: [artifact('model-acceptance-ubuntu-24.04-llama.cpp', modelEvidence())], tree,
+  });
+  assert.match(problems.join(), /unrecognized artifact/);
+  for (const [backend, rule] of Object.entries(BACKENDS)) assert.match(rule.suite, /acceptance\.yaml$/, backend);
 });
 
 test('turns matching model evidence into a passed record at its keyed path', () => {
@@ -90,6 +111,8 @@ test('turns matching model evidence into a passed record at its keyed path', () 
   assert.equal(path, `llama.cpp/${record.pinId}/linux-x86_64-cpu.json`);
   assert.equal(recordPath(record), path);
   assert.equal(record.source.commit, SHA);
+  assert.equal(record.source.ref, 'refs/heads/main');
+  assert.match(record.pinId, /-[0-9a-f]{24}$/);
   assert.equal(record.runner.imageVersion, '20261116.376.1');
 });
 
@@ -105,15 +128,17 @@ test('refuses evidence that does not match the run commit or the tree pins', () 
 });
 
 test('promotions need exact tree pins, passing records, service evidence and review', () => {
-  const runtime = modelRecords().records[0];
-  const service = serviceRecord();
-  const entries = [runtime, { path: service.path, record: service.record }];
+  const built = modelRecords().records[0];
+  const runtime = recordEntry(built.path, built.record);
+  const service = recordEntry(serviceRecord().path, serviceRecord().record);
+  const entries = [runtime, service];
+  const cite = entry => ({ path: entry.path, sha256: entry.sha256 });
   assert.deepEqual(checkRecords(entries, tree, recordSchema), { errors: [], stale: [] });
   const empty = { schema: 'canaveral-runtime-promotions', version: 1, promotions: [] };
   assert.deepEqual(checkPromotions(empty, entries, tree, promotionsSchema), []);
   const entry = {
     backend: 'llama.cpp', pinId: runtime.record.pinId, identity: runtime.record.identity, scope: runtime.record.scope,
-    records: [runtime.path], supporting: [service.path],
+    records: [cite(runtime)], supporting: [cite(service)],
     review: { pullRequest: `https://github.com/${REPOSITORY}/pull/1`, reviewer: 'maintainer', date: '2026-11-24' },
     limitations: ['CPU only.'],
   };
@@ -122,19 +147,25 @@ test('promotions need exact tree pins, passing records, service evidence and rev
   const errors = list => checkPromotions(promotions(list), entries, tree, promotionsSchema).join('\n');
   assert.match(errors([entry, entry]), /duplicate scope/);
   assert.match(errors([{ ...entry, backend: 'ollama' }]), /ollama_host_isolation_missing/);
-  assert.match(errors([{ ...entry, supporting: ['canaverald/service/macos-aarch64-launchd.json'] }]), /does not exist/);
-  assert.match(errors([{ ...entry, records: [service.path] }]), /not a passing runtime record/);
+  assert.match(errors([{ ...entry, supporting: [{ ...cite(service), path: 'canaverald/service/macos-aarch64-launchd.json' }] }]), /does not exist/);
+  assert.match(errors([{ ...entry, records: [cite(service)] }]), /not a passing runtime record/);
+  assert.match(errors([{ ...entry, records: [{ ...cite(runtime), sha256: '0'.repeat(64) }] }]), /changed since promotion/);
+  assert.match(errors([{ ...entry, backend: 'libvirt' }]), /vm_components_unbound/);
+  assert.match(errors([{ ...entry, backend: 'apple-virtualization' }]), /vm_components_unbound/);
   assert.match(errors([{ ...entry, scope: { ...entry.scope, executionMode: 'detect-only' } }]), /promotes only cpu-generation/);
   const drifted = { ...entry.identity, treeSha256: '0'.repeat(64) };
   assert.match(errors([{ ...entry, identity: drifted, pinId: pinId(drifted) }]), /not the exact pin the tree ships/);
   assert.match(errors([{ ...entry, review: { ...entry.review, pullRequest: 'https://example.com/pull/1' } }]), /pullRequest/);
   assert.match(errors([{ ...entry, limitations: [] }]), /limitations/);
-  const branch = { ...runtime, record: { ...runtime.record, source: { ...runtime.record.source, ref: 'feat/runtime-acceptance' } } };
-  assert.match(checkPromotions(promotions([entry]), [branch, entries[1]], tree, promotionsSchema).join(), /feat\/runtime-acceptance, not a run of main/);
-  const branchService = { ...entries[1], record: { ...entries[1].record, source: { ...entries[1].record.source, ref: 'feature' } } };
-  assert.match(checkPromotions(promotions([entry]), [runtime, branchService], tree, promotionsSchema).join(), /supporting record .* not a run of main/);
-  const failing = { ...runtime, record: { ...runtime.record, outcome: 'failed', blockers: [{ code: 'acceptance_failed', detail: 'x' }] } };
-  assert.match(checkPromotions(promotions([entry]), [failing, entries[1]], tree, promotionsSchema).join(), /not a passing runtime record/);
+  // Relabelled records keep a bound digest only if the promotion is re-reviewed; offline rules still apply.
+  const relabel = (base, source) => recordEntry(base.path, { ...base.record, source: { ...base.record.source, ...source } });
+  const promoteWith = (r, sv = service) => checkPromotions(promotions([{ ...entry, records: [cite(r)], supporting: [cite(sv)] }]), [r, sv], tree, promotionsSchema).join();
+  assert.match(promoteWith(relabel(runtime, { ref: 'refs/heads/feat/runtime-acceptance' })), /not refs\/heads\/main/);
+  assert.match(promoteWith(runtime, relabel(service, { ref: 'refs/heads/feature' })), /supporting record .* not refs\/heads\/main/);
+  assert.match(promoteWith(relabel(runtime, { runAttempt: 2 })), /run attempt 2/);
+  assert.match(promoteWith(relabel(runtime, { workflow: '.github/workflows/host-acceptance.yaml' })), /does not come from the llama.cpp suite/);
+  const failing = recordEntry(runtime.path, { ...runtime.record, outcome: 'failed', blockers: [{ code: 'acceptance_failed', detail: 'x' }] });
+  assert.match(promoteWith(failing), /not a passing runtime record/);
 
   const table = generated(promotions([entry]));
   assert.match(table[PATHS.tsTable], /"backend": "llama\.cpp"/);
@@ -151,14 +182,45 @@ test('record checks catch misplaced, inconsistent and stale records', () => {
   const old = { ...record, identity, pinId: pinId(identity) };
   assert.deepEqual(checkRecords([{ path: recordPath(old), record: old }], tree, recordSchema).stale, [`records/${recordPath(old)}`]);
   assert.deepEqual(schemaErrors(recordSchema, { ...record, extra: true }), ['$: unexpected extra']);
+  const wrongSuite = { ...record, source: { ...record.source, workflow: '.github/workflows/daemon-acceptance.yaml' } };
+  assert.match(checkRecords([{ path, record: wrongSuite }], tree, recordSchema).errors.join(), /must come from/);
 });
 
 test('every unpromotable backend carries an explicit blocker', () => {
-  for (const id of ['ollama', 'vllm', 'mlx-lm']) assert.ok(BACKENDS[id].blocker?.code);
+  for (const id of ['ollama', 'vllm', 'mlx-lm', 'libvirt', 'apple-virtualization']) assert.ok(BACKENDS[id].blocker?.code);
   assert.equal(BACKENDS.ollama.blocker.code, 'ollama_host_isolation_missing');
 });
 
 test('the committed records, promotions and generated tables are consistent', () => {
   const result = check(ROOT);
   assert.deepEqual(result.errors, []);
+});
+
+test('verify re-derives promoted records from the GitHub API', () => {
+  const { record } = modelRecords().records[0];
+  const evidence = modelEvidence();
+  const client = (overrides = {}) => ({
+    run: () => run('.github/workflows/model-acceptance.yaml'),
+    compare: () => 'behind',
+    artifact: () => ({ id: 3, name: 'model-acceptance-ubuntu-24.04-llama.cpp', digest: 'sha256:' + 'd'.repeat(64), workflow_run: { id: 1, head_sha: SHA } }),
+    jobs: () => [job('ubuntu-24.04 / llama.cpp', 'ubuntu-24.04')],
+    ...overrides,
+  });
+  // fetchEvidence is exercised separately; substitute its result through a fake download path.
+  const derive = (c, committed = record) => {
+    const fake = { ...c, download: () => { throw new Error('unused'); } };
+    try { return verifyRecord(committed, fake, tree, ROOT); }
+    catch (error) { return [error.message]; }
+  };
+  assert.match(derive(client({ compare: () => 'ahead' })).join(), /not reachable from main/);
+  assert.match(derive(client({ run: () => run('.github/workflows/model-acceptance.yaml', { head_branch: 'feature' }) })).join(), /not main/);
+  assert.match(derive(client({ artifact: () => ({ workflow_run: { id: 9, head_sha: SHA } }) })).join(), /does not belong to the run/);
+  assert.match(derive(client({ run: () => run('.github/workflows/host-acceptance.yaml') })).join(), /not the llama.cpp suite/);
+  assert.match(derive(client(), { ...record, source: { ...record.source, commit: 'f'.repeat(40) } }).join(), /commit or attempt differs/);
+  assert.ok(evidence);
+});
+
+test('packaging checks gate on the qualification state', async () => {
+  const { checkQualification } = await import('./package_checks.mjs');
+  assert.equal(await checkQualification(), true);
 });

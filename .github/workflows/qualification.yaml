@@ -8,7 +8,9 @@ on:
       - 'script/qualification*.mjs'
       - 'crates/model-execution/src/runtime-pins.json'
       - 'crates/model-execution/src/runtime-qualified.json'
+      - 'crates/host-installer/src/pins.json'
       - 'crates/host-installer/src/pins.rs'
+      - 'crates/model-execution/build.rs'
       - 'fixtures/model-execution/real-model.json'
       - 'coordination/src/host-runtimes/qualified-pins.ts'
   push:
@@ -19,7 +21,9 @@ on:
       - 'script/qualification*.mjs'
       - 'crates/model-execution/src/runtime-pins.json'
       - 'crates/model-execution/src/runtime-qualified.json'
+      - 'crates/host-installer/src/pins.json'
       - 'crates/host-installer/src/pins.rs'
+      - 'crates/model-execution/build.rs'
       - 'fixtures/model-execution/real-model.json'
       - 'coordination/src/host-runtimes/qualified-pins.ts'
   workflow_dispatch:
@@ -46,3 +50,29 @@ jobs:
         run: node --test script/qualification.test.mjs
       - name: Check records, promotions and embedded tables
         run: node script/qualification.mjs check
+
+  verify:
+    # Re-derives every record cited by a new or changed promotion from the
+    # GitHub API and its artifact. Uses only the job's read-only token.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Fetch the base promotions
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF"
+      - name: Verify promoted records against GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node script/qualification.mjs verify --base FETCH_HEAD

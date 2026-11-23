@@ -1,5 +1,6 @@
 /** Offline checks of emitted modules. Never imports or executes package code. */
 import { createRequire, isBuiltin } from 'node:module';
+import { existsSync } from 'node:fs';
 import { posix } from 'node:path';
 const require = createRequire(new URL('../coordination/package.json', import.meta.url));
 const ts = require('typescript');
@@ -34,3 +35,20 @@ export function checkModuleClosure(files, { rejectComputed = false } = {}) {
     }
   }
 }
+
+/** Refuses packaging when the runtime qualification records, promotions or the
+ * generated qualified-pin tables disagree. Runs when this module loads, so every
+ * flow that imports it (CLI preparation, runtime releases, guest bundles) is gated.
+ * Build contexts that omit the qualification sources skip it; the executor's
+ * build script still checks its own table against the engine catalog.
+ */
+export async function checkQualification() {
+  const tool = new URL('./qualification.mjs', import.meta.url);
+  const promotions = new URL('../qualification/promotions.json', import.meta.url);
+  if (!existsSync(tool) || !existsSync(promotions)) return false;
+  const { check } = await import(tool.href);
+  const { errors } = check();
+  if (errors.length) throw new Error(`Runtime qualification check failed:\n  ${errors.join('\n  ')}`);
+  return true;
+}
+await checkQualification();
