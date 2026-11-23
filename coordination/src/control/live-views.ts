@@ -50,11 +50,13 @@ export const LIVE_VIEWS_PER_MACHINE = 4, LIVE_VIEWS_PER_HOST = 16, LIVE_VIEWS_PE
 const ROWS_PER_MACHINE = 64, RETAIN_SECONDS = 300;
 /** The host enforces a lease deadline and its own assignment slightly before the controller
  * observes the same ending. A view is then first recorded as `disconnected` (its sockets
- * dropped) or, for a lease, by the stopping device or host the runner reported. Within this
- * window the controller's later finding replaces such a provisional reason: any cause replaces
- * `disconnected`, and the lease's or its key's own ending replaces a lease's device cause. */
+ * dropped) or, for a lease, by the stopping device or host the runner reported, or by its
+ * capture, which the runner stopped and reported clean at its own deadline. Within this window
+ * the controller's later finding replaces such a provisional reason: any cause replaces
+ * `disconnected`, and the lease's or its key's own ending replaces a lease's device or capture
+ * cause. */
 const REFINE_SECONDS = 3;
-const PROVISIONAL = ['device_stopped', 'host_unavailable'], LEASE_ENDED = ['lease_expired', 'lease_released', 'lease_failed', 'key_rotated', 'application_revoked'];
+const PROVISIONAL = ['device_stopped', 'host_unavailable', 'capture_ended'], LEASE_ENDED = ['lease_expired', 'lease_released', 'lease_failed', 'key_rotated', 'application_revoked'];
 const CAPTURE_REQUEST = JSON.stringify({ fps: LIVE_FPS, durationSeconds: LIVE_EPOCH_SECONDS, bitRate: LIVE_BIT_RATE });
 const fail = (status = 409, code?: string): never => { throw new ServiceError('Live view rejected.', status, code ? { code } : {}); };
 function exact(body: Record<string, unknown>, fields: string[], optional: string[] = []): void { if (fields.some(k => !Object.hasOwn(body, k)) || Object.keys(body).some(k => !fields.includes(k) && !optional.includes(k))) fail(400); }

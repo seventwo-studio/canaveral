@@ -108,3 +108,15 @@ test("a recording whose connection is reset before its finish stays incomplete",
   await b.reset;
   assert.equal(video.finish, undefined);
 });
+
+test("a lease view first recorded as ended with its capture reports the lease's own ending once the controller records it", async t => {
+  const b = await broker(t, { opened: socket => socket.write(PING), received: () => {} });
+  const connection = await connect(b.url, `/v1/leases/${randomUUID()}/live-views/${VIEW}/${randomUUID()}`, VIEW);
+  t.after(() => connection.close());
+  // The runner stopped the capture at its native deadline; the controller's clock reaches the lease's end on the third read.
+  const records = [view("ended", "capture_ended"), view("ended", "capture_ended"), view("ended", "lease_expired")];
+  let inspected = 0;
+  const stream = new LiveStream(connection, view("ready"), {}, async () => records[Math.min(inspected++, records.length - 1)]!);
+  assert.deepEqual(await stream.segments().next(), { done: true, value: { reason: "lease_expired", source: "controller" } });
+  assert.equal(inspected, 3);
+});

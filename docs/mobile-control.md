@@ -1477,10 +1477,11 @@ reported capture failure.
 The runner enforces a lease deadline and its own assignment slightly before the
 controller observes the same ending. A view is therefore first recorded as
 `disconnected` when its sockets dropped, or for a lease as `device_stopped` or
-`host_unavailable` when the runner had already reported its fenced emulator. Both
-are provisional for three seconds: any cause the controller then finds replaces
-`disconnected`, and the lease's or its key's own ending replaces a lease's device
-cause. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
+`host_unavailable` when the runner had already reported its fenced emulator, or as
+`capture_ended` when the runner had already stopped the capture and reported its
+encoder gone. These are provisional for three seconds: any cause the controller then
+finds replaces `disconnected`, and the lease's or its key's own ending replaces a
+lease's device or capture cause. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
 runner's fence report arrived first. The SDK waits out that window before it
 reports a provisional reason. A credential that was rotated or revoked can no longer
 read its view; the SDK reports `credential_rejected`.

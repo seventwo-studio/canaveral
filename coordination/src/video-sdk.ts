@@ -286,9 +286,10 @@ export class LiveStream {
       try {
         const view = await this.inspect(), reason = view.state === 'ended' ? view.endReason : undefined;
         if (reason) {
-          // A lease's device is stopped by its own fence a moment before the lease is recorded as
-          // ended, so for a lease that cause, like a bare disconnect, may still be replaced.
-          const provisional = reason === 'disconnected' || view.leaseId !== undefined && DEVICE_ENDED.includes(reason);
+          // A lease's device, and its capture, are stopped by its own fence a moment before the
+          // lease is recorded as ended, so for a lease such a cause, like a bare disconnect, may
+          // still be replaced.
+          const provisional = reason === 'disconnected' || view.leaseId !== undefined && [...DEVICE_ENDED, 'capture_ended'].includes(reason);
           if (!provisional) return !host || AUTHORITY_ENDED.includes(reason) ? { reason, source: 'controller' } : host;
           if (reason !== 'disconnected') device = reason;
         }

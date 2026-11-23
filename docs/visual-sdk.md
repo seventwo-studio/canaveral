@@ -209,8 +209,8 @@ A stream drops when the broker closes its sockets. A connection reset counts as 
 drop too: the viewer's pong or renewal can cross the broker's close and draw a reset
 instead of an orderly end. After a dropped stream the SDK reads the view for up to three seconds, because the
 host enforces a lease deadline slightly before the controller records it; within
-that time `disconnected`, and for a lease `device_stopped` or `host_unavailable`,
-may still give way to the lease's own ending. It does
+that time `disconnected`, and for a lease `device_stopped`, `host_unavailable` or
+`capture_ended`, may still give way to the lease's own ending. It does
 the same when the host reports `capture_failed`: if the
 view's lease, credential or device ended in that moment, that cause is reported
 with source `controller`; otherwise the host's reason stands. A worker
