@@ -1,0 +1,48 @@
+name: Runtime qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/qualification.yaml'
+      - 'qualification/**'
+      - 'script/qualification*.mjs'
+      - 'crates/model-execution/src/runtime-pins.json'
+      - 'crates/model-execution/src/runtime-qualified.json'
+      - 'crates/host-installer/src/pins.rs'
+      - 'fixtures/model-execution/real-model.json'
+      - 'coordination/src/host-runtimes/qualified-pins.ts'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/qualification.yaml'
+      - 'qualification/**'
+      - 'script/qualification*.mjs'
+      - 'crates/model-execution/src/runtime-pins.json'
+      - 'crates/model-execution/src/runtime-qualified.json'
+      - 'crates/host-installer/src/pins.rs'
+      - 'fixtures/model-execution/real-model.json'
+      - 'coordination/src/host-runtimes/qualified-pins.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Test the qualification tool
+        run: node --test script/qualification.test.mjs
+      - name: Check records, promotions and embedded tables
+        run: node script/qualification.mjs check

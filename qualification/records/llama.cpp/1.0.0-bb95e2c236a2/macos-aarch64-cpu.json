@@ -1,0 +1,123 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "llama.cpp",
+  "pinId": "1.0.0-bb95e2c236a2",
+  "identity": {
+    "version": "1.0.0",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-macos-arm64.tar.gz",
+    "sha256": "82b00abc740160e1b9980e6cc79c117345fa34af058c80e6c0a69aa8ddccde75",
+    "treeSha256": "6b41e2d33ea833181df066e3174e1a2335a26778cc835ab0b8a04353e7dab506",
+    "packageDigest": "0bcb74cf511ae9f55cb0ea85b5d8cf5a3bde213d0dbd9b4fe32bbc9b8d59b768"
+  },
+  "scope": {
+    "os": "macos",
+    "arch": "aarch64",
+    "acceleration": "cpu",
+    "executionMode": "cpu-generation"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "model": {
+      "name": "smollm2-135m-instruct:q4-k-m",
+      "revision": "9e6855bc4be717fca1ef21360a1db4b29d5c559a",
+      "sha256": "ed5fa30c487b282ec156c29062f1222e5c20875a944ac98289dbd242e947f747"
+    },
+    "steps": [
+      {
+        "name": "verify GGUF",
+        "outcome": "passed",
+        "durationMs": 422
+      },
+      {
+        "name": "enroll through public API",
+        "outcome": "passed",
+        "durationMs": 189
+      },
+      {
+        "name": "install package",
+        "outcome": "passed",
+        "durationMs": 2131
+      },
+      {
+        "name": "verify installed package",
+        "outcome": "passed",
+        "durationMs": 592
+      },
+      {
+        "name": "generate through public API",
+        "outcome": "passed",
+        "durationMs": 33042
+      },
+      {
+        "name": "check runtime cleanup",
+        "outcome": "passed",
+        "durationMs": 105
+      },
+      {
+        "name": "reject installed file tampering",
+        "outcome": "passed",
+        "durationMs": 1031
+      },
+      {
+        "name": "reinstall and verify package",
+        "outcome": "passed",
+        "durationMs": 3166
+      },
+      {
+        "name": "remove package",
+        "outcome": "passed",
+        "durationMs": 597
+      },
+      {
+        "name": "reject a truncated release archive and retry",
+        "outcome": "passed",
+        "durationMs": 28700
+      }
+    ],
+    "observations": {
+      "inputTokens": 26,
+      "outputTokens": 23,
+      "reservationHeldAfterJob": false,
+      "modelSource": "verified cache",
+      "tamperRepairExercised": true,
+      "archiveTransportRepairExercised": true
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/model-acceptance.yaml",
+    "workflowName": "Native model acceptance",
+    "runId": 45231181336,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336",
+    "event": "push",
+    "ref": "feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890815714,
+      "name": "macos-15 / llama.cpp",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336/job/137890815714"
+    },
+    "artifact": {
+      "id": 14847013076,
+      "name": "model-acceptance-macos-15-llama.cpp",
+      "digest": "sha256:b88ccee43b89a91c9eaae5c516fdc2c2249b1858c26c6fa903685881f83420fc"
+    },
+    "evidenceSha256": "998edad3360690544c9453268381701f6f41ce7f776dcc09587a3429907eb50b"
+  },
+  "runner": {
+    "label": "macos-15",
+    "imageOS": "macos15",
+    "imageVersion": "20261118.0550.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted macos-15 runner (macos15 20261118.0550.1), not a production host.",
+    "CPU-only generation of one pinned 135M-parameter GGUF through the public job API; no accelerator, resource-fit, throughput or concurrency evidence.",
+    "Isolation from untrusted local callers was not exercised."
+  ],
+  "recorded": "2026-11-23"
+}

@@ -1,0 +1,123 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "llama.cpp",
+  "pinId": "1.0.0-80ca19362dbc",
+  "identity": {
+    "version": "1.0.0",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-ubuntu-arm64.tar.gz",
+    "sha256": "dc7aa17a67884619b7223870aca9fd6addbc01717713b04a714add1c31137359",
+    "treeSha256": "3fe648c9faef09f5d7c331862a43359573369f1ee0b40a602134604b5309668b",
+    "packageDigest": "9f6ac230c734b6aca27dd9c6ea0ef89a14b6d8923ed02c2ac5340220a8b0e499"
+  },
+  "scope": {
+    "os": "linux",
+    "arch": "aarch64",
+    "acceleration": "cpu",
+    "executionMode": "cpu-generation"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "model": {
+      "name": "smollm2-135m-instruct:q4-k-m",
+      "revision": "9e6855bc4be717fca1ef21360a1db4b29d5c559a",
+      "sha256": "ed5fa30c487b282ec156c29062f1222e5c20875a944ac98289dbd242e947f747"
+    },
+    "steps": [
+      {
+        "name": "verify GGUF",
+        "outcome": "passed",
+        "durationMs": 131
+      },
+      {
+        "name": "enroll through public API",
+        "outcome": "passed",
+        "durationMs": 320
+      },
+      {
+        "name": "install package",
+        "outcome": "passed",
+        "durationMs": 1194
+      },
+      {
+        "name": "verify installed package",
+        "outcome": "passed",
+        "durationMs": 268
+      },
+      {
+        "name": "generate through public API",
+        "outcome": "passed",
+        "durationMs": 911
+      },
+      {
+        "name": "check runtime cleanup",
+        "outcome": "passed",
+        "durationMs": 12
+      },
+      {
+        "name": "reject installed file tampering",
+        "outcome": "passed",
+        "durationMs": 491
+      },
+      {
+        "name": "reinstall and verify package",
+        "outcome": "passed",
+        "durationMs": 2218
+      },
+      {
+        "name": "remove package",
+        "outcome": "passed",
+        "durationMs": 362
+      },
+      {
+        "name": "reject a truncated release archive and retry",
+        "outcome": "passed",
+        "durationMs": 14911
+      }
+    ],
+    "observations": {
+      "inputTokens": 26,
+      "outputTokens": 21,
+      "reservationHeldAfterJob": false,
+      "modelSource": "verified cache",
+      "tamperRepairExercised": true,
+      "archiveTransportRepairExercised": true
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/model-acceptance.yaml",
+    "workflowName": "Native model acceptance",
+    "runId": 45231181336,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336",
+    "event": "push",
+    "ref": "feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890815101,
+      "name": "ubuntu-24.04-arm / llama.cpp",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336/job/137890815101"
+    },
+    "artifact": {
+      "id": 14846453036,
+      "name": "model-acceptance-ubuntu-24.04-arm-llama.cpp",
+      "digest": "sha256:286a5773ae864f6657e8f0d284578e79f62f7ffb252a4783d57cb0d914bedc29"
+    },
+    "evidenceSha256": "a3b7a4e2b0e6b678ee5219d9a9d8f88789173e41215ccf576cd11108c62dbef3"
+  },
+  "runner": {
+    "label": "ubuntu-24.04-arm",
+    "imageOS": "ubuntu24-arm64",
+    "imageVersion": "20261116.188.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted ubuntu-24.04-arm runner (ubuntu24-arm64 20261116.188.1), not a production host.",
+    "CPU-only generation of one pinned 135M-parameter GGUF through the public job API; no accelerator, resource-fit, throughput or concurrency evidence.",
+    "Isolation from untrusted local callers was not exercised."
+  ],
+  "recorded": "2026-11-23"
+}

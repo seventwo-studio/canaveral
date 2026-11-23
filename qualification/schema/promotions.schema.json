@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/seventwo-studio/canaveral/qualification/schema/promotions.schema.json",
+  "title": "Canaveral runtime promotions",
+  "description": "Reviewed list of exact pins promoted to qualified for an explicit scope. See docs/runtime-qualification.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "promotions"],
+  "properties": {
+    "schema": { "const": "canaveral-runtime-promotions" },
+    "version": { "const": 1 },
+    "promotions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["backend", "pinId", "identity", "scope", "records", "supporting", "review", "limitations"],
+        "properties": {
+          "backend": { "enum": ["llama.cpp", "ollama", "vllm", "mlx-lm", "containerd", "libvirt", "apple-virtualization"] },
+          "pinId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}-[0-9a-f]{12}$" },
+          "identity": {
+            "oneOf": [
+              { "$ref": "#/$defs/modelIdentity" },
+              { "$ref": "#/$defs/containerdIdentity" },
+              { "$ref": "#/$defs/detectedIdentity" }
+            ]
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["os", "arch", "acceleration", "executionMode"],
+            "properties": {
+              "os": { "enum": ["linux", "macos"] },
+              "arch": { "enum": ["x86_64", "aarch64"] },
+              "acceleration": { "enum": ["cpu", "none", "kvm", "vz", "cuda", "rocm", "metal"] },
+              "executionMode": { "enum": ["cpu-generation", "root-lifecycle", "detect-only", "vm-boot"] }
+            }
+          },
+          "records": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/recordPath" } },
+          "supporting": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/recordPath" } },
+          "review": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pullRequest", "reviewer", "date"],
+            "properties": {
+              "pullRequest": { "type": "string", "pattern": "^https://github\\.com/seventwo-studio/canaveral/pull/[0-9]+$" },
+              "reviewer": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$" },
+              "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+            }
+          },
+          "limitations": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}$" },
+    "recordPath": { "type": "string", "pattern": "^[a-z0-9.-]+/[A-Za-z0-9.+_-]+/[a-z0-9_-]+\\.json$" },
+    "modelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "url", "sha256", "treeSha256", "packageDigest"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "url": { "type": "string", "pattern": "^https://" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "treeSha256": { "$ref": "#/$defs/sha256" },
+        "packageDigest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "containerdIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "assets"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "assets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "url", "bytes", "sha256"],
+            "properties": {
+              "name": { "enum": ["containerd", "runc", "cni-plugins"] },
+              "version": { "$ref": "#/$defs/version" },
+              "url": { "type": "string", "pattern": "^https://" },
+              "bytes": { "type": "integer", "minimum": 1 },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      }
+    },
+    "detectedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "source": { "enum": ["host-packages", "host-os"] }
+      }
+    }
+  }
+}

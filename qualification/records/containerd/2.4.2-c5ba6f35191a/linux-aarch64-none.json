@@ -1,0 +1,132 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "containerd",
+  "pinId": "2.4.2-c5ba6f35191a",
+  "identity": {
+    "version": "2.4.2",
+    "assets": [
+      {
+        "name": "containerd",
+        "version": "2.4.2",
+        "url": "https://github.com/containerd/containerd/releases/download/v2.4.2/containerd-static-2.4.2-linux-arm64.tar.gz",
+        "bytes": 30823894,
+        "sha256": "37b84b9534533672528141b9d815f58621a2fe5deee2daa84317800255756689"
+      },
+      {
+        "name": "runc",
+        "version": "1.5.3",
+        "url": "https://github.com/opencontainers/runc/releases/download/v1.5.3/runc.arm64",
+        "bytes": 10092000,
+        "sha256": "07b52aee923cc432c38fe4fb6809a08fc6471994efed650af3635350588a20be"
+      }
+    ]
+  },
+  "scope": {
+    "os": "linux",
+    "arch": "aarch64",
+    "acceleration": "none",
+    "executionMode": "root-lifecycle"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "steps": [
+      {
+        "name": "Build installer and coordination",
+        "outcome": "passed",
+        "durationMs": 53000
+      },
+      {
+        "name": "Unprivileged plan",
+        "outcome": "passed",
+        "durationMs": 0
+      },
+      {
+        "name": "Refuse the runner's preinstalled runtimes",
+        "outcome": "passed",
+        "durationMs": 0
+      },
+      {
+        "name": "Purge the preinstalled runtimes",
+        "outcome": "passed",
+        "durationMs": 17000
+      },
+      {
+        "name": "Prepare a root-owned installation ancestor",
+        "outcome": "passed",
+        "durationMs": 0
+      },
+      {
+        "name": "Cold install and privileged health check",
+        "outcome": "passed",
+        "durationMs": 2000
+      },
+      {
+        "name": "Verify receipt and detect file drift as the runner",
+        "outcome": "passed",
+        "durationMs": 1000
+      },
+      {
+        "name": "Run a pinned OCI task through the private socket",
+        "outcome": "passed",
+        "durationMs": 2000
+      },
+      {
+        "name": "Refuse removal with an active task and with a container record",
+        "outcome": "passed",
+        "durationMs": 1000
+      },
+      {
+        "name": "Same-pin reinstall preserves files, service and operator enablement",
+        "outcome": "passed",
+        "durationMs": 1000
+      },
+      {
+        "name": "Remove owned files and preserve the operator link",
+        "outcome": "passed",
+        "durationMs": 0
+      }
+    ],
+    "observations": {
+      "registryState": "verified",
+      "ociImage": "docker.io/library/busybox@sha256:f6a95d611e0a8780fabdb2aec43e31275b2720dfefa3e41b16835bfc42454478"
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/host-acceptance.yaml",
+    "workflowName": "Host runtime acceptance",
+    "runId": 45231181163,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181163",
+    "event": "push",
+    "ref": "feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890814739,
+      "name": "containerd (ubuntu-24.04-arm)",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181163/job/137890814739"
+    },
+    "artifact": {
+      "id": 14847118409,
+      "name": "host-containerd-ubuntu-24.04-arm",
+      "digest": "sha256:947cfc381e0cfc328887facfa8e9eb8dd6953ae31c6b4d2523d7c74f55fad6d2"
+    },
+    "evidenceSha256": "3bec98dea014f993439ab59f0f407506ac8a0fb38ebff870747ff063625084b7"
+  },
+  "runner": {
+    "label": "ubuntu-24.04-arm",
+    "imageOS": "ubuntu24-arm64",
+    "imageVersion": "20261116.188.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted ubuntu-24.04-arm runner (ubuntu24-arm64 20261116.188.1), not a production host.",
+    "The runner purged its preinstalled Docker, containerd and Podman before installation.",
+    "One digest-pinned OCI task ran through the private socket; no workload isolation or resource evidence.",
+    "Crash recovery: fixture-only: downloads precede the journal and remaining durable boundaries have no deterministic external pause."
+  ],
+  "recorded": "2026-11-23"
+}

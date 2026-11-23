@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/seventwo-studio/canaveral/qualification/schema/record.schema.json",
+  "title": "Canaveral runtime qualification record",
+  "description": "Durable copy of one acceptance cell's evidence. A record never qualifies a pin by itself; see docs/runtime-qualification.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "kind", "backend", "identity", "scope", "outcome", "blockers", "evidence", "source", "runner", "limitations", "recorded"],
+  "properties": {
+    "schema": { "const": "canaveral-runtime-qualification-record" },
+    "version": { "const": 1 },
+    "kind": { "enum": ["runtime", "service"] },
+    "backend": { "enum": ["llama.cpp", "ollama", "vllm", "mlx-lm", "containerd", "libvirt", "apple-virtualization", "canaverald"] },
+    "pinId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}-[0-9a-f]{12}$" },
+    "identity": {
+      "oneOf": [
+        { "$ref": "#/$defs/modelIdentity" },
+        { "$ref": "#/$defs/containerdIdentity" },
+        { "$ref": "#/$defs/detectedIdentity" },
+        { "$ref": "#/$defs/serviceIdentity" }
+      ]
+    },
+    "scope": { "$ref": "#/$defs/scope" },
+    "outcome": { "enum": ["passed", "blocked", "failed"] },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "detail"],
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,95}$" },
+          "detail": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps", "observations"],
+      "properties": {
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "revision", "sha256"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "outcome", "durationMs"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "outcome": { "enum": ["passed", "failed", "running"] },
+              "durationMs": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "observations": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow", "workflowName", "runId", "runAttempt", "runUrl", "event", "ref", "commit", "job", "artifact", "evidenceSha256"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "workflow": { "enum": [".github/workflows/model-acceptance.yaml", ".github/workflows/host-acceptance.yaml", ".github/workflows/daemon-acceptance.yaml"] },
+        "workflowName": { "type": "string", "minLength": 1 },
+        "runId": { "type": "integer", "minimum": 1 },
+        "runAttempt": { "type": "integer", "minimum": 1 },
+        "runUrl": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+$" },
+        "event": { "enum": ["push", "schedule", "workflow_dispatch"] },
+        "ref": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "job": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "conclusion", "url"],
+          "properties": {
+            "id": { "type": "integer", "minimum": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "conclusion": { "type": "string", "minLength": 1 },
+            "url": { "type": "string", "pattern": "^https://github\\.com/" }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "digest"],
+          "properties": {
+            "id": { "type": "integer", "minimum": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        },
+        "evidenceSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "imageOS", "imageVersion"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "imageOS": { "type": "string", "minLength": 1 },
+        "imageVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "limitations": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "recorded": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,80}$" },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch", "acceleration", "executionMode"],
+      "properties": {
+        "os": { "enum": ["linux", "macos"] },
+        "arch": { "enum": ["x86_64", "aarch64"] },
+        "acceleration": { "enum": ["cpu", "none", "kvm", "vz", "cuda", "rocm", "metal"] },
+        "executionMode": { "enum": ["cpu-generation", "root-lifecycle", "detect-only", "vm-boot", "service"] }
+      }
+    },
+    "modelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "url", "sha256", "treeSha256", "packageDigest"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "url": { "type": "string", "pattern": "^https://" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "treeSha256": { "$ref": "#/$defs/sha256" },
+        "packageDigest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "containerdIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "assets"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "assets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "url", "bytes", "sha256"],
+            "properties": {
+              "name": { "enum": ["containerd", "runc", "cni-plugins"] },
+              "version": { "$ref": "#/$defs/version" },
+              "url": { "type": "string", "pattern": "^https://" },
+              "bytes": { "type": "integer", "minimum": 1 },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      }
+    },
+    "detectedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "source": { "enum": ["host-packages", "host-os"] }
+      }
+    },
+    "serviceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manager", "node", "account"],
+      "properties": {
+        "manager": { "enum": ["systemd", "launchd"] },
+        "node": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "account": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    }
+  }
+}

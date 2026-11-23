@@ -1,0 +1,85 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "libvirt",
+  "pinId": "10.0.0-f0adbea90efc",
+  "identity": {
+    "version": "10.0.0",
+    "source": "host-packages"
+  },
+  "scope": {
+    "os": "linux",
+    "arch": "aarch64",
+    "acceleration": "none",
+    "executionMode": "detect-only"
+  },
+  "outcome": "blocked",
+  "blockers": [
+    {
+      "code": "libvirt_kvm_missing",
+      "detail": "The /dev/kvm device is unavailable."
+    }
+  ],
+  "evidence": {
+    "steps": [
+      {
+        "name": "Build coordination",
+        "outcome": "passed",
+        "durationMs": 15000
+      },
+      {
+        "name": "Install libvirt and host QEMU",
+        "outcome": "passed",
+        "durationMs": 38000
+      },
+      {
+        "name": "Check KVM device and prepare runner access",
+        "outcome": "passed",
+        "durationMs": 0
+      },
+      {
+        "name": "Check libvirt registry detection",
+        "outcome": "passed",
+        "durationMs": 0
+      }
+    ],
+    "observations": {
+      "registryState": "installed",
+      "kvmDevicePresent": false
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/host-acceptance.yaml",
+    "workflowName": "Host runtime acceptance",
+    "runId": 45231181163,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181163",
+    "event": "push",
+    "ref": "feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890814712,
+      "name": "virtualization (ubuntu-24.04-arm, libvirt)",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181163/job/137890814712"
+    },
+    "artifact": {
+      "id": 14847701016,
+      "name": "host-libvirt-ubuntu-24.04-arm",
+      "digest": "sha256:4d8b022e34c7ae8a0ef715f0dd73e9c81d017d5c149d22615a41f96b8e055c4c"
+    },
+    "evidenceSha256": "6a016e9c6ae848fb7b93187681cf88829ea641b27f1297c9b1f54942e550c256"
+  },
+  "runner": {
+    "label": "ubuntu-24.04-arm",
+    "imageOS": "ubuntu24-arm64",
+    "imageVersion": "20261116.188.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted ubuntu-24.04-arm runner (ubuntu24-arm64 20261116.188.1), not a production host.",
+    "Detection only; no guest was booted."
+  ],
+  "recorded": "2026-11-23"
+}

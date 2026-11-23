@@ -1,0 +1,123 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "ollama",
+  "pinId": "0.40.17-91d10e732dd3",
+  "identity": {
+    "version": "0.40.17",
+    "url": "https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-linux-arm64.tar.zst",
+    "sha256": "0ec632480057cef6300459d1fa7dbbb3fc188b9a7d56cd0b0a72d05927d90ecc",
+    "treeSha256": "807c37847715ed9a9cf96502c3229e253bd89f1a0bf1f8e6b097c385c736141d",
+    "packageDigest": "52b2b8a7126db3bc24d23c6934492fec483b8cf878322ca78ec5ef36bb5eff2f"
+  },
+  "scope": {
+    "os": "linux",
+    "arch": "aarch64",
+    "acceleration": "cpu",
+    "executionMode": "cpu-generation"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "model": {
+      "name": "smollm2-135m-instruct:q4-k-m",
+      "revision": "9e6855bc4be717fca1ef21360a1db4b29d5c559a",
+      "sha256": "ed5fa30c487b282ec156c29062f1222e5c20875a944ac98289dbd242e947f747"
+    },
+    "steps": [
+      {
+        "name": "verify GGUF",
+        "outcome": "passed",
+        "durationMs": 141
+      },
+      {
+        "name": "enroll through public API",
+        "outcome": "passed",
+        "durationMs": 319
+      },
+      {
+        "name": "install package",
+        "outcome": "passed",
+        "durationMs": 11460
+      },
+      {
+        "name": "verify installed package",
+        "outcome": "passed",
+        "durationMs": 314
+      },
+      {
+        "name": "generate through public API",
+        "outcome": "passed",
+        "durationMs": 1865
+      },
+      {
+        "name": "check runtime cleanup",
+        "outcome": "passed",
+        "durationMs": 11
+      },
+      {
+        "name": "reject installed file tampering",
+        "outcome": "passed",
+        "durationMs": 378
+      },
+      {
+        "name": "reinstall and verify package",
+        "outcome": "passed",
+        "durationMs": 12045
+      },
+      {
+        "name": "remove package",
+        "outcome": "passed",
+        "durationMs": 409
+      },
+      {
+        "name": "reject a truncated release archive and retry",
+        "outcome": "passed",
+        "durationMs": 31888
+      }
+    ],
+    "observations": {
+      "inputTokens": 17,
+      "outputTokens": 25,
+      "reservationHeldAfterJob": false,
+      "modelSource": "verified cache",
+      "tamperRepairExercised": true,
+      "archiveTransportRepairExercised": true
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/model-acceptance.yaml",
+    "workflowName": "Native model acceptance",
+    "runId": 45231181336,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336",
+    "event": "push",
+    "ref": "feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890815628,
+      "name": "ubuntu-24.04-arm / ollama",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336/job/137890815628"
+    },
+    "artifact": {
+      "id": 14845679020,
+      "name": "model-acceptance-ubuntu-24.04-arm-ollama",
+      "digest": "sha256:0a1faa975a14ec68de487590b22924ac581990eb36a70e5739f636876bf27de1"
+    },
+    "evidenceSha256": "053c38e5ed932b53e9c188c3c74254843495799022f714cfd0bed1e2211a8830"
+  },
+  "runner": {
+    "label": "ubuntu-24.04-arm",
+    "imageOS": "ubuntu24-arm64",
+    "imageVersion": "20261116.188.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted ubuntu-24.04-arm runner (ubuntu24-arm64 20261116.188.1), not a production host.",
+    "CPU-only generation of one pinned 135M-parameter GGUF through the public job API; no accelerator, resource-fit, throughput or concurrency evidence.",
+    "Isolation from untrusted local callers was not exercised."
+  ],
+  "recorded": "2026-11-23"
+}
