@@ -6,8 +6,10 @@ COPY dashboard/package*.json ./dashboard/
 RUN npm --prefix coordination ci --ignore-scripts && npm --prefix dashboard ci --ignore-scripts
 COPY coordination ./coordination
 COPY dashboard ./dashboard
-# prepare_cli.mjs imports package_checks.mjs to verify the emitted module closure.
-COPY script/prepare_cli.mjs script/package_checks.mjs ./script/
+# prepare_cli.mjs imports package_checks.mjs to verify the emitted module closure
+# and the embedded qualified-pin table against the reviewed promotions.
+COPY script/prepare_cli.mjs script/package_checks.mjs script/qualification.mjs ./script/
+COPY qualification/promotions.json ./qualification/promotions.json
 RUN npm --prefix coordination run build && npm --prefix dashboard run build
 
 FROM rust:1.99.1-bookworm AS rust-build
@@ -15,6 +17,8 @@ WORKDIR /source
 ENV CARGO_BUILD_JOBS=2
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+# The executor's build script checks its qualified-pin table against these promotions.
+COPY qualification/promotions.json ./qualification/promotions.json
 COPY coordination/src/providers/apple-native.rs ./coordination/src/providers/apple-native.rs
 RUN cargo build --release --workspace --bins --locked -j 2
 

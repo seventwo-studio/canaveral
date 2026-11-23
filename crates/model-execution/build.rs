@@ -97,9 +97,10 @@ fn check_qualified_table() -> Result<(), String> {
             return Err(format!("{expected} is not the exact catalog pin"));
         }
     }
-    // In a source checkout, also require the table to be generated from the promotions.
+    // Fail closed: the table must be generated from the reviewed promotions, so a
+    // build context without them (for example a container stage) cannot embed it.
     let promotions = dir.join("../../qualification/promotions.json");
-    if promotions.exists() {
+    {
         let source = read(&promotions)?;
         let mut generated: Vec<String> = source["promotions"]
             .as_array()
