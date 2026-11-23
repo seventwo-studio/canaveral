@@ -489,7 +489,9 @@ async function exerciseVm() {
         nativeState: native ? virsh('domstate', machineId) : 'undefined',
         modes: tail('sudo', ['stat', '-c', '%n %U:%G %a', storage, storage + '/' + machineId, disk, template.image]),
         qemuLog: tail('sudo', ['tail', '-n', '8', '/var/log/libvirt/qemu/cvm-' + machineId + '.log']),
-        libvirtd: tail('sudo', ['journalctl', '-u', 'libvirtd', '--no-pager', '-n', '8', '-o', 'cat']),
+        libvirtd: tail('sudo', ['journalctl', '-u', 'libvirtd', '--no-pager', '-n', '8', '-o', 'cat', '--grep', 'error|denied|cvm-']),
+        apparmor: tail('sudo', ['journalctl', '-k', '--no-pager', '-n', '4', '-o', 'cat', '--grep', 'apparmor="DENIED"']),
+        daemon: tail('kubectl', ['-n', 'canaverald', 'logs', 'daemonset/canaverald', '--tail=12']),
       });
       throw new Error(error.message + ': ' + context);
     });
