@@ -70,6 +70,8 @@ export async function nativeService(paths) {
   const template = await readFile(join(repo, 'deploy', linux ? 'systemd' : 'launchd', name), 'utf8');
   const staged = join(root, name);
   const program = join(root, 'coordination');
+  const stopProbe = join(root, 'systemd-exit.mjs');
+  let stopReceipt = join(host, 'enrollment-exit.json');
   let createdUser = false, installed = false, loaded = false;
   let uid = process.getuid();
 
@@ -93,7 +95,7 @@ export async function nativeService(paths) {
       definition = definition.replaceAll(from, linux ? to : xml(to));
     }
     if (linux) {
-      definition = definition.replace('Type=simple\n', `Type=simple\nUser=${user}\nEnvironment="NODE_OPTIONS=" "NODE_PATH="\n`)
+      definition = definition.replace('Type=simple\n', `Type=simple\nUser=${user}\nEnvironment="NODE_OPTIONS=" "NODE_PATH="\nExecStopPost=${node} ${stopProbe} ${stopReceipt}\n`)
         .replace(/\nRestart=.*\nRestartSec=.*\n/, '\nRestart=no\n');
       if (!enroll) definition = definition.replace(/\nEnvironment=CANAVERAL_ENROLLMENT_TOKEN_FILE=.*\n/, '\n');
     } else {
@@ -108,7 +110,7 @@ export async function nativeService(paths) {
 
   async function show() {
     if (!linux) return ctl('print', target);
-    return ctl('show', target, '--property=MainPID,ActiveState,Result,ExecMainCode,ExecMainStatus');
+    return ctl('show', target, '--property=MainPID,ActiveState,Result');
   }
 
   async function stop() {
@@ -117,8 +119,10 @@ export async function nativeService(paths) {
       const status = await show();
       assert.match(status, /^ActiveState=inactive$/m);
       assert.match(status, /^Result=success$/m);
-      assert.match(status, /^ExecMainCode=1$/m, 'systemd must report normal exit');
-      assert.match(status, /^ExecMainStatus=0$/m);
+      assert.match(status, /^MainPID=0$/m);
+      // Inactive units can lose ExecMainCode when systemd unloads them.
+      const exit = JSON.parse(await sudo('-u', user, 'cat', stopReceipt));
+      assert.deepEqual(exit, { result: 'success', code: 'exited', status: '0' });
     } else {
       await ctl('kill', 'SIGTERM', target);
       await eventually('a normal launchd exit', async () => {
@@ -154,6 +158,7 @@ export async function nativeService(paths) {
       await cp(process.execPath, node);
       await chmod(node, 0o755);
       if (linux) {
+        await cp(new URL('./systemd-exit.mjs', import.meta.url), stopProbe);
         await sudo('useradd', '--system', '--no-create-home', '--home-dir', host, '--shell', '/usr/sbin/nologin', user);
         createdUser = true;
         uid = Number((await invoke('id', ['-u', user])).trim());
@@ -170,7 +175,8 @@ export async function nativeService(paths) {
       if (!enroll) {
         // The first instance was stopped cleanly. Reload without the
         // enrollment file so continued heartbeats prove saved authentication.
-        if (!linux) {
+        if (linux) stopReceipt = join(host, 'restart-exit.json');
+        else {
           await ctl('bootout', target);
           loaded = false;
         }
