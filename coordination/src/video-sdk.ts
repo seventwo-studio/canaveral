@@ -215,6 +215,9 @@ function ttl(value: unknown): Record<string, number> {
 /** Controller findings that the view's own authority ended, as opposed to its capture. */
 const DEVICE_ENDED = ['device_stopped', 'host_unavailable'];
 const AUTHORITY_ENDED = ['lease_expired', 'lease_released', 'lease_failed', 'key_rotated', 'application_revoked', 'access_revoked', ...DEVICE_ENDED];
+/** A failure of the session connection itself: it ended, was reset or could not be written. A
+ * worker's error control is not one; `checked` throws that from a received message. */
+const transportFailure = (error: unknown): boolean => error instanceof SessionError && ['session_disconnected', 'session_incomplete'].includes(error.code);
 const count = (value: unknown, maximum: number, minimum = 0): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -233,6 +236,8 @@ export class LiveStream {
   private needKey = true;
   private renewed = performance.now();
   private awaitingRenewal: number | undefined;
+  /** The connection itself failed, as opposed to a worker's error control. */
+  private dropped = false;
   constructor(readonly connection: SessionChannel, readonly view: LiveView, private readonly options: LiveOptions, private readonly inspect: () => Promise<LiveView>) {
     this.authorizationDeadline = view.authorizationDeadline;
     options.signal?.addEventListener('abort', () => this.connection.close(), { once: true });
@@ -246,9 +251,13 @@ export class LiveStream {
   private async message(): Promise<Buffer | Record<string, unknown>> {
     const limit = this.options.timeoutMs ?? 30000, cadence = this.view.ttlSeconds * 1000 / 3;
     for (;;) {
-      if (this.options.autoRenew !== false && performance.now() - this.renewed >= cadence) await this.renew();
+      // A renewal that cannot be written leaves the connection closed; the read below reports it.
+      if (this.options.autoRenew !== false && performance.now() - this.renewed >= cadence) await this.renew().catch((error: unknown) => { if (!transportFailure(error)) throw error; });
       if (this.awaitingRenewal !== undefined && performance.now() - this.awaitingRenewal > limit) throw new SessionError('The controller did not answer a live view renewal.', 'session_disconnected', this.view.id);
-      const value = checked(await this.connection.receive(Math.min(1000, cadence)), this.view.id);
+      let received: Awaited<ReturnType<SessionChannel['receive']>>;
+      try { received = await this.connection.receive(Math.min(1000, cadence)); }
+      catch (error) { this.dropped ||= transportFailure(error); throw error; }
+      const value = checked(received, this.view.id);
       if (value === null) continue;
       if (!Buffer.isBuffer(value) && value.type === 'renewal') {
         if (Object.keys(value).sort().join(',') !== 'authorizationDeadline,renewed,type' || typeof value.renewed !== 'boolean' || typeof value.authorizationDeadline !== 'string' || !Number.isFinite(Date.parse(value.authorizationDeadline))) throw new SessionError('Invalid live renewal reply.', 'session_protocol_error', this.view.id);
@@ -324,7 +333,10 @@ export class LiveStream {
       }
     } catch (error) {
       if (this.closedHere || this.options.signal?.aborted) return this.ended = { reason: this.closedHere ? 'closed' : 'cancelled', source: 'client' };
-      if (error instanceof SessionError && error.code === 'session_disconnected') return this.ended = await this.resolve();
+      // The broker ends a view by closing its sockets. A pong or renewal that crosses that close
+      // draws a reset instead of an orderly end, which the connection reports as a failure; either
+      // way the view's record says why it ended.
+      if (this.dropped || error instanceof SessionError && error.code === 'session_disconnected') return this.ended = await this.resolve();
       throw interrupted(error, this.view.id);
     } finally { this.connection.close(); }
   }
