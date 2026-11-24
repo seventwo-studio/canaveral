@@ -1325,28 +1325,61 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
   assert.deepEqual([untouched.state, untouched.mappingRemoved], ["pending", false]);
   assert.equal(h.calls(fenced.machineId, "reverse --no-rebind"), 0);
   // Its own host attaches at the next heartbeat, and the tunnel works.
-  const first = await holder.tunnels.connect(pending, { target: { port: echo.port } });
+  const stale = await holder.tunnels.connect(pending, { target: { port: echo.port } });
+  const staleReader = new Reader(await deviceConnect(h, fenced.machineId, 8081));
+  staleReader.socket.write("ECHO up\n"); assert.equal(await staleReader.line(), "echo up");
+
+  // The runner loses controller contact: its last heartbeat is suddenly older than the freshness
+  // window. Nothing else changed. The device runs, its lease guard and supervisor hold, and the
+  // controller and its broker still consider the tunnel authorized. Only the runner's own tunnel
+  // authority (HostRunner.tunnelAuthorized) can end this tunnel, and it does so within a second,
+  // seconds before the next heartbeat restores contact.
+  await heartbeat();
+  const supervisorOf = (lease: Lease) => JSON.parse(readFileSync(join(h.storage(lease.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
+  let since = Date.now();
+  h.runner().lastContact -= 60;
+  assert.equal(h.runner().fresh(), false);
+  await staleReader.finished(10000);
+  let elapsed = Date.now() - since;
+  t.diagnostic(`lost controller contact: the device's connection closed after ${elapsed} ms`);
+  assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
+  assert.notEqual((await stale.closed).reason, "closed");
+  assert.equal(h.runner().guard.allowed(fenced.machineId), true, "the lease guard never fenced");
+  assert.ok(alive(supervisorOf(fenced).supervisorPid) && alive(supervisorOf(fenced).childPid), "the device kept running");
+  assert.equal(await leaseState(fenced), "ready", "the lease continues");
+  // What the holder finds after such an interruption. The runner could not prove the removal while
+  // it had no authority over the device, so the ended tunnel keeps its device port, but not a
+  // place in the lease's allowance. Once contact is back the runner confirms the removal by
+  // itself, and the same port opens under a new UUID.
+  await until(async () => (await holder.tunnels.inspect(pending.id)).state === "disconnected", "the ended tunnel's state");
+  assert.equal((await holder.tunnels.inspect(pending.id)).mappingRemoved, false);
+  await refused(holder.tunnels.create({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081 }), 409, "tunnel_port_busy");
+  await until(async () => (await holder.tunnels.inspect(pending.id)).mappingRemoved === true, "the runner's retried removal", 30000);
+  assert.deepEqual(mappingsOf(h, fenced.machineId).reverse, []);
+  const first = await holder.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
   const firstReader = new Reader(await deviceConnect(h, fenced.machineId, 8081));
   firstReader.socket.write("ECHO up\n"); assert.equal(await firstReader.line(), "echo up");
   const second = await client(h, orphaned).tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
   const secondReader = new Reader(await deviceConnect(h, orphaned.machineId, 8081));
   secondReader.socket.write("ECHO up\n"); assert.equal(await secondReader.line(), "echo up");
 
-  // The runner's lease guard fences the lease locally, as it does at its own deadline or without
-  // controller contact. The controller hears of it only with the next heartbeat, seconds away.
+  // The runner's lease guard fences the lease locally, as it does at its own deadline. The runner
+  // acts on that in more than one place (its tunnel authority, and the reconcile loop that stops a
+  // fenced device), so this bound holds for the runner as a whole. The controller hears of it only
+  // with the next heartbeat, seconds away.
   await heartbeat();
-  let since = Date.now();
+  since = Date.now();
   h.runner().guard.records.get(fenced.machineId)!.fenced = true;
   await firstReader.finished(10000);
-  let elapsed = Date.now() - since;
+  elapsed = Date.now() - since;
   t.diagnostic(`local fence: the device's connection closed after ${elapsed} ms`);
-  assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
+  assert.ok(elapsed < 1000, `the runner's own lease guard took ${elapsed} ms`);
   assert.notEqual((await first.closed).reason, "closed");
   assert.equal(await leaseState(fenced), "ready", "the controller had not been told yet");
 
   // The supervisor dies. The runner's once-a-second device check sees the free lock and ends the tunnel.
   await heartbeat();
-  const group = JSON.parse(readFileSync(join(h.storage(orphaned.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
+  const group = supervisorOf(orphaned);
   since = Date.now();
   process.kill(group.supervisorPid, "SIGKILL");
   await secondReader.finished(10000);
