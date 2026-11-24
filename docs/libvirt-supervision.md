@@ -42,8 +42,7 @@ inherited loader environment variables before invoking the helper.
 
 `canaverald runtimes status` reports `leases: {eligible: true}` on the libvirt
 row when the helper verifies and the kernel supports peer pidfds. Otherwise it
-reports `libvirt_lease_helper_unverified`, `libvirt_lease_kernel_unsupported`
-or `libvirt_lease_sandbox_unsupported`.
+reports `libvirt_lease_helper_unverified` or `libvirt_lease_kernel_unsupported`.
 The host refuses to start with libvirt lease images declared on a kernel older
 than Linux 6.5 (`libvirt_lease_kernel_unsupported`) or without the helper.
 
