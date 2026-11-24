@@ -12,9 +12,10 @@ without TPM.
 Each step requests a consumer lease through the public request API and checks
 the boot through the guest's DHCP lease, the transient domain, QEMU's account
 and the storage modes. It then ends the lease one way: release, expiry,
-SIGKILL of the daemon, a kernel OOM kill of the guardian, a guardian killed
-mid-fence, a libvirtd restart, or a deadline that passes while libvirtd is
-frozen. Every step requires a fresh `VIR_ERR_NO_DOMAIN` lookup, no QEMU process
+SIGKILL of the daemon, a guardian killed mid-fence, a libvirtd restart, a
+deadline that passes while libvirtd is frozen, or a kernel OOM kill of the
+guardian under pressure in the service cgroup (a guardian that fences itself
+first under that pressure is also accepted and recorded). Every step requires a fresh `VIR_ERR_NO_DOMAIN` lookup, no QEMU process
 for the lease UUID, removed lease storage, a released reservation and a refused
 `virsh start`. The JSON evidence names each step, its outcome, timings and the
 guardian receipts.

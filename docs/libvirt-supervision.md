@@ -168,8 +168,22 @@ It covers boot evidence, release, expiry, daemon SIGKILL, a guardian OOM kill,
 a guardian killed mid-fence, a libvirtd restart, a deadline while libvirtd is
 frozen (the `CAP_KILL` path), an idle lease across many keepalive intervals,
 refused `virsh start` and autostart, and the `CLOCK_BOOTTIME` time-namespace
-offset. That proves one hosted kernel and libvirt build. Kubernetes pods, UEFI
-or TPM guests, other distributions, suspend and real host reboots remain
+offset.
+
+[Run 45442285242](https://github.com/seventwo-studio/canaveral/actions/runs/45442285242)
+(commit `9348874`, ubuntu-24.04 image 20261116.376.1, kernel 7.0.0-1017-azure,
+libvirt 10.0.0, QEMU 8.2.2) passed every step. QEMU ran as `libvirt-qemu` with
+group `canaveral-vm` and the guest took a DHCP lease. The domain was destroyed
+0.3 s after an expiry deadline. With libvirtd frozen past the deadline, the
+guardian killed QEMU through a pidfd 10.5 s after the deadline (one bounded
+probe), and stop was proven once libvirtd resumed. The kernel OOM killer chose
+the guardian (`oom_score_adj` 1000) inside the service cgroup, and systemd's
+`OOMPolicy=stop` then stopped the unit. Under memory-cgroup pressure a guardian
+can instead fence itself when its reads fail; the acceptance step accepts and
+records either ending.
+
+That proves one hosted kernel and libvirt build. Kubernetes pods, UEFI or TPM
+guests, other distributions, arm64, suspend and real host reboots remain
 unaccepted.
 
 ## Mounted host socket in Kubernetes

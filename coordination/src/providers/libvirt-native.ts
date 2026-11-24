@@ -11,8 +11,6 @@ import type { RecordValue } from "./libvirt-ownership.ts";
 
 // The libvirt lease guardian takes the daemon's pidfd from its inherited socket with
 // SO_PEERPIDFD, which Linux added in 6.5. Older kernels cannot offer libvirt leases.
-export const LIBVIRT_KERNEL_CODE = "libvirt_lease_kernel_unsupported";
-export const LIBVIRT_HELPER_CODE = "libvirt_lease_helper_unverified";
 const unverified = (): ServiceError => new ServiceError("The configured libvirt lease helper could not be verified.", 409, { code: "libvirt_lease_helper_unverified" });
 const unsupportedKernel = (): ServiceError => new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 409, { code: "libvirt_lease_kernel_unsupported" });
 /** Exit status of `canaveral-libvirt-native check` when the kernel lacks SO_PEERPIDFD (EX_CONFIG). */
