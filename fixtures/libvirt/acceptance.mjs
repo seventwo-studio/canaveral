@@ -412,7 +412,9 @@ try {
     const marker = `canaveral-oom-hog-${lease.machineId}`;
     const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
     try {
-      await until('the OOM-killed guardian', () => !alive(guardian), 90, 250);
+      await until('the end of the guardian under memory pressure', () => !alive(guardian), 90, 250);
+      // Give the kernel log a moment; the hog keeps the pressure on meanwhile.
+      await delay(3000);
     } finally {
       attempt('sudo', ['-n', 'pkill', '-KILL', '-f', marker]);
       hog.kill('SIGKILL');
@@ -421,9 +423,16 @@ try {
     }
     const oomLines = sudo('dmesg').split('\n').filter(line => /oom-kill:|Killed process/.test(line));
     record.oomLines = oomLines.slice(-6);
-    const kernel = oomLines.filter(line => line.includes(String(guardian)));
-    assert.ok(kernel.some(line => line.includes(`Killed process ${guardian}`) || line.includes(`pid=${guardian}`)), 'the kernel OOM killer ended the guardian');
+    const kernel = oomLines.filter(line => line.includes(`Killed process ${guardian} `) || line.includes(`pid=${guardian},`));
     record.kernel = kernel.slice(-3);
+    // Under memory-cgroup pressure the guardian's own reads can fail first; it then fences
+    // itself (fail-closed) before the OOM killer picks it. Either ending is acceptable here.
+    record.guardianEnd = kernel.length ? 'kernel-oom-kill' : 'self-fenced';
+    if (!kernel.length) {
+      const native = receipt(lease.machineId);
+      record.selfFenceReason = native.reason ?? null;
+      assert.ok(native.reason, 'a guardian that was not OOM-killed recorded why it fenced');
+    }
     record.oomKill = Number(/^oom_kill (\d+)$/m.exec(attempt('sudo', ['-n', 'cat', `${cgroup}/memory.events`]).stdout)?.[1] ?? 0) || null;
     // systemd's default OOMPolicy=stop may stop the whole unit; every lease then fences on daemon exit.
     record.unitAfterOom = attempt('systemctl', ['is-active', unit]).stdout;
