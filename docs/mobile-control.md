@@ -1025,7 +1025,8 @@ controller and runner event loop stalled for up to 1.4 seconds, and key rotation
 2.5 seconds to close a tunnel. The same applies to live views and recordings. A live
 view ends with its lease, key or device within about a second, and a recording's own
 duration and exit grace are counted in wall time. The test suite runs its timing-budget
-files one at a time, after the rest (`script/coordination_tests.mjs`).
+files as their own group, one file at a time (`npm run test:timed`, which `npm test`
+runs after the rest and CI runs as a separate job; see `script/coordination_tests.mjs`).
 
 - The broker checks tunnel authority up to four times a second using the lease key,
   application, lease, assignment and host state. Per direction and check interval it
