@@ -126,7 +126,10 @@ gateway; do not remove existing direct-origin protections.
 
 Port tunnels are off unless the member's host declares them and the application's policy
 allows them. They accept only the lease's current key, hold no capacity reservation and
-end with the lease, a fence, a key rotation or supervisor loss. A tunnel never extends a
+end with the lease, a fence, a key rotation or supervisor loss. A tunnel also ends when
+its device stops being ready or its device mapping disappears; nothing reconnects, and
+the holder opens a new tunnel with a new UUID. The holder chooses what a reverse tunnel
+reaches on their own machine. A tunnel never extends a
 lease and never delays its cleanup; see
 [lease port tunnels](mobile-control.md#lease-port-tunnels) for the contract and its
 native acceptance gaps.

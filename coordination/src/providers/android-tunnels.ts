@@ -22,9 +22,11 @@
  * cannot reconfigure. A guest that subverts its adb daemon could reach host endpoints through
  * adb with or without a tunnel; refusing debuggable images is the control for that, unchanged.
  *
- * Native acceptance is open. Whether a given emulator and platform-tools release honours a
- * `localfilesystem:` endpoint for `adb reverse`, the exact `--list` formats, and behaviour when
- * the device port is already bound are covered by fixtures with a stand-in adb only. */
+ * Native acceptance is mostly open. One recorded trial (coordination/native-acceptance/
+ * mobile-parity.md) carried a single request each way and saw both mappings removed, with
+ * emulator 37.2.13 and platform-tools 37.0.1. Other releases, the exact `--list` formats,
+ * behaviour when the device port is already bound, a vanished mapping and concurrent streams are
+ * covered by fixtures with a stand-in adb only. */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { connect, createServer } from "node:net";

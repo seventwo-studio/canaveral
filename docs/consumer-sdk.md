@@ -164,7 +164,7 @@ const tunnel = await lease.tunnels.open({
 // This machine reaches port 9229 on the device through a loopback listener.
 const inspect = await lease.tunnels.open({ id: otherUuid, member: "primary", direction: "forward", devicePort: 9229 });
 console.log(inspect.local); // { host: "127.0.0.1", port: <ephemeral> }
-const end = await tunnel.closed; // { reason, code?, state? }; never rejects
+const end = await tunnel.closed; // { reason, code?, state?, endReason? }; never rejects
 ```
 
 - `open(request, { timeoutMs?, signal? })` creates (or replays) the tunnel, attaches and
@@ -182,13 +182,29 @@ const end = await tunnel.closed; // { reason, code?, state? }; never rejects
   whose tunnel already attached or ended is refused locally with `tunnel_ended`, and a new
   tunnel needs a new UUID.
 - Controller refusals keep their `code` (`tunnels_not_permitted`, `capability_unsupported`,
-  `member_not_ready`, `tunnel_port_busy`, `tunnel_limit`, `lease_ended`). A mapping the
-  runner could not create rejects with `tunnel_mapping_failed`, and a local listener that
-  cannot bind with `tunnel_listen_failed`.
+  `member_not_ready`, `tunnel_port_busy`, `tunnel_limit`, `tunnel_residue_limit`,
+  `tunnel_identity_limit`, `tunnel_host_limit`, `lease_ended`). A mapping the runner could
+  not create rejects with `tunnel_mapping_failed`, and a local listener that cannot bind
+  with `tunnel_listen_failed`.
+- When the runner ended the tunnel on its own evidence, `closed` carries `endReason`:
+  `mapping_lost` (the device mapping disappeared, for example after an adb server
+  restart) or `open_rate` (connections kept arriving far faster than the tunnel's open
+  rate). Connections above the rate of 16 per second, after a burst of 64, are refused
+  one by one without ending the tunnel.
+- A tunnel also ends when the lease's device stops being ready. The SDK does not
+  reconnect. Once the device is ready again, open a new tunnel with a new UUID. The same
+  device port answers `tunnel_port_busy` until the ended tunnel's `mappingRemoved` is
+  true, which the runner confirms by itself; another device port is free at once. See
+  [what to expect after a readiness loss](mobile-control.md#lifetime-and-teardown).
+- The SDK checks a reverse `target` only for its form. What the device reaches through a
+  reverse tunnel is whatever that target serves, so a target that is a proxy gives the
+  device everything the proxy reaches.
 
 The command-line equivalent is `canaveral tunnel`
 ([example](mobile-control.md#sdk-cli-and-metro)). Fixtures with a stand-in adb cover this
-client; nothing has run against a real emulator.
+client. One [native trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels)
+carried a single request and response in each direction through it; concurrent
+connections, throughput and Metro have not run against a real emulator.
 
 ## Linux workspace transfers (ST-535)
 

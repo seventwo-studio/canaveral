@@ -98,9 +98,20 @@ these controls: a tunnel control carries a stream number and never a host, port 
 path, only the host may send the `tunnel` and `error` controls, and only the listening
 side may send `open`. A binary message is a four-byte big-endian stream number followed
 by 1 to 65,532 payload bytes. Flow control is per stream: `credit` returns at most
-262,144 bytes, the fixed window. The worker error code `tunnel_mapping_failed` belongs to
-this capability. Fixtures cover the relay rules and the multiplexer; no native adb has
-carried a tunnel.
+262,144 bytes, the fixed window. The worker error codes `tunnel_mapping_failed`,
+`tunnel_mapping_lost` and `tunnel_open_rate` belong to this capability.
+
+A tunnel pair is also the one family the broker does not authorize per message. It
+checks the pair's authority on an interval, relays nothing unless a check succeeded
+within the last 250 ms, and forwards at most 2 MiB, 256 messages and 32 stream opens per
+direction between two checks. After the controller's state ends a tunnel's authority, at
+most that interval and that budget can still pass. A busy controller pauses the relay
+instead of ending the pair. Every other capability keeps its per-message check
+([lifetime and teardown](mobile-control.md#lifetime-and-teardown)).
+
+Fixtures cover the relay rules, the interval check and the multiplexer. One
+[native trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels)
+carried a single request each way through a real adb.
 
 Administrative `video` is a separate relay capability from consumer lease access.
 Its session identities, finite capture limits, credential revalidation and cleanup
