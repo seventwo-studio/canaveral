@@ -482,6 +482,23 @@ try {
     record.offset = Number(inside.stdout) - outside;
     assert.ok(Math.abs(record.offset - 86400) < 5, `offset ${record.offset}`);
   });
+  await scenario('maintenance proves idle with retained lease cleanup journals', async record => {
+    const names = ['.assignment-locks', '.lease-cleanup'];
+    const bookkeeping = () => Object.fromEntries(names.map(name => {
+      const entries = sudo('ls', '-A', `${state}/machines/${name}`).split('\n').filter(Boolean);
+      assert.ok(entries.length, `${name} contains bookkeeping from the completed leases`);
+      return [name, entries];
+    }));
+    const before = bookkeeping(), id = randomUUID();
+    const path = `/v1/hosts/${(await host()).id}/maintenance`;
+    await call('POST', path, { id });
+    await until('a maintenance stop proof after lease cleanup', async () => {
+      record.maintenance = await call('GET', path);
+      return record.maintenance.safeToPowerOff && record.maintenance.readyToResume;
+    }, 45, 500);
+    assert.deepEqual(bookkeeping(), before);
+    assert.equal((await call('POST', `${path}/${id}/resume`, { requestId: randomUUID() })).phase, 'resumed');
+  });
   evidence.failures = failures;
   assert.deepEqual(failures, [], `failed scenarios: ${failures.join(', ')}`);
 } finally {

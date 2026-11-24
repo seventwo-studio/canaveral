@@ -42,7 +42,7 @@ import { ProcessUsageCollector, validateSample } from "./control/infrastructure.
 import type { ProcessObservation, UsageCategory } from "./control/infrastructure.ts";
 import { createGuestAccess, guestReady, guestRecipe, loadHelperArtifacts } from "./guest/access.ts";
 import { createInferenceExecutor } from "./inference-runtime.ts";
-import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
+import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, machineBookkeeping, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
 import { TUNNEL_END_REASONS, TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
@@ -1735,7 +1735,10 @@ export class HostRunner {
       // Unknown older local assignment directories cannot be inferred stopped from an empty heartbeat.
       for (const root of this.machineRoots()) {
         noLinks(root);
-        if (present(root) && readdirSync(root).some(id => !retained.has(id) && !this.guard.records.get(id)?.retired)) return NOT_IDLE;
+        if (present(root) && readdirSync(root).some(id => {
+          const bookkeeping = machineBookkeeping(root, id);
+          return bookkeeping === undefined ? !retained.has(id) && !this.guard.records.get(id)?.retired : bookkeeping === "unexpected";
+        })) return NOT_IDLE;
       }
       if (!(await this.inspectStopped(retained, readOnly)).workloadsStopped) return NOT_IDLE;
       if (!readOnly) {
@@ -1832,14 +1835,15 @@ export class HostRunner {
         for await (const entry of await opendir(root)) {
           if (!live()) return undefined;
           if (++entries > 20_000) { complete = false; break; }
-          if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+          const bookkeeping = journalRoots.has(root) ? machineBookkeeping(root, entry.name) : undefined;
+          if (bookkeeping === "owned" || bookkeeping === undefined && !entry.isDirectory() && !entry.isSymbolicLink()) continue;
           const path = join(root, entry.name);
           const quarantine = storageRoots.has(root) && removalQuarantine.test(entry.name);
           if (quarantine && entry.isDirectory() && known.quarantines.has(path)) continue;
           // Retirement only explains an old journal, never backing storage that still exists.
           const unexplainedJournal = journalRoots.has(root) && !known.folders.has(path) && !this.guard.records.get(entry.name)?.retired;
           const unexplainedStorage = storageRoots.has(root) && !known.storage.has(path) && storageId.test(entry.name);
-          if (!quarantine && !unexplainedJournal && !unexplainedStorage) continue;
+          if (bookkeeping !== "unexpected" && !quarantine && !unexplainedJournal && !unexplainedStorage) continue;
           if (names.size >= 100 && !names.has(entry.name) || entry.name.length > 200) { complete = false; break; }
           names.add(entry.name); found.push({ name: entry.name, path, storage: storageRoots.has(root), quarantine });
         }

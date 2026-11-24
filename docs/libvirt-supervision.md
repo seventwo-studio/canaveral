@@ -140,6 +140,9 @@ files, records `cleared`, unlinks them, removes the directory and records
 If the directory is already absent after `cleared`, the helper synchronizes
 its parent and publishes `removed`. The generic cleanup then erases the assignment's journals and
 credentials, and only then does the controller release the reservation.
+Maintenance keeps the assignment lock databases and cleanup journals on disk.
+It excludes their two directories from unknown-resource inventories only when
+their ownership, permissions and entries match the daemon bookkeeping layout.
 
 ## End paths
 
