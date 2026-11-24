@@ -383,7 +383,8 @@ export class LibvirtProvider {
     }
     if(this.guardianAlive(b,folder,launch)){
       if(receipt===null||["creating","paused"].includes(String(receipt.phase)))return{state:"starting"};
-      if(receipt.phase==="running"){
+      // A recorded reason means the guardian is already fencing.
+      if(receipt.phase==="running"&&receipt.reason===undefined){
         const observed=await this.observeLease(b,s);
         if(observed==="running")return{state:"running"};
         if(observed==="unknown")return{state:"unknown",detail:"The leased domain could not be observed; its guardian keeps enforcing the lease."};

@@ -353,3 +353,11 @@ test("durable stop evidence is read without locks and belongs to its exact launc
   assert.equal(await f.provider.updateStopped({ ...stopped, resources: { cpu: 2, memoryMiB: 512, diskGiB: 4 } }, f.image, f.folder, true), false);
   assert.equal(canonical(read(join(f.folder, "libvirt-native-execution.json")).identity), canonical(f.native.spec(f.folder).identity));
 });
+
+test("a guardian that is already fencing is never reported running", async t => {
+  const f = fixture(t);
+  await running(f);
+  f.native.receipt(f.folder, { ...read(join(f.folder, "libvirt-native-execution.json")), reason: "deadline" });
+  assert.equal((await f.provider.reconcile(f.machine, f.image, f.folder)).state, "stopping");
+  assert.deepEqual(f.native.fences, [f.folder], "the live guardian keeps the lock");
+});

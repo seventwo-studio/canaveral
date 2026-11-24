@@ -308,8 +308,9 @@ try {
     const lease = await acquire(120);
     await booted(lease, record);
     record.secondsToDeadline = remaining(lease.machineId);
-    await until('domain destruction after expiry', () => domainGone(lease.machineId), 240);
-    record.overrunSeconds = -remaining(lease.machineId);
+    const deadline = Date.now() / 1000 + record.secondsToDeadline;
+    await until('domain destruction after expiry', () => domainGone(lease.machineId), 240, 250);
+    record.overrunSeconds = Date.now() / 1000 - deadline;
     assert.ok(record.overrunSeconds >= 0 && record.overrunSeconds < 30, `destroyed ${record.overrunSeconds}s after the deadline`);
     const native = await stoppedReceipt(lease.machineId);
     record.reason = native.reason;
@@ -384,12 +385,13 @@ try {
     const libvirtd = Number(run('pidof', ['libvirtd']).split(' ')[0]);
     // Freeze libvirtd shortly before the deadline. Its keepalive needs about 15 s to declare the
     // connection dead, so the guardian's own deadline ends the lease while libvirt cannot act.
-    await delay(Math.max(0, remaining(lease.machineId) - 5) * 1000);
+    const deadline = Date.now() / 1000 + remaining(lease.machineId);
+    await delay(Math.max(0, deadline - Date.now() / 1000 - 5) * 1000);
     sudo('kill', '-STOP', String(libvirtd));
     try {
       await until('QEMU killed by the guardian while libvirtd is stopped', () => !alive(qemu), 90, 500);
       const native = receipt(lease.machineId);
-      Object.assign(record, { reason: native.reason, fence: native.fence ?? null, secondsAfterDeadline: -remaining(lease.machineId) });
+      Object.assign(record, { reason: native.reason, fence: native.fence ?? null, secondsAfterDeadline: Date.now() / 1000 - deadline });
       assert.ok(['deadline', 'fenced'].includes(native.reason), native.reason);
       assert.match(native.fence ?? '', /^qemu-killed/);
       assert.notEqual(native.phase, 'stopped', 'stop needs a fresh libvirt lookup');
