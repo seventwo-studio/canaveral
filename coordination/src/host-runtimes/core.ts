@@ -29,6 +29,8 @@ export interface BackendRecord {
   active?: string;
   installed?: RuntimePackageRecord[];
   blocker?: Blocker;
+  /** Consumer lease eligibility of a configured libvirt lease helper, separate from administrative VMs. */
+  leases?: { eligible: boolean; blocker?: Blocker };
 }
 export type HostConfigData = Record<string, unknown>;
 export const object = (value: unknown): HostConfigData =>
@@ -105,6 +107,8 @@ export interface Environment {
   lstat: (path: string) => Pick<Stats, "isCharacterDevice">;
   modelStat?: ModelPathStat;
   receipt: () => unknown;
+  /** Kernel release for lease eligibility; defaults to the running kernel. */
+  kernel?: string;
 }
 export async function probe(env: Environment, argv: readonly string[]): Promise<string> {
   const result = await env.run(argv, 5_000, 64 * 1024);
