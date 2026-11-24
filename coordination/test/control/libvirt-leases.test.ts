@@ -361,3 +361,17 @@ test("a guardian that is already fencing is never reported running", async t => 
   assert.equal((await f.provider.reconcile(f.machine, f.image, f.folder)).state, "stopping");
   assert.deepEqual(f.native.fences, [f.folder], "the live guardian keeps the lock");
 });
+
+test("cleanup without an authorization callback still fences a live guardian", async t => {
+  const f = fixture(t);
+  await running(f);
+  const id = f.terminal();
+  const { _leaseAuthorization: _, ...original } = f.image;
+  assert.equal((await f.provider.stopForCleanup(f.machine, original, f.folder)).state, "stopping");
+  const published = read(join(f.folder, "libvirt-authorization.json"));
+  assert.equal(published.fenced, true, "the guardian sees a fenced record and stops on its own");
+  assert.equal(published.deadline, 129.75, "latching never extends the deadline");
+  f.native.guardianFenced(f.folder);
+  assert.equal((await f.provider.stopForCleanup(f.machine, original, f.folder)).state, "stopped");
+  assert.equal((await f.provider.removeOwnedStorage(f.machine, original, f.folder, id)).state, "complete");
+});

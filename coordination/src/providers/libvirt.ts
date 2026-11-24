@@ -354,7 +354,8 @@ export class LibvirtProvider {
     // No adapter can prove a persistent-definition lease stopped; it stays unknown.
     if(s.executionMode!=="transient")return false;
     // A published fence stops a live guardian on its own; it also enforces its last deadline.
-    if(this.boot()===b.host_boot_id){try{this.publish(machine,image,folder,true);}catch{/* The last published deadline still holds. */}}
+    // Cleanup has no authorization callback, so it latches the last published record instead.
+    if(this.boot()===b.host_boot_id){try{this.publish(machine,image,folder,true);}catch{try{this.latchFence(machine,folder);}catch{/* The last published deadline still holds. */}}}
     const j=this.journal(folder);
     try{
       const execution=j.read();if(!matches(execution,b.identity()))refuse("Lease execution history is foreign.");
@@ -366,6 +367,12 @@ export class LibvirtProvider {
     }finally{j.close();}
     if(this.nativeReceipt(folder,b)?.phase==="stopped")return true;
     return await this.nativeFence(folder)==="stopped";
+  }
+  /** Marks the published authorization fenced without a new deadline sample. */
+  private latchFence(machine:RecordValue,folder:string):void{
+    const j=this.journal(folder,"libvirt-authorization");
+    try{const{binding:b}=this.readSpec(j,machine,false),previous=j.read();if(previous&&validAuthority(previous,b)&&previous.fenced!==true)j.write({...previous,fenced:true});}
+    finally{j.close();}
   }
   private leaseReport(stopped:boolean):RecordValue{
     return stopped?{state:"stopped",leaseFenced:true}:{state:"stopping",leaseFenced:true,detail:"The lease fence is not proven yet; its reservation is retained."};
