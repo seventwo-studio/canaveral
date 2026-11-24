@@ -434,7 +434,7 @@ try {
     const lease = await acquire(900);
     const { guardian } = await booted(lease, record);
     // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose. The
-    // guardian's oom_score_adj of 1000 adds the whole limit to its score; the hog's RSS stays below it.
+    // guardian is the preferred victim; the allocator and daemon are excluded from selection.
     const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
     sudo('choom', '-p', String(guardian), '-n', '1000');
     // Keep the daemon out of the OOM cascade so the guardian path is what this step measures.
@@ -449,7 +449,9 @@ try {
       // A stopped guardian is still eligible for the kernel OOM kill, and cannot self-fence
       // when pressure makes its reads fail. Its worker remains tied to guardian death.
       sudo('kill', '-STOP', String(guardian));
-      hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
+      // The hosted runner may give the allocator a positive inherited oom_score_adj. Exclude
+      // it explicitly so its growing RSS cannot make it a more likely victim than the guardian.
+      hog = spawn('sudo', ['-n', 'sh', '-c', `echo -1000 > /proc/$$/oom_score_adj && echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
       await until('the end of the guardian under memory pressure', () => !alive(guardian), 90, 250);
     } finally {
       attempt('sudo', ['-n', 'pkill', '-KILL', '-f', marker]);
