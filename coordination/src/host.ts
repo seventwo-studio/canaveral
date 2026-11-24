@@ -273,12 +273,14 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
       if (!helper) return refuse("for libvirt VMs without the pinned lease helper (leaseHelper and leaseHelperSha256)");
       if (config.leaseClockHelper !== helper.path) refuse("for libvirt VMs unless leaseClockHelper names the pinned lease helper");
       libvirtToCheck = libvirt;
-      if (!libvirtLeaseKernelSupported(kernel)) throw new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 400, { code: "libvirt_lease_kernel_unsupported" });
       return { ...identity(), runtime: "libvirt" };
     }
     return refuse();
   });
-  if (libvirtToCheck) checkHelper(libvirtToCheck, kernel);
+  if (libvirtToCheck) {
+    checkHelper(libvirtToCheck, kernel);
+    if (!libvirtLeaseKernelSupported(kernel)) throw new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 400, { code: "libvirt_lease_kernel_unsupported" });
+  }
   const offer: RecordValue = { leaseProtocol: 1, leaseImages };
   // Lease port tunnels are off unless the operator declares them. Their host-side sockets live in
   // each lease's private storage, so the storage path must fit a Unix socket address.

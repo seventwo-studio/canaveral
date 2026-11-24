@@ -10,6 +10,7 @@ import { libvirtLeaseHelper, libvirtLeaseKernelSupported, productionLibvirtAdapt
 import { canonical, fingerprint, validateDomainXML, LibvirtLeaseBinding } from "../../src/providers/libvirt-ownership.ts";
 import type { RecordValue } from "../../src/providers/libvirt-ownership.ts";
 import { hostOffer, leaseOffer } from "../../src/host.ts";
+import { ServiceError } from "../../src/errors.ts";
 
 const vmGid = process.getgid!();
 const read = (path: string): RecordValue => JSON.parse(fs.readFileSync(path, "utf8")) as RecordValue;
@@ -49,7 +50,7 @@ class FakeNative implements LibvirtLeaseNative {
   guardianFenced(folder: string, reason = "fenced"): void {
     this.domains.delete(this.uuid(folder));
     const old = read(join(folder, "libvirt-native-execution.json"));
-    this.receipt(folder, { ...old, phase: "stopped", stopProven: true, reason });
+    this.receipt(folder, { ...old, phase: "stopped", stopProven: true, stopEvidence: "observed", reason });
     this.guardians.get(folder)!.alive = false;
   }
   /** SIGKILL or OOM: the guardian vanished without a stop receipt. */
@@ -61,7 +62,7 @@ class FakeNative implements LibvirtLeaseNative {
     this.domains.delete(this.uuid(folder));
     const path = join(folder, "libvirt-native-execution.json");
     const old = fs.existsSync(path) ? read(path) : { identity: this.spec(folder).identity, phase: "unused" };
-    this.receipt(folder, { ...old, phase: "stopped", stopProven: true, reason: old.reason ?? "guardian-ended" });
+    this.receipt(folder, { ...old, phase: "stopped", stopProven: true, stopEvidence: "observed", reason: old.reason ?? "guardian-ended" });
     return "stopped";
   }
   async erase(folder: string, quarantine: string): Promise<boolean> {
@@ -367,6 +368,9 @@ test("lease offers need Linux, the pinned helper, a 6.5 kernel and a BIOS lease 
     (e: { code?: string }) => e.code === (process.platform === "linux" ? "libvirt_lease_helper_unverified" : "libvirt_lease_kernel_unsupported"));
   assert.throws(() => hostOffer({ ...base, leaseClockHelper: "/different/clock" }, "linux", "6.8.0", checkHelper), /names the pinned lease helper/);
   assert.throws(() => leaseOffer(base, "linux", "6.4.16"), (e: { code?: string }) => e.code === "libvirt_lease_kernel_unsupported");
+  assert.throws(() => hostOffer(base, "linux", "4.4.0", () => {
+    throw new ServiceError("Sandbox kernel", 409, { code: "libvirt_lease_sandbox_unsupported" });
+  }), (e: { code?: string }) => e.code === "libvirt_lease_sandbox_unsupported");
   assert.throws(() => leaseOffer(base, "darwin", "6.8.0"), /cannot advertise/);
   assert.throws(() => leaseOffer({ ...base, leaseHelperSha256: "short" }, "linux", "6.8.0"), /pinned lease helper/);
   assert.throws(() => leaseOffer({ ...base, leaseImages: [{ ...base.leaseImages[0], isolation: "shared-host" }] }, "linux", "6.8.0"), /cannot advertise/);
@@ -387,8 +391,8 @@ test("durable stop evidence is read without locks and belongs to its exact launc
   await running(f);
   const stopped = { ...f.machine, desired: "stopped" };
   assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), false);
-  f.native.receipt(f.folder, { identity: f.native.spec(f.folder).identity, phase: "stopped" });
-  assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), false, "legacy uncertain stop receipts require a new proof");
+  f.native.receipt(f.folder, { identity: f.native.spec(f.folder).identity, phase: "stopped", stopProven: true });
+  assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), false, "legacy stop receipts require a new proof");
   f.native.guardianFenced(f.folder);
   assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), true);
   assert.equal(await f.provider.updateStopped({ ...stopped, resources: { cpu: 2, memoryMiB: 512, diskGiB: 4 } }, f.image, f.folder, true), false);

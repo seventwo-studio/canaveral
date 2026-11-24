@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -492,9 +492,69 @@ impl Birth {
     }
 }
 
+fn kata_cmdline(cmdline: &str) -> bool {
+    cmdline.split_ascii_whitespace().any(|arg| {
+        arg.starts_with("agent.")
+            || matches!(arg, "init=/usr/bin/kata-agent" | "init=/sbin/kata-agent")
+    })
+}
+
+fn kata_mount(line: &str) -> bool {
+    let Some((mount, source)) = line.split_once(" - ") else {
+        return false;
+    };
+    let mut source = source.split_ascii_whitespace();
+    mount
+        .split_ascii_whitespace()
+        .nth(3)
+        .is_some_and(|root| root.starts_with("/run/kata-containers/"))
+        || matches!(
+            (source.next(), source.next()),
+            (Some("virtiofs" | "9p"), Some("kataShared"))
+        )
+}
+
+fn gvisor_log(log: &[u8]) -> bool {
+    log.split(|byte| *byte == b'\n')
+        .any(|line| line.ends_with(b"] Starting gVisor..."))
+}
+
+/// Recognizes kernel-provided sandbox signals without executing a command or requiring privileges.
+pub fn sandbox_kernel() -> bool {
+    if fs::metadata("/proc/gvisor/kernel_is_gvisor").is_ok()
+        || fs::read_to_string("/proc/cmdline").is_ok_and(|cmdline| kata_cmdline(&cmdline))
+        || fs::File::open("/proc/self/mountinfo").is_ok_and(|mounts| {
+            BufReader::new(mounts)
+                .lines()
+                .map_while(std::result::Result::ok)
+                .any(|line| kata_mount(&line))
+        })
+    {
+        return true;
+    }
+    // gVisor implements the unprivileged synthetic dmesg even without its optional proc marker.
+    // SYSLOG_ACTION_READ_ALL reads without consuming the log. A restricted Linux log is normal.
+    const READ_ALL: c_int = 3;
+    let mut log = [0u8; 4096];
+    let size = unsafe { libc::syscall(libc::SYS_syslog, READ_ALL, log.as_mut_ptr(), log.len()) };
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| log.get(..size))
+        .is_some_and(gvisor_log)
+}
+
 pub fn boot_id() -> Result<String> {
-    let id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    Ok(id.trim().to_string())
+    let raw = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let id = raw.trim();
+    if id.len() != 36
+        || !id.bytes().enumerate().all(|(i, byte)| match i {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+        })
+    {
+        return Err("invalid kernel boot identity".into());
+    }
+    Ok(id.to_owned())
 }
 
 /// Suspend-aware seconds since boot, the clock of every published deadline.
@@ -512,6 +572,24 @@ pub fn now() -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinguishes_sandbox_kernel_signals_from_ordinary_linux() {
+        assert!(gvisor_log(
+            b"[    0.000000] Starting gVisor...\n[    1.000000] Ready\n"
+        ));
+        assert!(!gvisor_log(b"[    0.000000] Linux version 6.8.0\n"));
+        assert!(kata_cmdline("root=/dev/vda agent.log=info"));
+        assert!(kata_cmdline("init=/usr/bin/kata-agent"));
+        assert!(!kata_cmdline(
+            "root=/dev/vda systemd.unified_cgroup_hierarchy=1"
+        ));
+        assert!(kata_mount("12 1 0:8 /rootfs / rw - virtiofs kataShared rw"));
+        assert!(kata_mount(
+            "12 1 0:8 /run/kata-containers/sandbox/shm /dev/shm rw - tmpfs shm rw"
+        ));
+        assert!(!kata_mount("12 1 0:8 /rootfs / rw - overlay overlay rw"));
+    }
 
     #[test]
     fn owner_metadata_requires_exact_identity_attributes() {
