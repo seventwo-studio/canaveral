@@ -40,6 +40,7 @@ export async function until(check: () => boolean | Promise<boolean>, label: stri
   assert.fail(`Timed out waiting for ${label}`);
 }
 
+const STOP_DELAY = "emulator-stop-delay-ms";
 export interface Emulator { name: string; port: number; pid: number; grandchild: number; bootedAt: number; data: string; backing: string }
 /** The stand-in overlay: a qcow2 header that names its backing file, then whatever was written to the device. */
 export const OVERLAY_HEADER = 2048;
@@ -87,11 +88,16 @@ if (process.env.ANDROID_AVD_HOME) {
   mkdirSync(avd + "/snapshots/default_boot", { recursive: true }); writeFileSync(avd + "/snapshots/default_boot/ram.bin", "ram of " + name);
 }
 writeFileSync(${JSON.stringify(registry)} + "/" + port + ".json", JSON.stringify({ name, port, pid: process.pid, grandchild: grandchild.pid, bootedAt: Date.now() + 300, data, backing }));
-process.on("SIGTERM", () => { grandchild.kill("SIGTERM"); process.exit(0); });
+// A stop is immediate unless a test asked for a slow one (slowEmulatorStop): the process then stays
+// alive, and observable as such, for that long after it was told to stop.
+const stop = () => { grandchild.kill("SIGTERM"); process.exit(0); };
+process.on("SIGTERM", () => { const wait = existsSync(${JSON.stringify(join(root, STOP_DELAY))}) ? Number(readFileSync(${JSON.stringify(join(root, STOP_DELAY))}, "utf8")) : 0; if (wait > 0) setTimeout(stop, wait); else stop(); });
 setInterval(() => {}, 1000);\n`);
   writeFileSync(join(sdkRoot, "emulator/emulator"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`, { mode: 0o755 });
   return { sdk: sdkRoot, registry, events };
 }
+/** A stand-in emulator told to stop after this call takes `ms` to exit. */
+export function slowEmulatorStop(h: { root: string }, ms: number): void { writeFileSync(join(h.root, STOP_DELAY), String(ms)); }
 export function emulators(registry: string): Emulator[] {
   return readdirSync(registry).filter(name => name.endsWith(".json")).map(name => JSON.parse(readFileSync(join(registry, name), "utf8")) as Emulator).filter(e => alive(e.pid));
 }
@@ -155,6 +161,7 @@ export function transport(paths: { sdk: string; registry: string; events: string
         return encoder;
       }
       assert.equal(argv[1], "-s");
+      if (fixture.adbDelayMs) await sleep(fixture.adbDelayMs);
       const serial = argv[2]!, args = argv.slice(3), live = () => emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
       const device = live(); if (!device) throw new Error("device offline");
       if (args.includes("install-write")) {
@@ -207,6 +214,7 @@ export function transport(paths: { sdk: string; registry: string; events: string
       if (argv[1] === "start-server") return ok("");
       if (argv[1] === "devices") return ok("List of devices attached\n" + emulators(paths.registry).map(e => `emulator-${e.port}\tdevice\n`).join(""));
       assert.equal(argv[1], "-s");
+      if (fixture.adbDelayMs) await sleep(fixture.adbDelayMs);
       const serial = argv[2]!, args = argv.slice(3), device = emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
       if (!device) return { stdout: "", exitCode: 1 };
       // A hung emulator is still listed by adb but answers nothing.
@@ -226,6 +234,8 @@ export function transport(paths: { sdk: string; registry: string; events: string
       if (media && args[0] === "shell" && args[1] === "pm" && args[2] === "install-abandon") return ok("Success");
       // The exact-recorder probe: signals only the recorder this capture started.
       if (media && args[0] === "shell" && args[1]?.includes("canaveral-recorder") && args[1].includes("boot_id")) {
+        // A guest that no longer answers the probe: the recorder's state stays unknown to the runner.
+        if (fixture.recorderProbe === "uncertain") return { stdout: "", exitCode: 1 };
         const state = media.recorders.get(device.name);
         if (!state?.running) return ok("canaveral-recorder absent");
         if (/kill -(TERM|KILL)/.test(args[1])) state.running = false;
@@ -272,6 +282,11 @@ export interface HarnessOptions {
   qemuImg?: "ok" | "fail" | "noop"; avdmanager?: "ok" | "fail";
   /** Emulators (by AVD name) that adb still lists but that answer no command. */
   hung?: Set<string>;
+  /** Milliseconds each device answer of the stand-in adb takes. Read at every call, so a test may
+   * change it while the harness runs, for example to leave a capture while it is being opened. */
+  adbDelayMs?: number;
+  /** The exact-recorder probe fails, so no stop of a guest recorder can be proven. Read at every call. */
+  recorderProbe?: "uncertain";
 }
 
 export interface Harness {

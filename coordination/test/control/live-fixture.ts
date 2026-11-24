@@ -1,4 +1,6 @@
 import type { NativePipe } from "../../src/providers/mobile.ts";
+import assert from "node:assert/strict";
+import type { TestContext } from "node:test";
 import type { LiveSegment, LiveStream } from "../../src/video-sdk.ts";
 
 /** Fragmented MP4 stand-ins for live-view fixtures: a real box structure with the sample flags
@@ -54,11 +56,26 @@ export class FragmentEncoder implements NativePipe {
   async close(): Promise<void> { if (!this.closed) { this.closed = true; this.hooks.close?.(); this.code ??= 143; } }
 }
 
-/** Pulls a live stream in the background so a test can wait for segments and for its end. */
-export function collect(stream: LiveStream): { segments: LiveSegment[]; done: Promise<void>; failure(): unknown } {
-  const segments: LiveSegment[] = []; let failure: unknown;
-  const done = (async () => { try { for await (const segment of stream.segments()) segments.push(segment); } catch (error) { failure = error; } })();
-  return { segments, done, failure: () => failure };
+/** Pulls a live stream in the background so a test can wait for segments and for its end.
+ * `lastAt` is when the latest segment reached the consumer (wall clock, milliseconds). */
+export function collect(stream: LiveStream): { segments: LiveSegment[]; done: Promise<void>; failure(): unknown; lastAt(): number } {
+  const segments: LiveSegment[] = []; let failure: unknown, last = 0;
+  const done = (async () => { try { for await (const segment of stream.segments()) { segments.push(segment); last = Date.now(); } } catch (error) { failure = error; } })();
+  return { segments, done, failure: () => failure, lastAt: () => last };
+}
+/** The bound the fixtures hold an ended authority to: no segment reaches a viewer later than
+ * this after its authority ended. docs/mobile-control.md states the same number. */
+export const LIVE_END_MS = 1000;
+/** Asserts that bound for a stream that has ended. `since` is the moment the authority was known
+ * to have ended: a request's response, or a deadline. The viewer may learn the reason later (the
+ * SDK waits out the controller's three-second window for a provisional reason); the picture may not
+ * go on. The stream must have been delivering shortly before, or the bound would prove nothing;
+ * that check is loose, because under load the request that ends the authority takes a while. */
+export function stoppedWithin(t: TestContext, got: ReturnType<typeof collect>, since: number, label: string, ms = LIVE_END_MS): void {
+  const late = got.lastAt() - since;
+  t.diagnostic(`${label}: last segment ${late} ms after the authority ended`);
+  assert.ok(late > -5000, `${label}: the stream was not delivering when the authority ended (last segment ${-late} ms before)`);
+  assert.ok(late <= ms, `${label}: a segment arrived ${late} ms after the authority ended; the bound is ${ms} ms`);
 }
 /** Within an epoch sequences only increase and each epoch opens with its header; a viewer's
  * first media segment of an epoch, and the first after any gap, is a key frame. */
