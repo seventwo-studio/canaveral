@@ -599,3 +599,43 @@ test("a finished recording whose receipt the runner repeats does not hold back t
   videoSessions = [finished, queued]; await runner.poll(); internals.liveRecordings.clear();
   assert.equal(internals.recordingPending(String(m.id)), true);
 });
+
+test("a recording whose native stop is unproven keeps a late viewer's capture off the device while its receipt is held", async t => {
+  const { config, image, clock } = setup(t);
+  const m: RecordValue = { ...machine(image), lease: { id: randomUUID(), revision: 1, state: "ready", controllerNow: 1000, authorizationDeadline: 1060 } };
+  // The lease recording ended here with only its encoder's exit confirmed; the controller lists it until the lease's cleanup proves the guest recorder gone.
+  const unproven = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "disconnected" };
+  let videoSessions: RecordValue[] = [unproven], receipts = 0, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  const transport: HostTransport = { request: async (_method, path) => {
+    if (path.endsWith("heartbeat")) return { machines: [m], videoSessions };
+    if (path.endsWith(`/video-sessions/${unproven.id}/finish`)) { receipts++; await held; }
+    return {};
+  } };
+  const runner = new HostRunner(config, { clock, transport, providerFactory });
+  t.after(() => runner.close().catch(() => {}));
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  saveRecord(join(config.stateDir, "work", "video", `${unproven.id}.json`), { generation: unproven.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true });
+  const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean; liveRecordings: Map<string, unknown>;
+    liveHub: import("../../src/live-capture.ts").LiveCaptureHub };
+  internals.stepVideo(); await drain();
+  assert.equal(receipts, 1, "the host-only receipt is in flight");
+  // A viewer attaches late, after the recording ended. Its capture consults the runner before every epoch.
+  let consulted = 0, opened = 0, enough!: () => void;
+  const consultedEnough = new Promise<void>(resolve => { enough = resolve; });
+  const source = { encoder: "/fixture/ffmpeg", guestSource: true, notRunning: () => true,
+    recordingQueued: () => { internals.liveRecordings.clear(); const pending = internals.recordingPending(String(m.id)); if (++consulted >= 3) enough(); return pending; },
+    openSource: async () => { opened++; enough(); throw new Error("no native capture in this fixture"); }, openEncoder: async () => { throw new Error("no encoder in this fixture"); } };
+  const handle = internals.liveHub.acquire({ id: randomUUID(), generation: randomUUID(), machineId: String(m.id) }, source);
+  const viewer = handle.subscribe(() => true);
+  await consultedEnough;
+  assert.equal(opened, 0, "no second recorder starts beside the unproven one");
+  // The receipt is acknowledged, but the controller still lists the session unproven: still held.
+  release(); await drain(); await runner.poll(); internals.liveRecordings.clear();
+  assert.equal(internals.recordingPending(String(m.id)), true);
+  // The lease's cleanup settles it and the controller stops listing it: the device is free again.
+  videoSessions = []; await runner.poll(); internals.liveRecordings.clear();
+  assert.equal(internals.recordingPending(String(m.id)), false);
+  viewer.close(); handle.release();
+});

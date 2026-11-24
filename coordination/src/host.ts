@@ -1226,16 +1226,24 @@ export class HostRunner {
     const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
     return () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
   }
-  /** A recording of this device that the controller still lists and that has not finished here:
-   * running, or not yet started. No live epoch starts meanwhile, so the recording finds the
-   * device free. The controller's list can trail a recording that ended here, while this runner
-   * repeats its receipt; that is neither. Evaluated at most once per 250 ms per device, like the
+  /** A recording of this device that the controller still lists and that still holds the
+   * device's native capture here: running, not yet started, or ended without positive proof that
+   * its native source stopped (for a lease, only its encoder's exit was confirmed, and the guest
+   * recorder's stop waits for the lease's cleanup). No live epoch starts meanwhile, so a recording
+   * finds the device free and no second recorder can run beside an unproven one. A recording that
+   * ended here with proof does not count, even while the controller's list still trails it and
+   * this runner repeats its receipt. Evaluated at most once per 250 ms per device, like the
    * authority above. */
   private recordingPending(machineId: string): boolean {
     const now = performance.now(), cached = this.liveRecordings.get(machineId);
     if (cached && now - cached.at < 250) return cached.value;
-    const value = (this.queues.video ?? []).some(job => job.machineId === machineId && ['pending', 'attaching', 'ready'].includes(String(job.state)) &&
-      (this.recordingCaptures.has(identifier(job.id)) || !present(join(this.state, 'work', 'video', `${identifier(job.id)}.json`))));
+    const value = (this.queues.video ?? []).some(job => {
+      if (job.machineId !== machineId) return false;
+      const id = identifier(job.id), path = join(this.state, 'work', 'video', `${id}.json`);
+      if (this.recordingCaptures.has(id)) return true;
+      if (!present(path)) return ['pending', 'attaching', 'ready'].includes(String(job.state));
+      try { return readRecord(path).cleaned !== true; } catch { return true; }
+    });
     this.liveRecordings.set(machineId, { at: now, value }); return value;
   }
   private liveSource(machine: RecordValue): LiveCaptureSource | undefined {
