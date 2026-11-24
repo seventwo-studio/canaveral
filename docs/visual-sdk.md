@@ -67,8 +67,10 @@ The writer implements `write(bytes): number | Promise<number>` and may accept
 partial writes. `record()` writes the same MP4 bytes received from the host,
 checks their SHA-256 digest and complete MP4 box envelope, and acknowledges the
 host's completion. The receipt contains `bytes`, `sha256` and `cleaned: true`.
-Once that acknowledgement is sent, the connection ending, or being reset as the
-broker closes it, completes the recording.
+Once that acknowledgement is sent, the broker ending the connection completes the
+recording. A connection reset is no proof that the host received it, so after a reset
+the SDK reads the session for up to `timeoutMs` and completes only once the controller
+records it `finished` with `cleaned: true`; otherwise it reports `video_incomplete`.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 

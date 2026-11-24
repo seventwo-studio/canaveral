@@ -53,9 +53,11 @@ export class VideoClient {
   readonly fps = 30;
   finish: VideoFinish | undefined;
   private used = false;
-  private constructor(readonly connection: SessionChannel, readonly options: VideoReceiveOptions) {}
-  static async connect(connection: SessionChannel, options: VideoReceiveOptions = {}): Promise<VideoClient> {
-    receiveOptions(options); const self = new VideoClient(connection, options);
+  /** `inspect` reads the session's controller record. Without it, a connection reset after the
+   * acknowledgement cannot be confirmed and the recording is reported incomplete. */
+  private constructor(readonly connection: SessionChannel, readonly options: VideoReceiveOptions, private readonly inspect?: () => Promise<VideoSession>) {}
+  static async connect(connection: SessionChannel, options: VideoReceiveOptions = {}, inspect?: () => Promise<VideoSession>): Promise<VideoClient> {
+    receiveOptions(options); const self = new VideoClient(connection, options, inspect);
     try {
       const value = checked(await bounded(() => connection.receive(options.timeoutMs ?? 30000), options, () => self.close()), connection.sessionId);
       if (!record(value) || Object.keys(value).sort().join(',') !== 'codec,fps,mediaType,type' || value.type !== 'video' || value.mediaType !== 'video/mp4' || value.codec !== 'avc1' || value.fps !== 30) throw new SessionError('Native MP4 video metadata was not confirmed.');
@@ -63,6 +65,19 @@ export class VideoClient {
     } catch (error) { self.close(); throw interrupted(error, connection.sessionId); }
   }
   close(): void { this.connection.close(); }
+  /** Reads the controller's record until it shows the session finished with positive cleanup,
+   * for at most `timeoutMs`. */
+  private async confirmed(): Promise<boolean> {
+    if (!this.inspect) return false;
+    const deadline = performance.now() + (this.options.timeoutMs ?? 30000);
+    while (!this.options.signal?.aborted) {
+      try { const current = await this.inspect(); if (current.state === 'finished' && current.cleaned === true) return true; }
+      catch (error) { if (!(error instanceof ConsumerServiceError)) return false; }
+      if (performance.now() >= deadline) return false;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return false;
+  }
   /** Chunks are arbitrary MP4 byte boundaries, not video frames or complete MP4 boxes. */
   async *chunks(): AsyncGenerator<Buffer, VideoFinish, unknown> {
     if (this.used) throw new ConsumerConfigurationError('A video stream can only be consumed once.'); this.used = true;
@@ -83,9 +98,13 @@ export class VideoClient {
           const ended = await bounded(() => this.connection.receive(this.options.timeoutMs ?? 30000), this.options, () => this.close());
           if (ended !== null) throw new SessionError('Unexpected data after completed video.', 'video_incomplete');
         } catch (error) {
-          // The broker closes both sockets once the host has the ACK. A heartbeat pong that crosses
-          // that close draws a reset instead of an orderly end; it is the same ending.
-          if (!transportFailure(error)) throw error;
+          if (!(error instanceof SessionError) || error.code !== 'session_disconnected') {
+            // A reset is no evidence that the host received the ACK: a heartbeat pong crossing the
+            // broker's close draws one, and so does a connection lost before the ACK was relayed.
+            // Only the controller's record of the finished, cleaned session completes it then.
+            if (!transportFailure(error)) throw error;
+            if (!await this.confirmed()) throw new SessionError('The connection was reset after the acknowledgement and the controller has not recorded the recording finished; completion is unconfirmed.', 'video_incomplete');
+          }
         }
         this.finish = value as unknown as VideoFinish; return this.finish;
       }
@@ -115,6 +134,8 @@ abstract class VideoSessions {
   readonly transport: Transport;
   constructor(transport: Transport) { this.transport = transport; }
   protected abstract attachPath(session: VideoSession): string;
+  /** The session's controller record, read with this client's credential. */
+  protected abstract sessionRecord(session: VideoSession): Promise<VideoSession>;
   protected async call(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | undefined, id: string, accepted = [200]): Promise<VideoSession> {
     return session((await this.transport.call(method, path, body, accepted, method === 'POST', id)).json);
   }
@@ -125,13 +146,14 @@ abstract class VideoSessions {
     try {
       const ready = checked(await bounded(() => connection.receive(options.timeoutMs ?? 30000), options, () => connection.close()), current.id);
       if (!record(ready) || ready.type !== 'ready' || ready.sessionId !== current.id || ready.generation !== current.generation || ready.capability !== 'video') throw new SessionError('Native video peers did not become ready.', 'video_incomplete', current.id);
-      return await VideoClient.connect(connection, options);
+      return await VideoClient.connect(connection, options, () => this.sessionRecord(current));
     } catch (error) { connection.close(); throw interrupted(error, current.id); }
   }
 }
 export class MobileVideoClient extends VideoSessions {
   constructor(options: ClientOptions & { credential: string }) { super(new Transport(options, options.credential)); }
   protected attachPath(s: VideoSession): string { return `/v1/machines/${s.machineId}/video-sessions/${s.id}/${s.generation}`; }
+  protected sessionRecord(s: VideoSession): Promise<VideoSession> { return this.inspect(s.machineId, s.id); }
   async create(machineId: string, request: VideoOptions & { id: string }): Promise<VideoSession> {
     const machine = identifier(machineId), id = identifier(request.id), value = options(request);
     const result = await this.call('POST', `/v1/machines/${machine}/video-sessions`, { id, ...value }, id, [200,201]);
@@ -150,6 +172,7 @@ export class LeaseVideoClient extends VideoSessions {
   readonly leaseId: string;
   constructor(options: LeaseClientOptions) { super(new Transport(options, options.leaseKey)); this.leaseId = identifier(options.leaseId); }
   protected attachPath(s: VideoSession): string { return `/v1/leases/${this.leaseId}/video-sessions/${s.id}/${s.generation}`; }
+  protected sessionRecord(s: VideoSession): Promise<VideoSession> { return this.inspect(s.id); }
   private bound(result: VideoSession, id: string): VideoSession {
     if (result.id !== id || result.leaseId !== this.leaseId || typeof result.member !== 'string') throw new SessionError('Video receipt belongs to another session.', 'video_incomplete', id); return result;
   }

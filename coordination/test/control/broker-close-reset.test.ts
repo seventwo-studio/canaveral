@@ -5,7 +5,7 @@ import http from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { SessionConnection, Transport } from "../../src/sdk.ts";
 import { LiveStream, VideoClient } from "../../src/video-sdk.ts";
-import type { LiveView } from "../../src/video-sdk.ts";
+import type { LiveView, VideoSession } from "../../src/video-sdk.ts";
 
 /** The SDK's stream clients against a real socket whose broker closes it. The broker ends a pair
  * by destroying its sockets, and it pings each peer every ten seconds. A pong the client sends in
@@ -83,20 +83,57 @@ function box(type: string, data = Buffer.alloc(0)): Buffer { const b = Buffer.al
 const MP4 = Buffer.concat([box("ftyp", Buffer.from("isom0000")), box("moov"), box("moof"), box("mdat", Buffer.from("encoded-native-samples"))]);
 const FINISH = { type: "finish", bytes: MP4.length, sha256: createHash("sha256").update(MP4).digest("hex"), cleaned: true };
 
-test("a verified recording whose connection is reset after its acknowledgement is complete", async t => {
+/** A video session's controller record, as `inspect` returns it. */
+function session(id: string, state: string, cleaned: boolean): VideoSession {
+  const now = Date.now();
+  return { id, machineId: randomUUID(), generation: randomUUID(), capability: "video", protocol: "canaveral-session-v1", state, fps: 30, durationSeconds: 3, bitRate: 4_000_000,
+    attachBefore: new Date(now + 30_000).toISOString(), authorizationDeadline: new Date(now + 60_000).toISOString(), cleaned };
+}
+/** A broker stand-in that sends a complete recording and, once the client's ACK arrives, pings it
+ * and resets the connection. `relay` says whether that ACK ever reaches the host; the test's
+ * controller record follows from it. */
+async function resetAfterAck(t: test.TestContext): Promise<{ connection: SessionConnection; id: string; acks: unknown[]; reset: Promise<void> }> {
   const acks: unknown[] = [];
   const b = await broker(t, {
     opened: socket => socket.write(Buffer.concat([text({ type: "video", mediaType: "video/mp4", codec: "avc1", fps: 30 }), frame(2, MP4), text(FINISH)])),
-    // The host has the ACK and closes; the broker's heartbeat crosses that close.
     received: (socket, { opcode, data }) => { if (opcode === 1) { acks.push(JSON.parse(data.toString())); socket.write(PING); } },
   });
   const id = randomUUID(), connection = await connect(b.url, `/v1/leases/${randomUUID()}/video-sessions/${id}/${randomUUID()}`, id);
   t.after(() => connection.close());
-  const out: Buffer[] = [], video = await VideoClient.connect(connection);
+  return { connection, id, acks, reset: b.reset };
+}
+
+test("a verified recording reset after its acknowledgement completes once the controller records it finished and cleaned", async t => {
+  const r = await resetAfterAck(t);
+  // The host reports its receipt a moment after the broker's close: the first reads still show the session ready.
+  const records = [session(r.id, "ready", false), session(r.id, "ready", false), session(r.id, "finished", true)];
+  let inspected = 0;
+  const out: Buffer[] = [], video = await VideoClient.connect(r.connection, {}, async () => records[Math.min(inspected++, records.length - 1)]!);
   const result = await video.record({ write: bytes => { out.push(Buffer.from(bytes)); return bytes.length; } });
-  await b.reset;
-  assert.deepEqual(acks, [{ type: "ack" }]);
-  assert.deepEqual(result, FINISH); assert.deepEqual(Buffer.concat(out), MP4);
+  await r.reset;
+  assert.deepEqual(r.acks, [{ type: "ack" }]);
+  assert.deepEqual(result, FINISH); assert.deepEqual(Buffer.concat(out), MP4); assert.equal(inspected, 3);
+});
+
+test("a recording reset after its acknowledgement is incomplete when the controller never records it finished", async t => {
+  // The ACK was written but never reached the host: the controller's record stays unfinished.
+  const r = await resetAfterAck(t);
+  let inspected = 0;
+  const video = await VideoClient.connect(r.connection, { timeoutMs: 1000 }, async () => { inspected++; return session(r.id, "ready", false); });
+  await assert.rejects(video.record({ write: bytes => bytes.length }), (error: Error & { code?: string }) => error.code === "video_incomplete");
+  await r.reset;
+  assert.ok(inspected >= 2); assert.equal(video.finish, undefined);
+  // A positive cleanup alone is not enough either: only `finished` with cleanup completes it.
+  const held = await resetAfterAck(t);
+  const unfinished = await VideoClient.connect(held.connection, { timeoutMs: 600 }, async () => session(held.id, "disconnected", false));
+  await assert.rejects(unfinished.record({ write: bytes => bytes.length }), (error: Error & { code?: string }) => error.code === "video_incomplete");
+});
+
+test("a recording reset after its acknowledgement is incomplete without a controller record to confirm it", async t => {
+  const r = await resetAfterAck(t);
+  const video = await VideoClient.connect(r.connection);
+  await assert.rejects(video.record({ write: bytes => bytes.length }), (error: Error & { code?: string }) => error.code === "video_incomplete");
+  await r.reset;
 });
 
 test("a recording whose connection is reset before its finish stays incomplete", async t => {
