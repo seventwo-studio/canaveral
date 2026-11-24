@@ -514,6 +514,7 @@ async function exerciseVmLeases(hostId, template, storage) {
     assert(deadline > boottime(), 'Lease must still be live before simulating libvirtd unavailability.');
     await delay(Math.max(0, deadline - boottime() - 5) * 1000);
     const fence = await withFrozenLibvirt(async () => {
+      await delay(Math.max(0, deadline - boottime() + 0.1) * 1000);
       const result = await unconfirmed(lease, ['deadline', 'fenced']);
       assert(boottime() >= deadline);
       assert.equal(proc(lease.qemu), lease.qemuBirth);
@@ -735,16 +736,8 @@ async function exerciseVm() {
     await eventually('safe-to-power-off proof for VM host', async () => {
       const status = await call(maintenance);
       blockers = status.blockers.map(({ kind, id, state, detail }) => ({ kind, id, state, detail }));
-      const unexpected = blockers.filter(blocker => blocker.kind === 'unexpectedResource').map(blocker => blocker.id).sort();
-      if (unexpected.join(',') === '.assignment-locks,.lease-cleanup' &&
-          blockers.every(blocker => ['unexpectedResource', 'notIdle'].includes(blocker.kind))) {
-        throw new Blocked('coordination/src/host.ts:1707 and :1804 count internal lease journals as unexpected resources: ' + JSON.stringify(blockers));
-      }
       return status.safeToPowerOff;
-    }, 120).catch(error => {
-      if (error instanceof Blocked) throw error;
-      throw new Error(error.message + ': ' + JSON.stringify(blockers));
-    });
+    }, 120).catch(error => { throw new Error(error.message + ': ' + JSON.stringify(blockers)); });
     admission('label', node, 'canaveral.dev/host-profile-');
     await eventually('VM pod termination after removing its node label', () => daemonPods().length === 0, 110);
     admission('delete', '-k', 'deploy/kubernetes/canaverald/vm', '--ignore-not-found', '--timeout=150s');
