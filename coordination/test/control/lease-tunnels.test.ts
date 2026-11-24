@@ -1332,9 +1332,14 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
   // The runner loses controller contact: its last heartbeat is suddenly older than the freshness
   // window. Nothing else changed. The device runs, its lease guard and supervisor hold, and the
   // controller and its broker still consider the tunnel authorized. Only the runner's own tunnel
-  // authority (HostRunner.tunnelAuthorized) can end this tunnel, and it does so within a second,
-  // seconds before the next heartbeat restores contact.
+  // authority (HostRunner.tunnelAuthorized) can end this tunnel, and it does so within a second.
+  // Heartbeats are held while this is observed, so no heartbeat can restore contact, confirm a
+  // removal or tell the controller anything in between: what happens is the runner's own doing.
+  const runner = h.runner(), poll = runner.poll.bind(runner);
+  let heartbeatsHeld = false;
+  t.mock.method(runner, "poll", async () => { if (!heartbeatsHeld) await poll(); });
   await heartbeat();
+  heartbeatsHeld = true;
   const supervisorOf = (lease: Lease) => JSON.parse(readFileSync(join(h.storage(lease.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
   let since = Date.now();
   h.runner().lastContact -= 60;
@@ -1354,6 +1359,8 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
   await until(async () => (await holder.tunnels.inspect(pending.id)).state === "disconnected", "the ended tunnel's state");
   assert.equal((await holder.tunnels.inspect(pending.id)).mappingRemoved, false);
   await refused(holder.tunnels.create({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081 }), 409, "tunnel_port_busy");
+  assert.equal(h.runner().fresh(), false, "no heartbeat arrived meanwhile");
+  heartbeatsHeld = false;
   await until(async () => (await holder.tunnels.inspect(pending.id)).mappingRemoved === true, "the runner's retried removal", 30000);
   assert.deepEqual(mappingsOf(h, fenced.machineId).reverse, []);
   const first = await holder.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
