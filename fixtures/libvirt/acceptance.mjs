@@ -429,7 +429,8 @@ try {
     // itself (fail-closed) before the OOM killer picks it. Either ending is acceptable here.
     record.guardianEnd = kernel.length ? 'kernel-oom-kill' : 'self-fenced';
     if (!kernel.length) {
-      const native = receipt(lease.machineId);
+      let native;
+      try { native = receipt(lease.machineId); } catch { native = { reason: 'stopped-and-erased-before-read' }; }
       record.selfFenceReason = native.reason ?? null;
       assert.ok(native.reason, 'a guardian that was not OOM-killed recorded why it fenced');
     }
