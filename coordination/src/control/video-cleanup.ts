@@ -18,7 +18,9 @@ export function initializeVideoResolutions(db: DatabaseSync): void {
     decision TEXT NOT NULL,reason TEXT NOT NULL,decided_by TEXT NOT NULL,created REAL NOT NULL)`);
 }
 
-const abandoned = 'EXISTS (SELECT 1 FROM mobile_video_session_resolutions r WHERE r.session=v.id)';
+/** Predicate over alias `v`: an administrator abandoned the session. */
+export const ABANDONED_VIDEO_SESSION = 'EXISTS (SELECT 1 FROM mobile_video_session_resolutions r WHERE r.session=v.id)';
+const abandoned = ABANDONED_VIDEO_SESSION;
 /** The device the session recorded is gone: an ordinary deletion, or a lease's proven cleanup. */
 const removed = `(EXISTS (SELECT 1 FROM machine_deletions d WHERE d.machine=v.machine AND d.state='complete') OR
   EXISTS (SELECT 1 FROM lease_cleanup_members c WHERE c.machine=v.machine AND c.state='complete'))`;
