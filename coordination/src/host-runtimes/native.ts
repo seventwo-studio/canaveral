@@ -203,7 +203,12 @@ async function libvirt(config: HostConfigData, env: Environment): Promise<Backen
   }
   const provider = new LibvirtProvider({ ...settings, templates: [], adapters: { platform: env.platform, run: (argv: string[]) => probe(env, argv) } }, "/");
   try { await provider.check(); }
-  catch { return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", "The local libvirt KVM capability probe did not pass."), version); }
+  catch (error) {
+    if ((error as { code?: unknown }).code === "libvirt_vm_storage_access") {
+      return record(id, true, "failed", blocker("libvirt_vm_storage_access", "VM storage and templates must be daemon-owned and shared only with the QEMU group."), version);
+    }
+    return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", "The local libvirt KVM capability probe did not pass."), version);
+  }
   return record(id, true, "verified", undefined, version);
 }
 

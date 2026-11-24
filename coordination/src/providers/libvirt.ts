@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { userInfo } from "node:os";
 import { basename, dirname, join, normalize } from "node:path";
 import { kubernetesDeployment } from "../host-deployment.ts";
 import { ServiceError, object } from "../errors.ts";
@@ -112,7 +113,36 @@ export function publishAuthorization(binding:LibvirtLeaseBinding,journal:Journal
   result.fenced ||= result.deadline<=after;
   if(!ownership())refuse("Ownership changed during deadline publication.");if(canonical(previous)!==canonical(result))journal.write(result);return result;
 }
-export interface ExecutionSpec extends RecordValue {version:1;binding:BindingData;uri:string;library:{path:string;sha256:string};storageIdentity:Inode;diskIdentity:Inode}
+export interface ExecutionSpec extends RecordValue {version:1;binding:BindingData;uri:string;library:{path:string;sha256:string};storageIdentity:Inode;diskIdentity:Inode;storageAccess?:StorageAccess}
+/** VM storage shared with QEMU through one dedicated group; QEMU keeps its own account. */
+export interface StorageAccess extends RecordValue {gid:number;label:string}
+const accountName=/^(?:[a-z_][a-z0-9_.-]{0,31}|\+[0-9]{1,10})$/;
+const VM_MODES={directory:0o2750,disk:0o660,media:0o640} as const;
+function passwdUid(name:string):number|undefined{
+  try{const line=snapshotFile("/etc/passwd",4*1048576).toString("utf8").split("\n").find(l=>l.split(":")[0]===name);const uid=Number(line?.split(":")[2]);return line&&Number.isSafeInteger(uid)?uid:undefined;}catch{return undefined;}
+}
+export function vmStorageAccess(config:RecordValue):StorageAccess{
+  const gid=config.vmGroupId??10002,group=config.vmGroup??"canaveral-vm",user=config.qemuUser??"libvirt-qemu";
+  if(!Number.isSafeInteger(gid)||(gid as number)<=0||(gid as number)>=2**31-1)refuse("vmGroupId must be a positive group ID.");
+  if(typeof group!=="string"||!accountName.test(group)||group.startsWith("+")&&Number(group.slice(1))!==gid)refuse("vmGroup must name the group vmGroupId identifies.");
+  if(typeof user!=="string"||!accountName.test(user)||user==="root"||user.startsWith("+")&&Number(user.slice(1))===0)refuse("qemuUser must name a dedicated QEMU account.");
+  const uid=process.getuid?.();let daemon:string|undefined;try{daemon=userInfo().username;}catch{/* A container may have no account entry. */}
+  if(user===daemon||(user.startsWith("+")?Number(user.slice(1)):passwdUid(user))===uid)refuse("QEMU must not share the daemon account.");
+  return{gid:gid as number,label:`${user}:${group}`};
+}
+/** Exact owner, group and mode; nothing broader is accepted. */
+export function vmEntry(s:fs.Stats,access:StorageAccess,kind:keyof typeof VM_MODES):void{
+  if(s.uid!==process.getuid?.()||s.gid!==access.gid||(s.mode&0o7777)!==VM_MODES[kind]||(kind==="directory"?!s.isDirectory():!s.isFile()||s.nlink!==1))refuse("VM storage must be owned by the daemon and shared only with the QEMU group.");
+}
+/** Linux gives a new directory the setgid parent's group and setgid bit; the mode must not lose group search. */
+function vmDirectory(path:string,access:StorageAccess):fs.Stats{
+  const mask=process.umask(0o027);
+  try{fs.mkdirSync(path,{mode:0o750});}catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;}finally{process.umask(mask);}
+  noSymlinks(path);let s=fs.lstatSync(path);
+  // Only a group member can set setgid itself, such as on platforms without inheritance.
+  if(s.isDirectory()&&s.uid===process.getuid?.()&&s.gid===access.gid&&(s.mode&0o7777)!==VM_MODES.directory&&process.getgroups?.().includes(access.gid)){fs.chmodSync(path,VM_MODES.directory);s=fs.lstatSync(path);}
+  vmEntry(s,access,"directory");return s;
+}
 interface Execution {binding:LibvirtLeaseBinding;spec:ExecutionSpec;execution:RecordValue;launch:RecordValue|null}
 export interface ProcessBirth {pid:number;createdAt:number;parentPid:number;uid:number;executable:string;argv:string[];zombie:boolean}
 export interface LibvirtAdapters {
@@ -125,6 +155,11 @@ export interface LibvirtAdapters {
   fileLease?:FileLeaseFactory;protectedRemove?:(root:string,manifest:ManifestEntry[])=>void;
   kernel?:UsageKernel;process?:(pid:number)=>UsageProcess;
   seed?:(image:RecordValue,machine:RecordValue,storage:string)=>Promise<string|null>;
+}
+/** A static DAC label without relabelling keeps QEMU on its own account and the daemon's files unchanged. */
+export function withDACLabel(xml:string,label:string):string{
+  if(!/<\/devices><\/domain>$/.test(xml))refuse("Domain XML cannot carry a QEMU account label.");
+  return xml.replace(/<\/domain>$/,`<seclabel type="static" model="dac" relabel="no"><label>${escapeXML(label)}</label></seclabel></domain>`);
 }
 export function domainXML(machine:RecordValue,image:RecordValue,disk:string,leased=true):string{
   uuid(machine.id);const r=object(machine.resources);for(const key of ["cpu","memoryMiB","diskGiB"])if(!Number.isSafeInteger(r[key])||(r[key] as number)<=0)refuse("Invalid native resources.");
@@ -146,33 +181,44 @@ export class LibvirtProvider {
   private connection(spec:ExecutionSpec,b:LibvirtLeaseBinding):OwnedNativeConnection{if(!this.adapters.connect)refuse("Native libvirt connection binding is unavailable.");return this.adapters.connect(spec.uri,b.machine_id);}
   async check():Promise<unknown>{
     if((this.adapters.platform??process.platform)!=="linux")refuse("The libvirt provider runs on Linux hosts.");this.uri();const arch=this.adapters.arch??({x64:"amd64",arm64:"arm64"}[process.arch as "x64"|"arm64"]);
-    const templates=this.config.templates??[];if(!Array.isArray(templates))refuse("Invalid native templates.");for(const value of templates){const image=object(value);if(!["linux","windows"].includes(String(image.os))||image.arch!==arch)refuse("Template is incompatible with this native host.");const path=absolute(image.image);noSymlinks(path);regular(fs.lstatSync(path),false);}
+    const templates=this.config.templates??[];if(!Array.isArray(templates))refuse("Invalid native templates.");for(const value of templates){const image=object(value);if(!["linux","windows"].includes(String(image.os))||image.arch!==arch)refuse("Template is incompatible with this native host.");const path=absolute(image.image);noSymlinks(path);this.storageEntry(fs.lstatSync(path),"media");}
+    if(this.config.storage!==undefined){const root=absolute(this.config.storage);noSymlinks(root);this.storageEntry(fs.lstatSync(root),"directory");}
     let artifact:unknown=null;if(this.config.leaseDeadlineLibrary!==undefined)artifact=deadlineArtifact(absolute(this.config.leaseDeadlineLibrary),arch as "amd64"|"arm64");
     await this.virsh("domcapabilities","--virttype","kvm");await this.command(["qemu-img","--version"],30000);
     return{kind:this.kind,libvirtLeaseArtifact:artifact!==null,leaseEligible:false,nativeAcceptance:false,warnings:["Kernel deadlines, native connection lifetime, storage leases and fresh-lease isolation require native acceptance."]};
   }
   private storagePath(machine:RecordValue):string{return join(absolute(this.config.storage),uuid(machine.id));}
+  /** The group and QEMU account label configured for this host. */
+  access():StorageAccess{return vmStorageAccess(this.config);}
+  private storageEntry(s:fs.Stats,kind:"directory"|"disk"|"media"):void{
+    try{vmEntry(s,this.access(),kind);}catch(error){throw new ServiceError(error instanceof ServiceError?error.message:"VM storage access is invalid.",409,{code:"libvirt_vm_storage_access"});}
+  }
   async maintenanceStorage(machine:RecordValue):Promise<"present"|"absent"|"unknown">{
     const path=this.storagePath(machine);noLinks(path);
     if(!present(path))return "absent";
     const directory=fs.lstatSync(path);owned(directory);if(!directory.isDirectory())return "unknown";
+    // Storage prepared before QEMU group access stays private; it is never widened in place.
+    const shared=directory.gid===this.access().gid&&(directory.mode&0o7777)===VM_MODES.directory;if(!shared)owned(directory,true);
     if(readPrivate(join(path,"canaveral-owner.json"))?.fingerprint!==fingerprint(machine))return "unknown";
     const disk=join(path,"disk.qcow2");noLinks(disk);if(!present(disk))return "absent";
-    regular(fs.lstatSync(disk),false);return "present";
+    if(shared)vmEntry(fs.lstatSync(disk),this.access(),"disk");else regular(fs.lstatSync(disk),true);return "present";
   }
-  private location(b:LibvirtLeaseBinding,s:ExecutionSpec):boolean{return s.uri===this.uri()&&b.disk===join(this.storagePath({id:b.machine_id}),"disk.qcow2");}
+  private location(b:LibvirtLeaseBinding,s:ExecutionSpec):boolean{return s.uri===this.uri()&&b.disk===join(this.storagePath({id:b.machine_id}),"disk.qcow2")&&(s.storageAccess===undefined||canonical(s.storageAccess)===canonical(this.access()));}
+  /** The QEMU account label bound at preparation; older preparations carry none. */
+  private label(s:ExecutionSpec):string|undefined{return s.storageAccess?.label;}
   private readSpec(j:SupervisorJournal,machine:RecordValue,storage=true):{binding:LibvirtLeaseBinding;spec:ExecutionSpec}{
-    const value=j.readNamed("libvirt-binding.json");if(!value||!exact(value,["version","binding","uri","library","storageIdentity","diskIdentity"])||value.version!==1||!validSavedUri(value.uri))refuse("Execution binding is missing or invalid.");
+    const value=j.readNamed("libvirt-binding.json");if(!value||!exact(value,["version","binding","uri","library","storageIdentity","diskIdentity",...(Object.hasOwn(value,"storageAccess")?["storageAccess"]:[])])||value.version!==1||!validSavedUri(value.uri))refuse("Execution binding is missing or invalid.");
     const raw=object(value.binding);if(!exact(raw,["machine_id","lease_id","boot_id","host_boot_id","fingerprint","disk"]))refuse("Malformed execution binding.");const b=new LibvirtLeaseBinding(raw as unknown as BindingData);const spec=value as ExecutionSpec;
     for(const key of ["storageIdentity","diskIdentity"] as const){const id=object(value[key]);if(!exact(id,["device","inode"])||!Object.values(id).every(n=>typeof n==="number"&&Number.isSafeInteger(n)&&n>=0))refuse("Invalid storage birth identity.");}
+    if(Object.hasOwn(value,"storageAccess")){const a=object(value.storageAccess);if(!exact(a,["gid","label"])||!Number.isSafeInteger(a.gid)||(a.gid as number)<=0||typeof a.label!=="string"||!/^[^:<>&]{1,64}:[^:<>&]{1,64}$/.test(a.label))refuse("Invalid VM storage access binding.");}
     const library=object(value.library);if(!exact(library,["path","sha256"])||typeof library.sha256!=="string"||!/^[a-f0-9]{64}$/.test(library.sha256))refuse("Invalid native artifact binding.");absolute(library.path);
     const lease=machine.lease?object(machine.lease):null;const assignment=j.readNamed("assignment.json");
     if(b.machine_id!==machine.id||b.fingerprint!==fingerprint(machine)||(lease&&b.lease_id!==lease.id)||!assignment||assignment.fingerprint!==b.fingerprint||(lease&&assignment.leaseId!==b.lease_id)||(!lease&&(b.lease_id!==machine.id||assignment.leaseId!==undefined)))refuse("Binding belongs to another assignment.");
     if(storage)this.assertStorage(b,spec);return{binding:b,spec};
   }
   private assertStorage(b:LibvirtLeaseBinding,s:ExecutionSpec,root=dirname(b.disk)):void{
-    noSymlinks(root);const directory=fs.lstatSync(root);owned(directory);if(!directory.isDirectory()||!sameInode(directory,s.storageIdentity)||basename(dirname(b.disk))!==b.machine_id)refuse("Owned storage changed.");
-    const disk=fs.lstatSync(join(root,basename(b.disk)));regular(disk,false);if(!sameInode(disk,s.diskIdentity)||readPrivate(join(root,"canaveral-owner.json"))?.fingerprint!==b.fingerprint)refuse("Owned disk or marker changed.");
+    noSymlinks(root);const directory=fs.lstatSync(root),access=s.storageAccess;if(access)vmEntry(directory,access,"directory");else owned(directory);if(!directory.isDirectory()||!sameInode(directory,s.storageIdentity)||basename(dirname(b.disk))!==b.machine_id)refuse("Owned storage changed.");
+    const disk=fs.lstatSync(join(root,basename(b.disk)));if(access)vmEntry(disk,access,"disk");else regular(disk,false);if(!sameInode(disk,s.diskIdentity)||readPrivate(join(root,"canaveral-owner.json"))?.fingerprint!==b.fingerprint)refuse("Owned disk or marker changed.");
   }
   private inspect(machine:RecordValue,folder:string):Execution|null{
     const j=this.journal(folder,"libvirt-binding");try{if(!j.read())return null;const{binding,spec}=this.readSpec(j,machine);const execution=j.readNamed("libvirt-execution.json"),launch=j.readNamed("libvirt-launch.json");if(!matches(execution,binding.identity())||(launch&&!matches(launch,binding.identity())))refuse("Execution history is missing or foreign.");return{binding,spec,execution,launch};}finally{j.close();}
@@ -199,18 +245,19 @@ export class LibvirtProvider {
   private async prepare(machine:RecordValue,image:RecordValue,folder:string,leased:boolean):Promise<void>{
     if(leased&&(!this.adapters.connect||!this.adapters.launch||!this.adapters.clock))refuse("Leased native execution binding is insufficient; preparation refused.");
     const library=leased?deadlineArtifact(absolute(this.config.leaseDeadlineLibrary),(this.adapters.arch??"amd64") as "amd64"|"arm64"):{path:"/unavailable-administrative-deadline",sha256:"0".repeat(64)};
-    const assignment=fingerprint(machine);const j=this.journal(folder,"libvirt-binding");try{
+    const assignment=fingerprint(machine),access=this.access();const j=this.journal(folder,"libvirt-binding");try{
       if(j.read()||["libvirt-execution.json","libvirt-launch.json","libvirt-authorization.json"].some(n=>j.readNamed(n)!==null))refuse("Preparation cannot adopt prior or partial history.");
       const a=j.readNamed("assignment.json"),lease=leased?object(machine.lease):null;if(a?.fingerprint!==assignment||(lease&&a.leaseId!==lease.id))refuse("Preparation cannot adopt another assignment.");
       if((await this.virsh("list","--all","--name")).split(/\r?\n/).includes(`cvm-${machine.id}`)||(await this.virsh("list","--all","--uuid")).toLowerCase().split(/\r?\n/).includes(String(machine.id)))refuse("Cannot adopt an existing domain.");
-      const root=absolute(this.config.storage);noSymlinks(root);const parent=fs.lstatSync(root);owned(parent);if(!parent.isDirectory())refuse("Owned storage parent required.");const path=this.storagePath(machine);
-      try{fs.mkdirSync(path,{mode:0o700});}catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;}
-      noSymlinks(path);const st=fs.lstatSync(path);owned(st);if(!st.isDirectory())refuse("Owned storage directory required.");const owner=join(path,"canaveral-owner.json");
+      const root=absolute(this.config.storage);noSymlinks(root);this.storageEntry(fs.lstatSync(root),"directory");const path=this.storagePath(machine);
+      // QEMU reads VM storage through its group; daemon state and the owner marker stay private.
+      const st=vmDirectory(path,access);const owner=join(path,"canaveral-owner.json");
       const prior=readPrivate(owner);if(prior){if(prior.fingerprint!==assignment)refuse("Storage belongs to another assignment.");}else{if(fs.readdirSync(path).length)refuse("Unmarked storage cannot be adopted.");const fd=fs.openSync(owner,"wx",0o600);try{fs.writeFileSync(fd,canonical({fingerprint:assignment}));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
       if(fs.readdirSync(path).some(n=>n!=="canaveral-owner.json"))refuse("Partial native preparation cannot be replayed.");
-      const base=absolute(image.image);noSymlinks(base);regular(fs.lstatSync(base),false);let seed:string|null=null;
+      const base=absolute(image.image);noSymlinks(base);this.storageEntry(fs.lstatSync(base),"media");let seed:string|null=null;
       if(image.guestAccess&&!this.adapters.seed)refuse("Guest seed construction is not bound.");if(this.adapters.seed)seed=await this.adapters.seed(image,machine,path);
       if(seed&&(dirname(absolute(seed))!==path||!fs.lstatSync(seed).isFile()||fs.lstatSync(seed).isSymbolicLink()))refuse("Seed media is not owned.");
+      if(seed){fs.chmodSync(seed,VM_MODES.media);vmEntry(fs.lstatSync(seed),access,"media");}
       const info=object(JSON.parse(await this.command(["qemu-img","info","--output=json",base])));const resources=object(machine.resources);
       if(!Number.isSafeInteger(info["virtual-size"])||(info["virtual-size"] as number)<0||(info["virtual-size"] as number)>(resources.diskGiB as number)*1073741824||!["raw","qcow2"].includes(String(info.format))||info["backing-filename"])refuse("Base disk must be standalone and fit the assignment.");
       // Persist intent before qemu-img: a lost creation acknowledgement cannot repeat provisioning.
@@ -218,16 +265,18 @@ export class LibvirtProvider {
       const execution=this.journal(folder);try{execution.write({...b.identity(),phase:"preparing"});}finally{execution.close();}
       const output=fs.openSync(disk,"wx",0o600),birth=inode(fs.fstatSync(output));
       try {
+        // The disk takes the directory's group; only that group gains read and write.
+        fs.fchmodSync(output,VM_MODES.disk);vmEntry(fs.fstatSync(output),access,"disk");
         // Child access names this retained descriptor, not a swappable output path.
         const destination=process.platform==="linux"?`/proc/${process.pid}/fd/${output}`:disk;
         await this.command(["qemu-img","create","-f","qcow2","-F",String(info.format),"-b",base,destination,`${resources.diskGiB}G`]);
         if(!sameInode(fs.lstatSync(disk),birth))refuse("Prepared disk was replaced during creation.");fs.fsyncSync(output);
       } finally { fs.closeSync(output); }
-      regular(fs.lstatSync(disk),false);const spec:ExecutionSpec={version:1,binding:{...b},uri:this.uri(),library:{path:library.path as string,sha256:library.sha256 as string},storageIdentity:inode(st),diskIdentity:inode(fs.lstatSync(disk))};this.assertStorage(b,spec);j.write(spec);
-      const xml=bindDomainXML(domainXML(machine,{...image,...(seed?{_seedISO:seed}:{})},disk),b),definition=join(path,"domain.xml");const fd=fs.openSync(definition,"wx",0o600);try{fs.writeFileSync(fd,xml);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+      vmEntry(fs.lstatSync(disk),access,"disk");const spec:ExecutionSpec={version:1,binding:{...b},uri:this.uri(),library:{path:library.path as string,sha256:library.sha256 as string},storageIdentity:inode(st),diskIdentity:inode(fs.lstatSync(disk)),storageAccess:access};this.assertStorage(b,spec);j.write(spec);
+      const xml=bindDomainXML(withDACLabel(domainXML(machine,{...image,...(seed?{_seedISO:seed}:{})},disk),access.label),b),definition=join(path,"domain.xml");const fd=fs.openSync(definition,"wx",0o600);try{fs.writeFileSync(fd,xml);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
       const dir=fs.openSync(path,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW);try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}
       const receipt=this.journal(folder);try{receipt.write({...b.identity(),phase:"prepared"});}finally{receipt.close();}
-      this.assertStorage(b,spec);validateDomainXML(xml,b);
+      this.assertStorage(b,spec);validateDomainXML(xml,b,access.label);
       await this.definePrepared(j,b,spec);
     }finally{j.close();}
   }
@@ -235,7 +284,7 @@ export class LibvirtProvider {
     if (!this.location(b,s)) refuse("The prepared domain namespace changed.");
     this.assertStorage(b,s);
     const source=join(dirname(b.disk),"domain.xml");
-    const bytes=snapshotFile(source,1048576);validateDomainXML(bytes.toString("utf8"),b);
+    const bytes=snapshotFile(source,1048576);validateDomainXML(bytes.toString("utf8"),b,this.label(s));
     // Node uses a Unix socket for child stdin on Linux. virsh needs a reopenable file.
     const path=join(j.folder,`temporary-${randomUUID()}.xml`);
     const fd=fs.openSync(path,"wx",0o600);
@@ -261,7 +310,7 @@ export class LibvirtProvider {
         }
       }
       if(leased){const auth=this.publish(machine,image,folder,machine.desired==="stopped"||execution.phase==="fenced");if(auth.fenced===true){const stopped=this.confirmExecutionStopped(machine,folder);return{state:stopped?"stopped":"stopping",leaseFenced:true,detail:"Storage handles and erasure remain unverified."};}}
-      const id=uuid(machine.id);const xml=await this.virsh("dumpxml",id);validateDomainXML(xml,b);if((await this.virsh("domuuid",id)).toLowerCase()!==id)refuse("Native UUID differs.");this.assertStorage(b,s);
+      const id=uuid(machine.id);const xml=await this.virsh("dumpxml",id);validateDomainXML(xml,b,this.label(s));if((await this.virsh("domuuid",id)).toLowerCase()!==id)refuse("Native UUID differs.");this.assertStorage(b,s);
       const state=(await this.virsh("domstate",id)).toLowerCase();
       if(leased){if(!launch){if(execution.phase!=="prepared"||state!=="shut off")refuse("Launch is not a fresh inactive owned boot.");this.launch(machine,folder);return{state:"starting"};}
         if(execution.phase==="running"&&state==="running"&&this.supervisorAlive(b,folder,launch))return{state:"running"};
@@ -280,7 +329,7 @@ export class LibvirtProvider {
       const { binding, spec } = this.readSpec(journal, machine);
       if (!this.location(binding, spec)) return false;
       if (await this.virsh("domuuid", binding.machine_id) !== binding.machine_id) return false;
-      validateDomainXML(await this.virsh("dumpxml", binding.machine_id), binding);
+      validateDomainXML(await this.virsh("dumpxml", binding.machine_id), binding, this.label(spec));
       if (await this.virsh("domstate", binding.machine_id) !== "shut off") return false;
       return this.location(binding, spec) && canonical(this.readSpec(journal, machine).spec) === canonical(spec);
     } catch { return false; }
@@ -288,7 +337,7 @@ export class LibvirtProvider {
   }
   private async adminAction(machine:RecordValue,folder:string,b:LibvirtLeaseBinding,s:ExecutionSpec,action:"start"|"shutdown"):Promise<void>{
     const j=this.journal(folder);try{const old=j.read();if(old?.phase===`${action}-pending`)refuse("Uncertain native action is not replayed.");
-      const validate=async()=>{this.readSpec(j,machine);if(!this.location(b,s)||(await this.virsh("domuuid",b.machine_id)).toLowerCase()!==b.machine_id)refuse("Administrative native owner changed.");validateDomainXML(await this.virsh("dumpxml",b.machine_id),b);this.assertStorage(b,s);};
+      const validate=async()=>{this.readSpec(j,machine);if(!this.location(b,s)||(await this.virsh("domuuid",b.machine_id)).toLowerCase()!==b.machine_id)refuse("Administrative native owner changed.");validateDomainXML(await this.virsh("dumpxml",b.machine_id),b,this.label(s));this.assertStorage(b,s);};
       await validate();j.write({...b.identity(),phase:`${action}-pending`});await validate();await this.virsh(action,b.machine_id);j.write({...b.identity(),phase:`${action}-requested`});
     }finally{j.close();}
   }
@@ -394,7 +443,7 @@ export class LibvirtProvider {
     const read=(name:string)=>readPrivate(join(folder,name));noSymlinks(folder);const spec=read("libvirt-binding.json") as ExecutionSpec|null;if(!spec)refuse("Resource binding is missing.");const b=new LibvirtLeaseBinding(spec.binding);const assignment=read("assignment.json"),marker=readPrivate(join(dirname(b.disk),"canaveral-owner.json"));
     if(b.machine_id!==machine.id||b.fingerprint!==fingerprint(machine)||assignment?.fingerprint!==b.fingerprint||marker?.fingerprint!==b.fingerprint||!this.location(b,spec))refuse("Resource assignment ownership differs.");this.assertStorage(b,spec);const boot=uuid(this.boot());
     if(machine.lease&&(b.host_boot_id!==boot||object(machine.lease).id!==b.lease_id||assignment.leaseId!==b.lease_id))refuse("Resource lease boot differs.");
-    const connection=this.connection(spec,b);try{const s=connection.snapshot();if(s.uuid!==b.machine_id)refuse("Resource native UUID differs.");validateDomainXML(s.xml,b);let result:BoundUsageProcess[]=[];
+    const connection=this.connection(spec,b);try{const s=connection.snapshot();if(s.uuid!==b.machine_id)refuse("Resource native UUID differs.");validateDomainXML(s.xml,b,this.label(spec));let result:BoundUsageProcess[]=[];
       if(!s.active){if(s.state!=="shut off"||domainHasTPM(s.xml)||canonical(connection.snapshot())!==canonical(s))refuse("Inactive helper usage is unknown.");}
       else{if(!["running","paused"].includes(s.state)||!s.id||!s.threads?.length||!this.adapters.kernel||!this.adapters.process)refuse("Native resource anchor is unavailable.");
         const kernel=this.adapters.kernel,process=this.adapters.process,emulator=domainEmulator(s.xml);if(!emulator)refuse("Native emulator identity is unavailable.");const tgids=new Set(s.threads.map(t=>kernel.tgid(t)));if(tgids.size!==1)refuse("QMP threads do not identify one QEMU process.");const pid=[...tgids][0]!,primary=process(pid),argv=primary.argv,born=primary.createdAt;
