@@ -29,8 +29,16 @@ group/other writable, and the daemon must not run as root. Pin the digest from
 the release or image manifest. For every execution the daemon opens the file,
 hashes those bytes, rechecks the descriptor, and runs the child through
 `/proc/self/fd/3`, the same descriptor. It never runs the configured path after
-hashing it. `leaseClockHelper` may name the same binary: its `clock` command
-prints `CLOCK_BOOTTIME`.
+hashing it. For libvirt lease offers, set `leaseClockHelper` to the same pinned
+binary. The host verifies the image and the kernel's peer pidfd support before
+advertising leases. Every clock sample reopens and verifies the image and runs
+its `clock` command through the verified descriptor. If that fails, the host
+withdraws lease offers, fences lease authority and continues reporting cleanup.
+Restore the matching helper and restart the daemon to resume admission.
+
+The helper's `dlopen` calls depend on root-owned system loader configuration,
+search paths and libraries, including inside the pod image. The daemon strips
+inherited loader environment variables before invoking the helper.
 
 `canaverald runtimes status` reports `leases: {eligible: true}` on the libvirt
 row when the helper verifies and the kernel supports peer pidfds. Otherwise it
@@ -74,9 +82,11 @@ fenced like any other end.
 2. takes the lease lock (`libvirt-native.lock`, `flock`) for its lifetime;
 3. waits for the launch record that names its own PID and start time;
 4. starts a connection worker whose `PR_SET_PDEATHSIG` is armed before exec;
-5. lets the worker create the domain with `virDomainCreateXML(PAUSED|AUTODESTROY)`,
-   proves the UUID, nonce, lease and domain ID, records the domain ID and (on
-   bare metal) the QEMU process birth, then lets it resume.
+5. persists that a create may be submitted, then grants permission to call
+   `virDomainCreateXML(PAUSED|AUTODESTROY)`. After a successful reply the worker
+   journals completion in `libvirt-native-create.json` and adds the proven UUID,
+   nonce, lease, domain ID and (on bare metal) QEMU process birth. The guardian
+   durably records the paused instance and rechecks authority before resuming it.
 
 The worker runs the libvirt default event loop with keepalive (5 s, 3 probes)
 and a close callback. Connection loss, including a libvirtd restart, ends the
@@ -91,8 +101,10 @@ the controller and libvirt RPCs: the same revision can never extend it.
 domain still bound to it. The fence does not rely on that. Through a fresh
 connection it destroys a remaining domain only after the UUID, nonce and lease
 in its metadata, the recorded domain ID and, on bare metal, the QEMU birth all
-match. It records `stopped` only after a fresh lookup returns
-`VIR_ERR_NO_DOMAIN` and the recorded QEMU process is gone. Each probe runs in
+match on the same host boot. It records `stopped` with `stopProven` after a
+fresh lookup returns `VIR_ERR_NO_DOMAIN`, the recorded QEMU process is gone,
+and the create is known to have completed or to have never been submitted. A
+new host boot also settles the earlier boot's create. Each probe runs in
 its own child, bounded to 10 seconds. If libvirt cannot complete the proof on
 bare metal, the guardian opens a pidfd on the recorded QEMU process, checks its
 start time and sends `SIGKILL` through the pidfd. That needs `CAP_KILL` from the
@@ -104,7 +116,14 @@ unconfirmed.
 helper's `fence` command for any lease whose guardian is gone, fenced or on an
 old boot. `fence` first takes the same lease lock: a live guardian makes it
 return busy, so there is never a second destroyer, and acquiring it proves the
-guardian is gone. It then runs the same proof-gated fence with the same
+guardian is gone. An RPC submitted by its worker can still be in flight on
+the server. A dead worker or repeated `VIR_ERR_NO_DOMAIN` replies provide no
+completion evidence. With an uncertain create the reconciler records
+`unknown`, retains the reservation and keeps probing the per-lease UUID.
+If a domain appears, explicit destruction requires the durable instance
+identity. A same-boot libvirtd restart does not settle a missing create reply
+because the journal does not identify the libvirtd process. The reconciler
+runs the same proof-gated fence with the same
 `CAP_KILL` fallback. A transient domain cannot survive a host reboot or be
 resurrected by `virsh start`, autostart or libvirt-guests.
 
@@ -114,10 +133,12 @@ cleanup records its removal intent, renames the machine directory to
 lock. `erase` repeats the fresh absence lookup and takes a Linux write lease on
 every file, which the kernel grants only when no other process has it open.
 It accepts only the owner marker and the disk with their exact owner, group and
-mode, verifies the marker and the disk inode, truncates and syncs every file,
-records `cleared`, unlinks them, removes the directory and records `removed`.
-An interruption resumes from that receipt; missing storage counts only after
-`cleared`. The generic cleanup then erases the assignment's journals and
+mode, then records `verified` with the marker's device and inode and the exact
+removal intent before truncating either file. It truncates and syncs both
+files, records `cleared`, unlinks them, removes the directory and records
+`removed`. A retry uses the verified inodes even if the marker is already empty.
+If the directory is already absent after `cleared`, the helper synchronizes
+its parent and publishes `removed`. The generic cleanup then erases the assignment's journals and
 credentials, and only then does the controller release the reservation.
 
 ## End paths
@@ -135,7 +156,8 @@ credentials, and only then does the controller release the reservation.
 | Host reboot | Reboot | Fresh lookup on the new boot |
 
 Until the proof exists, the lease's reservation, storage and journals stay and
-the controller reports the cleanup as blocked (`execution_pending`).
+the controller reports the cleanup as blocked with `libvirt-unconfirmed` in
+Kubernetes and `execution_pending` on bare metal.
 
 ## Kubernetes
 
@@ -179,8 +201,9 @@ guardian killed QEMU through a pidfd 10.5 s after the deadline (one bounded
 probe), and stop was proven once libvirtd resumed. The kernel OOM killer chose
 the guardian (`oom_score_adj` 1000) inside the service cgroup, and systemd's
 `OOMPolicy=stop` then stopped the unit. Under memory-cgroup pressure a guardian
-can instead fence itself when its reads fail; the acceptance step accepts and
-records either ending.
+can instead fence itself when its reads fail. The current acceptance step
+requires a fresh kernel OOM-kill record for the guardian PID and records
+self-fencing separately.
 
 That proves one hosted kernel and libvirt build. Kubernetes pods, UEFI or TPM
 guests, other distributions, arm64, suspend and real host reboots remain

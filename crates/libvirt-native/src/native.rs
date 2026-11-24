@@ -39,7 +39,6 @@ struct Libvirt {
         Option<unsafe extern "C" fn(Ptr)>,
     ) -> c_int,
     connect_keepalive: unsafe extern "C" fn(Ptr, c_int, c_uint) -> c_int,
-    connect_alive: unsafe extern "C" fn(Ptr) -> c_int,
     lookup_uuid: unsafe extern "C" fn(Ptr, *const c_char) -> Ptr,
     create_xml: unsafe extern "C" fn(Ptr, *const c_char, c_uint) -> Ptr,
     domain_free: unsafe extern "C" fn(Ptr) -> c_int,
@@ -94,7 +93,6 @@ fn load() -> Result<Libvirt> {
             connect_close: symbol(core, c"virConnectClose")?,
             connect_register_close: symbol(core, c"virConnectRegisterCloseCallback")?,
             connect_keepalive: symbol(core, c"virConnectSetKeepAlive")?,
-            connect_alive: symbol(core, c"virConnectIsAlive")?,
             lookup_uuid: symbol(core, c"virDomainLookupByUUIDString")?,
             create_xml: symbol(core, c"virDomainCreateXML")?,
             domain_free: symbol(core, c"virDomainFree")?,
@@ -240,10 +238,6 @@ impl Connection {
             return Err("libvirt keepalive unavailable".into());
         }
         Ok(connection)
-    }
-
-    pub fn alive(&self) -> bool {
-        libvirt().is_ok_and(|lib| unsafe { (lib.connect_alive)(self.0) } == 1)
     }
 
     /// `None` only for the exact VIR_ERR_NO_DOMAIN reply.
@@ -440,6 +434,7 @@ pub enum Kill {
 }
 
 impl Birth {
+    #[cfg(test)]
     pub fn of(pid: i32) -> io::Result<Self> {
         Ok(Self {
             pid,

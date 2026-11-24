@@ -137,9 +137,12 @@ export class LeaseGuard {
     if (changed || this.checkpointDirty) this.save();
     return undefined;
   }
-  observe(machines: RecordValue[], roundTrip: number): void {
-    if (!Number.isFinite(roundTrip) || roundTrip < 0) throw new ServiceError("Invalid heartbeat timing.", 400);
-    const now = this.sample(); if (now === undefined) throw unknownOutcome('Lease clock failed; retained assignments remain fenced.');
+  observe(machines: RecordValue[], roundTrip: number | undefined): void {
+    if (roundTrip !== undefined && (!Number.isFinite(roundTrip) || roundTrip < 0)) throw new ServiceError("Invalid heartbeat timing.", 400);
+    // A heartbeat without a trusted clock can deliver terminal cleanup and only fenced leases.
+    const now = roundTrip === undefined ? 0 : this.sample();
+    if (now === undefined) throw unknownOutcome('Lease clock failed; retained assignments remain fenced.');
+    if (roundTrip === undefined) for (const record of this.records.values()) record.fenced = true;
     const wall = this.clock.wall(), seen = new Set<string>();
     for (const machine of machines) {
       const id = identifier(machine.id), previous = this.records.get(id); seen.add(id);
@@ -148,10 +151,10 @@ export class LeaseGuard {
       if (previous && object(previous.machine.lease).id !== lease.id) { previous.fenced = true; this.save(); throw new ServiceError("Machine lease ownership changed.", 409); }
       if (previous?.retired) continue;
       if (previous && Number(lease.revision) < Number(object(previous.machine.lease).revision)) continue;
-      let deadline = now + Math.max(0, Number(lease.authorizationDeadline) - Number(lease.controllerNow) - roundTrip);
+      let deadline = now + Math.max(0, Number(lease.authorizationDeadline) - Number(lease.controllerNow) - (roundTrip ?? 0));
       if (previous && Number(lease.authorizationDeadline) <= Number(object(previous.machine.lease).authorizationDeadline)) deadline = Math.min(deadline, this.deadlines.get(id)!);
-      const fenced = !!previous && (previous.fenced || now >= this.deadlines.get(id)!) ||
-        !["provisioning", "ready"].includes(String(lease.state)) || Math.abs(wall - Number(lease.controllerNow)) > 5 + roundTrip || deadline <= now || !this.clock.suspendAware;
+      const fenced = roundTrip === undefined || !!previous && (previous.fenced || now >= this.deadlines.get(id)!) ||
+        !["provisioning", "ready"].includes(String(lease.state)) || Math.abs(wall - Number(lease.controllerNow)) > 5 + (roundTrip ?? 0) || deadline <= now || !this.clock.suspendAware;
       this.records.set(id, { machine: structuredClone(machine), receivedAt: wall, fenced, executionStarted: previous ? previous.executionStarted : !this.historyKnown,
         ...(this.clock.bootId === undefined ? {} : { bootId: this.clock.bootId, elapsedDeadline: deadline }) });
       this.deadlines.set(id, deadline);
@@ -572,7 +575,7 @@ export interface LeaseCleanupOptions {
 }
 /** External intent survives assignment credential erasure; only positive proofs complete it. */
 /** The blocked-cleanup reasons the controller's lifecycle contract accepts. */
-const CLEANUP_REASONS = new Set(["execution_pending", "operations_pending", "sessions_pending", "ownership", "storage_removal", "credential_erasure", "unsupported", "recovery"]);
+const CLEANUP_REASONS = new Set(["execution_pending", "libvirt-unconfirmed", "operations_pending", "sessions_pending", "ownership", "storage_removal", "credential_erasure", "unsupported", "recovery"]);
 export async function cleanupLease(options: LeaseCleanupOptions): Promise<RecordValue> {
   const { machine, folder, guard } = options, id = identifier(machine.id), lease = object(machine.lease), intent = object(machine.leaseCleanup), request = identifier(intent.id);
   if (identifier(intent.leaseId) !== identifier(lease.id) || !["released", "expired", "failed"].includes(String(lease.state)) || machine.desired !== "stopped") throw new ServiceError("Cleanup requires its terminal pinned lease and stopped intent.", 409);

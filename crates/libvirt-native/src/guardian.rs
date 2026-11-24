@@ -25,6 +25,7 @@ const SPEC: &str = "libvirt-native-spec.json";
 const LAUNCH: &str = "libvirt-launch.json";
 const AUTH: &str = "libvirt-authorization.json";
 const RECEIPT: &str = "libvirt-native-execution.json";
+const CREATE_RESULT: &str = "libvirt-native-create.json";
 const REMOVAL: &str = "libvirt-native-removal.json";
 const ERASED: &str = "libvirt-native-erased.json";
 /// Linux UAPI asm-generic/socket.h; added in Linux 6.5.
@@ -104,12 +105,12 @@ struct Domain {
 #[serde(rename_all = "camelCase")]
 struct Receipt {
     identity: Value,
-    /// creating | paused | running | create-failed | unused | stopped
+    /// unused | creating | paused | running | unknown | stopped
     phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     domain: Option<Domain>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    worker: Option<Birth>,
+    #[serde(default)]
+    stop_proven: bool,
     /// Why the lease ended; absent while it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -124,7 +125,7 @@ impl Receipt {
             identity: spec.identity.clone(),
             phase: phase.into(),
             domain: None,
-            worker: None,
+            stop_proven: false,
             reason: None,
             fence: None,
         }
@@ -315,45 +316,73 @@ fn probe(folder: &Path, destroy: bool) -> bool {
     false
 }
 
-/// The probe child: absence (and, with `destroy`, proof-gated destroy) through a fresh connection.
-fn absent(spec: &Spec, receipt: &Receipt, destroy: bool) -> Result<bool> {
+/// Durable evidence published only by the connection worker after a successful create reply.
+#[derive(Deserialize, Serialize)]
+struct CreateResult {
+    identity: Value,
+    domain: Option<Domain>,
+}
+
+fn create_result(journal: &Journal, spec: &Spec) -> Result<Option<CreateResult>> {
+    let result = journal.read::<CreateResult>(CREATE_RESULT)?;
+    if result
+        .as_ref()
+        .is_some_and(|result| result.identity != spec.identity)
+    {
+        return Err("foreign create result".into());
+    }
+    Ok(result)
+}
+
+fn completed_create(receipt: &Receipt, result: Option<&CreateResult>, same_boot: bool) -> bool {
+    !same_boot
+        || receipt.stop_proven
+        || receipt.phase == "unused"
+        || receipt.domain.is_some()
+        || result.is_some()
+}
+
+/// The ID and, on bare metal, the recorded QEMU birth are required before any destroy.
+fn destruction_proof(domain: Option<Domain>, cluster: bool, same_boot: bool) -> Option<Domain> {
+    domain.filter(|domain| {
+        same_boot
+            && domain.id > 0
+            && domain.id < u32::MAX
+            && (cluster
+                || domain
+                    .birth
+                    .is_some_and(|birth| birth.pid > 1 && birth.start > 0))
+    })
+}
+
+/// A lookup can prove absence only after the create completed or its host boot ended.
+fn absent(journal: &Journal, spec: &Spec, receipt: &Receipt, destroy: bool) -> Result<bool> {
     let owner = spec.owner()?;
     let conn = Connection::open(&spec.uri, false)?;
     let same_boot = native::boot_id()? == spec.host_boot()?;
-    let birth = if same_boot {
-        receipt.domain.and_then(|domain| domain.birth)
-    } else {
-        None
-    };
+    let result = create_result(journal, spec)?;
+    let domain = receipt
+        .domain
+        .or_else(|| result.as_ref().and_then(|result| result.domain));
+    let birth = domain.and_then(|domain| domain.birth).filter(|_| same_boot);
     let qemu_gone = || -> Result<bool> {
         Ok(birth.map_or(Ok(Kill::Gone), |process| process.fence(false))? == Kill::Gone)
     };
     let Some(vm) = conn.lookup(owner.uuid)? else {
-        if same_boot && receipt.phase == "creating" && receipt.domain.is_none() {
-            // A create RPC can finish after its client died. Its worker must be gone and the
-            // absence must hold on a second lookup.
-            if let Some(worker) = receipt.worker {
-                if worker.fence(false)? != Kill::Gone {
-                    return Ok(false);
-                }
-            }
-            thread::sleep(Duration::from_secs(2));
-            if conn.lookup(owner.uuid)?.is_some() {
-                return Ok(false);
-            }
-        }
-        return qemu_gone();
+        return Ok(completed_create(receipt, result.as_ref(), same_boot) && qemu_gone()?);
     };
     if !destroy {
         return Ok(false);
     }
-    // Ownership proof: UUID, launch nonce and lease in the metadata, the recorded domain ID,
-    // and on bare metal the recorded QEMU birth.
+    let Some(expected) = destruction_proof(domain, spec.cluster, same_boot) else {
+        return Ok(false);
+    };
+    // identity also checks the UUID, launch nonce and lease in the metadata.
     let (id, _) = vm.identity(&owner)?;
-    if receipt.domain.is_some_and(|known| known.id != id) {
+    if id != expected.id {
         return Err("live domain ID differs".into());
     }
-    if let Some(process) = birth {
+    if let Some(process) = expected.birth {
         if vm.birth(owner.uuid)? != process {
             return Err("live QEMU birth differs".into());
         }
@@ -378,15 +407,27 @@ fn fence(
 ) -> Result<bool> {
     let deadline = native::now()? + budget;
     let mut killed = false;
+    // Keep pre-submit evidence intact when the worker never received a create grant.
+    if receipt.phase != "unused" {
+        receipt.phase = "unknown".into();
+    }
+    receipt.fence = Some("libvirt-unconfirmed".into());
+    journal.write(RECEIPT, receipt)?;
     loop {
         if probe(folder, true) {
             receipt.phase = "stopped".into();
+            receipt.stop_proven = true;
             receipt.fence = None;
             journal.write(RECEIPT, receipt)?;
             return Ok(true);
         }
         let same_boot = native::boot_id()? == spec.host_boot()?;
-        let birth = receipt.domain.and_then(|domain| domain.birth);
+        let result = create_result(journal, spec)?;
+        let domain = receipt
+            .domain
+            .or_else(|| result.and_then(|result| result.domain));
+        let birth =
+            destruction_proof(domain, spec.cluster, same_boot).and_then(|domain| domain.birth);
         receipt.fence = Some(match (spec.cluster, same_boot, birth) {
             (false, true, Some(process)) if !killed => match process.fence(true) {
                 Ok(Kill::Gone) => {
@@ -411,7 +452,6 @@ fn fence(
 struct Reply {
     domain: Option<Domain>,
     running: Option<bool>,
-    failed: Option<bool>,
     ended: Option<bool>,
 }
 
@@ -458,12 +498,10 @@ fn guard(folder: &Path, parent: i32) -> Result<()> {
     }
     let mut authority = Authority::default();
     authority.check(&journal, &spec, &daemon)?;
-    let mut receipt = Receipt::new(&spec, "creating");
+    let mut receipt = Receipt::new(&spec, "unused");
     journal.write(RECEIPT, &receipt)?;
     let path = folder.to_str().ok_or("invalid path")?;
     let mut worker = child("connection", &[path], Stdio::piped())?;
-    receipt.worker = Birth::of(worker.id().try_into()?).ok();
-    journal.write(RECEIPT, &receipt)?;
     let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
     let (sender, replies) = mpsc::channel();
     thread::spawn(move || {
@@ -480,6 +518,8 @@ fn guard(folder: &Path, parent: i32) -> Result<()> {
         if let Err(reason) = authority.check(&journal, &spec, &daemon) {
             break 'lease reason.into();
         }
+        receipt.phase = "creating".into();
+        journal.write(RECEIPT, &receipt)?;
         if !tell(&mut worker, "create") {
             break 'lease "connection-ended".into();
         }
@@ -489,11 +529,7 @@ fn guard(folder: &Path, parent: i32) -> Result<()> {
             }
             match replies.try_recv() {
                 Ok(Some(reply)) => {
-                    if receipt.phase == "creating" && reply.failed == Some(true) {
-                        receipt.phase = "create-failed".into();
-                        journal.write(RECEIPT, &receipt)?;
-                        break 'lease "create-failed".into();
-                    } else if receipt.phase == "creating" && reply.domain.is_some() {
+                    if receipt.phase == "creating" && reply.domain.is_some() {
                         receipt.domain = reply.domain;
                         receipt.phase = "paused".into();
                         journal.write(RECEIPT, &receipt)?;
@@ -548,16 +584,12 @@ fn connection(folder: &Path) -> Result<()> {
     if conn.lookup(owner.uuid)?.is_some() {
         return Err("domain already exists".into());
     }
-    let vm = match conn.create(&spec.xml) {
-        Ok(vm) => vm,
-        Err(error) => {
-            // A refused create on a still-live connection, then definite absence, is final.
-            if conn.alive() && conn.lookup(owner.uuid)?.is_none() {
-                println!("{}", json!({"failed": true}));
-            }
-            return Err(error);
-        }
+    let vm = conn.create(&spec.xml)?;
+    let mut result = CreateResult {
+        identity: spec.identity.clone(),
+        domain: None,
     };
+    journal.write(CREATE_RESULT, &result)?;
     let (id, state) = vm.identity(&owner)?;
     if state != 1 {
         return Err("domain is not paused".into());
@@ -567,7 +599,10 @@ fn connection(folder: &Path) -> Result<()> {
     } else {
         Some(vm.birth(owner.uuid)?)
     };
-    println!("{}", json!({"domain": Domain { id, birth }}));
+    let domain = Domain { id, birth };
+    result.domain = Some(domain);
+    journal.write(CREATE_RESULT, &result)?;
+    println!("{}", json!({"domain": domain}));
     if commands.next().transpose()?.as_deref() != Some("resume") {
         return Err("missing resume grant".into());
     }
@@ -622,7 +657,7 @@ pub fn run() -> Result<()> {
             let journal = Journal::open(Path::new(folder))?;
             let spec = read_spec(&journal)?;
             let receipt = Receipt::load(&journal, &spec)?;
-            if absent(&spec, &receipt, *mode == "destroy")? {
+            if absent(&journal, &spec, &receipt, *mode == "destroy")? {
                 Ok(())
             } else {
                 Err("domain absence unconfirmed".into())
@@ -634,7 +669,7 @@ pub fn run() -> Result<()> {
             let _lock = locked(&journal)?;
             let spec = read_spec(&journal)?;
             let mut receipt = Receipt::load(&journal, &spec)?;
-            if receipt.phase != "stopped" {
+            if receipt.phase != "stopped" || !receipt.stop_proven {
                 receipt
                     .reason
                     .get_or_insert_with(|| "guardian-ended".into());
@@ -652,7 +687,9 @@ pub fn run() -> Result<()> {
             let spec = read_spec(&journal)?;
             let receipt = Receipt::load(&journal, &spec)?;
             // Erasure follows a positive stop and repeats the absence proof under the lock.
-            if !matches!(receipt.phase.as_str(), "stopped" | "unused") || !probe(path, false) {
+            if !(receipt.phase == "unused" || receipt.phase == "stopped" && receipt.stop_proven)
+                || !probe(path, false)
+            {
                 return Err("owned domain stop unconfirmed".into());
             }
             let intent: storage::Intent = journal.read(REMOVAL)?.ok_or("missing removal intent")?;
@@ -723,6 +760,45 @@ mod tests {
         ] {
             assert!(!native::local_uri(bad));
         }
+    }
+
+    #[test]
+    fn uncertain_create_requires_a_successful_reply_or_new_boot() {
+        let spec = spec();
+        let result = CreateResult {
+            identity: spec.identity.clone(),
+            domain: None,
+        };
+        for phase in ["creating", "unknown", "create-failed", "stopped"] {
+            let receipt = Receipt::new(&spec, phase);
+            assert!(!completed_create(&receipt, None, true));
+            assert!(completed_create(&receipt, Some(&result), true));
+            assert!(completed_create(&receipt, None, false));
+        }
+        assert!(completed_create(&Receipt::new(&spec, "unused"), None, true));
+    }
+
+    #[test]
+    fn a_live_domain_needs_durable_id_and_bare_metal_birth_to_destroy() {
+        let without_birth = Some(Domain { id: 7, birth: None });
+        assert!(destruction_proof(None, true, true).is_none());
+        assert!(destruction_proof(without_birth, true, true).is_some());
+        assert!(destruction_proof(without_birth, false, true).is_none());
+        let with_birth = Some(Domain {
+            id: 7,
+            birth: Some(Birth { pid: 9, start: 10 }),
+        });
+        assert!(destruction_proof(with_birth, false, true).is_some());
+        assert!(destruction_proof(with_birth, false, false).is_none());
+        assert!(destruction_proof(
+            Some(Domain {
+                id: u32::MAX,
+                birth: None
+            }),
+            true,
+            true
+        )
+        .is_none());
     }
 
     #[test]

@@ -8,6 +8,10 @@ on:
       - '.github/workflows/vm-acceptance.yaml'
       - 'crates/libvirt-native/**'
       - 'coordination/src/providers/libvirt*.ts'
+      - 'coordination/src/host.ts'
+      - 'coordination/src/native-clock.ts'
+      - 'coordination/src/runtime-process.ts'
+      - 'coordination/src/control/lifecycle.ts'
       - 'coordination/test/control/libvirt*.ts'
       - 'fixtures/libvirt/**'
       - 'deploy/systemd/canaverald.service.d/libvirt-leases.conf'
@@ -44,8 +48,9 @@ jobs:
         working-directory: coordination
         run: |
           npm ci --ignore-scripts
+          npm run typecheck
           npm run build
-          node --test dist/test/control/libvirt.test.js dist/test/control/libvirt-leases.test.js
+          node --test dist/test/control/{libvirt,libvirt-leases,host-runner,kubernetes-host,native-clock,lifecycle}.test.js dist/test/error-catalogue.test.js
 
   native:
     if: github.event_name != 'pull_request'
@@ -80,8 +85,9 @@ jobs:
         working-directory: coordination
         run: |
           npm ci --ignore-scripts
+          npm run typecheck
           npm run build
-          node --test dist/test/control/libvirt.test.js dist/test/control/libvirt-leases.test.js
+          node --test dist/test/control/{libvirt,libvirt-leases,host-runner,kubernetes-host,native-clock,lifecycle}.test.js dist/test/error-catalogue.test.js
       - name: Run the native lease acceptance
         run: node fixtures/libvirt/acceptance.mjs "$GITHUB_WORKSPACE/target/release/canaveral-libvirt-native" "$RUNNER_TEMP/vm-evidence.json"
       - name: Collect libvirt diagnostics

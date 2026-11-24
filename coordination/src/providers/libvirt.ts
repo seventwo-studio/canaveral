@@ -334,11 +334,15 @@ export class LibvirtProvider {
   // Transient lease execution. The guardian creates the domain with PAUSED|AUTODESTROY on its own
   // connection; there is never a persistent definition to resurrect. Stopped means that no
   // guardian was ever started, or that the guardian's lock was taken and a fresh connection
-  // returned VIR_ERR_NO_DOMAIN for the per-launch UUID. Everything else keeps the reservation.
+  // returned VIR_ERR_NO_DOMAIN for the per-launch UUID after its create completed or its host
+  // boot ended. Everything else keeps the reservation.
   private nativeReceipt(folder:string,b:LibvirtLeaseBinding):RecordValue|null{
     noSymlinks(folder);const receipt=readPrivate(join(folder,"libvirt-native-execution.json"));
     if(receipt&&canonical(receipt.identity)!==canonical(b.identity()))refuse("The lease guardian receipt belongs to another launch.");
     return receipt;
+  }
+  private nativeStopProven(receipt:RecordValue|null):boolean{
+    return receipt?.phase==="stopped"&&receipt.stopProven===true;
   }
   private readonly fences=new Map<string,Promise<LeaseFence>>();
   /** One proof-gated fence per lease at a time. A failed call is unconfirmed, never stopped. */
@@ -365,7 +369,7 @@ export class LibvirtProvider {
         return true;
       }
     }finally{j.close();}
-    if(this.nativeReceipt(folder,b)?.phase==="stopped")return true;
+    if(this.nativeStopProven(this.nativeReceipt(folder,b)))return true;
     return await this.nativeFence(folder)==="stopped";
   }
   /** Marks the published authorization fenced without a new deadline sample. */
@@ -374,15 +378,16 @@ export class LibvirtProvider {
     try{const{binding:b}=this.readSpec(j,machine,false),previous=j.read();if(previous&&validAuthority(previous,b)&&previous.fenced!==true)j.write({...previous,fenced:true});}
     finally{j.close();}
   }
-  private leaseReport(stopped:boolean):RecordValue{
-    return stopped?{state:"stopped",leaseFenced:true}:{state:"stopping",leaseFenced:true,detail:"The lease fence is not proven yet; its reservation is retained."};
+  private leaseReport(stopped:boolean,receipt?:RecordValue|null):RecordValue{
+    if(stopped)return{state:"stopped",leaseFenced:true};
+    return{state:receipt?.phase==="unknown"?"unknown":"stopping",leaseFenced:true,detail:"The lease fence is not proven yet; its reservation is retained."};
   }
   /** Running needs the recorded guardian alive, its receipt running and the owned domain observed running. */
   private async reconcileLease(machine:RecordValue,image:RecordValue,folder:string,current:Execution):Promise<RecordValue>{
     const{binding:b,spec:s,execution,launch}=current;
     let fenced=machine.desired==="stopped"||execution.phase==="fenced"||!this.location(b,s)||s.executionMode!=="transient"||this.boot()!==b.host_boot_id;
     if(!fenced){try{fenced=this.publish(machine,image,folder).fenced===true;}catch{fenced=true;}}
-    if(fenced)return this.leaseReport(await this.stopLease(machine,image,folder,current));
+    if(fenced)return this.leaseReport(await this.stopLease(machine,image,folder,current),this.nativeReceipt(folder,b));
     const receipt=this.nativeReceipt(folder,b);
     if(!launch){
       if(execution.phase!=="prepared"||receipt)refuse("A lease guardian needs an unused preparation.");
@@ -398,7 +403,7 @@ export class LibvirtProvider {
       }
     }
     // The guardian or its domain ended: this one-use launch is over.
-    return this.leaseReport(await this.stopLease(machine,image,folder,current));
+    return this.leaseReport(await this.stopLease(machine,image,folder,current),this.nativeReceipt(folder,b));
   }
   private async observeLease(b:LibvirtLeaseBinding,s:ExecutionSpec):Promise<"running"|"ended"|"unknown">{
     let xml:string,state:string;
@@ -415,11 +420,13 @@ export class LibvirtProvider {
     let fenced=machine.desired==="stopped"||execution.phase==="fenced"||!this.location(b,s)||s.executionMode!=="transient"||this.boot()!==b.host_boot_id||(launch!==null&&!this.guardianAlive(b,folder,launch));
     if(!fenced){try{fenced=this.publish(machine,local,folder).fenced===true;}catch{fenced=true;}}
     if(!fenced)return null;
-    return this.leaseReport(await this.stopLease(machine,local,folder,current));
+    return this.leaseReport(await this.stopLease(machine,local,folder,current),this.nativeReceipt(folder,b));
   }
   async stopForCleanup(machine:RecordValue,image:RecordValue,folder:string):Promise<RecordValue>{
     this.terminal(machine);
-    return this.leaseReport(await this.stopLease(machine,image,folder,this.inspect(machine,folder)));
+    const stopped=await this.stopLease(machine,image,folder,this.inspect(machine,folder));
+    if(!stopped&&kubernetesDeployment(this.config))throw new ServiceError("Native stop of the lease is unconfirmed.",409,{code:"libvirt-unconfirmed"});
+    return this.leaseReport(stopped);
   }
   /** Lock-free stop evidence for idle checks: a durable stopped receipt, or a stopped lease that never launched. */
   private leaseStopped(machine:RecordValue,folder:string):boolean{
@@ -429,7 +436,7 @@ export class LibvirtProvider {
       const b=new LibvirtLeaseBinding(spec.binding);if(b.machine_id!==machine.id||b.fingerprint!==fingerprint(machine))return false;
       if(!read("libvirt-launch.json"))return machine.desired==="stopped";
       const receipt=read("libvirt-native-execution.json");
-      return receipt?.phase==="stopped"&&canonical(receipt.identity)===canonical(b.identity());
+      return this.nativeStopProven(receipt)&&canonical(receipt?.identity)===canonical(b.identity());
     }catch{return false;}
   }
   async removeOwnedStorage(machine:RecordValue,_image:RecordValue,folder:string,requestId:string):Promise<RecordValue>{
@@ -445,7 +452,7 @@ export class LibvirtProvider {
       if(proof?.state==="complete"){if(exists(root)||exists(quarantine))refuse("Storage reappeared after removal.");return proof;}
       if(s.executionMode!=="transient"||!s.storageAccess)refuse("Removal needs a transient lease execution.");
       // Positive stop first: a launch that never happened, or the guardian's durable stopped receipt.
-      if(deletion.readNamed("libvirt-launch.json")&&this.nativeReceipt(folder,b)?.phase!=="stopped")throw new ServiceError("Native stop of the lease is not proven.",409,{code:"execution_pending"});
+      if(deletion.readNamed("libvirt-launch.json")&&!this.nativeStopProven(this.nativeReceipt(folder,b)))throw new ServiceError("Native stop of the lease is not proven.",409,{code:kubernetesDeployment(this.config)?"libvirt-unconfirmed":"execution_pending"});
       const intent={cleanupId:requestId,root,quarantine,fingerprint:b.fingerprint,storageIdentity:s.storageIdentity,diskIdentity:s.diskIdentity,storageGid:s.storageAccess.gid};
       const intents=this.journal(folder,"libvirt-native-removal");
       try{const old=intents.read();if(old&&canonical(old)!==canonical(intent))refuse("The native removal intent belongs to another cleanup.");if(!old)intents.write(intent);}finally{intents.close();}
@@ -454,12 +461,15 @@ export class LibvirtProvider {
         if(exists(quarantine))refuse("Storage occupies both owned paths.");
         this.assertStorage(b,s);fs.renameSync(root,quarantine);syncDirectory(parent);
       }
-      if(exists(quarantine)){
-        // An interrupted erasure leaves its own receipt; the helper resumes it.
-        if(!deletion.readNamed("libvirt-native-erased.json"))this.assertStorage(b,s,quarantine);
+      let erased=deletion.readNamed("libvirt-native-erased.json");
+      if(erased&&erased.cleanupId!==requestId)refuse("The erasure receipt belongs to another cleanup.");
+      const quarantined=exists(quarantine);
+      if(quarantined||erased?.phase==="cleared"){
+        // The helper can finalize a durable cleared receipt after the quarantine was unlinked.
+        if(!erased)this.assertStorage(b,s,quarantine);
         if(!await native.erase(folder,quarantine))refuse("Erasure of the quarantined lease storage is unconfirmed.");
+        erased=deletion.readNamed("libvirt-native-erased.json");
       }
-      const erased=deletion.readNamed("libvirt-native-erased.json");
       if(erased?.phase!=="removed"||erased.cleanupId!==requestId||exists(root)||exists(quarantine))refuse("Lease storage removal is unconfirmed.");
       proof={...expected,state:"complete",executionStopped:true,storageRemoved:true};deletion.write(proof);return proof;
     }finally{deletion.close();}

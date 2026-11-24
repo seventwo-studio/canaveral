@@ -190,6 +190,7 @@ status.
 | `transport_interrupted` | 503 | The controller's or a guest's reply was not confirmed; a mutation may have taken effect | No. Inspect state, then replay the identical request if needed |
 | `assignment_busy` | 409 | The assignment or its owned state has active work or an unresolved lock | After the current work ends; an unresolved lock needs inspection |
 | `execution_pending` | 409, receipt | Native stop of a leased runtime is not confirmed, so cleanup cannot proceed | The runner retries cleanup; reservations stay held |
+| `libvirt-unconfirmed` | 409, receipt | The in-cluster libvirt guardian or reconciler has no positive stop proof for the leased VM | The runner retries cleanup by UUID and keeps the reservation held |
 | `operations_pending` | 409, receipt | Owned helper processes of an assignment are not confirmed closed | The runner retries cleanup; inspect surviving helpers |
 | `ownership` | 409, receipt | Assignment or storage ownership differs from the recorded owner | No. Investigate the mismatch before any removal |
 | `storage_removal` | 409, receipt | A native storage removal receipt does not match its request | No. Inspect the host's storage and receipts |
