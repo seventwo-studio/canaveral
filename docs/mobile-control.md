@@ -810,6 +810,7 @@ native authorization. Expiry, release, a fence, supervisor loss or a key rotatio
 therefore ends a recording within about a second: the stream stops without a finish
 receipt, and the SDK reports `session_disconnected` or `video_incomplete`. Reading receipts and deleting
 clean uploads remain available to the current key after the lease ends.
+Like the tunnel bounds below, this holds under normal load and is not hard real-time.
 
 #### Reservations and cleanup proof
 
@@ -1017,6 +1018,14 @@ disconnects, and with its lease: expiry, release, failure, a fence, a key rotati
 supervisor loss each end it within about a second, as they end a lease recording. That
 bound follows from the checks below. Fixtures confirm teardown within seconds on a shared
 event loop; the native timing is not measured.
+
+**These bounds hold under normal load; they are not hard real-time.** A starved CPU or
+event loop can exceed them: in a fixture run at background CPU priority, the shared
+controller and runner event loop stalled for up to 1.4 seconds, and key rotation took up to
+2.5 seconds to close a tunnel. The same applies to live views and recordings. A live
+view ends with its lease, key or device within about a second, and a recording's own
+duration and exit grace are counted in wall time. The test suite runs its timing-budget
+files one at a time, after the rest (`script/coordination_tests.mjs`).
 
 - The broker checks tunnel authority up to four times a second using the lease key,
   application, lease, assignment and host state. Per direction and check interval it
