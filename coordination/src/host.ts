@@ -474,8 +474,9 @@ export class HostRunner {
   private machineCursor = 0;
   private maintenanceFence: MaintenanceFence | null = null;
   private maintenanceChallenge: MaintenanceFence | null = null;
-  private maintenanceProof: { challenge: MaintenanceFence; proof: MaintenanceProof } | undefined;
+  private maintenanceProof: { challenge: MaintenanceFence; proof: MaintenanceProof; epoch: number } | undefined;
   private inspectingMaintenance = false;
+  private readonly stopInspections = new Set<string>();
   private updateAdmissionBlocked = false;
   private updateEpoch = 0;
   private updateExternalWork = 0;
@@ -766,7 +767,7 @@ export class HostRunner {
     this.identity.credential = secret(identity.credential);
     const pending = this.maintenanceProof;
     const proof = pending && pending.challenge === this.maintenanceChallenge && this.fresh() ?
-      { ...pending.proof, ...(!this.idleEligible() ? NOT_IDLE : {}) } : undefined;
+      { ...pending.proof, ...(!this.idleEligible() || this.kubernetes && pending.epoch !== this.updateEpoch ? NOT_IDLE : {}) } : undefined;
     // Dispatch can consume a challenge even if its response is lost.
     this.maintenanceChallenge = null;
     this.maintenanceProof = undefined;
@@ -1143,6 +1144,10 @@ export class HostRunner {
     for (const machine of ordered) {
       const id = String(machine.id), key = `machine:${id}`;
       if (machine.leaseCleanup || this.updateAdmissionBlocked && machine.desired !== "stopped") continue;
+      // Stop inspection owns the libvirt reconcile journal. Keep a successful
+      // proof current until the next heartbeat by deferring routine rechecks.
+      if (this.stopInspections.has(id) || this.kubernetes && this.maintenanceProof?.proof.workloadsStopped &&
+          this.maintenanceProof.epoch === this.updateEpoch && this.fresh() && this.settledAdministrativeStop(machine)) continue;
       // Device operations own the same assignment lock. Keep polling/cancellation
       // active, but wait for the owned operation before reconciling this machine.
       if (this.deviceMachines.has(id) || machine.desired === 'running' && this.reports.get(id)?.state === 'running' && this.queues.device?.some(o => o.machineId === id && !TERMINAL.has(String(this.deviceReports.get(String(o.id))?.state)))) continue;
@@ -1654,20 +1659,40 @@ export class HostRunner {
   private machineRoots(): Set<string> {
     return new Set([this.state, ...[...this.runtimes.values()].map(r => r.state ?? this.state)].map(state => resolve(state, "machines")));
   }
-  private async inspectStopped(retained: Map<string, RecordValue>, readOnly = false): Promise<IdleReceipt> {
-    if (!this.idleEligible() || [...retained.values()].some(m => m.desired !== "stopped")) return NOT_IDLE;
+  private settledAdministrativeStop(machine: RecordValue): boolean {
+    return machine.desired === "stopped" && !machine.lease && !machine.warm && !machine.leaseCleanup &&
+      !machine.deletion && !machine.powerOffRequest && this.reports.get(String(machine.id))?.state === "stopped";
+  }
+  private async inspectStopped(retained: Map<string, RecordValue>, readOnly = false, current = () => true): Promise<IdleReceipt> {
+    if ([...retained.values()].some(m => m.desired !== "stopped")) return NOT_IDLE;
+    // Kubernetes admin VM probes and routine reconciliation take the same
+    // exclusive libvirt journal lock. Let rechecks already holding it finish.
+    const reserved = this.kubernetes ? [...retained].filter(([, machine]) => this.settledAdministrativeStop(machine)).map(([id]) => id) : [];
+    if (reserved.some(id => this.stopInspections.has(id))) return NOT_IDLE;
+    for (const id of reserved) this.stopInspections.add(id);
     const epoch = this.updateEpoch;
-    let inspected = 0;
-    for (const machine of retained.values()) {
-      if (readOnly && inspected++ % 32 === 0) await yieldWork();
-      if (epoch !== this.updateEpoch || !this.fresh()) return NOT_IDLE;
-      const { runtime, image, folder } = this.context(machine);
-      if (!helpersClosed(machine, folder)) return NOT_IDLE;
-      const stopped = runtime.updateStopped ? await runtime.updateStopped(machine, image, folder, readOnly) :
-        runtime.confirmExecutionStopped?.(machine, folder, readOnly)?.executionStopped === true;
-      if (!stopped || epoch !== this.updateEpoch || !this.fresh()) return NOT_IDLE;
+    const valid = () => epoch === this.updateEpoch && this.fresh() && current();
+    try {
+      const rechecks = reserved.flatMap(id => {
+        const active = this.active.get(`machine:${id}`);
+        return active ? [active.promise] : [];
+      });
+      if (rechecks.length) await Promise.all(rechecks);
+      if (!valid() || !this.idleEligible()) return NOT_IDLE;
+      let inspected = 0;
+      for (const machine of retained.values()) {
+        if (readOnly && inspected++ % 32 === 0) await yieldWork();
+        if (!valid()) return NOT_IDLE;
+        const { runtime, image, folder } = this.context(machine);
+        if (!helpersClosed(machine, folder)) return NOT_IDLE;
+        const stopped = runtime.updateStopped ? await runtime.updateStopped(machine, image, folder, readOnly) :
+          runtime.confirmExecutionStopped?.(machine, folder, readOnly)?.executionStopped === true;
+        if (!stopped || !valid()) return NOT_IDLE;
+      }
+      return this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
+    } finally {
+      for (const id of reserved) this.stopInspections.delete(id);
     }
-    return this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
   }
   async updateIdle(readOnly = false): Promise<IdleReceipt> {
     if (!this.idleEligible()) return NOT_IDLE;
@@ -1697,14 +1722,14 @@ export class HostRunner {
     // Inventory and provider probes never run on the heartbeat's critical path.
     void yieldWork().then(async () => {
       if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
-      const proof = await this.collectMaintenance(challenge);
-      if (proof && challenge === this.maintenanceChallenge && this.fresh()) this.maintenanceProof = { challenge, proof };
+      const result = await this.collectMaintenance(challenge);
+      if (result && challenge === this.maintenanceChallenge && this.fresh()) this.maintenanceProof = { challenge, ...result };
     }).catch(() => this.log("Host maintenance inspection failed; no proof was sent.")).finally(() => {
       this.inspectingMaintenance = false;
       if (challenge !== this.maintenanceChallenge) this.inspectMaintenance();
     });
   }
-  private async collectMaintenance(challenge: MaintenanceFence): Promise<MaintenanceProof | undefined> {
+  private async collectMaintenance(challenge: MaintenanceFence): Promise<{ proof: MaintenanceProof; epoch: number } | undefined> {
     const current = this.assignments, retained = this.retainedAssignments(current);
     const assignments: MaintenanceProof["inventory"]["assignments"] = [];
     const knownFolders = new Set<string>(), knownStorage = new Set<string>(), knownQuarantines = new Set<string>();
@@ -1757,9 +1782,10 @@ export class HostRunner {
     if (!scan) return;
     for (const found of scan.found) unexpected.add(found.name);
     if (!scan.complete) { complete = false; issues.push("Local journal or provider storage inventory could not be completed."); }
+    const epoch = this.updateEpoch;
     const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
-      await this.inspectStopped(retained, true) : NOT_IDLE;
-    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
+      await this.inspectStopped(retained, true, () => challenge === this.maintenanceChallenge) : NOT_IDLE;
+    return { proof: { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues }, epoch };
   }
   /** Directory entries under the journal and provider storage roots that no known assignment
    * explains. Shared by the maintenance proof and the storage inspection; it changes nothing. */

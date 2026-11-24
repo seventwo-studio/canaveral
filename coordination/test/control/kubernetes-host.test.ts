@@ -5,13 +5,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { createModule, InfrastructureStore } from "../../src/control/infrastructure.ts";
-import { legacyDigest } from "../../src/control/templates.ts";
+import { legacyDigest, normalizeTemplate } from "../../src/control/templates.ts";
 import { ServiceError } from "../../src/errors.ts";
 import { cleanupKubernetesEnrollment } from "../../src/host-bootstrap.ts";
 import { MachineStore } from "../../src/control/machines.ts";
 import { HostRunner } from "../../src/host.ts";
 import type { HostConfig, HostTransport } from "../../src/host.ts";
+import { SupervisorJournal } from "../../src/providers/libvirt-ownership.ts";
 import { readRecord, saveRecord, StateLock, unknownOutcome } from "../../src/runtime-process.ts";
 import type { RecordValue } from "../../src/runtime-process.ts";
 import { SqliteStore } from "../../src/sqlite.ts";
@@ -120,6 +122,73 @@ test("Kubernetes validates deployment and refuses containerd and managed activat
   assert.throws(() => new HostRunner({ ...config, provider: "containerd" }), { code: "kubernetes_containerd_disabled" });
   assert.throws(() => new HostRunner({ ...config, provider: "linux", runtimes: { containerd: {} } }), { code: "kubernetes_containerd_disabled" });
   assert.throws(() => preflightManagedHost(config, {}), { code: "kubernetes_managed_updates_disabled" });
+});
+
+test("Kubernetes maintenance proves a stopped VM without racing reconciliation for its journal", async t => {
+  const { config, identity, root } = fixture(t);
+  const image = { id: "linux", revision: "1", os: "linux", arch: "amd64", mode: "headless",
+    minimum: { cpu: 1, memoryMiB: 512, diskGiB: 1 }, image: join(root, "base.img") };
+  const machine = { id: randomUUID(), templateId: image.id, template: normalizeTemplate(image),
+    resources: image.minimum, desired: "stopped", observed: "stopped" };
+  saveRecord(identity, { id: randomUUID(), orchestrator: config.url, credential: "k".repeat(43) });
+  const drainId = randomUUID();
+  let draining = false, challenge = 0, proof: RecordValue | undefined;
+  const transport: HostTransport = { request: async (_method, _endpoint, body) => {
+    proof = (body.maintenance as { proof?: RecordValue }).proof;
+    return { machines: [machine], ...(draining ? { maintenance: { version: 1, phase: "draining",
+      drainId, challenge: (++challenge).toString(16).padStart(64, "0") } } : {}) };
+  } };
+  let reconciles = 0, nativeStopped = true;
+  const latch = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>(done => { resolve = done; });
+    return { promise, resolve };
+  };
+  const checking = latch(), releaseCheck = latch(), checked = [latch(), latch()];
+  let probes = 0;
+  const runner = new HostRunner({ ...config, provider: "libvirt", socketPath: "/run/canaveral/libvirt-sock",
+    templates: [image], storage: join(root, "disks") }, { transport, providerFactory: () => ({
+    kind: "libvirt",
+    check: async () => ({}),
+    maintenanceStorage: async () => "present",
+    async reconcile(_machine, _image, folder) {
+      reconciles++;
+      const journal = new SupervisorJournal(folder, "libvirt-reconcile", { fixture: true });
+      try { return { state: "stopped" }; } finally { journal.close(); }
+    },
+    async updateStopped(_machine: RecordValue, _image: RecordValue, folder: string, readOnly?: boolean) {
+      assert.equal(readOnly, true);
+      const done = checked[probes++];
+      const journal = new SupervisorJournal(folder, "libvirt-reconcile", { fixture: true, existingOnly: true });
+      try {
+        checking.resolve();
+        await releaseCheck.promise;
+        return nativeStopped;
+      } finally { journal.close(); done?.resolve(); }
+    },
+  }) });
+  t.after(async () => { releaseCheck.resolve(); await runner.close(); });
+  await runner.initializeProviders(); await runner.connect();
+  await runner.poll(); await runner.step(); await nextTurn();
+
+  draining = true;
+  await runner.poll(); await checking.promise;
+  await runner.step();
+  assert.equal(reconciles, 1, "reconciliation must wait while the stop probe owns the journal");
+  releaseCheck.resolve(); await checked[0]!.promise; await nextTurn();
+  await runner.step();
+  assert.equal(reconciles, 1, "keep the stop proof current until the heartbeat sends it");
+
+  nativeStopped = false;
+  await runner.poll();
+  assert.equal(proof?.challenge, "1".padStart(64, "0"));
+  assert.equal(proof?.idle, true); assert.equal(proof?.workloadsStopped, true);
+  // A failed native probe releases the reservation for another reconciliation.
+  await checked[1]!.promise; await nextTurn();
+  await runner.step();
+  assert.equal(reconciles, 2);
+  await runner.poll();
+  assert.equal(proof?.idle, false); assert.equal(proof?.workloadsStopped, false);
 });
 
 test("Kubernetes shutdown is shared across callers and requires positive quiescence", async t => {
