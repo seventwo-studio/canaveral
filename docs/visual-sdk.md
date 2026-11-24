@@ -200,7 +200,7 @@ never renews, extends or releases a lease.
 | `source` | Meaning |
 | --- | --- |
 | `host` | The capturing host ended a stream it was still serving: `capture_failed`, `capture_unavailable` or `capture_ended` |
-| `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed` or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
+| `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed`, `capture_ended`, `preempted_by_recording` (a recording on the host took the capture's slot; open a new view later) or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
 | `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost` (the controller could not be reached) |
 
 After a dropped stream the SDK reads the view for up to three seconds, because the
