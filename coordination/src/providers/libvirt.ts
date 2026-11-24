@@ -407,8 +407,9 @@ export class LibvirtProvider {
     return state==="running"?"running":"ended";
   }
   async refreshExecution(machine:RecordValue,image:RecordValue,folder:string,authorization?:()=>unknown):Promise<RecordValue|null>{
-    // The cleanup pipeline owns a lease once its cleanup intent exists.
-    if(machine.leaseCleanup)return null;
+    // The cleanup pipeline owns a lease once its cleanup intent exists. This loop still latches the
+    // fence at once, so a reconciliation blocked on libvirt cannot delay the guardian's stop.
+    if(machine.leaseCleanup){try{if(present(join(folder,"libvirt-authorization.json")))this.latchFence(machine,folder);}catch{/* Cleanup fences again. */}return null;}
     const current=this.inspect(machine,folder);if(!current)return null;
     const local=authorization?{...image,_leaseAuthorization:authorization}:image,{binding:b,spec:s,execution,launch}=current;
     let fenced=machine.desired==="stopped"||execution.phase==="fenced"||!this.location(b,s)||s.executionMode!=="transient"||this.boot()!==b.host_boot_id||(launch!==null&&!this.guardianAlive(b,folder,launch));

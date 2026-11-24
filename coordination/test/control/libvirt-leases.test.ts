@@ -375,3 +375,13 @@ test("cleanup without an authorization callback still fences a live guardian", a
   assert.equal((await f.provider.stopForCleanup(f.machine, original, f.folder)).state, "stopped");
   assert.equal((await f.provider.removeOwnedStorage(f.machine, original, f.folder, id)).state, "complete");
 });
+
+test("the independent refresh latches a cleanup fence without waiting for reconciliation", async t => {
+  const f = fixture(t);
+  await running(f);
+  f.terminal();
+  const { _leaseAuthorization: _, ...original } = f.image;
+  assert.equal(await f.provider.refreshExecution(f.machine, original, f.folder), null);
+  assert.equal(read(join(f.folder, "libvirt-authorization.json")).fenced, true);
+  assert.equal(f.native.fences.length, 0, "the cleanup pipeline runs the fence itself");
+});

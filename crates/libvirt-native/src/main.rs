@@ -9,6 +9,11 @@ mod native;
 mod storage;
 
 fn main() {
+    // Executed through /proc/self/fd/3, the process would otherwise be named "3".
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, c"cv-libvirt-lease".as_ptr());
+    }
     #[cfg(target_os = "linux")]
     match guardian::run() {
         Ok(()) => return,

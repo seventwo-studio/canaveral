@@ -160,6 +160,8 @@ dedicated VM hosts. Without the drop-in such a lease stays fenced but unproven,
 with its reservation held, until libvirtd returns. Keep the default
 `KillMode=control-group`: guardians ignore `SIGTERM` and fence each lease when
 the daemon exits, so stopping or restarting the service always ends its leases.
+Under systemd's default `OOMPolicy=stop`, a kernel OOM kill of any process in
+the unit, a guardian included, stops the service and so fences every lease.
 Kubernetes pods never receive `CAP_KILL`; see
 [libvirt supervision](libvirt-supervision.md#kubernetes) for that gap.
 

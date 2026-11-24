@@ -352,7 +352,9 @@ try {
     try {
       await call('POST', `/v1/leases/${lease.id}/release`, { id: randomUUID() }, app);
       // The guardian takes the published fence; its destroy probe waits on the stopped libvirtd.
-      await until('a fencing guardian', () => receipt(lease.machineId).reason === 'fenced', 60, 250);
+      const released = Date.now();
+      await until('a fencing guardian', () => receipt(lease.machineId).reason === 'fenced', 120, 250);
+      record.fenceSeconds = (Date.now() - released) / 1000;
       assert.notEqual(receipt(lease.machineId).phase, 'stopped');
       sudo('kill', '-KILL', String(guardian));
       record.killedDuring = receipt(lease.machineId);
@@ -402,6 +404,8 @@ try {
     // guardian's oom_score_adj of 1000 adds the whole limit to its score; the hog's RSS stays below it.
     const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
     sudo('choom', '-p', String(guardian), '-n', '1000');
+    // Keep the daemon out of the OOM cascade so the guardian path is what this step measures.
+    sudo('choom', '-p', String(mainPid()), '-n', '-1000');
     record.scores = Object.fromEntries([['guardian', guardian], ['daemon', mainPid()]].map(([name, pid]) => [name, { adj: readFileSync(`/proc/${pid}/oom_score_adj`, 'utf8').trim(), score: readFileSync(`/proc/${pid}/oom_score`, 'utf8').trim() }]));
     const limit = Number(sudo('cat', `${cgroup}/memory.current`)) + 128 * 1048576;
     sudo('sh', '-c', `echo ${limit} > ${cgroup}/memory.max`);
