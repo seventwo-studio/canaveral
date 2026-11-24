@@ -31,6 +31,10 @@ class Driver implements NativeDriver{
   undefine(flags:number):void{assert.equal(flags,72);this.events.push("retire");this.present=false;if(this.lostRetire){this.lostRetire=false;throw Error("Lost retirement ack");}}
   close():void{this.events.push("close");this.afterClose();if(this.closeFails)throw Error("Unknown close");}
 }
+function domuuid(selector: string | undefined, driver: Driver): string {
+  if (driver.present && (selector === `cvm-${driver.uuid}` || driver.state !== "shut off" && selector === String(driver.id))) return driver.uuid;
+  throw Error("failed to get domain");
+}
 function fixture(t:{after(fn:()=>void):void}){
   const root=temporary(t),machine:RecordValue={id:randomUUID(),desired:"running",template:{id:"linux"},resources:{cpu:1,memoryMiB:512,diskGiB:4},lease:{id:randomUUID(),state:"provisioning"}};
   const folder=join(root,"assignment"),storageRoot=join(root,"disks"),storage=join(storageRoot,machine.id as string);fs.mkdirSync(folder,{mode:0o700});fs.mkdirSync(storageRoot,{mode:0o700});shareVM(storageRoot,0o2750);fs.mkdirSync(storage,{mode:0o700});
@@ -44,12 +48,24 @@ function fixture(t:{after(fn:()=>void):void}){
   save(join(folder,"libvirt-binding.json"),spec);save(join(folder,"libvirt-execution.json"),{...binding.identity(),phase:"prepared"});
   const driver=new Driver(bindDomainXML(domainXML(machine,image,disk),binding),machine.id as string),commands:string[][]=[];
   let auth:RecordValue={leaseID:(machine.lease as RecordValue).id,revision:1,remainingSeconds:30,fenced:false};image._leaseAuthorization=()=>({...auth});
-  const adapters:LibvirtAdapters={fixture:true,platform:"linux",arch:"amd64",clock:()=>now,hostBoot:()=>boot,connect:()=>new OwnedNativeConnection(driver),run:async(argv)=>{commands.push([...argv]);const args=argv.slice(3);if(args[0]==="dumpxml")return driver.xml;if(args[0]==="domuuid")return machine.id as string;if(args[0]==="domstate")return driver.state;return"";},fileLease:()=>({verify(){},close(){}}),protectedRemove:path=>fs.rmSync(path,{recursive:true})};
+  const adapters:LibvirtAdapters={fixture:true,platform:"linux",arch:"amd64",clock:()=>now,hostBoot:()=>boot,connect:()=>new OwnedNativeConnection(driver),run:async(argv)=>{commands.push([...argv]);const args=argv.slice(3);if(args[0]==="dumpxml")return driver.xml;if(args[0]==="domuuid")return domuuid(args[1],driver);if(args[0]==="domstate")return driver.state;return"";},fileLease:()=>({verify(){},close(){}}),protectedRemove:path=>fs.rmSync(path,{recursive:true})};
   const provider=new LibvirtProvider({storage:storageRoot,templates:[],leaseDeadlineLibrary:library,vmGroupId:vmGid,adapters},root);
   const write=(prefix:string,value:RecordValue)=>{const j=new SupervisorJournal(folder,prefix,{fixture:true});try{j.write(value);}finally{j.close();}};
   const terminal=()=>{machine.desired="stopped";(machine.lease as RecordValue).state="expired";auth={...auth,fenced:true};machine.leaseCleanup={id:randomUUID(),leaseId:(machine.lease as RecordValue).id};};
   return{root,machine,image,folder,storage,disk,library,spec,binding,driver,adapters,provider,commands,write,terminal,get now(){return now;},set now(v:number){now=v;},get boot(){return boot;},set boot(v:string){boot=v;},originalBoot,get auth(){return auth;},set auth(v:RecordValue){auth=v;}};
 }
+test("reconciliation refuses a foreign UUID returned for the owned name", async t => {
+  const f = fixture(t), run = f.adapters.run!;
+  f.adapters.run = async (argv, options) => {
+    if (argv[3] === "domuuid") {
+      assert.equal(argv[4], `cvm-${f.machine.id}`);
+      return randomUUID();
+    }
+    return run(argv, options);
+  };
+  await assert.rejects(f.provider.reconcile(f.machine, f.image, f.folder), /Native UUID differs/);
+  assert.deepEqual(f.driver.events, []);
+});
 // Ported from Python supervision, execution, readiness, stop, removal, reboot and usage fixtures.
 test("exact XML UUID, ownership metadata, writable disk, firmware and TPM",t=>{
   const f=fixture(t);validateDomainXML(f.driver.xml,f.binding);assert.throws(()=>bindDomainXML(f.driver.xml,f.binding));
@@ -159,7 +175,7 @@ for(const lost of [false,true])test(`fresh preparation persists binding before d
     if(argv[0]==="qemu-img"&&argv[1]==="info")return JSON.stringify({"virtual-size":1024,format:"raw"});
     if(argv[0]==="qemu-img"&&argv[1]==="create"){creates++;return"";}
     if(argv[3]==="define"){defines++;assert.match(argv[4]!,/temporary-.*\.xml$/);assert.equal(fs.statSync(argv[4]!).mode&0o777,0o600);definition=fs.readFileSync(argv[4]!,"utf8");assert.ok(definition.includes("<metadata>"));assert.ok(fs.existsSync(join(f.folder,"libvirt-binding.json")));assert.equal(JSON.parse(fs.readFileSync(join(f.folder,"libvirt-execution.json"),"utf8")).phase,"prepared");if(lost)throw Error("lost define ack");return"";}
-    if(argv[3]==="dumpxml")return definition;if(argv[3]==="domuuid")return f.machine.id as string;if(argv[3]==="domstate")return"shut off";return"";
+    if(argv[3]==="dumpxml")return definition;if(argv[3]==="domuuid")return domuuid(argv[4],f.driver);if(argv[3]==="domstate")return"shut off";return"";
   };
   if(lost)await assert.rejects(f.provider.reconcile(f.machine,f.image,f.folder),e=>(e as {outcome:string}).outcome==="unknown");
   assert.equal((await f.provider.reconcile(f.machine,f.image,f.folder)).state,"starting");assert.equal(creates,1);assert.equal(defines,1);assert.equal(launches,1);
@@ -299,7 +315,7 @@ test("administrative definition retries only the identical owned XML after defin
       assert.equal(definition,seen);defined=true;return "";
     }
     if(action==="dumpxml")return definition;
-    if(action==="domuuid")return String(f.machine.id);
+    if(action==="domuuid")return domuuid(argv[4],f.driver);
     if(action==="domstate")return "shut off";
     if(action==="start"){starts++;return "";}
     throw Error("Unexpected operation");
@@ -318,7 +334,7 @@ test("administrative preparation shares VM storage only with the QEMU group and 
     const action=argv[3];
     if(action==="list")return definition?(argv.includes("--uuid")?String(f.machine.id):"cvm-"+f.machine.id):"";
     if(action==="define"){definition=fs.readFileSync(argv[4]!,"utf8");return "";}
-    if(action==="dumpxml")return definition;if(action==="domuuid")return String(f.machine.id);if(action==="domstate")return "shut off";if(action==="start")return "";
+    if(action==="dumpxml")return definition;if(action==="domuuid")return domuuid(argv[4],f.driver);if(action==="domstate")return "shut off";if(action==="start")return "";
     throw Error("Unexpected operation");
   };
   assert.equal((await f.provider.reconcile(f.machine,f.image,f.folder)).state,"starting");

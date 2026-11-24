@@ -310,7 +310,7 @@ export class LibvirtProvider {
         }
       }
       if(leased){const auth=this.publish(machine,image,folder,machine.desired==="stopped"||execution.phase==="fenced");if(auth.fenced===true){const stopped=this.confirmExecutionStopped(machine,folder);return{state:stopped?"stopped":"stopping",leaseFenced:true,detail:"Storage handles and erasure remain unverified."};}}
-      const id=uuid(machine.id);const xml=await this.virsh("dumpxml",id);validateDomainXML(xml,b,this.label(s));if((await this.virsh("domuuid",id)).toLowerCase()!==id)refuse("Native UUID differs.");this.assertStorage(b,s);
+      const id=uuid(machine.id);const xml=await this.virsh("dumpxml",id);validateDomainXML(xml,b,this.label(s));if((await this.virsh("domuuid",`cvm-${id}`)).toLowerCase()!==id)refuse("Native UUID differs.");this.assertStorage(b,s);
       const state=(await this.virsh("domstate",id)).toLowerCase();
       if(leased){if(!launch){if(execution.phase!=="prepared"||state!=="shut off")refuse("Launch is not a fresh inactive owned boot.");this.launch(machine,folder);return{state:"starting"};}
         if(execution.phase==="running"&&state==="running"&&this.supervisorAlive(b,folder,launch))return{state:"running"};
@@ -328,7 +328,7 @@ export class LibvirtProvider {
       journal = new SupervisorJournal(folder, "libvirt-reconcile", { fixture: this.adapters.fixture === true, existingOnly: readOnly });
       const { binding, spec } = this.readSpec(journal, machine);
       if (!this.location(binding, spec)) return false;
-      if (await this.virsh("domuuid", binding.machine_id) !== binding.machine_id) return false;
+      if (await this.virsh("domuuid", `cvm-${binding.machine_id}`) !== binding.machine_id) return false;
       validateDomainXML(await this.virsh("dumpxml", binding.machine_id), binding, this.label(spec));
       if (await this.virsh("domstate", binding.machine_id) !== "shut off") return false;
       return this.location(binding, spec) && canonical(this.readSpec(journal, machine).spec) === canonical(spec);
@@ -337,7 +337,7 @@ export class LibvirtProvider {
   }
   private async adminAction(machine:RecordValue,folder:string,b:LibvirtLeaseBinding,s:ExecutionSpec,action:"start"|"shutdown"):Promise<void>{
     const j=this.journal(folder);try{const old=j.read();if(old?.phase===`${action}-pending`)refuse("Uncertain native action is not replayed.");
-      const validate=async()=>{this.readSpec(j,machine);if(!this.location(b,s)||(await this.virsh("domuuid",b.machine_id)).toLowerCase()!==b.machine_id)refuse("Administrative native owner changed.");validateDomainXML(await this.virsh("dumpxml",b.machine_id),b,this.label(s));this.assertStorage(b,s);};
+      const validate=async()=>{this.readSpec(j,machine);if(!this.location(b,s)||(await this.virsh("domuuid",`cvm-${b.machine_id}`)).toLowerCase()!==b.machine_id)refuse("Administrative native owner changed.");validateDomainXML(await this.virsh("dumpxml",b.machine_id),b,this.label(s));this.assertStorage(b,s);};
       await validate();j.write({...b.identity(),phase:`${action}-pending`});await validate();await this.virsh(action,b.machine_id);j.write({...b.identity(),phase:`${action}-requested`});
     }finally{j.close();}
   }
