@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as fs from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { LibvirtProvider, LibvirtLeaseSupervisor, OwnedNativeConnection, domainXML, publishAuthorization, parseQMPThreads, enabledRuntimes, runtimeFor, NativeProvider, runSupervisorChild, LinuxDomainCgroup } from "../../src/providers/libvirt.ts";
+import { LibvirtProvider, LibvirtLeaseSupervisor, OwnedNativeConnection, domainXML, publishAuthorization, parseQMPThreads, enabledRuntimes, runtimeFor, NativeProvider, runSupervisorChild, LinuxDomainCgroup, vmStorageAccess, withDACLabel } from "../../src/providers/libvirt.ts";
 import type { ExecutionSpec, LibvirtAdapters, NativeDriver, NativeSnapshot, ProcessBirth } from "../../src/providers/libvirt.ts";
 import { LibvirtLeaseBinding, SupervisorJournal, StorageHandleGuard, bindDomainXML, validateDomainXML, canonical, fingerprint, inode, deadlineArtifact, hash } from "../../src/providers/libvirt-ownership.ts";
 import type { RecordValue } from "../../src/providers/libvirt-ownership.ts";
 function save(path:string,value:unknown):void{fs.writeFileSync(path,canonical(value),{mode:0o600});}
+// The test account's primary group stands in for the dedicated QEMU storage group.
+const vmGid=process.getgid!();
+function shareVM(path:string,mode:number):void{fs.chownSync(path,process.getuid!(),vmGid);fs.chmodSync(path,mode);}
 function temporary(t:{after(fn:()=>void):void}):string{const p=fs.realpathSync(fs.mkdtempSync(join(tmpdir(),"canaveral-libvirt-ts-")));fs.chmodSync(p,0o700);t.after(()=>fs.rmSync(p,{recursive:true,force:true}));return p;}
 function syntheticELF(machine=62):Buffer{
   const b=Buffer.alloc(1024);b.set([127,69,76,70,2,1,1]);const u16=(o:number,v:number)=>b.writeUInt16LE(v,o),u32=(o:number,v:number)=>b.writeUInt32LE(v,o),u64=(o:number,v:number)=>b.writeBigUInt64LE(BigInt(v),o);
@@ -30,8 +33,9 @@ class Driver implements NativeDriver{
 }
 function fixture(t:{after(fn:()=>void):void}){
   const root=temporary(t),machine:RecordValue={id:randomUUID(),desired:"running",template:{id:"linux"},resources:{cpu:1,memoryMiB:512,diskGiB:4},lease:{id:randomUUID(),state:"provisioning"}};
-  const image:RecordValue={os:"linux",arch:"amd64",mode:"headless",image:join(root,"base.raw")};fs.writeFileSync(image.image as string,"base",{mode:0o600});
-  const folder=join(root,"assignment"),storageRoot=join(root,"disks"),storage=join(storageRoot,machine.id as string);fs.mkdirSync(folder,{mode:0o700});fs.mkdirSync(storageRoot,{mode:0o700});fs.mkdirSync(storage,{mode:0o700});
+  const folder=join(root,"assignment"),storageRoot=join(root,"disks"),storage=join(storageRoot,machine.id as string);fs.mkdirSync(folder,{mode:0o700});fs.mkdirSync(storageRoot,{mode:0o700});shareVM(storageRoot,0o2750);fs.mkdirSync(storage,{mode:0o700});
+  // Templates live in the shared VM storage root, readable by the QEMU group only.
+  const image:RecordValue={os:"linux",arch:"amd64",mode:"headless",image:join(storageRoot,"base.raw")};fs.writeFileSync(image.image as string,"base",{mode:0o600});shareVM(image.image as string,0o640);
   const disk=join(storage,"disk.qcow2");fs.writeFileSync(disk,"private disk",{mode:0o600});save(join(folder,"assignment.json"),{fingerprint:fingerprint(machine),leaseId:(machine.lease as RecordValue).id});save(join(storage,"canaveral-owner.json"),{fingerprint:fingerprint(machine)});
   let now=100,boot:string=randomUUID();const originalBoot=boot;
   const binding=new LibvirtLeaseBinding({machine_id:machine.id as string,lease_id:(machine.lease as RecordValue).id as string,boot_id:randomUUID(),host_boot_id:boot,fingerprint:fingerprint(machine),disk});
@@ -41,7 +45,7 @@ function fixture(t:{after(fn:()=>void):void}){
   const driver=new Driver(bindDomainXML(domainXML(machine,image,disk),binding),machine.id as string),commands:string[][]=[];
   let auth:RecordValue={leaseID:(machine.lease as RecordValue).id,revision:1,remainingSeconds:30,fenced:false};image._leaseAuthorization=()=>({...auth});
   const adapters:LibvirtAdapters={fixture:true,platform:"linux",arch:"amd64",clock:()=>now,hostBoot:()=>boot,connect:()=>new OwnedNativeConnection(driver),run:async(argv)=>{commands.push([...argv]);const args=argv.slice(3);if(args[0]==="dumpxml")return driver.xml;if(args[0]==="domuuid")return machine.id as string;if(args[0]==="domstate")return driver.state;return"";},fileLease:()=>({verify(){},close(){}}),protectedRemove:path=>fs.rmSync(path,{recursive:true})};
-  const provider=new LibvirtProvider({storage:storageRoot,templates:[],leaseDeadlineLibrary:library,adapters},root);
+  const provider=new LibvirtProvider({storage:storageRoot,templates:[],leaseDeadlineLibrary:library,vmGroupId:vmGid,adapters},root);
   const write=(prefix:string,value:RecordValue)=>{const j=new SupervisorJournal(folder,prefix,{fixture:true});try{j.write(value);}finally{j.close();}};
   const terminal=()=>{machine.desired="stopped";(machine.lease as RecordValue).state="expired";auth={...auth,fenced:true};machine.leaseCleanup={id:randomUUID(),leaseId:(machine.lease as RecordValue).id};};
   return{root,machine,image,folder,storage,disk,library,spec,binding,driver,adapters,provider,commands,write,terminal,get now(){return now;},set now(v:number){now=v;},get boot(){return boot;},set boot(v:string){boot=v;},originalBoot,get auth(){return auth;},set auth(v:RecordValue){auth=v;}};
@@ -304,4 +308,52 @@ test("administrative definition retries only the identical owned XML after defin
   assert.equal((await f.provider.reconcile(f.machine,f.image,f.folder)).state,"starting");
   assert.deepEqual([creates,defines,starts],[1,2,1]);
   assert.ok(files.every(file=>!fs.existsSync(file)));
+});
+test("administrative preparation shares VM storage only with the QEMU group and labels the domain",async t=>{
+  const f=fixture(t);delete f.machine.lease;save(join(f.folder,"assignment.json"),{fingerprint:fingerprint(f.machine)});
+  for(const name of ["libvirt-binding.json","libvirt-execution.json"])fs.unlinkSync(join(f.folder,name));fs.rmSync(f.storage,{recursive:true});
+  let definition="";
+  f.adapters.run=async argv=>{
+    if(argv[0]==="qemu-img")return argv[1]==="info"?JSON.stringify({"virtual-size":1024,format:"raw"}):"";
+    const action=argv[3];
+    if(action==="list")return definition?(argv.includes("--uuid")?String(f.machine.id):"cvm-"+f.machine.id):"";
+    if(action==="define"){definition=fs.readFileSync(argv[4]!,"utf8");return "";}
+    if(action==="dumpxml")return definition;if(action==="domuuid")return String(f.machine.id);if(action==="domstate")return "shut off";if(action==="start")return "";
+    throw Error("Unexpected operation");
+  };
+  assert.equal((await f.provider.reconcile(f.machine,f.image,f.folder)).state,"starting");
+  const owner=(p:string)=>{const s=fs.lstatSync(p);return[s.uid,s.gid,s.mode&0o7777];};
+  assert.deepEqual(owner(f.storage),[process.getuid!(),vmGid,0o2750]);
+  assert.deepEqual(owner(f.disk),[process.getuid!(),vmGid,0o660]);
+  assert.equal(fs.lstatSync(join(f.storage,"canaveral-owner.json")).mode&0o777,0o600);
+  assert.equal(fs.lstatSync(f.folder).mode&0o777,0o700);
+  assert.match(definition,/<seclabel type="static" model="dac" relabel="no"><label>libvirt-qemu:canaveral-vm<\/label><\/seclabel>/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(f.folder,"libvirt-binding.json"),"utf8")).storageAccess,{gid:vmGid,label:"libvirt-qemu:canaveral-vm"});
+  assert.equal(await f.provider.maintenanceStorage(f.machine),"present");
+  // A live definition without the static label, or one that relabels storage, is not adopted.
+  const labelled=definition;
+  for(const changed of [labelled.replace(/<seclabel[^]*?<\/seclabel>/,""),labelled.replace('relabel="no"','relabel="yes"')]){definition=changed;await assert.rejects(f.provider.reconcile(f.machine,f.image,f.folder),/QEMU account label/);}
+  definition=labelled;fs.chmodSync(f.disk,0o666);await assert.rejects(f.provider.maintenanceStorage(f.machine),/QEMU group/);await assert.rejects(f.provider.reconcile(f.machine,f.image,f.folder),/QEMU group/);
+});
+test("VM storage root and templates accept exactly the shared owner, group and mode",async t=>{
+  const f=fixture(t),provider=new LibvirtProvider({...f.provider.config,templates:[f.image]},f.root),root=dirname(f.storage),base=f.image.image as string;
+  await provider.check();
+  for(const[path,mode,restore]of [[root,0o750,0o2750],[root,0o2770,0o2750],[root,0o2755,0o2750],[base,0o644,0o640],[base,0o660,0o640],[base,0o600,0o640]] as const){
+    fs.chmodSync(path,mode);await assert.rejects(provider.check(),e=>(e as {code?:string}).code==="libvirt_vm_storage_access");fs.chmodSync(path,restore);
+  }
+  const foreign=new LibvirtProvider({...f.provider.config,templates:[f.image],vmGroupId:vmGid+1},f.root);await assert.rejects(foreign.check(),e=>(e as {code?:string}).code==="libvirt_vm_storage_access");
+  // Preparation refuses before provisioning when the storage root lost its shared group mode.
+  delete f.machine.lease;save(join(f.folder,"assignment.json"),{fingerprint:fingerprint(f.machine)});for(const name of ["libvirt-binding.json","libvirt-execution.json"])fs.unlinkSync(join(f.folder,name));fs.rmSync(f.storage,{recursive:true});
+  fs.chmodSync(root,0o700);f.commands.length=0;await assert.rejects(f.provider.reconcile(f.machine,f.image,f.folder),/QEMU group/);assert.ok(!f.commands.some(c=>c[0]==="qemu-img"));assert.equal(fs.existsSync(f.storage),false);
+});
+test("QEMU account and storage group configuration is exact",()=>{
+  assert.deepEqual(vmStorageAccess({}),{gid:10002,label:"libvirt-qemu:canaveral-vm"});
+  assert.deepEqual(vmStorageAccess({vmGroupId:20000,vmGroup:"+20000",qemuUser:"qemu"}),{gid:20000,label:"qemu:+20000"});
+  for(const config of [{vmGroupId:0},{vmGroupId:1.5},{vmGroupId:"10002"},{vmGroup:"+10003"},{vmGroup:"x<y"},{qemuUser:"root"},{qemuUser:"+0"},{qemuUser:`+${process.getuid!()}`},{qemuUser:userInfo().username},{qemuUser:"a:b"}])assert.throws(()=>vmStorageAccess(config),JSON.stringify(config));
+});
+test("DAC label validation accepts live labels and refuses relabelling or a second DAC label",t=>{
+  const f=fixture(t),label="libvirt-qemu:canaveral-vm",xml=bindDomainXML(withDACLabel(domainXML(f.machine,f.image,f.disk),label),f.binding);
+  validateDomainXML(xml,f.binding,label);
+  validateDomainXML(xml.replace(`${label}</label></seclabel>`,`${label}</label><imagelabel>${label}</imagelabel></seclabel><seclabel type="dynamic" model="apparmor" relabel="yes"><label>libvirt-a</label><imagelabel>libvirt-a</imagelabel></seclabel>`),f.binding,label);
+  for(const changed of [xml.replace(`>${label}<`,">root:root<"),xml.replace('type="static"','type="dynamic"'),xml.replace('relabel="no"','relabel="yes"'),xml.replace("</seclabel>",`</seclabel><seclabel type="static" model="dac" relabel="no"><label>${label}</label></seclabel>`),xml.replace(`${label}</label>`,`${label}</label><baselabel>x</baselabel>`),bindDomainXML(domainXML(f.machine,f.image,f.disk),f.binding)])assert.throws(()=>validateDomainXML(changed,f.binding,label));
 });
