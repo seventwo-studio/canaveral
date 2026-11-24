@@ -209,13 +209,14 @@ stays enabled: libvirt confines each QEMU process in its generated
 `libvirt-<uuid>` profile, and `firmware="efi"` selects the packaged OVMF
 build.
 
-The hosted suite requests the checksum-pinned CirrOS guest through the machines API.
-It checks controller-observed power, guest SSH, QEMU credentials and AppArmor
-confinement, domain identity across pod replacement, and disk retention after
-stop and uninstall. The [hosted Ubuntu run](https://github.com/seventwo-studio/canaveral/actions/runs/45431668629)
-verified boot, confinement, replacement, and stop with a retained disk reservation.
-A [second run](https://github.com/seventwo-studio/canaveral/actions/runs/45433842003) reached the safe-to-power-off gate.
-After removing the VM node label, allow the pod its full termination grace period before deleting the overlay.
+On hosted Ubuntu 24.04, the machines API booted the checksum-pinned CirrOS guest.
+The controller observed it running, SSH answered, and QEMU ran under the configured
+account and enforced AppArmor profile. After pod replacement, the same host
+reported the same running domain with its original runtime ID. An API stop
+retained the disk inode and disk reservation. After the host reported
+`safeToPowerOff`, removing the node label and waiting for pod termination
+allowed the overlay to be uninstalled. The stopped domain, disk, and host
+identity survived. [Native acceptance run](https://github.com/seventwo-studio/canaveral/actions/runs/45436151644).
 
 On Ubuntu, libvirtd's AppArmor profile denies `ptrace read` on the
 `cri-containerd.apparmor.d` profile each time the pod connects. libvirtd is
