@@ -600,6 +600,37 @@ test("a finished recording whose receipt the runner repeats does not hold back t
   assert.equal(internals.recordingPending(String(m.id)), true);
 });
 
+test("an older controller receives live cleanup without fence attribution, including on retry", async t => {
+  const { config, image, clock } = setup(t);
+  const m = machine(image), capture = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "disconnected" };
+  const stop = { cause: "fence", leaseId: randomUUID(), leaseRevision: 1 }, reports: RecordValue[] = [];
+  const transport: HostTransport = { request: async (_method, route, body) => {
+    if (route.endsWith("heartbeat")) return { machines: [m], liveCaptures: [capture] };
+    if (route.endsWith(`/video-sessions/${capture.id}/finish`)) {
+      reports.push(body);
+      if (body.stop) throw new ServiceError("Mobile video session rejected.", 400);
+      if (reports.length === 2) throw new ServiceError("Lost response.", 503, { outcome: "unknown" });
+    }
+    return {};
+  } };
+  const runner = new HostRunner(config, { clock, transport, providerFactory });
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  const path = join(config.stateDir, "work", "live", `${capture.id}.json`);
+  saveRecord(path, { generation: capture.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true, stop });
+  const internals = runner as unknown as { stepLive(): void; active: Map<string, { promise: Promise<void> }> };
+  const repeat = () => {
+    internals.stepLive();
+    return internals.active.get(`live-capture:${capture.id}`)!.promise;
+  };
+  await repeat();
+  assert.equal(readRecord(path).legacyReceipt, true);
+  assert.deepEqual(readRecord(path).stop, stop);
+  await repeat();
+  const cleanup = { generation: capture.generation, hostCleaned: true };
+  assert.deepEqual(reports, [{ ...cleanup, stop }, cleanup, cleanup]);
+});
+
 test("a recording whose native stop is unproven keeps a late viewer's capture off the device while its receipt is held", async t => {
   const { config, image, clock } = setup(t);
   const m: RecordValue = { ...machine(image), lease: { id: randomUUID(), revision: 1, state: "ready", controllerNow: 1000, authorizationDeadline: 1060 } };

@@ -11,7 +11,8 @@ import type { HostConfig } from '../../src/host.ts';
 import { MobileProvider } from '../../src/providers/mobile.ts';
 import type { Authorized, DeviceRequest, NativePipe, RecordValue } from '../../src/providers/mobile.ts';
 import { MobileVideoClient } from '../../src/video-sdk.ts';
-import { object } from '../../src/errors.ts';
+import { object, ServiceError } from '../../src/errors.ts';
+import { readRecord } from '../../src/runtime-process.ts';
 
 function box(type: string, body = Buffer.alloc(0)): Buffer { const header = Buffer.alloc(8); header.writeUInt32BE(8 + body.length); header.write(type, 4); return Buffer.concat([header, body]); }
 // Container envelopes prove transport/accounting only; these are not decodable video frames.
@@ -103,4 +104,25 @@ test('runner streams owned video through the real broker without blocking input 
   const receipt = await videoApi.inspect(machineId, dropped.id);
   assert.equal(receipt.cleaned, true);
   assert.equal(receipt.ackReceived, undefined);
+
+  const legacy = await videoApi.create(machineId, { ...request, id: randomUUID() });
+  const send = runner.transport.request.bind(runner.transport), reports: RecordValue[] = [];
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    if (args[1].endsWith(`/video-sessions/${legacy.id}/finish`)) {
+      reports.push(args[2]);
+      if (args[2].ackReceived) throw new ServiceError('Mobile video session rejected.', 400);
+    }
+    return send(...args);
+  });
+  const legacyConnection = videoApi.connect(legacy, { timeoutMs: 5000 });
+  await runner.poll(); await runner.step();
+  const legacyVideo = await legacyConnection;
+  await assert.rejects(legacyVideo.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
+  const cleanup = { generation: legacy.generation, cleaned: true };
+  assert.deepEqual(reports, [{ ...cleanup, ackReceived: true }, cleanup]);
+  const journal = readRecord(join(config.stateDir, 'work', 'video', `${legacy.id}.json`));
+  assert.equal(journal.ackReceived, true);
+  assert.equal(journal.legacyReceipt, true);
+  assert.equal((await videoApi.inspect(machineId, legacy.id)).ackReceived, undefined);
+  assert.equal(await reservedCpu(), initialCpu);
 });

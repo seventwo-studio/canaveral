@@ -34,6 +34,12 @@ class Wire implements SessionChannel {
   async sendControl(value: Record<string, unknown>) { this.controls.push(value); }
   async sendBytes() { throw new Error('viewers cannot send video bytes'); }
   close() { this.closes++; }
+  receipt() {
+    assert.deepEqual(this.controls, [{ type: 'ack' }]);
+    return { ...options, id: this.sessionId, machineId: randomUUID(), generation: randomUUID(), state: 'finished',
+      capability: 'video' as const, protocol: 'canaveral-session-v1' as const, attachBefore: new Date().toISOString(),
+      authorizationDeadline: new Date().toISOString(), cleaned: true };
+  }
 }
 function pipe(parts: Uint8Array[], exit = 0): NativePipe & { closes: number; ends: number; input: Buffer[] } {
   return { closes: 0, ends: 0, input: [],
@@ -121,10 +127,21 @@ test('MP4 envelope handles arbitrary chunk boundaries and rejects truncation and
 
 test('SDK streams the exact MP4 through partial writes, verifies digest/cleanup, then acknowledges', async () => {
   const wire = new Wire(); for (let at = 0; at < mp4.length; at += 3) wire.queue.push(mp4.subarray(at, at + 3)); wire.queue.push(finish);
-  const video = await VideoClient.connect(wire), output: Buffer[] = [];
+  const video = await VideoClient.connect(wire, {}, async () => ({ ...wire.receipt(), ackReceived: true })), output: Buffer[] = [];
   const result = await video.record({ write(bytes) { assert.ok(!wire.controls.length); const count = Math.min(2, bytes.length); output.push(Buffer.from(bytes.subarray(0, count))); return count; } });
   assert.deepEqual(Buffer.concat(output), mp4); assert.deepEqual(result, finish); assert.deepEqual(wire.controls, [{ type: 'ack' }]); assert.ok(wire.closes);
   await assert.rejects(video.record({ write: bytes => bytes.length }));
+});
+
+test('EOF after ACK is incomplete without persisted ACK acceptance', async () => {
+  for (const inspect of [false, true]) {
+    const wire = new Wire();
+    wire.queue.push(mp4, finish, null);
+    const video = await VideoClient.connect(wire, {}, inspect ? async () => wire.receipt() : undefined);
+    await assert.rejects(video.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
+    assert.deepEqual(wire.controls, [{ type: 'ack' }]);
+    assert.equal(video.finish, undefined);
+  }
 });
 
 test('SDK rejects bad digest, absent finish, missing cleanup, byte-budget excess and bad metadata', async () => {

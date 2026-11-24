@@ -72,6 +72,9 @@ After the connection ends, the SDK requires a `finished` session with
 when it accepts the acknowledgement. The SDK uses the remaining completion
 budget from `timeoutMs` for inspection and cancels the request if the caller
 aborts or the budget runs out. Missing confirmation reports `video_incomplete`.
+An older controller can receive the cleanup receipt and release the reservation
+even when it cannot store ACK acceptance. In that case recording completion
+remains unconfirmed.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 
