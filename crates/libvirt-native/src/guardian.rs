@@ -5,7 +5,8 @@
 //! (PR_SET_PDEATHSIG). Daemon exit (pidfd), connection loss, a fenced or expired deadline and a
 //! domain that stops all end the lease. The fence then destroys the domain through a fresh
 //! connection only after ownership proof, and records `stopped` only after a fresh lookup
-//! returns VIR_ERR_NO_DOMAIN. The daemon's reconciler runs the same fence after taking the lock.
+//! returns VIR_ERR_NO_DOMAIN and the create and process state are settled. The daemon's
+//! reconciler runs the same fence after taking the lock.
 use crate::journal::Journal;
 use crate::native::{self, Birth, Connection, Kill, Owner, Result};
 use crate::storage;
@@ -34,6 +35,8 @@ const SO_PEERPIDFD: libc::c_int = 77;
 pub const BUSY: i32 = 75;
 /// The kernel cannot give a peer pidfd (EX_CONFIG).
 pub const KERNEL: i32 = 78;
+/// The boot identity belongs to a sandbox kernel (EX_UNAVAILABLE).
+pub const SANDBOX: i32 = 69;
 /// Seconds one fresh-connection probe may take before it counts as unconfirmed.
 const PROBE_SECONDS: f64 = 10.0;
 
@@ -100,6 +103,13 @@ struct Domain {
     birth: Option<Birth>,
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum StopEvidence {
+    Unused,
+    Observed,
+}
+
 /// The guardian's durable receipt. `stopped` is written only after positive proof.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +121,8 @@ struct Receipt {
     domain: Option<Domain>,
     #[serde(default)]
     stop_proven: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_evidence: Option<StopEvidence>,
     /// Why the lease ended; absent while it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -126,6 +138,7 @@ impl Receipt {
             phase: phase.into(),
             domain: None,
             stop_proven: false,
+            stop_evidence: None,
             reason: None,
             fence: None,
         }
@@ -138,6 +151,14 @@ impl Receipt {
             return Err("foreign launch receipt".into());
         }
         Ok(receipt)
+    }
+
+    fn create_not_submitted(&self) -> bool {
+        self.phase == "unused" || self.stop_evidence == Some(StopEvidence::Unused)
+    }
+
+    fn stopped(&self) -> bool {
+        self.phase == "stopped" && self.stop_proven && self.stop_evidence.is_some()
     }
 }
 
@@ -316,11 +337,11 @@ fn probe(folder: &Path, destroy: bool) -> bool {
     false
 }
 
-/// Durable evidence published only by the connection worker after a successful create reply.
+/// Durable evidence published by the worker after paused creation and identity verification.
 #[derive(Deserialize, Serialize)]
 struct CreateResult {
     identity: Value,
-    domain: Option<Domain>,
+    domain: Option<Domain>, // Older helpers could leave a partial record with no domain.
 }
 
 fn create_result(journal: &Journal, spec: &Spec) -> Result<Option<CreateResult>> {
@@ -332,14 +353,6 @@ fn create_result(journal: &Journal, spec: &Spec) -> Result<Option<CreateResult>>
         return Err("foreign create result".into());
     }
     Ok(result)
-}
-
-fn completed_create(receipt: &Receipt, result: Option<&CreateResult>, same_boot: bool) -> bool {
-    !same_boot
-        || receipt.stop_proven
-        || receipt.phase == "unused"
-        || receipt.domain.is_some()
-        || result.is_some()
 }
 
 /// The ID and, on bare metal, the recorded QEMU birth are required before any destroy.
@@ -355,7 +368,32 @@ fn destruction_proof(domain: Option<Domain>, cluster: bool, same_boot: bool) -> 
     })
 }
 
-/// A lookup can prove absence only after the create completed or its host boot ended.
+/// Interprets a fresh VIR_ERR_NO_DOMAIN result. The bare-metal birth check is mandatory
+/// for submitted creates on the original boot, even when an older receipt says stopped.
+fn prove_absence(
+    receipt: &Receipt,
+    result: Option<&CreateResult>,
+    cluster: bool,
+    same_boot: bool,
+    observe_birth: impl FnOnce(Birth) -> Result<Kill>,
+) -> Result<bool> {
+    if !same_boot
+        || (receipt.create_not_submitted() && receipt.domain.is_none() && result.is_none())
+    {
+        return Ok(true);
+    }
+    let domain = receipt
+        .domain
+        .or_else(|| result.and_then(|result| result.domain));
+    let Some(proof) = destruction_proof(domain, cluster, same_boot) else {
+        return Ok(false);
+    };
+    match proof.birth {
+        Some(birth) => Ok(observe_birth(birth)? == Kill::Gone),
+        None => Ok(cluster),
+    }
+}
+
 fn absent(journal: &Journal, spec: &Spec, receipt: &Receipt, destroy: bool) -> Result<bool> {
     let owner = spec.owner()?;
     let conn = Connection::open(&spec.uri, false)?;
@@ -364,12 +402,17 @@ fn absent(journal: &Journal, spec: &Spec, receipt: &Receipt, destroy: bool) -> R
     let domain = receipt
         .domain
         .or_else(|| result.as_ref().and_then(|result| result.domain));
-    let birth = domain.and_then(|domain| domain.birth).filter(|_| same_boot);
-    let qemu_gone = || -> Result<bool> {
-        Ok(birth.map_or(Ok(Kill::Gone), |process| process.fence(false))? == Kill::Gone)
+    let prove = || {
+        prove_absence(
+            receipt,
+            result.as_ref(),
+            spec.cluster,
+            same_boot,
+            |process| process.fence(false),
+        )
     };
     let Some(vm) = conn.lookup(owner.uuid)? else {
-        return Ok(completed_create(receipt, result.as_ref(), same_boot) && qemu_gone()?);
+        return prove();
     };
     if !destroy {
         return Ok(false);
@@ -392,7 +435,7 @@ fn absent(journal: &Journal, spec: &Spec, receipt: &Receipt, destroy: bool) -> R
     if conn.lookup(owner.uuid)?.is_some() {
         return Ok(false);
     }
-    qemu_gone()
+    prove()
 }
 
 /// Fences until a fresh lookup proves the domain gone or the budget ends. On bare metal it
@@ -408,7 +451,8 @@ fn fence(
     let deadline = native::now()? + budget;
     let mut killed = false;
     // Keep pre-submit evidence intact when the worker never received a create grant.
-    if receipt.phase != "unused" {
+    let unused = receipt.create_not_submitted();
+    if !unused {
         receipt.phase = "unknown".into();
     }
     receipt.fence = Some("libvirt-unconfirmed".into());
@@ -417,6 +461,11 @@ fn fence(
         if probe(folder, true) {
             receipt.phase = "stopped".into();
             receipt.stop_proven = true;
+            receipt.stop_evidence = Some(if unused {
+                StopEvidence::Unused
+            } else {
+                StopEvidence::Observed
+            });
             receipt.fence = None;
             journal.write(RECEIPT, receipt)?;
             return Ok(true);
@@ -585,11 +634,6 @@ fn connection(folder: &Path) -> Result<()> {
         return Err("domain already exists".into());
     }
     let vm = conn.create(&spec.xml)?;
-    let mut result = CreateResult {
-        identity: spec.identity.clone(),
-        domain: None,
-    };
-    journal.write(CREATE_RESULT, &result)?;
     let (id, state) = vm.identity(&owner)?;
     if state != 1 {
         return Err("domain is not paused".into());
@@ -600,7 +644,10 @@ fn connection(folder: &Path) -> Result<()> {
         Some(vm.birth(owner.uuid)?)
     };
     let domain = Domain { id, birth };
-    result.domain = Some(domain);
+    let result = CreateResult {
+        identity: spec.identity.clone(),
+        domain: Some(domain),
+    };
     journal.write(CREATE_RESULT, &result)?;
     println!("{}", json!({"domain": domain}));
     if commands.next().transpose()?.as_deref() != Some("resume") {
@@ -637,8 +684,12 @@ fn locked(journal: &Journal) -> Result<std::fs::File> {
 pub fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if native::sandbox_kernel() {
+        return Err(Box::new(Exit(SANDBOX)));
+    }
     match args.as_slice() {
         ["check"] => {
+            native::boot_id()?;
             let (ours, _peer) = UnixStream::pair()?;
             let fd = pidfd_for_peer(ours.as_raw_fd(), unsafe { libc::getpid() })?;
             if native::pidfd_ready(&fd, 0)? {
@@ -669,7 +720,7 @@ pub fn run() -> Result<()> {
             let _lock = locked(&journal)?;
             let spec = read_spec(&journal)?;
             let mut receipt = Receipt::load(&journal, &spec)?;
-            if receipt.phase != "stopped" || !receipt.stop_proven {
+            if !receipt.stopped() {
                 receipt
                     .reason
                     .get_or_insert_with(|| "guardian-ended".into());
@@ -687,9 +738,7 @@ pub fn run() -> Result<()> {
             let spec = read_spec(&journal)?;
             let receipt = Receipt::load(&journal, &spec)?;
             // Erasure follows a positive stop and repeats the absence proof under the lock.
-            if !(receipt.phase == "unused" || receipt.phase == "stopped" && receipt.stop_proven)
-                || !probe(path, false)
-            {
+            if !(receipt.phase == "unused" || receipt.stopped()) || !probe(path, false) {
                 return Err("owned domain stop unconfirmed".into());
             }
             let intent: storage::Intent = journal.read(REMOVAL)?.ok_or("missing removal intent")?;
@@ -763,19 +812,57 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_create_requires_a_successful_reply_or_new_boot() {
+    fn bare_metal_absence_requires_qemu_exit_or_a_new_boot_after_create() {
         let spec = spec();
-        let result = CreateResult {
+        let partial: CreateResult =
+            serde_json::from_value(json!({"identity": spec.identity, "domain": null})).unwrap();
+        let without_birth = CreateResult {
             identity: spec.identity.clone(),
-            domain: None,
+            domain: Some(Domain { id: 7, birth: None }),
         };
+        let birth = Birth { pid: 9, start: 10 };
+        let complete = CreateResult {
+            identity: spec.identity.clone(),
+            domain: Some(Domain {
+                id: 7,
+                birth: Some(birth),
+            }),
+        };
+        let unexpected_birth = |_| panic!("No birth should be checked");
         for phase in ["creating", "unknown", "create-failed", "stopped"] {
-            let receipt = Receipt::new(&spec, phase);
-            assert!(!completed_create(&receipt, None, true));
-            assert!(completed_create(&receipt, Some(&result), true));
-            assert!(completed_create(&receipt, None, false));
+            let mut receipt = Receipt::new(&spec, phase);
+            receipt.stop_proven = phase == "stopped"; // A legacy receipt could assert this unsafely.
+            assert!(!receipt.stopped());
+            for result in [None, Some(&partial), Some(&without_birth)] {
+                assert!(!prove_absence(&receipt, result, false, true, unexpected_birth).unwrap());
+                assert!(prove_absence(&receipt, result, false, false, unexpected_birth).unwrap());
+            }
+            assert!(
+                !prove_absence(&receipt, Some(&partial), true, true, unexpected_birth).unwrap()
+            );
+            assert!(
+                prove_absence(&receipt, Some(&without_birth), true, true, unexpected_birth)
+                    .unwrap()
+            );
+            for (status, stopped) in [(Kill::Running, false), (Kill::Gone, true)] {
+                assert_eq!(
+                    prove_absence(&receipt, Some(&complete), false, true, |recorded| {
+                        assert_eq!(recorded, birth);
+                        Ok(status)
+                    })
+                    .unwrap(),
+                    stopped
+                );
+            }
         }
-        assert!(completed_create(&Receipt::new(&spec, "unused"), None, true));
+        let mut receipt = Receipt::new(&spec, "unused");
+        assert!(prove_absence(&receipt, None, false, true, unexpected_birth).unwrap());
+        assert!(!prove_absence(&receipt, Some(&partial), false, true, unexpected_birth).unwrap());
+        receipt.phase = "stopped".into();
+        receipt.stop_proven = true;
+        receipt.stop_evidence = Some(StopEvidence::Unused);
+        assert!(receipt.stopped());
+        assert!(prove_absence(&receipt, None, false, true, unexpected_birth).unwrap());
     }
 
     #[test]

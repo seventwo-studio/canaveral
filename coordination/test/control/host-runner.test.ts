@@ -249,6 +249,13 @@ test("maintenance and update idle verify assignment bookkeeping before excluding
   await inventory([]);
   assert.deepEqual(readRecord(receipt), proof, "inspection leaves the cleanup receipt intact");
 
+  for (const phase of ["planned", "unstarted", "preboot", "storageRemoved", "erasing", "removing"]) {
+    saveRecord(receipt, { ...proof, phase });
+    await inventory([".lease-cleanup"]);
+  }
+  saveRecord(receipt, proof);
+  await inventory([]);
+
   chmodSync(locks, 0o755);
   saveRecord(receipt, { ...proof, machineId: randomUUID() });
   await inventory([".assignment-locks", ".lease-cleanup"]);

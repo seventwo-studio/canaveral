@@ -66,7 +66,6 @@ export class StateLock {
 }
 const ASSIGNMENT_LOCKS = ".assignment-locks";
 const LEASE_CLEANUP = ".lease-cleanup";
-const CLEANUP_PHASES = new Set(["planned", "unstarted", "preboot", "storageRemoved", "erasing", "removing", "complete"]);
 const ASSIGNMENT_LOCK_SCHEMA = "CREATE TABLE runner_lock (id INTEGER PRIMARY KEY)";
 
 /** Recognizes the private bookkeeping layout without mutating journals or taking locks. */
@@ -116,7 +115,7 @@ function bookkeepingFile(path: string, uid: number, id: string, cleanup: boolean
     const proof = object(JSON.parse(bytes.toString("utf8", 0, size)));
     return proof.machineId === id && identifier(proof.id) === proof.id && identifier(proof.leaseId) === proof.leaseId &&
       typeof proof.fingerprint === "string" && /^[a-f0-9]{64}$/.test(proof.fingerprint) &&
-      Number.isSafeInteger(proof.attempt) && Number(proof.attempt) >= 0 && typeof proof.phase === "string" && CLEANUP_PHASES.has(proof.phase);
+      Number.isSafeInteger(proof.attempt) && Number(proof.attempt) >= 0 && proof.phase === "complete";
   } finally { closeSync(fd); }
 }
 

@@ -13,8 +13,11 @@ import type { RecordValue } from "./libvirt-ownership.ts";
 // SO_PEERPIDFD, which Linux added in 6.5. Older kernels cannot offer libvirt leases.
 const unverified = (): ServiceError => new ServiceError("The configured libvirt lease helper could not be verified.", 409, { code: "libvirt_lease_helper_unverified" });
 const unsupportedKernel = (): ServiceError => new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 409, { code: "libvirt_lease_kernel_unsupported" });
+const unsupportedSandbox = (): ServiceError => new ServiceError("Libvirt leases need the libvirt host kernel's boot identity.", 409, { code: "libvirt_lease_sandbox_unsupported" });
 /** Exit status of `canaveral-libvirt-native check` when the kernel lacks SO_PEERPIDFD (EX_CONFIG). */
 const KERNEL_EXIT = 78;
+/** Exit status when the helper detects a sandbox kernel (EX_UNAVAILABLE). */
+const SANDBOX_EXIT = 69;
 /** Exit status of `fence` while a live guardian holds the lease lock (EX_TEMPFAIL). */
 const BUSY_EXIT = 75;
 const HELPER_LIMIT = 64 * 1048576;
@@ -80,18 +83,27 @@ function runVerifiedHelper(helper: HelperPin, mode: "check" | "clock", timeout: 
       stdio: ["ignore", "pipe", "ignore", fd], argv0: helper.path, env: helperEnv(),
       encoding: "utf8", timeout, killSignal: "SIGKILL", maxBuffer: 1024,
     });
+    if (result.status === SANDBOX_EXIT) throw unsupportedSandbox();
     if (mode === "check" && result.status === KERNEL_EXIT) throw unsupportedKernel();
     if (result.error || result.status !== 0) throw unverified();
     return result.stdout;
   } finally { fs.closeSync(fd); }
 }
 
-/** Inventory check: helper identity and the kernel's peer pidfd support. */
+/** Inventory check: helper identity, host kernel scope and peer pidfd support. */
 export function checkLibvirtLeaseHelper(config: RecordValue, kernel: string = release()): void {
   const helper = libvirtLeaseHelper(config);
   if (!helper) throw unverified();
-  if (process.platform !== "linux" || !libvirtLeaseKernelSupported(kernel)) throw unsupportedKernel();
-  if (!/^\d+(?:\.\d+)?\n$/.test(runVerifiedHelper(helper, "check", 5000))) throw unverified();
+  if (process.platform !== "linux") throw unsupportedKernel();
+  const supported = libvirtLeaseKernelSupported(kernel);
+  let sample: string;
+  try { sample = runVerifiedHelper(helper, "check", 5000); }
+  catch (error) {
+    if (!supported && error instanceof ServiceError && error.code === "libvirt_lease_helper_unverified") throw unsupportedKernel();
+    throw error;
+  }
+  if (!supported) throw unsupportedKernel();
+  if (!/^\d+(?:\.\d+)?\n$/.test(sample)) throw unverified();
 }
 
 export function libvirtLeaseClockSample(path: string, sha256: string): string {

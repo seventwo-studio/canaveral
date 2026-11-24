@@ -42,7 +42,8 @@ inherited loader environment variables before invoking the helper.
 
 `canaverald runtimes status` reports `leases: {eligible: true}` on the libvirt
 row when the helper verifies and the kernel supports peer pidfds. Otherwise it
-reports `libvirt_lease_helper_unverified` or `libvirt_lease_kernel_unsupported`.
+reports `libvirt_lease_helper_unverified`, `libvirt_lease_kernel_unsupported`
+or `libvirt_lease_sandbox_unsupported`.
 The host refuses to start with libvirt lease images declared on a kernel older
 than Linux 6.5 (`libvirt_lease_kernel_unsupported`) or without the helper.
 
@@ -55,10 +56,22 @@ A host advertises a libvirt lease image only when all of these hold:
 - the template is headless x64 Linux with `firmware: "bios"`, without TPM,
   secure boot, guest access or a preparation recipe (the natively accepted
   template; UEFI and TPM state provisioning is not qualified for leases);
-- the host is Linux 6.5 or later with the pinned helper and `leaseClockHelper`.
+- the host is Linux 6.5 or later with the pinned helper and `leaseClockHelper`,
+  and the daemon runs on the same kernel as libvirtd.
 
 The host also enforces this itself: an assignment outside its advertised
 libvirt lease images is never started.
+
+Run Kubernetes lease pods with a host-kernel runtime. A gVisor sandbox or Kata
+guest can reboot while libvirtd and QEMU continue on the node. The helper
+refuses detected sandboxes with `libvirt_lease_sandbox_unsupported`. It checks
+gVisor's optional proc marker and its synthetic kernel log, plus Kata agent
+kernel parameters and Kata shared mounts. These signals identify standard
+configurations. Operators must keep lease pods off sandboxed runtimes even when
+a custom configuration hides those signals.
+[gVisor detection](https://gvisor.dev/docs/user_guide/quick_start/docker/),
+[gVisor proc marker](https://github.com/google/gvisor/blob/master/runsc/config/flags.go),
+[Kata agent and shared mounts](https://github.com/kata-containers/kata-containers/blob/main/src/runtime/virtcontainers/kata_agent.go).
 
 ## Lease lifecycle
 
@@ -101,10 +114,13 @@ the controller and libvirt RPCs: the same revision can never extend it.
 domain still bound to it. The fence does not rely on that. Through a fresh
 connection it destroys a remaining domain only after the UUID, nonce and lease
 in its metadata, the recorded domain ID and, on bare metal, the QEMU birth all
-match on the same host boot. It records `stopped` with `stopProven` after a
-fresh lookup returns `VIR_ERR_NO_DOMAIN`, the recorded QEMU process is gone,
-and the create is known to have completed or to have never been submitted. A
-new host boot also settles the earlier boot's create. Each probe runs in
+match on the same host boot. It records `stopped` with `stopProven` and
+`stopEvidence` after a fresh lookup returns `VIR_ERR_NO_DOMAIN` and one of these
+conditions holds. The create was never submitted, the libvirt host rebooted,
+or the complete domain identity was recorded and, on bare metal, the recorded
+QEMU birth is confirmed gone. The worker publishes the complete identity in one
+atomic journal write. Older stop receipts without `stopEvidence` require fresh
+proof. Each probe runs in
 its own child, bounded to 10 seconds. If libvirt cannot complete the proof on
 bare metal, the guardian opens a pidfd on the recorded QEMU process, checks its
 start time and sends `SIGKILL` through the pidfd. That needs `CAP_KILL` from the
@@ -120,6 +136,9 @@ guardian is gone. An RPC submitted by its worker can still be in flight on
 the server. A dead worker or repeated `VIR_ERR_NO_DOMAIN` replies provide no
 completion evidence. With an uncertain create the reconciler records
 `unknown`, retains the reservation and keeps probing the per-lease UUID.
+Even a definite create refusal leaves the reservation held once the attempt
+was recorded. The worker journals only verified successful creates, so cleanup
+needs a proven host reboot or fresh evidence that settles the attempt.
 If a domain appears, explicit destruction requires the durable instance
 identity. A same-boot libvirtd restart does not settle a missing create reply
 because the journal does not identify the libvirtd process. The reconciler
@@ -141,8 +160,8 @@ If the directory is already absent after `cleared`, the helper synchronizes
 its parent and publishes `removed`. The generic cleanup then erases the assignment's journals and
 credentials, and only then does the controller release the reservation.
 Maintenance keeps the assignment lock databases and cleanup journals on disk.
-It excludes their two directories from unknown-resource inventories only when
-their ownership, permissions and entries match the daemon bookkeeping layout.
+These directories qualify as idle bookkeeping when their ownership, permissions
+and entries match the daemon layout and every cleanup receipt is complete.
 
 ## End paths
 

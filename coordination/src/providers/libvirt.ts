@@ -334,15 +334,15 @@ export class LibvirtProvider {
   // Transient lease execution. The guardian creates the domain with PAUSED|AUTODESTROY on its own
   // connection; there is never a persistent definition to resurrect. Stopped means that no
   // guardian was ever started, or that the guardian's lock was taken and a fresh connection
-  // returned VIR_ERR_NO_DOMAIN for the per-launch UUID after its create completed or its host
-  // boot ended. Everything else keeps the reservation.
+  // proved the per-launch UUID absent after resolving create and, on bare metal, QEMU
+  // process identity. Everything else keeps the reservation.
   private nativeReceipt(folder:string,b:LibvirtLeaseBinding):RecordValue|null{
     noSymlinks(folder);const receipt=readPrivate(join(folder,"libvirt-native-execution.json"));
     if(receipt&&canonical(receipt.identity)!==canonical(b.identity()))refuse("The lease guardian receipt belongs to another launch.");
     return receipt;
   }
   private nativeStopProven(receipt:RecordValue|null):boolean{
-    return receipt?.phase==="stopped"&&receipt.stopProven===true;
+    return receipt?.phase==="stopped"&&receipt.stopProven===true&&(receipt.stopEvidence==="unused"||receipt.stopEvidence==="observed");
   }
   private readonly fences=new Map<string,Promise<LeaseFence>>();
   /** One proof-gated fence per lease at a time. A failed call is unconfirmed, never stopped. */
@@ -370,7 +370,7 @@ export class LibvirtProvider {
       }
     }finally{j.close();}
     if(this.nativeStopProven(this.nativeReceipt(folder,b)))return true;
-    return await this.nativeFence(folder)==="stopped";
+    return await this.nativeFence(folder)==="stopped"&&this.nativeStopProven(this.nativeReceipt(folder,b));
   }
   /** Marks the published authorization fenced without a new deadline sample. */
   private latchFence(machine:RecordValue,folder:string):void{
