@@ -230,8 +230,41 @@ Administrative starts use host libvirtd and can keep running through pod
 replacement. Verify the same host ID, domain and owned disk when the pod returns.
 Stop an administrative machine through Canaveral and confirm the observed stop
 before maintenance. A stop retains the disk and its reservation. Verified
-administrative deletion and connection-bound AUTODESTROY require native adapters
-that the current daemon does not ship.
+administrative deletion remains outside this profile's lifecycle.
+
+### Consumer VM leases
+
+Consumer VM leases use transient domains and require Linux 6.5 or later for
+Unix peer pidfds. On an amd64 VM node, declare a headless x64 Linux template with
+`firmware: "bios"` and without TPM, secure boot, guest access or a preparation
+recipe. Set `leaseProtocol: 1` and add the template's `id`, `revision`, `arch`
+and `runtime: "libvirt"` to `leaseImages`. Enroll with that offer and verify
+`leases: {eligible: true}` on the libvirt row in `canaverald runtimes status`.
+
+The image installs the root-owned helper at
+`/usr/local/lib/canaveral/canaveral-libvirt-native`. The VM ConfigMap uses it for
+both `leaseHelper` and `leaseClockHelper`. The signed deployment artifact sets
+`leaseHelperSha256` from `libvirtLeaseHelper.sha256.amd64` in its
+`app-release.json`. The release workflow hashes the helper in each published
+image platform and includes both hashes in `release.json`. For a source-built
+image, replace the all-zero template value with the SHA-256 of the helper in
+that image before declaring lease images. An image change requires a matching
+ConfigMap pin.
+
+When a pod exits, its guardian and connection worker exit with it. The
+replacement takes the lease lock and reconciles the domain from the node-local
+journal. It checks the UUID, launch nonce, lease and recorded domain ID before
+destroying a matching live domain. It requires fresh proof of absence before
+erasing the overlay and releasing the reservation.
+
+The pod has neither the host PID view nor `CAP_KILL`. If libvirtd is unavailable
+through a lease deadline, QEMU can keep running until libvirtd returns. The
+receipt reports `libvirt-unconfirmed`, and the reservation stays held until the
+fence and cleanup complete. This is an accepted in-cluster gap. The bare-metal
+`canaverald.service` uses `OOMPolicy=continue` so an OOM-killed guardian fences
+its own lease while canaverald continues serving the others. The bare-metal
+`CAP_KILL` drop-in provides the PID-checked fallback described in
+[libvirt supervision](libvirt-supervision.md).
 
 ## Upgrades, recovery and removal
 

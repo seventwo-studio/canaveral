@@ -56,7 +56,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node script/publish_release.mjs
-      - name: Read published digests
+      - name: Read published image, deployment and helper digests
         id: digests
         run: |
           node -e '
@@ -64,6 +64,9 @@ jobs:
             const digest = v => { const m = /@(sha256:[a-f0-9]{64})$/.exec(v); if (!m) throw new Error("Unpinned release image"); return m[1]; };
             const out = { orchestrator: digest(r.images.orchestrator), dashboard: digest(r.images.dashboard), canaverald: digest(r.images.canaverald), deploy: r.deployment.digest };
             if (!/^sha256:[a-f0-9]{64}$/.test(out.deploy)) throw new Error("Unpinned deployment artifact");
+            for (const arch of ["amd64", "arm64"]) {
+              if (!/^[a-f0-9]{64}$/.test(r.libvirtLeaseHelper?.sha256?.[arch])) throw new Error("Unpinned libvirt lease helper");
+            }
             require("fs").appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(out).map(([k, v]) => k + "=" + v + "\n").join(""));
           '
       - name: Install Cosign

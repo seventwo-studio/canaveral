@@ -43,6 +43,13 @@ record passed
 step='build and import node and controller images'
 began=$SECONDS
 docker build --target canaverald -t canaverald:local .
+docker run --rm --entrypoint /bin/sh canaverald:local -ec '
+  helper=/usr/local/lib/canaveral/canaveral-libvirt-native
+  test "$(stat -c "%u:%g:%a:%h" "$helper")" = "0:0:755:1"
+  test ! -w "$helper"
+  test ! -w "$(dirname "$helper")"
+  sha256sum "$helper" | cut -d " " -f 1
+' > "$CLUSTER_WORK/lease-helper.sha256"
 docker build --target orchestrator -t canaveral:local .
 docker save -o "$CLUSTER_WORK/images.tar" canaveral:local canaverald:local
 sudo k3s ctr images import "$CLUSTER_WORK/images.tar"

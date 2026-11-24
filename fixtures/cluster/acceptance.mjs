@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import { createConnection } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pinVmLeaseHelper } from '../../script/publish_release.mjs';
 
 const work = process.env.CLUSTER_WORK;
 const evidencePath = process.env.CLUSTER_EVIDENCE;
@@ -360,23 +361,162 @@ if (ready) {
       writeFileSync(evidencePath, JSON.stringify(report, null, 2) + '\n');
     }
   }
-  await step('consumer libvirt lease admission and reservation reconciliation', async () => {
-    const image = {
-      id: 'cluster-catalogue-control', revision: '1', arch: 'amd64', os: 'linux', mode: 'headless',
-      digest: 'sha256:' + guest.sha256, resources, capabilities: ['command'],
-    };
-    const refused = await request('/v1/linux-lease-images', { ...image, backend: 'libvirt' });
-    assert.equal(refused.status, 400, rejection(refused));
-    assert.equal(refused.body.code, 'invalid_request');
-    const control = await call('/v1/linux-lease-images', { ...image, backend: 'appleVirtualization' });
-    assert.equal(control.backend, 'appleVirtualization');
-    throw new ExpectedGap('The API refused only the libvirt catalogue request (HTTP 400 invalid_request). The libvirt lease path lacks a production OwnedNativeConnection, supervisor and owned storage adapter.');
-  });
-  await step('libvirt AUTODESTROY on connection loss', () => {
-    throw new ExpectedGap('Administrative start uses one-shot virsh start. PAUSED|AUTODESTROY is available only to the lease supervisor, whose OwnedNativeConnection has no production adapter.');
-  });
   await step('verified administrative libvirt deletion', () => {
-    throw new ExpectedGap('Verified removal requires the unavailable native connection, file lease and protected removal adapters. The administrative lifecycle retains the definition, owned disk and disk reservation.');
+    throw new ExpectedGap('The administrative lifecycle retains the definition, owned disk and disk reservation.');
+  });
+}
+
+async function exerciseVmLeases(hostId, template, storage) {
+  const selector = { id: template.id, revision: template.revision, arch: template.arch };
+  const allocation = async () => (await call('/v1/hosts/' + hostId + '/resources')).reserved;
+  const baseline = await allocation();
+  const reserved = Object.fromEntries(Object.entries(template.minimum).map(([key, value]) => [key, baseline[key] + value]));
+  let token;
+  await step('grant a consumer access to the advertised libvirt template', async () => {
+    const { credential } = await call('/v1/consumers', {
+      id: randomUUID(), name: 'disposable cluster VM lease tests', templates: [selector],
+      limits: { resources: template.minimum, activeLeases: 1, defaultTTLSeconds: 300, maxTTLSeconds: 900,
+        maxLifetimeSeconds: 900, provisioningTimeoutSeconds: 300 },
+    });
+    assert(credential);
+    token = credential;
+    return { granted: true };
+  });
+  if (!token) return;
+
+  const journal = (machineId, name) => JSON.parse(sudo('cat', `${state}/machines/${machineId}/libvirt-${name}.json`));
+  const receipt = machineId => journal(machineId, 'native-execution');
+  const proc = pid => {
+    try {
+      const fields = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1).trim().split(/\s+/);
+      if (fields[0] !== 'Z') return fields[19];
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;
+    }
+  };
+  const release = id => call('/v1/leases/' + id + '/release', { id: randomUUID() }, token);
+  const host = async () => (await call('/v1/hosts')).hosts.find(row => row.id === hostId);
+  const requireReservation = async machineId => {
+    assert.deepEqual(await allocation(), reserved);
+    sudo('test', '-f', `${storage}/${machineId}/disk.qcow2`);
+  };
+  const booted = async ttlSeconds => {
+    const id = randomUUID();
+    const requestRoute = '/v1/requests/' + id;
+    await call('/v1/requests', {
+      id, kind: 'lease', intent: { templateId: template.id, templateRevision: template.revision, arch: template.arch, ttlSeconds },
+    }, token);
+    await eventually('consumer request admission', async () => (await call(requestRoute, undefined, token)).state === 'admitted');
+    const lease = await eventually('ready consumer libvirt lease', async () => {
+      const current = await call('/v1/leases/' + id, undefined, token);
+      assert(!['failed', 'released', 'expired'].includes(current.state), 'Lease ended as ' + current.state);
+      return current.state === 'ready' && current;
+    }, 150);
+    const machineId = lease.members[0].machineId;
+    assert.match(machineId, /^[0-9a-f-]{36}$/);
+    const native = receipt(machineId);
+    assert.equal(native.phase, 'running');
+    assert.equal(native.identity.machineId, machineId);
+    assert.equal(native.identity.leaseId, id);
+    assert.match(native.identity.bootId, /^[0-9a-f-]{36}$/);
+    assert.equal(native.domain.birth, null, 'The pod has no host QEMU PID view.');
+    assert.equal(virsh('domuuid', 'cvm-' + machineId), machineId);
+    assert.match(virsh('dominfo', machineId), /^Persistent:\s+no$/m);
+    const xml = virsh('dumpxml', machineId);
+    assert(xml.includes(`bootId="${native.identity.bootId}"`) || xml.includes(`bootId='${native.identity.bootId}'`));
+    assert(xml.includes(`leaseId="${id}"`) || xml.includes(`leaseId='${id}'`));
+    assert.match(xml, /<label>libvirt-qemu:canaveral-vm<\/label>/);
+    const qemu = sudo('cat', `/run/libvirt/qemu/cvm-${machineId}.pid`);
+    const qemuBirth = proc(qemu);
+    assert(qemuBirth, 'QEMU process birth');
+    const status = sudo('cat', `/proc/${qemu}/status`);
+    assert.equal(status.match(/^Uid:\s+\d+\s+(\d+)/m)?.[1], command('id', ['-u', 'libvirt-qemu']));
+    assert.equal(status.match(/^Gid:\s+\d+\s+(\d+)/m)?.[1], '10002');
+    const guardian = command('pgrep', ['-f', `canaveral-libvirt-native guard ${state}/machines/${machineId} `]);
+    assert.match(guardian, /^\d+$/);
+    const guardianBirth = proc(guardian);
+    assert(guardianBirth, 'guardian process birth');
+    const ip = await eventually('consumer guest DHCP and SSH service', async () => {
+      const address = virsh('domifaddr', machineId, '--source', 'lease').match(/\b(192\.168\.122\.\d{1,3})\/\d+\b/)?.[1];
+      return address && await sshBanner(address) && address;
+    }, 60);
+    await requireReservation(machineId);
+    return { id, machineId, ip, nonce: native.identity.bootId, guardian, guardianBirth, qemu, qemuBirth };
+  };
+  const cleaned = async ({ machineId, qemu, qemuBirth }) => {
+    await eventually('owned domain gone, overlay removed and reservation freed', async () => {
+      const current = await allocation();
+      if (current.diskGiB !== baseline.diskGiB) return false;
+      assert.deepEqual(current, baseline);
+      assert(!virsh('list', '--all', '--uuid').split('\n').includes(machineId));
+      assert.notEqual(proc(qemu), qemuBirth);
+      assert(!sudo('ls', '-A', storage).split('\n').some(entry => entry === machineId || entry.startsWith(`.removing-${machineId}-`)));
+      return true;
+    }, 120);
+    assert.match(refusal('sudo', ['virsh', '--connect', 'qemu:///system', 'start', machineId]), /failed to get domain|Domain not found/i);
+  };
+  const withFrozenLibvirt = async task => {
+    const pid = sudo('systemctl', 'show', 'libvirtd.service', '-p', 'MainPID', '--value');
+    assert.match(pid, /^[1-9]\d*$/);
+    sudo('kill', '-STOP', pid);
+    try { return await task(); } finally { sudo('kill', '-CONT', pid); }
+  };
+  const unconfirmed = (lease, reasons) => eventually('libvirt-unconfirmed native receipt', () => {
+    const native = receipt(lease.machineId);
+    assert.notEqual(native.phase, 'stopped');
+    assert.equal(native.identity.bootId, lease.nonce);
+    return native.fence === 'libvirt-unconfirmed' && reasons.includes(native.reason) && native.fence;
+  }, 35);
+
+  const released = await step('consumer lease boots and releases its domain, overlay and reservation', async () => {
+    const lease = await booted(300);
+    await release(lease.id);
+    await cleaned(lease);
+    return { machineId: lease.machineId, guestIp: lease.ip, qemuAccount: 'libvirt-qemu:canaveral-vm', restartRefused: true };
+  });
+  if (!released) return;
+  const replaced = await step('pod deletion kills the guardian and same-identity replacement proves the fence', async () => {
+    const lease = await booted(600);
+    const [old] = daemonPods();
+    const heartbeat = (await host()).lastSeen;
+    // Keep the old guardian from racing the replacement to the stop receipt.
+    sudo('kill', '-STOP', lease.guardian);
+    try {
+      await withFrozenLibvirt(async () => {
+        daemon('delete', 'pod', old.metadata.name, '--grace-period=1', '--wait=false');
+        await eventually('old pod guardian death', () => proc(lease.guardian) !== lease.guardianBirth, 30);
+        await waitForDaemon(old.metadata.uid);
+        assert.equal(sudo('jq', '-r', '.id', state + '/identity.json'), hostId);
+        await eventually('fresh heartbeat under the original host ID', async () => {
+          const current = await host();
+          return current?.online && current.lastSeen > heartbeat;
+        });
+        assert.equal(await unconfirmed(lease, ['guardian-ended']), 'libvirt-unconfirmed');
+        assert.equal(proc(lease.qemu), lease.qemuBirth);
+        await requireReservation(lease.machineId);
+      });
+    } finally {
+      if (proc(lease.guardian) === lease.guardianBirth) sudo('kill', '-CONT', lease.guardian);
+    }
+    await cleaned(lease);
+    return { hostId, machineId: lease.machineId, nonce: lease.nonce, reason: 'guardian-ended', reservationHeldUntilProof: true, restartRefused: true };
+  });
+  if (!replaced) return;
+  await step('deadline with libvirtd unavailable reports the accepted cluster gap', async () => {
+    const lease = await booted(120);
+    const { deadline } = journal(lease.machineId, 'authorization');
+    const boottime = () => Number(readFileSync('/proc/uptime', 'ascii').split(' ')[0]);
+    assert(deadline > boottime(), 'Lease must still be live before simulating libvirtd unavailability.');
+    await delay(Math.max(0, deadline - boottime() - 5) * 1000);
+    const fence = await withFrozenLibvirt(async () => {
+      const result = await unconfirmed(lease, ['deadline', 'fenced']);
+      assert(boottime() >= deadline);
+      assert.equal(proc(lease.qemu), lease.qemuBirth);
+      await requireReservation(lease.machineId);
+      return result;
+    });
+    await cleaned(lease);
+    return { machineId: lease.machineId, fence, qemuSurvivedDeadline: true, reservationHeldUntilProof: true };
   });
 }
 
@@ -387,6 +527,7 @@ async function exerciseVm() {
     image: storage + '/cirros.qcow2', network: 'default',
     minimum: { cpu: 1, memoryMiB: 512, diskGiB: 1 },
   };
+  const leaseTemplate = { ...template, id: 'cluster-cirros-lease', firmware: 'bios' };
   const enrollment = await step('enroll the VM overlay and verify the mounted socket', async () => {
     // Configure the host exactly as docs/cluster-hosts.md "Host libvirt setup" instructs.
     const prepared = command('sudo', ['bash', 'script/provision_cluster_node.sh', 'libvirt-host'], { timeout: 120_000, reveal: true });
@@ -418,8 +559,11 @@ async function exerciseVm() {
     daemon('create', 'configmap', 'canaveral-controller-ca', '--from-file=ca.crt=' + work + '/ca.crt');
     const overlay = JSON.parse(kubectl('apply', '-k', 'deploy/kubernetes/canaverald/vm', '--dry-run=client', '-o', 'json'));
     const config = overlay.items.find(item => item.kind === 'ConfigMap');
+    pinVmLeaseHelper(config, readFileSync(work + '/lease-helper.sha256', 'utf8').trim());
     const vm = JSON.parse(config.data['host.json']);
-    vm.templates = [template];
+    vm.templates = [template, leaseTemplate];
+    vm.leaseProtocol = 1;
+    vm.leaseImages = [{ id: leaseTemplate.id, revision: leaseTemplate.revision, arch: leaseTemplate.arch, runtime: 'libvirt' }];
     config.data['host.json'] = JSON.stringify(vm);
     const pod = overlay.items.find(item => item.kind === 'DaemonSet').spec.template.spec;
     assert.deepEqual(pod.securityContext.supplementalGroups, [10003]);
@@ -462,10 +606,13 @@ async function exerciseVm() {
     const libvirt = status.find(row => row.id === 'libvirt');
     assert.equal(libvirt?.state, 'verified', JSON.stringify(libvirt));
     assert.equal(libvirt.qualified, false);
+    assert.deepEqual(libvirt.leases, { eligible: true });
+    assert.equal(inPod('sha256sum', vm.leaseHelper).split(/\s+/)[0], vm.leaseHelperSha256);
     return { hostId: view.id, libvirt: libvirt.version, qualified: libvirt.qualified, kvmProbe: 'domcapabilities over the mounted socket', socketAuth: auth,
       socket: 'root:canaveral-libvirt:660', storage: 'canaverald:canaveral-vm:2750', replacedUnclaimedToken: true };
   });
   if (!enrollment) return;
+  await exerciseVmLeases(enrollment.hostId, leaseTemplate, storage);
 
   const machineId = randomUUID();
   const route = '/v1/machines/' + machineId;

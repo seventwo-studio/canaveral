@@ -23,8 +23,6 @@ source checkout before importing either package.
   means evidence was invalid or unreadable. It never changes the inputs.
 - `node script/build_android_transfer.mjs --ndk /installed/ndk --output-dir dist/android-transfer`
   compiles both Android ABIs, verifies architecture and excludes test injection.
-- `node script/build_linux_lease_deadline.mjs --output /new/absolute/deadline.so`
-  builds an uninstalled library on Linux. It refuses to replace existing artifacts.
 - `node fixtures/migration/verify_lease_guard.mjs` runs the Rust shared trace and
   persisted wire assertions against disposable fixture state.
 - `npm run check:no-python` scans tracked and new files for forbidden extensions,

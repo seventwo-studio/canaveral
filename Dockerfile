@@ -73,6 +73,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgomp1=14.2.0-19 \
       libssl3t64=3.5.9-1~deb13u1 \
       libvirt-clients=11.3.0-3+deb13u3 \
+      libvirt0=11.3.0-3+deb13u3 \
       qemu-utils=1:10.0.13+ds-0+deb13u1 \
       genisoimage=9:1.1.11-4 && \
     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 canaverald && \
@@ -81,6 +82,7 @@ COPY --from=node-build /app/coordination/dist/src ./coordination/dist/src
 COPY coordination/package.json ./coordination/package.json
 COPY canaveral/schemas ./canaveral/schemas
 COPY --from=rust-build /source/target/release/canaveral-model-execution /usr/local/bin/
+COPY --from=rust-build --chown=0:0 --chmod=0755 /source/target/release/canaveral-libvirt-native /usr/local/lib/canaveral/
 RUN ln -s /app/coordination/dist/src/canaverald.js /usr/local/bin/canaverald && \
     chmod 0755 /app/coordination/dist/src/canaverald.js
 USER 10001:10001

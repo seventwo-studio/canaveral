@@ -11,6 +11,7 @@ on:
       - 'deploy/orchestrator/**'
       - 'script/provision_cluster_node.sh'
       - 'script/publish_release*.mjs'
+      - 'crates/libvirt-native/**'
       - 'fixtures/cluster/**'
       - 'fixtures/model-execution/real-model.json'
       - 'coordination/src/host*.ts'
@@ -64,7 +65,7 @@ jobs:
             "KUBECONFIG=$RUNNER_TEMP/canaveral-cluster/kubeconfig" >> "$GITHUB_ENV"
       - name: Set up disposable k3s controller
         run: bash fixtures/cluster/setup.sh
-      - name: Exercise enrollment, CPU generation and maintenance over TLS
+      - name: Exercise enrollment, CPU generation, maintenance and VM leases over TLS
         run: |
           kubectl -n canaveral port-forward service/orchestrator 8765:8765 >"$CLUSTER_WORK/port-forward.log" 2>&1 &
           trap 'kill "$!" 2>/dev/null || true' EXIT
