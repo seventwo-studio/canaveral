@@ -91,7 +91,8 @@ const stoppedReceipt = machineId => until('a stopped guardian receipt', () => {
 /** Seconds until the deadline the daemon published, on the guardian's CLOCK_BOOTTIME. */
 const remaining = machineId => Number(JSON.parse(sudo('cat', `${folder(machineId)}/libvirt-authorization.json`)).deadline) - Number(readFileSync('/proc/uptime', 'ascii').split(' ')[0]);
 function domainGone(machineId) {
-  const result = virshTry('domuuid', machineId);
+  // dominfo resolves a UUID argument (domuuid resolves only names and IDs).
+  const result = virshTry('dominfo', machineId);
   return result.status !== 0 && /failed to get domain|Domain not found/i.test(result.stderr);
 }
 const storageGone = machineId => attempt('sudo', ['-n', 'test', '-e', `${storage}/${machineId}`]).status !== 0 &&
