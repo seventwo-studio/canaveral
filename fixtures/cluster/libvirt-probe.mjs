@@ -67,8 +67,7 @@ for (const id of fs.existsSync(machines) ? fs.readdirSync(machines) : []) {
     if (ownership.readPrivate(join(root, 'canaveral-owner.json'))?.fingerprint !== binding.fingerprint) throw new Error('owner marker differs');
     return 'unchanged';
   });
-  // The daemon calls domuuid with the UUID; virsh resolves domuuid only by name or ID.
-  for (const args of [['list', '--all', '--uuid'], ['domuuid', binding.machine_id], ['domuuid', 'cvm-' + binding.machine_id],
+  for (const args of [['list', '--all', '--uuid'], ['domuuid', 'cvm-' + binding.machine_id],
     ['domname', binding.machine_id], ['domstate', binding.machine_id]]) {
     await check('virsh ' + args.join(' ').replaceAll(binding.machine_id, '<uuid>'), () => virsh(spec.uri, ...args).slice(0, 200));
   }

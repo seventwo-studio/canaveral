@@ -209,17 +209,10 @@ stays enabled: libvirt confines each QEMU process in its generated
 `libvirt-<uuid>` profile, and `firmware="efi"` selects the packaged OVMF
 build.
 
-Administrative VM start is blocked by a daemon defect. Before `virsh start`,
-the daemon verifies the domain with `virsh domuuid <uuid>`, but virsh resolves
-`domuuid` only by domain name or ID, so the check always fails and the machine
-stays `unknown` with the domain defined and shut off. The hosted acceptance run
-reports exactly that state as blocked; any other boot failure fails the run.
-It then starts the daemon-defined domain from the host as root through the same
-libvirtd and checks the host half: QEMU runs as `libvirt-qemu` with primary
-group `canaveral-vm`, in enforce mode under `libvirt-<uuid>`, and the guest
-leases an address on the `default` network and answers SSH. It destroys the
-domain and checks that the disk is retained. That check does not accept the
-daemon.
+The hosted suite requests the checksum-pinned CirrOS guest through the machines API.
+It checks controller-observed power, guest SSH, QEMU credentials and AppArmor
+confinement, domain identity across pod replacement, and disk retention after
+stop and uninstall. A failed administrative boot fails the workflow.
 
 On Ubuntu, libvirtd's AppArmor profile denies `ptrace read` on the
 `cri-containerd.apparmor.d` profile each time the pod connects. libvirtd is
