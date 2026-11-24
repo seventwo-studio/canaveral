@@ -21,7 +21,8 @@ import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { enabledRuntimes, hostProvider, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
 import { credential, sshPreparation, userData } from "./control/preparation.ts";
-import { localLibvirtUri } from "./providers/libvirt.ts";
+import { libvirtLeaseTemplate, localLibvirtUri } from "./providers/libvirt.ts";
+import { libvirtLeaseHelper, libvirtLeaseKernelSupported } from "./providers/libvirt-native.ts";
 import { createProvider } from "./providers/index.ts";
 import type { NativeProvider } from "./providers/index.ts";
 import { ImageLibrary, prepareImage, specification } from "./control/images.ts";
@@ -218,8 +219,10 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-/** Only supervised Android emulators and, by explicit operator opt-in, supervised iOS simulators
- * have independent native deadline enforcement and owned cleanup. Every other runtime keeps
+/** Only supervised Android emulators, guardian-supervised libvirt VMs and, by explicit operator
+ * opt-in, supervised iOS simulators have independent native deadline enforcement and owned
+ * cleanup. A libvirt lease image needs the pinned native lease helper on Linux 6.5 or later and
+ * a headless x64 BIOS Linux template (see hostOffer). Every other runtime keeps
  * refusing lease declarations, whatever the configuration.
  *
  * iOS (owner decision, 21 November 2026): a simulator app is an ordinary process of the Mac
@@ -227,7 +230,7 @@ export function hostTransport(config: HostConfig): HostTransport {
  * an iOS lease image only when that selector itself declares `isolation: "shared-host"`, on
  * macOS, with the native supervisor and the lease's control companion configured. There is no
  * default for the declaration and nothing outside this configuration can supply it. */
-export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release()): RecordValue {
   if (!("leaseProtocol" in config) && !("leaseImages" in config)) {
     if ("leaseTunnelProtocol" in config) throw new ServiceError("Lease tunnels require lease execution on this host.", 400);
     if ("leaseWarmPool" in config) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
@@ -236,7 +239,7 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   const refuse = (detail = "before native fencing and owned cleanup acceptance"): never => { throw new ServiceError(`This runner cannot advertise lease execution ${detail}.`, 400); };
   if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
   const provider = String(config.provider);
-  const runtime = (kind: "android" | "ios"): RecordValue | undefined => {
+  const runtime = (kind: "android" | "ios" | "libvirt"): RecordValue | undefined => {
     try { const settings = provider === kind ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config)[kind] : undefined; return settings === undefined ? undefined : object(settings); }
     catch { return refuse(); }
   };
@@ -254,6 +257,15 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
       if (fields !== "arch,id,isolation,revision,runtime" || entry.isolation !== IOS_LEASE_ISOLATION) refuse("for an iOS simulator without the explicit shared-host isolation declaration on its lease image");
       if (!ios || !absolute(ios.leaseSupervisor) || !absolute(ios.idbCompanion) || ios.xcrun !== undefined && !absolute(ios.xcrun) || platform !== "darwin") refuse("for iOS simulators without macOS, the native lease supervisor and an absolute idbCompanion");
       return { ...identity(), runtime: "ios", isolation: IOS_LEASE_ISOLATION };
+    }
+    if (entry.runtime === "libvirt") {
+      const libvirt = runtime("libvirt");
+      if (fields !== "arch,id,revision,runtime" || platform !== "linux" || !libvirt) refuse("for libvirt VMs without a Linux libvirt runtime");
+      let helper: unknown;
+      try { helper = libvirtLeaseHelper(libvirt); } catch { helper = undefined; }
+      if (!helper) refuse("for libvirt VMs without the pinned lease helper (leaseHelper and leaseHelperSha256)");
+      if (!libvirtLeaseKernelSupported(kernel)) throw new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 400, { code: "libvirt_lease_kernel_unsupported" });
+      return { ...identity(), runtime: "libvirt" };
     }
     return refuse();
   });
@@ -283,9 +295,9 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   }
   return offer;
 }
-export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release()): RecordValue {
   const provider = hostProvider(config.provider);
-  const leases = leaseOffer(config, platform);
+  const leases = leaseOffer(config, platform, kernel);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
   let templates = config.templates.map(normalizeTemplate);
   if (new Set(templates.map(t => `${t.id}@${t.revision}:${t.arch}`)).size !== templates.length) throw new ServiceError("Duplicate installed template revision.", 400);
@@ -298,7 +310,18 @@ export function hostOffer(config: RecordValue, platform: NodeJS.Platform = proce
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
-  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === entry.runtime)) throw new ServiceError(`Lease images must name offered ${entry.runtime === "ios" ? "iOS" : "Android"} templates.`, 400);
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) {
+    if (entry.runtime === "libvirt") {
+      // Only the natively qualified template boots a lease: headless x64 BIOS Linux on the libvirt runtime.
+      const raw = (config.templates as RecordValue[]).find(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch);
+      const offered = templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch);
+      if (!raw || !offered || !libvirtLeaseTemplate(raw) || (Object.hasOwn(HOST_RUNTIMES, provider) ? runtimeFor(config, raw) !== "libvirt" : provider !== "libvirt")) {
+        throw new ServiceError("Libvirt lease images must name offered headless x64 BIOS Linux templates without TPM, secure boot or guest access.", 400);
+      }
+      continue;
+    }
+    if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === entry.runtime)) throw new ServiceError(`Lease images must name offered ${entry.runtime === "ios" ? "iOS" : "Android"} templates.`, 400);
+  }
   // An account-owned emulator launches without the lease isolation arguments, so it can reach this
   // host's adb server and, through it, the device port of another lease's tunnel. A host that
   // declares tunnels therefore offers Android templates for leases only, and refuses to start.
@@ -1032,14 +1055,14 @@ export class HostRunner {
       return result;
     });
   }
-  /** Leased execution runs only on the Android or iOS runtime, for a template this host advertised
+  /** Leased execution runs only on the Android, iOS or libvirt runtime, for a template this host advertised
    * in leaseImages. An iOS entry counts only with its explicit shared-host isolation declaration. */
   leaseEligible(machine: RecordValue): boolean {
     if (this.offer.leaseProtocol !== 1 || !Array.isArray(this.offer.leaseImages)) return false;
     let context: { runtime: Runtime; image: RecordValue };
     try { context = this.context(machine); } catch { return false; }
     const { runtime, image } = context;
-    if (!["android", "ios"].includes(runtime.kind) || image.os !== runtime.kind) return false;
+    if (runtime.kind === "libvirt" ? image.os !== "linux" || !libvirtLeaseTemplate(image) : !["android", "ios"].includes(runtime.kind) || image.os !== runtime.kind) return false;
     return (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === runtime.kind && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch &&
       (runtime.kind === "ios" ? entry.isolation === IOS_LEASE_ISOLATION : !("isolation" in entry)));
   }

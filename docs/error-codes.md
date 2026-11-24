@@ -198,7 +198,8 @@ status.
 | `helper_cancellation_uncertain` | 409 | Closure of an owned helper process could not be confirmed; its reservation is retained | No. Inspect the process before reuse |
 | `host_shutdown_incomplete` | 409 | A host stopped without confirming every cleanup step | No. Inspect the host before restarting work |
 | `image_cache_publication_uncertain` | 409 | Publication of a cached base image was not confirmed | No. Inspect the cache before retrying |
-| `lease_deadline_artifact_invalid` | 409 | The configured Linux lease deadline library failed its static validation | No. Install a valid artifact |
+| `libvirt_lease_helper_unverified` | 409, local | The libvirt lease helper is not configured, is writable by the daemon account, or differs from its pinned `leaseHelperSha256`; the daemon must not run as root | No. Install the released helper root-owned and pin its digest; see [libvirt supervision](libvirt-supervision.md) |
+| `libvirt_lease_kernel_unsupported` | 400, local | Libvirt lease images were declared on a kernel older than Linux 6.5, which cannot give the guardian a peer pidfd | No. Run libvirt leases on Linux 6.5 or later; administrative VMs are unaffected |
 
 ## Observability
 

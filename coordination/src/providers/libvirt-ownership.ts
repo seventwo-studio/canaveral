@@ -167,7 +167,7 @@ export function validateDomainXML(xml: string,binding:LibvirtLeaseBinding,label?
 export function domainEmulator(xml:string):string|undefined { const d=one(xmlTree(xml),"devices"); const e=nodes(d,"emulator"); return e.length===1?absolute(e[0]!.text.trim()):undefined; }
 export function domainHasTPM(xml:string):boolean { return nodes(one(xmlTree(xml),"devices"),"tpm").length>0; }
 
-const kinds=new Set(["libvirt-execution","libvirt-binding","libvirt-authorization","libvirt-launch","libvirt-reconcile","libvirt-reboot","deletion"]);
+const kinds=new Set(["libvirt-execution","libvirt-binding","libvirt-authorization","libvirt-launch","libvirt-reconcile","deletion","libvirt-native-spec","libvirt-native-execution","libvirt-native-removal","libvirt-native-erased"]);
 /** SQLite lifetime locks replace flock; no stale-lock reclamation or PID signalling.
  * Linux operations use a pinned directory descriptor. Other platforms are fixtures only.
  * Python flock participants must be quiesced before migration to this lock protocol.
@@ -197,58 +197,4 @@ export class SupervisorJournal {
   }
   prepare(binding:LibvirtLeaseBinding):void{if(this.read()!==null)refuse("Preparation cannot reset prior history.");this.write({...binding.identity(),phase:"prepared"});}
   close():void{if(this.closed)return;this.closed=true;try{this.db?.exec("ROLLBACK");}finally{this.db?.close();fs.closeSync(this.directory);}}
-}
-
-export interface FileLease {verify():void;close():void}
-export type FileLeaseFactory=(fd:number)=>FileLease;
-export interface ManifestEntry {path:string[];identity:number[];kind:"file"|"directory"}
-interface Pinned {fd:number;path:string;identity:string;entry:ManifestEntry;names?:string[];lease?:FileLease}
-/** Native F_SETLEASE is deliberately required; an empty process scan is never proof. */
-export class StorageHandleGuard {
-  private entries:Pinned[]=[]; private failed=false;private closed=false;private readonly pid=process.pid;
-  constructor(readonly root:string,readonly expected:Inode,leaseFactory?:FileLeaseFactory){
-    if(!leaseFactory)refuse("Linux write-file-lease binding is unavailable; storage handles are unknown.");
-    try{absolute(root);noSymlinks(root);if(!sameInode(fs.lstatSync(root),expected))refuse("Storage root changed.");
-      const parent=openDirectory(dirname(root));
-      try { this.walk(process.platform==="linux"?`/proc/self/fd/${parent}/${root.slice(root.lastIndexOf("/")+1)}`:root,[],leaseFactory); }
-      finally { fs.closeSync(parent); }
-      // Root verification uses its public path; descendants use pinned parents.
-      this.entries[0]!.path=root;this.verify();
-    }catch(e){this.failed=true;this.close();throw e;}
-  }
-  private walk(path:string,parts:string[],factory:FileLeaseFactory):void{
-    const s=fs.lstatSync(path);owned(s);if(s.dev!==this.expected.device||(!s.isDirectory()&&!s.isFile()))refuse("Unsupported storage entry.");if(s.isFile())regular(s,false);
-    const fd=fs.openSync(path,(s.isDirectory()?fs.constants.O_RDONLY|fs.constants.O_DIRECTORY:fs.constants.O_RDWR)|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
-    const pin:Pinned={fd,path,identity:stamp(s),entry:{path:parts,identity:[s.dev,s.ino,s.mode,s.uid],kind:s.isDirectory()?"directory":"file"}};this.entries.push(pin);
-    if(stamp(fs.fstatSync(fd))!==pin.identity)refuse("Storage changed while pinning.");
-    if(s.isDirectory()){const pinned=process.platform==="linux"?`/proc/self/fd/${fd}`:path;pin.names=fs.readdirSync(pinned).sort();for(const name of pin.names)this.walk(join(pinned,name),[...parts,name],factory);}else pin.lease=factory(fd);
-  }
-  verify():void{
-    if(this.failed||this.closed||this.pid!==process.pid)refuse("Storage handle guard is invalid.");
-    try{for(const p of this.entries){if(stamp(fs.lstatSync(p.path))!==p.identity||stamp(fs.fstatSync(p.fd))!==p.identity)refuse("Storage identity changed.");if(p.names&&canonical(fs.readdirSync(p.path).sort())!==canonical(p.names))refuse("Storage membership changed.");p.lease?.verify();}}catch(e){this.failed=true;throw e;}
-  }
-  snapshot():ManifestEntry[]{this.verify();return this.entries.map(p=>structuredClone(p.entry)).sort((a,b)=>a.path.join("/").localeCompare(b.path.join("/")));}
-  eraseContents():void{this.verify();try{for(const p of this.entries)if(p.lease){p.lease.verify();if(stamp(fs.fstatSync(p.fd))!==p.identity)refuse("Storage changed before clearing.");fs.ftruncateSync(p.fd,0);fs.fsyncSync(p.fd);const after=fs.fstatSync(p.fd);if(after.size!==0||!sameInode(after,{device:p.entry.identity[0]!,inode:p.entry.identity[1]!}))refuse("Content erasure is unconfirmed.");p.identity=stamp(after);}this.verify();}catch(e){this.failed=true;throw e;}}
-  empty():boolean{this.verify();return this.entries.filter(p=>p.lease).every(p=>fs.fstatSync(p.fd).size===0);}
-  /** Protected unlink must be supplied by an fd-relative native adapter. Node rm is not sufficient. */
-  remove(unlink:(root:string,entries:ManifestEntry[])=>void):void{this.verify();if(!this.empty())refuse("Nonempty storage cannot be removed.");unlink(this.root,this.snapshot());this.verifyUnlinked();}
-  verifyUnlinked():void{if(this.failed||this.closed||this.pid!==process.pid)refuse("Storage guard is invalid.");try{if(fs.existsSync(this.root)||fs.lstatSync(dirname(this.root)).isSymbolicLink())refuse("Storage remains.");for(const p of this.entries)if(p.lease){p.lease.verify();const s=fs.fstatSync(p.fd);if(s.size||s.nlink||!sameInode(s,{device:p.entry.identity[0]!,inode:p.entry.identity[1]!}))refuse("Pinned content remains linked.");}}catch(e){this.failed=true;throw e;}}
-  close():void{if(this.closed)return;this.closed=true;let failed=false;for(const p of [...this.entries].reverse()){try{p.lease?.close();}catch{failed=true;}try{fs.closeSync(p.fd);}catch{failed=true;}}if(failed)refuse("Storage descriptor release is uncertain.");}
-}
-
-/** Inspect only. No dlopen, helper execution or native acceptance claim. */
-export function deadlineArtifact(path:string,arch:"amd64"|"arm64"):RecordValue{
-  try{
-    absolute(path);noSymlinks(path);const d=snapshotFile(path,8*1048576);const region=(o:number,n:number)=>{if(!Number.isSafeInteger(o)||!Number.isSafeInteger(n)||o<0||n<0||o+n>d.length)throw Error();return d.subarray(o,o+n);};
-    const u64=(o:number)=>{const n=Number(d.readBigUInt64LE(o));if(!Number.isSafeInteger(n))throw Error();return n;};
-    if(d.length<64||!d.subarray(0,7).equals(Buffer.from([127,69,76,70,2,1,1]))||![0,3].includes(d[7]!)||d.readUInt16LE(16)!==3||d.readUInt16LE(18)!==({amd64:62,arm64:183}[arch])||d.readUInt32LE(20)!==1||d.readUInt16LE(52)!==64||d.readUInt16LE(54)!==56||d.readUInt16LE(58)!==64)throw Error();
-    const ph=u64(32),sh=u64(40),pc=d.readUInt16LE(56),sc=d.readUInt16LE(60);if(!pc||!sc)throw Error();region(ph,pc*56);region(sh,sc*64);const segments=new Set<number>();
-    for(let i=0;i<pc;i++){const o=ph+i*56;region(u64(o+8),u64(o+32));if(u64(o+40)<u64(o+32))throw Error();segments.add(d.readUInt32LE(o));}if(!segments.has(1)||!segments.has(2))throw Error();
-    const found=new Set<string>();const exports=["canaveral_lease_deadline_arm","canaveral_lease_deadline_install"];
-    for(let i=0;i<sc;i++){const o=sh+i*64;if(d.readUInt32LE(o+4)!==11)continue;const off=u64(o+24),size=u64(o+32),link=d.readUInt32LE(o+40);if(u64(o+56)!==24||size%24||link>=sc)throw Error();region(off,size);const str=sh+link*64;if(d.readUInt32LE(str+4)!==3)throw Error();const names=region(u64(str+24),u64(str+32));
-      for(let s=off;s<off+size;s+=24){const n=d.readUInt32LE(s),info=d[s+4]!,visibility=d[s+5]!,defined=d.readUInt16LE(s+6);if(n>=names.length)throw Error();if(info>>4!==1||(info&15)!==2||![0,3].includes(visibility&3)||!defined)continue;
-        for(const name of exports){const expected=Buffer.from(name+"\0");if(!names.subarray(n,n+expected.length).equals(expected))continue;if(defined>=sc)throw Error();const code=sh+defined*64,addr=u64(s+8),length=u64(s+16);if(d.readUInt32LE(code+4)!==1||!(u64(code+8)&4)||!length||addr<u64(code+16)||addr+length>u64(code+16)+u64(code+32))throw Error();region(u64(code+24),u64(code+32));found.add(name);}
-      }
-    }if(exports.some(n=>!found.has(n)))throw Error();return{path,sha256:hash(d),arch,format:"elf64",exports};
-  }catch{throw new ServiceError("Configured Linux deadline artifact is invalid or unsupported.",409,{code:"lease_deadline_artifact_invalid"});}
 }
