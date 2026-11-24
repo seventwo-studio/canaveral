@@ -49,7 +49,7 @@ class FakeNative implements LibvirtLeaseNative {
   guardianFenced(folder: string, reason = "fenced"): void {
     this.domains.delete(this.uuid(folder));
     const old = read(join(folder, "libvirt-native-execution.json"));
-    this.receipt(folder, { ...old, phase: "stopped", reason });
+    this.receipt(folder, { ...old, phase: "stopped", stopProven: true, reason });
     this.guardians.get(folder)!.alive = false;
   }
   /** SIGKILL or OOM: the guardian vanished without a stop receipt. */
@@ -61,7 +61,7 @@ class FakeNative implements LibvirtLeaseNative {
     this.domains.delete(this.uuid(folder));
     const path = join(folder, "libvirt-native-execution.json");
     const old = fs.existsSync(path) ? read(path) : { identity: this.spec(folder).identity, phase: "unused" };
-    this.receipt(folder, { ...old, phase: "stopped", reason: old.reason ?? "guardian-ended" });
+    this.receipt(folder, { ...old, phase: "stopped", stopProven: true, reason: old.reason ?? "guardian-ended" });
     return "stopped";
   }
   async erase(folder: string, quarantine: string): Promise<boolean> {
@@ -70,13 +70,13 @@ class FakeNative implements LibvirtLeaseNative {
     const intent = read(join(folder, "libvirt-native-removal.json"));
     assert.equal(intent.quarantine, quarantine);
     assert.ok(!this.domains.has(this.uuid(folder)), "erasure only after the domain is gone");
-    fs.rmSync(quarantine, { recursive: true });
+    fs.rmSync(quarantine, { recursive: true, force: true });
     save(join(folder, "libvirt-native-erased.json"), { cleanupId: intent.cleanupId, phase: "removed" });
     return true;
   }
 }
 
-function fixture(t: { after(fn: () => void): void }) {
+function fixture(t: { after(fn: () => void): void }, inCluster = false) {
   const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), "canaveral-libvirt-lease-")));
   fs.chmodSync(root, 0o700);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -103,7 +103,7 @@ function fixture(t: { after(fn: () => void): void }) {
       throw Error(`unexpected ${argv.join(" ")}`);
     },
   };
-  const provider = new LibvirtProvider({ storage, vmGroupId: vmGid, templates: [], adapters }, root);
+  const provider = new LibvirtProvider({ storage, vmGroupId: vmGid, templates: [], adapters, ...(inCluster ? { deployment: "kubernetes" } : {}) }, root);
   const disk = join(storage, String(machine.id), "disk.qcow2");
   const terminal = (state = "released") => {
     machine.desired = "stopped"; (machine.lease as RecordValue).state = state; auth = { ...auth, fenced: true };
@@ -209,6 +209,35 @@ test("unconfirmed native proof keeps the reservation through cleanup", async t =
   assert.equal(f.native.erases, 0);
   f.native.libvirtDown = false;
   assert.equal((await f.provider.stopForCleanup(f.machine, f.image, f.folder)).state, "stopped");
+});
+
+test("an unconfirmed in-cluster stop surfaces the libvirt cleanup reason", async t => {
+  const f = fixture(t, true);
+  await running(f);
+  f.native.kill(f.folder);
+  f.native.libvirtDown = true;
+  const id = f.terminal();
+  f.native.receipt(f.folder, { identity: f.native.spec(f.folder).identity, phase: "unknown", fence: "libvirt-unconfirmed" });
+  assert.equal((await f.provider.reconcile(f.machine, f.image, f.folder)).state, "unknown");
+  const unconfirmed = (e: { code?: string }) => e.code === "libvirt-unconfirmed";
+  await assert.rejects(f.provider.stopForCleanup(f.machine, f.image, f.folder), unconfirmed);
+  await assert.rejects(f.provider.removeOwnedStorage(f.machine, f.image, f.folder, id), unconfirmed);
+  assert.ok(fs.existsSync(f.disk));
+});
+
+test("a missing quarantine with durable cleared evidence finalizes erasure", async t => {
+  const f = fixture(t);
+  await running(f);
+  f.native.guardianFenced(f.folder);
+  const id = f.terminal();
+  f.native.eraseFailures = 1;
+  await assert.rejects(f.provider.removeOwnedStorage(f.machine, f.image, f.folder, id), /unconfirmed/);
+  const quarantine = join(f.storage, `.removing-${f.machine.id}-${id}`);
+  fs.rmSync(quarantine, { recursive: true });
+  await assert.rejects(f.provider.removeOwnedStorage(f.machine, f.image, f.folder, id), /unconfirmed/);
+  save(join(f.folder, "libvirt-native-erased.json"), { cleanupId: id, phase: "cleared" });
+  assert.equal((await f.provider.removeOwnedStorage(f.machine, f.image, f.folder, id)).state, "complete");
+  assert.equal(f.native.erases, 2);
 });
 
 test("removal quarantines, erases through the helper once and completes repeatably", async t => {
@@ -323,16 +352,26 @@ test("lease offers need Linux, the pinned helper, a 6.5 kernel and a BIOS lease 
   const helper = { leaseHelper: "/usr/lib/canaveral/canaveral-libvirt-native", leaseHelperSha256: "c".repeat(64) };
   const template = { id: "lease-linux", revision: "1", os: "linux", arch: "amd64", mode: "headless", firmware: "bios", image: "/var/lib/libvirt/images/canaveral/lease.qcow2", minimum: { cpu: 1, memoryMiB: 512, diskGiB: 2 } };
   const base = { name: "vm", provider: "libvirt", storage: "/var/lib/libvirt/images/canaveral", capacity: { cpu: 2, memoryMiB: 2048, diskGiB: 20 }, templates: [template], leaseClockHelper: "/usr/lib/canaveral/canaveral-libvirt-native", leaseProtocol: 1, leaseImages: [{ id: "lease-linux", revision: "1", arch: "amd64", runtime: "libvirt" }], ...helper };
-  assert.deepEqual(hostOffer(base, "linux", "6.8.0-1017-azure").leaseImages, base.leaseImages);
+  let verified = 0;
+  const checkHelper = (config: RecordValue) => {
+    assert.deepEqual(libvirtLeaseHelper(config), libvirtLeaseHelper(helper));
+    verified++;
+  };
+  assert.deepEqual(hostOffer(base, "linux", "6.8.0-1017-azure", checkHelper).leaseImages, base.leaseImages);
   const physical = { ...base, provider: "linux", runtimes: { libvirt: helper } };
   delete (physical as RecordValue).leaseHelper; delete (physical as RecordValue).leaseHelperSha256;
-  assert.deepEqual(hostOffer(physical, "linux", "6.5.0").leaseImages, base.leaseImages);
+  assert.deepEqual(hostOffer(physical, "linux", "6.5.0", checkHelper).leaseImages, base.leaseImages);
+  assert.equal(verified, 2);
+  const missing = "/usr/lib/canaveral/no-such-lease-helper";
+  assert.throws(() => hostOffer({ ...base, leaseHelper: missing, leaseClockHelper: missing }, "linux", "6.8.0"),
+    (e: { code?: string }) => e.code === (process.platform === "linux" ? "libvirt_lease_helper_unverified" : "libvirt_lease_kernel_unsupported"));
+  assert.throws(() => hostOffer({ ...base, leaseClockHelper: "/different/clock" }, "linux", "6.8.0", checkHelper), /names the pinned lease helper/);
   assert.throws(() => leaseOffer(base, "linux", "6.4.16"), (e: { code?: string }) => e.code === "libvirt_lease_kernel_unsupported");
   assert.throws(() => leaseOffer(base, "darwin", "6.8.0"), /cannot advertise/);
   assert.throws(() => leaseOffer({ ...base, leaseHelperSha256: "short" }, "linux", "6.8.0"), /pinned lease helper/);
   assert.throws(() => leaseOffer({ ...base, leaseImages: [{ ...base.leaseImages[0], isolation: "shared-host" }] }, "linux", "6.8.0"), /cannot advertise/);
   for (const change of [{ firmware: "efi" }, { mode: "desktop" }, { tpm: true }, { guestAccess: true }]) {
-    assert.throws(() => hostOffer({ ...base, templates: [{ ...template, ...change }] }, "linux", "6.8.0"), /headless x64 BIOS Linux/, JSON.stringify(change));
+    assert.throws(() => hostOffer({ ...base, templates: [{ ...template, ...change }] }, "linux", "6.8.0", checkHelper), /headless x64 BIOS Linux/, JSON.stringify(change));
   }
   assert.equal(libvirtLeaseKernelSupported("6.5.0-rc1"), true);
   assert.equal(libvirtLeaseKernelSupported("5.15.0-1050-azure"), false);
@@ -348,6 +387,8 @@ test("durable stop evidence is read without locks and belongs to its exact launc
   await running(f);
   const stopped = { ...f.machine, desired: "stopped" };
   assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), false);
+  f.native.receipt(f.folder, { identity: f.native.spec(f.folder).identity, phase: "stopped" });
+  assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), false, "legacy uncertain stop receipts require a new proof");
   f.native.guardianFenced(f.folder);
   assert.equal(await f.provider.updateStopped(stopped, f.image, f.folder, true), true);
   assert.equal(await f.provider.updateStopped({ ...stopped, resources: { cpu: 2, memoryMiB: 512, diskGiB: 4 } }, f.image, f.folder, true), false);

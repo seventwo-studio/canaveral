@@ -275,6 +275,21 @@ try {
     sudo('cp', '-r', join(repo, 'coordination/dist'), join(repo, 'coordination/node_modules'), join(repo, 'coordination/package.json'), `${install}/coordination/`);
     sudo('install', '-m', '0755', '-o', 'root', '-g', 'root', process.execPath, `${install}/node`);
     sudo('chown', '-R', 'root:root', install);
+    const source = `${install}/coordination/dist/src`;
+    sudo('-u', account, `${install}/node`, '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { readFileSync } from 'node:fs';
+      import { hostOffer } from '${source}/host.js';
+      import { nativeExecutionClock } from '${source}/native-clock.js';
+      const config = JSON.parse(readFileSync('${stateRoot}/host.json', 'utf8'));
+      const wrongDigest = '0'.repeat(64);
+      assert.throws(() => hostOffer({ ...config, leaseHelperSha256: wrongDigest }),
+        { code: 'libvirt_lease_helper_unverified' });
+      assert.throws(() => nativeExecutionClock(config.leaseClockHelper, wrongDigest), { status: 503 });
+      assert.equal(hostOffer(config).leaseProtocol, 1);
+      assert.ok(nativeExecutionClock(config.leaseClockHelper, config.leaseHelperSha256).now() > 0);
+    `);
+    record.helperPinChecked = true;
     const writeUnit = enroll => sudo('install', '-m', '0644', '-o', 'root', '-g', 'root', staged(unit, renderUnit(`${install}/node`, `${install}/coordination/dist/src/canaverald.js`, `${stateRoot}/host.json`, enroll)), `/etc/systemd/system/${unit}`);
     writeUnit(true);
     sudo('install', '-d', '-m', '0755', `/etc/systemd/system/${unit}.d`);
@@ -307,11 +322,29 @@ try {
     assert.equal(receipt(lease.machineId).phase, 'running');
     assert.equal(receipt(lease.machineId).reason, undefined);
     assert.equal((await call('GET', `/v1/leases/${lease.id}`, undefined, app)).state, 'ready');
-    record.idleSeconds = 150;
     const autostart = virshTry('autostart', `cvm-${lease.machineId}`);
     assert.notEqual(autostart.status, 0, 'transient domains cannot autostart');
     record.autostartRefused = autostart.stderr.split('\n')[0] ?? '';
-    await call('POST', `/v1/leases/${lease.id}/release`, { id: randomUUID() }, app);
+    record.idleSeconds = 150;
+    // Observe the real lease UUID through an isolated crash-recovery journal that has no create
+    // reply or instance identity. Its probe may neither destroy the guest nor prove absence.
+    const incomplete = sudo('mktemp', '-d', `${stateRoot}/incomplete-create.XXXXXX`);
+    try {
+      sudo('chown', `${account}:${account}`, incomplete);
+      const spec = `${folder(lease.machineId)}/libvirt-native-spec.json`;
+      sudo('install', '-m', '0600', '-o', account, '-g', account, spec, incomplete);
+      const identity = receipt(lease.machineId).identity;
+      const pending = join(work, 'incomplete-execution.json');
+      writeFileSync(pending, JSON.stringify({ identity, phase: 'creating' }), { mode: 0o600 });
+      sudo('install', '-m', '0600', '-o', account, '-g', account, pending, `${incomplete}/libvirt-native-execution.json`);
+      assert.equal(attempt('sudo', ['-n', '-u', account, helper, 'probe', incomplete, 'destroy']).status, 1);
+      assert.match(virsh('domstate', lease.machineId), /^running$/);
+      record.incompleteOwnershipRefused = true;
+      await call('POST', `/v1/leases/${lease.id}/release`, { id: randomUUID() }, app);
+      await until('absence of the released VM', () => domainGone(lease.machineId), 120);
+      assert.equal(attempt('sudo', ['-n', '-u', account, helper, 'probe', incomplete, 'observe']).status, 1);
+      record.uncertainCreateAbsenceRefused = true;
+    } finally { sudo('rm', '-rf', incomplete); }
     const native = await stoppedReceipt(lease.machineId);
     record.reason = native.reason;
     await cleaned(lease, record);
@@ -401,46 +434,45 @@ try {
     const lease = await acquire(900);
     const { guardian } = await booted(lease, record);
     // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose. The
-    // guardian's oom_score_adj of 1000 adds the whole limit to its score; the hog's RSS stays below it.
+    // guardian is the preferred victim; the allocator and daemon are excluded from selection.
     const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
     sudo('choom', '-p', String(guardian), '-n', '1000');
     // Keep the daemon out of the OOM cascade so the guardian path is what this step measures.
     sudo('choom', '-p', String(mainPid()), '-n', '-1000');
     record.scores = Object.fromEntries([['guardian', guardian], ['daemon', mainPid()]].map(([name, pid]) => [name, { adj: readFileSync(`/proc/${pid}/oom_score_adj`, 'utf8').trim(), score: readFileSync(`/proc/${pid}/oom_score`, 'utf8').trim() }]));
+    const priorOom = new Set(sudo('dmesg').split('\n'));
     const limit = Number(sudo('cat', `${cgroup}/memory.current`)) + 128 * 1048576;
     sudo('sh', '-c', `echo ${limit} > ${cgroup}/memory.max`);
     const marker = `canaveral-oom-hog-${lease.machineId}`;
-    const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
+    let hog;
     try {
+      // A stopped guardian is still eligible for the kernel OOM kill, and cannot self-fence
+      // when pressure makes its reads fail. Its worker remains tied to guardian death.
+      sudo('kill', '-STOP', String(guardian));
+      // The hosted runner may give the allocator a positive inherited oom_score_adj. Exclude
+      // it explicitly so its growing RSS cannot make it a more likely victim than the guardian.
+      hog = spawn('sudo', ['-n', 'sh', '-c', `echo -1000 > /proc/$$/oom_score_adj && echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
       await until('the end of the guardian under memory pressure', () => !alive(guardian), 90, 250);
-      // Give the kernel log a moment; the hog keeps the pressure on meanwhile.
-      await delay(3000);
     } finally {
       attempt('sudo', ['-n', 'pkill', '-KILL', '-f', marker]);
-      hog.kill('SIGKILL');
-      // The unit may already be stopped and its cgroup gone.
+      hog?.kill('SIGKILL');
       attempt('sudo', ['-n', 'sh', '-c', `echo max > ${cgroup}/memory.max`]);
+      if (alive(guardian)) attempt('sudo', ['-n', 'kill', '-CONT', String(guardian)]);
     }
-    const oomLines = sudo('dmesg').split('\n').filter(line => /oom-kill:|Killed process/.test(line));
+    const oomLines = sudo('dmesg').split('\n').filter(line => !priorOom.has(line) && /oom-kill:|Killed process/.test(line));
     record.oomLines = oomLines.slice(-6);
-    const kernel = oomLines.filter(line => line.includes(`Killed process ${guardian} `) || line.includes(`pid=${guardian},`));
-    record.kernel = kernel.slice(-3);
-    // Under memory-cgroup pressure the guardian's own reads can fail first; it then fences
-    // itself (fail-closed) before the OOM killer picks it. Either ending is acceptable here.
-    record.guardianEnd = kernel.length ? 'kernel-oom-kill' : 'self-fenced';
-    if (!kernel.length) {
-      let native;
-      try { native = receipt(lease.machineId); } catch { native = { reason: 'stopped-and-erased-before-read' }; }
-      record.selfFenceReason = native.reason ?? null;
-      assert.ok(native.reason, 'a guardian that was not OOM-killed recorded why it fenced');
-    }
+    const kernel = oomLines.find(line => line.includes(`Killed process ${guardian} (`));
+    record.kernel = kernel ?? null;
+    record.guardianEnd = kernel ? 'kernel-oom-kill' : 'unconfirmed';
     record.oomKill = Number(/^oom_kill (\d+)$/m.exec(attempt('sudo', ['-n', 'cat', `${cgroup}/memory.events`]).stdout)?.[1] ?? 0) || null;
     // systemd's default OOMPolicy=stop may stop the whole unit; every lease then fences on daemon exit.
     record.unitAfterOom = attempt('systemctl', ['is-active', unit]).stdout;
     if (record.unitAfterOom !== 'active') await startDaemon();
     const native = await stoppedReceipt(lease.machineId);
     record.reason = native.reason ?? 'guardian-ended';
+    if (!kernel && native.reason && native.reason !== 'guardian-ended') record.guardianEnd = 'self-fenced';
     await cleaned(lease, record);
+    assert.ok(kernel, `guardian outcome was ${record.guardianEnd}; missing kernel evidence for PID ${guardian}`);
   });
 
   await scenario('CLOCK_BOOTTIME follows the time namespace of the guardian', async record => {
@@ -449,6 +481,23 @@ try {
     if (inside.status !== 0) { record.skipped = inside.stderr.slice(0, 200); return; }
     record.offset = Number(inside.stdout) - outside;
     assert.ok(Math.abs(record.offset - 86400) < 5, `offset ${record.offset}`);
+  });
+  await scenario('maintenance proves idle with retained lease cleanup journals', async record => {
+    const names = ['.assignment-locks', '.lease-cleanup'];
+    const bookkeeping = () => Object.fromEntries(names.map(name => {
+      const entries = sudo('ls', '-A', `${state}/machines/${name}`).split('\n').filter(Boolean);
+      assert.ok(entries.length, `${name} contains bookkeeping from the completed leases`);
+      return [name, entries];
+    }));
+    const before = bookkeeping(), id = randomUUID();
+    const path = `/v1/hosts/${(await host()).id}/maintenance`;
+    await call('POST', path, { id });
+    await until('a maintenance stop proof after lease cleanup', async () => {
+      record.maintenance = await call('GET', path);
+      return record.maintenance.safeToPowerOff && record.maintenance.readyToResume;
+    }, 45, 500);
+    assert.deepEqual(bookkeeping(), before);
+    assert.equal((await call('POST', `${path}/${id}/resume`, { requestId: randomUUID() })).phase, 'resumed');
   });
   evidence.failures = failures;
   assert.deepEqual(failures, [], `failed scenarios: ${failures.join(', ')}`);

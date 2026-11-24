@@ -22,7 +22,7 @@ import { object, secret, ServiceError } from "./errors.ts";
 import { enabledRuntimes, hostProvider, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
 import { credential, sshPreparation, userData } from "./control/preparation.ts";
 import { libvirtLeaseTemplate, localLibvirtUri } from "./providers/libvirt.ts";
-import { libvirtLeaseHelper, libvirtLeaseKernelSupported } from "./providers/libvirt-native.ts";
+import { checkLibvirtLeaseHelper, libvirtLeaseHelper, libvirtLeaseKernelSupported } from "./providers/libvirt-native.ts";
 import { createProvider } from "./providers/index.ts";
 import type { NativeProvider } from "./providers/index.ts";
 import { ImageLibrary, prepareImage, specification } from "./control/images.ts";
@@ -42,7 +42,7 @@ import { ProcessUsageCollector, validateSample } from "./control/infrastructure.
 import type { ProcessObservation, UsageCategory } from "./control/infrastructure.ts";
 import { createGuestAccess, guestReady, guestRecipe, loadHelperArtifacts } from "./guest/access.ts";
 import { createInferenceExecutor } from "./inference-runtime.ts";
-import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
+import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, machineBookkeeping, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
 import { TUNNEL_END_REASONS, TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
@@ -219,6 +219,12 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
+function libvirtRuntimeSettings(config: RecordValue): RecordValue | undefined {
+  if (config.provider === "libvirt") return config;
+  if (config.provider === "linux") return enabledRuntimes(config).libvirt as RecordValue | undefined;
+  return undefined;
+}
+
 /** Only supervised Android emulators, guardian-supervised libvirt VMs and, by explicit operator
  * opt-in, supervised iOS simulators have independent native deadline enforcement and owned
  * cleanup. A libvirt lease image needs the pinned native lease helper on Linux 6.5 or later and
@@ -230,7 +236,7 @@ export function hostTransport(config: HostConfig): HostTransport {
  * an iOS lease image only when that selector itself declares `isolation: "shared-host"`, on
  * macOS, with the native supervisor and the lease's control companion configured. There is no
  * default for the declaration and nothing outside this configuration can supply it. */
-export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release()): RecordValue {
+export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release(), checkHelper = checkLibvirtLeaseHelper): RecordValue {
   if (!("leaseProtocol" in config) && !("leaseImages" in config)) {
     if ("leaseTunnelProtocol" in config) throw new ServiceError("Lease tunnels require lease execution on this host.", 400);
     if ("leaseWarmPool" in config) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
@@ -239,12 +245,13 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   const refuse = (detail = "before native fencing and owned cleanup acceptance"): never => { throw new ServiceError(`This runner cannot advertise lease execution ${detail}.`, 400); };
   if (config.leaseProtocol !== 1 || !Array.isArray(config.leaseImages) || !config.leaseImages.length || config.leaseImages.length > 100) refuse();
   const provider = String(config.provider);
-  const runtime = (kind: "android" | "ios" | "libvirt"): RecordValue | undefined => {
+  const runtime = (kind: "android" | "ios"): RecordValue | undefined => {
     try { const settings = provider === kind ? config : Object.hasOwn(HOST_RUNTIMES, provider) ? enabledRuntimes(config)[kind] : undefined; return settings === undefined ? undefined : object(settings); }
     catch { return refuse(); }
   };
   const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
   if (!absolute(config.leaseClockHelper)) refuse();
+  let libvirtToCheck: RecordValue | undefined;
   const leaseImages = (config.leaseImages as unknown[]).map(value => {
     const entry = object(value), fields = Object.keys(entry).sort().join();
     const identity = () => ({ id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch") });
@@ -259,16 +266,19 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
       return { ...identity(), runtime: "ios", isolation: IOS_LEASE_ISOLATION };
     }
     if (entry.runtime === "libvirt") {
-      const libvirt = runtime("libvirt");
+      const libvirt = libvirtRuntimeSettings(config);
       if (fields !== "arch,id,revision,runtime" || platform !== "linux" || !libvirt) refuse("for libvirt VMs without a Linux libvirt runtime");
-      let helper: unknown;
+      let helper: ReturnType<typeof libvirtLeaseHelper>;
       try { helper = libvirtLeaseHelper(libvirt); } catch { helper = undefined; }
-      if (!helper) refuse("for libvirt VMs without the pinned lease helper (leaseHelper and leaseHelperSha256)");
+      if (!helper) return refuse("for libvirt VMs without the pinned lease helper (leaseHelper and leaseHelperSha256)");
+      if (config.leaseClockHelper !== helper.path) refuse("for libvirt VMs unless leaseClockHelper names the pinned lease helper");
+      libvirtToCheck = libvirt;
       if (!libvirtLeaseKernelSupported(kernel)) throw new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 400, { code: "libvirt_lease_kernel_unsupported" });
       return { ...identity(), runtime: "libvirt" };
     }
     return refuse();
   });
+  if (libvirtToCheck) checkHelper(libvirtToCheck, kernel);
   const offer: RecordValue = { leaseProtocol: 1, leaseImages };
   // Lease port tunnels are off unless the operator declares them. Their host-side sockets live in
   // each lease's private storage, so the storage path must fit a Unix socket address.
@@ -295,9 +305,9 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   }
   return offer;
 }
-export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release()): RecordValue {
+export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release(), checkHelper = checkLibvirtLeaseHelper): RecordValue {
   const provider = hostProvider(config.provider);
-  const leases = leaseOffer(config, platform, kernel);
+  const leases = leaseOffer(config, platform, kernel, checkHelper);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
   let templates = config.templates.map(normalizeTemplate);
   if (new Set(templates.map(t => `${t.id}@${t.revision}:${t.arch}`)).size !== templates.length) throw new ServiceError("Duplicate installed template revision.", 400);
@@ -344,6 +354,7 @@ export class HostRunner {
   private shutdown: Promise<void> | undefined;
   readonly state: string;
   readonly offer: RecordValue;
+  private readonly pinnedLibvirtClock: boolean;
   readonly library: ImageLibrary;
   imageAdapter: HostImageAdapter;
   private inferenceAdapter: HostTaskAdapter | undefined;
@@ -497,8 +508,10 @@ export class HostRunner {
     hostProvider(config.provider);
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config), platform = dependencies.platform ?? process.platform;
-    leaseOffer(config, platform);
-    const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
+    const leases = leaseOffer(config, platform);
+    this.pinnedLibvirtClock = (leases.leaseImages as RecordValue[] | undefined)?.some(image => image.runtime === "libvirt") ?? false;
+    const clockPin = this.pinnedLibvirtClock ? libvirtLeaseHelper(libvirtRuntimeSettings(config))?.sha256 : undefined;
+    const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string, clockPin));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir);
     if (this.kubernetes) {
@@ -549,12 +562,12 @@ export class HostRunner {
       this.identity = { id: identifier(value.id), credential: secret(value.credential), orchestrator };
       if (this.kubernetes) cleanupKubernetesEnrollment(this.state, this.identity, this.log);
     } else if (this.kubernetes) {
-      this.identity = await enrollKubernetesHost(this.state, orchestrator, this.offer, this.transport, this.stopController.signal, this.log);
+      this.identity = await enrollKubernetesHost(this.state, orchestrator, this.advertisedOffer(!this.pinnedLibvirtClock || this.heartbeatClock() !== undefined), this.transport, this.stopController.signal, this.log);
     } else {
       if (!this.config.enrollmentToken) throw new ServiceError("A new host needs an enrollment credential.", 400);
       this.identity = { id: randomUUID(), credential: randomBytes(32).toString("base64url"), orchestrator }; saveRecord(path, this.identity);
     }
-    if (this.config.enrollmentToken) await this.transport.request("POST", "/v1/hosts/enroll", { ...this.identity, offer: this.offer }, secret(this.config.enrollmentToken), this.stopController.signal);
+    if (this.config.enrollmentToken) await this.transport.request("POST", "/v1/hosts/enroll", { ...this.identity, offer: this.advertisedOffer(!this.pinnedLibvirtClock || this.heartbeatClock() !== undefined) }, secret(this.config.enrollmentToken), this.stopController.signal);
   }
   async initializeProviders(): Promise<void> {
     const factory = this.dependencies.providerFactory ?? createProvider, provider = String(this.config.provider);
@@ -756,10 +769,26 @@ export class HostRunner {
     // Keep private host settings while giving the provider that exact definition.
     return { runtime, image: structuredClone(['android','ios'].includes(String(image.os)) ? { ...image, ...normalizeTemplate(image) } : image), folder };
   }
+  private heartbeatClock(): number | undefined {
+    try { return this.clock.now(); }
+    catch (error) {
+      if (!this.pinnedLibvirtClock) throw error;
+      // Keep reporting cleanup even when the pinned helper has disappeared. A heartbeat without
+      // a trusted clock withdraws lease admission and cannot grant any execution authority.
+      return undefined;
+    }
+  }
+  private advertisedOffer(clockAvailable: boolean): RecordValue {
+    if (clockAvailable) return this.offer;
+    const offer = { ...this.offer };
+    for (const field of ["leaseProtocol", "leaseImages", "leaseTunnelProtocol", "warmPool"]) delete offer[field];
+    return offer;
+  }
   async poll(): Promise<void> {
     if (!this.identity) throw new ServiceError("Host is not connected.", 409);
     const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports), baselineReports = firstReport(this.baselineReports, true);
-    const sent = this.clock.now();
+    const sent = this.heartbeatClock();
+    const offer = this.advertisedOffer(sent !== undefined);
     // Read the current credential on every heartbeat. Rotation delivery may replace
     // identity.json between requests, but cannot change the host/controller binding.
     const identity = readRecord(join(this.state, "identity.json"));
@@ -773,7 +802,7 @@ export class HostRunner {
     this.maintenanceProof = undefined;
     const upkeep = this.upkeepReport(), hostOperationReports = upkeep ? Object.fromEntries([...this.hostOperationReports].slice(0, 16)) : {};
     const reportedBusy = upkeep ? upkeep.busy as string[] : [];
-    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
+    const body = { offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
       ...(this.pressureReport ? { pressure: this.pressureReport } : {}), ...(upkeep ? { upkeep, hostOperationReports } : {}), ...(this.baselines ? { baselines: this.baselines, baselineReports } : {}) };
     if (proof && Buffer.byteLength(JSON.stringify(body)) > MAX_HOST_MESSAGE) delete body.maintenance.proof;
     const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, body, this.identity.credential, this.stopController.signal);
@@ -783,8 +812,10 @@ export class HostRunner {
     const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), baselines: records(response.baselineTasks ?? [], "baseline tasks"), hostOperations: records(response.hostOperations ?? [], "host operations"), tunnels: records(response.leaseTunnels ?? [], "lease tunnels") ,
       live: records(response.liveViews ?? [], 'live views'), liveCaptures: records(response.liveCaptures ?? [], 'live captures') };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
-    this.observeWarm(machines, sent);
-    this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
+    const received = this.heartbeatClock();
+    const timed = sent !== undefined && received !== undefined;
+    if (timed) this.observeWarm(machines, sent);
+    this.guard.observe(machines, timed ? Math.max(0, received - sent) : undefined);
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
     for (const [id, report] of sentReports) if (!active.has(id)) {
@@ -796,7 +827,7 @@ export class HostRunner {
     for (const machine of machines) this.updateAssignments.set(String(machine.id), structuredClone(machine));
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
-    this.assignments = machines; this.queues = queues; this.lastContact = sent;
+    this.assignments = machines; this.queues = queues; this.lastContact = timed ? sent : 0;
     // Delivered: work that ended before this heartbeat has now been counted as activity.
     for (const id of reportedBusy) this.recentlyBusy.delete(id);
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
@@ -1704,7 +1735,10 @@ export class HostRunner {
       // Unknown older local assignment directories cannot be inferred stopped from an empty heartbeat.
       for (const root of this.machineRoots()) {
         noLinks(root);
-        if (present(root) && readdirSync(root).some(id => !retained.has(id) && !this.guard.records.get(id)?.retired)) return NOT_IDLE;
+        if (present(root) && readdirSync(root).some(id => {
+          const bookkeeping = machineBookkeeping(root, id);
+          return bookkeeping === undefined ? !retained.has(id) && !this.guard.records.get(id)?.retired : bookkeeping === "unexpected";
+        })) return NOT_IDLE;
       }
       if (!(await this.inspectStopped(retained, readOnly)).workloadsStopped) return NOT_IDLE;
       if (!readOnly) {
@@ -1801,14 +1835,15 @@ export class HostRunner {
         for await (const entry of await opendir(root)) {
           if (!live()) return undefined;
           if (++entries > 20_000) { complete = false; break; }
-          if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+          const bookkeeping = journalRoots.has(root) ? machineBookkeeping(root, entry.name) : undefined;
+          if (bookkeeping === "owned" || bookkeeping === undefined && !entry.isDirectory() && !entry.isSymbolicLink()) continue;
           const path = join(root, entry.name);
           const quarantine = storageRoots.has(root) && removalQuarantine.test(entry.name);
           if (quarantine && entry.isDirectory() && known.quarantines.has(path)) continue;
           // Retirement only explains an old journal, never backing storage that still exists.
           const unexplainedJournal = journalRoots.has(root) && !known.folders.has(path) && !this.guard.records.get(entry.name)?.retired;
           const unexplainedStorage = storageRoots.has(root) && !known.storage.has(path) && storageId.test(entry.name);
-          if (!quarantine && !unexplainedJournal && !unexplainedStorage) continue;
+          if (bookkeeping !== "unexpected" && !quarantine && !unexplainedJournal && !unexplainedStorage) continue;
           if (names.size >= 100 && !names.has(entry.name) || entry.name.length > 200) { complete = false; break; }
           names.add(entry.name); found.push({ name: entry.name, path, storage: storageRoots.has(root), quarantine });
         }

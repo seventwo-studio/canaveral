@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Intent {
     pub cleanup_id: String,
@@ -23,7 +23,7 @@ pub struct Intent {
     pub storage_gid: u32,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Identity {
     device: u64,
     inode: u64,
@@ -35,12 +35,22 @@ impl Identity {
     }
 }
 
-/// Durable erasure progress: `cleared` once every file is empty, `removed` once unlinked.
+/// Ownership checked while both files are held, before the marker can be truncated.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct VerifiedOwnership {
+    intent: Intent,
+    marker_identity: Identity,
+}
+
+/// Durable erasure progress: verified ownership, cleared contents, then removed entries.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Erased {
     pub cleanup_id: String,
     pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ownership: Option<VerifiedOwnership>,
 }
 
 /// Linux UAPI fcntl.h: the signal for lease-break notification.
@@ -170,14 +180,24 @@ pub fn erase(
     if path != intent.quarantine || intent.root.parent() != intent.quarantine.parent() {
         return Err("quarantine path differs".into());
     }
-    if previous.is_some_and(|state| state.cleanup_id != intent.cleanup_id) {
-        return Err("erasure belongs to another cleanup".into());
+    if previous.is_some_and(|state| {
+        state.cleanup_id != intent.cleanup_id
+            || !matches!(state.phase.as_str(), "verified" | "cleared" | "removed")
+            || state
+                .ownership
+                .as_ref()
+                .is_some_and(|ownership| ownership.intent != *intent)
+            || state.phase == "verified" && state.ownership.is_none()
+    }) {
+        return Err("erasure receipt differs".into());
     }
     let cleared =
         previous.is_some_and(|state| matches!(state.phase.as_str(), "cleared" | "removed"));
-    let state = |phase: &str| Erased {
+    let mut ownership = previous.and_then(|state| state.ownership.clone());
+    let state = |phase: &str, ownership: Option<VerifiedOwnership>| Erased {
         cleanup_id: intent.cleanup_id.clone(),
         phase: phase.into(),
+        ownership,
     };
     let parent = safe_directory(path.parent().ok_or("missing storage parent")?)?;
     let parent_stat = parent.metadata()?;
@@ -189,7 +209,8 @@ pub fn erase(
         Ok(stat) => stat,
         // Missing storage counts only after durable cleared-content evidence.
         Err(error) if error.kind() == io::ErrorKind::NotFound && cleared => {
-            return record(&state("removed"));
+            parent.sync_all()?;
+            return record(&state("removed", ownership));
         }
         Err(error) => return Err(error.into()),
     };
@@ -210,25 +231,40 @@ pub fn erase(
     for entry in fs::read_dir(proc_path(root.as_raw_fd()))? {
         held.push(Held::take(&root, &entry?.file_name(), intent)?);
     }
+    let marker = held.iter().find(|entry| entry.name.as_bytes() == MARKER);
+    let disk = held.iter().find(|entry| entry.name.as_bytes() == DISK);
+    if disk.is_some_and(|entry| !intent.disk_identity.same(&entry.metadata)) {
+        return Err("owned disk identity changed".into());
+    }
+    if let (Some(marker), Some(ownership)) = (marker, &ownership) {
+        if !ownership.marker_identity.same(&marker.metadata) {
+            return Err("owner marker identity changed".into());
+        }
+    }
     if !cleared {
-        let marker = held
-            .iter()
-            .find(|entry| entry.name.as_bytes() == MARKER)
-            .ok_or("owner marker missing")?;
-        if marker.metadata.len() > 16384 {
-            return Err("owner marker exceeds its envelope".into());
+        let marker = marker.ok_or("owner marker missing")?;
+        disk.ok_or("owned disk missing")?;
+        if ownership.is_none() || marker.metadata.len() != 0 {
+            if marker.metadata.len() > 16384 {
+                return Err("owner marker exceeds its envelope".into());
+            }
+            let mut bytes = Vec::new();
+            (&marker.file).take(16385).read_to_end(&mut bytes)?;
+            if serde_json::from_slice::<Value>(&bytes)?["fingerprint"]
+                != intent.fingerprint.as_str()
+            {
+                return Err("storage owner differs".into());
+            }
         }
-        let mut bytes = Vec::new();
-        (&marker.file).take(16385).read_to_end(&mut bytes)?;
-        if serde_json::from_slice::<Value>(&bytes)?["fingerprint"] != intent.fingerprint.as_str() {
-            return Err("storage owner differs".into());
-        }
-        let disk = held
-            .iter()
-            .find(|entry| entry.name.as_bytes() == DISK)
-            .ok_or("owned disk missing")?;
-        if !intent.disk_identity.same(&disk.metadata) {
-            return Err("owned disk identity changed".into());
+        if ownership.is_none() {
+            ownership = Some(VerifiedOwnership {
+                intent: intent.clone(),
+                marker_identity: Identity {
+                    device: marker.metadata.dev(),
+                    inode: marker.metadata.ino(),
+                },
+            });
+            record(&state("verified", ownership.clone()))?;
         }
         // Logical erasure: contents are discarded while every lease is held.
         for entry in &held {
@@ -236,7 +272,7 @@ pub fn erase(
             entry.file.set_len(0)?;
             entry.file.sync_all()?;
         }
-        record(&state("cleared"))?;
+        record(&state("cleared", ownership.clone()))?;
     }
     for entry in &held {
         entry.verify(&root)?;
@@ -259,7 +295,7 @@ pub fn erase(
         return Err(io::Error::last_os_error().into());
     }
     parent.sync_all()?;
-    record(&state("removed"))
+    record(&state("removed", ownership))
 }
 
 #[cfg(test)]
@@ -332,15 +368,48 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(*states.borrow(), ["cleared", "removed"]);
+        assert_eq!(*states.borrow(), ["verified", "cleared", "removed"]);
         assert!(!f.quarantine.exists());
         // A repeated call after removal needs the durable cleared evidence.
         let cleared = Erased {
             cleanup_id: "c".into(),
             phase: "cleared".into(),
+            ownership: None,
         };
         erase(&f.intent, &f.quarantine, Some(&cleared), |_| Ok(())).unwrap();
         assert!(erase(&f.intent, &f.quarantine, None, |_| Ok(())).is_err());
+        fs::remove_dir_all(f.base).unwrap();
+    }
+
+    #[test]
+    fn crash_after_truncation_resumes_from_verified_inodes() {
+        let f = fixture("after-truncate");
+        let saved = RefCell::new(None);
+        let marker = f.quarantine.join("canaveral-owner.json");
+        assert!(erase(&f.intent, &f.quarantine, None, |state| {
+            if state.phase == "cleared" {
+                return Err("injected interruption before cleared receipt".into());
+            }
+            *saved.borrow_mut() = Some(state.clone());
+            Ok(())
+        })
+        .is_err());
+        let proof = saved.into_inner().unwrap();
+        assert_eq!(proof.phase, "verified");
+        assert_eq!(fs::metadata(&marker).unwrap().len(), 0);
+        assert!(erase(&f.intent, &f.quarantine, None, |_| Ok(())).is_err());
+
+        let original = f.quarantine.join("marker-original");
+        fs::rename(&marker, &original).unwrap();
+        File::create(&marker)
+            .unwrap()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .unwrap();
+        fs::rename(&original, f.base.join("marker-original")).unwrap();
+        assert!(erase(&f.intent, &f.quarantine, Some(&proof), |_| Ok(())).is_err());
+        fs::rename(f.base.join("marker-original"), &marker).unwrap();
+        erase(&f.intent, &f.quarantine, Some(&proof), |_| Ok(())).unwrap();
+        assert!(!f.quarantine.exists());
         fs::remove_dir_all(f.base).unwrap();
     }
 
@@ -386,6 +455,7 @@ mod tests {
         let cleared = Erased {
             cleanup_id: "c".into(),
             phase: "cleared".into(),
+            ownership: None,
         };
         // Cleared evidence with nonempty contents is a contradiction.
         assert!(erase(&f.intent, &f.quarantine, Some(&cleared), |_| Ok(())).is_err());

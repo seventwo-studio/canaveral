@@ -18,6 +18,7 @@ const KERNEL_EXIT = 78;
 /** Exit status of `fence` while a live guardian holds the lease lock (EX_TEMPFAIL). */
 const BUSY_EXIT = 75;
 const HELPER_LIMIT = 64 * 1048576;
+type HelperPin = { path: string; sha256: string };
 
 export function libvirtLeaseKernelSupported(kernel: string = release()): boolean {
   const match = /^(\d+)\.(\d+)[.-]/.exec(kernel + ".");
@@ -25,7 +26,7 @@ export function libvirtLeaseKernelSupported(kernel: string = release()): boolean
 }
 
 /** The configured helper: an absolute, normalized path and its pinned SHA-256. */
-export function libvirtLeaseHelper(config: RecordValue | undefined): { path: string; sha256: string } | undefined {
+export function libvirtLeaseHelper(config: RecordValue | undefined): HelperPin | undefined {
   if (config?.leaseHelper === undefined && config?.leaseHelperSha256 === undefined) return undefined;
   const path = config.leaseHelper, sha256 = config.leaseHelperSha256;
   if (typeof path !== "string" || !isAbsolute(path) || normalize(path) !== path || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) {
@@ -38,7 +39,8 @@ export function libvirtLeaseHelper(config: RecordValue | undefined): { path: str
  * then executes exactly that descriptor, never the configured path again. */
 function verifiedHelper(path: string, sha256: string): number {
   // A root daemon could replace a root-owned helper itself.
-  if (process.getuid?.() === 0) throw unverified();
+  const uid = process.getuid?.();
+  if (!uid || uid !== process.geteuid?.()) throw unverified();
   let fd: number | undefined;
   try {
     noSymlinks(path);
@@ -47,9 +49,16 @@ function verifiedHelper(path: string, sha256: string): number {
       if (!directory.isDirectory() || directory.uid !== 0 || (directory.mode & 0o022)) throw unverified();
       if (dirname(parent) === parent) break;
     }
+    // Even a nonroot daemon may have been granted write access.
+    try {
+      fs.accessSync(path, fs.constants.W_OK);
+      throw unverified();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EACCES" && (error as NodeJS.ErrnoException).code !== "EROFS") throw error;
+    }
     fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const before = fs.fstatSync(fd, { bigint: true });
-    if (!before.isFile() || before.uid !== 0n || before.nlink !== 1n || (before.mode & 0o022n) || (before.mode & 0o111n) === 0n || before.size > BigInt(HELPER_LIMIT)) throw unverified();
+    if (!before.isFile() || before.uid !== 0n || before.nlink !== 1n || (before.mode & 0o6022n) || (before.mode & 0o111n) === 0n || before.size > BigInt(HELPER_LIMIT)) throw unverified();
     const bytes = fs.readFileSync(fd);
     const after = fs.fstatSync(fd, { bigint: true });
     if (after.ctimeNs !== before.ctimeNs || after.ino !== before.ino || after.size !== BigInt(bytes.length) || hash(bytes) !== sha256) throw unverified();
@@ -64,20 +73,29 @@ function verifiedHelper(path: string, sha256: string): number {
 const descriptorExecutable = "/proc/self/fd/3";
 const helperEnv = (): Record<string, string> => ({ PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C", LC_ALL: "C" });
 
+function runVerifiedHelper(helper: HelperPin, mode: "check" | "clock", timeout: number): string {
+  const fd = verifiedHelper(helper.path, helper.sha256);
+  try {
+    const result = spawnSync(descriptorExecutable, [mode], {
+      stdio: ["ignore", "pipe", "ignore", fd], argv0: helper.path, env: helperEnv(),
+      encoding: "utf8", timeout, killSignal: "SIGKILL", maxBuffer: 1024,
+    });
+    if (mode === "check" && result.status === KERNEL_EXIT) throw unsupportedKernel();
+    if (result.error || result.status !== 0) throw unverified();
+    return result.stdout;
+  } finally { fs.closeSync(fd); }
+}
+
 /** Inventory check: helper identity and the kernel's peer pidfd support. */
 export function checkLibvirtLeaseHelper(config: RecordValue, kernel: string = release()): void {
   const helper = libvirtLeaseHelper(config);
   if (!helper) throw unverified();
   if (process.platform !== "linux" || !libvirtLeaseKernelSupported(kernel)) throw unsupportedKernel();
-  const fd = verifiedHelper(helper.path, helper.sha256);
-  try {
-    const result = spawnSync(descriptorExecutable, ["check"], {
-      stdio: ["ignore", "pipe", "ignore", fd], argv0: helper.path, env: helperEnv(),
-      encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", maxBuffer: 1024,
-    });
-    if (result.status === KERNEL_EXIT) throw unsupportedKernel();
-    if (result.error || result.status !== 0 || !/^\d+(?:\.\d+)?\n$/.test(result.stdout)) throw unverified();
-  } finally { fs.closeSync(fd); }
+  if (!/^\d+(?:\.\d+)?\n$/.test(runVerifiedHelper(helper, "check", 5000))) throw unverified();
+}
+
+export function libvirtLeaseClockSample(path: string, sha256: string): string {
+  return runVerifiedHelper({ path, sha256 }, "clock", 1000);
 }
 
 /** CLOCK_BOOTTIME seconds: /proc/uptime counts suspended time, like the guardian's clock. */
