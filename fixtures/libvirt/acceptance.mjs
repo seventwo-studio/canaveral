@@ -136,8 +136,10 @@ async function booted(lease, record) {
   assert.match(info, /^Autostart:\s+disable$/m);
   const qemu = qemuPid(lease.machineId);
   assert.ok(qemu, 'QEMU process');
-  const [user, group] = run('ps', ['-o', 'user=,group=', '-p', String(qemu)]).split(/\s+/);
-  assert.deepEqual([user, group], ['libvirt-qemu', 'canaveral-vm'], 'QEMU keeps its own account and gains only the VM storage group');
+  // Numeric IDs: ps truncates long account names.
+  const [user, group] = run('ps', ['-o', 'euid=,egid=', '-p', String(qemu)]).split(/\s+/).map(Number);
+  assert.deepEqual([user, group], [Number(run('id', ['-u', 'libvirt-qemu'])), 10002], 'QEMU keeps its own account and gains only the VM storage group');
+  assert.notEqual(user, Number(run('id', ['-u', account])), 'QEMU never shares the daemon account');
   const mac = /([0-9a-f]{2}(?::[0-9a-f]{2}){5})/i.exec(virsh('domiflist', lease.machineId))?.[1];
   assert.ok(mac, 'guest MAC');
   const address = await until('the guest DHCP lease', () => {
