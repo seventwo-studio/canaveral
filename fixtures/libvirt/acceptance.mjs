@@ -335,14 +335,14 @@ try {
   await step('OOM kill of the guardian is fenced by the reconciler', async record => {
     const lease = await acquire(900);
     const { guardian } = await booted(lease, record);
-    // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose: the
-    // guardian has the highest oom_score_adj, then the allocating hog, never the daemon.
+    // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose. The
+    // guardian's oom_score_adj of 1000 adds the whole limit to its score; the hog's RSS stays below it.
     const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
     sudo('choom', '-p', String(guardian), '-n', '1000');
     const limit = Number(sudo('cat', `${cgroup}/memory.current`)) + 128 * 1048576;
     sudo('sh', '-c', `echo ${limit} > ${cgroup}/memory.max`);
     const marker = `canaveral-oom-hog-${lease.machineId}`;
-    const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && echo 900 > /proc/self/oom_score_adj && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
+    const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
     try {
       await until('the OOM-killed guardian', () => !alive(guardian), 90, 250);
     } finally {
