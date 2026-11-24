@@ -333,8 +333,14 @@ automatically replay an uncertain save.
 `placementReady`. Image offers use health-qualified accepting state, which is also false
 while pressure blocks placement on a host that gates it. Heartbeats optionally carry bounded `health`, `resources`,
 `pressure` and `upkeep` reports and receive `checksRequestedAt`. Host identity may not switch provider after enrollment.
-Scoped setup credentials authorize only `/v1/hosts/enroll`; they cannot read
-inventory, issue setups or control guests. The dashboard proxies the administrative
+Scoped setup credentials are minted only by an operator, bound to the setup's
+name, provider and capacity, claimable by a single host identity (retries by
+that identity succeed) and expire 30 minutes after issue unless already
+claimed. They authorize only host enrollment: `/v1/hosts/enroll/setup`, which
+Kubernetes node bootstrap uses, and the legacy `/v1/hosts/enroll`, which
+accepts them for every provider, native inference included, in addition to the
+global enrollment token. They cannot read inventory, issue setups or control
+guests. The dashboard proxies the administrative
 paths with its existing session/CSRF checks. Its setup response also supplies the
 configured controller URL as an editable starting point; that origin may need a
 different externally reachable address for remote runners.

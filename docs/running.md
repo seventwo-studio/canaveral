@@ -291,8 +291,12 @@ the pod's daemon UID as owner. Enroll each node using its
 Change the DaemonSet image digest to update the daemon. Managed daemon updates
 and the containerd backend are disabled in this mode.
 
-Drain the host in Canaveral and wait for its cleanup proofs before replacing
-the pod. SIGTERM fences local admission and gives the daemon up to
+**Drain the host first.** Drain it in Canaveral and wait for its cleanup proofs
+before replacing the pod or draining the Kubernetes node. SIGTERM on a node that
+still runs work is not a drain: the daemon cannot confirm quiescence, exits with
+status 1 after `shutdownGraceSeconds` and reports `host_shutdown_incomplete`.
+That outcome is the safe, documented behavior; it keeps the state and
+reservations. SIGTERM fences local admission and gives the daemon up to
 `shutdownGraceSeconds` to confirm quiescence and close its workers. The field
 accepts 1–300 seconds and defaults to 120. Set `terminationGracePeriodSeconds`
 above this value and allow time for any preStop hook. A daemon exits with
