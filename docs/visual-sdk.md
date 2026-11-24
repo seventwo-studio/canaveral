@@ -67,10 +67,11 @@ The writer implements `write(bytes): number | Promise<number>` and may accept
 partial writes. `record()` writes the same MP4 bytes received from the host,
 checks their SHA-256 digest and complete MP4 box envelope, and acknowledges the
 host's completion. The receipt contains `bytes`, `sha256` and `cleaned: true`.
-Once that acknowledgement is sent, the broker ending the connection completes the
-recording. A connection reset is no proof that the host received it, so after a reset
-the SDK reads the session for up to `timeoutMs` and completes only once the controller
-records it `finished` with `cleaned: true`; otherwise it reports `video_incomplete`.
+After the connection ends, the SDK requires a `finished` session with
+`cleaned: true` and `ackReceived: true`. The runner records `ackReceived`
+when it accepts the acknowledgement. The SDK uses the remaining completion
+budget from `timeoutMs` for inspection and cancels the request if the caller
+aborts or the budget runs out. Missing confirmation reports `video_incomplete`.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 
@@ -210,14 +211,11 @@ never renews, extends or releases a lease.
 A stream drops when the broker closes its sockets. A connection reset counts as a
 drop too: the viewer's pong or renewal can cross the broker's close and draw a reset
 instead of an orderly end. After a dropped stream the SDK reads the view for up to three seconds, because the
-host enforces a lease deadline slightly before the controller records it; within
-that time `disconnected`, and for a lease `device_stopped`, `host_unavailable` or
-`capture_ended`, may still give way to the lease's own ending. A source of
-`controller` always means the controller recorded that reason. It does
-the same when the host reports `capture_failed`: if the
-view's lease, credential or device ended in that moment, that cause is reported
-with source `controller`; otherwise the host's reason stands, and the controller's
-plain `capture_ended` never replaces it. A worker
+host can enforce a lease deadline before the controller records it. The controller
+can refine a provisional `disconnected`, `device_stopped` or `host_unavailable`
+within three seconds. It can refine `capture_ended` whenever the capture receipt
+attributes the stop to the matching lease fence and the lease ends. An in-band
+`capture_failed` from the host stays the stream's end reason. A worker
 error, such as `capability_unsupported` from a host without live capture for that
 device, is thrown instead: by `connect` when the host refuses at once, otherwise by
 the iterator. The SDK never reconnects, never opens a new view and never replays

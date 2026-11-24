@@ -1477,29 +1477,25 @@ cleanup) or `capture_ended` (the capture this view belongs to is ending, or was
 attempted before a runner restart; open a new view). A host whose own authority
 ended sends nothing more; the controller records that cause.
 
-A device's native side can stop a moment before the runner observes the same
-ending: a lease deadline is also enforced by the native supervisor. After a failed
-epoch the runner therefore waits up to a second for its viewers' own authority to
-lapse before it tells the remaining ones `capture_failed`, and the SDK prefers the
-controller's finding that the view's lease, credential or device ended over a
-reported capture failure.
+A device's native side can stop before the runner observes the same ending. After
+a failed epoch, the runner waits up to a second for its viewers' authority to
+lapse before it sends `capture_failed` to the remaining viewers. The SDK preserves
+an explicit `capture_failed` from the host.
 
 The runner enforces a lease deadline and its own assignment slightly before the
 controller observes the same ending. A view is therefore first recorded as
 `disconnected` when its sockets dropped, or for a lease as `device_stopped` or
 `host_unavailable` when the runner had already reported its fenced emulator, or as
 `capture_ended` when the runner had already stopped the capture and reported its
-encoder gone. These are provisional for three seconds: any cause the controller then
-finds replaces `disconnected`, and the lease's or its key's own ending replaces a
-lease's device cause. `capture_ended` gives way only to the fence that caused it: to
-`lease_expired` when the capture ended within those three seconds before the lease's
-deadline, or to `lease_failed`, and in both cases only when the runner's receipt for
-the capture confirmed just its encoder's exit, as a fenced runner's does. A capture
-the runner stopped with proof, or one that ended before a release or key rotation,
-keeps `capture_ended`. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
-runner's fence report arrived first. The SDK waits out that window before it
-reports a provisional reason. A credential that was rotated or revoked can no longer
-read its view; the SDK reports `credential_rejected`.
+encoder gone. For three seconds, a cause found by the controller can replace
+`disconnected`, and the lease's or its key's ending can replace a device cause.
+The runner records the lease ID and revision in the capture's stop receipt when
+its local fence caused the epoch to stop. The controller can then refine
+`capture_ended` to `lease_expired` or `lease_failed` when the lease and revision
+match, regardless of how long ago the capture ended. A receipt that records only
+cleanup leaves `capture_ended` in place. After a dropped stream, the SDK polls
+the view briefly for an updated reason. A rotated or revoked credential can no
+longer read its view, so the SDK reports `credential_rejected`.
 
 ### Reservations and cleanup proof
 

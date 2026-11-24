@@ -65,36 +65,36 @@ function fixture(t: TestContext) {
     authorized: () => (command({ type: "live-views.authorized", ready: true }) as { authorized: boolean }).authorized,
     /** The broker saw the host's socket drop. */
     disconnected: () => command({ type: "live-views.disconnect" }),
-    /** The runner's receipt: its encoder exited; the fenced guest recorder's stop is the lease's to prove. */
-    hostCleaned: () => video.handle(operator("POST", `/v1/hosts/${host}/video-sessions/${capture}/finish`, { generation: captureGeneration, hostCleaned: true }, hostToken)),
+    /** The runner's receipt: only its encoder exit is proven. */
+    hostCleaned: (stop?: Record<string, unknown>) => video.handle(operator("POST", `/v1/hosts/${host}/video-sessions/${capture}/finish`, { generation: captureGeneration, hostCleaned: true, ...(stop ? { stop } : {}) }, hostToken)),
+    fence: { cause: "fence", leaseId: lease, leaseRevision: 1 },
     /** The runner stopped the capture itself and proved it: positive cleanup. */
     cleaned: () => video.handle(operator("POST", `/v1/hosts/${host}/video-sessions/${capture}/finish`, { generation: captureGeneration, cleaned: true }, hostToken)),
     /** The lease's own state, as the lease module records a release or a failure. */
-    lease: (state: string) => store.transaction(db => { db.prepare("UPDATE leases SET state=? WHERE id=?").run(state, lease); }),
+    lease: (state: string) => store.transaction(db => { db.prepare("UPDATE leases SET state=?,revision=revision+1 WHERE id=?").run(state, lease); }),
     /** The controller's clock moves on while the host still reports in (each heartbeat refreshes the views). */
     advanceTo: (time: number) => { while (now < time) { now = Math.min(time, now + 1); heartbeat(); } },
     now: () => now,
   };
 }
 
-test("a leased view whose capture the host ended at its native deadline ends with the lease, not with its capture", t => {
+test("an explicit fence of the matching lease refines a view that ended well before expiry", t => {
   const f = fixture(t);
   assert.equal(f.authorized(), true);
-  // The host fenced the lease a moment early: its capture is gone and its receipt arrives before
-  // the broker noticed the dropped sockets.
-  f.advanceTo(f.expires - 1);
-  f.hostCleaned();
+  // The attributed receipt arrives before the broker notices the dropped sockets.
+  f.advanceTo(f.expires - 10);
+  f.hostCleaned(f.fence);
   assert.equal(f.authorized(), false);
   assert.deepEqual(f.reason(), { state: "ended", reason: "capture_ended" }, "the controller records what it sees first");
   f.disconnected();
-  // The controller's own clock reaches the lease's end within the refinement window.
+  // The time since the capture ended does not affect the refinement.
   f.advanceTo(f.expires + 1);
   assert.deepEqual(f.reason(), { state: "ended", reason: "lease_expired" });
 });
 
-test("a leased view's capture that ended long before its lease ends stays ended with its capture", t => {
+test("an unattributed encoder exit just before lease expiry leaves the view ended with its capture", t => {
   const f = fixture(t);
-  f.advanceTo(f.expires - 10);
+  f.advanceTo(f.expires - 1);
   f.hostCleaned();
   assert.equal(f.authorized(), false);
   f.advanceTo(f.expires + 1);
@@ -121,12 +121,21 @@ test("a release recorded after a leased view's capture ended does not replace th
   assert.deepEqual(f.reason(), { state: "ended", reason: "capture_ended" });
 });
 
-test("a lease that fails just after its runner's host-only capture receipt replaces the capture's ending", t => {
+test("a failed lease refines capture_ended only with an explicit matching fence", t => {
   const f = fixture(t);
   f.advanceTo(f.expires - 20);
-  // Supervisor loss: the runner lost the device and could confirm only its encoder's exit.
-  f.hostCleaned();
+  f.hostCleaned(f.fence);
   assert.equal(f.authorized(), false);
   f.advanceTo(f.expires - 19); f.lease("failed"); f.advanceTo(f.expires - 18);
   assert.deepEqual(f.reason(), { state: "ended", reason: "lease_failed" });
+});
+
+test("a fence from a different lease or revision cannot refine the capture's ending", t => {
+  const f = fixture(t);
+  f.advanceTo(f.expires - 1);
+  assert.throws(() => f.hostCleaned({ ...f.fence, leaseId: randomUUID() }), { status: 403 });
+  f.hostCleaned({ ...f.fence, leaseRevision: 2 });
+  assert.equal(f.authorized(), false);
+  f.advanceTo(f.expires + 1);
+  assert.deepEqual(f.reason(), { state: "ended", reason: "capture_ended" });
 });

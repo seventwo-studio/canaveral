@@ -1160,7 +1160,8 @@ export class HostRunner {
         const saved = readRecord(path);
         // A lease session may repeat its host-only receipt: the encoder exited, and the lease's own
         // proven emulator removal settles the guest recorder on the controller.
-        const receipt = saved.cleaned === true ? { generation, cleaned: true } : saved.hostCleaned === true ? { generation, hostCleaned: true } : undefined;
+        const receipt = saved.cleaned === true ? { generation, cleaned: true, ...(saved.ackReceived === true ? { ackReceived: true } : {}) }
+          : saved.hostCleaned === true ? { generation, hostCleaned: true } : undefined;
         if (saved.generation === generation && saved.machineId === machineId && receipt && this.identity) {
           const identity = this.identity;
           this.launch(key, () => this.fresh(), async () => {
@@ -1190,7 +1191,7 @@ export class HostRunner {
       const receipt = saved.cleaned === true || saved.state === 'attaching' ? { cleaned: true } : saved.hostCleaned === true ? { hostCleaned: true } : undefined;
       if (saved.generation !== generation || saved.machineId !== job.machineId || !receipt) continue;
       this.launch(key, () => this.fresh(), async () => {
-        await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, ...receipt }, identity.credential, this.stopController.signal);
+        await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, ...receipt, ...(saved.stop ? { stop: saved.stop } : {}) }, identity.credential, this.stopController.signal);
       });
     }
     const queued = new Set((this.queues.live ?? []).map(job => `${String(job.id)}:${String(job.generation)}`));
@@ -1253,8 +1254,16 @@ export class HostRunner {
     const offered = image.os === 'android' || image.os === 'ios' && runtime.config?.liveView === true;
     if (!runtime.openVideo || !runtime.pipe || typeof encoder !== 'string' || !isAbsolute(encoder) || !offered) return undefined;
     // Stopping an early-ended recorder needs the same assignment that started it, as for recordings.
-    const sameAssignment = this.assignmentUnchanged(machine);
+    const sameAssignment = this.assignmentUnchanged(machine), machineId = String(machine.id);
+    const leaseId = machine.lease ? identifier(object(machine.lease).id) : undefined;
     return { encoder, guestSource: image.os === 'android', notRunning: captureNotRunning, recordingQueued: () => this.recordingPending(String(machine.id)),
+      leaseFence: () => {
+        if (!leaseId || this.stopController.signal.aborted || !sameAssignment()) return undefined;
+        const record = this.guard.records.get(machineId);
+        const lease = record && object(record.machine.lease);
+        if (!record || !lease || lease.id !== leaseId || lease.state !== 'ready' || record.retired || this.guard.allowed(machineId)) return undefined;
+        return { cause: 'fence', leaseId, leaseRevision: Number(lease.revision) };
+      },
       openSource: (options, authorized) => runtime.openVideo!(machine, image, folder, options, authorized, () => this.machineAuthorized(String(machine.id)) && sameAssignment()),
       openEncoder: argv => runtime.pipe!(argv) };
   }
@@ -1481,7 +1490,7 @@ export class HostRunner {
     const { runtime, image, folder } = this.context(machine);
     // hostCleaned: this runner's own encoder is confirmed exited (or never started). For a leased
     // emulator that alone may be reported when the guest recorder's stop is unproven.
-    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true;
+    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true, ackReceived = false;
     let tap: Awaited<ReturnType<LiveCaptureHub['beginRecording']>> | undefined;
     const leased = machine.lease != null;
     saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
@@ -1514,6 +1523,7 @@ export class HostRunner {
         sendBytes: async (data: Uint8Array) => { viewers.push(data); await recording.sendBytes(data); } };
       const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
       await serveMobileVideo(tee, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
+      ackReceived = true;
       cleaned = true;
     } catch {
       if (!captureStarted) cleaned = true;
@@ -1526,9 +1536,10 @@ export class HostRunner {
       const hostOnly = !cleaned && leased && hostCleaned;
       // The hand-over wait is recorded with the recording's journal, for the operator.
       const handover = tap && (tap.waitedMs >= 100 || !tap.proven) ? { liveHandoverMs: Math.round(tap.waitedMs), liveStopProven: tap.proven } : {};
-      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}), ...handover });
+      const delivery = ackReceived ? { ackReceived: true } : {};
+      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}), ...delivery, ...handover });
       if (cleaned || hostOnly) {
-        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, cleaned ? { generation: job.generation, cleaned: true } : { generation: job.generation, hostCleaned: true }, identity.credential, this.stopController.signal); }
+        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, cleaned ? { generation: job.generation, cleaned: true, ...delivery } : { generation: job.generation, hostCleaned: true }, identity.credential, this.stopController.signal); }
         catch { this.log('Video cleanup receipt was not acknowledged; its reservation is retained.'); }
       }
     }

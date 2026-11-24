@@ -84,10 +84,23 @@ test('runner streams owned video through the real broker without blocking input 
   const finish = await recording;
   assert.deepEqual(Buffer.concat(received), mp4); assert.deepEqual(Buffer.concat(encoderInput), raw);
   assert.deepEqual(finish, { type: 'finish', bytes: mp4.length, sha256: createHash('sha256').update(mp4).digest('hex'), cleaned: true });
-  await eventually(async () => (await videoApi.inspect(machineId, session.id)).state === 'finished');
+  assert.equal((await videoApi.inspect(machineId, session.id)).ackReceived, true);
   assert.equal(sourceClosed, 1); assert.equal(encoderClosed, 1); assert.equal(await reservedCpu(), initialCpu);
   const replay = await videoApi.create(machineId, request); assert.equal(replay.id, session.id); assert.equal(replay.generation, session.generation); assert.equal(replay.state, 'finished');
   await runner.poll(); await runner.step(); assert.equal(captures, 1);
   await runner.close(); runner = makeRunner(); await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step();
   assert.equal(captures, 1, 'persisted session identity cannot replay native capture after runner restart');
+
+  const dropped = await videoApi.create(machineId, { ...request, id: randomUUID() });
+  const next = videoApi.connect(dropped, { timeoutMs: 5000 });
+  await runner.poll(); await runner.step();
+  const interrupted = await next;
+  t.mock.method(interrupted.connection, 'sendControl', async (value: Record<string, unknown>) => {
+    assert.deepEqual(value, { type: 'ack' });
+    interrupted.connection.close();
+  });
+  await assert.rejects(interrupted.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
+  const receipt = await videoApi.inspect(machineId, dropped.id);
+  assert.equal(receipt.cleaned, true);
+  assert.equal(receipt.ackReceived, undefined);
 });

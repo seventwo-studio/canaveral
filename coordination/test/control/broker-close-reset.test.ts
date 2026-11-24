@@ -1,3 +1,5 @@
+/// <reference lib="es2024.promise" />
+
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -90,8 +92,7 @@ function session(id: string, state: string, cleaned: boolean): VideoSession {
     attachBefore: new Date(now + 30_000).toISOString(), authorizationDeadline: new Date(now + 60_000).toISOString(), cleaned };
 }
 /** A broker stand-in that sends a complete recording and, once the client's ACK arrives, pings it
- * and resets the connection. `relay` says whether that ACK ever reaches the host; the test's
- * controller record follows from it. */
+ * and resets the connection. Tests supply the controller record for the chosen delivery order. */
 async function resetAfterAck(t: test.TestContext): Promise<{ connection: SessionConnection; id: string; acks: unknown[]; reset: Promise<void> }> {
   const acks: unknown[] = [];
   const b = await broker(t, {
@@ -103,10 +104,10 @@ async function resetAfterAck(t: test.TestContext): Promise<{ connection: Session
   return { connection, id, acks, reset: b.reset };
 }
 
-test("a verified recording reset after its acknowledgement completes once the controller records it finished and cleaned", async t => {
+test("a verified recording reset completes once the controller records the accepted acknowledgement", async t => {
   const r = await resetAfterAck(t);
   // The host reports its receipt a moment after the broker's close: the first reads still show the session ready.
-  const records = [session(r.id, "ready", false), session(r.id, "ready", false), session(r.id, "finished", true)];
+  const records = [session(r.id, "ready", false), session(r.id, "ready", false), { ...session(r.id, "finished", true), ackReceived: true }];
   let inspected = 0;
   const out: Buffer[] = [], video = await VideoClient.connect(r.connection, {}, async () => records[Math.min(inspected++, records.length - 1)]!);
   const result = await video.record({ write: bytes => { out.push(Buffer.from(bytes)); return bytes.length; } });
@@ -127,6 +128,62 @@ test("a recording reset after its acknowledgement is incomplete when the control
   const held = await resetAfterAck(t);
   const unfinished = await VideoClient.connect(held.connection, { timeoutMs: 600 }, async () => session(held.id, "disconnected", false));
   await assert.rejects(unfinished.record({ write: bytes => bytes.length }), (error: Error & { code?: string }) => error.code === "video_incomplete");
+});
+
+test("a dropped acknowledgement leaves a recording incomplete even when the runner proved cleanup", async t => {
+  const r = await resetAfterAck(t);
+  const video = await VideoClient.connect(r.connection, {}, async () => {
+    assert.deepEqual(r.acks, [{ type: "ack" }]);
+    return session(r.id, "finished", true);
+  });
+  await assert.rejects(video.record({ write: bytes => bytes.length }), { code: "video_incomplete" });
+  await r.reset;
+  assert.equal(video.finish, undefined);
+});
+
+test("a stalled post-ACK inspection is aborted at the remaining deadline", async t => {
+  const r = await resetAfterAck(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const started = Promise.withResolvers<AbortSignal>();
+  const video = await VideoClient.connect(r.connection, { timeoutMs: 1000 }, ({ signal, timeoutMs }) => {
+    assert.equal(timeoutMs, 600);
+    started.resolve(signal);
+    return new Promise(() => {});
+  });
+  const receive = r.connection.receive.bind(r.connection);
+  t.mock.method(r.connection, "receive", async (timeoutMs?: number) => {
+    try { return await receive(timeoutMs); }
+    catch (error) { now = 400; throw error; }
+  });
+  const completion = assert.rejects(video.record({ write: bytes => bytes.length }), { code: "video_incomplete" });
+  const signal = await started.promise;
+  now = 1000;
+  t.mock.timers.tick(600);
+  await completion;
+  assert.equal(signal.aborted, true);
+});
+
+test("a positive post-ACK inspection cannot confirm a cancelled or expired recording", async t => {
+  for (const ending of ["cancelled", "expired"]) await t.test(ending, async t => {
+    const r = await resetAfterAck(t), abort = new AbortController();
+    let now = 0;
+    t.mock.method(performance, "now", () => now);
+    const started = Promise.withResolvers<AbortSignal>(), reply = Promise.withResolvers<VideoSession>();
+    const video = await VideoClient.connect(r.connection, { signal: abort.signal }, ({ signal }) => {
+      started.resolve(signal);
+      return reply.promise;
+    });
+    const completion = assert.rejects(video.record({ write: bytes => bytes.length }), { code: "video_incomplete" });
+    const signal = await started.promise;
+    if (ending === "cancelled") abort.abort();
+    else now = 30_000;
+    reply.resolve({ ...session(r.id, "finished", true), ackReceived: true });
+    await completion;
+    assert.equal(signal.aborted, true);
+    assert.equal(video.finish, undefined);
+  });
 });
 
 test("a recording reset after its acknowledgement is incomplete without a controller record to confirm it", async t => {
@@ -180,11 +237,9 @@ test("a dropped live stream reports `disconnected` from the controller only when
   assert.deepEqual(stream.ended, { reason: "disconnected", source: "controller" });
 });
 
-test("a host's capture_failed is not replaced by the controller's plain record that the capture ended", async () => {
+test("an explicit capture failure takes precedence over the controller's lease end", async () => {
   const messages: unknown[] = [{ type: "end", reason: "capture_failed" }];
   const channel = { sessionId: VIEW, async sendControl() {}, async sendBytes() {}, async receive() { return (messages.shift() ?? null) as Record<string, unknown> | null; }, close() {} };
-  let inspected = 0;
-  const stream = new LiveStream(channel, view("ready"), {}, async () => { inspected++; return view("ended", "capture_ended"); });
+  const stream = new LiveStream(channel, view("ready"), {}, async () => view("ended", "lease_failed"));
   assert.deepEqual(await stream.segments().next(), { done: true, value: { reason: "capture_failed", source: "host" } });
-  assert.ok(inspected > 1, "the SDK waited for a lease ending that never came");
 });
