@@ -67,6 +67,10 @@ function fixture(t: TestContext) {
     disconnected: () => command({ type: "live-views.disconnect" }),
     /** The runner's receipt: its encoder exited; the fenced guest recorder's stop is the lease's to prove. */
     hostCleaned: () => video.handle(operator("POST", `/v1/hosts/${host}/video-sessions/${capture}/finish`, { generation: captureGeneration, hostCleaned: true }, hostToken)),
+    /** The runner stopped the capture itself and proved it: positive cleanup. */
+    cleaned: () => video.handle(operator("POST", `/v1/hosts/${host}/video-sessions/${capture}/finish`, { generation: captureGeneration, cleaned: true }, hostToken)),
+    /** The lease's own state, as the lease module records a release or a failure. */
+    lease: (state: string) => store.transaction(db => { db.prepare("UPDATE leases SET state=? WHERE id=?").run(state, lease); }),
     /** The controller's clock moves on while the host still reports in (each heartbeat refreshes the views). */
     advanceTo: (time: number) => { while (now < time) { now = Math.min(time, now + 1); heartbeat(); } },
     now: () => now,
@@ -95,4 +99,34 @@ test("a leased view's capture that ended long before its lease ends stays ended 
   assert.equal(f.authorized(), false);
   f.advanceTo(f.expires + 1);
   assert.deepEqual(f.reason(), { state: "ended", reason: "capture_ended" });
+});
+
+test("a leased view's capture that the runner stopped with proof keeps its reason, though the lease expires within the window", t => {
+  const f = fixture(t);
+  f.advanceTo(f.expires - 1);
+  // A positive receipt: the runner still held its authority and proved the recorder stopped. No fence did this.
+  f.cleaned();
+  assert.equal(f.authorized(), false);
+  f.advanceTo(f.expires + 1);
+  assert.deepEqual(f.reason(), { state: "ended", reason: "capture_ended" });
+});
+
+test("a release recorded after a leased view's capture ended does not replace the capture's own ending", t => {
+  const f = fixture(t);
+  f.advanceTo(f.expires - 20);
+  f.hostCleaned();
+  assert.equal(f.authorized(), false);
+  // The holder releases the lease a second later: the controller records that before any runner acts on it, so it did not end this capture.
+  f.advanceTo(f.expires - 19); f.lease("released"); f.advanceTo(f.expires - 18);
+  assert.deepEqual(f.reason(), { state: "ended", reason: "capture_ended" });
+});
+
+test("a lease that fails just after its runner's host-only capture receipt replaces the capture's ending", t => {
+  const f = fixture(t);
+  f.advanceTo(f.expires - 20);
+  // Supervisor loss: the runner lost the device and could confirm only its encoder's exit.
+  f.hostCleaned();
+  assert.equal(f.authorized(), false);
+  f.advanceTo(f.expires - 19); f.lease("failed"); f.advanceTo(f.expires - 18);
+  assert.deepEqual(f.reason(), { state: "ended", reason: "lease_failed" });
 });

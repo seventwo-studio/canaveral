@@ -212,7 +212,11 @@ export interface LiveView {
 export interface LiveSegment { kind: 'init' | 'media'; epoch: number; sequence: number; keyframe: boolean; data: Buffer }
 /** Why a stream ended, and who said so: the capturing host in-band, the controller's record of
  * the view, or this client (it closed, was cancelled, or lost the controller). */
-export interface LiveEnd { reason: string; source: 'host' | 'controller' | 'client' }
+export interface LiveEnd {
+  reason: string; source: 'host' | 'controller' | 'client';
+  /** With `connection_lost`: the connection failure, when the controller named no cause. */
+  error?: SessionError;
+}
 export interface LiveOptions {
   /** Bound for the handshake and each renewal reply. Not a limit on silence: Android emits no
    * frames while the screen is static. Default 30000. */
@@ -303,8 +307,10 @@ export class LiveStream {
   /** After the sockets dropped without a word from the host: what the controller recorded. The
    * host enforces a lease deadline slightly before the controller observes it, so the record is
    * read for a few seconds until it names a cause. */
-  private async resolve(host?: LiveEnd): Promise<LiveEnd> {
-    let device: string | undefined;
+  private async resolve(host?: LiveEnd, dropped?: unknown): Promise<LiveEnd> {
+    // Without a cause from the controller or the host, the end is this client's lost connection.
+    const lost = (): LiveEnd => ({ reason: 'connection_lost', source: 'client', ...(dropped instanceof SessionError ? { error: dropped } : {}) });
+    let device: string | undefined, disconnected = false;
     for (let attempt = 0; attempt < 12; attempt++) {
       try {
         const view = await this.inspect(), reason = view.state === 'ended' ? view.endReason : undefined;
@@ -314,16 +320,19 @@ export class LiveStream {
           // still be replaced.
           const provisional = reason === 'disconnected' || view.leaseId !== undefined && [...DEVICE_ENDED, 'capture_ended'].includes(reason);
           if (!provisional) return !host || AUTHORITY_ENDED.includes(reason) ? { reason, source: 'controller' } : host;
-          if (reason !== 'disconnected') device = reason;
+          // A host's explicit `capture_failed` is never replaced by the controller's plain record
+          // that the capture ended.
+          if (reason === 'disconnected') disconnected = true;
+          else if (!(host && reason === 'capture_ended')) device = reason;
         }
       } catch (error) {
         // The credential that opened the view no longer reads it: rotated or revoked.
         if (error instanceof ConsumerServiceError && [401, 403].includes(error.status)) return { reason: 'credential_rejected', source: 'controller' };
-        if (!(error instanceof ConsumerServiceError)) return host ?? { reason: 'connection_lost', source: 'client' };
+        if (!(error instanceof ConsumerServiceError)) return host ?? lost();
       }
       await pause(250);
     }
-    return device ? { reason: device, source: 'controller' } : host ?? { reason: 'disconnected', source: 'controller' };
+    return device ? { reason: device, source: 'controller' } : host ?? (disconnected ? { reason: 'disconnected', source: 'controller' } : lost());
   }
   async *segments(): AsyncGenerator<LiveSegment, LiveEnd, unknown> {
     if (this.used) throw new ConsumerConfigurationError('A live stream can only be consumed once.'); this.used = true;
@@ -362,7 +371,7 @@ export class LiveStream {
       // The broker ends a view by closing its sockets. A pong or renewal that crosses that close
       // draws a reset instead of an orderly end, which the connection reports as a failure; either
       // way the view's record says why it ended.
-      if (this.dropped || error instanceof SessionError && error.code === 'session_disconnected') return this.ended = await this.resolve();
+      if (this.dropped || error instanceof SessionError && error.code === 'session_disconnected') return this.ended = await this.resolve(undefined, error);
       throw interrupted(error, this.view.id);
     } finally { this.connection.close(); }
   }

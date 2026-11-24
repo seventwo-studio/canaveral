@@ -157,3 +157,34 @@ test("a lease view first recorded as ended with its capture reports the lease's 
   assert.deepEqual(await stream.segments().next(), { done: true, value: { reason: "lease_expired", source: "controller" } });
   assert.equal(inspected, 3);
 });
+
+test("a live stream reset mid-view that the controller never records as ended is this client's lost connection, with the transport error", async t => {
+  const b = await broker(t, { opened: socket => socket.write(PING), received: () => {} });
+  const connection = await connect(b.url, `/v1/leases/${randomUUID()}/live-views/${VIEW}/${randomUUID()}`, VIEW);
+  t.after(() => connection.close());
+  let inspected = 0;
+  const stream = new LiveStream(connection, view("ready"), {}, async () => { inspected++; return view("ready"); });
+  const result = await stream.segments().next();
+  await b.reset;
+  assert.equal(result.done, true);
+  assert.deepEqual([stream.ended?.reason, stream.ended?.source, stream.ended?.error?.code], ["connection_lost", "client", "session_incomplete"]);
+  assert.ok(inspected > 1, "the controller was asked for its record before the client concluded");
+});
+
+test("a dropped live stream reports `disconnected` from the controller only when the controller recorded it", async t => {
+  const b = await broker(t, { opened: socket => socket.write(PING), received: () => {} });
+  const connection = await connect(b.url, `/v1/leases/${randomUUID()}/live-views/${VIEW}/${randomUUID()}`, VIEW);
+  t.after(() => connection.close());
+  const stream = new LiveStream(connection, view("ready"), {}, async () => view("ended", "disconnected"));
+  await stream.segments().next();
+  assert.deepEqual(stream.ended, { reason: "disconnected", source: "controller" });
+});
+
+test("a host's capture_failed is not replaced by the controller's plain record that the capture ended", async () => {
+  const messages: unknown[] = [{ type: "end", reason: "capture_failed" }];
+  const channel = { sessionId: VIEW, async sendControl() {}, async sendBytes() {}, async receive() { return (messages.shift() ?? null) as Record<string, unknown> | null; }, close() {} };
+  let inspected = 0;
+  const stream = new LiveStream(channel, view("ready"), {}, async () => { inspected++; return view("ended", "capture_ended"); });
+  assert.deepEqual(await stream.segments().next(), { done: true, value: { reason: "capture_failed", source: "host" } });
+  assert.ok(inspected > 1, "the SDK waited for a lease ending that never came");
+});

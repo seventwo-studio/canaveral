@@ -1490,7 +1490,12 @@ controller observes the same ending. A view is therefore first recorded as
 `capture_ended` when the runner had already stopped the capture and reported its
 encoder gone. These are provisional for three seconds: any cause the controller then
 finds replaces `disconnected`, and the lease's or its key's own ending replaces a
-lease's device or capture cause. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
+lease's device cause. `capture_ended` gives way only to the fence that caused it: to
+`lease_expired` when the capture ended within those three seconds before the lease's
+deadline, or to `lease_failed`, and in both cases only when the runner's receipt for
+the capture confirmed just its encoder's exit, as a fenced runner's does. A capture
+the runner stopped with proof, or one that ended before a release or key rotation,
+keeps `capture_ended`. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
 runner's fence report arrived first. The SDK waits out that window before it
 reports a provisional reason. A credential that was rotated or revoked can no longer
 read its view; the SDK reports `credential_rejected`.

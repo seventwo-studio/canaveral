@@ -205,17 +205,19 @@ never renews, extends or releases a lease.
 | --- | --- |
 | `host` | The capturing host ended a stream it was still serving: `capture_failed`, `capture_unavailable` or `capture_ended` |
 | `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed` or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
-| `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost` (the controller could not be reached) |
+| `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost`: the controller could not be reached, or the connection dropped and the controller recorded no cause. `ended.error` then holds the connection failure |
 
 A stream drops when the broker closes its sockets. A connection reset counts as a
 drop too: the viewer's pong or renewal can cross the broker's close and draw a reset
 instead of an orderly end. After a dropped stream the SDK reads the view for up to three seconds, because the
 host enforces a lease deadline slightly before the controller records it; within
 that time `disconnected`, and for a lease `device_stopped`, `host_unavailable` or
-`capture_ended`, may still give way to the lease's own ending. It does
+`capture_ended`, may still give way to the lease's own ending. A source of
+`controller` always means the controller recorded that reason. It does
 the same when the host reports `capture_failed`: if the
 view's lease, credential or device ended in that moment, that cause is reported
-with source `controller`; otherwise the host's reason stands. A worker
+with source `controller`; otherwise the host's reason stands, and the controller's
+plain `capture_ended` never replaces it. A worker
 error, such as `capability_unsupported` from a host without live capture for that
 device, is thrown instead: by `connect` when the host refuses at once, otherwise by
 the iterator. The SDK never reconnects, never opens a new view and never replays
