@@ -565,9 +565,12 @@ async function exerciseVm() {
       const status = await call(maintenance);
       blockers = status.blockers.map(({ kind, state, detail }) => ({ kind, state, detail }));
       return status.safeToPowerOff;
-    }).catch(error => { throw new Error(error.message + ': ' + JSON.stringify(blockers)); });
-    kubectl('label', node, 'canaveral.dev/host-profile-');
-    kubectl('delete', '-k', 'deploy/kubernetes/canaverald/vm', '--timeout=150s');
+    }, 120).catch(error => { throw new Error(error.message + ': ' + JSON.stringify(blockers)); });
+    admission('label', node, 'canaveral.dev/host-profile-');
+    await eventually('VM pod termination after removing its node label', () => daemonPods().length === 0, 110);
+    admission('delete', '-k', 'deploy/kubernetes/canaverald/vm', '--ignore-not-found', '--timeout=150s');
+    assert.deepEqual(virsh('list', '--all', '--uuid').split('\n'), [machineId]);
+    assert.equal(virsh('domstate', machineId), 'shut off');
     assert.equal(sudo('jq', '-r', '.id', state + '/identity.json'), enrollment.hostId);
     assert.equal(sudo('jq', '-r', '.id', state + '-cpu-acceptance/identity.json'), cpuRetained.hostId);
     sudo('test', '-f', disk);
