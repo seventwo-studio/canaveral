@@ -45,6 +45,18 @@ async function step(name, work) {
   }
 }
 
+const failures = [];
+/** A lease scenario records its outcome and lets later scenarios run; the run fails at the end. */
+async function scenario(name, work) {
+  try { await step(name, work); }
+  catch {
+    failures.push(name);
+    // Best effort: leave libvirtd running, the daemon active and the reservation released.
+    try { attempt("sudo", ["-n", "pkill", "-CONT", "-x", "libvirtd"]); } catch { /* none */ }
+    try { if (attempt("systemctl", ["is-active", unit]).stdout !== "active") await startDaemon(); } catch { /* reported below */ }
+    try { await until("a released reservation after a failed scenario", reservedFree, 300, 2000); } catch { /* reported below */ }
+  }
+}
 const run = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...options }).trim();
 const sudo = (...args) => run('sudo', ['-n', ...args]);
 const attempt = (command, args) => {
@@ -286,7 +298,7 @@ try {
     app = created.credential;
   });
 
-  await step('consumer lease boots, stays up across idle keepalive, releases to a destroyed domain and removed overlay', async record => {
+  await scenario('consumer lease boots, stays up across idle keepalive, releases to a destroyed domain and removed overlay', async record => {
     const lease = await acquire(900);
     await booted(lease, record);
     // Idle for longer than many 5 s keepalive intervals: no spurious connection-loss fence.
@@ -305,7 +317,7 @@ try {
     await cleaned(lease, record);
   });
 
-  await step('expiry destroys the domain at its deadline and removes the overlay', async record => {
+  await scenario('expiry destroys the domain at its deadline and removes the overlay', async record => {
     const lease = await acquire(120);
     await booted(lease, record);
     record.secondsToDeadline = remaining(lease.machineId);
@@ -318,7 +330,7 @@ try {
     await cleaned(lease, record);
   });
 
-  await step('SIGKILL of the daemon fences the lease through the guardian while the daemon is down', async record => {
+  await scenario('SIGKILL of the daemon fences the lease through the guardian while the daemon is down', async record => {
     const lease = await acquire(900);
     const { qemu, guardian } = await booted(lease, record);
     ctl('kill', '--kill-whom=main', '--signal=SIGKILL', unit);
@@ -332,38 +344,7 @@ try {
     await cleaned(lease, record);
   });
 
-  await step('OOM kill of the guardian is fenced by the reconciler', async record => {
-    const lease = await acquire(900);
-    const { guardian } = await booted(lease, record);
-    // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose. The
-    // guardian's oom_score_adj of 1000 adds the whole limit to its score; the hog's RSS stays below it.
-    const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
-    sudo('choom', '-p', String(guardian), '-n', '1000');
-    const limit = Number(sudo('cat', `${cgroup}/memory.current`)) + 128 * 1048576;
-    sudo('sh', '-c', `echo ${limit} > ${cgroup}/memory.max`);
-    const marker = `canaveral-oom-hog-${lease.machineId}`;
-    const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
-    try {
-      await until('the OOM-killed guardian', () => !alive(guardian), 90, 250);
-    } finally {
-      attempt('sudo', ['-n', 'pkill', '-KILL', '-f', marker]);
-      hog.kill('SIGKILL');
-      // The unit may already be stopped and its cgroup gone.
-      attempt('sudo', ['-n', 'sh', '-c', `echo max > ${cgroup}/memory.max`]);
-    }
-    const kernel = sudo('dmesg').split('\n').filter(line => /oom|Killed process/i.test(line) && line.includes(String(guardian)));
-    assert.ok(kernel.some(line => line.includes(`Killed process ${guardian}`) || line.includes(`pid=${guardian}`)), 'the kernel OOM killer ended the guardian');
-    record.kernel = kernel.slice(-3);
-    record.oomKill = Number(/^oom_kill (\d+)$/m.exec(attempt('sudo', ['-n', 'cat', `${cgroup}/memory.events`]).stdout)?.[1] ?? 0) || null;
-    // systemd's default OOMPolicy=stop may stop the whole unit; every lease then fences on daemon exit.
-    record.unitAfterOom = attempt('systemctl', ['is-active', unit]).stdout;
-    if (record.unitAfterOom !== 'active') await startDaemon();
-    const native = await stoppedReceipt(lease.machineId);
-    record.reason = native.reason ?? 'guardian-ended';
-    await cleaned(lease, record);
-  });
-
-  await step('a guardian killed mid-fence is completed by the reconciler under its lock', async record => {
+  await scenario('a guardian killed mid-fence is completed by the reconciler under its lock', async record => {
     const lease = await acquire(900);
     const { qemu, guardian } = await booted(lease, record);
     const libvirtd = Number(run('pidof', ['libvirtd']).split(' ')[0]);
@@ -382,7 +363,7 @@ try {
     record.qemuGone = !alive(qemu);
   });
 
-  await step('a libvirtd restart mid-lease is a connection-loss fence', async record => {
+  await scenario('a libvirtd restart mid-lease is a connection-loss fence', async record => {
     const lease = await acquire(900);
     const { qemu } = await booted(lease, record);
     ctl('restart', 'libvirtd.service');
@@ -393,7 +374,7 @@ try {
     await cleaned(lease, record);
   });
 
-  await step('the deadline passes while libvirtd is stopped: CAP_KILL stops QEMU through a pidfd', async record => {
+  await scenario('the deadline passes while libvirtd is stopped: CAP_KILL stops QEMU through a pidfd', async record => {
     const lease = await acquire(150);
     const { qemu } = await booted(lease, record);
     const libvirtd = Number(run('pidof', ['libvirtd']).split(' ')[0]);
@@ -414,13 +395,49 @@ try {
     await cleaned(lease, record);
   });
 
-  await step('CLOCK_BOOTTIME follows the time namespace of the guardian', async record => {
+  await scenario('OOM kill of the guardian is fenced by the reconciler', async record => {
+    const lease = await acquire(900);
+    const { guardian } = await booted(lease, record);
+    // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose. The
+    // guardian's oom_score_adj of 1000 adds the whole limit to its score; the hog's RSS stays below it.
+    const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
+    sudo('choom', '-p', String(guardian), '-n', '1000');
+    record.scores = Object.fromEntries([['guardian', guardian], ['daemon', mainPid()]].map(([name, pid]) => [name, { adj: readFileSync(`/proc/${pid}/oom_score_adj`, 'utf8').trim(), score: readFileSync(`/proc/${pid}/oom_score`, 'utf8').trim() }]));
+    const limit = Number(sudo('cat', `${cgroup}/memory.current`)) + 128 * 1048576;
+    sudo('sh', '-c', `echo ${limit} > ${cgroup}/memory.max`);
+    const marker = `canaveral-oom-hog-${lease.machineId}`;
+    const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
+    try {
+      await until('the OOM-killed guardian', () => !alive(guardian), 90, 250);
+    } finally {
+      attempt('sudo', ['-n', 'pkill', '-KILL', '-f', marker]);
+      hog.kill('SIGKILL');
+      // The unit may already be stopped and its cgroup gone.
+      attempt('sudo', ['-n', 'sh', '-c', `echo max > ${cgroup}/memory.max`]);
+    }
+    const oomLines = sudo('dmesg').split('\n').filter(line => /oom-kill:|Killed process/.test(line));
+    record.oomLines = oomLines.slice(-6);
+    const kernel = oomLines.filter(line => line.includes(String(guardian)));
+    assert.ok(kernel.some(line => line.includes(`Killed process ${guardian}`) || line.includes(`pid=${guardian}`)), 'the kernel OOM killer ended the guardian');
+    record.kernel = kernel.slice(-3);
+    record.oomKill = Number(/^oom_kill (\d+)$/m.exec(attempt('sudo', ['-n', 'cat', `${cgroup}/memory.events`]).stdout)?.[1] ?? 0) || null;
+    // systemd's default OOMPolicy=stop may stop the whole unit; every lease then fences on daemon exit.
+    record.unitAfterOom = attempt('systemctl', ['is-active', unit]).stdout;
+    if (record.unitAfterOom !== 'active') await startDaemon();
+    const native = await stoppedReceipt(lease.machineId);
+    record.reason = native.reason ?? 'guardian-ended';
+    await cleaned(lease, record);
+  });
+
+  await scenario('CLOCK_BOOTTIME follows the time namespace of the guardian', async record => {
     const outside = Number(run(helper, ['clock']));
     const inside = attempt('sudo', ['-n', 'unshare', '--time', '--boottime', '86400', '--fork', helper, 'clock']);
     if (inside.status !== 0) { record.skipped = inside.stderr.slice(0, 200); return; }
     record.offset = Number(inside.stdout) - outside;
     assert.ok(Math.abs(record.offset - 86400) < 5, `offset ${record.offset}`);
   });
+  evidence.failures = failures;
+  assert.deepEqual(failures, [], `failed scenarios: ${failures.join(', ')}`);
 } finally {
   try { ctl('stop', unit); } catch { /* not installed */ }
   try { evidence.journal = sudo('journalctl', '-u', unit, '--no-pager', '-n', '200', '-o', 'cat').split('\n').slice(-200); } catch { /* none */ }
