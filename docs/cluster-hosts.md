@@ -277,6 +277,9 @@ draining a node for infrastructure work. Kubernetes owns daemon updates in this
 profile.
 
 The daemon's shutdown budget, `shutdownGraceSeconds`, defaults to 120 seconds.
+Tini runs as PID 1, reaps orphaned processes and forwards SIGTERM to canaverald.
+Canaverald runs as Tini's child, so each lease guardian can verify its own
+daemon parent inside the pod's PID namespace.
 The pod's `terminationGracePeriodSeconds` is 150. Keep
 `shutdownGraceSeconds` at most `terminationGracePeriodSeconds` minus 30, so the
 daemon finishes its bounded cleanup before Kubernetes sends SIGKILL. The release

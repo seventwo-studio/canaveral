@@ -75,7 +75,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libvirt-clients=11.3.0-3+deb13u3 \
       libvirt0=11.3.0-3+deb13u3 \
       qemu-utils=1:10.0.13+ds-0+deb13u1 \
-      genisoimage=9:1.1.11-4 && \
+      genisoimage=9:1.1.11-4 \
+      tini=0.19.0-3+b8 && \
     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 canaverald && \
     useradd --uid 10001 --gid 10001 --no-create-home canaverald
 COPY --from=node-build /app/coordination/dist/src ./coordination/dist/src
@@ -86,5 +87,5 @@ COPY --from=rust-build --chown=0:0 --chmod=0755 /source/target/release/canaveral
 RUN ln -s /app/coordination/dist/src/canaverald.js /usr/local/bin/canaverald && \
     chmod 0755 /app/coordination/dist/src/canaverald.js
 USER 10001:10001
-ENTRYPOINT ["canaverald"]
+ENTRYPOINT ["/usr/bin/tini", "--", "canaverald"]
 CMD ["--config", "/etc/canaverald/host.json", "--state", "/var/lib/canaverald"]

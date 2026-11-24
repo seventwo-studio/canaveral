@@ -414,6 +414,9 @@ async function exerciseVmLeases(hostId, template, storage) {
     }, 150);
     const machineId = lease.members[0].machineId;
     assert.match(machineId, /^[0-9a-f-]{36}$/);
+    const { parentPid } = journal(machineId, 'launch');
+    assert(parentPid > 1, 'The guardian has a namespaced canaverald parent distinct from init.');
+    assert(inPod('cat', '/proc/1/task/1/children').split(/\s+/).includes(String(parentPid)));
     const native = receipt(machineId);
     assert.equal(native.phase, 'running');
     assert.equal(native.identity.machineId, machineId);
@@ -566,6 +569,8 @@ async function exerciseVm() {
     vm.leaseImages = [{ id: leaseTemplate.id, revision: leaseTemplate.revision, arch: leaseTemplate.arch, runtime: 'libvirt' }];
     config.data['host.json'] = JSON.stringify(vm);
     const pod = overlay.items.find(item => item.kind === 'DaemonSet').spec.template.spec;
+    assert.equal(pod.terminationGracePeriodSeconds, 150);
+    assert.equal(vm.shutdownGraceSeconds, 120);
     assert.deepEqual(pod.securityContext.supplementalGroups, [10003]);
     assert(!pod.volumes.some(volume => volume.hostPath?.path === '/dev/kvm'));
     // Exercise the documented replacement of an unclaimed token before the first claim.
@@ -612,6 +617,23 @@ async function exerciseVm() {
       socket: 'root:canaveral-libvirt:660', storage: 'canaverald:canaveral-vm:2750', replacedUnclaimedToken: true };
   });
   if (!enrollment) return;
+  await step('Tini forwards SIGTERM for graceful canaverald shutdown', async () => {
+    const [old] = daemonPods();
+    const restartCount = old.status.containerStatuses[0].restartCount;
+    assert.equal(inPod('readlink', '/proc/1/exe'), '/usr/bin/tini');
+    const before = Date.now();
+    inPod('sh', '-ec', 'kill -TERM 1');
+    const ended = await eventually('clean container exit after SIGTERM', () => {
+      const [pod] = daemonPods();
+      const current = pod?.status.containerStatuses?.[0];
+      return pod?.metadata.uid === old.metadata.uid && current?.restartCount > restartCount &&
+        current.ready && current.lastState.terminated;
+    }, 75);
+    assert.equal(ended.exitCode, 0);
+    assert(Date.parse(ended.finishedAt) - before <= 120_000, 'Shutdown should finish within the daemon budget.');
+    assert.equal(sudo('jq', '-r', '.id', state + '/identity.json'), enrollment.hostId);
+    return { init: 'tini', exitCode: ended.exitCode, hostId: enrollment.hostId };
+  });
   await exerciseVmLeases(enrollment.hostId, leaseTemplate, storage);
 
   const machineId = randomUUID();
