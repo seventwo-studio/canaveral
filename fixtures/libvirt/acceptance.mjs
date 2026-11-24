@@ -2,7 +2,7 @@
 // x64 runner: host libvirtd with KVM, canaverald as a systemd service, the pinned Rust lease
 // helper and a digest-pinned CirrOS guest. Usage: acceptance.mjs HELPER EVIDENCE.json
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { release, tmpdir } from 'node:os';
@@ -335,19 +335,32 @@ try {
   await step('OOM kill of the guardian is fenced by the reconciler', async record => {
     const lease = await acquire(900);
     const { guardian } = await booted(lease, record);
-    // A dedicated cgroup v2 leaf whose memory.max is below the guardian's usage invokes the kernel OOM killer.
-    const cgroup = '/sys/fs/cgroup/canaveral-guardian-oom';
-    sudo('mkdir', cgroup);
-    sudo('sh', '-c', `echo ${guardian} > ${cgroup}/cgroup.procs`);
-    sudo('sh', '-c', `echo 4096 > ${cgroup}/memory.max || true`);
-    await until('the OOM-killed guardian', () => !alive(guardian), 30);
-    const events = sudo('cat', `${cgroup}/memory.events`);
-    record.oomKill = Number(/^oom_kill (\d+)$/m.exec(events)?.[1] ?? 0);
-    assert.ok(record.oomKill >= 1, events);
+    // Memory pressure inside the service's own cgroup makes the kernel OOM killer choose: the
+    // guardian has the highest oom_score_adj, then the allocating hog, never the daemon.
+    const cgroup = '/sys/fs/cgroup' + readFileSync(`/proc/${guardian}/cgroup`, 'utf8').trim().split('::')[1];
+    sudo('choom', '-p', String(guardian), '-n', '1000');
+    const limit = Number(sudo('cat', `${cgroup}/memory.current`)) + 128 * 1048576;
+    sudo('sh', '-c', `echo ${limit} > ${cgroup}/memory.max`);
+    const marker = `canaveral-oom-hog-${lease.machineId}`;
+    const hog = spawn('sudo', ['-n', 'sh', '-c', `echo $$ > ${cgroup}/cgroup.procs && echo 900 > /proc/self/oom_score_adj && exec ${process.execPath} -e "const a=[];setInterval(()=>a.push(Buffer.alloc(8<<20,1)),10)" ${marker}`], { stdio: 'ignore' });
+    try {
+      await until('the OOM-killed guardian', () => !alive(guardian), 90, 250);
+    } finally {
+      attempt('sudo', ['-n', 'pkill', '-KILL', '-f', marker]);
+      hog.kill('SIGKILL');
+      // The unit may already be stopped and its cgroup gone.
+      attempt('sudo', ['-n', 'sh', '-c', `echo max > ${cgroup}/memory.max`]);
+    }
+    const kernel = sudo('dmesg').split('\n').filter(line => /oom|Killed process/i.test(line) && line.includes(String(guardian)));
+    assert.ok(kernel.some(line => line.includes(`Killed process ${guardian}`) || line.includes(`pid=${guardian}`)), 'the kernel OOM killer ended the guardian');
+    record.kernel = kernel.slice(-3);
+    record.oomKill = Number(/^oom_kill (\d+)$/m.exec(attempt('sudo', ['-n', 'cat', `${cgroup}/memory.events`]).stdout)?.[1] ?? 0) || null;
+    // systemd's default OOMPolicy=stop may stop the whole unit; every lease then fences on daemon exit.
+    record.unitAfterOom = attempt('systemctl', ['is-active', unit]).stdout;
+    if (record.unitAfterOom !== 'active') await startDaemon();
     const native = await stoppedReceipt(lease.machineId);
     record.reason = native.reason ?? 'guardian-ended';
     await cleaned(lease, record);
-    sudo('rmdir', cgroup);
   });
 
   await step('a guardian killed mid-fence is completed by the reconciler under its lock', async record => {
@@ -391,7 +404,7 @@ try {
     sudo('kill', '-STOP', String(libvirtd));
     try {
       await until('QEMU killed by the guardian while libvirtd is stopped', () => !alive(qemu), 90, 500);
-      const native = receipt(lease.machineId);
+      const native = await until('the receipt of the pidfd kill', () => { const r = receipt(lease.machineId); return /^qemu-killed/.test(r.fence ?? '') && r; }, 20, 200);
       Object.assign(record, { reason: native.reason, fence: native.fence ?? null, secondsAfterDeadline: Date.now() / 1000 - deadline });
       assert.ok(['deadline', 'fenced'].includes(native.reason), native.reason);
       assert.match(native.fence ?? '', /^qemu-killed/);
