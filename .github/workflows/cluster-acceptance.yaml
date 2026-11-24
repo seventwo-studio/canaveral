@@ -42,7 +42,7 @@ jobs:
           for overlay in deploy/kubernetes/*/ deploy/kubernetes/canaverald/vm; do
             kubectl kustomize "$overlay" >/dev/null
           done
-          bash -n script/provision_cluster_node.sh fixtures/cluster/setup.sh
+          bash -n script/provision_cluster_node.sh fixtures/cluster/setup.sh fixtures/cluster/diagnostics.sh
       - name: Check the release bundle, image pin and shutdown budget
         run: node --test script/publish_release.test.mjs
   native:
@@ -60,6 +60,7 @@ jobs:
         run: |
           printf '%s\n' "CLUSTER_WORK=$RUNNER_TEMP/canaveral-cluster" \
             "CLUSTER_EVIDENCE=$RUNNER_TEMP/canaveral-cluster-evidence.json" \
+            "CLUSTER_DIAGNOSTICS=$RUNNER_TEMP/canaveral-cluster-diagnostics" \
             "KUBECONFIG=$RUNNER_TEMP/canaveral-cluster/kubeconfig" >> "$GITHUB_ENV"
       - name: Set up disposable k3s controller
         run: bash fixtures/cluster/setup.sh
@@ -69,10 +70,15 @@ jobs:
           trap 'kill "$!" 2>/dev/null || true' EXIT
           export NODE_EXTRA_CA_CERTS="$CLUSTER_WORK/ca.crt"
           node fixtures/cluster/acceptance.mjs
+      - name: Collect host libvirt, QEMU and AppArmor diagnostics
+        if: always()
+        run: bash fixtures/cluster/diagnostics.sh "$CLUSTER_DIAGNOSTICS"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: cluster-acceptance
-          path: ${{ env.CLUSTER_EVIDENCE }}
+          path: |
+            ${{ env.CLUSTER_EVIDENCE }}
+            ${{ env.CLUSTER_DIAGNOSTICS }}
           if-no-files-found: error
           retention-days: 7

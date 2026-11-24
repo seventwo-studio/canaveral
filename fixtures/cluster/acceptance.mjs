@@ -480,29 +480,18 @@ async function exerciseVm() {
       machine = await call(route);
       return machine.observed === 'running' && machine.ready;
     }).catch(error => {
-      // Host-side state only: modes, libvirt state and the domain's QEMU log tail.
+      // A summary only. The workflow's diagnostics step collects the domain XML,
+      // QEMU log, libvirtd journal and AppArmor denials from the host.
       const native = virsh('list', '--all', '--uuid').split('\n').includes(machineId);
       const tail = (bin, args) => { try { return command(bin, args).replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(-600); } catch (failure) { return failure.message; } };
       const context = JSON.stringify({
         observed: machine?.observed,
         detail: String(machine?.detail ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 300),
-        nativeState: native ? virsh('domstate', machineId) : 'undefined',
+        nativeState: native ? virsh('domstate', '--reason', machineId) : 'undefined',
         modes: tail('sudo', ['stat', '-c', '%n %U:%G %a', storage, storage + '/' + machineId, disk, template.image]),
-        qemuLog: tail('sudo', ['tail', '-n', '8', '/var/log/libvirt/qemu/cvm-' + machineId + '.log']),
-        libvirtd: tail('sudo', ['journalctl', '-u', 'libvirtd', '--no-pager', '-n', '8', '-o', 'cat', '--grep', 'error|denied|cvm-']),
-        apparmor: tail('sudo', ['journalctl', '-k', '--no-pager', '-n', '4', '-o', 'cat', '--grep', 'apparmor="DENIED"']),
         daemon: tail('kubectl', ['-n', 'canaverald', 'logs', 'daemonset/canaverald', '--tail=12']),
+        diagnostics: 'cluster-acceptance artifact, canaveral-cluster-diagnostics/',
       });
-      // Expected only while the daemon creates VM storage without group access
-      // for the canaveral-vm QEMU account (docs/cluster-hosts.md, Host libvirt setup).
-      const mode = path => { try { return parseInt(sudo('stat', '-c', '%a', path), 8); } catch { return null; } };
-      const folderMode = mode(storage + '/' + machineId), diskMode = mode(disk);
-      if (machine?.observed === 'unknown' && native && virsh('domstate', machineId) === 'shut off' &&
-          folderMode !== null && diskMode !== null && ((folderMode & 0o050) !== 0o050 || (diskMode & 0o060) !== 0o060)) {
-        throw new ExpectedGap('The domain is defined but cannot start: the daemon created the VM directory ' +
-          (folderMode & 0o7777).toString(8) + ' and disk ' + (diskMode & 0o777).toString(8) +
-          ' without canaveral-vm access and renders no static DAC seclabel. ' + context);
-      }
       throw new Error(error.message + ': ' + context);
     });
     assert.equal(virsh('domstate', machineId), 'running');
