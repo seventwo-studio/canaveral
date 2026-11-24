@@ -470,6 +470,11 @@ async function exerciseVm() {
   const machineId = randomUUID();
   const route = '/v1/machines/' + machineId;
   const disk = storage + '/' + machineId + '/disk.qcow2';
+  // Read-only replay of the daemon's pre-start checks inside the pod (fixtures/cluster/libvirt-probe.mjs).
+  const probe = () => JSON.parse(command('kubectl', ['-n', 'canaverald', 'exec', '-i', 'daemonset/canaverald', '--',
+    'node', '--input-type=module', '-'], { input: readFileSync(new URL('./libvirt-probe.mjs', import.meta.url)), timeout: 120_000 }))
+    .find(entry => entry.machineId === machineId)?.checks ?? [];
+  let daemonDomuuid = false;
   const started = await step('boot the pinned guest through the administrative API', async () => {
     await call('/v1/machines', {
       id: machineId, name: 'disposable CirrOS guest', hostId: enrollment.hostId,
@@ -484,14 +489,30 @@ async function exerciseVm() {
       // QEMU log, libvirtd journal and AppArmor denials from the host.
       const native = virsh('list', '--all', '--uuid').split('\n').includes(machineId);
       const tail = (bin, args) => { try { return command(bin, args).replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(-600); } catch (failure) { return failure.message; } };
+      let checks;
+      try { checks = probe(); } catch (failure) { checks = [{ check: 'probe', ok: false, error: failure.message }]; }
+      const failed = checks.filter(entry => !entry.ok);
+      const result = name => checks.find(entry => entry.check === name);
       const context = JSON.stringify({
         observed: machine?.observed,
         detail: String(machine?.detail ?? '').replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]').slice(0, 300),
         nativeState: native ? virsh('domstate', '--reason', machineId) : 'undefined',
         modes: tail('sudo', ['stat', '-c', '%n %U:%G %a', storage, storage + '/' + machineId, disk, template.image]),
-        daemon: tail('kubectl', ['-n', 'canaverald', 'logs', 'daemonset/canaverald', '--tail=12']),
+        refusedChecks: failed,
         diagnostics: 'cluster-acceptance artifact, canaveral-cluster-diagnostics/',
       });
+      // Known daemon defect: it verifies the domain with `virsh domuuid <uuid>`, but
+      // virsh resolves domuuid only by name or ID, so every check before start refuses.
+      // Only this exact state is blocked; any other boot failure fails the run.
+      daemonDomuuid = machine?.observed === 'unknown' && native && virsh('domstate', machineId) === 'shut off' &&
+        result('execution phase')?.value === 'prepared' && failed.length === 1 &&
+        failed[0].check === 'virsh domuuid <uuid>' && /failed to get domain/.test(failed[0].error) &&
+        result('virsh domuuid cvm-<uuid>')?.value === machineId && result('domain XML')?.value === 'valid';
+      if (daemonDomuuid) {
+        throw new ExpectedGap('The daemon defined the domain with the static DAC label and group-shared storage, then refused ' +
+          'before `virsh start`: coordination/src/providers/libvirt.ts runs `virsh domuuid <uuid>` (reconcile and adminAction), ' +
+          'which virsh resolves only by name or ID. ' + context);
+      }
       throw new Error(error.message + ': ' + context);
     });
     assert.equal(virsh('domstate', machineId), 'running');
@@ -505,6 +526,46 @@ async function exerciseVm() {
     return { machineId, domainId, guestBoot: 'SSH banner on private libvirt network', guestIp: ip };
   });
   if (!started) {
+    // Verifies the host half while the daemon start is blocked: root starts the
+    // daemon-defined domain through the same libvirtd, so QEMU gets the same
+    // account, AppArmor profile, firmware, network and storage as a daemon start.
+    if (daemonDomuuid) await step('host-side start of the daemon-defined domain (host setup check, not daemon acceptance)', async () => {
+      const name = 'cvm-' + machineId, before = sudo('stat', '-c', '%d:%i', disk), facts = {};
+      // Collect every fact before asserting, so one failure still leaves the others as evidence.
+      command('sudo', ['virsh', '--connect', 'qemu:///system', 'start', machineId], { reveal: true });
+      try {
+        facts.state = virsh('domstate', machineId);
+        const pid = sudo('cat', '/run/libvirt/qemu/' + name + '.pid');
+        const status = Object.fromEntries(sudo('cat', '/proc/' + pid + '/status').split('\n')
+          .map(line => line.split(':\t')).filter(([key]) => ['Uid', 'Gid', 'Groups'].includes(key)).map(([key, value]) => [key, value.trim().split(/\s+/)]));
+        facts.qemu = { uid: status.Uid?.[0], gid: status.Gid?.[0], groups: status.Groups ?? [] };
+        facts.apparmor = sudo('cat', '/proc/' + pid + '/attr/current').replace(/\0/g, '').trim();
+        try {
+          facts.guestIp = await eventually('guest DHCP and SSH service', async () => {
+            const address = virsh('domifaddr', machineId, '--source', 'lease')
+              .match(/\b(192\.168\.122\.\d{1,3})\/\d+\b/)?.[1];
+            return address && await sshBanner(address) && address;
+          }, 125);
+        } catch (failure) { facts.guestBoot = failure.message; }
+        // The pod-replacement step reconciles a running domain; record whether the
+        // daemon's own validation accepts libvirt's live XML.
+        const live = probe().find(entry => entry.check === 'domain XML');
+        facts.liveXmlDaemonValidation = live?.ok ? 'valid' : live?.error ?? 'not probed';
+        try { facts.qemuProfileDenials = sudo('journalctl', '-k', '--no-pager', '-o', 'cat', '--grep', 'apparmor="DENIED".*profile="libvirt-' + machineId).split('\n').slice(0, 5); }
+        catch { facts.qemuProfileDenials = []; /* journalctl exits 1 when nothing matches */ }
+      } finally {
+        try { if (virsh('domstate', machineId) !== 'shut off') virsh('destroy', machineId); } catch (failure) { facts.destroy = failure.message; }
+      }
+      const evidence = JSON.stringify(facts);
+      assert.equal(facts.state, 'running', evidence);
+      assert.equal(facts.qemu.uid, command('id', ['-u', 'libvirt-qemu']), evidence);
+      assert.equal(facts.qemu.gid, '10002', evidence);
+      assert.equal(facts.apparmor, 'libvirt-' + machineId + ' (enforce)', evidence);
+      assert(facts.guestIp, evidence);
+      assert.equal(virsh('domstate', machineId), 'shut off', evidence);
+      assert.equal(sudo('stat', '-c', '%d:%i', disk), before, evidence);
+      return { ...facts, guestBoot: 'SSH banner on private libvirt network', firmware: 'OVMF selected by firmware="efi"', disk: 'retained after destroy' };
+    });
     report.steps.push(...[
       'replace the pod during an administrative VM run',
       'stop the administrative VM and retain its owned disk',

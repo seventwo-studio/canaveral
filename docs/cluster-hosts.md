@@ -200,17 +200,34 @@ Install templates as regular files owned by `10001:canaveral-vm` with mode
 images. The daemon state directory stays `0700` and is not readable by
 `canaveral-vm`.
 
-Per-domain ownership is the remaining daemon contract. The model needs each
-Canaveral domain to carry a static DAC label without relabelling, such as
+Each Canaveral domain carries a static DAC label without relabelling,
 `<seclabel type="static" model="dac" relabel="no"><label>libvirt-qemu:canaveral-vm</label></seclabel>`,
-so that libvirtd neither changes ownership host-wide nor chowns the daemon's
-files. VM directories must be `2750` and disks `0660` for QEMU to open them.
-The current daemon writes no `seclabel`, creates VM directories `0700` and disks
-`0600`, and refuses group-writable disks. Until the libvirt lease work ships
-those changes, VM boot on this host model remains blocked. The hosted
-acceptance run defines the domain and stops there: the daemon's VM directory is
-`2700` and its disk `0600`, so QEMU never starts. It reports that exact state as
-blocked; any other boot failure fails the run.
+so libvirtd neither changes ownership host-wide nor chowns the daemon's files.
+The daemon creates VM directories `2750` and disks `0660` in `canaveral-vm`,
+which QEMU needs to open them. The distribution's AppArmor security driver
+stays enabled: libvirt confines each QEMU process in its generated
+`libvirt-<uuid>` profile, and `firmware="efi"` selects the packaged OVMF
+build.
+
+Administrative VM start is blocked by a daemon defect. Before `virsh start`,
+the daemon verifies the domain with `virsh domuuid <uuid>`, but virsh resolves
+`domuuid` only by domain name or ID, so the check always fails and the machine
+stays `unknown` with the domain defined and shut off. The hosted acceptance run
+reports exactly that state as blocked; any other boot failure fails the run.
+It then starts the daemon-defined domain from the host as root through the same
+libvirtd and checks the host half: QEMU runs as `libvirt-qemu` with primary
+group `canaveral-vm`, in enforce mode under `libvirt-<uuid>`, and the guest
+leases an address on the `default` network and answers SSH. It destroys the
+domain and checks that the disk is retained. That check does not accept the
+daemon.
+
+On Ubuntu, libvirtd's AppArmor profile denies `ptrace read` on the
+`cri-containerd.apparmor.d` profile each time the pod connects. libvirtd is
+trying to inspect the connecting client process. Every libvirt call from the
+pod still succeeds, and with `auth_unix_rw = "none"` no polkit subject check
+depends on it, so Canaveral leaves the profile unchanged. On hosts that keep
+`auth_unix_rw = "polkit"` with AppArmor enabled, the effect of the denial has
+not been verified.
 
 Administrative starts use host libvirtd and can keep running through pod
 replacement. Verify the same host ID, domain and owned disk when the pod returns.

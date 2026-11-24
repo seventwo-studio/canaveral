@@ -13,7 +13,8 @@ const ownership = await import(dist + 'libvirt-ownership.js');
 const provider = await import(dist + 'libvirt.js');
 const config = JSON.parse(fs.readFileSync('/etc/canaverald/host.json', 'utf8'));
 const machines = '/var/lib/canaverald/machines';
-const results = [];
+const machinesReport = [];
+let results;
 const check = async (name, task) => {
   try { results.push({ check: name, ok: true, value: await task() }); }
   catch (error) { results.push({ check: name, ok: false, error: String(error?.message ?? error).slice(0, 400) }); }
@@ -30,30 +31,32 @@ const json = path => JSON.parse(fs.readFileSync(path, 'utf8'));
 for (const id of fs.existsSync(machines) ? fs.readdirSync(machines) : []) {
   const folder = join(machines, id);
   if (!fs.existsSync(join(folder, 'libvirt-binding.json'))) continue;
+  results = [];
+  machinesReport.push({ machineId: id, checks: results });
   const spec = json(join(folder, 'libvirt-binding.json'));
   const binding = new ownership.LibvirtLeaseBinding(spec.binding);
   const access = provider.vmStorageAccess(config);
   const root = join(config.storage, binding.machine_id);
-  await check(id + ' process', () => ({ uid: process.getuid(), gid: process.getgid(), groups: process.getgroups() }));
-  await check(id + ' private folder', () => { ownership.owned(fs.lstatSync(folder), true); return 'owned 0700'; });
-  await check(id + ' execution phase', () => json(join(folder, 'libvirt-execution.json')).phase);
-  await check(id + ' execution identity', () => {
+  await check('process', () => ({ uid: process.getuid(), gid: process.getgid(), groups: process.getgroups() }));
+  await check('private folder', () => { ownership.owned(fs.lstatSync(folder), true); return 'owned 0700'; });
+  await check('execution phase', () => json(join(folder, 'libvirt-execution.json')).phase);
+  await check('execution identity', () => {
     if (!ownership.matches(json(join(folder, 'libvirt-execution.json')), binding.identity())) throw new Error('execution history is foreign');
     return 'matches';
   });
-  await check(id + ' assignment receipt', () => {
+  await check('assignment receipt', () => {
     const receipt = json(join(folder, 'assignment.json'));
     if (receipt.fingerprint !== binding.fingerprint) throw new Error('assignment fingerprint differs from the binding');
     return 'matches';
   });
-  await check(id + ' location', () => {
+  await check('location', () => {
     const uri = provider.localLibvirtUri(config);
     const facts = { uri: spec.uri === uri, disk: binding.disk === join(root, 'disk.qcow2'),
       access: spec.storageAccess === undefined || ownership.canonical(spec.storageAccess) === ownership.canonical(access) };
     if (!Object.values(facts).every(Boolean)) throw new Error('location differs: ' + JSON.stringify({ ...facts, saved: spec.uri, expected: uri }));
     return facts;
   });
-  await check(id + ' owned storage', () => {
+  await check('owned storage', () => {
     ownership.noSymlinks(root);
     const directory = fs.lstatSync(root);
     provider.vmEntry(directory, spec.storageAccess, 'directory');
@@ -64,12 +67,14 @@ for (const id of fs.existsSync(machines) ? fs.readdirSync(machines) : []) {
     if (ownership.readPrivate(join(root, 'canaveral-owner.json'))?.fingerprint !== binding.fingerprint) throw new Error('owner marker differs');
     return 'unchanged';
   });
-  for (const args of [['list', '--all', '--uuid'], ['domuuid', binding.machine_id], ['domstate', binding.machine_id]]) {
-    await check(id + ' virsh ' + args[0], () => virsh(spec.uri, ...args).slice(0, 200));
+  // The daemon calls domuuid with the UUID; virsh resolves domuuid only by name or ID.
+  for (const args of [['list', '--all', '--uuid'], ['domuuid', binding.machine_id], ['domuuid', 'cvm-' + binding.machine_id],
+    ['domname', binding.machine_id], ['domstate', binding.machine_id]]) {
+    await check('virsh ' + args.join(' ').replaceAll(binding.machine_id, '<uuid>'), () => virsh(spec.uri, ...args).slice(0, 200));
   }
-  await check(id + ' domain XML', () => {
+  await check('domain XML', () => {
     ownership.validateDomainXML(virsh(spec.uri, 'dumpxml', binding.machine_id), binding, spec.storageAccess?.label);
     return 'valid';
   });
 }
-console.log(JSON.stringify(results, null, 2));
+console.log(JSON.stringify(machinesReport, null, 2));
