@@ -162,14 +162,25 @@ test("a live view ends with its lease at expiry, and its capture is released onl
     assert.ok(ordered(viewer.got.segments));
     await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease");
     assert.ok(Date.now() - h.media.recorders.get(name)!.started < 30000, "the capture ended with the lease, not at its time limit");
-    // The runner's encoder exited; the fenced guest's recorder is proven gone only by the lease's cleanup.
+    // The runner's encoder exited in both orderings below. While the lease's cleanup proof is held,
+    // the capture is released only on the runner's own proof that the exact guest recorder stopped.
     await until(async () => (await lease.video.inspect(view.captureId)).hostCleaned === true, "host encoder cleanup", 30000);
     assert.equal(h.media.encodersOpen, 0);
-    assert.equal((await lease.video.inspect(view.captureId)).cleaned, false);
-    assert.deepEqual(await h.reserved(), WITH_CAPTURE);
+    const settled = await lease.video.inspect(view.captureId);
+    if (settled.cleaned) {
+      // The controller ended the view a moment before the runner's own fence: the runner still held
+      // the device's authority and proved the recorder stopped. The emulator stays reserved for its proof.
+      t.diagnostic("ordering: the runner proved the guest recorder stopped before its fence");
+      assert.equal(h.media.recorders.get(name)!.running, false);
+      assert.deepEqual(await h.reserved(), LEASE);
+    } else {
+      // The runner fenced first and could confirm only its encoder: the capture stays reserved.
+      t.diagnostic("ordering: the runner fenced first; the lease's cleanup proves the recorder gone");
+      assert.deepEqual(await h.reserved(), WITH_CAPTURE);
+    }
     releaseProof();
     await cleaned(h, app, a.id);
-    await until(async () => (await lease.video.inspect(view.captureId)).cleaned === true, "capture settled by lease cleanup");
+    await until(async () => (await lease.video.inspect(view.captureId)).cleaned === true, "capture settled with proof");
     assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
     // The ended lease reads its view but cannot watch again.
     await until(async () => (await lease.live.inspect(viewer.id)).state === "ended", "settled view");
