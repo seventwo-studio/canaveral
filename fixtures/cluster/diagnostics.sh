@@ -24,6 +24,7 @@ collect networks.txt bash -c 'sudo virsh --connect qemu:///system net-list --all
 collect storage.txt sudo bash -c 'find /var/lib/libvirt/images/canaveral -maxdepth 2 -printf "%M %u:%g %s %p\n"; for disk in /var/lib/libvirt/images/canaveral/*/disk.qcow2; do [[ -f "$disk" ]] && qemu-img info --force-share "$disk"; done'
 # The daemon journals record each administrative phase; only the phase is copied.
 collect daemon-phases.txt sudo bash -c 'find /var/lib/canaverald /var/lib/canaverald-cpu-acceptance -name "libvirt-*.json" 2>/dev/null | while read -r file; do printf "%s phase=%s\n" "$file" "$(jq -r ".phase // \"(none)\"" "$file")"; done'
+collect journal-directories.txt sudo find /var/lib/canaverald/machines -mindepth 1 -maxdepth 1 -printf '%y %M %u:%g %f\n'
 collect domains.txt bash -c 'sudo virsh --connect qemu:///system list --all --uuid --name'
 
 for domain in $(sudo virsh --connect qemu:///system list --all --name 2>/dev/null | grep '^cvm-'); do
