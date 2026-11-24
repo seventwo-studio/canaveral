@@ -13,7 +13,7 @@ collect() {
   local file=$1; shift
   { printf '$ %s\n' "$*"; "$@" 2>&1; printf '[exit %s]\n' "$?"; } | redact > "$out/$file"
 }
-virsh() { sudo virsh --connect qemu:///system "$@"; }
+here=$(dirname -- "${BASH_SOURCE[0]}")
 
 collect host.txt bash -c 'uname -a; cat /etc/os-release; id libvirt-qemu; id canaverald; getent group canaveral-vm canaveral-libvirt kvm; ls -l /dev/kvm; nproc; free -m'
 collect packages.txt bash -c 'dpkg-query -W libvirt-daemon-system libvirt-daemon-driver-qemu qemu-system-x86 ovmf apparmor 2>&1'
@@ -26,7 +26,7 @@ collect storage.txt sudo bash -c 'find /var/lib/libvirt/images/canaveral -maxdep
 collect daemon-phases.txt sudo bash -c 'find /var/lib/canaverald /var/lib/canaverald-cpu-acceptance -name "libvirt-*.json" 2>/dev/null | while read -r file; do printf "%s phase=%s\n" "$file" "$(jq -r ".phase // \"(none)\"" "$file")"; done'
 collect domains.txt bash -c 'sudo virsh --connect qemu:///system list --all --uuid --name'
 
-for domain in $(virsh list --all --name 2>/dev/null | grep '^cvm-'); do
+for domain in $(sudo virsh --connect qemu:///system list --all --name 2>/dev/null | grep '^cvm-'); do
   collect "$domain.state.txt" sudo virsh --connect qemu:///system domstate --reason "$domain"
   collect "$domain.dominfo.txt" sudo virsh --connect qemu:///system dominfo "$domain"
   collect "$domain.xml" sudo virsh --connect qemu:///system dumpxml "$domain"
@@ -37,6 +37,8 @@ collect apparmor-profiles.txt sudo bash -c 'aa-status 2>&1 | grep -E "libvirt|co
 collect apparmor-denials.txt sudo journalctl -k --no-pager -o short-precise --grep 'apparmor="DENIED"'
 collect libvirtd.journal.txt sudo journalctl --no-pager -o short-precise -u libvirtd.service -u libvirtd.socket -u virtqemud.service -u virtlogd.service
 collect dmesg.txt bash -c 'sudo dmesg --ctime | tail -n 300'
+# Replays the daemon's pre-start checks inside the pod; the daemon itself logs no refusal reason.
+collect daemon-probe.json bash -c "kubectl -n canaverald exec -i daemonset/canaverald -- node --input-type=module - < '$here/libvirt-probe.mjs'"
 collect canaverald-pods.txt kubectl -n canaverald get pods -o wide
 collect canaverald.log bash -c 'for pod in $(kubectl -n canaverald get pods -o name); do echo "== $pod"; kubectl -n canaverald logs "$pod" --all-containers --tail=400; kubectl -n canaverald logs "$pod" --all-containers --previous --tail=200 2>/dev/null; done'
 exit 0
