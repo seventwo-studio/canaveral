@@ -560,7 +560,12 @@ async function exerciseVm() {
   if (stopped) await step('drain and uninstall the VM DaemonSet with retained state', async () => {
     const maintenance = '/v1/hosts/' + enrollment.hostId + '/maintenance';
     await call(maintenance, { id: randomUUID(), reason: 'disposable VM node teardown' });
-    await eventually('safe-to-power-off proof for VM host', async () => (await call(maintenance)).safeToPowerOff);
+    let blockers;
+    await eventually('safe-to-power-off proof for VM host', async () => {
+      const status = await call(maintenance);
+      blockers = status.blockers.map(({ kind, state, detail }) => ({ kind, state, detail }));
+      return status.safeToPowerOff;
+    }).catch(error => { throw new Error(error.message + ': ' + JSON.stringify(blockers)); });
     kubectl('label', node, 'canaveral.dev/host-profile-');
     kubectl('delete', '-k', 'deploy/kubernetes/canaverald/vm', '--timeout=150s');
     assert.equal(sudo('jq', '-r', '.id', state + '/identity.json'), enrollment.hostId);

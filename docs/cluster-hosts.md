@@ -212,7 +212,9 @@ build.
 The hosted suite requests the checksum-pinned CirrOS guest through the machines API.
 It checks controller-observed power, guest SSH, QEMU credentials and AppArmor
 confinement, domain identity across pod replacement, and disk retention after
-stop and uninstall. A failed administrative boot fails the workflow.
+stop and uninstall. The [hosted Ubuntu run](https://github.com/seventwo-studio/canaveral/actions/runs/45431668629)
+verified boot, confinement, replacement, and stop with a retained disk reservation.
+The VM host did not reach `safeToPowerOff`, so uninstall remains unverified.
 
 On Ubuntu, libvirtd's AppArmor profile denies `ptrace read` on the
 `cri-containerd.apparmor.d` profile each time the pod connects. libvirtd is
