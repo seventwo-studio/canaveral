@@ -107,6 +107,12 @@ version tag. Its signed image index identifies the build target. Retries
 verify that target and the signature from the release workflow's exact tag
 identity before reusing a version image.
 
+The publisher exports the lease helper from both platforms of the verified
+`canaverald` image index through BuildKit, then hashes the two files. The
+**Validate Canaveral** workflow accepts an optional `lease_helper_image` input
+such as `ghcr.io/seventwo-studio/canaveral/canaverald@sha256:<digest>`. Use it
+to check both helper digests on a runner without publishing a release.
+
 A failed run may leave some immutable images or an unsigned deployment artifact
 and an unfinished draft. After a completed push, the publisher makes at most six
 manifest readback attempts, two seconds apart, reconnecting each time. Only

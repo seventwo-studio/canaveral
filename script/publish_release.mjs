@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT } from './tasks.mjs';
 import { uniqueJSON } from './json.mjs';
@@ -131,22 +131,34 @@ export function pinVmLeaseHelper(configMap,sha256) {
   config.leaseHelperSha256=sha256;
   configMap.data['host.json']=JSON.stringify(config,null,2)+'\n';
 }
-function imageLeaseHelperDigests(image,temporary,execute) {
+export function imageLeaseHelperDigests(image,temporary,execute=capture) {
+  const expectedPrefix=IMAGES.canaverald+'@';
+  if(!image.startsWith(expectedPrefix) || !DIGEST.test(image.slice(expectedPrefix.length))) {
+    throw new PublicationFailure('The lease helper source must be a digest-pinned canaverald image.');
+  }
+  const context=join(temporary,'lease-helper-context');
+  const output=join(temporary,'lease-helpers');
+  mkdirSync(context);
+  // Use the image only as a COPY source so inherited ONBUILD instructions
+  // cannot run. Copy the directory so a symlink at the helper path remains
+  // visible to lstat rather than being dereferenced by a single-file COPY.
+  writeFileSync(join(context,'Dockerfile'),
+    'FROM scratch\nCOPY --from=daemon '+dirname(LEASE_HELPER)+'/ /helpers/\n',
+    {flag:'wx'});
+  const platforms=LINUX_ARCHITECTURES.map(architecture=>'linux/'+architecture).join(',');
+  try {
+    execute('docker',['buildx','build','--platform',platforms,'--network','none',
+      '--build-context','daemon=docker-image://'+image,
+      '--output','type=local,dest='+output+',platform-split=true',context]);
+  } catch (error) {
+    throw new PublicationFailure('Lease helper export failed. '+publicationFailure(error));
+  }
   return Object.fromEntries(LINUX_ARCHITECTURES.map(architecture=>{
-    const platform='linux/'+architecture;
-    // Copy bytes from the immutable image without executing its entrypoint or
-    // requiring either architecture's binary to run in the release job.
-    execute('docker',['pull','--platform',platform,image]);
-    const container=execute('docker',['create','--platform',platform,image]);
-    if(!SHA256.test(container)) throw new Error('Expected a Docker container ID.');
-    const file=join(temporary,'lease-helper-'+architecture);
-    try {
-      execute('docker',['cp',container+':'+LEASE_HELPER,file]);
-      if(!lstatSync(file).isFile()) throw new Error('Expected a regular lease helper in the image.');
-      return [architecture,createHash('sha256').update(readFileSync(file)).digest('hex')];
-    } finally {
-      execute('docker',['rm',container]);
+    const file=join(output,'linux_'+architecture,'helpers',basename(LEASE_HELPER));
+    if(!existsSync(file) || !lstatSync(file).isFile()) {
+      throw new PublicationFailure('Expected a regular lease helper for linux/'+architecture+'.');
     }
+    return [architecture,createHash('sha256').update(readFileSync(file)).digest('hex')];
   }));
 }
 function verifyReleaseSignature(execute,tag,reference) {
@@ -296,7 +308,7 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
       console.log('Checking '+stage+' image.');
       images[stage]=await releaseImage(stage,packageName,version,revision,finalize,temporary,execute,connect,pause);
     }
-    const helperDigests=imageLeaseHelperDigests(images.canaverald,temporary,execute);
+    const helperDigests=imageLeaseHelperDigests(images.canaverald.replace(':'+version+'@','@'),temporary,execute);
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,helperDigests,output,root);
     for(const [stage,{render}] of Object.entries(STAGES)) for(const overlay of render) run('kubectl',['kustomize',join(output,stage,overlay)]);
     const registry=await connect(DEPLOYMENT), candidate='candidate-'+version+'-'+revision;
