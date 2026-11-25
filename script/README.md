@@ -95,6 +95,11 @@ reused: immutable identity guards reject another source revision.
    `node script/publish_release.mjs` only prepares artifacts; --finalize is the
    workflow's final step, not a substitute for signing and provenance.
 
+The workflow builds each image under a candidate tag and checks the registry
+digest against Buildx metadata. It signs that digest before assigning the
+version tag. Retries reuse an existing version image only after verifying its
+signature against the release workflow's exact tag identity.
+
 A failed run may leave some immutable images or an unsigned deployment artifact
 and an unfinished draft. After a completed push, the publisher makes at most six
 manifest readback attempts, two seconds apart, reconnecting each time. Only
