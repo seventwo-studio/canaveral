@@ -810,6 +810,7 @@ native authorization. Expiry, release, a fence, supervisor loss or a key rotatio
 therefore ends a recording within about a second: the stream stops without a finish
 receipt, and the SDK reports `session_disconnected` or `video_incomplete`. Reading receipts and deleting
 clean uploads remain available to the current key after the lease ends.
+Like the tunnel bounds below, this holds under normal load and is not hard real-time.
 
 #### Reservations and cleanup proof
 
@@ -1017,6 +1018,15 @@ disconnects, and with its lease: expiry, release, failure, a fence, a key rotati
 supervisor loss each end it within about a second, as they end a lease recording. That
 bound follows from the checks below. Fixtures confirm teardown within seconds on a shared
 event loop; the native timing is not measured.
+
+**These bounds hold under normal load; they are not hard real-time.** A starved CPU or
+event loop can exceed them: in a fixture run at background CPU priority, the shared
+controller and runner event loop stalled for up to 1.4 seconds, and key rotation took up to
+2.5 seconds to close a tunnel. The same applies to live views and recordings. A live
+view ends with its lease, key or device within about a second, and a recording's own
+duration and exit grace are counted in wall time. The test suite runs its timing-budget
+files as their own group, one file at a time (`npm run test:timed`, which `npm test`
+runs after the rest and CI runs as a separate job; see `script/coordination_tests.mjs`).
 
 - The broker checks tunnel authority up to four times a second using the lease key,
   application, lease, assignment and host state. Per direction and check interval it
@@ -1467,23 +1477,25 @@ cleanup) or `capture_ended` (the capture this view belongs to is ending, or was
 attempted before a runner restart; open a new view). A host whose own authority
 ended sends nothing more; the controller records that cause.
 
-A device's native side can stop a moment before the runner observes the same
-ending: a lease deadline is also enforced by the native supervisor. After a failed
-epoch the runner therefore waits up to a second for its viewers' own authority to
-lapse before it tells the remaining ones `capture_failed`, and the SDK prefers the
-controller's finding that the view's lease, credential or device ended over a
-reported capture failure.
+A device's native side can stop before the runner observes the same ending. After
+a failed epoch, the runner waits up to a second for its viewers' authority to
+lapse before it sends `capture_failed` to the remaining viewers. The SDK preserves
+an explicit `capture_failed` from the host.
 
 The runner enforces a lease deadline and its own assignment slightly before the
 controller observes the same ending. A view is therefore first recorded as
 `disconnected` when its sockets dropped, or for a lease as `device_stopped` or
-`host_unavailable` when the runner had already reported its fenced emulator. Both
-are provisional for three seconds: any cause the controller then finds replaces
-`disconnected`, and the lease's or its key's own ending replaces a lease's device
-cause. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
-runner's fence report arrived first. The SDK waits out that window before it
-reports a provisional reason. A credential that was rotated or revoked can no longer
-read its view; the SDK reports `credential_rejected`.
+`host_unavailable` when the runner had already reported its fenced emulator, or as
+`capture_ended` when the runner had already stopped the capture and reported its
+encoder gone. For three seconds, a cause found by the controller can replace
+`disconnected`, and the lease's or its key's ending can replace a device cause.
+The runner records the lease ID and revision in the capture's stop receipt when
+its local fence caused the epoch to stop. The controller can then refine
+`capture_ended` to `lease_expired` or `lease_failed` when the lease and revision
+match, regardless of how long ago the capture ended. A receipt that records only
+cleanup leaves `capture_ended` in place. After a dropped stream, the SDK polls
+the view briefly for an updated reason. A rotated or revoked credential can no
+longer read its view, so the SDK reports `credential_rejected`.
 
 ### Reservations and cleanup proof
 
