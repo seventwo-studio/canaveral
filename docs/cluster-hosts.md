@@ -10,14 +10,11 @@ and [runner enrollment](runner-enrollment.md). The VM profile mounts the host
 libvirt socket and VM storage for administrative machines. QEMU runs on the
 host under its own account, so the pod mounts no `/dev/kvm`; the daemon checks
 KVM by asking host libvirtd (`virsh domcapabilities --virttype kvm`) over the
-socket. Consumer libvirt leases require a production native connection,
-supervisor and owned-storage adapters. The controller's bound Linux lease API
-currently admits Apple Virtualization. Native acceptance of administrative VM
-startup remains open. The hosted test defines the domain, but it cannot start
-until the daemon gives QEMU group access to VM storage (see
-[Host libvirt setup](#host-libvirt-setup)). Keep the owned state for inspection if the controller reports an unknown
+socket. Hosted k3s acceptance booted an administrative VM with QEMU group access
+to storage and exercised headless amd64 [consumer VM leases](#consumer-vm-leases).
+Keep the owned state for inspection if the controller reports an unknown
 assignment. Containerd operations, Android and GPU execution are outside this
-deployment.
+deployment. [Host libvirt setup](#host-libvirt-setup)
 
 ## Select and prepare nodes
 

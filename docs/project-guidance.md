@@ -52,6 +52,7 @@ interpreter dependency to the controller, host or SDK; see
 - [orchestration](orchestration.md)
 - [power and recovery](power-and-recovery.md)
 - [running](running.md)
+- [Getting started](getting-started.md) (source quickstart, installation and contributing)
 - [managed runtime updates](runtime-updates.md) (Unix offline bootstrap, generated service definitions, separate component receipts and operator acceptance; no automatic service installation)
 - [runner enrollment](runner-enrollment.md)
 - [Rust runner identity client](../crates/runner-client/README.md)
