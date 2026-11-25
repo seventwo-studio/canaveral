@@ -85,16 +85,20 @@ function box(type: string, data = Buffer.alloc(0)): Buffer { const b = Buffer.al
 const MP4 = Buffer.concat([box("ftyp", Buffer.from("isom0000")), box("moov"), box("moof"), box("mdat", Buffer.from("encoded-native-samples"))]);
 const FINISH = { type: "finish", bytes: MP4.length, sha256: createHash("sha256").update(MP4).digest("hex"), cleaned: true };
 
-test("a direct video channel can complete after an orderly end without controller inspection", async () => {
-  const messages = [{ type: "video", mediaType: "video/mp4", codec: "avc1", fps: 30 }, MP4, FINISH];
+test("a direct video channel can complete after an orderly end without controller inspection", async t => {
   const acks: unknown[] = [];
-  const channel = {
-    sessionId: randomUUID(),
-    async sendControl(value: unknown) { acks.push(value); },
-    async sendBytes() {},
-    async receive() { return messages.shift() ?? null; },
-    close() {},
-  };
+  const b = await broker(t, {
+    opened: socket => socket.write(Buffer.concat([text({ type: "video", mediaType: "video/mp4", codec: "avc1", fps: 30 }), frame(2, MP4), text(FINISH)])),
+    received: (socket, { opcode, data }) => {
+      if (opcode === 1) {
+        acks.push(JSON.parse(data.toString()));
+        socket.end(frame(8, Buffer.alloc(0)));
+      }
+    },
+  });
+  const id = randomUUID();
+  const channel = await connect(b.url, `/v1/leases/${randomUUID()}/video-sessions/${id}/${randomUUID()}`, id);
+  t.after(() => channel.close());
   const video = await VideoClient.connect(channel, {});
   assert.deepEqual(await video.record({ write: bytes => bytes.length }), FINISH);
   assert.deepEqual(acks, [{ type: "ack" }]);

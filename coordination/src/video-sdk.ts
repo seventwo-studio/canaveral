@@ -40,7 +40,7 @@ function session(value: unknown): VideoSession {
 }
 /** A failure of the session connection itself: it ended, was reset or could not be written. A
  * worker's error control is not one; `checked` throws that from a received message. */
-const transportFailure = (error: unknown): boolean => error instanceof SessionError && ['session_disconnected', 'session_incomplete'].includes(error.code);
+const transportFailure = (error: unknown): error is SessionError => error instanceof SessionError && ['session_disconnected', 'session_incomplete'].includes(error.code);
 function bounded<T>(work: () => Promise<T>, options: VideoReceiveOptions, close: () => void): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -117,7 +117,7 @@ export class VideoClient {
           if (ended !== null) throw new SessionError('Unexpected data after completed video.', 'video_incomplete');
         } catch (error) {
           if (!transportFailure(error)) throw error;
-          if (!this.inspect) throw new SessionError('The connection reset before recording completion was confirmed.', 'video_incomplete');
+          if (!this.inspect && error.code !== 'session_disconnected') throw new SessionError('The connection reset before recording completion was confirmed.', 'video_incomplete');
         }
         if (this.inspect && !await this.confirmed(deadline)) throw new SessionError('The connection ended before the runner confirmed the acknowledgement.', 'video_incomplete');
         if (this.options.signal?.aborted || performance.now() >= deadline) throw new SessionError('Video completion is unconfirmed.', 'video_incomplete');
