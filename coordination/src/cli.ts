@@ -13,6 +13,16 @@ import type { AccountContext, CliArguments, RequestClient } from "./account-cli.
 import { handleObservability, OBSERVABILITY_COMMANDS } from "./observability-cli.ts";
 import type { ObservabilityIO } from "./observability-cli.ts";
 
+const DAEMON_HELP = `canaverald host daemon
+Usage: canaverald [--url ORIGIN] [--allow-http] --config FILE --state DIR [options]
+       canaverald --setup-file FILE --state DIR [options]
+
+--check                       Probe runtime prerequisites without enrolling
+--inventory                   Print hardware, configured offers and runtime checks as JSON
+--ca-file FILE                Trust the controller's private CA
+--enrollment-token-file FILE   Enroll with a private credential file
+`;
+
 const HELP = `Canaveral machine and inference orchestration
 Usage: canaveral [--url ORIGIN] [--token-file FILE] [--allow-http] COMMAND [options]
 
@@ -22,6 +32,7 @@ dashboard [--bind IP] [--port PORT]       Start the optional dashboard
 local [--state DIR]                      Isolated loopback controller, dashboard and optional host
 host --config FILE --state DIR           Run a host (--setup-file FILE is also supported)
 host --config FILE --state DIR --check   Inspect without enrollment or starting machines
+host --config FILE --state DIR --inventory  Print the local capability inventory
 promote-macos --config FILE --state DIR [--model-domain ID]
 login --username NAME --output-file FILE [--password-file FILE]
 logout | account password | users [list|create|update|invite|reset-password|revoke-invite]
@@ -119,7 +130,7 @@ const schemas: Record<string, Schema> = {
   serve: { values: ["config", "bind", "port", "database", "admin-token-file", "enrollment-token-file", "controller-id", "tls-cert-file", "tls-key-file", "update-trust-file", "browser-gateway-config"] },
   dashboard: { values: ["bind", "port", "bootstrap-token-file"] },
   local: { values: ["state", "api-port", "dashboard-port", "linux-image", "macos-image", "macos-restore-image", "apple-runner", "android-sdk", "guest-helper-manifest", "controller-id"] },
-  host: { flags: ["check"], values: ["config", "setup-file", "state", "ca-file", "enrollment-token-file"], required: ["state"] },
+  host: { flags: ["check", "inventory"], values: ["config", "setup-file", "state", "ca-file", "enrollment-token-file"], required: ["state"] },
   "promote-macos": { values: ["config", "state", "model-domain"], required: ["config", "state"] },
   admin: { actions: ["create", "setup-link", "recover"], values: ["username", "password-file", "user-id", "dashboard-url", "output-file"] },
   login: { values: ["username", "password-file", "output-file"], required: ["username", "output-file"] },
@@ -228,6 +239,7 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
   }
   if (Array.isArray(result.values.scope) && result.values.scope.some(scope => typeof scope !== "string" || !["machines:read", "machines:write", "machines:access", "admin"].includes(scope))) throw new CliError("Invalid --scope.");
   if (command === "host" && Number(Boolean(result.values.config)) + Number(Boolean(result.values["setup-file"])) !== 1) throw new CliError("Supply exactly one of --config and --setup-file.");
+  if (command === "host" && result.values.check && result.values.inventory) throw new CliError("Choose either --check or --inventory.");
   const tokenFile = globals.values["token-file"] ?? env.CANAVERAL_TOKEN_FILE;
   return { command, action, positionals: result.positionals, options: result.values as CliArguments["options"],
     url: typeof globals.values.url === "string" ? globals.values.url : env.CANAVERAL_URL ?? "http://127.0.0.1:8765", allowHttp: globals.values["allow-http"] === true || env.CANAVERAL_ALLOW_HTTP === "1",
@@ -267,7 +279,7 @@ export interface CliService { close(): Promise<void> | void }
 export interface HostOptions {
   config: Record<string, unknown>; configDirectory: string; stateDirectory: string;
   controllerUrl: string; enrollmentToken?: string; allowHttp: boolean; caFile?: string;
-  signal: AbortSignal;
+  signal: AbortSignal; inventory?: boolean;
 }
 /** Host/dashboard ports can be injected by portable fixtures; production imports their TypeScript modules. */
 export interface CliRuntime {
@@ -308,9 +320,8 @@ const defaults: CliRuntime = {
   },
   async checkHost(options) {
     const { loadHost } = await import("./control/templates.ts");
-    const { HostRunner } = await import("./host.ts");
-    const runner = new HostRunner({ ...loadHost(options.config, options.configDirectory), url: options.controllerUrl, stateDir: options.stateDirectory, allowHTTP: options.allowHttp, ...(options.caFile ? { caFile: options.caFile } : {}) });
-    try { await runner.initializeProviders(); await runner.checkEnvironment(); return runner.health; } finally { await runner.close(); }
+    const { checkHost } = await import("./host.ts");
+    return checkHost({ ...loadHost(options.config, options.configDirectory), url: options.controllerUrl, stateDir: options.stateDirectory, allowHTTP: options.allowHttp, ...(options.caFile ? { caFile: options.caFile } : {}) }, {}, options.inventory);
   },
   async template(value) { const { normalizeTemplate } = await import("./control/templates.ts"); return normalizeTemplate(value); },
   prepareImage: prepareCachedImage,
@@ -387,7 +398,7 @@ async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<Hos
     config = record(config.config);
     // The private setup token must pass the same validation as an enrollment file.
     if (!/^[A-Za-z0-9_-]{43,128}$/.test(enrollment)) throw new CliError("Invalid setup enrollment token.");
-    if (!args.options.check && !managed) {
+    if (!args.options.check && !args.options.inventory && !managed) {
       const saved = join(resolve(expandPath(option(args, "state"))), "host-config.json");
       if (await exists(saved)) {
         if (canonical(await jsonFile(saved)) !== canonical(config)) throw new CliError("State directory contains a different runner config; choose another state directory.");
@@ -395,6 +406,7 @@ async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<Hos
     }
   }
   return { config, configDirectory: dirname(file), stateDirectory: resolve(expandPath(option(args, "state"))), controllerUrl: url, allowHttp: managed ? (args.allowHttp || config.allowHTTP === true) : args.allowHttp, signal,
+    ...(args.options.inventory ? { inventory: true } : {}),
     ...(enrollment ? { enrollmentToken: enrollment } : {}), ...(args.options["ca-file"] ? { caFile: resolve(expandPath(option(args, "ca-file"))) } : managed && typeof config.caFile === "string" ? { caFile: config.caFile } : {}) };
 }
 function canonical(value: unknown): string {
@@ -596,9 +608,10 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
 }
 
 /** Execute without exiting the embedding process. Returns a conventional exit status. */
-export async function main(argv = process.argv.slice(2), overrides: Partial<CliIO> = {}): Promise<number> {
+export async function main(argv = process.argv.slice(2), overrides: Partial<CliIO> = {}, program: "canaveral" | "canaverald" = "canaveral"): Promise<number> {
+  const daemon = program === "canaverald";
   // The stable launcher has a fixed bootstrap argv; ordinary CLI parsing is unchanged.
-  if (process.env.CANAVERAL_UPDATE_CANDIDATE === "1" && argv.length === 4 && argv[0] === "--config" && argv[2] === "--state") argv = ["host", ...argv];
+  if (!daemon && process.env.CANAVERAL_UPDATE_CANDIDATE === "1" && argv.length === 4 && argv[0] === "--config" && argv[2] === "--state") argv = ["host", ...argv];
   const io: CliIO = { stdout: text => { process.stdout.write(text); }, stderr: text => { process.stderr.write(text); },
     client: (url, token, allowHttp) => new CliClient(url, token, allowHttp), password: promptPassword, output: privateOutput, runtime: defaults, ...overrides };
   try {
@@ -610,6 +623,7 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       else if (flag === "--url" || flag === "--token-file") boundary += arg.includes("=") ? 1 : 2;
       else break;
     }
+    if (daemon) argv = [...argv.slice(0, boundary), "host", ...argv.slice(boundary)];
     if (argv[boundary] === "updates") {
       const { updateMain } = await import("./updates/cli.ts");
       return updateMain([...argv.slice(0, boundary), ...argv.slice(boundary + 1)], { stdout: io.stdout, stderr: io.stderr });
@@ -618,7 +632,7 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
       const { installMain } = await import("./updates/install-cli.ts");
       return installMain([...argv.slice(0, boundary), ...argv.slice(boundary + 1)], { stdout: io.stdout, stderr: io.stderr });
     }
-    if (argv.includes("--help") || argv.includes("-h")) { io.stdout(HELP); return 0; }
+    if (argv.includes("--help") || argv.includes("-h")) { io.stdout(daemon ? DAEMON_HELP : HELP); return 0; }
     const args = parseCli(argv);
     if (args.command === "init") { await initialize(positional(args)); io.stdout("Created private credential files in " + positional(args) + "\n"); return 0; }
     if (args.command === "promote-macos") { await promoteMacHost(args, io); return 0; }
@@ -639,10 +653,10 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
             allowHttp: args.allowHttp, ...(typeof bootstrap === "string" ? { bootstrapToken: await privateInput(bootstrap) } : {}) });
         } else {
           const options = await hostOptions(args, lifecycle.signal);
-          if (args.options.check) { const report = await io.runtime.checkHost(options); io.stdout(JSON.stringify(metadata(report), null, 2) + "\n"); return report.status === "failed" ? 1 : 0; }
+          if (args.options.check || args.options.inventory) { const report = await io.runtime.checkHost(options); io.stdout(JSON.stringify(metadata(report), null, 2) + "\n"); return report.status === "failed" ? 1 : 0; }
           service = await io.runtime.host(options);
         }
-        io.stdout(JSON.stringify({ service: args.command, listening: args.command !== "host" }) + "\n");
+        io.stdout(JSON.stringify({ service: daemon ? program : args.command, listening: args.command !== "host" }) + "\n");
         await stopped(lifecycle.signal);
       } finally { try { await service?.close(); } finally { lifecycle.dispose(); } }
       return 0;
@@ -662,11 +676,11 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
     return 0;
   } catch (error) {
     if (error instanceof CliError) {
-      io.stderr("canaveral: " + error.message + (error.outcome ? " outcome=unknown; no automatic retry." : "") + (error.requestId ? " requestId=" + error.requestId : "") + "\n");
-    } else if (error instanceof ServiceError) io.stderr(`canaveral: Command refused (HTTP ${error.status}, ${error.code.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}). Inspect configuration or state before retrying.${error.outcome ? " outcome=unknown; no automatic retry." : ""}\n`);
-    else if (error instanceof Error && error.name.startsWith("ERR_PARSE_ARGS")) io.stderr("canaveral: Invalid command arguments.\n");
-    else if ((error as NodeJS.ErrnoException)?.code) io.stderr("canaveral: Local file or command input failed (" + String((error as NodeJS.ErrnoException).code).replace(/[^A-Z0-9_]/g, "").slice(0, 60) + ").\n");
-    else io.stderr("canaveral: Command failed. Inspect state before retrying; no credentials were printed.\n");
+      io.stderr(program + ": " + error.message + (error.outcome ? " outcome=unknown; no automatic retry." : "") + (error.requestId ? " requestId=" + error.requestId : "") + "\n");
+    } else if (error instanceof ServiceError) io.stderr(`${program}: Command refused (HTTP ${error.status}, ${error.code.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}). Inspect configuration or state before retrying.${error.outcome ? " outcome=unknown; no automatic retry." : ""}\n`);
+    else if (error instanceof Error && error.name.startsWith("ERR_PARSE_ARGS")) io.stderr(program + ": Invalid command arguments.\n");
+    else if ((error as NodeJS.ErrnoException)?.code) io.stderr(program + ": Local file or command input failed (" + String((error as NodeJS.ErrnoException).code).replace(/[^A-Z0-9_]/g, "").slice(0, 60) + ").\n");
+    else io.stderr(program + ": Command failed. Inspect state before retrying; no credentials were printed.\n");
     return 1;
   }
 }
