@@ -58,9 +58,10 @@ export class Mp4Envelope {
 /** Source and encoder are owned by this attempt. No native process or input is replayed. */
 export async function serveMobileVideo(channel: SessionChannel, source: NativePipe,
   openEncoder: (argv: readonly string[]) => Promise<NativePipe>, ffmpeg: string, value: VideoOptions,
-  authorized: () => boolean, onCleanup?: (cleaned: boolean, parts: { source: boolean; encoder: boolean }) => void): Promise<void> {
+  authorized: () => boolean, onCleanup?: (cleaned: boolean, parts: { source: boolean; encoder: boolean }, primaryError?: unknown) => void): Promise<void> {
   let encoder: NativePipe | undefined, timer: ReturnType<typeof setTimeout> | undefined, watch: ReturnType<typeof setInterval> | undefined;
   let sourceClosing: Promise<void> | undefined, pumping: Promise<void> | undefined;
+  let primary: { error: unknown } | undefined;
   const closeSource = () => sourceClosing ??= source.close();
   const check = () => { if (!authorized()) throw new ServiceError('Video authorization ended.', 410); };
   let rejectFailure!: (error: unknown) => void;
@@ -110,13 +111,23 @@ export async function serveMobileVideo(channel: SessionChannel, source: NativePi
     await channel.sendControl({ type: 'finish', bytes, sha256: hash.digest('hex'), cleaned: true });
     const ack = await channel.receive(30); check();
     if (!ack || ack instanceof Uint8Array || Object.keys(ack).join(',') !== 'type' || ack.type !== 'ack') throw new ServiceError('Video completion was not acknowledged.', 409);
+  } catch (error) {
+    primary = { error };
+    throw error;
   } finally {
     if (timer) clearTimeout(timer); if (watch) clearInterval(watch);
     const results = await Promise.allSettled([closeSource(), ...(encoder ? [(async () => { await encoder.close(); const code = await encoder.wait(5000); if (!Number.isInteger(code)) throw new Error('Encoder exit is unconfirmed.'); })()] : [])]);
     if (pumping) await pumping.catch(() => {});
     // The source is the native capture (for Android, the guest recorder); the encoder is a host process.
     const source = results[0]!.status === 'fulfilled', encoderExited = results.length < 2 || results[1]!.status === 'fulfilled';
-    const cleaned = source && encoderExited; onCleanup?.(cleaned, { source, encoder: encoderExited });
-    if (!cleaned) throw new ServiceError('Video process cleanup is unconfirmed.', 409, { outcome: 'unknown' });
+    const cleaned = source && encoderExited;
+    onCleanup?.(cleaned, { source, encoder: encoderExited }, primary?.error);
+    if (!cleaned) {
+      const cleanupError = new ServiceError('Video process cleanup is unconfirmed.', 409, { outcome: 'unknown' });
+      if (!primary) throw cleanupError;
+      if (primary.error instanceof Error && Object.isExtensible(primary.error) && !('cause' in primary.error)) {
+        Object.defineProperty(primary.error, 'cause', { value: cleanupError, configurable: true, writable: true });
+      }
+    }
   }
 }
