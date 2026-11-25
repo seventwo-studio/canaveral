@@ -20,7 +20,30 @@ concurrency:
   group: canaveral-release
   cancel-in-progress: false
 jobs:
+  qualification:
+    # Release gate: no image is built until every promoted runtime pin is
+    # consistent offline and verified against its acceptance run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Check and verify runtime qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node script/qualification.mjs check
+          node script/qualification.mjs verify --all
   release:
+    needs: qualification
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

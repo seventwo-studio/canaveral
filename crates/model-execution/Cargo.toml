@@ -24,6 +24,8 @@ tempfile = "3"
 
 [build-dependencies]
 cc = "1"
+serde_json.workspace = true
+sha2 = "0.10"
 
 [[test]]
 name = "runtime_fixture"

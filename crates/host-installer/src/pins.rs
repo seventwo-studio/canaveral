@@ -1,6 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Pin {
     pub name: &'static str,
     pub version: &'static str,
@@ -9,49 +11,65 @@ pub(crate) struct Pin {
     pub sha256: &'static str,
 }
 
-// GitHub latest stable releases, retrieved 2026-11-23. Sizes and SHA-256
-// were computed from the assets and compared with containerd's per-asset
-// .sha256sum files and upstream runc.sha256sum.
-macro_rules! pins {
-    ($arch:literal, $containerd_bytes:literal, $containerd_sha:literal, $runc_bytes:literal, $runc_sha:literal) => {
-        [
-            Pin {
-                name: "containerd",
-                version: "2.4.2",
-                url: concat!(
-                    "https://github.com/containerd/containerd/releases/download/v2.4.2/containerd-static-2.4.2-linux-",
-                    $arch, ".tar.gz"
-                ),
-                bytes: $containerd_bytes,
-                sha256: $containerd_sha,
-            },
-            Pin {
-                name: "runc",
-                version: "1.5.3",
-                url: concat!("https://github.com/opencontainers/runc/releases/download/v1.5.3/runc.", $arch),
-                bytes: $runc_bytes,
-                sha256: $runc_sha,
-            },
-        ]
-    };
+// pins.json is the single source for these pins. The runtime qualification
+// tool (script/qualification.mjs) reads the same file.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    #[allow(dead_code)]
+    retrieved: &'static str,
+    #[allow(dead_code)]
+    source: &'static str,
+    x86_64: [Pin; 2],
+    aarch64: [Pin; 2],
 }
+
+static CATALOG: LazyLock<Catalog> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("pins.json")).expect("compiled containerd pins")
+});
 
 pub(crate) fn for_arch(arch: &str) -> Option<[Pin; 2]> {
     match arch {
-        "x86_64" => Some(pins!(
-            "amd64",
-            34_415_353,
-            "da656542e754c699a0f438eab925e6ffdbd6346a4428e659f83dc058f04dcffe",
-            10_866_576,
-            "50dcc0b257d724fe07f3852c2dda52340223f038227c7572644eec870741223e"
-        )),
-        "aarch64" => Some(pins!(
-            "arm64",
-            30_823_894,
-            "37b84b9534533672528141b9d815f58621a2fe5deee2daa84317800255756689",
-            10_092_000,
-            "07b52aee923cc432c38fe4fb6809a08fc6471994efed650af3635350588a20be"
-        )),
+        "x86_64" => Some(CATALOG.x86_64.clone()),
+        "aarch64" => Some(CATALOG.aarch64.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn pins_name_containerd_then_runc_with_matching_urls() {
+        for (arch, asset) in [("x86_64", "amd64"), ("aarch64", "arm64")] {
+            let [containerd, runc] = for_arch(arch).unwrap();
+            assert_eq!((containerd.name, runc.name), ("containerd", "runc"));
+            assert_eq!(
+                containerd.url,
+                format!(
+                    "https://github.com/containerd/containerd/releases/download/v{0}/containerd-static-{0}-linux-{asset}.tar.gz",
+                    containerd.version
+                )
+            );
+            assert_eq!(
+                runc.url,
+                format!(
+                    "https://github.com/opencontainers/runc/releases/download/v{}/runc.{asset}",
+                    runc.version
+                )
+            );
+            for pin in [&containerd, &runc] {
+                assert!(pin.bytes > 0);
+                assert!(
+                    pin.sha256.len() == 64
+                        && pin
+                            .sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                );
+            }
+        }
+        assert!(for_arch("riscv64").is_none());
     }
 }

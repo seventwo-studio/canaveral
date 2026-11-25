@@ -73,7 +73,8 @@ Go bypasses proxies for loopback destinations. See [Rust model execution](rust-m
 - `failed` means a check rejected its input or found a definite problem.
 - `unknown` means the daemon could not establish status or confirm the outcome. Inspect status before retrying a mutation.
 
-Native qualification is a separate catalog decision. Local checks cannot
+Native qualification is a separate, reviewed decision (see
+[runtime qualification](runtime-qualification.md)). Local checks cannot
 establish it or grant controller placement. The controller's
 `canaveral runtimes` command continues to manage mobile runtimes through the
 controller.
@@ -94,8 +95,16 @@ a JSON evidence record identifying the commit and runner image.
 
 Hosted ARM Ubuntu lacks KVM. Hosted macOS lacks nested virtualization, so the
 Apple detection cells assert blockers only. Containerd crash recovery has
-fixture coverage only. Qualification requires a reviewed follow-up that cites
-the evidence and promotes exact pins. No pin is currently `qualified`.
+fixture coverage only.
+
+Artifacts expire after 90 days. Copy evidence from trusted runs into the
+committed records described in [runtime qualification](runtime-qualification.md).
+A backend reports `qualified` only for an exact pin and scope that a reviewed
+entry in `qualification/promotions.json` promotes. Promotions cite
+digest-bound records from first-attempt runs of `main`. The executor and the
+daemon compile those promotions in at build time. No pin is currently promoted.
+Ollama remains blocked until hosts enforce isolation. Libvirt and Apple
+Virtualization remain blocked until guest-boot evidence binds their components.
 
 ## Local blocker codes
 
