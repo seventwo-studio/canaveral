@@ -37,7 +37,7 @@ enum Format {
     Zip,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Pin {
     pub backend: Backend,
@@ -323,6 +323,7 @@ fn download(pin: &Pin, root: &File, test_loopback: bool, deadline: Instant) -> R
     let client = package::download_client(redirect_policy())?;
     let mut response = client
         .get(package::https_url(&pin.url, test_loopback)?)
+        .timeout(deadline.saturating_duration_since(Instant::now()))
         .send()
         .map_err(|_| "runtime archive download failed")?;
     if !response.status().is_success()
@@ -761,24 +762,53 @@ pub(super) fn stage(
     references: &PackageReferences,
     test_loopback: bool,
 ) -> Result<package::StagedRuntime> {
+    stage_with_repair(pin, state, state_path, references, test_loopback, false)
+}
+
+pub(super) fn stage_with_repair(
+    pin: &Pin,
+    state: &Directory,
+    state_path: &Path,
+    references: &PackageReferences,
+    test_loopback: bool,
+    repair: bool,
+) -> Result<package::StagedRuntime> {
     pin.validate(test_loopback)?;
     let cache = pin.cache();
     let deadline = Instant::now() + Duration::from_secs(600);
-    let executables = if let Some(root) = state.cached_package(&cache)? {
-        verify(pin, &root, deadline)?
+    let (existing, installed) = match state.cached_package(&cache) {
+        Ok(Some(root)) => {
+            let installed = verify(pin, &root, deadline);
+            (Some(root), Some(installed))
+        }
+        Ok(None) => (None, None),
+        Err(private::UNSAFE_CACHE_ENTRY) => (None, Some(Err(private::UNSAFE_CACHE_ENTRY))),
+        Err(error) => return Err(error),
+    };
+    let damaged = installed.as_ref().is_some_and(|result| result.is_err());
+    if damaged && repair && references.contains(&cache) {
+        return Err("runtime_in_use");
+    }
+    let executables = if let Some(result) = installed.filter(|result| result.is_ok() || !repair) {
+        result?
     } else {
         let root = state.package_workspace()?;
-        match install(pin, state, &root, &cache, test_loopback, deadline) {
+        let replace = damaged.then_some((existing.as_ref(), references));
+        match install(pin, state, &root, replace, test_loopback, deadline) {
             Ok(executables) => executables,
             Err(error) => {
-                state.discard_package_workspace(&root)?;
+                state
+                    .discard_package_workspace(&root)
+                    .map_err(|_| "runtime_state_unknown")?;
                 return Err(error);
             }
         }
     };
-    state.prune_packages(&cache, references, |entry, root| {
-        cached_manifest(entry, root).is_some_and(|manifest| manifest.backend == pin.backend)
-    })?;
+    state
+        .prune_packages(&cache, references, |entry, root| {
+            cached_manifest(entry, root).is_some_and(|manifest| manifest.backend == pin.backend)
+        })
+        .map_err(|_| "runtime_state_unknown")?;
     Ok(package::StagedRuntime::new(
         state_path.join(cache),
         &pin.entrypoint,
@@ -795,7 +825,7 @@ fn install(
     pin: &Pin,
     state: &Directory,
     root: &File,
-    cache: &str,
+    replace: Option<(Option<&File>, &PackageReferences)>,
     test_loopback: bool,
     deadline: Instant,
 ) -> Result<package::Executables> {
@@ -825,14 +855,18 @@ fn install(
     )?;
     file.write_all(&bytes).map_err(|_| invalid())?;
     finalize(&file, 0o400)?;
-    package::publish(
-        &manifest.package,
-        state,
-        root,
-        cache,
-        deadline,
-        Some(&bytes),
-    )
+    root.sync_all().map_err(|_| invalid())?;
+    let executables = package::verify_cache(&manifest.package, root, deadline, Some(&bytes))?;
+    let cache = pin.cache();
+    if let Some((previous, references)) = replace {
+        state
+            .quarantine_package(&cache, previous, references)
+            .map_err(|_| "runtime_state_unknown")?;
+    }
+    state
+        .publish_package(&cache, root)
+        .map_err(|_| "runtime_state_unknown")?;
+    Ok(executables)
 }
 
 #[cfg(test)]
@@ -1267,6 +1301,210 @@ mod tests {
             stream.write_all(&bytes).unwrap();
         });
         (url, thread)
+    }
+
+    #[test]
+    #[ignore = "requires the pinned engine archive on a disposable native runner"]
+    fn real_archive_transport_refuses_truncation_and_retries() {
+        let backend = match std::env::var("MODEL_BACKEND").unwrap().as_str() {
+            "ollama" => Backend::Ollama,
+            "llama.cpp" => Backend::LlamaCpp,
+            _ => panic!("expected a catalog backend"),
+        };
+        let archive = PathBuf::from(std::env::var_os("CANAVERAL_REAL_ARCHIVE").unwrap());
+        let mut pin = host_pin(backend).unwrap().clone();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        let state = Directory::open(&path).unwrap();
+        let references = PackageReferences::default();
+        for truncate in [true, false] {
+            let archive = File::open(&archive).unwrap();
+            assert_eq!(archive.metadata().unwrap().len(), pin.bytes);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            pin.url = format!("http://{}/archive", listener.local_addr().unwrap());
+            let bytes = if truncate { 64 * 1024 } else { pin.bytes };
+            let transport = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(600)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").unwrap();
+                assert_eq!(
+                    io::copy(&mut archive.take(bytes), &mut stream).unwrap(),
+                    bytes
+                );
+            });
+            let staged = stage(&pin, &state, &path, &references, true);
+            transport.join().unwrap();
+            assert!(!path.join("runtime-package.next").exists());
+            if truncate {
+                assert_eq!(staged, Err("runtime archive size mismatch"));
+                assert!(state.package_entries().unwrap().is_empty());
+            } else {
+                staged.unwrap().verify_executables(&state).unwrap();
+                assert_eq!(state.package_entries().unwrap(), vec![pin.cache()]);
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_upgrade_preserves_references_and_repairs_an_unreferenced_pin() {
+        let bytes = tar([regular("server", ENTRY)]);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        let state = Directory::open(&path).unwrap();
+        let mut old = pin(&bytes, Format::TarGz);
+        let (url, task) = serve(bytes.clone());
+        old.url = url;
+        let old_staged = stage(&old, &state, &path, &Default::default(), true).unwrap();
+        task.join().unwrap();
+        let mut references = PackageReferences::default();
+        references
+            .digests
+            .insert(old.cache().trim_start_matches("runtime-package.").into());
+        let mut current = old.clone();
+        current.version = "1.2.4".into();
+        let (url, task) = serve(bytes.clone());
+        current.url = url;
+        let staged = stage(&current, &state, &path, &references, true).unwrap();
+        task.join().unwrap();
+        assert_ne!(old.cache(), current.cache());
+        old_staged.verify_executables(&state).unwrap();
+        assert_eq!(
+            state.delete_package(&old.cache(), &references),
+            Err("runtime_in_use")
+        );
+
+        fs::set_permissions(&staged.entrypoint, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&staged.entrypoint, b"damaged").unwrap();
+        fs::set_permissions(&staged.entrypoint, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(stage(&current, &state, &path, &references, true).is_err());
+        let (url, task) = serve(bytes.clone());
+        current.url = url;
+        stage_with_repair(&current, &state, &path, &references, true, true)
+            .unwrap()
+            .verify_executables(&state)
+            .unwrap();
+        task.join().unwrap();
+        assert!(old_staged.verify_executables(&state).is_ok());
+
+        let cache = current.cache();
+        let current_path = path.join(&cache);
+        fs::set_permissions(&current_path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            stage(&current, &state, &path, &references, true),
+            Err(private::UNSAFE_CACHE_ENTRY)
+        );
+        references
+            .digests
+            .insert(cache.trim_start_matches("runtime-package.").into());
+        assert_eq!(
+            stage_with_repair(&current, &state, &path, &references, true, true),
+            Err("runtime_in_use")
+        );
+        assert_eq!(
+            fs::metadata(&current_path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        references
+            .digests
+            .remove(cache.trim_start_matches("runtime-package."));
+        let (url, task) = serve(bytes);
+        current.url = url;
+        stage_with_repair(&current, &state, &path, &references, true, true)
+            .unwrap()
+            .verify_executables(&state)
+            .unwrap();
+        task.join().unwrap();
+        let preserved = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                entry
+                    .file_name()
+                    .to_str()?
+                    .starts_with("runtime-quarantine.")
+                    .then(|| entry.path())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(preserved.len(), 2);
+        for directory in &preserved {
+            assert_eq!(
+                fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(preserved
+            .iter()
+            .any(|directory| fs::metadata(directory.join(&cache))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+                == 0o755));
+        assert!(preserved
+            .iter()
+            .any(
+                |directory| fs::read(directory.join(&cache).join("server")).unwrap() == b"damaged"
+            ));
+        let job = serde_json::from_value(serde_json::json!({
+            "version": 1, "applicationId": "11111111-1111-4111-8111-111111111111",
+            "id": "22222222-2222-4222-8222-222222222222",
+            "message": {"type":"submit","adapter":"llama.cpp","model":"fixture:1",
+                "digest":format!("sha256:{}", old.sha256),"prompt":"fixture","maxTokens":10}
+        }))
+        .unwrap();
+        let receipt = crate::receipt(
+            &job,
+            crate::State::Unknown,
+            false,
+            false,
+            crate::Cleanup::Pending,
+            None,
+        )
+        .unwrap();
+        let journal = serde_json::json!({
+            "binding": {"controllerId":job.application_id,"runnerId":job.id,"generation":1,"incarnationId":job.application_id},
+            "assignment":{"id":job.id,"claimId":job.id,"domainId":job.id,"sequence":0,"closed":false,"cancelRequested":false,"job":job},
+            "sequence":1,"receipt":receipt,"pending":false,"launchIntent":false,
+            "runtimePackageDigest":old.cache().trim_start_matches("runtime-package.")
+        });
+        state
+            .write(
+                "receipt.json",
+                "receipt.next",
+                &serde_json::to_vec(&serde_json::json!({
+                    "current":"work","entries":{"work":journal}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        drop(state);
+        let config = serde_json::from_value(serde_json::json!({
+            "backend":"llama.cpp","modelsDir":path,"stateDir":path,"inventory":{},
+            "startupMs":1000,"executionMs":1000,"contactMs":1000,"stopMs":1000,"responseBytes":1024,"contextTokens":512
+        })).unwrap();
+        let args = [
+            "--runtime-remove",
+            "--config",
+            "/unused",
+            "--backend",
+            "llama.cpp",
+            "--version",
+            &old.version,
+        ]
+        .map(str::to_owned);
+        let request = crate::runtime_management::Request::parse(&args).unwrap();
+        let (report, removed) = crate::runtime_management::execute(&request, &config).unwrap();
+        assert!(!removed);
+        assert_eq!(report["result"]["code"], "runtime_in_use", "{report}");
+        assert_eq!(report["backends"][0]["installed"][0]["referenced"], true);
+
+        let state = Directory::open(&path).unwrap();
+        stage(&current, &state, &path, &Default::default(), true).unwrap();
+        assert_eq!(state.package_entries().unwrap(), vec![current.cache()]);
     }
 
     #[test]

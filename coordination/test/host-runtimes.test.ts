@@ -21,7 +21,11 @@ const digest = "1".repeat(64);
 const receipt = {
   type: "canaveral-host-installer-receipt", version: 1, component: "containerd", installedAt: 1,
   assets: ["containerd", "runc"].map(name => ({ name, version: "1.2.3", sha256: digest })),
-  files: [{ path: "/opt/canaveral/bin/containerd", sha256: digest }],
+  files: [
+    "/etc/systemd/system/canaveral-containerd.service",
+    "/etc/canaveral-containerd/config.toml",
+    ...["containerd", "containerd-shim-runc-v2", "ctr", "runc"].map(name => `/opt/canaveral-containerd/1.2.3/bin/${name}`),
+  ].map(path => ({ path, sha256: digest })),
   unit: "/etc/systemd/system/canaveral-containerd.service", socket: "/run/canaveral-containerd/containerd.sock",
 };
 const absent = () => { throw Object.assign(new Error("Missing fixture path"), { code: "ENOENT" }); };
@@ -108,7 +112,7 @@ function executor(t: TestContext) {
   const script = (body: string) => writeFileSync(binary, "#!" + process.execPath + "\n" + body, { mode: 0o755 });
   const rows = modelIds.map((backend, index) => ({
     backend, catalogVersion: "1.2.3", available: index < 2, state: ["verified", "absent", "unavailable", "unavailable"][index],
-    installed: index === 0 ? [{ version: "1.2.3", packageDigest: digest, verified: true, referenced: false }] : [],
+    installed: index === 0 ? [{ version: "1.2.3", packageDigest: digest, verified: true, referenced: true }] : [],
     qualified: false,
   }));
   const plan = { downloadBytes: 4, assets: [{ url: "https://example.invalid/model", bytes: 4, sha256: digest }] };
@@ -138,6 +142,7 @@ console.log(${JSON.stringify(JSON.stringify(report))}); process.exitCode = ${act
     const observed = await mutateRuntime(f.settings, action, "ollama", dryRun, selected, { ...linux, run: f.invoke, modelStat: f.modelStat });
     assert.deepEqual(observed.result, result);
     assert.equal(observed.backends[0]?.state, "verified");
+    assert.deepEqual(observed.backends[0]?.installed, report.backends[0]?.installed);
     assert.deepEqual(observed.plan, plan.plan);
   }
 });
@@ -157,8 +162,15 @@ test("bounded executor rejects timeout, oversize output and contract violations"
     assert.equal(rows[3]?.state, "unknown");
     assert.equal(rows[3]?.blocker?.code, "model_executor_invalid_report");
   }
-  f.script(`console.log(${JSON.stringify(JSON.stringify(status))});`);
-  assert.equal((await runtimeInventory(f.settings, env))[3]?.state, "verified");
+  const qualified = { ...status, backends: status.backends.map(row => row.backend === "ollama"
+    ? { ...row, qualified: true, active: "1.2.3" } : row) };
+  f.script(`console.log(${JSON.stringify(JSON.stringify(qualified))});`);
+  const installed = (await runtimeInventory(f.settings, env))[3];
+  assert.equal(installed?.state, "verified");
+  assert.equal(installed?.active, "1.2.3");
+  assert.equal(installed?.catalogVersion, "1.2.3");
+  assert.equal(installed?.qualified, true);
+  assert.deepEqual(installed?.installed, status.backends[0]?.installed);
   const linked = join(f.root, "linked");
   symlinkSync(f.binary, linked);
   assert.throws(() => modelConfig({ modelExecutor: { ...f.settings.modelExecutor, binary: linked } }, f.modelStat), /without links/);
@@ -243,7 +255,7 @@ test("executor files and both parent chains require trusted owners, modes and ty
 });
 
 test("native mutation refusals preserve detected state and reject unsupported platforms", async () => {
-  const env = { ...linux, receipt: () => receipt };
+  const env = { ...linux, receipt: () => undefined };
   const status = await runtimeInventory({}, env);
   for (const action of ["install", "verify", "remove"] as const) {
     const container = await mutateRuntime({}, action, "containerd", false, undefined, env);
@@ -260,6 +272,23 @@ test("native mutation refusals preserve detected state and reject unsupported pl
       assert.equal(unsupported.result?.code, "runtime_platform_unsupported");
     }
   }
+});
+
+test("containerd mutations preserve unknown receipt-backed status when a system path is unreadable", async t => {
+  const env: Partial<Environment> = {
+    ...linux, receipt: () => receipt,
+    lstat: () => { throw Object.assign(new Error("Permission denied"), { code: "EACCES" }); },
+  };
+  const status = (await runtimeInventory({}, env)).find(backend => backend.id === "containerd");
+  assert.equal(status?.state, "unknown");
+  assert.equal(status.blocker?.code, "runtime_probe_failed");
+  const run = t.mock.fn(async () => assert.fail("containerd mutation invoked a command"));
+  for (const action of ["install", "verify", "remove"] as const) {
+    const response = await mutateRuntime({}, action, "containerd", false, undefined, { ...env, run });
+    assert.deepEqual(response.backends, [status]);
+    assert.deepEqual(response.result, { state: "failed", code: "containerd_root_installer_required" });
+  }
+  assert.equal(run.mock.callCount(), 0);
 });
 
 test("daemon CLI and inventory expose the registry without contacting the controller", async t => {

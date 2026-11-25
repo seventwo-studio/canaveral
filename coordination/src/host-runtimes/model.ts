@@ -1,5 +1,5 @@
 import { blocker, digest, modelConfig, modelIds, object, ProbeError, record, states, version } from "./core.ts";
-import type { BackendRecord, Blocker, Environment, HostConfigData, ModelId, State } from "./core.ts";
+import type { BackendRecord, Blocker, Environment, HostConfigData, ModelId, RuntimePackageRecord, State } from "./core.ts";
 
 type Request = { operation: "status" } | {
   operation: "prepare" | "verify" | "remove"; backend: ModelId; dryRun: boolean; version?: string;
@@ -27,17 +27,19 @@ function supported(id: ModelId, env: Environment): boolean {
 function parseBackend(value: unknown, env: Environment): BackendRecord {
   const { backend, catalogVersion, available, state, installed, active, qualified, blocker: reason } = object(value);
   requireReport(modelIds.some(id => id === backend) && typeof available === "boolean"
-    && states.some(s => s === state) && qualified === false && Array.isArray(installed)
+    && states.some(s => s === state) && typeof qualified === "boolean" && Array.isArray(installed)
     && (catalogVersion === undefined || version(catalogVersion))
     && (active === undefined || version(active)));
   const versions = new Set<string>();
   const digests = new Set<string>();
+  const packages: RuntimePackageRecord[] = [];
   for (const item of installed) {
     const pkg = object(item);
     requireReport(version(pkg.version) && digest(pkg.packageDigest) && typeof pkg.verified === "boolean"
       && typeof pkg.referenced === "boolean" && !digests.has(pkg.packageDigest));
     versions.add(pkg.version);
     digests.add(pkg.packageDigest);
+    packages.push({ version: pkg.version, packageDigest: pkg.packageDigest, verified: pkg.verified, referenced: pkg.referenced });
   }
   requireReport(active === undefined || versions.has(active));
   let message: Blocker | undefined;
@@ -47,8 +49,11 @@ function parseBackend(value: unknown, env: Environment): BackendRecord {
     message = blocker(reasonCode, detail, action);
   }
   const id = backend as ModelId;
-  requireReport((id !== "mlx-lm" && id !== "vllm" && supported(id, env)) || !available);
-  return record(id, supported(id, env), state as State, message, active ?? catalogVersion);
+  const compatible = supported(id, env);
+  requireReport((id !== "mlx-lm" && id !== "vllm" && compatible) || !available);
+  requireReport(!qualified || (available && catalogVersion !== undefined));
+  return { ...record(id, compatible, state as State, message, active ?? catalogVersion),
+    qualified, installed: packages, ...(catalogVersion ? { catalogVersion } : {}), ...(active ? { active } : {}) };
 }
 
 function parsePlan(value: unknown): Plan {
@@ -120,7 +125,7 @@ export async function modelRecords(config: HostConfigData, env: Environment, req
       if (request.version) argv.push("--version", request.version);
       if (request.dryRun) argv.push("--dry-run");
     }
-    const timeout = request.operation === "prepare" && !request.dryRun ? 15 * 60_000 : request.operation === "status" ? 10_000 : 60_000;
+    const timeout = request.operation === "prepare" && !request.dryRun ? 15 * 60_000 : 60_000;
     const { stdout, exit } = await env.run(argv, timeout, 256 * 1024);
     if (exit === 2 && stdout === "") return unavailable("failed", blocker("model_executor_refused", "The model executor rejected its configuration or arguments."));
     return parseReport(stdout, exit, request, env);

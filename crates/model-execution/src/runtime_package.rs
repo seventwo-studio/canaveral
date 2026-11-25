@@ -313,6 +313,37 @@ impl StagedRuntime {
         }
     }
 
+    pub fn configure_loader(&self, command: &mut std::process::Command) -> Result<()> {
+        // Release archives place libraries beside the executable or under lib/ollama.
+        let library = self.root.join("lib/ollama");
+        // glibc accepts semicolons as well as colons and expands dollar tokens.
+        // Use the same path policy for dyld so packages are portable.
+        const UNSAFE_PATH: &str = "runtime_loader_path_unsafe";
+        for path in [&self.root, &library, &self.entrypoint] {
+            if !path.is_absolute()
+                || path
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .iter()
+                    .any(|byte| matches!(byte, b':' | b';' | b'$' | 0))
+            {
+                return Err(UNSAFE_PATH);
+            }
+        }
+        let path = std::env::join_paths(
+            std::iter::once(self.root.as_path())
+                .chain(library.is_dir().then_some(library.as_path())),
+        )
+        .map_err(|_| UNSAFE_PATH)?;
+        let variable = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        command.env(variable, path);
+        Ok(())
+    }
+
     pub fn verify_executables(&self, state: &private::Directory) -> Result<()> {
         for (relative, expected) in &self.executables {
             let path = self.root.join(relative);
@@ -644,6 +675,39 @@ mod tests {
     fn root() -> tempfile::TempDir {
         tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
     }
+    #[test]
+    fn loader_paths_require_absolute_literal_entries() {
+        let root = root();
+        let safe = root.path().join("release assets");
+        let library = safe.join("lib/ollama");
+        fs::create_dir_all(&library).unwrap();
+        let mut command = std::process::Command::new("unused");
+        StagedRuntime::new(safe.clone(), "bin/server", Executables::new())
+            .configure_loader(&mut command)
+            .unwrap();
+        let (_, value) = command.get_envs().next().unwrap();
+        assert_eq!(
+            std::env::split_paths(value.unwrap()).collect::<Vec<_>>(),
+            [safe, library]
+        );
+
+        for name in [
+            "release:assets",
+            "release;assets",
+            "release$assets",
+            "release\0assets",
+        ] {
+            let mut command = std::process::Command::new("unused");
+            let staged =
+                StagedRuntime::new(root.path().join(name), "bin/server", Executables::new());
+            assert_eq!(
+                staged.configure_loader(&mut command),
+                Err("runtime_loader_path_unsafe")
+            );
+            assert_eq!(command.get_envs().count(), 0);
+        }
+    }
+
     fn serve(
         bodies: Vec<(u16, Vec<u8>)>,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {

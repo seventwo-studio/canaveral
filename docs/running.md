@@ -49,15 +49,23 @@ node coordination/dist/src/canaverald.js --url https://canaveral.example.interna
   --enrollment-token-file /etc/canaveral/enrollment.token
 ```
 
-The npm package installs the same executable as `canaverald`. Use
-[`--inventory`](infrastructure.md#capabilities-and-environment-checks) to inspect
-the host before enrolling.
-Use [host runtime commands](host-runtimes.md) to inspect local backends or
-manage model runtime packages.
+The npm package installs the same executable as `canaverald`. For first
+enrollment, deliver the enrollment file through your secret-management channel.
+Customize the service example for the host. Set the controller URL and paths,
+and run the daemon under a non-root account that owns the private host
+configuration and persistent state.
 
-Deliver the enrollment file through your normal secret-management channel. After successful enrollment the agent can restart without the enrollment argument using its saved per-host identity. Keep its state private and persistent. Do not reinitialize identity on each launch.
+- On Linux, set `User=` in the [systemd unit](../deploy/systemd/canaverald.service). Install the unit, then run `systemctl daemon-reload` and `systemctl start canaverald.service`.
+- On macOS, set `UserName` in the [LaunchDaemon plist](../deploy/launchd/com.canaveral.canaverald.plist). Install it under `/Library/LaunchDaemons`, then run `launchctl bootstrap system /Library/LaunchDaemons/com.canaveral.canaverald.plist` and `launchctl kickstart system/com.canaveral.canaverald`.
 
-For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and access to the template/storage directories. Let the host's libvirt ownership and SELinux/AppArmor policies govern runtime disk access; do not place the disks under the private agent-credential directory. `deploy/systemd/canaverald.service` is an editable service example. On a host that offers Android emulator leases, also install `deploy/systemd/canaverald.service.d/android-leases.conf`, which sets `KillMode=process` so that stopping or restarting the host does not kill the detached lease supervisors and their emulators (or use an equivalent separate scope). Other hosts keep the default `control-group` cleanup. When switching from the
+After enrollment, remove `CANAVERAL_ENROLLMENT_TOKEN_FILE` from the service
+definition. Reload the unit or re-bootstrap the plist and restart with the
+same state directory to reuse the saved host identity. Run
+`canaverald --inventory` and `canaverald runtimes status --json` as the
+service account, passing the service's `--config` and `--state` paths to both.
+See [host runtime commands](host-runtimes.md) for package management.
+
+For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and access to the template/storage directories. Let the host's libvirt ownership and SELinux/AppArmor policies govern runtime disk access; do not place the disks under the private agent-credential directory. On a host that offers Android emulator leases, also install `deploy/systemd/canaverald.service.d/android-leases.conf`, which sets `KillMode=process` so that stopping or restarting the host does not kill the detached lease supervisors and their emulators (or use an equivalent separate scope). Other hosts keep the default `control-group` cleanup. When switching from the
 previous sample unit, stop and disable it before starting the new unit. Keep the
 same state directory and move any applicable drop-ins with the service name.
 

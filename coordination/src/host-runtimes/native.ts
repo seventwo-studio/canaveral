@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppleProvider } from "../providers/apple.ts";
 import { LibvirtProvider } from "../providers/libvirt.ts";
@@ -8,20 +10,26 @@ import type { BackendId, BackendRecord, Environment, HostConfigData } from "./co
 export const receiptPath = "/var/lib/canaveral-host-installer/receipts/containerd.json";
 export const installerInstruction = "Install canaveral-host-installer as root per its README, then run sudo canaveral-host-installer containerd install.";
 const unit = "/etc/systemd/system/canaveral-containerd.service";
+const configuration = "/etc/canaveral-containerd/config.toml";
 const socket = "/run/canaveral-containerd/containerd.sock";
 const receiptLimit = 64 * 1024;
+const managedFileLimit = 64 * 1024 * 1024;
 
-export function readReceipt(path = receiptPath, owner = 0, inspect: typeof lstatSync = lstatSync): unknown {
+function checkAncestors(path: string, owner: number, inspect: typeof lstatSync): void {
   const ancestors = [];
   for (let parent = dirname(path); ; parent = dirname(parent)) {
     ancestors.unshift(parent);
     if (parent === dirname(parent)) break;
   }
+  for (const ancestor of ancestors) {
+    const stat = inspect(ancestor);
+    if (!stat.isDirectory() || stat.uid !== owner || stat.mode & 0o022) throw new Error("Unsafe installer directory");
+  }
+}
+
+export function readReceipt(path = receiptPath, owner = 0, inspect: typeof lstatSync = lstatSync): unknown {
   try {
-    for (const ancestor of ancestors) {
-      const stat = inspect(ancestor);
-      if (!stat.isDirectory() || stat.uid !== owner || stat.mode & 0o022) throw new Error("Unsafe receipt directory");
-    }
+    checkAncestors(path, owner, inspect);
     const entry = lstatSync(path);
     if (!entry.isFile() || entry.uid !== owner || entry.nlink !== 1 || (entry.mode & 0o7777) !== 0o644) throw new Error("Unsafe receipt file");
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -44,7 +52,7 @@ export function readReceipt(path = receiptPath, owner = 0, inspect: typeof lstat
   }
 }
 
-function parseReceipt(value: unknown): { version: string; files: Set<unknown> } {
+function parseReceipt(value: unknown): { version: string; files: Map<string, string> } {
   const r = object(value);
   const assets = Array.isArray(r.assets) ? r.assets.map(object) : [];
   const files = Array.isArray(r.files) ? r.files.map(object) : [];
@@ -58,7 +66,40 @@ function parseReceipt(value: unknown): { version: string; files: Set<unknown> } 
     || new Set(files.map(f => f.path)).size !== files.length) {
     throw new ProbeError("containerd_receipt_invalid");
   }
-  return { version: assets.find(a => a.name === "containerd")!.version as string, files: new Set(files.map(f => f.path)) };
+  return {
+    version: assets.find(a => a.name === "containerd")!.version as string,
+    files: new Map(files.map(f => [f.path as string, f.sha256 as string])),
+  };
+}
+
+export async function matchesManagedFile(path: string, expected: string, mode: number,
+  owner = 0, inspect: typeof lstatSync = lstatSync): Promise<boolean> {
+  try {
+    checkAncestors(path, owner, inspect);
+    const entry = lstatSync(path);
+    if (!entry.isFile() || entry.uid !== owner || entry.nlink !== 1 || (entry.mode & 0o7777) !== mode
+      || entry.size > managedFileLimit) return false;
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const unchanged = async () => {
+        const stat = await file.stat();
+        return stat.dev === entry.dev && stat.ino === entry.ino && stat.size === entry.size
+          && stat.mtimeMs === entry.mtimeMs && stat.ctimeMs === entry.ctimeMs;
+      };
+      if (!await unchanged()) return false;
+      const hash = createHash("sha256");
+      const buffer = Buffer.alloc(64 * 1024);
+      for (let offset = 0; offset < entry.size;) {
+        const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, entry.size - offset), offset);
+        if (!bytesRead) return false;
+        hash.update(buffer.subarray(0, bytesRead));
+        offset += bytesRead;
+      }
+      return await unchanged() && hash.digest("hex") === expected;
+    } finally { await file.close(); }
+  } catch {
+    return false;
+  }
 }
 
 const hasPath = (env: Environment, path: string): boolean => {
@@ -73,7 +114,7 @@ const foreignPaths = [
     .flatMap(dir => ["containerd.service", "docker.service"].map(name => join(dir, name))),
 ];
 
-function containerd(env: Environment): BackendRecord {
+async function containerd(env: Environment): Promise<BackendRecord> {
   const receipt = env.receipt();
   const owned = receipt === undefined ? undefined : parseReceipt(receipt);
   const installed = owned?.version;
@@ -82,9 +123,25 @@ function containerd(env: Environment): BackendRecord {
       "containerd_foreign_install", "An existing containerd or Docker installation needs operator review.", installerInstruction,
     ), installed);
   }
-  return record("containerd", true, installed ? "installed" : "absent", blocker(
-    "containerd_root_installer_required", installerInstruction,
-  ), installed);
+  if (!owned) {
+    return record("containerd", true, "absent", blocker("containerd_root_installer_required", installerInstruction));
+  }
+  // Only read paths emitted by the installer, never arbitrary paths from a receipt.
+  const binaries = ["containerd", "containerd-shim-runc-v2", "ctr", "runc"]
+    .map(name => `/opt/canaveral-containerd/${owned.version}/bin/${name}`);
+  const paths = [unit, configuration, ...binaries];
+  if (owned.files.size !== paths.length || paths.some(path => !owned.files.has(path))) {
+    throw new ProbeError("containerd_receipt_invalid");
+  }
+  for (const path of paths) {
+    if (!await matchesManagedFile(path, owned.files.get(path)!, path === unit || path === configuration ? 0o644 : 0o755)) {
+      return record("containerd", true, "failed", blocker(
+        "containerd_receipt_file_mismatch", "A recorded file is missing, unsafe, unreadable, or has a different SHA-256.",
+        "Inspect the installation with the root host installer.",
+      ), installed);
+    }
+  }
+  return record("containerd", true, "verified", undefined, installed);
 }
 
 async function apple(config: HostConfigData, env: Environment): Promise<BackendRecord> {
@@ -147,7 +204,7 @@ export async function nativeRecord(id: Exclude<BackendId, "ollama" | "llama.cpp"
     : env.platform === "linux" && ["arm64", "x64"].includes(env.arch);
   if (!supported) return record(id, false, "unavailable", blocker("runtime_platform_unsupported", "This backend does not support the host platform and architecture."));
   try {
-    if (id === "containerd") return containerd(env);
+    if (id === "containerd") return await containerd(env);
     return await (id === "apple-virtualization" ? apple(config, env) : libvirt(config, env));
   } catch (error) {
     const code = error instanceof ProbeError ? error.code : "runtime_probe_failed";
