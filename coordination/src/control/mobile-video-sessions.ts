@@ -26,7 +26,7 @@ export type VideoSessionCommand =
   | { type: 'video-sessions.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
   | { type: 'video-sessions.authorized'; sessionId: string; generation: string; ready?: boolean }
   | { type: 'video-sessions.disconnect'; sessionId: string; generation: string };
-type Row = { id: string; machine: string; host: string; binding: string; generation: string; credential: string; host_credential: string | null; request: string; state: string; created: number; deadline: number; host_attached: number; consumer_attached: number; cleaned: number;
+type Row = { id: string; machine: string; host: string; binding: string; generation: string; credential: string; host_credential: string | null; request: string; state: string; created: number; deadline: number; host_attached: number; consumer_attached: number; cleaned: number; ack_received: number; fence_revision: number | null;
   /** Lease sessions only: the lease and member, and the runner's own encoder-exit receipt. */
   lease: string | null; member: string | null; host_cleaned: number;
   /** `record`: one bounded recording. `live`: the capture shared by a device's live views. */
@@ -43,7 +43,7 @@ function resolution(db: DatabaseSync, id: string): Resolution | undefined { retu
 /** Owner-facing view: adds positive cleanup and any administrator abandonment. */
 function present(db: DatabaseSync, r: Row) {
   const decision = resolution(db, r.id);
-  return { ...view(r), cleaned: r.cleaned === 1, ...(r.lease || r.kind === 'live' ? { hostCleaned: r.host_cleaned === 1 } : {}), ...(decision ? { resolution: { decision: decision.decision, reason: decision.reason, decidedBy: JSON.parse(decision.decided_by) as unknown, decided: new Date(decision.created * 1000).toISOString() } } : {}) };
+  return { ...view(r), cleaned: r.cleaned === 1, ...(r.ack_received === 1 ? { ackReceived: true } : {}), ...(r.lease || r.kind === 'live' ? { hostCleaned: r.host_cleaned === 1 } : {}), ...(decision ? { resolution: { decision: decision.decision, reason: decision.reason, decidedBy: JSON.parse(decision.decided_by) as unknown, decided: new Date(decision.created * 1000).toISOString() } } : {}) };
 }
 function reasonText(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 1000 || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(value)) throw new ServiceError('Abandonment requires a reason of at most 1000 characters.', 400);
@@ -69,6 +69,8 @@ export class MobileVideoSessions implements ControlModule {
       if (!columns.includes('member')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN member TEXT');
       if (!columns.includes('host_cleaned')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN host_cleaned INTEGER NOT NULL DEFAULT 0');
       if (!columns.includes('kind')) db.exec("ALTER TABLE mobile_video_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'record'");
+      if (!columns.includes('ack_received')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN ack_received INTEGER NOT NULL DEFAULT 0');
+      if (!columns.includes('fence_revision')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN fence_revision INTEGER');
       initializeVideoResolutions(db); });
     registerMachineHooks(store, {
       additionalReservationsSql: { id: 'mobile-video-v1', query: reservations },
@@ -164,13 +166,23 @@ export class MobileVideoSessions implements ControlModule {
         // proven emulator removal then completes its cleanup (video-cleanup.ts). A live capture
         // of an owned device may report it too; its device's proven stop then completes it.
         const hostOnly = Object.hasOwn(req.body, 'hostCleaned');
-        exact(req.body, ['generation', hostOnly ? 'hostCleaned' : 'cleaned']); const r = row(db, p[4]!);
+        const ack = Object.hasOwn(req.body, 'ackReceived'), attributed = Object.hasOwn(req.body, 'stop');
+        exact(req.body, ['generation', hostOnly ? 'hostCleaned' : 'cleaned', ...(ack ? ['ackReceived'] : []), ...(attributed ? ['stop'] : [])]);
+        const r = row(db, p[4]!);
         this.machines.authenticateHost(uuid(p[2]), req.token);
         // Current credentials may acknowledge saved cleanup after rotation; they
         // cannot revive capture or acknowledge another immutable assignment.
         if (r.host !== uuid(p[2]) || r.generation !== uuid(req.body.generation) || !r.host_attached || (hostOnly ? req.body.hostCleaned !== true || !(r.lease || r.kind === 'live') : req.body.cleaned !== true) || binding(this.target(db, r.machine)) !== r.binding) return fail(403);
+        if (ack && (hostOnly || r.kind !== 'record' || !r.consumer_attached || req.body.ackReceived !== true)) return fail(400);
+        if (attributed) {
+          const stop = object(req.body.stop);
+          exact(stop, ['cause', 'leaseId', 'leaseRevision']);
+          if (r.kind !== 'live' || stop.cause !== 'fence' || typeof stop.leaseRevision !== 'number' || !Number.isSafeInteger(stop.leaseRevision) || stop.leaseRevision < 1) return fail(400);
+          if (uuid(stop.leaseId) !== r.lease) return fail(403);
+          db.prepare('UPDATE mobile_video_sessions SET fence_revision=COALESCE(fence_revision,?) WHERE id=?').run(stop.leaseRevision, r.id);
+        }
         if (hostOnly) { if (live.includes(r.state)) this.disconnect(db, r); db.prepare('UPDATE mobile_video_sessions SET host_cleaned=1 WHERE id=?').run(r.id); settleLeaseVideoSessions(db); settleStoppedLiveCaptures(db); }
-        else db.prepare("UPDATE mobile_video_sessions SET state='finished',cleaned=1,host_cleaned=1 WHERE id=?").run(r.id);
+        else db.prepare("UPDATE mobile_video_sessions SET state='finished',cleaned=1,host_cleaned=1,ack_received=MAX(ack_received,?) WHERE id=?").run(Number(ack), r.id);
         return { body: present(db, row(db, r.id)) };
       }
       const principal = requireScope(req, 'access'), m = this.target(db, p[2]!, principal);
