@@ -55,7 +55,9 @@
   "scripts": {
     "build": "tsc && node ../script/prepare_cli.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-force-exit dist/test/*.test.js dist/test/control/*.test.js"
+    "test": "node ../script/coordination_tests.mjs",
+    "test:parallel": "node ../script/coordination_tests.mjs --group=parallel",
+    "test:timed": "node ../script/coordination_tests.mjs --group=timed"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
