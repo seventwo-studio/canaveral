@@ -54,6 +54,7 @@ status.
 | Code | Status | Meaning | Retry |
 | --- | --- | --- | --- |
 | `capacity_unavailable` | 503 | No eligible host or approved runner domain has capacity for this acquisition | Yes, later. Prefer a waiting request, which is admitted when capacity frees |
+| `unsupported_host_provider` | 400, local | The provider is unsupported by canaverald or controller enrollment | No. Configure a supported provider and enroll it with a separate host identity |
 | `capability_unsupported` | 409, receipt | The image, runtime or host does not implement the requested capability or operation; nothing ran | No. Choose a supported capability or template |
 | `member_not_ready` | 409 | The lease or its member is not ready for access yet | Yes, once the lease is `ready` |
 | `lease_credential_required` | 403 | Guest access needs the lease-scoped key; the application key was presented | No. Exchange for a lease key and use it |

@@ -134,20 +134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "canaveral-kubevirt-execution"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "uuid",
-]
-
-[[package]]
 name = "canaveral-mobile-native"
 version = "0.1.0"
 dependencies = [

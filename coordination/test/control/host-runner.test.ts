@@ -15,7 +15,6 @@ import { ServiceError } from "../../src/errors.ts";
 import { AndroidProvider } from "../../src/providers/android.ts";
 import { IosProvider } from "../../src/providers/ios.ts";
 import { digest } from "../../src/providers/mobile.ts";
-import { beginCreation, creationAnnotations, KubevirtProvider, manifest, rememberCreation } from "../../src/providers/kubevirt.ts";
 const token = "a".repeat(43);
 function setup(t: { after(fn: () => void | Promise<void>): void }): { config: HostConfig; image: RecordValue; clock: ExecutionClock & { mono: number; wallTime: number } } {
   const state = realpathSync(mkdtempSync(join(tmpdir(), "canaveral-host-runner-"))); t.after(() => rmSync(state, { recursive: true, force: true }));
@@ -222,55 +221,6 @@ test("maintenance inventories stopped backing storage after runner restart and r
   proof = await inventoryProof(runner, fixture, machines);
   assert.deepEqual(proof.inventory, { complete: true, unexpected: [unexpected], assignments: expected("present").map((a, i) => ({ ...a, storage: ["present", "absent", "unknown", "notMaterialized"][i] })) });
   assert.equal(proof.idle, false); assert.equal(reconciles, 0);
-});
-
-test("a runner journal does not prove KubeVirt backing storage", async t => {
-  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
-  const m: RecordValue = { ...machine(image), desired: "stopped", observed: "stopped" };
-  saveRecord(join(config.stateDir, "machines", String(m.id), "assignment.json"), { fingerprint: assignmentFingerprint(m) });
-  const runner = new HostRunner({ ...config, provider: "kubevirt" }, { clock, transport: fixture.transport,
-    providerFactory: () => ({ kind: "kubevirt", check: async () => ({}), reconcile: async () => assert.fail("Inspection must not reconcile") }) });
-  t.after(() => runner.close());
-  await runner.initializeProviders(); await runner.connect();
-  const proof = await inventoryProof(runner, fixture, [m]);
-  assert.deepEqual(proof.inventory, { complete: true, unexpected: [], assignments: [{ id: m.id, storage: "unsupported", stopProof: "unsupported" }] });
-});
-
-test("KubeVirt maintenance probes the assigned PVC read-only and distinguishes absence from failure", async t => {
-  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
-  const m = { ...machine(image), desired: "stopped", observed: "stopped" } as RecordValue;
-  const folder = join(config.stateDir, "machines", String(m.id)), namespace = "guests", name = `cvm-${m.id}`;
-  saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(m) });
-  const creation = beginCreation(m, namespace, folder), vm = manifest(m, { ...image, pvc: "base" }, namespace);
-  Object.assign(vm.metadata as RecordValue, { uid: randomUUID(), annotations: creationAnnotations(creation) });
-  rememberCreation(m, namespace, folder, vm);
-  const provider = new KubevirtProvider({ namespace }, config.stateDir);
-  let observed = "present";
-  const commands: string[][] = [];
-  provider.kubectl = async (args, options) => {
-    commands.push(args);
-    assert.equal(options?.timeoutMs, 5000);
-    if (args[1] === "virtualmachine") return JSON.stringify(vm);
-    if (observed === "absent") return ""; // kubectl --ignore-not-found on a named object
-    if (observed === "unknown") throw new Error("Forbidden");
-    return JSON.stringify({ apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: { namespace, name, uid: randomUUID() }, status: { phase: "Bound" } });
-  };
-  provider.reconcile = async () => assert.fail("Inspection must not reconcile");
-  const runner = new HostRunner({ ...config, provider: "kubevirt" }, { clock, transport: fixture.transport, providerFactory: () => provider });
-  t.after(() => runner.close());
-  await runner.initializeProviders(); await runner.connect();
-  for (observed of ["present", "absent", "unknown"]) {
-    commands.length = 0;
-    const proof = await inventoryProof(runner, fixture, [m]);
-    assert.deepEqual((proof.inventory as RecordValue).assignments, [{ id: m.id, storage: observed, stopProof: "unsupported" }]);
-    assert.ok(commands.some(args => args.join(" ") === `get pvc ${name} --ignore-not-found -o json`));
-    assert.ok(commands.every(args => args[0] === "get" && args[2] === name));
-  }
-  observed = "present";
-  Object.assign(vm.metadata as RecordValue, { uid: randomUUID() });
-  fixture.set({ machines: [m], maintenance: fixture.draining() }); await runner.poll();
-  const foreign = await inventoryProof(runner, fixture, [m]);
-  assert.deepEqual((foreign.inventory as RecordValue).assignments, [{ id: m.id, storage: "unknown", stopProof: "unsupported" }]);
 });
 
 test("maintenance reports unexplained removal quarantines in Apple and libvirt storage", async t => {

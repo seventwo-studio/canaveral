@@ -19,7 +19,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setImmediate as yieldWork } from "node:timers/promises";
 import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
-import { enabledRuntimes, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
+import { enabledRuntimes, hostProvider, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
 import { credential, sshPreparation, userData } from "./control/preparation.ts";
 import { createProvider } from "./providers/index.ts";
 import type { NativeProvider } from "./providers/index.ts";
@@ -129,7 +129,6 @@ interface Runtime extends NativeProvider {
   streamDownload?: GuestAccess["streamDownload"];
   desktop?: GuestAccess["desktop"];
   closeShells?(machine: RecordValue): Promise<void>;
-  resourceReport?(assignments: RecordValue[]): Promise<RecordValue>;
   /** Mobile runtimes only: operator-requested runtime changes and orphan storage evidence. */
   runtimeOperation?(kind: string, args: RecordValue, context: RuntimeContext): Promise<RuntimeReport>;
   orphanEvidence?(name: string): Promise<OrphanEvidence>;
@@ -279,9 +278,8 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   return offer;
 }
 export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+  const provider = hostProvider(config.provider);
   const leases = leaseOffer(config, platform);
-  const provider = text(config.provider, "provider");
-  if (!["macos", "linux", "windows", "apple", "libvirt", "hyperv", "kubevirt", "android", "ios", "native"].includes(provider)) throw new ServiceError("Unsupported host provider.", 400);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
   let templates = config.templates.map(normalizeTemplate);
   if (new Set(templates.map(t => `${t.id}@${t.revision}:${t.arch}`)).size !== templates.length) throw new ServiceError("Duplicate installed template revision.", 400);
@@ -477,6 +475,7 @@ export class HostRunner {
   private updateExternalWork = 0;
   private updateAssignments = new Map<string, RecordValue>();
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
+    hostProvider(config.provider);
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config), platform = dependencies.platform ?? process.platform;
     leaseOffer(config, platform);
@@ -499,12 +498,8 @@ export class HostRunner {
     this.idlePolicy = upkeepPolicy(config.upkeep, (this.config.templates as RecordValue[]).map(template => String(template.id)));
     const pressure = pressureConfig(config.pressure);
     this.pressureGates = pressure.gates;
-    if (this.config.provider === "kubevirt" && (pressure.gates.placement || pressure.gates.restart)) throw new ServiceError("A KubeVirt pool reports no host pressure and cannot gate on it.", 400);
-    // A KubeVirt pool runner measures its own pod, not the cluster's nodes, so it reports no pressure.
-    if (this.config.provider !== "kubevirt") {
-      if (pressure.enabled) this.pressureMonitor = new PressureMonitor(pressure.thresholds);
-      else this.pressureReport = { version: 1, state: "disabled", sampledAt: clock.wall() };
-    }
+    if (pressure.enabled) this.pressureMonitor = new PressureMonitor(pressure.thresholds);
+    else this.pressureReport = { version: 1, state: "disabled", sampledAt: clock.wall() };
     this.transport = dependencies.transport ?? transport; this.log = dependencies.log ?? (() => {}); this.guest = dependencies.guest;
     this.loadReports();
     const retained = join(this.state, "update-assignments.json");
@@ -1621,13 +1616,7 @@ export class HostRunner {
     }
     let disk: RecordValue = { diskTotalGiB: null, diskFreeGiB: null };
     try { const sample = statfsSync(String(this.config.storage ?? this.state)); disk = { diskTotalGiB: sample.blocks * sample.bsize / 2 ** 30, diskFreeGiB: sample.bavail * sample.bsize / 2 ** 30 }; } catch { /* Missing telemetry remains unknown. */ }
-    let cluster: RecordValue | undefined;
-    const binding = legacyDigest(this.assignments);
-    for (const runtime of this.runtimes.values()) if (runtime.resourceReport) {
-      try { const report = await runtime.resourceReport(structuredClone(this.assignments)); if (binding === legacyDigest(this.assignments)) cluster = report; }
-      catch { this.log("Cluster resource observation unavailable; no ownership totals inferred."); }
-    }
-    const sample = validateSample({ scope: this.config.provider === "kubevirt" ? "runner" : "host", domain: hostname().slice(0, 100), sampledAt: this.clock.wall(), cpuCount, cpuPercent: previous && total > previous.total ? Math.max(0, Math.min(100, 100 * (1 - (idle - previous.idle) / (total - previous.total)))) : null, memoryTotalMiB: totalmem() / 2 ** 20, memoryAvailableMiB: freemem() / 2 ** 20, ...disk, ...(cluster ? { cluster } : {}), canaveral: this.usage.collect(observations, cpuCount, this.clock.now(), unavailable, true) });
+    const sample = validateSample({ scope: "host", domain: hostname().slice(0, 100), sampledAt: this.clock.wall(), cpuCount, cpuPercent: previous && total > previous.total ? Math.max(0, Math.min(100, 100 * (1 - (idle - previous.idle) / (total - previous.total)))) : null, memoryTotalMiB: totalmem() / 2 ** 20, memoryAvailableMiB: freemem() / 2 ** 20, ...disk, canaveral: this.usage.collect(observations, cpuCount, this.clock.now(), unavailable, true) });
     if (!this.stopping) this.resourceSample = sample;
   }
   /** Admission only: existing operations keep their original authorization and signals. */
@@ -1989,7 +1978,6 @@ export class HostRunner {
     this.lock = new StateLock(join(this.state, "host-runner.sqlite")); this.started = true;
     try {
       for (const image of this.config.templates as RecordValue[]) if (image.source && !image.catalogueImageId) {
-        if (this.config.provider === "kubevirt") throw new ServiceError("KubeVirt requires a separately installed base PVC; omit image source.", 409);
         const runtimeConfig = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? enabledRuntimes(this.config)[runtimeFor(this.config, image)] : undefined;
         const cache = runtimeConfig?.imageCache ?? this.config.imageCache;
         if (typeof cache !== "string") throw new ServiceError("Configure imageCache for verified base sources.", 400);
@@ -2121,7 +2109,7 @@ export async function checkHost(config: HostConfig, dependencies: HostDependenci
     return {
       version: 1, status, checkedAt,
       machine: {
-        scope: config.provider === "kubevirt" ? "runner" : "host",
+        scope: "host",
         platform: process.platform,
         architecture: process.arch,
         osRelease: release(),

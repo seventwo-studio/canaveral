@@ -14,7 +14,6 @@ import type {
   Host,
   HostAllocation,
   IssuedSetup,
-  NamespaceObservation,
   ResourceDetails,
   RunnerBindings,
   SetupActivity,
@@ -24,7 +23,6 @@ import type { Refresh, ResourceInput } from "@/lib/catalogue";
 import { useEffect, useRef, useState } from "react";
 import {
   Server,
-  Orbit,
   Download,
   RefreshCw,
   Check,
@@ -55,8 +53,6 @@ import {
   CardFooter,
 } from "./ui/card";
 
-const kind = (h: Host) =>
-  h.kind || (h.provider === "kubevirt" ? "orchestrator" : "host");
 const runtimeChoices: Record<string, string[] | undefined> = {
   macos: ["apple", "android", "ios"],
   linux: ["libvirt", "android"],
@@ -78,13 +74,9 @@ const defaults = (p: string) => ({
       ? "C:\\Canaveral\\guests"
       : "/absolute/path/to/canaveral-guests",
   templates: [],
-  ...(runtimeChoices[p]
-    ? {
-        runtimes: {
-          [runtimeChoices[p]![0]!]: runtimeDefaults(runtimeChoices[p]![0]!),
-        },
-      }
-    : { namespace: "canaveral-guests", context: "your-cluster-context" }),
+  runtimes: {
+    [runtimeChoices[p]![0]!]: runtimeDefaults(runtimeChoices[p]![0]!),
+  },
 });
 const Metric = ({
   label,
@@ -141,10 +133,8 @@ function Usage({ host }: { host: Host }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {u.scope === "runner"
-          ? "Runner usage · not cluster capacity"
-          : "Physical host usage · includes other workloads"}{" "}
-        · {fresh ? "Latest report" : "Stale report"} ·{" "}
+        Physical host usage · includes other workloads ·{" "}
+        {fresh ? "Latest report" : "Stale report"} ·{" "}
         {u.receivedAt === 0
           ? new Date(0).toLocaleString()
           : since(u.receivedAt)}
@@ -217,110 +207,6 @@ function Usage({ host }: { host: Host }) {
         </details>
       </section>
     </div>
-  );
-}
-export function NamespaceResources({
-  cluster,
-}: {
-  cluster: NamespaceObservation;
-}) {
-  const metrics = cluster.metrics,
-    quotas = cluster.quotas;
-  const cores = (value: number) =>
-    new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(
-      value,
-    );
-  return (
-    <Card asChild className="gap-2 px-4 text-xs">
-      <section>
-        <h3 className="text-sm font-semibold [overflow-wrap:anywhere]">
-          Namespace {cluster.namespace}
-        </h3>
-        <p className="text-muted-foreground">
-          Includes all workloads in the namespace · sampled{" "}
-          {since(cluster.sampledAt)}
-        </p>
-        <p>
-          {metrics.status === "available"
-            ? `${cores(metrics.cpuCores)} CPU cores · ${memory(metrics.memoryMiB)} · ${metrics.podCount} measured pods`
-            : "Namespace usage unavailable. Check metrics-server, pod inventory and API permissions."}
-        </p>
-        {metrics.coverage && (
-          <p className="text-muted-foreground">
-            {metrics.coverage.status === "unavailable"
-              ? "Measurement coverage unavailable."
-              : `${metrics.coverage.measuredPods} of ${metrics.coverage.activePods} active pods have fresh complete measurements.`}
-            {metrics.status === "available" && metrics.sampledAt
-              ? ` Oldest measurement ${since(metrics.sampledAt)}.`
-              : " Incomplete measurements are not shown as namespace totals."}
-          </p>
-        )}
-        <section
-          aria-label="Canaveral VM workload usage"
-          className="space-y-1 border-t pt-2"
-        >
-          <h4 className="font-medium">Canaveral VM workloads</h4>
-          {cluster.canaveral?.ownership.status === "complete" &&
-          cluster.canaveral?.metrics.status === "available" ? (
-            <>
-              <p>
-                {cores(cluster.canaveral.metrics.cpuCores)} CPU cores ·{" "}
-                {memory(cluster.canaveral.metrics.memoryMiB)} ·{" "}
-                {cluster.canaveral.metrics.podCount} measured pods
-              </p>
-              <p className="text-muted-foreground">
-                Verified for {cluster.canaveral.ownership.verifiedMachines}{" "}
-                assigned machine
-                {cluster.canaveral.ownership.verifiedMachines === 1 ? "" : "s"}.
-                Oldest measurement {since(cluster.canaveral.metrics.sampledAt)}.
-              </p>
-            </>
-          ) : (
-            <p className="text-muted-foreground">
-              Canaveral VM usage unavailable. Ownership or measurements are
-              incomplete.
-            </p>
-          )}
-          <p className="text-muted-foreground">
-            Assigned VM pods and their support pods. This usage is included in
-            the namespace total.
-          </p>
-        </section>
-        {quotas.status === "unavailable" ? (
-          <p className="text-muted-foreground">
-            Namespace quotas unavailable. Check resourcequota read permissions.
-          </p>
-        ) : !quotas.items.length ? (
-          <p className="text-muted-foreground">
-            No namespace resource quotas configured.
-          </p>
-        ) : (
-          quotas.items.map((q) => (
-            <div key={q.name} className="space-y-1 border-t pt-2">
-              <p className="font-medium">Quota: {q.name}</p>
-              {Object.entries(q.hard).map(([key, limit]) => (
-                <p key={key} className="break-words text-muted-foreground">
-                  {key}:{" "}
-                  {q.used[key] == null ? "Unavailable" : number(q.used[key])} /{" "}
-                  {number(limit)}{" "}
-                  {key.includes("memory")
-                    ? "MiB"
-                    : key.includes("storage")
-                      ? "GiB"
-                      : key.includes("cpu")
-                        ? "cores"
-                        : "claims"}
-                </p>
-              ))}
-            </div>
-          ))
-        )}
-        <p className="text-muted-foreground">
-          Kubernetes quota and live usage are observations; Canaveral host
-          limits constrain placement reservations.
-        </p>
-      </section>
-    </Card>
   );
 }
 function ReservationMeters({
@@ -400,11 +286,7 @@ function AcceptingToggle({ host, busy, mutate }: AcceptingProps) {
           )
         }
       >
-        {host.enabled
-          ? kind(host) === "orchestrator"
-            ? "Drain pool"
-            : "Drain host"
-          : "Accept machines"}
+        {host.enabled ? "Drain host" : "Accept machines"}
       </Button>
     </div>
   );
@@ -424,8 +306,6 @@ export function InfrastructureCard({
     message: string,
   ) => void | Promise<void>;
 }) {
-  const orchestrator = kind(host) === "orchestrator";
-  const Icon = orchestrator ? Orbit : Server;
   const availability = !host.online
     ? "Offline"
     : !host.enabled
@@ -437,7 +317,7 @@ export function InfrastructureCard({
     <Card className="min-w-0">
       <CardHeader>
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Icon className="size-4 shrink-0 text-muted-foreground" />
+          <Server className="size-4 shrink-0 text-muted-foreground" />
           <CardTitle className="min-w-0 flex-1 break-words">
             <a
               href={resourcesHref}
@@ -460,8 +340,7 @@ export function InfrastructureCard({
           </Badge>
         </div>
         <CardDescription>
-          {provider(host.platform || host.provider)} ·{" "}
-          {orchestrator ? "Orchestrator pool" : "Direct host"}
+          {host.detail ?? provider(host.platform || host.provider)}
         </CardDescription>
         {!!host.runtimes?.length && (
           <p className="text-xs text-muted-foreground">
@@ -627,9 +506,6 @@ export function InfrastructureDetails({
           <section className="min-w-0 space-y-3">
             <h2 className="text-sm font-semibold">Observed resources</h2>
             <Usage host={host} />
-            {host.usage?.cluster && (
-              <NamespaceResources cluster={host.usage.cluster} />
-            )}
             <CpuHistory
               samples={data?.samples ?? []}
               host={host}
@@ -642,9 +518,7 @@ export function InfrastructureDetails({
               </summary>
               <p className="mt-2">
                 Shared resource domain: {host.usage?.domain || "unknown"}. Do
-                not sum physical usage from runners on the same host. KubeVirt
-                runner measurements are separate from namespace usage and
-                quotas.
+                not sum physical usage from runners on the same host.
               </p>
             </details>
           </section>
@@ -740,35 +614,24 @@ export function InfrastructureDetails({
 }
 
 export function ConnectionSetup({
-  initialKind,
   onClose,
   onRefresh,
   hosts,
 }: {
-  initialKind: "host" | "orchestrator";
   onClose: () => void;
   onRefresh: Refresh;
   hosts: Host[];
 }) {
   const intent = useRef<{ id: string; fingerprint: string } | null>(null);
-  const [type, setType] = useState(initialKind),
-    [name, setName] = useState(""),
-    [backend, setBackend] = useState(
-      initialKind === "orchestrator" ? "kubevirt" : "macos",
-    ),
+  const [name, setName] = useState(""),
+    [backend, setBackend] = useState("macos"),
     [url, setUrl] = useState(""),
     [capacity, setCapacity] = useState<ResourceInput>({
       cpu: 4,
       memoryMiB: 8192,
       diskGiB: 100,
     }),
-    [config, setConfig] = useState(
-      JSON.stringify(
-        defaults(initialKind === "orchestrator" ? "kubevirt" : "macos"),
-        null,
-        2,
-      ),
-    ),
+    [config, setConfig] = useState(JSON.stringify(defaults("macos"), null, 2)),
     [issued, setIssued] = useState<IssuedSetup | null>(null),
     [activity, setActivity] = useState<SetupActivity[]>([]),
     [busy, setBusy] = useState(false),
@@ -803,15 +666,7 @@ export function ConnectionSetup({
   } catch {
     /* The submit handler reports invalid JSON. */
   }
-  const fields = [
-    ["storage", "Storage directory"],
-    ...(backend === "kubevirt"
-      ? [
-          ["namespace", "Kubernetes namespace"],
-          ["context", "Kubernetes context"],
-        ]
-      : []),
-  ];
+  const fields = [["storage", "Storage directory"]];
   function toggleRuntime(name: string, enabled: boolean) {
     const runtimes = { ...bindings.runtimes };
     if (enabled) runtimes[name] = runtimeDefaults(name);
@@ -937,9 +792,7 @@ export function ConnectionSetup({
     >
       <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
-            Add {type === "orchestrator" ? "orchestrator" : "host"}
-          </DialogTitle>
+          <DialogTitle>Add host</DialogTitle>
           <DialogDescription>
             Connect a runner that provides VMs or simulators. Credentials stay
             on that runner.
@@ -954,42 +807,14 @@ export function ConnectionSetup({
           <form onSubmit={issue} className="@container/setup space-y-4">
             <div className="grid gap-4 @sm/setup:grid-cols-2">
               <label className="grid min-w-0 gap-1.5 text-ui font-medium">
-                Connection type
+                Host operating system
                 <NativeSelect
-                  aria-label="Connection type"
-
-                  value={type}
-                  onChange={(e) => {
-                    setType(
-                      e.target.value === "orchestrator"
-                        ? "orchestrator"
-                        : "host",
-                    );
-                    change(
-                      e.target.value === "orchestrator" ? "kubevirt" : "macos",
-                    );
-                  }}
-                >
-                  <option value="host">Direct host</option>
-                  <option value="orchestrator">External orchestrator</option>
-                </NativeSelect>
-              </label>
-              <label className="grid min-w-0 gap-1.5 text-ui font-medium">
-                {type === "orchestrator" ? "Provider" : "Host operating system"}
-                <NativeSelect
-                  aria-label={
-                    type === "orchestrator"
-                      ? "Provider"
-                      : "Host operating system"
-                  }
+                  aria-label="Host operating system"
 
                   value={backend}
                   onChange={(e) => change(e.target.value)}
                 >
-                  {(type === "orchestrator"
-                    ? ["kubevirt"]
-                    : ["macos", "linux", "windows"]
-                  ).map((p) => (
+                  {["macos", "linux", "windows"].map((p) => (
                     <option key={p} value={p}>
                       {provider(p)}
                     </option>
@@ -1004,7 +829,7 @@ export function ConnectionSetup({
                 maxLength={100}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Build Mac or development cluster"
+                placeholder="Build Mac or development Linux host"
               />
             </label>
             <div className="grid min-w-0 gap-1.5">
@@ -1061,8 +886,7 @@ export function ConnectionSetup({
               </div>
               <p className="text-xs text-muted-foreground">
                 Set how much Canaveral can allocate on this host. Divide
-                resources between runners sharing a physical host or cluster
-                pool.
+                resources between runners sharing a physical host pool.
               </p>
             </fieldset>
             <div className="grid gap-4 @sm/setup:grid-cols-2">

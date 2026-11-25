@@ -373,17 +373,6 @@ test("dispatch readiness is explicit and expiry bounds the server deadline", asy
   assert.equal((await x.f.ok(x.poll())).cancelRequested, true);
 });
 
-test("backend eligibility denies command admission on KubeVirt", async t => {
-  const f = await fixture(t), app = await f.application();
-  const image = { ...IMAGE, id: "kube-only", backend: "kubevirt" };
-  await f.ok(f.post("/v1/linux-lease-images", image, f.admin)); await f.grant(app.id, image);
-  const domain = await f.domain(VM), runner = await f.enroll(); await f.ok(f.approve(runner, domain, image));
-  const { lease } = await app.client().acquireLease(f.acquire({ templateId: image.id, requiredCapabilities: ["command"] }));
-  const a = (await f.claim(runner)).assignment!; await f.ok(f.report(runner, a.id, 1, f.receipt(a, f.running)));
-  const key = (await app.client().rotateLeaseCredential(lease.id)).credential;
-  await rejectsWith(f.leaseClient(lease.id, key).createOperation(intent()), 409);
-});
-
 async function workspaceReady(t: Parameters<typeof fixture>[0], filesOnly=false) {
   const f=await fixture(t,true), app=await f.application(); await f.grant(app.id);
   const domain=await f.domain({cpu:32,memoryMiB:65536,diskGiB:200}), runner=await f.enroll(); await f.ok(f.approve(runner,domain));

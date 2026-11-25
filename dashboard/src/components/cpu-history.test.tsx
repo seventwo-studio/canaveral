@@ -137,7 +137,7 @@ it("labels stale, offline and retained reports without presenting them as live",
   expect(screen.queryByText(/\bLive\b/)).toBeNull();
 });
 
-it("preserves runner vs physical scope and treats missing scope as unknown", () => {
+it("labels physical scope and treats missing scope as unknown", () => {
   freezeTime();
   const samples = [
     { receivedAt: now - 10, cpuPercent: 20 },
@@ -148,13 +148,6 @@ it("preserves runner vs physical scope and treats missing scope as unknown", () 
     screen.getByText("Physical host CPU · includes other workloads"),
   ).toBeTruthy();
   expect(screen.getByText("Reported samples")).toBeTruthy();
-  rerender(
-    <CpuHistory
-      host={{ ...host, usage: { ...host.usage!, scope: "runner" } }}
-      samples={samples}
-    />,
-  );
-  expect(screen.getByText("Runner CPU · not cluster capacity")).toBeTruthy();
   rerender(<CpuHistory host={{ online: true }} samples={samples} />);
   expect(screen.getByText("CPU scope not reported")).toBeTruthy();
 });

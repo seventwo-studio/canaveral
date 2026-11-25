@@ -38,7 +38,7 @@ Each entry has exactly `id`, `revision`, `arch` and `runtime`. An iOS entry, and
 entry, has a fifth field, `isolation`; see [isolation class](#isolation-class). It must uniquely
 match a currently offered installed image and that image's actual configured
 runtime. Physical hosts resolve runtimes through the existing platform/runtime
-configuration; legacy single-runtime and KubeVirt offers bind to their adapter.
+configuration; legacy single-runtime offers bind to their adapter.
 A selected legacy image cannot claim another runtime through its image metadata.
 
 Normalization bounds declarations to the existing 100-image offer limit and

@@ -47,11 +47,9 @@ export function CpuHistory({
     host.usage?.fresh === false ||
     (lastMeasurement !== undefined && Date.now() / 1000 - lastMeasurement > 30);
   const scope =
-    host.usage?.scope === "runner"
-      ? "Runner CPU · not cluster capacity"
-      : host.usage?.scope === "host"
-        ? "Physical host CPU · includes other workloads"
-        : "CPU scope not reported";
+    host.usage?.scope === "host"
+      ? "Physical host CPU · includes other workloads"
+      : "CPU scope not reported";
   const crossesDate =
     first !== undefined &&
     last !== undefined &&
