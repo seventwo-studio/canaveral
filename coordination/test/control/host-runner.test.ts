@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkHost, HostRunner, hostOffer, hostTransport, startHost } from "../../src/host.ts";
@@ -221,6 +222,57 @@ test("maintenance inventories stopped backing storage after runner restart and r
   proof = await inventoryProof(runner, fixture, machines);
   assert.deepEqual(proof.inventory, { complete: true, unexpected: [unexpected], assignments: expected("present").map((a, i) => ({ ...a, storage: ["present", "absent", "unknown", "notMaterialized"][i] })) });
   assert.equal(proof.idle, false); assert.equal(reconciles, 0);
+});
+
+test("maintenance and update idle verify assignment bookkeeping before excluding it", async t => {
+  const { config, clock } = setup(t), fixture = maintenanceReplies();
+  const runner = new HostRunner(config, { clock, transport: fixture.transport, providerFactory });
+  t.after(() => runner.close());
+  const root = join(config.stateDir, "machines"), locks = join(root, ".assignment-locks"), cleanups = join(root, ".lease-cleanup");
+  const id = randomUUID(), receipt = join(cleanups, `${id}.json`);
+  const proof = { id: randomUUID(), machineId: id, leaseId: randomUUID(), attempt: 1, phase: "complete", fingerprint: "f".repeat(64) };
+  const lockPath = join(locks, `${id}.sqlite`);
+  new StateLock(lockPath).close();
+  new StateLock(`${receipt}.sqlite`).close();
+  saveRecord(receipt, proof);
+  await runner.initializeProviders(); await runner.connect();
+
+  const inventory = async (unexpected: string[]) => {
+    fixture.set({ machines: [], maintenance: fixture.draining() }); await runner.poll();
+    const report = await inventoryProof(runner, fixture, []);
+    assert.deepEqual(report.inventory, { complete: true, assignments: [], unexpected });
+    const idle = unexpected.length === 0;
+    assert.equal(report.idle, idle);
+    assert.deepEqual(await runner.updateIdle(true), { idle, workloadsStopped: idle });
+  };
+
+  await inventory([]);
+  assert.deepEqual(readRecord(receipt), proof, "inspection leaves the cleanup receipt intact");
+
+  for (const phase of ["planned", "unstarted", "preboot", "storageRemoved", "erasing", "removing"]) {
+    saveRecord(receipt, { ...proof, phase });
+    await inventory([".lease-cleanup"]);
+  }
+  saveRecord(receipt, proof);
+  await inventory([]);
+
+  chmodSync(locks, 0o755);
+  saveRecord(receipt, { ...proof, machineId: randomUUID() });
+  await inventory([".assignment-locks", ".lease-cleanup"]);
+
+  chmodSync(locks, 0o700);
+  rmSync(lockPath);
+  const unrelated = new DatabaseSync(lockPath);
+  try { unrelated.exec("CREATE TABLE foreign_data (id INTEGER PRIMARY KEY)"); } finally { unrelated.close(); }
+  await inventory([".assignment-locks", ".lease-cleanup"]);
+
+  rmSync(locks, { recursive: true });
+  rmSync(cleanups, { recursive: true });
+  const foreign = join(config.stateDir, "foreign");
+  mkdirSync(foreign, { mode: 0o700 });
+  symlinkSync(foreign, locks);
+  writeFileSync(cleanups, "foreign entry", { mode: 0o600 });
+  await inventory([".assignment-locks", ".lease-cleanup"]);
 });
 
 test("maintenance reports unexplained removal quarantines in Apple and libvirt storage", async t => {

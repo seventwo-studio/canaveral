@@ -190,6 +190,7 @@ status.
 | `transport_interrupted` | 503 | The controller's or a guest's reply was not confirmed; a mutation may have taken effect | No. Inspect state, then replay the identical request if needed |
 | `assignment_busy` | 409 | The assignment or its owned state has active work or an unresolved lock | After the current work ends; an unresolved lock needs inspection |
 | `execution_pending` | 409, receipt | Native stop of a leased runtime is not confirmed, so cleanup cannot proceed | The runner retries cleanup; reservations stay held |
+| `libvirt-unconfirmed` | 409, receipt | The in-cluster libvirt guardian or reconciler has no positive stop proof for the leased VM | The runner retries cleanup by UUID and keeps the reservation held |
 | `operations_pending` | 409, receipt | Owned helper processes of an assignment are not confirmed closed | The runner retries cleanup; inspect surviving helpers |
 | `ownership` | 409, receipt | Assignment or storage ownership differs from the recorded owner | No. Investigate the mismatch before any removal |
 | `storage_removal` | 409, receipt | A native storage removal receipt does not match its request | No. Inspect the host's storage and receipts |
@@ -198,7 +199,9 @@ status.
 | `helper_cancellation_uncertain` | 409 | Closure of an owned helper process could not be confirmed; its reservation is retained | No. Inspect the process before reuse |
 | `host_shutdown_incomplete` | 409 | A host stopped without confirming every cleanup step | No. Inspect the host before restarting work |
 | `image_cache_publication_uncertain` | 409 | Publication of a cached base image was not confirmed | No. Inspect the cache before retrying |
-| `lease_deadline_artifact_invalid` | 409 | The configured Linux lease deadline library failed its static validation | No. Install a valid artifact |
+| `libvirt_lease_helper_unverified` | 409, local | The libvirt lease helper is not configured, is writable by the daemon account, or differs from its pinned `leaseHelperSha256`; the daemon must not run as root | No. Install the released helper root-owned and pin its digest; see [libvirt supervision](libvirt-supervision.md) |
+| `libvirt_lease_kernel_unsupported` | 400, local | Libvirt lease images were declared on a kernel older than Linux 6.5, which cannot give the guardian a peer pidfd | No. Run libvirt leases on Linux 6.5 or later; administrative VMs are unaffected |
+| `libvirt_lease_sandbox_unsupported` | 409, local | The lease helper detected a sandbox kernel whose boot identity cannot establish a reboot of the libvirt host | No. Run the lease daemon on the same kernel as libvirtd |
 
 ## Observability
 

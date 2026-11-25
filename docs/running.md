@@ -114,6 +114,57 @@ directory. Libvirtd creates that file for its own configured QEMU account, so
 the daemon's ownership checks cover the directory and disk but not that file.
 UEFI and TPM state provisioning is not natively qualified.
 
+### Libvirt VM leases
+
+Consumer VM leases on a libvirt host run as transient domains under a per-lease
+guardian; see [libvirt supervision](libvirt-supervision.md). They need Linux 6.5
+or later, the VM storage above, a non-root daemon account and the released lease
+helper installed root-owned:
+
+```sh
+sudo install -d -m 0755 -o root -g root /usr/local/lib/canaveral
+sudo install -m 0755 -o root -g root canaveral-libvirt-native /usr/local/lib/canaveral/
+sha256sum /usr/local/lib/canaveral/canaveral-libvirt-native   # compare with the release manifest
+```
+
+Add the pinned helper and lease selectors to the host config:
+
+```json
+{
+  "provider": "libvirt", "storage": "/var/lib/libvirt/images/canaveral",
+  "leaseHelper": "/usr/local/lib/canaveral/canaveral-libvirt-native",
+  "leaseHelperSha256": "<sha256 from the release manifest>",
+  "leaseClockHelper": "/usr/local/lib/canaveral/canaveral-libvirt-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{ "id": "lease-linux", "revision": "1", "arch": "amd64", "runtime": "libvirt" }],
+  "templates": [{ "id": "lease-linux", "revision": "1", "os": "linux", "arch": "amd64", "mode": "headless",
+    "firmware": "bios", "image": "/var/lib/libvirt/images/canaveral/lease-linux.qcow2", "network": "default",
+    "minimum": { "cpu": 1, "memoryMiB": 512, "diskGiB": 4 } }]
+}
+```
+
+A lease template must be headless x64 Linux booted by BIOS, without TPM,
+secure boot or guest access. On a physical `linux` host put `leaseHelper` and
+`leaseHelperSha256` under `runtimes.libvirt` instead. `canaverald runtimes
+status` shows `leases: {eligible: true}` on the libvirt row when the helper
+and kernel qualify.
+
+On bare metal, also install
+`deploy/systemd/canaverald.service.d/libvirt-leases.conf` with the service
+account in the libvirt socket group (for example `SupplementaryGroups=libvirt`
+on Debian and Ubuntu). The drop-in grants the daemon ambient `CAP_KILL`. A lease
+guardian uses it only when libvirtd cannot destroy a domain that must end: it
+then kills the recorded QEMU process through a pidfd after checking its start
+time. `CAP_KILL` lets the service signal any process, so grant it only on
+dedicated VM hosts. Without the drop-in such a lease stays fenced but unproven,
+with its reservation held, until libvirtd returns. Keep the default
+`KillMode=control-group`: guardians ignore `SIGTERM` and fence each lease when
+the daemon exits, so stopping or restarting the service always ends its leases.
+Under systemd's default `OOMPolicy=stop`, a kernel OOM kill of any process in
+the unit, a guardian included, stops the service and so fences every lease.
+Kubernetes pods never receive `CAP_KILL`; see
+[libvirt supervision](libvirt-supervision.md#kubernetes) for that gap.
+
 ## Docker
 
 Container and deployment files must select the Node.js runtime and the same CLI

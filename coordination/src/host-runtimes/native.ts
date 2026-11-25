@@ -4,7 +4,9 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "
 import { open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppleProvider } from "../providers/apple.ts";
+import { release } from "node:os";
 import { LibvirtProvider, localLibvirtUri } from "../providers/libvirt.ts";
+import { checkLibvirtLeaseHelper } from "../providers/libvirt-native.ts";
 import { absolute, blocker, digest, missing, object, probe, ProbeError, record } from "./core.ts";
 import type { BackendId, BackendRecord, Environment, HostConfigData } from "./core.ts";
 
@@ -169,7 +171,23 @@ async function apple(config: HostConfigData, env: Environment): Promise<BackendR
   return record(id, true, "verified");
 }
 
+/** A configured lease helper adds consumer lease eligibility; administrative VMs never depend on it. */
 async function libvirt(config: HostConfigData, env: Environment): Promise<BackendRecord> {
+  const result = await libvirtBackend(config, env);
+  const settings = { ...config, ...object(object(config.runtimes).libvirt) };
+  if (settings.leaseHelper === undefined && settings.leaseHelperSha256 === undefined || result.state !== "verified") return result;
+  try {
+    checkLibvirtLeaseHelper(settings, env.kernel ?? release());
+    return { ...result, leases: { eligible: true } };
+  } catch (error) {
+    const kernel = (error as { code?: unknown }).code === "libvirt_lease_kernel_unsupported";
+    return { ...result, leases: { eligible: false, blocker: kernel
+      ? blocker("libvirt_lease_kernel_unsupported", "Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", "Upgrade the kernel or run leases on another host.")
+      : blocker("libvirt_lease_helper_unverified", "The libvirt lease helper is missing, writable by the daemon or differs from its pinned SHA-256.", "Install the released helper root-owned and set leaseHelperSha256.") } };
+  }
+}
+
+async function libvirtBackend(config: HostConfigData, env: Environment): Promise<BackendRecord> {
   const id = "libvirt";
   const kubernetes = kubernetesDeployment(config);
   if (kubernetes && config.provider !== "libvirt" && !Object.hasOwn(object(config.runtimes), "libvirt") &&
