@@ -52,6 +52,8 @@ node coordination/dist/src/canaverald.js --url https://canaveral.example.interna
 The npm package installs the same executable as `canaverald`. Use
 [`--inventory`](infrastructure.md#capabilities-and-environment-checks) to inspect
 the host before enrolling.
+Use [host runtime commands](host-runtimes.md) to inspect local backends or
+manage model runtime packages.
 
 Deliver the enrollment file through your normal secret-management channel. After successful enrollment the agent can restart without the enrollment argument using its saved per-host identity. Keep its state private and persistent. Do not reinitialize identity on each launch.
 
