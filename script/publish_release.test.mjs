@@ -31,11 +31,11 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
  const previous=process.env.RELEASE_TAG;process.env.RELEASE_TAG=tag;t.after(()=>{if(previous===undefined)delete process.env.RELEASE_TAG;else process.env.RELEASE_TAG=previous;});
  const event=process.env.GITHUB_SHA;process.env.GITHUB_SHA=sha;t.after(()=>{if(event===undefined)delete process.env.GITHUB_SHA;else process.env.GITHUB_SHA=event;});
  const calls=[],manifests=new Map(),signed=new Set(),helpers={...imageHelpers};let rows=existing;
- const manifest=(artifact=false)=>[{annotations:{'org.opencontainers.image.source':conflict?'different':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':artifact?tag+'@sha1:'+sha:sha},...(artifact?{layers:[{mediaType:'application/vnd.cncf.flux.content.v1.tar+gzip'}]}:{manifests:['amd64','arm64'].map(architecture=>({platform:{os:'linux',architecture}}))})},'sha256:'+'c'.repeat(64)];
+ const manifest=(artifact=false,stage)=>[{annotations:{'org.opencontainers.image.source':conflict?'different':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':artifact?tag+'@sha1:'+sha:sha,...(stage?{'io.canaveral.release.target':stage}:{})},...(artifact?{layers:[{mediaType:'application/vnd.cncf.flux.content.v1.tar+gzip'}]}:{manifests:['amd64','arm64'].map(architecture=>({platform:{os:'linux',architecture}}))})},'sha256:'+'c'.repeat(64)];
  const candidate='candidate-'+version+'-'+sha;
  if(!missing) {
-  for(const name of Object.values(IMAGES)) {
-   const image=manifest(); manifests.set(name,image); signed.add(name+'@'+image[1]);
+  for(const [stage,name] of Object.entries(IMAGES)) {
+   const image=manifest(false,stage); manifests.set(name,image); signed.add(name+'@'+image[1]);
   }
   manifests.set(DEPLOYMENT+':'+candidate,manifest(true));
  }
@@ -53,13 +53,14 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
   }
   if(command==='docker') {
    if(args[0]==='buildx'&&args[1]==='build') {
-    const image=manifest();
+    const image=manifest(false,args[args.indexOf('--target')+1]);
     manifests.set(args[args.indexOf('--tag')+1],image);
     writeFileSync(args[args.indexOf('--metadata-file')+1],JSON.stringify({'containerimage.digest':substituteBuild?'sha256:'+'e'.repeat(64):image[1]}));
    }
    if(args[0]==='buildx'&&args[1]==='imagetools') {
     assert.ok(signed.has(args.at(-1)));
-    manifests.set(args[4].split(':')[0],manifest());
+    const name=args[4].split(':')[0];
+    manifests.set(name,manifests.get(name+':'+candidate));
    }
    if(args[0]==='create')return 'd'.repeat(64);
    if(args[0]==='cp') {
@@ -162,6 +163,12 @@ test('an existing version image with matching annotations still needs a trusted 
  const f=fixture(t);f.signed.clear();
  await assert.rejects(main(false,f),/unverified image signature/);
  assert.ok(!f.calls.some(c=>c[0]==='cosign'&&c[1]==='sign'||c[0]==='docker'||c[0]==='flux'));
+});
+test('a signature for another release target does not authorize image reuse',async t=>{
+ const f=fixture(t);
+ f.manifests.set(IMAGES.orchestrator,f.manifests.get(IMAGES.canaverald));
+ await assert.rejects(main(false,f),/does not match the release target/);
+ assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='docker'||c[0]==='flux'));
 });
 const images=Object.fromEntries(Object.entries(IMAGES).map(([stage,name])=>[stage,name+':'+version+'@sha256:'+'c'.repeat(64)]));
 test('finalization checks both helper digests against the immutable images again',async t=>{

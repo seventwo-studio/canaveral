@@ -46,6 +46,7 @@ function declaredTree(directory,prefix='') {
 export const DEPLOYMENT=NAMESPACE+'/deploy';
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
 const SHA256=/^[a-f0-9]{64}$/;
+const IMAGE_TARGET='io.canaveral.release.target';
 const LINUX_ARCHITECTURES=['amd64','arm64'];
 export const LEASE_HELPER='/usr/local/lib/canaveral/canaveral-libvirt-native';
 const VM_CONFIG='vm/configmap.json';
@@ -155,6 +156,13 @@ function verifyReleaseSignature(execute,tag,reference) {
     reference]);
 }
 
+function checkReleaseImage(manifest,version,revision,stage) {
+  checkIdentity(manifest,version,revision);
+  if(manifest.annotations?.[IMAGE_TARGET]!==stage) {
+    throw new PublicationFailure('The image index does not match the release target.');
+  }
+}
+
 async function releaseImage(stage,packageName,version,revision,finalize,temporary,execute,connect,pause) {
   const tag='v'+version;
   const registry=await connect(packageName);
@@ -163,7 +171,8 @@ async function releaseImage(stage,packageName,version,revision,finalize,temporar
     if(finalize) throw new Error('Cannot finalize missing image.');
     const candidate='candidate-'+version+'-'+revision;
     const metadata=join(temporary,stage+'-build.json');
-    const annotations={'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':revision};
+    const annotations={'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':version,
+      'org.opencontainers.image.revision':revision,[IMAGE_TARGET]:stage};
     console.log('Building and publishing '+stage+' candidate image.');
     execute('docker',['buildx','build','.', '--target',stage,'--platform','linux/amd64,linux/arm64',
       '--push','--tag',packageName+':'+candidate,'--metadata-file',metadata,
@@ -173,7 +182,7 @@ async function releaseImage(stage,packageName,version,revision,finalize,temporar
     if(typeof digest!=='string' || !DIGEST.test(digest) || built[1]!==digest) {
       throw new PublicationFailure('The candidate image digest differs from the Buildx output.');
     }
-    checkIdentity(built[0],version,revision);
+    checkReleaseImage(built[0],version,revision,stage);
     const reference=packageName+'@'+digest;
     execute('cosign',['sign','--yes','--new-bundle-format=false','--use-signing-config=false',reference]);
     verifyReleaseSignature(execute,tag,reference);
@@ -183,7 +192,7 @@ async function releaseImage(stage,packageName,version,revision,finalize,temporar
     found=await publishedManifest(connect,packageName,version,pause);
     if(found[1]!==digest) throw new PublicationFailure('The published image digest differs from the signed Buildx output.');
   } else {
-    checkIdentity(found[0],version,revision);
+    checkReleaseImage(found[0],version,revision,stage);
     verifyReleaseSignature(execute,tag,packageName+'@'+found[1]);
   }
   return packageName+':'+version+'@'+found[1];

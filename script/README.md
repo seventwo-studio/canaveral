@@ -97,8 +97,9 @@ reused: immutable identity guards reject another source revision.
 
 The workflow builds each image under a candidate tag and checks the registry
 digest against Buildx metadata. It signs that digest before assigning the
-version tag. Retries reuse an existing version image only after verifying its
-signature against the release workflow's exact tag identity.
+version tag. Its signed image index identifies the build target. Retries
+verify that target and the signature from the release workflow's exact tag
+identity before reusing a version image.
 
 A failed run may leave some immutable images or an unsigned deployment artifact
 and an unfinished draft. After a completed push, the publisher makes at most six
