@@ -71,6 +71,8 @@ pub struct Journal {
     pub stop_confirmed: bool,
     #[serde(default)]
     pub cleanup_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_package_digest: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,10 +80,65 @@ struct Store {
     current: String,
     entries: BTreeMap<String, Journal>,
 }
+#[derive(Default)]
+struct PackageReferences {
+    all: bool,
+    digests: std::collections::BTreeSet<String>,
+}
+impl PackageReferences {
+    fn from_history(history: &BTreeMap<String, Journal>) -> Self {
+        let mut references = Self::default();
+        for journal in history
+            .values()
+            .filter(|j| j.launch_intent || j.pending || !j.receipt.can_release())
+        {
+            match &journal.runtime_package_digest {
+                Some(digest) => {
+                    references.digests.insert(digest.clone());
+                }
+                // A journal predating package identities can refer to any cached version.
+                None => references.all = true,
+            }
+        }
+        references
+    }
+    fn contains(&self, cache: &str) -> bool {
+        self.all
+            || cache
+                .strip_prefix("runtime-package.")
+                .is_some_and(|digest| self.digests.contains(digest))
+    }
+}
+
+fn load_history(directory: &private::Directory) -> Result<Option<Store>> {
+    let store = directory
+        .read_optional("receipt.json")?
+        .map(|bytes| serde_json::from_slice::<Store>(&bytes).map_err(|_| "corrupt receipt"))
+        .transpose()?;
+    if let Some(store) = &store {
+        if !store.entries.contains_key(&store.current) {
+            return Err("corrupt current receipt");
+        }
+        for journal in store.entries.values() {
+            journal.assignment.job.validate()?;
+            journal.receipt.validate()?;
+            if !journal.assignment.job.receipt_matches(&journal.receipt)
+                || journal
+                    .runtime_package_digest
+                    .as_deref()
+                    .is_some_and(|digest| !runtime_package::hash_valid(digest))
+            {
+                return Err("corrupt receipt binding");
+            }
+        }
+    }
+    Ok(store)
+}
+
 pub struct Executor {
     config: Config,
     directory: private::Directory,
-    staged: Result<PathBuf>,
+    staged: Result<runtime_package::StagedRuntime>,
     journal: Option<Journal>,
     history: BTreeMap<String, Journal>,
     poisoned: bool,
@@ -137,10 +194,7 @@ impl Executor {
             return Err("explicit positive budgets required");
         }
         let directory = private::Directory::open(&config.state_dir)?;
-        let stored: Option<Store> = directory
-            .read_optional("receipt.json")?
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| "corrupt receipt"))
-            .transpose()?;
+        let stored = load_history(&directory)?;
         let (journal, history) = if let Some(store) = stored {
             (
                 Some(
@@ -163,13 +217,6 @@ impl Executor {
             history,
             poisoned: false,
         };
-        for j in this.history.values() {
-            j.assignment.job.validate()?;
-            j.receipt.validate()?;
-            if !j.assignment.job.receipt_matches(&j.receipt) {
-                return Err("corrupt receipt binding");
-            }
-        }
         if let Some(mut j) = this.journal.clone() {
             if j.launch_intent && !j.pending && !j.receipt.can_release() {
                 if !matches!(
@@ -275,6 +322,19 @@ impl Executor {
             launch_intent: true,
             stop_confirmed: false,
             cleanup_confirmed: false,
+            runtime_package_digest: self.staged.as_ref().ok().and_then(|staged| {
+                let relative = staged
+                    .entrypoint
+                    .strip_prefix(&self.config.state_dir)
+                    .ok()?;
+                relative
+                    .components()
+                    .next()?
+                    .as_os_str()
+                    .to_str()?
+                    .strip_prefix("runtime-package.")
+                    .map(str::to_owned)
+            }),
         };
         self.persist(j.clone())?; // Durable launch intent precedes every process effect.
         let work = self.config.state_dir.join("workspace");
@@ -332,11 +392,28 @@ impl Executor {
             self.staged = self.stage_runtime();
         }
     }
-    fn stage_runtime(&self) -> Result<PathBuf> {
+    fn stage_runtime(&self) -> Result<runtime_package::StagedRuntime> {
         validate_models(&self.config.models_dir)?;
         self.config.backend.verify_models(&self.config)?;
+        let references = PackageReferences::from_history(&self.history);
         if let Some(package) = runtime_package::select(&self.config.runtime_packages)? {
-            return runtime_package::stage(package, &self.directory, &self.config.state_dir);
+            return runtime_package::stage(
+                package,
+                &self.directory,
+                &self.config.state_dir,
+                &references,
+            );
+        }
+        if self.config.executable.as_os_str().is_empty() {
+            let pin = runtime_archive::host_pin(self.config.backend)
+                .ok_or("no runtime package for this host")?;
+            return runtime_archive::stage(
+                pin,
+                &self.directory,
+                &self.config.state_dir,
+                &references,
+                false,
+            );
         }
         let mut executable = OpenOptions::new()
             .read(true)
@@ -350,7 +427,6 @@ impl Executor {
             return Err("unsafe runtime permissions");
         }
         // Stage the verified bytes privately: macOS cannot execute /dev/fd artifacts.
-        let staged = self.config.state_dir.join("runtime");
         let mut output = self.directory.runtime_output()?;
         let mut hash = Sha256::new();
         let mut buffer = [0; 65536];
@@ -367,13 +443,22 @@ impl Executor {
                 .map_err(|_| "runtime staging failed")?;
         }
         output.sync_all().map_err(|_| "runtime sync failed")?;
+        let staged_metadata = output
+            .metadata()
+            .map_err(|_| "runtime metadata unavailable")?;
         drop(output);
         if format!("{:x}", hash.finalize()) != self.config.executable_sha256 {
             return Err("runtime identity mismatch");
         }
         self.directory.check()?;
-        Ok(staged)
+        let identity = runtime_package::ExecutableIdentity::from_metadata(&staged_metadata);
+        Ok(runtime_package::StagedRuntime::new(
+            self.config.state_dir.clone(),
+            "runtime",
+            [("runtime".to_owned(), identity)].into_iter().collect(),
+        ))
     }
+
     fn generate<F: FnMut() -> Control>(
         &self,
         job: &ModelJob,
@@ -392,7 +477,7 @@ impl Executor {
             .map_err(|_| "loopback unavailable")?
             .port();
         let host = format!("127.0.0.1:{port}");
-        let mut cmd = Command::new(staged);
+        let mut cmd = Command::new(&staged.entrypoint);
         cmd.env_clear()
             .env("HOME", work)
             .env("TMPDIR", work)
@@ -420,6 +505,7 @@ impl Executor {
             .backend
             .configure(&mut cmd, &self.config, model, port, &key, &key_file)?;
         check(control)?;
+        staged.verify_executables(&self.directory)?;
         drop(listener);
         let start = clock::Clock::now();
         let child = cmd.spawn().map_err(|_| "runtime launch failed")?;
@@ -668,7 +754,9 @@ impl Drop for Scope {
     }
 }
 pub mod controller;
+mod runtime_archive;
 pub mod runtime_backend;
+pub mod runtime_management;
 pub mod runtime_package;
 pub mod runtime_policy;
 mod socket_owner;

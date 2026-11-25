@@ -1,0 +1,145 @@
+{
+  "pins": [
+    {
+      "backend": "ollama",
+      "version": "0.40.17",
+      "os": "macos",
+      "arch": "aarch64",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-darwin.tgz",
+      "bytes": 187626746,
+      "unpackedBytes": 637220779,
+      "sha256": "4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653",
+      "format": "tar.gz",
+      "entrypoint": "ollama",
+      "executables": [
+        "llama-server",
+        "llama-quantize"
+      ],
+      "materializeLinks": true,
+      "treeSha256": "22f4df8f4637825471853e3d1c5dc7a99667b11bcbc0751f626369710eee8978",
+      "qualified": false,
+      "retrieved": "2026-11-23"
+    },
+    {
+      "backend": "ollama",
+      "version": "0.40.17",
+      "os": "linux",
+      "arch": "aarch64",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-linux-arm64.tar.zst",
+      "bytes": 1601174092,
+      "unpackedBytes": 91986372,
+      "sha256": "0ec632480057cef6300459d1fa7dbbb3fc188b9a7d56cd0b0a72d05927d90ecc",
+      "format": "tar.zst",
+      "entrypoint": "bin/ollama",
+      "executables": [
+        "lib/ollama/llama-server",
+        "lib/ollama/llama-quantize"
+      ],
+      "materializeLinks": true,
+      "treeSha256": "807c37847715ed9a9cf96502c3229e253bd89f1a0bf1f8e6b097c385c736141d",
+      "qualified": false,
+      "retrieved": "2026-11-23",
+      "omitPrefixes": [
+        "lib/ollama/cuda_v12",
+        "lib/ollama/cuda_v13"
+      ]
+    },
+    {
+      "backend": "ollama",
+      "version": "0.40.17",
+      "os": "linux",
+      "arch": "x86_64",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-linux-amd64.tar.zst",
+      "bytes": 1545470208,
+      "unpackedBytes": 106498258,
+      "sha256": "1df9d6228bac5a22e420b242708c0d10e5b886db97bab99d446a41760f4e79af",
+      "format": "tar.zst",
+      "entrypoint": "bin/ollama",
+      "executables": [
+        "lib/ollama/llama-server",
+        "lib/ollama/llama-quantize"
+      ],
+      "materializeLinks": true,
+      "treeSha256": "2f2f45e48cf038c5fbb942d80f441d26bfa81105922bab797385b17c633049f6",
+      "qualified": false,
+      "retrieved": "2026-11-23",
+      "omitPrefixes": [
+        "lib/ollama/cuda_v12",
+        "lib/ollama/cuda_v13",
+        "lib/ollama/vulkan"
+      ]
+    },
+    {
+      "backend": "llama.cpp",
+      "version": "1.0.0",
+      "os": "macos",
+      "arch": "aarch64",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-macos-arm64.tar.gz",
+      "bytes": 16907811,
+      "unpackedBytes": 85401254,
+      "sha256": "82b00abc740160e1b9980e6cc79c117345fa34af058c80e6c0a69aa8ddccde75",
+      "format": "tar.gz",
+      "entrypoint": "llama-server",
+      "executables": [
+
+      ],
+      "materializeLinks": true,
+      "treeSha256": "6b41e2d33ea833181df066e3174e1a2335a26778cc835ab0b8a04353e7dab506",
+      "qualified": false,
+      "retrieved": "2026-11-23",
+      "stripPrefix": "llama-b12359"
+    },
+    {
+      "backend": "llama.cpp",
+      "version": "1.0.0",
+      "os": "linux",
+      "arch": "aarch64",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-ubuntu-arm64.tar.gz",
+      "bytes": 18949862,
+      "unpackedBytes": 72503238,
+      "sha256": "dc7aa17a67884619b7223870aca9fd6addbc01717713b04a714add1c31137359",
+      "format": "tar.gz",
+      "entrypoint": "llama-server",
+      "executables": [
+
+      ],
+      "materializeLinks": true,
+      "treeSha256": "3fe648c9faef09f5d7c331862a43359573369f1ee0b40a602134604b5309668b",
+      "qualified": false,
+      "retrieved": "2026-11-23",
+      "stripPrefix": "llama-b12359"
+    },
+    {
+      "backend": "llama.cpp",
+      "version": "1.0.0",
+      "os": "linux",
+      "arch": "x86_64",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-ubuntu-x64.tar.gz",
+      "bytes": 23311084,
+      "unpackedBytes": 90153358,
+      "sha256": "0bc1f091e8916102b6d8f2cf944233a620e90a0f856c72d0ce41150c65c2e72e",
+      "format": "tar.gz",
+      "entrypoint": "llama-server",
+      "executables": [
+
+      ],
+      "materializeLinks": true,
+      "treeSha256": "30d1a3ba1b7eeb878730613d9bc076c35ff5544b44dd8a9c8a27ba5c0c0b26bf",
+      "qualified": false,
+      "retrieved": "2026-11-23",
+      "stripPrefix": "llama-b12359"
+    }
+  ],
+  "unavailable": [
+    {
+      "backend": "vllm",
+      "available": false,
+      "blocker": "Hermetic package not yet qualified."
+    },
+    {
+      "backend": "mlx",
+      "available": false,
+      "blocker": "Hermetic package not yet qualified."
+    }
+  ]
+}
