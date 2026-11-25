@@ -174,13 +174,16 @@ export function transport(paths: { sdk: string; registry: string; events: string
         const limit = Number(/--time-limit ([0-9]+)/.exec(String(args.at(-1)))![1]), state = { running: true, started: Date.now() };
         media.recorders.set(device.name, state);
         const all = media.started.get(device.name) ?? []; all.push(state); media.started.set(device.name, all);
+        const run = all.length;
         media.peak = Math.max(media.peak, all.filter(recorder => recorder.running).length);
         const recorder = new FakePipe();
         recorder.push(Buffer.from(`canaveral-recorder ${BOOT} 4321 (sh) R 812 4321 812 0 -1 4194560 120 0 0 0 0 0 0 0 20 0 1 0 98765 10973184 512 18446744073709551615\n`));
         const timer = setInterval(() => {
           if (!live()) { state.running = false; recorder.exit(255); clearInterval(timer); return; }
           if (!state.running) { recorder.exit(1); clearInterval(timer); return; }
-          if (Date.now() - state.started >= limit * 1000) { state.running = false; recorder.exit(0); clearInterval(timer); return; }
+          if (Date.now() - state.started >= limit * 1000 && (fixture.allowRecorderEof?.(run) ?? true)) {
+            state.running = false; recorder.exit(0); clearInterval(timer); return;
+          }
           if (!recorder.closed) recorder.push(Buffer.from([0, 0, 0, 1, 0x65, 1, 2, 3]));
         }, 100);
         return recorder;
@@ -262,6 +265,8 @@ export interface HarnessOptions {
   /** Host capacity beyond the emulators, for recording and upload reservations. */
   extra?: { cpu?: number; memoryMiB?: number; diskGiB?: number };
   encoder?: "ok" | "stuck" | "fragments" | "fragments-stuck";
+  /** Per-device recorder run number, starting at one. Only gates natural EOF. */
+  allowRecorderEof?: (run: number) => boolean;
   liveEpochSeconds?: number; installStall?: boolean;
   /** The host's own warm device opt-in and bounds (`leaseWarmPool`). */
   warmPool?: { maxDevices: number; maxAgeSeconds: number };
