@@ -28,4 +28,3 @@ export function linuxLibvirtBirth(pid: number): ProcessBirth | "gone" | "unknown
     return { pid, ...first, uid, executable, argv: raw.slice(0, -1).split("\0") };
   } catch { return "unknown"; }
 }
-
