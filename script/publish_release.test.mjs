@@ -63,12 +63,13 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
     manifests.set(name,manifests.get(name+':'+candidate));
    }
    if(args[0]==='buildx'&&args[1]==='build'&&args.includes('--output')) {
-    assert.deepEqual(args.slice(2,7),['--platform','linux/amd64,linux/arm64','--network','none','--output']);
-    const [,output]=/^type=local,dest=(.+),platform-split=true$/.exec(args[7]);
     const reference=IMAGES.canaverald+'@'+manifests.get(IMAGES.canaverald)[1];
+    assert.deepEqual(args.slice(2,9),['--platform','linux/amd64,linux/arm64','--network','none',
+      '--build-context','daemon=docker-image://'+reference,'--output']);
+    const [,output]=/^type=local,dest=(.+),platform-split=true$/.exec(args[9]);
     assert.ok(signed.has(reference));
-    assert.equal(readFileSync(join(args[8],'Dockerfile'),'utf8'),
-      'FROM '+reference+' AS daemon\nFROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n');
+    assert.equal(readFileSync(join(args[10],'Dockerfile'),'utf8'),
+      'FROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n');
     for(const [arch,bytes] of Object.entries(helpers)) {
       const directory=join(output,'linux_'+arch);
       mkdirSync(directory,{recursive:true});

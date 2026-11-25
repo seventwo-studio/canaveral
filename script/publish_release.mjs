@@ -139,15 +139,16 @@ export function imageLeaseHelperDigests(image,temporary,execute=capture) {
   const context=join(temporary,'lease-helper-context');
   const output=join(temporary,'lease-helpers');
   mkdirSync(context);
-  // BuildKit resolves the signed image index for each platform and exports
-  // only the helper. No source entrypoint runs and no image is loaded into
-  // Docker's local image store.
+  // Use the image only as a COPY source so even inherited ONBUILD instructions
+  // cannot run. BuildKit resolves the signed index for each platform without
+  // loading the image into Docker's local image store.
   writeFileSync(join(context,'Dockerfile'),
-    'FROM '+image+' AS daemon\nFROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n',
+    'FROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n',
     {flag:'wx'});
   const platforms=LINUX_ARCHITECTURES.map(architecture=>'linux/'+architecture).join(',');
   try {
     execute('docker',['buildx','build','--platform',platforms,'--network','none',
+      '--build-context','daemon=docker-image://'+image,
       '--output','type=local,dest='+output+',platform-split=true',context]);
   } catch (error) {
     throw new PublicationFailure('Lease helper export failed. '+publicationFailure(error));
