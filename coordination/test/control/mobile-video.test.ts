@@ -1,3 +1,5 @@
+/// <reference lib="es2024.promise" />
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash, randomUUID } from 'node:crypto';
@@ -5,6 +7,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { serveMobileVideo, videoEncoderArguments, Mp4Envelope, MAX_VIDEO_READ_MS } from '../../src/mobile-video.ts';
 import { MobileVideoClient, VideoClient } from '../../src/video-sdk.ts';
+import { Transport } from '../../src/consumer-client.ts';
 import { createSessionUpgradeHandler, SessionConnection } from '../../src/control/sessions.ts';
 import { validateRelayMessage } from '../../src/control/session-protocol.ts';
 import type { NativePipe } from '../../src/providers/mobile.ts';
@@ -31,6 +34,12 @@ class Wire implements SessionChannel {
   async sendControl(value: Record<string, unknown>) { this.controls.push(value); }
   async sendBytes() { throw new Error('viewers cannot send video bytes'); }
   close() { this.closes++; }
+  receipt() {
+    assert.deepEqual(this.controls, [{ type: 'ack' }]);
+    return { ...options, id: this.sessionId, machineId: randomUUID(), generation: randomUUID(), state: 'finished',
+      capability: 'video' as const, protocol: 'canaveral-session-v1' as const, attachBefore: new Date().toISOString(),
+      authorizationDeadline: new Date().toISOString(), cleaned: true };
+  }
 }
 function pipe(parts: Uint8Array[], exit = 0): NativePipe & { closes: number; ends: number; input: Buffer[] } {
   return { closes: 0, ends: 0, input: [],
@@ -67,6 +76,40 @@ test('process cleanup evidence is independent of recording or ACK success', asyn
   assert.equal(cleaned, false, 'uncertain native stop cannot release its reservation');
 });
 
+test('a failed cleanup preserves the primary capture error', async () => {
+  const failure = new Error('The recorder failed first.'), source = pipe([]);
+  source.read = async () => { throw failure; };
+  source.close = async () => { throw new Error('The stop is unproven.'); };
+  const encoder = pipe([]);
+  let reported: unknown;
+  await assert.rejects(serveMobileVideo(viewer([]), source, async () => encoder, '/opt/ffmpeg', options, () => true,
+    (cleaned, parts, error) => {
+      assert.equal(cleaned, false);
+      assert.deepEqual(parts, { source: false, encoder: true });
+      reported = error;
+    }), error => error === failure);
+  assert.equal(reported, failure);
+  assert.match(String(failure.cause), /cleanup is unconfirmed/);
+});
+
+test('inspection request limits abort the underlying HTTP response', async t => {
+  const started = Promise.withResolvers<void>(), closed = Promise.withResolvers<void>();
+  const server = createServer((_req, res) => {
+    res.on('close', () => closed.resolve());
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.write('{');
+    started.resolve();
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const api = new Transport({ baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, allowLoopbackHttp: true }, 'a'.repeat(43));
+  const abort = new AbortController();
+  const reply = assert.rejects(api.call('GET', '/inspection', undefined, [200], false, undefined, { timeoutMs: 30000, signal: abort.signal }), { code: 'connection_failed' });
+  await started.promise;
+  abort.abort();
+  await Promise.all([reply, closed.promise]);
+});
+
 test('encoder options pin low-delay H26430 and fMP4 without consumer command injection', () => {
   const args = videoEncoderArguments('/opt/ffmpeg', options);
   assert.ok(args.includes('libx264')); assert.ok(args.includes('zerolatency')); assert.ok(args.includes('+frag_keyframe+empty_moov+default_base_moof')); assert.ok(args.includes('250000'));
@@ -84,10 +127,21 @@ test('MP4 envelope handles arbitrary chunk boundaries and rejects truncation and
 
 test('SDK streams the exact MP4 through partial writes, verifies digest/cleanup, then acknowledges', async () => {
   const wire = new Wire(); for (let at = 0; at < mp4.length; at += 3) wire.queue.push(mp4.subarray(at, at + 3)); wire.queue.push(finish);
-  const video = await VideoClient.connect(wire), output: Buffer[] = [];
+  const video = await VideoClient.connect(wire, {}, async () => ({ ...wire.receipt(), ackReceived: true })), output: Buffer[] = [];
   const result = await video.record({ write(bytes) { assert.ok(!wire.controls.length); const count = Math.min(2, bytes.length); output.push(Buffer.from(bytes.subarray(0, count))); return count; } });
   assert.deepEqual(Buffer.concat(output), mp4); assert.deepEqual(result, finish); assert.deepEqual(wire.controls, [{ type: 'ack' }]); assert.ok(wire.closes);
   await assert.rejects(video.record({ write: bytes => bytes.length }));
+});
+
+test('a null receive after ACK is incomplete without persisted ACK acceptance', async () => {
+  for (const inspect of [false, true]) {
+    const wire = new Wire();
+    wire.queue.push(mp4, finish, null);
+    const video = await VideoClient.connect(wire, {}, inspect ? async () => wire.receipt() : undefined);
+    await assert.rejects(video.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
+    assert.deepEqual(wire.controls, [{ type: 'ack' }]);
+    assert.equal(video.finish, undefined);
+  }
 });
 
 test('SDK rejects bad digest, absent finish, missing cleanup, byte-budget excess and bad metadata', async () => {
@@ -120,7 +174,7 @@ test('video relay rejects consumer binary/input and malformed metadata or finish
 test('real WebSocket SDK records exact MP4 and keeps its ACK attached until host completion', { timeout: 10000 }, async t => {
   const id = randomUUID(), generation = randomUUID(), machineId = randomUUID(), hostId = randomUUID(), credential = 'a'.repeat(43), hostCredential = 'b'.repeat(43);
   const view = { id, generation, machineId, capability: 'video', protocol: 'canaveral-session-v1', state: 'ready', ...options, attachBefore: new Date(Date.now() + 30000).toISOString(), authorizationDeadline: new Date(Date.now() + 60000).toISOString() };
-  let attached = 0, disconnected = false;
+  let attached = 0, disconnected = false, ackReceived = false;
   const broker = createSessionUpgradeHandler({ async request(command) {
     assert.ok(command.type.startsWith('video-sessions.'));
     if (command.type === 'video-sessions.attach') { assert.equal(command.token, command.side === 'host' ? hostCredential : credential); attached++; return view; }
@@ -128,7 +182,14 @@ test('real WebSocket SDK records exact MP4 and keeps its ACK attached until host
     disconnected = true; return { disconnected: true };
   } }, { video: true });
   const server = createServer(async (req, res) => {
-    assert.equal(req.headers.authorization, `Bearer ${credential}`); const parts: Buffer[] = []; for await (const part of req) parts.push(Buffer.from(part));
+    assert.equal(req.headers.authorization, `Bearer ${credential}`);
+    if (req.method === 'GET') {
+      assert.equal(req.url, `/v1/machines/${machineId}/video-sessions/${id}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...view, state: 'finished', cleaned: true, ackReceived }));
+      return;
+    }
+    const parts: Buffer[] = []; for await (const part of req) parts.push(Buffer.from(part));
     assert.equal(req.url, `/v1/machines/${machineId}/video-sessions`); assert.deepEqual(JSON.parse(Buffer.concat(parts).toString()), { id, ...options });
     res.writeHead(201, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(view));
   });
@@ -141,7 +202,8 @@ test('real WebSocket SDK records exact MP4 and keeps its ACK attached until host
   const host = await SessionConnection.connect(origin, `/v1/hosts/${hostId}/video-sessions/${id}/${generation}`, hostCredential); t.after(() => host.close());
   assert.equal((await host.receive(2) as Record<string, unknown>).type, 'ready');
   let cleaned: boolean | undefined;
-  const serving = serveMobileVideo(host, pipe([Buffer.from('h264')]), async () => pipe([mp4]), '/opt/ffmpeg', options, () => true, value => { cleaned = value; }).finally(() => host.close());
+  const serving = serveMobileVideo(host, pipe([Buffer.from('h264')]), async () => pipe([mp4]), '/opt/ffmpeg', options, () => true, value => { cleaned = value; })
+    .then(() => { ackReceived = true; }).finally(() => host.close());
   const video = await connecting, saved: Buffer[] = [];
   const [receipt] = await Promise.all([video.record({ write(data) { saved.push(Buffer.from(data)); return data.length; } }), serving]);
   assert.deepEqual(Buffer.concat(saved), mp4); assert.deepEqual(receipt, finish); assert.equal(cleaned, true);
@@ -154,13 +216,17 @@ test('host session keeps answering pings through a capture longer than the heart
   const heartbeat = { intervalMs: 40, timeoutMs: 200 };
   const id = randomUUID(), generation = randomUUID(), machineId = randomUUID(), hostId = randomUUID(), credential = 'a'.repeat(43), hostCredential = 'b'.repeat(43);
   const view = { id, generation, machineId, capability: 'video', protocol: 'canaveral-session-v1', state: 'ready', ...options, attachBefore: new Date(Date.now() + 30000).toISOString(), authorizationDeadline: new Date(Date.now() + 60000).toISOString() };
-  let attached = 0, disconnected = false;
+  let attached = 0, disconnected = false, ackReceived = false;
   const broker = createSessionUpgradeHandler({ async request(command) {
     if (command.type === 'video-sessions.attach') { attached++; return view; }
     if (command.type === 'video-sessions.authorized') return { authorized: !disconnected && (!command.ready || attached === 2) };
     disconnected = true; return { disconnected: true };
   } }, { video: true, heartbeat });
-  const server = createServer((_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(view)); });
+  const server = createServer((req, res) => {
+    const inspect = req.method === 'GET';
+    res.writeHead(inspect ? 200 : 201, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(inspect ? { ...view, state: 'finished', cleaned: true, ackReceived } : view));
+  });
   server.on('upgrade', (req, socket, head) => { void broker.handle(req, socket, head); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { broker.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
@@ -174,7 +240,8 @@ test('host session keeps answering pings through a capture longer than the heart
   const encoder = pipe([]); let first = true;
   encoder.read = async () => { await sleep(first ? 600 : 100); first = false; return pieces.shift() ?? Buffer.alloc(0); };
   const started = Date.now(); let cleaned: boolean | undefined;
-  const serving = serveMobileVideo(host, pipe([Buffer.from('h264')]), async () => encoder, '/opt/ffmpeg', options, () => true, value => { cleaned = value; }).finally(() => host.close());
+  const serving = serveMobileVideo(host, pipe([Buffer.from('h264')]), async () => encoder, '/opt/ffmpeg', options, () => true, value => { cleaned = value; })
+    .then(() => { ackReceived = true; }).finally(() => host.close());
   const video = await connecting, saved: Buffer[] = [];
   const [receipt] = await Promise.all([video.record({ write(data) { saved.push(Buffer.from(data)); return data.length; } }), serving]);
   assert.ok(Date.now() - started > 4 * heartbeat.timeoutMs, 'the capture outlasted the heartbeat timeout several times');

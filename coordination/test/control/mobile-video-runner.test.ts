@@ -11,7 +11,8 @@ import type { HostConfig } from '../../src/host.ts';
 import { MobileProvider } from '../../src/providers/mobile.ts';
 import type { Authorized, DeviceRequest, NativePipe, RecordValue } from '../../src/providers/mobile.ts';
 import { MobileVideoClient } from '../../src/video-sdk.ts';
-import { object } from '../../src/errors.ts';
+import { object, ServiceError } from '../../src/errors.ts';
+import { readRecord } from '../../src/runtime-process.ts';
 
 function box(type: string, body = Buffer.alloc(0)): Buffer { const header = Buffer.alloc(8); header.writeUInt32BE(8 + body.length); header.write(type, 4); return Buffer.concat([header, body]); }
 // Container envelopes prove transport/accounting only; these are not decodable video frames.
@@ -84,10 +85,44 @@ test('runner streams owned video through the real broker without blocking input 
   const finish = await recording;
   assert.deepEqual(Buffer.concat(received), mp4); assert.deepEqual(Buffer.concat(encoderInput), raw);
   assert.deepEqual(finish, { type: 'finish', bytes: mp4.length, sha256: createHash('sha256').update(mp4).digest('hex'), cleaned: true });
-  await eventually(async () => (await videoApi.inspect(machineId, session.id)).state === 'finished');
+  assert.equal((await videoApi.inspect(machineId, session.id)).ackReceived, true);
   assert.equal(sourceClosed, 1); assert.equal(encoderClosed, 1); assert.equal(await reservedCpu(), initialCpu);
   const replay = await videoApi.create(machineId, request); assert.equal(replay.id, session.id); assert.equal(replay.generation, session.generation); assert.equal(replay.state, 'finished');
   await runner.poll(); await runner.step(); assert.equal(captures, 1);
   await runner.close(); runner = makeRunner(); await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step();
   assert.equal(captures, 1, 'persisted session identity cannot replay native capture after runner restart');
+
+  const dropped = await videoApi.create(machineId, { ...request, id: randomUUID() });
+  const next = videoApi.connect(dropped, { timeoutMs: 5000 });
+  await runner.poll(); await runner.step();
+  const interrupted = await next;
+  t.mock.method(interrupted.connection, 'sendControl', async (value: Record<string, unknown>) => {
+    assert.deepEqual(value, { type: 'ack' });
+    interrupted.connection.close();
+  });
+  await assert.rejects(interrupted.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
+  const receipt = await videoApi.inspect(machineId, dropped.id);
+  assert.equal(receipt.cleaned, true);
+  assert.equal(receipt.ackReceived, undefined);
+
+  const legacy = await videoApi.create(machineId, { ...request, id: randomUUID() });
+  const send = runner.transport.request.bind(runner.transport), reports: RecordValue[] = [];
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    if (args[1].endsWith(`/video-sessions/${legacy.id}/finish`)) {
+      reports.push(args[2]);
+      if (args[2].ackReceived) throw new ServiceError('Mobile video session rejected.', 400);
+    }
+    return send(...args);
+  });
+  const legacyConnection = videoApi.connect(legacy, { timeoutMs: 5000 });
+  await runner.poll(); await runner.step();
+  const legacyVideo = await legacyConnection;
+  await assert.rejects(legacyVideo.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
+  const cleanup = { generation: legacy.generation, cleaned: true };
+  assert.deepEqual(reports, [{ ...cleanup, ackReceived: true }, cleanup]);
+  const journal = readRecord(join(config.stateDir, 'work', 'video', `${legacy.id}.json`));
+  assert.equal(journal.ackReceived, true);
+  assert.equal(journal.legacyReceipt, true);
+  assert.equal((await videoApi.inspect(machineId, legacy.id)).ackReceived, undefined);
+  assert.equal(await reservedCpu(), initialCpu);
 });

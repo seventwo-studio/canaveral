@@ -356,6 +356,10 @@ export class HostRunner {
   private readonly liveAttempts = new Set<string>();
   private readonly liveAuthority = new Map<string, { at: number; value: boolean }>();
   private readonly liveRecordings = new Map<string, { at: number; value: boolean }>();
+  /** Recordings whose native capture this runner runs now: from their journal until the capture is
+   * stopped. A finished recording's repeated receipt also runs under its `video:` key, and is not one. */
+  private readonly recordingCaptures = new Set<string>();
+  private readonly videoReceipts = new Map<string, Promise<void>>();
   private liveCaptures: LiveCaptureHub | undefined;
   /** One shared native capture per watched device (live-capture.ts). Its journal lives beside
    * the recording journals; its cleanup receipt uses the recording's finish route. */
@@ -364,12 +368,34 @@ export class HostRunner {
     return this.liveCaptures ??= new LiveCaptureHub({
       load: id => present(path(id)) ? readRecord(path(id)) : undefined,
       save: (id, value) => saveRecord(path(id), value),
-      report: async (job, receipt) => {
-        if (!this.identity) throw unknownOutcome('Host identity is unavailable.');
-        await this.transport.request('POST', `/v1/hosts/${this.identity.id}/video-sessions/${identifier(job.id)}/finish`, { generation: job.generation, ...receipt }, this.identity.credential);
-      },
+      report: (job, receipt) => this.reportVideoReceipt(job.id, path(job.id), { generation: job.generation, ...receipt }),
       ...(this.dependencies.liveEpochSeconds === undefined ? {} : { epochSeconds: this.dependencies.liveEpochSeconds }),
     });
+  }
+  private async reportVideoReceipt(id: string, journal: string, receipt: RecordValue): Promise<void> {
+    const pending = this.videoReceipts.get(journal);
+    if (pending) return pending;
+    const identity = this.identity;
+    if (!identity) throw unknownOutcome('Host identity is unavailable.');
+    const path = `/v1/hosts/${identity.id}/video-sessions/${identifier(id)}/finish`;
+    const send = (body: RecordValue) => this.transport.request('POST', path, body, identity.credential, this.stopController.signal);
+    const report = (async () => {
+      const { ackReceived, stop, ...cleanup } = receipt;
+      if (ackReceived === undefined && stop === undefined) { await send(cleanup); return; }
+      const saved = readRecord(journal);
+      if (saved.legacyReceipt !== true) {
+        try { await send(receipt); return; }
+        catch (error) {
+          // Older controllers reject the extra fields with their exact-body validation.
+          if (!(error instanceof ServiceError) || error.status !== 400 || error.code !== 'invalid_request' || error.outcome === 'unknown') throw error;
+        }
+        try { saveRecord(journal, { ...saved, legacyReceipt: true }); }
+        catch { this.log('Could not journal that the controller refused recording or fence evidence.'); }
+      }
+      await send(cleanup);
+    })();
+    this.videoReceipts.set(journal, report);
+    try { await report; } finally { this.videoReceipts.delete(journal); }
   }
   /** Owner display attachments are attempted once per identity; a refused attach is not retried. */
   private readonly displayAttempts = new Set<string>();
@@ -1153,12 +1179,10 @@ export class HostRunner {
         const saved = readRecord(path);
         // A lease session may repeat its host-only receipt: the encoder exited, and the lease's own
         // proven emulator removal settles the guest recorder on the controller.
-        const receipt = saved.cleaned === true ? { generation, cleaned: true } : saved.hostCleaned === true ? { generation, hostCleaned: true } : undefined;
+        const receipt = saved.cleaned === true ? { generation, cleaned: true, ...(saved.ackReceived === true ? { ackReceived: true } : {}) }
+          : saved.hostCleaned === true ? { generation, hostCleaned: true } : undefined;
         if (saved.generation === generation && saved.machineId === machineId && receipt && this.identity) {
-          const identity = this.identity;
-          this.launch(key, () => this.fresh(), async () => {
-            await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, receipt, identity.credential, this.stopController.signal);
-          });
+          this.launch(key, () => this.fresh(), () => this.reportVideoReceipt(id, path, receipt));
         }
         continue; // Only positive cleanup reports repeat; native capture never does.
       }
@@ -1182,9 +1206,7 @@ export class HostRunner {
       const saved = readRecord(path);
       const receipt = saved.cleaned === true || saved.state === 'attaching' ? { cleaned: true } : saved.hostCleaned === true ? { hostCleaned: true } : undefined;
       if (saved.generation !== generation || saved.machineId !== job.machineId || !receipt) continue;
-      this.launch(key, () => this.fresh(), async () => {
-        await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`, { generation, ...receipt }, identity.credential, this.stopController.signal);
-      });
+      this.launch(key, () => this.fresh(), () => this.reportVideoReceipt(id, path, { generation, ...receipt, ...(saved.stop ? { stop: saved.stop } : {}) }));
     }
     const queued = new Set((this.queues.live ?? []).map(job => `${String(job.id)}:${String(job.generation)}`));
     for (const attempt of this.liveAttempts) if (!queued.has(attempt)) this.liveAttempts.delete(attempt);
@@ -1219,14 +1241,24 @@ export class HostRunner {
     const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
     return () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
   }
-  /** A recording of this device that the controller still lists and that has not finished here:
-   * running, or not yet started. No live epoch starts meanwhile, so the recording finds the
-   * device free. Evaluated at most once per 250 ms per device, like the authority above. */
+  /** A recording of this device that the controller still lists and that still holds the
+   * device's native capture here: running, not yet started, or ended without positive proof that
+   * its native source stopped (for a lease, only its encoder's exit was confirmed, and the guest
+   * recorder's stop waits for the lease's cleanup). No live epoch starts meanwhile, so a recording
+   * finds the device free and no second recorder can run beside an unproven one. A recording that
+   * ended here with proof does not count, even while the controller's list still trails it and
+   * this runner repeats its receipt. Evaluated at most once per 250 ms per device, like the
+   * authority above. */
   private recordingPending(machineId: string): boolean {
     const now = performance.now(), cached = this.liveRecordings.get(machineId);
     if (cached && now - cached.at < 250) return cached.value;
-    const value = (this.queues.video ?? []).some(job => job.machineId === machineId && ['pending', 'attaching', 'ready'].includes(String(job.state)) &&
-      (this.active.has(`video:${String(job.id)}`) || !present(join(this.state, 'work', 'video', `${identifier(job.id)}.json`))));
+    const value = (this.queues.video ?? []).some(job => {
+      if (job.machineId !== machineId) return false;
+      const id = identifier(job.id), path = join(this.state, 'work', 'video', `${id}.json`);
+      if (this.recordingCaptures.has(id)) return true;
+      if (!present(path)) return ['pending', 'attaching', 'ready'].includes(String(job.state));
+      try { return readRecord(path).cleaned !== true; } catch { return true; }
+    });
     this.liveRecordings.set(machineId, { at: now, value }); return value;
   }
   private liveSource(machine: RecordValue): LiveCaptureSource | undefined {
@@ -1236,8 +1268,16 @@ export class HostRunner {
     const offered = image.os === 'android' || image.os === 'ios' && runtime.config?.liveView === true;
     if (!runtime.openVideo || !runtime.pipe || typeof encoder !== 'string' || !isAbsolute(encoder) || !offered) return undefined;
     // Stopping an early-ended recorder needs the same assignment that started it, as for recordings.
-    const sameAssignment = this.assignmentUnchanged(machine);
+    const sameAssignment = this.assignmentUnchanged(machine), machineId = String(machine.id);
+    const leaseId = machine.lease ? identifier(object(machine.lease).id) : undefined;
     return { encoder, guestSource: image.os === 'android', notRunning: captureNotRunning, recordingQueued: () => this.recordingPending(String(machine.id)),
+      leaseFence: () => {
+        if (!leaseId || this.stopController.signal.aborted || !sameAssignment()) return undefined;
+        const record = this.guard.records.get(machineId);
+        const lease = record && object(record.machine.lease);
+        if (!record || !lease || lease.id !== leaseId || lease.state !== 'ready' || record.retired || this.guard.allowed(machineId)) return undefined;
+        return { cause: 'fence', leaseId, leaseRevision: Number(lease.revision) };
+      },
       openSource: (options, authorized) => runtime.openVideo!(machine, image, folder, options, authorized, () => this.machineAuthorized(String(machine.id)) && sameAssignment()),
       openEncoder: argv => runtime.pipe!(argv) };
   }
@@ -1464,10 +1504,11 @@ export class HostRunner {
     const { runtime, image, folder } = this.context(machine);
     // hostCleaned: this runner's own encoder is confirmed exited (or never started). For a leased
     // emulator that alone may be reported when the guest recorder's stop is unproven.
-    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true;
+    let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true, ackReceived = false;
     let tap: Awaited<ReturnType<LiveCaptureHub['beginRecording']>> | undefined;
     const leased = machine.lease != null;
     saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'started' });
+    const recordingId = identifier(job.id); this.recordingCaptures.add(recordingId);
     try {
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/${identifier(job.generation)}`, identity.credential,
         { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
@@ -1496,20 +1537,23 @@ export class HostRunner {
         sendBytes: async (data: Uint8Array) => { viewers.push(data); await recording.sendBytes(data); } };
       const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
       await serveMobileVideo(tee, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
+      ackReceived = true;
       cleaned = true;
     } catch {
       if (!captureStarted) cleaned = true;
       try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
     } finally {
       channel?.close();
+      this.recordingCaptures.delete(recordingId);
       // Live viewers may resume their own capture only after this one is proven stopped.
       tap?.end(cleaned);
       const hostOnly = !cleaned && leased && hostCleaned;
       // The hand-over wait is recorded with the recording's journal, for the operator.
       const handover = tap && (tap.waitedMs >= 100 || !tap.proven) ? { liveHandoverMs: Math.round(tap.waitedMs), liveStopProven: tap.proven } : {};
-      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}), ...handover });
+      const delivery = ackReceived ? { ackReceived: true } : {};
+      saveRecord(path, { generation: job.generation, machineId: machine.id, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}), ...delivery, ...handover });
       if (cleaned || hostOnly) {
-        try { await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/finish`, cleaned ? { generation: job.generation, cleaned: true } : { generation: job.generation, hostCleaned: true }, identity.credential, this.stopController.signal); }
+        try { await this.reportVideoReceipt(recordingId, path, cleaned ? { generation: job.generation, cleaned: true, ...delivery } : { generation: job.generation, hostCleaned: true }); }
         catch { this.log('Video cleanup receipt was not acknowledged; its reservation is retained.'); }
       }
     }
