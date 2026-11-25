@@ -117,8 +117,9 @@ export class VideoClient {
           if (ended !== null) throw new SessionError('Unexpected data after completed video.', 'video_incomplete');
         } catch (error) {
           if (!transportFailure(error)) throw error;
+          if (!this.inspect) throw new SessionError('The connection reset before recording completion was confirmed.', 'video_incomplete');
         }
-        if (!await this.confirmed(deadline)) throw new SessionError('The connection ended before the runner confirmed the acknowledgement.', 'video_incomplete');
+        if (this.inspect && !await this.confirmed(deadline)) throw new SessionError('The connection ended before the runner confirmed the acknowledgement.', 'video_incomplete');
         if (this.options.signal?.aborted || performance.now() >= deadline) throw new SessionError('Video completion is unconfirmed.', 'video_incomplete');
         this.finish = value as unknown as VideoFinish; return this.finish;
       }
