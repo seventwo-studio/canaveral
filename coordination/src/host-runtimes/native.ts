@@ -9,6 +9,8 @@ import { LibvirtProvider, localLibvirtUri } from "../providers/libvirt.ts";
 import { checkLibvirtLeaseHelper } from "../providers/libvirt-native.ts";
 import { absolute, blocker, digest, missing, object, probe, ProbeError, record } from "./core.ts";
 import type { BackendId, BackendRecord, Environment, HostConfigData } from "./core.ts";
+import { containerdPromoted, promoted } from "./qualification.ts";
+import type { ReceiptAsset } from "./qualification.ts";
 
 export const receiptPath = "/var/lib/canaveral-host-installer/receipts/containerd.json";
 export const installerInstruction = "Install canaveral-host-installer as root per its README, then run sudo canaveral-host-installer containerd install.";
@@ -55,7 +57,7 @@ export function readReceipt(path = receiptPath, owner = 0, inspect: typeof lstat
   }
 }
 
-function parseReceipt(value: unknown): { version: string; files: Map<string, string> } {
+function parseReceipt(value: unknown): { version: string; assets: ReceiptAsset[]; files: Map<string, string> } {
   const r = object(value);
   const assets = Array.isArray(r.assets) ? r.assets.map(object) : [];
   const files = Array.isArray(r.files) ? r.files.map(object) : [];
@@ -71,6 +73,7 @@ function parseReceipt(value: unknown): { version: string; files: Map<string, str
   }
   return {
     version: assets.find(a => a.name === "containerd")!.version as string,
+    assets: assets.map(a => ({ name: String(a.name), version: String(a.version), sha256: String(a.sha256) })),
     files: new Map(files.map(f => [f.path as string, f.sha256 as string])),
   };
 }
@@ -144,7 +147,7 @@ async function containerd(env: Environment): Promise<BackendRecord> {
       ), installed);
     }
   }
-  return record("containerd", true, "verified", undefined, installed);
+  return { ...record("containerd", true, "verified", undefined, installed), qualified: containerdPromoted(env, owned.assets) };
 }
 
 async function apple(config: HostConfigData, env: Environment): Promise<BackendRecord> {
@@ -168,7 +171,7 @@ async function apple(config: HostConfigData, env: Environment): Promise<BackendR
   }
   const provider = new AppleProvider({ runner, platform: env.platform, templates: [], command: (argv: string[]) => probe(env, argv) }, "");
   if (await provider.check() !== "Apple virtualization available") throw new ProbeError("runtime_probe_invalid_output");
-  return record(id, true, "verified");
+  return { ...record(id, true, "verified"), qualified: promoted(id, env, identity => identity.version === release) };
 }
 
 /** A configured lease helper adds consumer lease eligibility; administrative VMs never depend on it. */
@@ -232,7 +235,7 @@ async function libvirtBackend(config: HostConfigData, env: Environment): Promise
     const detail = kubernetes ? "Host libvirtd did not report KVM support over the mounted socket." : "The local libvirt KVM capability probe did not pass.";
     return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", detail), version);
   }
-  return record(id, true, "verified", undefined, version);
+  return { ...record(id, true, "verified", undefined, version), qualified: promoted(id, env, identity => identity.version === version) };
 }
 
 export async function nativeRecord(id: Exclude<BackendId, "ollama" | "llama.cpp" | "vllm" | "mlx-lm">, config: HostConfigData, env: Environment): Promise<BackendRecord> {

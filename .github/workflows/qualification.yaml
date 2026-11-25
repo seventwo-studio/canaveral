@@ -1,0 +1,101 @@
+name: Runtime qualification
+
+# Trust anchors are the runs on main (push and nightly) and the release gate in
+# release.yaml: both execute the verifier from trusted code. Pull request runs
+# execute the PR's own verifier and workflow, so their verification is advisory.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/qualification.yaml'
+      - 'qualification/**'
+      - 'script/qualification*.mjs'
+      - 'script/package_checks.mjs'
+      - 'crates/model-execution/build.rs'
+      - 'crates/model-execution/src/runtime-pins.json'
+      - 'crates/model-execution/src/runtime-qualified.json'
+      - 'crates/host-installer/src/pins.json'
+      - 'crates/host-installer/src/pins.rs'
+      - 'fixtures/model-execution/real-model.json'
+      - 'coordination/src/host-runtimes/qualified-pins.ts'
+  push:
+    branches: [main]
+  schedule:
+    - cron: '7 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      # The tests exercise the packaging gate in script/package_checks.mjs, which
+      # loads TypeScript from the coordination dependencies.
+      - name: Install coordination dependencies
+        run: npm --prefix coordination ci --ignore-scripts
+      - name: Test the qualification tool
+        run: node --test script/qualification.test.mjs
+      - name: Check records, promotions and embedded tables
+        run: node script/qualification.mjs check
+
+  verify-advisory:
+    name: verify (advisory)
+    # Rebuilds records cited by promotions that are new or changed since the
+    # pull request's base commit. Advisory: the PR controls this code.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Fetch the base commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+      - name: Verify newly cited records against GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node script/qualification.mjs verify --base "$BASE_SHA"
+
+  verify-all:
+    name: verify all promotions
+    # Trusted: runs main's own verifier against every promoted record.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Verify every promoted record against GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node script/qualification.mjs verify --all

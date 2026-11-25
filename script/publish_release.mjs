@@ -46,6 +46,7 @@ function declaredTree(directory,prefix='') {
 export const DEPLOYMENT=NAMESPACE+'/deploy';
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
 const SHA256=/^[a-f0-9]{64}$/;
+const IMAGE_TARGET='io.canaveral.release.target';
 const LINUX_ARCHITECTURES=['amd64','arm64'];
 export const LEASE_HELPER='/usr/local/lib/canaveral/canaveral-libvirt-native';
 const VM_CONFIG='vm/configmap.json';
@@ -148,6 +149,55 @@ function imageLeaseHelperDigests(image,temporary,execute) {
     }
   }));
 }
+function verifyReleaseSignature(execute,tag,reference) {
+  execute('cosign',['verify','--new-bundle-format=false',
+    '--certificate-oidc-issuer','https://token.actions.githubusercontent.com',
+    '--certificate-identity',SOURCE+'/.github/workflows/release.yaml@refs/tags/'+tag,
+    reference]);
+}
+
+function checkReleaseImage(manifest,version,revision,stage) {
+  checkIdentity(manifest,version,revision);
+  if(manifest.annotations?.[IMAGE_TARGET]!==stage) {
+    throw new PublicationFailure('The image index does not match the release target.');
+  }
+}
+
+async function releaseImage(stage,packageName,version,revision,finalize,temporary,execute,connect,pause) {
+  const tag='v'+version;
+  const registry=await connect(packageName);
+  let found=await registry.manifest(version);
+  if(!found) {
+    if(finalize) throw new Error('Cannot finalize missing image.');
+    const candidate='candidate-'+version+'-'+revision;
+    const metadata=join(temporary,stage+'-build.json');
+    const annotations={'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':version,
+      'org.opencontainers.image.revision':revision,[IMAGE_TARGET]:stage};
+    console.log('Building and publishing '+stage+' candidate image.');
+    execute('docker',['buildx','build','.', '--target',stage,'--platform','linux/amd64,linux/arm64',
+      '--push','--tag',packageName+':'+candidate,'--metadata-file',metadata,
+      ...Object.entries(annotations).flatMap(([key,value])=>['--label',key+'='+value,'--annotation','index:'+key+'='+value])]);
+    const digest=uniqueJSON(readFileSync(metadata,'utf8'))['containerimage.digest'];
+    const built=await publishedManifest(connect,packageName,candidate,pause);
+    if(typeof digest!=='string' || !DIGEST.test(digest) || built[1]!==digest) {
+      throw new PublicationFailure('The candidate image digest differs from the Buildx output.');
+    }
+    checkReleaseImage(built[0],version,revision,stage);
+    const reference=packageName+'@'+digest;
+    execute('cosign',['sign','--yes','--new-bundle-format=false','--use-signing-config=false',reference]);
+    verifyReleaseSignature(execute,tag,reference);
+    const current=await registry.manifest(version);
+    if(current && current[1]!==digest) throw new PublicationFailure('The version image changed before promotion.');
+    if(!current) execute('docker',['buildx','imagetools','create','--tag',packageName+':'+version,reference]);
+    found=await publishedManifest(connect,packageName,version,pause);
+    if(found[1]!==digest) throw new PublicationFailure('The published image digest differs from the signed Buildx output.');
+  } else {
+    checkReleaseImage(found[0],version,revision,stage);
+    verifyReleaseSignature(execute,tag,packageName+'@'+found[1]);
+  }
+  return packageName+':'+version+'@'+found[1];
+}
+
 export function bundle(version,revision,images,helperDigests,output,sourceRoot=ROOT) {
   if(!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error('Semantic version and full source revision required.');
   if(Object.keys(images).sort().join(',')!==Object.keys(IMAGES).sort().join(',')) throw new Error('Controller, dashboard and canaverald images are required.');
@@ -239,23 +289,13 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   if(finalize) draftRelease(releases(),tag,revision);
   else ensureDraft(releases(),tag,revision,args=>run('gh',args),releases);
   const dist=join(root,'dist');mkdirSync(dist,{recursive:true});
-  const images={};
-  for(const [stage,packageName] of Object.entries(IMAGES)) {
-    console.log('Checking '+stage+' image.');
-    let registry=await connect(packageName), found=await registry.manifest(version);
-    if(found===null) {
-      if(finalize) throw new Error('Cannot finalize missing image.');
-      const annotations={'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':revision};
-      console.log('Building and publishing '+stage+' image.');
-      run('docker',['buildx','build','.', '--target',stage,'--platform','linux/amd64,linux/arm64','--push','--tag',packageName+':'+version,...Object.entries(annotations).flatMap(([k,v])=>['--label',k+'='+v,'--annotation','index:'+k+'='+v])]);
-      console.log('Confirming '+stage+' image publication.');
-      found=await publishedManifest(connect,packageName,version,pause);
-    }
-    if(!found) throw new Error('Image publication did not complete.');
-    checkIdentity(found[0],version,revision);images[stage]=packageName+':'+version+'@'+found[1];
-  }
   const temporary=mkdtempSync(join(tmpdir(),'canaveral-release-'));const metadata=join(dist,'release.json');
   try {
+    const images={};
+    for(const [stage,packageName] of Object.entries(IMAGES)) {
+      console.log('Checking '+stage+' image.');
+      images[stage]=await releaseImage(stage,packageName,version,revision,finalize,temporary,execute,connect,pause);
+    }
     const helperDigests=imageLeaseHelperDigests(images.canaverald,temporary,execute);
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,helperDigests,output,root);
     for(const [stage,{render}] of Object.entries(STAGES)) for(const overlay of render) run('kubectl',['kustomize',join(output,stage,overlay)]);
@@ -283,7 +323,7 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
     if(finalize && readFileSync(metadata,'utf8')!==text) throw new Error('Prepared release metadata differs.');
     if(!finalize) writeFileSync(metadata,text);
     if(finalize) {
-      run('cosign',['verify','--new-bundle-format=false','--certificate-oidc-issuer','https://token.actions.githubusercontent.com','--certificate-identity',SOURCE+'/.github/workflows/release.yaml@refs/tags/'+tag,DEPLOYMENT+'@'+artifact[1]]);
+      verifyReleaseSignature(execute,tag,DEPLOYMENT+'@'+artifact[1]);
       // Only complete, verified candidates enter the stable semver feed.
       // A failed signing/provenance step leaves no new selectable version.
       draftRelease(releases(),tag,revision);
