@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import { main, bundle, checkDaemonGrace, STAGES, LEASE_HELPER, capture, imageLeaseHelperDigests, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure, RegistryUnavailable, publishedManifest, publicationFailure } from './publish_release.mjs';
 const sha='a'.repeat(40),other='b'.repeat(40),tag='v0.4.0',version='0.4.0';
@@ -24,7 +24,7 @@ test('missing draft is created for exact commit and reloaded; conflicts never cr
  for(const rows of [[draft,draft],[{...draft,draft:false}],[{...draft,target_commitish:'main'}],[{...draft,target_commitish:other}]])assert.throws(()=>ensureDraft([rows],tag,sha,()=>assert.fail('created conflicting release'),()=>assert.fail('reloaded conflict')));
  assert.throws(()=>ensureDraft([[]],tag,sha,()=>{},()=>[[{...draft,draft:false}]]));
 });
-function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false,conflict=false,failContent=false,failSignature=false,substituteBuild=false}={}) {
+function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false,conflict=false,failContent=false,failSignature=false,substituteBuild=false,symlinkHelper=false}={}) {
  const root=mkdtempSync(join(tmpdir(),'canaveral-publish-test-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
  for(const {source} of Object.values(STAGES))cpSync(new URL('../'+source,import.meta.url),join(root,source),{recursive:true});
  writeFileSync(join(root,'package.json'),JSON.stringify({version}));writeFileSync(join(root,'package-lock.json'),JSON.stringify(lock));
@@ -69,11 +69,13 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
     const [,output]=/^type=local,dest=(.+),platform-split=true$/.exec(args[9]);
     assert.ok(signed.has(reference));
     assert.equal(readFileSync(join(args[10],'Dockerfile'),'utf8'),
-      'FROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n');
+      'FROM scratch\nCOPY --from=daemon '+dirname(LEASE_HELPER)+'/ /helpers/\n');
     for(const [arch,bytes] of Object.entries(helpers)) {
-      const directory=join(output,'linux_'+arch);
+      const directory=join(output,'linux_'+arch,'helpers');
       mkdirSync(directory,{recursive:true});
-      writeFileSync(join(directory,'lease-helper'),bytes);
+      const path=join(directory,basename(LEASE_HELPER));
+      if(symlinkHelper && arch==='arm64') symlinkSync('../../linux_amd64/helpers/'+basename(LEASE_HELPER),path);
+      else writeFileSync(path,bytes);
     }
    }
   }
@@ -119,6 +121,11 @@ test('lease helper export refuses unpinned input and blocks publication if an ar
  assert.throws(()=>imageLeaseHelperDigests(IMAGES.canaverald+':latest',f.root,f.execute),/digest-pinned/);
  assert.equal(f.calls.length,0);
  delete f.helpers.arm64;
+ await assert.rejects(main(false,f),/Expected a regular lease helper for linux\/arm64/);
+ assert.ok(!f.calls.some(c=>c[0]==='flux'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+});
+test('lease helper export refuses a symlink from either platform',{skip:process.platform==='win32'},async t=>{
+ const f=fixture(t,{symlinkHelper:true});
  await assert.rejects(main(false,f),/Expected a regular lease helper for linux\/arm64/);
  assert.ok(!f.calls.some(c=>c[0]==='flux'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
 });

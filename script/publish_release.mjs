@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT } from './tasks.mjs';
 import { uniqueJSON } from './json.mjs';
@@ -139,11 +139,11 @@ export function imageLeaseHelperDigests(image,temporary,execute=capture) {
   const context=join(temporary,'lease-helper-context');
   const output=join(temporary,'lease-helpers');
   mkdirSync(context);
-  // Use the image only as a COPY source so even inherited ONBUILD instructions
-  // cannot run. BuildKit resolves the signed index for each platform without
-  // loading the image into Docker's local image store.
+  // Use the image only as a COPY source so inherited ONBUILD instructions
+  // cannot run. Copy the directory so a symlink at the helper path remains
+  // visible to lstat rather than being dereferenced by a single-file COPY.
   writeFileSync(join(context,'Dockerfile'),
-    'FROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n',
+    'FROM scratch\nCOPY --from=daemon '+dirname(LEASE_HELPER)+'/ /helpers/\n',
     {flag:'wx'});
   const platforms=LINUX_ARCHITECTURES.map(architecture=>'linux/'+architecture).join(',');
   try {
@@ -154,7 +154,7 @@ export function imageLeaseHelperDigests(image,temporary,execute=capture) {
     throw new PublicationFailure('Lease helper export failed. '+publicationFailure(error));
   }
   return Object.fromEntries(LINUX_ARCHITECTURES.map(architecture=>{
-    const file=join(output,'linux_'+architecture,'lease-helper');
+    const file=join(output,'linux_'+architecture,'helpers',basename(LEASE_HELPER));
     if(!existsSync(file) || !lstatSync(file).isFile()) {
       throw new PublicationFailure('Expected a regular lease helper for linux/'+architecture+'.');
     }
