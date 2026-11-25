@@ -23,8 +23,6 @@ source checkout before importing either package.
   means evidence was invalid or unreadable. It never changes the inputs.
 - `node script/build_android_transfer.mjs --ndk /installed/ndk --output-dir dist/android-transfer`
   compiles both Android ABIs, verifies architecture and excludes test injection.
-- `node script/build_linux_lease_deadline.mjs --output /new/absolute/deadline.so`
-  builds an uninstalled library on Linux. It refuses to replace existing artifacts.
 - `node fixtures/migration/verify_lease_guard.mjs` runs the Rust shared trace and
   persisted wire assertions against disposable fixture state.
 - `npm run check:no-python` scans tracked and new files for forbidden extensions,
@@ -96,6 +94,12 @@ reused: immutable identity guards reject another source revision.
    source-content check; matching annotations alone are insufficient.
    `node script/publish_release.mjs` only prepares artifacts; --finalize is the
    workflow's final step, not a substitute for signing and provenance.
+
+The workflow builds each image under a candidate tag and checks the registry
+digest against Buildx metadata. It signs that digest before assigning the
+version tag. Its signed image index identifies the build target. Retries
+verify that target and the signature from the release workflow's exact tag
+identity before reusing a version image.
 
 A failed run may leave some immutable images or an unsigned deployment artifact
 and an unfinished draft. After a completed push, the publisher makes at most six

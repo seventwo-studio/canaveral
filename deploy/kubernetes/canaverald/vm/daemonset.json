@@ -1,0 +1,55 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "DaemonSet",
+  "metadata": {
+    "name": "canaverald",
+    "namespace": "canaverald"
+  },
+  "spec": {
+    "template": {
+      "spec": {
+        "nodeSelector": {
+          "canaveral.dev/host-profile": "vm"
+        },
+        "securityContext": {
+          "supplementalGroups": [
+            10003
+          ]
+        },
+        "containers": [
+          {
+            "name": "canaverald",
+            "volumeMounts": [
+              {
+                "name": "libvirt-socket",
+                "mountPath": "/var/run/libvirt/libvirt-sock",
+                "readOnly": true
+              },
+              {
+                "name": "vm-storage",
+                "mountPath": "/var/lib/libvirt/images/canaveral",
+                "readOnly": false
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "libvirt-socket",
+            "hostPath": {
+              "path": "/var/run/libvirt/libvirt-sock",
+              "type": "Socket"
+            }
+          },
+          {
+            "name": "vm-storage",
+            "hostPath": {
+              "path": "/var/lib/libvirt/images/canaveral",
+              "type": "Directory"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

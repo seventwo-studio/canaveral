@@ -57,3 +57,35 @@ COPY --from=rust-build /source/target/release/canaveral-mobile-native /usr/local
 USER 10001:10001
 # Each native executable keeps its own strict configuration and acceptance gates.
 ENTRYPOINT ["/usr/local/bin/canaveral-model-execution"]
+
+# The pinned ARM64 llama.cpp release uses Ubuntu 24.04 and GCC 14.
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS canaverald
+WORKDIR /app
+ENV NODE_ENV=production HOME=/tmp
+# Exact Debian trixie package versions keep daemon images reviewable. Refresh
+# them together with the base digest: list candidates with
+# `apt-cache policy PACKAGE` in that base image (or
+# https://qa.debian.org/madison.php?s=trixie,trixie-security&package=PACKAGE),
+# update every pin, then rebuild both architectures. A build that fails on a
+# missing version means Debian superseded it and the pins need that refresh.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates=20250419+deb13u1 \
+      libgomp1=14.2.0-19 \
+      libssl3t64=3.5.9-1~deb13u1 \
+      libvirt-clients=11.3.0-3+deb13u3 \
+      libvirt0=11.3.0-3+deb13u3 \
+      qemu-utils=1:10.0.13+ds-0+deb13u1 \
+      genisoimage=9:1.1.11-4 \
+      tini=0.19.0-3+b8 && \
+    rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 canaverald && \
+    useradd --uid 10001 --gid 10001 --no-create-home canaverald
+COPY --from=node-build /app/coordination/dist/src ./coordination/dist/src
+COPY coordination/package.json ./coordination/package.json
+COPY canaveral/schemas ./canaveral/schemas
+COPY --from=rust-build /source/target/release/canaveral-model-execution /usr/local/bin/
+COPY --from=rust-build --chown=0:0 --chmod=0755 /source/target/release/canaveral-libvirt-native /usr/local/lib/canaveral/
+RUN ln -s /app/coordination/dist/src/canaverald.js /usr/local/bin/canaverald && \
+    chmod 0755 /app/coordination/dist/src/canaverald.js
+USER 10001:10001
+ENTRYPOINT ["/usr/bin/tini", "--", "canaverald"]
+CMD ["--config", "/etc/canaverald/host.json", "--state", "/var/lib/canaverald"]
