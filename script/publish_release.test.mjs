@@ -24,16 +24,21 @@ test('missing draft is created for exact commit and reloaded; conflicts never cr
  for(const rows of [[draft,draft],[{...draft,draft:false}],[{...draft,target_commitish:'main'}],[{...draft,target_commitish:other}]])assert.throws(()=>ensureDraft([rows],tag,sha,()=>assert.fail('created conflicting release'),()=>assert.fail('reloaded conflict')));
  assert.throws(()=>ensureDraft([[]],tag,sha,()=>{},()=>[[{...draft,draft:false}]]));
 });
-function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false,conflict=false,failContent=false,failSignature=false}={}) {
+function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false,conflict=false,failContent=false,failSignature=false,substituteBuild=false}={}) {
  const root=mkdtempSync(join(tmpdir(),'canaveral-publish-test-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
  for(const {source} of Object.values(STAGES))cpSync(new URL('../'+source,import.meta.url),join(root,source),{recursive:true});
  writeFileSync(join(root,'package.json'),JSON.stringify({version}));writeFileSync(join(root,'package-lock.json'),JSON.stringify(lock));
  const previous=process.env.RELEASE_TAG;process.env.RELEASE_TAG=tag;t.after(()=>{if(previous===undefined)delete process.env.RELEASE_TAG;else process.env.RELEASE_TAG=previous;});
  const event=process.env.GITHUB_SHA;process.env.GITHUB_SHA=sha;t.after(()=>{if(event===undefined)delete process.env.GITHUB_SHA;else process.env.GITHUB_SHA=event;});
- const calls=[],manifests=new Map(),helpers={...imageHelpers};let rows=existing;
- const manifest=(artifact=false)=>[{annotations:{'org.opencontainers.image.source':conflict?'different':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':artifact?tag+'@sha1:'+sha:sha},...(artifact?{layers:[{mediaType:'application/vnd.cncf.flux.content.v1.tar+gzip'}]}:{manifests:['amd64','arm64'].map(architecture=>({platform:{os:'linux',architecture}}))})},'sha256:'+'c'.repeat(64)];
+ const calls=[],manifests=new Map(),signed=new Set(),helpers={...imageHelpers};let rows=existing;
+ const manifest=(artifact=false,stage)=>[{annotations:{'org.opencontainers.image.source':conflict?'different':SOURCE,'org.opencontainers.image.version':version,'org.opencontainers.image.revision':artifact?tag+'@sha1:'+sha:sha,...(stage?{'io.canaveral.release.target':stage}:{})},...(artifact?{layers:[{mediaType:'application/vnd.cncf.flux.content.v1.tar+gzip'}]}:{manifests:['amd64','arm64'].map(architecture=>({platform:{os:'linux',architecture}}))})},'sha256:'+'c'.repeat(64)];
  const candidate='candidate-'+version+'-'+sha;
- if(!missing) {for(const name of Object.values(IMAGES))manifests.set(name,manifest());manifests.set(DEPLOYMENT+':'+candidate,manifest(true));}
+ if(!missing) {
+  for(const [stage,name] of Object.entries(IMAGES)) {
+   const image=manifest(false,stage); manifests.set(name,image); signed.add(name+'@'+image[1]);
+  }
+  manifests.set(DEPLOYMENT+':'+candidate,manifest(true));
+ }
  const execute=(command,args)=>{
   calls.push([command,...args]);
   if(command==='git') {
@@ -47,7 +52,16 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
    if(args[1]==='edit')rows=[{...draft,draft:false}];
   }
   if(command==='docker') {
-   if(args[0]==='buildx')manifests.set(args[args.indexOf('--tag')+1].split(':')[0],manifest());
+   if(args[0]==='buildx'&&args[1]==='build') {
+    const image=manifest(false,args[args.indexOf('--target')+1]);
+    manifests.set(args[args.indexOf('--tag')+1],image);
+    writeFileSync(args[args.indexOf('--metadata-file')+1],JSON.stringify({'containerimage.digest':substituteBuild?'sha256:'+'e'.repeat(64):image[1]}));
+   }
+   if(args[0]==='buildx'&&args[1]==='imagetools') {
+    assert.ok(signed.has(args.at(-1)));
+    const name=args[4].split(':')[0];
+    manifests.set(name,manifests.get(name+':'+candidate));
+   }
    if(args[0]==='create')return 'd'.repeat(64);
    if(args[0]==='cp') {
     assert.equal(args[1],'d'.repeat(64)+':'+LEASE_HELPER);
@@ -60,14 +74,22 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
    if(args[0]==='diff' && failContent)throw new Error('bundle bytes differ');
    if(args[0]==='tag')manifests.set(DEPLOYMENT+':'+version,manifest(true));
   }
-  if(command==='cosign' && failSignature)throw new Error('signature unverified');
+  if(command==='cosign') {
+   const reference=args.at(-1);
+   if(args[0]==='sign') signed.add(reference);
+   else if(reference.startsWith(DEPLOYMENT+'@')) {
+    if(failSignature)throw new Error('signature unverified');
+   } else if(!signed.has(reference))throw new Error('unverified image signature');
+  }
   return '';
  };
- return {root,execute,connect:async name=>({manifest:async ref=>manifests.get(name===DEPLOYMENT?name+':'+ref:name)??null}),calls,manifests,helpers};
+ return {root,execute,connect:async name=>({manifest:async ref=>manifests.get(name!==DEPLOYMENT&&ref===version?name:name+':'+ref)??null}),calls,manifests,signed,helpers};
 }
+const imageBuild=call=>call[0]==='docker'&&call[1]==='buildx'&&call[2]==='build';
+const deploymentVerification=call=>call[0]==='cosign'&&call.at(-1)?.startsWith(DEPLOYMENT+'@');
 test('prepare creates draft and missing artifacts; retry reuses digests; finalize alone publishes',async t=>{
  const f=fixture(t,{existing:[],missing:true});await main(false,f);
- assert.equal(f.calls.filter(c=>c[0]==='docker'&&c[1]==='buildx').length,3);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
+ assert.equal(f.calls.filter(imageBuild).length,3);assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
  assert.ok(f.calls.some(c=>c[0]==='docker' && c.includes('--target') && c[c.indexOf('--target')+1]==='canaverald'));
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
  assert.ok(!f.calls.some(c=>c[0]==='gh' && ['upload','edit'].includes(c[2])));
@@ -96,8 +118,8 @@ test('post-push readback tolerates absence without rebuilding or promoting',asyn
   return n<3?null:found;
  }});
  await main(false,f);
- assert.equal(waits,8);
- assert.equal(f.calls.filter(c=>c[0]==='docker'&&c[1]==='buildx').length,3);
+ assert.equal(waits,14);
+ assert.equal(f.calls.filter(imageBuild).length,3);
  assert.equal(f.calls.filter(c=>c[0]==='flux'&&c[1]==='push').length,1);
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),false);
 });
@@ -127,16 +149,33 @@ test('finalization rejects missing artifacts and changed prepared metadata witho
 });
 test('finalization refuses a canaverald digest that differs from prepared metadata',async t=>{
  const f=fixture(t);await main(false,f);
- const [found]=f.manifests.get(IMAGES.canaverald);f.manifests.set(IMAGES.canaverald,[found,'sha256:'+'e'.repeat(64)]);
+ const [found]=f.manifests.get(IMAGES.canaverald),changed='sha256:'+'e'.repeat(64);
+ f.manifests.set(IMAGES.canaverald,[found,changed]);f.signed.add(IMAGES.canaverald+'@'+changed);
  await assert.rejects(main(true,f),/metadata differs/);
- assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='flux'&&c[1]==='tag'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+ assert.ok(!f.calls.some(c=>deploymentVerification(c)||c[0]==='flux'&&c[1]==='tag'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+});
+test('a candidate differing from Buildx metadata is never signed or promoted',async t=>{
+ const f=fixture(t,{missing:true,substituteBuild:true});
+ await assert.rejects(main(false,f),/differs from the Buildx output/);
+ assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='docker'&&c[2]==='imagetools'||c[0]==='flux'));
+});
+test('an existing version image with matching annotations still needs a trusted signature',async t=>{
+ const f=fixture(t);f.signed.clear();
+ await assert.rejects(main(false,f),/unverified image signature/);
+ assert.ok(!f.calls.some(c=>c[0]==='cosign'&&c[1]==='sign'||c[0]==='docker'||c[0]==='flux'));
+});
+test('a signature for another release target does not authorize image reuse',async t=>{
+ const f=fixture(t);
+ f.manifests.set(IMAGES.orchestrator,f.manifests.get(IMAGES.canaverald));
+ await assert.rejects(main(false,f),/does not match the release target/);
+ assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='docker'||c[0]==='flux'));
 });
 const images=Object.fromEntries(Object.entries(IMAGES).map(([stage,name])=>[stage,name+':'+version+'@sha256:'+'c'.repeat(64)]));
 test('finalization checks both helper digests against the immutable images again',async t=>{
  const f=fixture(t);await main(false,f);
  f.helpers.arm64='different helper bytes';
  await assert.rejects(main(true,f),/metadata differs/);
- assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='flux'&&c[1]==='tag'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+ assert.ok(!f.calls.some(c=>deploymentVerification(c)||c[0]==='flux'&&c[1]==='tag'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
 });
 test('the bundle pins the canaverald image in its declared overlays',t=>{
  const output=mkdtempSync(join(tmpdir(),'canaveral-bundle-'));t.after(()=>rmSync(output,{recursive:true,force:true}));
@@ -191,7 +230,7 @@ test('stable-candidate digest conflicts refuse promotion even with matching anno
  const candidate=f.manifests.get(DEPLOYMENT+':candidate-'+version+'-'+sha);
  f.manifests.set(DEPLOYMENT+':'+version,[candidate[0],'sha256:'+'d'.repeat(64)]);
  await assert.rejects(main(true,f),/differs from its candidate/);
- assert.ok(!f.calls.some(c=>c[0]==='cosign'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
+ assert.ok(!f.calls.some(c=>deploymentVerification(c)||c[0]==='gh'&&['upload','edit'].includes(c[2])));
 });
 test('subprocess and network failures cannot echo secrets',async t=>{
  assert.throws(()=>capture(process.execPath,['-e','console.error("secret-value");process.exit(7)']),e=>!publicationFailure(e).includes('secret-value')&&publicationFailure(e).includes('exit 7'));
@@ -206,6 +245,7 @@ test('workflow keeps tag identity, signing and provenance ahead of final publica
  assert.match(w,/cosign sign --yes --new-bundle-format=false --use-signing-config=false/);
  assert.match(w,/ref: \$\{\{ github.sha \}\}/);
  assert.ok(w.indexOf('Attest deploy provenance')<w.indexOf('cosign sign'));
+ assert.ok(w.indexOf('Install Cosign')<w.indexOf('Prepare reviewed images'));
  assert.ok(w.indexOf('cosign sign')<w.indexOf('node script/publish_release.mjs --finalize'));
  assert.ok(!w.slice(w.indexOf('env:'),w.indexOf('concurrency:')).includes('GITHUB_TOKEN'));
  assert.equal((w.match(/actions\/attest-build-provenance@/g)??[]).length,4);
