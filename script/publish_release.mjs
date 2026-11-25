@@ -131,22 +131,33 @@ export function pinVmLeaseHelper(configMap,sha256) {
   config.leaseHelperSha256=sha256;
   configMap.data['host.json']=JSON.stringify(config,null,2)+'\n';
 }
-function imageLeaseHelperDigests(image,temporary,execute) {
+export function imageLeaseHelperDigests(image,temporary,execute=capture) {
+  const expectedPrefix=IMAGES.canaverald+'@';
+  if(!image.startsWith(expectedPrefix) || !DIGEST.test(image.slice(expectedPrefix.length))) {
+    throw new PublicationFailure('The lease helper source must be a digest-pinned canaverald image.');
+  }
+  const context=join(temporary,'lease-helper-context');
+  const output=join(temporary,'lease-helpers');
+  mkdirSync(context);
+  // BuildKit resolves the signed image index for each platform and exports
+  // only the helper. No source entrypoint runs and no image is loaded into
+  // Docker's local image store.
+  writeFileSync(join(context,'Dockerfile'),
+    'FROM '+image+' AS daemon\nFROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n',
+    {flag:'wx'});
+  const platforms=LINUX_ARCHITECTURES.map(architecture=>'linux/'+architecture).join(',');
+  try {
+    execute('docker',['buildx','build','--platform',platforms,'--network','none',
+      '--output','type=local,dest='+output+',platform-split=true',context]);
+  } catch (error) {
+    throw new PublicationFailure('Lease helper export failed. '+publicationFailure(error));
+  }
   return Object.fromEntries(LINUX_ARCHITECTURES.map(architecture=>{
-    const platform='linux/'+architecture;
-    // Copy bytes from the immutable image without executing its entrypoint or
-    // requiring either architecture's binary to run in the release job.
-    execute('docker',['pull','--platform',platform,image]);
-    const container=execute('docker',['create','--platform',platform,image]);
-    if(!SHA256.test(container)) throw new Error('Expected a Docker container ID.');
-    const file=join(temporary,'lease-helper-'+architecture);
-    try {
-      execute('docker',['cp',container+':'+LEASE_HELPER,file]);
-      if(!lstatSync(file).isFile()) throw new Error('Expected a regular lease helper in the image.');
-      return [architecture,createHash('sha256').update(readFileSync(file)).digest('hex')];
-    } finally {
-      execute('docker',['rm',container]);
+    const file=join(output,'linux_'+architecture,'lease-helper');
+    if(!existsSync(file) || !lstatSync(file).isFile()) {
+      throw new PublicationFailure('Expected a regular lease helper for linux/'+architecture+'.');
     }
+    return [architecture,createHash('sha256').update(readFileSync(file)).digest('hex')];
   }));
 }
 function verifyReleaseSignature(execute,tag,reference) {
@@ -296,7 +307,7 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
       console.log('Checking '+stage+' image.');
       images[stage]=await releaseImage(stage,packageName,version,revision,finalize,temporary,execute,connect,pause);
     }
-    const helperDigests=imageLeaseHelperDigests(images.canaverald,temporary,execute);
+    const helperDigests=imageLeaseHelperDigests(images.canaverald.replace(':'+version+'@','@'),temporary,execute);
     const output=join(temporary,'bundle'), result=bundle(version,revision,images,helperDigests,output,root);
     for(const [stage,{render}] of Object.entries(STAGES)) for(const overlay of render) run('kubectl',['kustomize',join(output,stage,overlay)]);
     const registry=await connect(DEPLOYMENT), candidate='candidate-'+version+'-'+revision;

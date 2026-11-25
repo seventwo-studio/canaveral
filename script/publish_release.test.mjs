@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { main, bundle, checkDaemonGrace, STAGES, LEASE_HELPER, capture, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure, RegistryUnavailable, publishedManifest, publicationFailure } from './publish_release.mjs';
+import { main, bundle, checkDaemonGrace, STAGES, LEASE_HELPER, capture, imageLeaseHelperDigests, releaseIdentity, remoteTag, ensureDraft, IMAGES, DEPLOYMENT, SOURCE, Registry, registryFailure, RegistryUnavailable, publishedManifest, publicationFailure } from './publish_release.mjs';
 const sha='a'.repeat(40),other='b'.repeat(40),tag='v0.4.0',version='0.4.0';
 const lock={version,packages:{'':{version}}};
 const draft={id:1,tag_name:tag,draft:true,target_commitish:sha};
@@ -52,7 +52,7 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
    if(args[1]==='edit')rows=[{...draft,draft:false}];
   }
   if(command==='docker') {
-   if(args[0]==='buildx'&&args[1]==='build') {
+   if(args[0]==='buildx'&&args[1]==='build'&&args.includes('--push')) {
     const image=manifest(false,args[args.indexOf('--target')+1]);
     manifests.set(args[args.indexOf('--tag')+1],image);
     writeFileSync(args[args.indexOf('--metadata-file')+1],JSON.stringify({'containerimage.digest':substituteBuild?'sha256:'+'e'.repeat(64):image[1]}));
@@ -62,11 +62,18 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
     const name=args[4].split(':')[0];
     manifests.set(name,manifests.get(name+':'+candidate));
    }
-   if(args[0]==='create')return 'd'.repeat(64);
-   if(args[0]==='cp') {
-    assert.equal(args[1],'d'.repeat(64)+':'+LEASE_HELPER);
-    const arch=args[2].endsWith('-amd64')?'amd64':'arm64';
-    writeFileSync(args[2],helpers[arch]);
+   if(args[0]==='buildx'&&args[1]==='build'&&args.includes('--output')) {
+    assert.deepEqual(args.slice(2,7),['--platform','linux/amd64,linux/arm64','--network','none','--output']);
+    const [,output]=/^type=local,dest=(.+),platform-split=true$/.exec(args[7]);
+    const reference=IMAGES.canaverald+'@'+manifests.get(IMAGES.canaverald)[1];
+    assert.ok(signed.has(reference));
+    assert.equal(readFileSync(join(args[8],'Dockerfile'),'utf8'),
+      'FROM '+reference+' AS daemon\nFROM scratch\nCOPY --from=daemon '+LEASE_HELPER+' /lease-helper\n');
+    for(const [arch,bytes] of Object.entries(helpers)) {
+      const directory=join(output,'linux_'+arch);
+      mkdirSync(directory,{recursive:true});
+      writeFileSync(join(directory,'lease-helper'),bytes);
+    }
    }
   }
   if(command==='flux') {
@@ -85,7 +92,7 @@ function fixture(t,{failAncestry=false,remote=sha,existing=[draft],missing=false
  };
  return {root,execute,connect:async name=>({manifest:async ref=>manifests.get(name!==DEPLOYMENT&&ref===version?name:name+':'+ref)??null}),calls,manifests,signed,helpers};
 }
-const imageBuild=call=>call[0]==='docker'&&call[1]==='buildx'&&call[2]==='build';
+const imageBuild=call=>call[0]==='docker'&&call[1]==='buildx'&&call[2]==='build'&&call.includes('--push');
 const deploymentVerification=call=>call[0]==='cosign'&&call.at(-1)?.startsWith(DEPLOYMENT+'@');
 test('prepare creates draft and missing artifacts; retry reuses digests; finalize alone publishes',async t=>{
  const f=fixture(t,{existing:[],missing:true});await main(false,f);
@@ -96,16 +103,23 @@ test('prepare creates draft and missing artifacts; retry reuses digests; finaliz
  const prepared=JSON.parse(readFileSync(join(f.root,'dist/release.json'),'utf8'));
  assert.equal(prepared.images.canaverald,IMAGES.canaverald+':'+version+'@sha256:'+'c'.repeat(64));
  assert.deepEqual(prepared.libvirtLeaseHelper,{path:LEASE_HELPER,sha256:helperDigests});
- assert.deepEqual(f.calls.filter(c=>c[0]==='docker'&&c[1]==='create').map(c=>c.slice(2)),[
-  ['--platform','linux/amd64',prepared.images.canaverald],['--platform','linux/arm64',prepared.images.canaverald],
- ]);
+ assert.equal(f.calls.filter(c=>c[0]==='docker'&&c.includes('--output')).length,1);
+ assert.ok(!f.calls.some(c=>c[0]==='docker'&&['pull','create','cp','rm'].includes(c[1])));
  for(const overlay of ['canaverald','canaverald/vm'])assert.ok(f.calls.some(c=>c[0]==='kubectl' && c[2].endsWith('/bundle/'+overlay)));
- f.calls.length=0;await main(false,f);assert.ok(!f.calls.some(c=>c[0]==='docker'&&c[1]==='buildx'||c[0]==='flux'&&c[1]!=='diff'));
+ f.calls.length=0;await main(false,f);assert.ok(!f.calls.some(c=>imageBuild(c)||c[0]==='flux'&&c[1]!=='diff'));
  await main(true,f);assert.equal(f.calls.filter(c=>c[0]==='gh' && c[2]==='edit').length,1);
  assert.ok(f.calls.findIndex(c=>c[0]==='cosign')<f.calls.findIndex(c=>c[0]==='flux'&&c[1]==='tag'));
  assert.equal(f.manifests.has(DEPLOYMENT+':'+version),true);
  // A completed release is never reopened, reuploaded or overwritten, even at the same source.
  f.calls.length=0;await assert.rejects(main(false,f),/unfinished draft/);assert.ok(!f.calls.some(c=>['docker','flux'].includes(c[0]) || c[2]==='upload'));
+});
+test('lease helper export refuses unpinned input and blocks publication if an architecture is missing',async t=>{
+ const f=fixture(t);
+ assert.throws(()=>imageLeaseHelperDigests(IMAGES.canaverald+':latest',f.root,f.execute),/digest-pinned/);
+ assert.equal(f.calls.length,0);
+ delete f.helpers.arm64;
+ await assert.rejects(main(false,f),/Expected a regular lease helper for linux\/arm64/);
+ assert.ok(!f.calls.some(c=>c[0]==='flux'||c[0]==='gh'&&['upload','edit'].includes(c[2])));
 });
 test('post-push readback tolerates absence without rebuilding or promoting',async t=>{
  const f=fixture(t,{missing:true});let waits=0;
