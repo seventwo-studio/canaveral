@@ -48,9 +48,9 @@ cannot extend the deadline. Revision rollback, clock rollback, late renewal,
 revocation and expiry fence execution. Authority is sampled again after slow
 metadata reads and between paused creation and resume.
 
-The native C adapter opens a new local QEMU connection and requests
-`PAUSED | AUTODESTROY` together. Every temporary domain handle is explicitly
-freed before connection closure. Libvirt documents connection-bound destruction,
+The supervisor requires a dedicated local QEMU connection and requests
+`PAUSED | AUTODESTROY` together. The native adapter must free temporary
+domain handles before connection closure. Libvirt documents connection-bound destruction,
 including client crash or disconnect, in
 [`virDomainCreateWithFlags`](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainCreateWithFlags).
 Its [connection reference counting](https://libvirt.org/html/libvirt-libvirt-host.html#virConnectClose)
@@ -310,3 +310,29 @@ clearing and partial unlink. Kernel boot IDs, native drivers and file leases are
 injected; filesystem/journal transitions use real private temporary files. No
 actual host was rebooted. Linux kernel/driver acceptance, real host restart and
 fresh-lease isolation remain open, and ordinary consumer admission stays disabled.
+
+## Mounted host socket in Kubernetes
+
+On a VM node, configure `provider: "libvirt"` or select `libvirt` under
+`provider: "linux"` in the host config. The provider uses the system libvirt
+namespace. Set `socketPath` in that provider's settings when the socket is
+mounted somewhere other than `/var/run/libvirt/libvirt-sock`. Libvirt operations
+and capability probes use the explicit local Unix transport. Keep the socket
+path stable across restarts. Mount VM storage and backing images at the same
+absolute paths visible to host libvirtd and grant the daemon UID and libvirt
+service the access each needs.
+
+The lease supervisor starts a persistent definition with
+`VIR_DOMAIN_START_PAUSED | VIR_DOMAIN_START_AUTODESTROY` on its own connection.
+After disconnection the definition can remain while its VM process is gone.
+On restart, a fresh observation of the owned inactive definition and evidence
+that the original supervisor exited can establish execution stop. The storage
+cleanup path must still confirm handle closure and removal before the
+controller can release a reservation. An unexpectedly missing definition or
+ambiguous native response retains the reservation.
+
+The mounted socket enables administrative libvirt operations. The daemon still
+requires production native connection, supervisor launch and storage erasure
+adapters before it can offer consumer VM leases. Portable tests exercise the
+connection and reconciliation contract with injected drivers. Verify the
+deployed provider on Linux with real libvirtd and KVM before enabling admission.

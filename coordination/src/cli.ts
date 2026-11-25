@@ -1,3 +1,4 @@
+import { kubernetesDeployment } from "./host-deployment.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants, promises as fs, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -34,6 +35,7 @@ serve [--config FILE]                    Start a controller; also accepts legacy
 dashboard [--bind IP] [--port PORT]       Start the optional dashboard
 local [--state DIR]                      Isolated loopback controller, dashboard and optional host
 host --config FILE --state DIR           Run a host (--setup-file FILE is also supported)
+connection-setups create|list|revoke     Manage scoped node setup tokens
 host --config FILE --state DIR --check   Inspect without enrollment or starting machines
 host --config FILE --state DIR --inventory  Print the local capability inventory
 promote-macos --config FILE --state DIR [--model-domain ID]
@@ -133,13 +135,14 @@ const schemas: Record<string, Schema> = {
   serve: { values: ["config", "bind", "port", "database", "admin-token-file", "enrollment-token-file", "controller-id", "tls-cert-file", "tls-key-file", "update-trust-file", "browser-gateway-config"] },
   dashboard: { values: ["bind", "port", "bootstrap-token-file"] },
   local: { values: ["state", "api-port", "dashboard-port", "linux-image", "macos-image", "macos-restore-image", "apple-runner", "android-sdk", "guest-helper-manifest", "controller-id"] },
-  host: { flags: ["check", "inventory"], values: ["config", "setup-file", "state", "ca-file", "enrollment-token-file"], required: ["state"] },
+  host: { flags: ["check", "inventory"], values: ["config", "setup-file", "state", "ca-file", "enrollment-token-file", "url"], required: ["state"] },
   "promote-macos": { values: ["config", "state", "model-domain"], required: ["config", "state"] },
   admin: { actions: ["create", "setup-link", "recover"], values: ["username", "password-file", "user-id", "dashboard-url", "output-file"] },
   login: { values: ["username", "password-file", "output-file"], required: ["username", "output-file"] },
   logout: {}, account: { actions: ["password"], values: ["current-password-file", "password-file"] },
   users: { actions: ["list", "create", "update", "invite", "reset-password", "revoke-invite"], defaultAction: "list" },
   tokens: { actions: ["list", "create", "revoke"], defaultAction: "list" },
+  "connection-setups": { actions: ["create", "list", "revoke"] },
   hosts: {}, machines: {}, templates: {}, models: {}, jobs: {}, images: {}, "image-tasks": {}, baselines: {},
   "warm-pool": { actions: ["list", "show", "set"], defaultAction: "list" },
   baseline: { actions: ["show", "save", "remove"] },
@@ -182,6 +185,8 @@ const subSchemas: Record<string, Schema> = {
   "users:revoke-invite": { positional: 1 },
   "tokens:list": {}, "tokens:create": { values: ["name", "scope", "expires-in", "request-id", "output-file"], required: ["name", "scope", "request-id", "output-file"] },
   "tokens:revoke": { positional: 1 },
+  "connection-setups:create": { values: ["config", "id", "output-file"], required: ["config", "id", "output-file"] },
+  "connection-setups:list": {}, "connection-setups:revoke": { positional: 1 },
   "leases:acquire": { values: ["request-file"], required: ["request-file"] }, "leases:templates": {}, "leases:list": { values: ["after"] },
   "warm-pool:list": {}, "warm-pool:show": { positional: 1 }, "warm-pool:set": { positional: 1, values: ["request-file"], required: ["request-file"] },
   "baseline:show": { positional: 1 }, "baseline:save": { positional: 1, values: ["name", "revision", "request-id"], required: ["name", "revision", "request-id"] },
@@ -242,10 +247,11 @@ export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): 
   }
   if (Array.isArray(result.values.scope) && result.values.scope.some(scope => typeof scope !== "string" || !["machines:read", "machines:write", "machines:access", "admin"].includes(scope))) throw new CliError("Invalid --scope.");
   if (command === "host" && Number(Boolean(result.values.config)) + Number(Boolean(result.values["setup-file"])) !== 1) throw new CliError("Supply exactly one of --config and --setup-file.");
+  if (command === "host" && result.values.url && globals.values.url) throw new CliError("Supply --url once.");
   if (command === "host" && result.values.check && result.values.inventory) throw new CliError("Choose either --check or --inventory.");
   const tokenFile = globals.values["token-file"] ?? env.CANAVERAL_TOKEN_FILE;
   return { command, action, positionals: result.positionals, options: result.values as CliArguments["options"],
-    url: typeof globals.values.url === "string" ? globals.values.url : env.CANAVERAL_URL ?? "http://127.0.0.1:8765", allowHttp: globals.values["allow-http"] === true || env.CANAVERAL_ALLOW_HTTP === "1",
+    url: typeof result.values.url === "string" ? result.values.url : typeof globals.values.url === "string" ? globals.values.url : env.CANAVERAL_URL ?? "http://127.0.0.1:8765", allowHttp: globals.values["allow-http"] === true || env.CANAVERAL_ALLOW_HTTP === "1",
     ...(typeof tokenFile === "string" ? { tokenFile } : {}) };
 }
 function numberOption(args: CliArguments, name: string, fallback?: number, minimum = 1, maximum = 1_048_576): number {
@@ -319,7 +325,7 @@ const defaults: CliRuntime = {
       const { startManagedHost } = await import("./updates/runtime.ts");
       return startManagedHost(config);
     }
-    return startHost(config);
+    return startHost(config, {}, options.signal);
   },
   async checkHost(options) {
     const { loadHost } = await import("./control/templates.ts");
@@ -393,6 +399,9 @@ async function hostOptions(args: CliArguments, signal: AbortSignal): Promise<Hos
   const managed = process.env.CANAVERAL_UPDATE_CANDIDATE === "1";
   if (managed && typeof config.url === "string") url = config.url;
   const enrollmentFile = args.options["enrollment-token-file"] ?? process.env.CANAVERAL_ENROLLMENT_TOKEN_FILE;
+  if (kubernetesDeployment(args.options["setup-file"] ? record(config.config) : config) && (enrollmentFile !== undefined || args.options["setup-file"])) {
+    throw new ServiceError("Kubernetes enrollment requires bootstrap/enrollment-token in host state.", 409, { code: "kubernetes_bootstrap_token_invalid" });
+  }
   let enrollment = typeof enrollmentFile === "string" ? await privateInput(enrollmentFile) : undefined;
   if (args.options["setup-file"]) {
     config = await jsonFile(file, HOST_CONFIG_BYTES);
@@ -456,13 +465,14 @@ async function promoteMacHost(args: CliArguments, io: CliIO): Promise<void> {
     io.stdout(JSON.stringify({ id, provider: "macos" }) + "\n");
   } finally { lock.close(); }
 }
-async function credentialRequest(destination: string, client: RequestClient, route: string, body: Record<string, unknown>, io: CliIO, resourceId: string): Promise<Record<string, unknown>> {
+async function credentialRequest(destination: string, client: RequestClient, route: string, body: Record<string, unknown>, io: CliIO, resourceId: string, field: "credential" | "enrollmentToken" = "credential"): Promise<Record<string, unknown>> {
   let received = false;
   try {
     return await io.output(destination, async write => {
       const reply = await client.request("POST", route, body); received = true;
-      if (reply.id !== resourceId || typeof reply.credential !== "string" || !/^[A-Za-z0-9_-]{43,128}$/.test(reply.credential)) throw new CliError("Credential exchange was not confirmed for this resource. Inspect state before an explicit rotation.", 502, typeof body.id === "string" ? body.id : undefined, "unknown");
-      await write(reply.credential + "\n"); return reply;
+      const token = reply[field];
+      if (reply.id !== resourceId || typeof token !== "string" || !/^[A-Za-z0-9_-]{43,128}$/.test(token)) throw new CliError("Credential exchange was not confirmed for this resource. Inspect state before an explicit rotation.", 502, typeof body.id === "string" ? body.id : undefined, "unknown");
+      await write(token + "\n"); return reply;
     });
   } catch (error) {
     if (received && !(error instanceof CliError)) throw new CliError("Credential file could not be saved after issuance. Inspect the resource before an explicit rotation; no automatic retry.", 503, typeof body.id === "string" ? body.id : undefined, "unknown");
@@ -474,6 +484,19 @@ async function handleRemote(args: CliArguments, io: CliIO): Promise<void> {
   const client = io.client(args.url, await credential(args), args.allowHttp);
   let result: Record<string, unknown>;
   if (["hosts", "machines", "templates", "models", "jobs", "images", "image-tasks", "baselines"].includes(args.command)) result = await client.request("GET", "/v1/" + args.command);
+  else if (args.command === "connection-setups") {
+    const route = "/v1/connection-setups";
+    if (args.action === "list") result = await client.request("GET", route);
+    else if (args.action === "revoke") result = await client.request("POST", `${route}/${uuid(positional(args))}/revoke`, {});
+    else {
+      const { hostProvider, resources, text } = await import("./control/templates.ts");
+      const config = await jsonFile(option(args, "config"), HOST_CONFIG_BYTES);
+      const id = uuid(option(args, "id")), destination = option(args, "output-file");
+      const spec = { id, name: text(config.name, "connection name"), provider: hostProvider(config.provider), capacity: resources(config.capacity) };
+      result = await credentialRequest(destination, client, route, spec, io, id, "enrollmentToken");
+      result = { ...metadata(result), credentialFile: expandPath(destination) };
+    }
+  }
   else if (args.command === "warm-pool") {
     if (args.action === "list") result = await client.request("GET", "/v1/warm-pool");
     else {
@@ -719,7 +742,8 @@ export async function main(argv = process.argv.slice(2), overrides: Partial<CliI
   } catch (error) {
     if (error instanceof CliError) {
       io.stderr(program + ": " + error.message + (error.outcome ? " outcome=unknown; no automatic retry." : "") + (error.requestId ? " requestId=" + error.requestId : "") + "\n");
-    } else if (error instanceof ServiceError) io.stderr(`${program}: Command refused (HTTP ${error.status}, ${error.code.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}). Inspect configuration or state before retrying.${error.outcome ? " outcome=unknown; no automatic retry." : ""}\n`);
+    } else if (error instanceof ServiceError && error.code.startsWith("kubernetes_")) io.stderr(`${program}: ${error.code}: ${error.message}\n`);
+    else if (error instanceof ServiceError) io.stderr(`${program}: Command refused (HTTP ${error.status}, ${error.code.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}). Inspect configuration or state before retrying.${error.outcome ? " outcome=unknown; no automatic retry." : ""}\n`);
     else if (error instanceof Error && error.name.startsWith("ERR_PARSE_ARGS")) io.stderr(program + ": Invalid command arguments.\n");
     else if ((error as NodeJS.ErrnoException)?.code) io.stderr(program + ": Local file or command input failed (" + String((error as NodeJS.ErrnoException).code).replace(/[^A-Z0-9_]/g, "").slice(0, 60) + ").\n");
     else io.stderr(program + ": Command failed. Inspect state before retrying; no credentials were printed.\n");

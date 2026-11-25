@@ -156,7 +156,6 @@ export class InfrastructureStore {
   createSetup(value: unknown, authorize: (db: DatabaseSync) => void = () => {}): Record<string, unknown> {
     const v = object(value), id = identifier(v.id);
     const provider = hostProvider(v.provider);
-    if (provider === "native") fail("Choose a VM or simulator provider.");
     const spec = { name: text(v.name, "connection name"), provider, capacity: resources(v.capacity) };
     const token = randomBytes(32).toString("base64url");
     return this.store.transaction(db => {

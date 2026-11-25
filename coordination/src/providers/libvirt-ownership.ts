@@ -129,19 +129,32 @@ export function bindDomainXML(xml: string, binding: LibvirtLeaseBinding): string
   const owner=`<metadata><cv:owner xmlns:cv="${NAMESPACE}" ${Object.entries(binding.metadata()).map(([k,v])=>`${k}="${escapeXML(v)}"`).join(" ")}/></metadata>`;
   const result=xml.replace(/<\/domain>\s*$/,`${owner}</domain>`); validateDomainXML(result,binding); return result;
 }
-export function validateDomainXML(xml: string,binding:LibvirtLeaseBinding): void {
+/** Exactly one static, non-relabelling DAC label. Live XML may add labels for other security models. */
+function validateDACLabel(root: Element, label: string): void {
+  const dac=nodes(root,"seclabel").filter(n=>n.attrs.model==="dac");
+  if(dac.length!==1||!attrsEqual(dac[0]!,{type:"static",model:"dac",relabel:"no"})) refuse("Native QEMU account label differs.");
+  const children=dac[0]!.children;
+  if(children.some(n=>n.uri||!["label","imagelabel"].includes(n.name)||n.children.length||n.text.trim()!==label)||nodes(dac[0]!,"label").length!==1||nodes(dac[0]!,"imagelabel").length>1) refuse("Native QEMU account label differs.");
+}
+export function validateDomainXML(xml: string,binding:LibvirtLeaseBinding,label?:string): void {
   const root=xmlTree(xml);
   if(textOf(root,"uuid")!==binding.machine_id||textOf(root,"name")!==`cvm-${binding.machine_id}`) refuse("Native UUID or name differs.");
+  if(label!==undefined) validateDACLabel(root,label);
   const owners=one(root,"metadata").children.filter(n=>n.name==="owner"&&n.uri===NAMESPACE);
   if(owners.length!==1 || !attrsEqual(owners[0]!,binding.metadata()) || owners[0]!.children.length) refuse("Native ownership metadata differs.");
   const devices=one(root,"devices");
   if(root.children.some(n=>n.uri)||devices.children.some(n=>n.uri)) refuse("Namespaced native extensions are not owned.");
   if(nodes(devices,"filesystem").length||nodes(devices,"hostdev").length) refuse("Passthrough ownership is unsupported.");
   const disks=nodes(devices,"disk"), primary=disks.filter(d=>d.attrs.device==="disk");
-  if(primary.length!==1||primary[0]!.attrs.type!=="file"||nodes(primary[0]!,"readonly").length||!attrsEqual(one(primary[0]!,"source"),{file:binding.disk})) refuse("Native writable disk is not owned.");
+  // Libvirt adds a block graph index to a live disk source.
+  const diskSource=(source:Element,path:string):boolean=>{
+    const index=source.attrs.index;
+    return index===undefined?attrsEqual(source,{file:path}):/^[1-9][0-9]*$/.test(index)&&attrsEqual(source,{file:path,index});
+  };
+  if(primary.length!==1||primary[0]!.attrs.type!=="file"||nodes(primary[0]!,"readonly").length||!diskSource(one(primary[0]!,"source"),binding.disk)) refuse("Native writable disk is not owned.");
   for(const disk of disks) if(disk!==primary[0]) {
     const source=one(disk,"source"); const path=source.attrs.file;
-    if(disk.attrs.device!=="cdrom"||disk.attrs.type!=="file"||nodes(disk,"readonly").length!==1||!path||absolute(path)!==path||dirname(path)!==dirname(binding.disk)||!attrsEqual(source,{file:path})) refuse("Additional media is not an owned read-only CD-ROM.");
+    if(disk.attrs.device!=="cdrom"||disk.attrs.type!=="file"||nodes(disk,"readonly").length!==1||!path||absolute(path)!==path||dirname(path)!==dirname(binding.disk)||!diskSource(source,path)) refuse("Additional media is not an owned read-only CD-ROM.");
   }
   const systems=nodes(root,"os"); if(systems.length>1) refuse("Ambiguous domain firmware.");
   if(systems[0]) {

@@ -1,9 +1,10 @@
+import { kubernetesDeployment } from "../host-deployment.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppleProvider } from "../providers/apple.ts";
-import { LibvirtProvider } from "../providers/libvirt.ts";
+import { LibvirtProvider, localLibvirtUri } from "../providers/libvirt.ts";
 import { absolute, blocker, digest, missing, object, probe, ProbeError, record } from "./core.ts";
 import type { BackendId, BackendRecord, Environment, HostConfigData } from "./core.ts";
 
@@ -170,14 +171,21 @@ async function apple(config: HostConfigData, env: Environment): Promise<BackendR
 
 async function libvirt(config: HostConfigData, env: Environment): Promise<BackendRecord> {
   const id = "libvirt";
-  const uri = object(object(config.runtimes).libvirt).uri ?? (config.provider === "libvirt" ? config.uri : undefined) ?? "qemu:///system";
-  if (uri !== "qemu:///system" && uri !== "qemu:///session") {
+  const kubernetes = kubernetesDeployment(config);
+  if (kubernetes && config.provider !== "libvirt" && !Object.hasOwn(object(config.runtimes), "libvirt") &&
+      !(Array.isArray(config.runtimes) && config.runtimes.includes("libvirt"))) {
+    return record(id, false, "unavailable", blocker("libvirt_runtime_not_configured", "Enable libvirt and mount its host socket to use it in Kubernetes."));
+  }
+  const settings = { ...config, ...object(object(config.runtimes).libvirt), deployment: config.deployment };
+  try { localLibvirtUri(settings); } catch {
     return record(id, true, "failed", blocker("libvirt_uri_invalid", "Configure a local libvirt URI."));
   }
   const qemu = env.arch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   let version: string;
   try {
-    const outputs = await Promise.all([["virsh", "--version"], ["qemu-img", "--version"], [qemu, "--version"]].map(argv => probe(env, argv)));
+    const tools = [["virsh", "--version"], ["qemu-img", "--version"]];
+    if (!kubernetes) tools.push([qemu, "--version"]);
+    const outputs = await Promise.all(tools.map(argv => probe(env, argv)));
     const versions = outputs.map(output => /\b\d+\.\d+\.\d+\b/.exec(output)?.[0]);
     if (versions.some(value => !value)) throw new ProbeError("runtime_probe_invalid_output");
     version = versions[0]!;
@@ -187,19 +195,26 @@ async function libvirt(config: HostConfigData, env: Environment): Promise<Backen
     }
     throw error;
   }
-  let kvm: boolean;
-  try { kvm = env.lstat("/dev/kvm").isCharacterDevice(); }
+  let kvm = kubernetes;
+  try { if (!kubernetes) kvm = env.lstat("/dev/kvm").isCharacterDevice(); }
   catch (error) { if (!missing(error)) throw error; kvm = false; }
   if (!kvm) {
     return record(id, true, "installed", blocker("libvirt_kvm_missing", "The /dev/kvm device is unavailable."), version);
   }
-  const provider = new LibvirtProvider({ uri, adapters: { platform: env.platform, run: (argv: string[]) => probe(env, argv) } }, "/");
+  const provider = new LibvirtProvider({ ...settings, templates: [], adapters: { platform: env.platform, run: (argv: string[]) => probe(env, argv) } }, "/");
   try { await provider.check(); }
-  catch { return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", "The local libvirt KVM capability probe did not pass."), version); }
+  catch (error) {
+    if ((error as { code?: unknown }).code === "libvirt_vm_storage_access") {
+      return record(id, true, "failed", blocker("libvirt_vm_storage_access", "VM storage and templates must be daemon-owned and shared only with the QEMU group."), version);
+    }
+    return record(id, true, "unknown", blocker("libvirt_kvm_probe_failed", "The local libvirt KVM capability probe did not pass."), version);
+  }
   return record(id, true, "verified", undefined, version);
 }
 
 export async function nativeRecord(id: Exclude<BackendId, "ollama" | "llama.cpp" | "vllm" | "mlx-lm">, config: HostConfigData, env: Environment): Promise<BackendRecord> {
+  const kubernetes = kubernetesDeployment(config);
+  if (id === "containerd" && kubernetes) return record(id, false, "unavailable", blocker("kubernetes_containerd_disabled", "containerd is disabled in Kubernetes."));
   const supported = id === "apple-virtualization" ? env.platform === "darwin" && env.arch === "arm64"
     : env.platform === "linux" && ["arm64", "x64"].includes(env.arch);
   if (!supported) return record(id, false, "unavailable", blocker("runtime_platform_unsupported", "This backend does not support the host platform and architecture."));
