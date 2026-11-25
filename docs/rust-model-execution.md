@@ -21,7 +21,10 @@ reconcile a lost reply. A successful invocation may mean no eligible job, a
 completed assignment, or an acknowledged unknown receipt. Inspect the controller
 job state to distinguish them. An unresolved assignment blocks new claims.
 
-The operator supplies the configuration below. Paths are absolute;
+The operator supplies the configuration below. Omit `runtimePackages` and
+the legacy executable fields to use the compiled catalog for the selected
+backend and host. Existing explicit per-file packages and the legacy Ollama
+executable remain supported for execution. Paths are absolute;
 the state directory must be owned by the effective user with mode 0700 and have an existing parent. The credential
 file must be owned by that user, private, regular and single-linked. Credential,
 CA and state paths reject symlinks in every component. Ancestors must be owned
@@ -152,8 +155,8 @@ provisioner handles downloadable release assets. Driver and model preparation
 remain separate from runtime package installation. A content-addressed installed
 cache preserves the package layout. Every reuse verifies its exact file set,
 hashes and modes, with no download or copy. Changed releases publish a verified
-new cache before obsolete caches are removed; a failed installation preserves
-the prior version. Tampering in an existing cache fails closed.
+new cache before pruning unreferenced obsolete versions. A failed installation
+preserves the prior version. Tampering in an existing cache fails closed.
 
 Package entrypoints must have an ELF header on Linux or Mach-O/fat binary header
 on macOS. Script entrypoints that depend on an ambient interpreter are rejected.
@@ -174,6 +177,82 @@ usage separately from per-job temporary disk reservations. The existing native
 isolation gate remains open; package pinning does not isolate the model API or
 make model weights immutable. This configuration applies to the Rust executor;
 the legacy TypeScript embedded host inference adapter is a separate path.
+
+## Runtime management
+
+Supply the same private runner configuration with `--config`. These commands
+use its state directory and the compiled engine catalog. They do not read the
+credential or CA files, contact the controller, or start an engine.
+
+```sh
+canaveral-model-execution --runtime-status --config /absolute/private/runner.json
+canaveral-model-execution --runtime-prepare --config /absolute/private/runner.json --backend llama.cpp --dry-run
+canaveral-model-execution --runtime-verify --config /absolute/private/runner.json --backend llama.cpp
+canaveral-model-execution --runtime-remove --config /absolute/private/runner.json --backend llama.cpp --version 1.0.0
+```
+
+Management backend names are `ollama`, `llama.cpp`, `vllm` and `mlx-lm`.
+`prepare` downloads an absent pin and reuses a verified installation.
+`verify` checks the current installed pin. `remove` accepts `--dry-run`, as
+does `prepare`. Dry runs leave disk state untouched. Removal and pruning
+hold the execution lock and retain packages referenced by live or unresolved
+journals. An explicit removal of a referenced version returns `runtime_in_use`.
+An older unresolved journal without a package digest protects the entire cache.
+
+Each invocation writes one `canaveral-runtime-report` JSON line. Exit 0 means
+success, exit 1 reports a failed or unknown operation in JSON, and exit 2
+reports a usage or config error on stderr. A verified package has the pinned
+files, digests, entrypoint header and modes. `qualified` records separate
+native acceptance for that engine and host. The current catalog sets it to false.
+
+### Archive pins
+
+The catalog ships as [compiled-in release data](../crates/model-execution/src/runtime-pins.json).
+Each archive uses the bounded HTTPS client. GitHub release URLs can follow one
+redirect to GitHub's HTTPS release asset host. The executor checks exact
+compressed bytes and SHA-256 before parsing, bounds expansion to 128:1 and
+applies the per-file and package limits above. Each pin's `unpackedBytes` also
+caps installed file data, including materialized aliases. The executor checks
+filesystem free space for the download and installed tree, then checks again
+before extraction. Both checks reserve a 64 MiB margin. Failed extraction
+removes the staging directory under the executor lock.
+
+Archives allow 4,096 entries with paths up to 1,024 bytes. Zstandard tarballs
+use a single frame with an 8 MiB maximum window. The executor uses ruzstd for
+pure-Rust streaming decoding with a configurable allocation bound, avoiding a
+native dependency. ZIP support covers single-disk stored and deflated files
+with standard end records. Unsafe paths, case collisions, special files,
+set-id bits and hard links fail before publication. Catalog tarballs may opt
+into materializing same-directory symlink chains from retained file descriptors.
+Pinned omissions, such as the Ollama GPU subtrees, still undergo tar validation
+and count toward decompressed stream limits. The installer discards permitted
+PAX timestamp and Apple code-signing annotations, so native acceptance must
+check any dependency on those attributes.
+
+The executor verifies the staging directory's device and inode on either side
+of publication. It verifies file digests during staging and checks the
+entrypoint and other listed executables against their verified file metadata
+before spawn.
+As with [managed updates](runtime-updates.md), these checks assume a controlled
+directory tree. Same-account concurrent malicious filesystem mutation is outside
+that trust boundary. Old cache entries with unreadable or undecodable manifests
+are skipped during inventory and pruning. A corrupt current package fails
+verification. Explicit removal still refuses journal-referenced packages.
+
+To update a pin, download the versioned upstream asset to a disposable directory.
+Measure its byte count with `wc -c` and its SHA-256 with `shasum -a 256`.
+Compare both against the release metadata and checksum list when available.
+Update the URL, version, retrieval date, format, strip prefix, entrypoint and
+executable paths in the catalog. Record the installed byte count after omissions
+and including materialized aliases. Run the offline archive check with all
+catalog assets present. The check prints the calculated tree digest if it differs from
+`treeSha256`. Review the installed file layout and update the tree pin and notices
+before landing the release. Remove the downloaded copies afterwards.
+
+```sh
+CANAVERAL_RUNTIME_PIN_FIXTURES=/absolute/temp/assets \
+  cargo test --locked -p canaveral-model-execution downloaded_catalog_archives_match_tree_pins -- --ignored
+```
 
 ## Backend and model configuration
 
