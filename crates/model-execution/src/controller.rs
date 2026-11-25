@@ -590,6 +590,7 @@ mod update_tests {
                     launch_intent: false,
                     stop_confirmed: false,
                     cleanup_confirmed: false,
+                    runtime_package_digest: None,
                 })
                 .unwrap();
             drop(executor);
