@@ -1,0 +1,123 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "ollama",
+  "pinId": "0.40.17-193fd748e431fb099d785566",
+  "identity": {
+    "version": "0.40.17",
+    "url": "https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-darwin.tgz",
+    "sha256": "4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653",
+    "treeSha256": "22f4df8f4637825471853e3d1c5dc7a99667b11bcbc0751f626369710eee8978",
+    "packageDigest": "3e2ad397d1bc24883db86c782458582c0f6529d12a2446f94df07361e50450ab"
+  },
+  "scope": {
+    "os": "macos",
+    "arch": "aarch64",
+    "acceleration": "cpu",
+    "executionMode": "cpu-generation"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "model": {
+      "name": "smollm2-135m-instruct:q4-k-m",
+      "revision": "9e6855bc4be717fca1ef21360a1db4b29d5c559a",
+      "sha256": "ed5fa30c487b282ec156c29062f1222e5c20875a944ac98289dbd242e947f747"
+    },
+    "steps": [
+      {
+        "name": "verify GGUF",
+        "outcome": "passed",
+        "durationMs": 272
+      },
+      {
+        "name": "enroll through public API",
+        "outcome": "passed",
+        "durationMs": 146
+      },
+      {
+        "name": "install package",
+        "outcome": "passed",
+        "durationMs": 10500
+      },
+      {
+        "name": "verify installed package",
+        "outcome": "passed",
+        "durationMs": 2492
+      },
+      {
+        "name": "generate through public API",
+        "outcome": "passed",
+        "durationMs": 26578
+      },
+      {
+        "name": "check runtime cleanup",
+        "outcome": "passed",
+        "durationMs": 40
+      },
+      {
+        "name": "reject installed file tampering",
+        "outcome": "passed",
+        "durationMs": 4623
+      },
+      {
+        "name": "reinstall and verify package",
+        "outcome": "passed",
+        "durationMs": 18838
+      },
+      {
+        "name": "remove package",
+        "outcome": "passed",
+        "durationMs": 2770
+      },
+      {
+        "name": "reject a truncated release archive and retry",
+        "outcome": "passed",
+        "durationMs": 32657
+      }
+    ],
+    "observations": {
+      "inputTokens": 17,
+      "outputTokens": 32,
+      "reservationHeldAfterJob": false,
+      "modelSource": "verified cache",
+      "tamperRepairExercised": true,
+      "archiveTransportRepairExercised": true
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/model-acceptance.yaml",
+    "workflowName": "Native model acceptance",
+    "runId": 45231181336,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336",
+    "event": "push",
+    "ref": "refs/heads/feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890815501,
+      "name": "macos-15 / ollama",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181336/job/137890815501"
+    },
+    "artifact": {
+      "id": 14847841496,
+      "name": "model-acceptance-macos-15-ollama",
+      "digest": "sha256:645ab773e91bd7575611709887bbc083bd49860eb5dbb9668e893b0f4f0d5772"
+    },
+    "evidenceSha256": "4a968cff1f3f57d434abb87cc37162d98e6af74b79f90a4c3b7136b1fd1aca14"
+  },
+  "runner": {
+    "label": "macos-15",
+    "imageOS": "macos15",
+    "imageVersion": "20261118.0550.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted macos-15 runner (macos15 20261118.0550.1), not a production host.",
+    "CPU-only generation of one pinned 135M-parameter GGUF through the public job API; no accelerator, resource-fit, throughput or concurrency evidence.",
+    "Isolation from untrusted local callers was not exercised."
+  ],
+  "recorded": "2026-11-23"
+}

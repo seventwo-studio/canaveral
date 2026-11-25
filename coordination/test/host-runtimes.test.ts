@@ -162,14 +162,18 @@ test("bounded executor rejects timeout, oversize output and contract violations"
     assert.equal(rows[3]?.state, "unknown");
     assert.equal(rows[3]?.blocker?.code, "model_executor_invalid_report");
   }
-  const qualified = { ...status, backends: status.backends.map(row => row.backend === "ollama"
+  // Ollama has no promotable scope, so an executor claiming it is qualified violates the contract.
+  const ollama = { ...status, backends: status.backends.map(row => row.backend === "ollama"
     ? { ...row, qualified: true, active: "1.2.3" } : row) };
-  f.script(`console.log(${JSON.stringify(JSON.stringify(qualified))});`);
+  f.script(`console.log(${JSON.stringify(JSON.stringify(ollama))});`);
+  assert.equal((await runtimeInventory(f.settings, env))[3]?.blocker?.code, "model_executor_invalid_report");
+  const active = { ...status, backends: status.backends.map(row => row.backend === "ollama" ? { ...row, active: "1.2.3" } : row) };
+  f.script(`console.log(${JSON.stringify(JSON.stringify(active))});`);
   const installed = (await runtimeInventory(f.settings, env))[3];
   assert.equal(installed?.state, "verified");
   assert.equal(installed?.active, "1.2.3");
   assert.equal(installed?.catalogVersion, "1.2.3");
-  assert.equal(installed?.qualified, true);
+  assert.equal(installed?.qualified, false);
   assert.deepEqual(installed?.installed, status.backends[0]?.installed);
   const linked = join(f.root, "linked");
   symlinkSync(f.binary, linked);

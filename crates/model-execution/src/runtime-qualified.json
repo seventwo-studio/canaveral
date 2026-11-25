@@ -1,0 +1,6 @@
+{
+  "schema": "canaveral-qualified-pins",
+  "version": 1,
+  "source": "qualification/promotions.json",
+  "pins": []
+}

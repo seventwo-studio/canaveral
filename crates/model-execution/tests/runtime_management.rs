@@ -129,7 +129,12 @@ fn management_contract_is_local_and_dry_runs_do_not_create_state() {
     assert_eq!(backends.len(), 4);
     assert!(backends
         .iter()
-        .all(|item| item["qualified"] == false && item["installed"] == json!([])));
+        .all(|item| item["qualified"].is_boolean() && item["installed"] == json!([])));
+    // Ollama, vLLM and MLX-LM have no promotable scope.
+    assert!(backends
+        .iter()
+        .filter(|item| item["backend"] != "llama.cpp")
+        .all(|item| item["qualified"] == false));
     assert_eq!(backends[2]["backend"], "vllm");
     assert_eq!(backends[3]["backend"], "mlx-lm");
     assert_eq!(backends[3]["state"], "unavailable");
@@ -196,6 +201,19 @@ fn remove_preserves_referenced_versions_and_verify_reports_damage() {
     let digest = format!(
         "{:x}",
         Sha256::digest(format!("archive-v1\nllama.cpp\n{version}\n{tree}"))
+    );
+    let status = fixture.report("--runtime-status", &[], 0);
+    let row = status["backends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["backend"] == "llama.cpp")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        row["catalogPin"],
+        json!({"version": version, "url": catalog["url"], "sha256": catalog["sha256"],
+            "treeSha256": tree, "packageDigest": digest})
     );
     let cache = fixture.state.join(format!("runtime-package.{digest}"));
     fs::create_dir(&fixture.state).unwrap();

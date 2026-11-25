@@ -58,8 +58,10 @@ trees omit bundled CUDA and Vulkan libraries. GPU support, including separate
 CUDA/JetPack and ROCm packages, is deferred. The Ollama v0.40.17 assets were
 retrieved on 2026-11-23 and checked against the
 [upstream checksum list](https://github.com/ollama/ollama/releases/download/v0.40.17/sha256sum.txt).
-MLX-LM and vLLM remain unavailable pending qualified hermetic packages. Every
-catalog entry remains unqualified for native operation. Use Ollama only on
+MLX-LM and vLLM remain unavailable pending qualified hermetic packages. A catalog
+entry is qualified only when a reviewed promotion cites passing evidence from
+runs of `main`; see [runtime qualification](runtime-qualification.md). No entry
+is promoted, so every catalog entry is unqualified. Use Ollama only on
 trusted single-tenant hosts. The importer and server expose an unauthenticated
 loopback API. The deny proxy covers only non-loopback registry traffic. Go's
 default HTTP transport bypasses proxies for localhost and loopback addresses

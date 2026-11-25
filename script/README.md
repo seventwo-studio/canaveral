@@ -101,6 +101,12 @@ completed their cutover. [Existing KubeVirt installations](../docs/getting-start
    `node script/publish_release.mjs` only prepares artifacts; --finalize is the
    workflow's final step, not a substitute for signing and provenance.
 
+The workflow builds each image under a candidate tag and checks the registry
+digest against Buildx metadata. It signs that digest before assigning the
+version tag. Its signed image index identifies the build target. Retries
+verify that target and the signature from the release workflow's exact tag
+identity before reusing a version image.
+
 A failed run may leave some immutable images or an unsigned deployment artifact
 and an unfinished draft. After a completed push, the publisher makes at most six
 manifest readback attempts, two seconds apart, reconnecting each time. Only
