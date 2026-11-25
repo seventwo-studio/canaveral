@@ -64,7 +64,7 @@ same state directory to reuse the saved host identity. Run
 service account, passing the service's `--config` and `--state` paths to both.
 See [host runtime commands](host-runtimes.md) for package management.
 
-For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and access to the template/storage directories. Let the host's libvirt ownership and SELinux/AppArmor policies govern runtime disk access; do not place the disks under the private agent-credential directory. On a host that offers Android emulator leases, also install `deploy/systemd/canaverald.service.d/android-leases.conf`, which sets `KillMode=process` so that stopping or restarting the host does not kill the detached lease supervisors and their emulators (or use an equivalent separate scope). Other hosts keep the default `control-group` cleanup. When switching from the
+For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and own the VM storage described in [libvirt VM storage](#libvirt-vm-storage); do not place the disks under the private agent-credential directory. On a host that offers Android emulator leases, also install `deploy/systemd/canaverald.service.d/android-leases.conf`, which sets `KillMode=process` so that stopping or restarting the host does not kill the detached lease supervisors and their emulators (or use an equivalent separate scope). Other hosts keep the default `control-group` cleanup. When switching from the
 previous sample unit, stop and disable it before starting the new unit. Keep the
 same state directory and move any applicable drop-ins with the service name.
 
@@ -79,6 +79,91 @@ The headless Apple runner retains the serial console's bounded tail in private
 guest boot failure and cloud-init failure when the hypervisor reports Running
 but no guest preparation receipt arrives. This log is available after rebuilding
 the native runner; controller container updates do not replace native binaries.
+
+### Libvirt VM storage
+
+QEMU runs under its own account, never the daemon's. The daemon shares VM
+storage with it through one dedicated group and never changes host-wide
+`qemu.conf` settings. Each domain the daemon defines carries a static DAC label
+without relabelling, so libvirtd neither chowns the daemon's files nor applies
+its dynamic ownership:
+
+```xml
+<seclabel type="static" model="dac" relabel="no"><label>libvirt-qemu:canaveral-vm</label></seclabel>
+```
+
+| Item | Owner and mode | Configuration |
+| --- | --- | --- |
+| Storage group | Group `canaveral-vm`, GID `10002`; the QEMU account is a member | `vmGroup` and `vmGroupId` |
+| QEMU account | Distribution default `libvirt-qemu` (`qemu` on Fedora) | `qemuUser`; a name or `+UID`, never root or the daemon account |
+| Storage root (`storage`) | Daemon UID, group `canaveral-vm`, mode `2750` | Create it before starting the daemon |
+| Templates | Daemon UID, group `canaveral-vm`, mode `0640`, inside a directory QEMU can search | One regular file without hard links |
+| Per-machine directory | Daemon UID, group `canaveral-vm`, mode `2750` | Created by the daemon |
+| Writable disk | Daemon UID, group `canaveral-vm`, mode `0660` | Created by the daemon |
+| Owner marker, daemon state, journals and credentials | Daemon UID, mode `0600`/`0700` | Never readable by the group |
+
+The setgid storage root gives each new machine directory and disk its group,
+so the daemon need not be a member of `canaveral-vm` (the Kubernetes VM profile
+keeps only the libvirt socket group). Checks accept exactly these owners,
+groups and modes and nothing broader; anything else reports
+`libvirt_vm_storage_access` and preparation refuses before it provisions.
+Machines prepared before this contract keep private storage that QEMU cannot
+open; the daemon never widens it in place. Remove and recreate them.
+A UEFI definition keeps its variable store as `nvram.fd` in the machine
+directory. Libvirtd creates that file for its own configured QEMU account, so
+the daemon's ownership checks cover the directory and disk but not that file.
+UEFI and TPM state provisioning is not natively qualified.
+
+### Libvirt VM leases
+
+Consumer VM leases on a libvirt host run as transient domains under a per-lease
+guardian; see [libvirt supervision](libvirt-supervision.md). They need Linux 6.5
+or later, the VM storage above, a non-root daemon account and the released lease
+helper installed root-owned:
+
+```sh
+sudo install -d -m 0755 -o root -g root /usr/local/lib/canaveral
+sudo install -m 0755 -o root -g root canaveral-libvirt-native /usr/local/lib/canaveral/
+sha256sum /usr/local/lib/canaveral/canaveral-libvirt-native   # compare with the release manifest
+```
+
+Add the pinned helper and lease selectors to the host config:
+
+```json
+{
+  "provider": "libvirt", "storage": "/var/lib/libvirt/images/canaveral",
+  "leaseHelper": "/usr/local/lib/canaveral/canaveral-libvirt-native",
+  "leaseHelperSha256": "<sha256 from the release manifest>",
+  "leaseClockHelper": "/usr/local/lib/canaveral/canaveral-libvirt-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{ "id": "lease-linux", "revision": "1", "arch": "amd64", "runtime": "libvirt" }],
+  "templates": [{ "id": "lease-linux", "revision": "1", "os": "linux", "arch": "amd64", "mode": "headless",
+    "firmware": "bios", "image": "/var/lib/libvirt/images/canaveral/lease-linux.qcow2", "network": "default",
+    "minimum": { "cpu": 1, "memoryMiB": 512, "diskGiB": 4 } }]
+}
+```
+
+A lease template must be headless x64 Linux booted by BIOS, without TPM,
+secure boot or guest access. On a physical `linux` host put `leaseHelper` and
+`leaseHelperSha256` under `runtimes.libvirt` instead. `canaverald runtimes
+status` shows `leases: {eligible: true}` on the libvirt row when the helper
+and kernel qualify.
+
+On bare metal, also install
+`deploy/systemd/canaverald.service.d/libvirt-leases.conf` with the service
+account in the libvirt socket group (for example `SupplementaryGroups=libvirt`
+on Debian and Ubuntu). The drop-in grants the daemon ambient `CAP_KILL`. A lease
+guardian uses it only when libvirtd cannot destroy a domain that must end: it
+then kills the recorded QEMU process through a pidfd after checking its start
+time. `CAP_KILL` lets the service signal any process, so grant it only on
+dedicated VM hosts. Without the drop-in such a lease stays fenced but unproven,
+with its reservation held, until libvirtd returns. Keep the default
+`KillMode=control-group`: guardians ignore `SIGTERM` and fence each lease when
+the daemon exits, so stopping or restarting the service always ends its leases.
+Under systemd's default `OOMPolicy=stop`, a kernel OOM kill of any process in
+the unit, a guardian included, stops the service and so fences every lease.
+Kubernetes pods never receive `CAP_KILL`; see
+[libvirt supervision](libvirt-supervision.md#kubernetes) for that gap.
 
 ## Docker
 
@@ -196,3 +281,27 @@ Provision writable PVC/emptyDir ownership and readable mounted keys for the
 assigned group, and verify private-state ownership checks under that UID. Otherwise
 use a dedicated narrowly scoped SCC permitting 10001. Neither route has native
 OpenShift acceptance here; do not grant privileged access to the Canaveral pods.
+
+## Run canaverald in Kubernetes
+
+Set `"deployment": "kubernetes"` in the host JSON mounted at
+`/etc/canaverald/host.json`. Start the daemon with
+`--config /etc/canaverald/host.json --state /var/lib/canaverald --url <controller>`.
+Pre-provision `/var/lib/canaverald` on each selected node with mode `0700` and
+the pod's daemon UID as owner. Enroll each node using its
+[bootstrap token file](runner-enrollment.md#kubernetes-node-bootstrap).
+Change the DaemonSet image digest to update the daemon. Managed daemon updates
+and the containerd backend are disabled in this mode.
+
+**Drain the host first.** Drain it in Canaveral and wait for its cleanup proofs
+before replacing the pod or draining the Kubernetes node. SIGTERM on a node that
+still runs work is not a drain: the daemon cannot confirm quiescence, exits with
+status 1 after `shutdownGraceSeconds` and reports `host_shutdown_incomplete`.
+That outcome is the safe, documented behavior; it keeps the state and
+reservations. SIGTERM fences local admission and gives the daemon up to
+`shutdownGraceSeconds` to confirm quiescence and close its workers. The field
+accepts 1–300 seconds and defaults to 120. Set `terminationGracePeriodSeconds`
+above this value and allow time for any preStop hook. A daemon exits with
+status 0 after confirmed shutdown and status 1 when it could not confirm
+shutdown. Keep the node state for reconciliation with the same identity.
+Pod termination does not establish stop evidence or release reservations.

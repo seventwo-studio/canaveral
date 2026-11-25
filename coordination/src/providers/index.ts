@@ -2,6 +2,7 @@ import { ServiceError } from "../errors.ts";
 import { AppleProvider } from "./apple.ts";
 import { HypervProvider } from "./hyperv.ts";
 import { LibvirtProvider } from "./libvirt.ts";
+import { productionLibvirtAdapters } from "./libvirt-native.ts";
 import { AndroidProvider } from "./android.ts";
 import { IosProvider } from "./ios.ts";
 
@@ -17,7 +18,8 @@ export function createProvider(config: ProviderRecord, state: string): NativePro
   switch (config.provider) {
     case "apple": return new AppleProvider(config, state);
     case "hyperv": return new HypervProvider(config, state);
-    case "libvirt": return new LibvirtProvider(config, state);
+    // Lease execution binds the pinned native helper; fixtures inject their own adapters.
+    case "libvirt": return new LibvirtProvider(config.adapters === undefined ? { ...config, adapters: productionLibvirtAdapters(config) } : config, state);
     case "android": return new AndroidProvider(config, state);
     case "ios": return new IosProvider(config, state);
     default: throw new ServiceError("Configure a supported native provider.", 400);

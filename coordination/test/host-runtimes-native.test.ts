@@ -85,3 +85,23 @@ test("virtualization detection keeps explicit hosted prerequisites", async () =>
     assert.equal(apple.qualified, false);
   }
 });
+
+test("Kubernetes libvirt status decides KVM through the mounted socket, never a pod device", async () => {
+  const commands: string[][] = [];
+  const config = { deployment: "kubernetes", provider: "libvirt", uri: "qemu:///system" };
+  const env = (domcapabilities: number): Environment => ({
+    platform: "linux", arch: "x64", receipt: () => undefined,
+    lstat: () => assert.fail("Kubernetes libvirt status must not inspect /dev/kvm in the pod"),
+    run: async argv => {
+      commands.push([...argv]);
+      return argv.includes("domcapabilities") ? { stdout: "", exit: domcapabilities } : { stdout: "version 11.3.0", exit: 0 };
+    },
+  });
+  assert.equal((await nativeRecord("libvirt", config, env(0))).state, "verified");
+  assert.ok(commands.some(argv => argv.join(" ").endsWith("domcapabilities --virttype kvm")));
+  assert.ok(!commands.some(argv => argv[0]!.startsWith("qemu-system")));
+  const refused = await nativeRecord("libvirt", config, env(1));
+  assert.equal(refused.state, "unknown");
+  assert.equal(refused.blocker?.code, "libvirt_kvm_probe_failed");
+  assert.match(refused.blocker?.detail ?? "", /mounted socket/);
+});

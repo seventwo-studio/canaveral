@@ -134,6 +134,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "canaveral-libvirt-native"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canaveral-mobile-native"
 version = "0.1.0"
 dependencies = [

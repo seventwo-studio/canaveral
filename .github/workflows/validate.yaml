@@ -292,7 +292,6 @@ jobs:
           node script/check_guest_bootstrap.mjs
       - if: runner.os == 'Linux'
         run: |
-          node script/build_linux_lease_deadline.mjs --output "$RUNNER_TEMP/deadline.so"
           test -n "$ANDROID_NDK_LATEST_HOME"
           cat "$ANDROID_NDK_LATEST_HOME/source.properties"
           node script/build_android_transfer.mjs --ndk "$ANDROID_NDK_LATEST_HOME" --output-dir "$RUNNER_TEMP/android-transfer"

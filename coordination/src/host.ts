@@ -21,6 +21,8 @@ import { identifier } from "./consumers.ts";
 import { object, secret, ServiceError } from "./errors.ts";
 import { enabledRuntimes, hostProvider, HOST_RUNTIMES, legacyDigest, loadHostConfig, normalizeOperatorTemplate as normalizeTemplate, resources, runtimeFor, text } from "./control/templates.ts";
 import { credential, sshPreparation, userData } from "./control/preparation.ts";
+import { libvirtLeaseTemplate, localLibvirtUri } from "./providers/libvirt.ts";
+import { checkLibvirtLeaseHelper, libvirtLeaseHelper, libvirtLeaseKernelSupported } from "./providers/libvirt-native.ts";
 import { createProvider } from "./providers/index.ts";
 import type { NativeProvider } from "./providers/index.ts";
 import { ImageLibrary, prepareImage, specification } from "./control/images.ts";
@@ -40,7 +42,7 @@ import { ProcessUsageCollector, validateSample } from "./control/infrastructure.
 import type { ProcessObservation, UsageCategory } from "./control/infrastructure.ts";
 import { createGuestAccess, guestReady, guestRecipe, loadHelperArtifacts } from "./guest/access.ts";
 import { createInferenceExecutor } from "./inference-runtime.ts";
-import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
+import { assignmentAccess, assignmentFingerprint, cleanupLease, contactFresh, executionClock, helpersClosed, LeaseGuard, machineBookkeeping, noLinks, present, privateDirectory, ProcessSupervisor, readRecord, recordPreparation, saveRecord, StateLock, unknownOutcome } from "./runtime-process.ts";
 import type { ExecutionClock, LeaseAuthorization, RecordValue } from "./runtime-process.ts";
 import { nativeExecutionClock } from './native-clock.ts';
 import { TUNNEL_END_REASONS, TunnelRelay, tunnelIntent } from './tunnel-relay.ts';
@@ -53,8 +55,12 @@ import { modelConfig, runtimeInventory } from "./host-runtimes/index.ts";
 import type { PressureGates, PressureReport, PressureSample } from "./pressure.ts";
 import type { OrphanEvidence, OrphanRemoval, RuntimeContext, RuntimeReport } from "./providers/mobile-runtimes.ts";
 
+import { kubernetesDeployment, requireKubernetesBackends, requireManagedUpdates } from "./host-deployment.ts";
+import { cleanupKubernetesEnrollment, enrollKubernetesHost } from "./host-bootstrap.ts";
+
 export interface HostConfig extends RecordValue {
   url: string; stateDir: string;
+  deployment?: "kubernetes"; shutdownGraceSeconds?: number;
   enrollmentToken?: string; allowHTTP?: boolean; caFile?: string;
 }
 export interface HostTransport { request(method: string, path: string, body: RecordValue, token: string, signal?: AbortSignal): Promise<RecordValue> }
@@ -145,6 +151,7 @@ interface MaintenanceProof extends MaintenanceFence {
 }
 type IdleReceipt = Pick<MaintenanceProof, "idle" | "workloadsStopped">;
 const NOT_IDLE = { idle: false, workloadsStopped: false };
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 120;
 const MAX_HOST_MESSAGE = 8 * 1_048_576;
 const TERMINAL = new Set(["succeeded", "failed", "unknown", "cancelled"]);
 const PRIVATE_CONFIG = new Set(["url", "stateDir", "enrollmentToken", "allowHTTP", "caFile", "leaseClockHelper"]);
@@ -212,8 +219,16 @@ export function hostTransport(config: HostConfig): HostTransport {
   } };
 }
 
-/** Only supervised Android emulators and, by explicit operator opt-in, supervised iOS simulators
- * have independent native deadline enforcement and owned cleanup. Every other runtime keeps
+function libvirtRuntimeSettings(config: RecordValue): RecordValue | undefined {
+  if (config.provider === "libvirt") return config;
+  if (config.provider === "linux") return enabledRuntimes(config).libvirt as RecordValue | undefined;
+  return undefined;
+}
+
+/** Only supervised Android emulators, guardian-supervised libvirt VMs and, by explicit operator
+ * opt-in, supervised iOS simulators have independent native deadline enforcement and owned
+ * cleanup. A libvirt lease image needs the pinned native lease helper on Linux 6.5 or later and
+ * a headless x64 BIOS Linux template (see hostOffer). Every other runtime keeps
  * refusing lease declarations, whatever the configuration.
  *
  * iOS (owner decision, 21 November 2026): a simulator app is an ordinary process of the Mac
@@ -221,7 +236,7 @@ export function hostTransport(config: HostConfig): HostTransport {
  * an iOS lease image only when that selector itself declares `isolation: "shared-host"`, on
  * macOS, with the native supervisor and the lease's control companion configured. There is no
  * default for the declaration and nothing outside this configuration can supply it. */
-export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release(), checkHelper = checkLibvirtLeaseHelper): RecordValue {
   if (!("leaseProtocol" in config) && !("leaseImages" in config)) {
     if ("leaseTunnelProtocol" in config) throw new ServiceError("Lease tunnels require lease execution on this host.", 400);
     if ("leaseWarmPool" in config) throw new ServiceError("Warm devices need supervised Android lease execution on this host.", 400);
@@ -236,6 +251,7 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   };
   const absolute = (value: unknown): boolean => typeof value === "string" && isAbsolute(value);
   if (!absolute(config.leaseClockHelper)) refuse();
+  let libvirtToCheck: RecordValue | undefined;
   const leaseImages = (config.leaseImages as unknown[]).map(value => {
     const entry = object(value), fields = Object.keys(entry).sort().join();
     const identity = () => ({ id: text(entry.id, "lease image id"), revision: text(entry.revision, "lease image revision"), arch: text(entry.arch, "lease image arch") });
@@ -249,8 +265,22 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
       if (!ios || !absolute(ios.leaseSupervisor) || !absolute(ios.idbCompanion) || ios.xcrun !== undefined && !absolute(ios.xcrun) || platform !== "darwin") refuse("for iOS simulators without macOS, the native lease supervisor and an absolute idbCompanion");
       return { ...identity(), runtime: "ios", isolation: IOS_LEASE_ISOLATION };
     }
+    if (entry.runtime === "libvirt") {
+      const libvirt = libvirtRuntimeSettings(config);
+      if (fields !== "arch,id,revision,runtime" || platform !== "linux" || !libvirt) refuse("for libvirt VMs without a Linux libvirt runtime");
+      let helper: ReturnType<typeof libvirtLeaseHelper>;
+      try { helper = libvirtLeaseHelper(libvirt); } catch { helper = undefined; }
+      if (!helper) return refuse("for libvirt VMs without the pinned lease helper (leaseHelper and leaseHelperSha256)");
+      if (config.leaseClockHelper !== helper.path) refuse("for libvirt VMs unless leaseClockHelper names the pinned lease helper");
+      libvirtToCheck = libvirt;
+      return { ...identity(), runtime: "libvirt" };
+    }
     return refuse();
   });
+  if (libvirtToCheck) {
+    checkHelper(libvirtToCheck, kernel);
+    if (!libvirtLeaseKernelSupported(kernel)) throw new ServiceError("Libvirt leases need Linux 6.5 or later for Unix peer pidfds.", 400, { code: "libvirt_lease_kernel_unsupported" });
+  }
   const offer: RecordValue = { leaseProtocol: 1, leaseImages };
   // Lease port tunnels are off unless the operator declares them. Their host-side sockets live in
   // each lease's private storage, so the storage path must fit a Unix socket address.
@@ -277,9 +307,9 @@ export function leaseOffer(config: RecordValue, platform: NodeJS.Platform = proc
   }
   return offer;
 }
-export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform): RecordValue {
+export function hostOffer(config: RecordValue, platform: NodeJS.Platform = process.platform, kernel: string = release(), checkHelper = checkLibvirtLeaseHelper): RecordValue {
   const provider = hostProvider(config.provider);
-  const leases = leaseOffer(config, platform);
+  const leases = leaseOffer(config, platform, kernel, checkHelper);
   if (!Array.isArray(config.templates) || config.templates.length > 100) throw new ServiceError("Offer at most 100 installed templates.", 400);
   let templates = config.templates.map(normalizeTemplate);
   if (new Set(templates.map(t => `${t.id}@${t.revision}:${t.arch}`)).size !== templates.length) throw new ServiceError("Duplicate installed template revision.", 400);
@@ -292,7 +322,18 @@ export function hostOffer(config: RecordValue, platform: NodeJS.Platform = proce
   }
   const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
-  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === entry.runtime)) throw new ServiceError(`Lease images must name offered ${entry.runtime === "ios" ? "iOS" : "Android"} templates.`, 400);
+  for (const entry of (leases.leaseImages ?? []) as RecordValue[]) {
+    if (entry.runtime === "libvirt") {
+      // Only the natively qualified template boots a lease: headless x64 BIOS Linux on the libvirt runtime.
+      const raw = (config.templates as RecordValue[]).find(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch);
+      const offered = templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch);
+      if (!raw || !offered || !libvirtLeaseTemplate(raw) || (Object.hasOwn(HOST_RUNTIMES, provider) ? runtimeFor(config, raw) !== "libvirt" : provider !== "libvirt")) {
+        throw new ServiceError("Libvirt lease images must name offered headless x64 BIOS Linux templates without TPM, secure boot or guest access.", 400);
+      }
+      continue;
+    }
+    if (!templates.some(t => t.id === entry.id && t.revision === entry.revision && t.arch === entry.arch && t.os === entry.runtime)) throw new ServiceError(`Lease images must name offered ${entry.runtime === "ios" ? "iOS" : "Android"} templates.`, 400);
+  }
   // An account-owned emulator launches without the lease isolation arguments, so it can reach this
   // host's adb server and, through it, the device port of another lease's tunnel. A host that
   // declares tunnels therefore offers Android templates for leases only, and refuses to start.
@@ -311,13 +352,17 @@ export function hostOffer(config: RecordValue, platform: NodeJS.Platform = proce
 
 export class HostRunner {
   readonly config: HostConfig;
+  readonly kubernetes: boolean;
+  private shutdown: Promise<void> | undefined;
   readonly state: string;
   readonly offer: RecordValue;
+  private readonly pinnedLibvirtClock: boolean;
   readonly library: ImageLibrary;
   imageAdapter: HostImageAdapter;
   private inferenceAdapter: HostTaskAdapter | undefined;
   private sessionAdapter: HostTaskAdapter | undefined;
-  readonly guard: LeaseGuard;
+  private leaseGuard: LeaseGuard | undefined;
+  get guard(): LeaseGuard { return this.leaseGuard ??= new LeaseGuard(this.state, this.clock); }
   readonly clock: ExecutionClock;
   readonly processes = new ProcessSupervisor();
   readonly reports = new Map<string, RecordValue>();
@@ -442,20 +487,42 @@ export class HostRunner {
   private machineCursor = 0;
   private maintenanceFence: MaintenanceFence | null = null;
   private maintenanceChallenge: MaintenanceFence | null = null;
-  private maintenanceProof: { challenge: MaintenanceFence; proof: MaintenanceProof } | undefined;
+  private maintenanceProof: { challenge: MaintenanceFence; proof: MaintenanceProof; epoch: number } | undefined;
   private inspectingMaintenance = false;
+  private readonly stopInspections = new Set<string>();
   private updateAdmissionBlocked = false;
   private updateEpoch = 0;
   private updateExternalWork = 0;
   private updateAssignments = new Map<string, RecordValue>();
   constructor(config: HostConfig, readonly dependencies: HostDependencies = {}) {
+    this.kubernetes = kubernetesDeployment(config);
+    if (this.kubernetes) {
+      requireKubernetesBackends(config);
+      if (config.enrollmentToken !== undefined) throw new ServiceError("Kubernetes enrollment requires the state bootstrap token file.", 409, { code: "kubernetes_bootstrap_token_invalid" });
+      if (config.updates !== undefined) requireManagedUpdates(config);
+      const runtimes = config.provider === "linux" ? enabledRuntimes(config) : {};
+      const libvirt = config.provider === "libvirt" ? config : runtimes.libvirt;
+      if ((!libvirt && config.provider !== "native") || Object.keys(runtimes).length > 1) {
+        throw new ServiceError("Kubernetes hosts support native inference and libvirt runtimes.", 400);
+      }
+      if (libvirt) localLibvirtUri({ ...config, ...libvirt, deployment: config.deployment });
+    }
     hostProvider(config.provider);
     // Validate trust before writing identity, even with an injected transport.
     const transport = hostTransport(config), platform = dependencies.platform ?? process.platform;
-    leaseOffer(config, platform);
-    const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string));
+    const leases = leaseOffer(config, platform);
+    this.pinnedLibvirtClock = (leases.leaseImages as RecordValue[] | undefined)?.some(image => image.runtime === "libvirt") ?? false;
+    const clockPin = this.pinnedLibvirtClock ? libvirtLeaseHelper(libvirtRuntimeSettings(config))?.sha256 : undefined;
+    const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string, clockPin));
     this.config = structuredClone(config);
-    this.state = resolve(config.stateDir); privateDirectory(this.state);
+    this.state = resolve(config.stateDir);
+    if (this.kubernetes) {
+      noLinks(this.state);
+      const info = present(this.state) ? lstatSync(this.state) : undefined;
+      if (!info?.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o7777) !== 0o700) {
+        throw new ServiceError("Pre-provision Kubernetes host state as an owned 0700 directory.", 409);
+      }
+    } else privateDirectory(this.state);
     this.library = new ImageLibrary(this.state);
     this.config.templates = [...recordsWithoutIds(config.templates), ...this.library.definitions()];
     this.offer = hostOffer(this.config, platform);
@@ -468,7 +535,6 @@ export class HostRunner {
     this.concurrency = Number(config.concurrency ?? 2);
     if (!Number.isFinite(this.pollInterval) || this.pollInterval < .25 || this.pollInterval > 5 || !Number.isSafeInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 32) throw new ServiceError("Invalid host poll interval or concurrency.", 400);
     this.clock = clock;
-    this.guard = new LeaseGuard(this.state, this.clock);
     this.idlePolicy = upkeepPolicy(config.upkeep, (this.config.templates as RecordValue[]).map(template => String(template.id)));
     const pressure = pressureConfig(config.pressure);
     this.pressureGates = pressure.gates;
@@ -496,11 +562,14 @@ export class HostRunner {
       const value = readRecord(path);
       if (value.orchestrator !== orchestrator) throw new ServiceError("Host identity belongs to another controller; use separate state.", 409);
       this.identity = { id: identifier(value.id), credential: secret(value.credential), orchestrator };
+      if (this.kubernetes) cleanupKubernetesEnrollment(this.state, this.identity, this.log);
+    } else if (this.kubernetes) {
+      this.identity = await enrollKubernetesHost(this.state, orchestrator, this.advertisedOffer(!this.pinnedLibvirtClock || this.heartbeatClock() !== undefined), this.transport, this.stopController.signal, this.log);
     } else {
       if (!this.config.enrollmentToken) throw new ServiceError("A new host needs an enrollment credential.", 400);
       this.identity = { id: randomUUID(), credential: randomBytes(32).toString("base64url"), orchestrator }; saveRecord(path, this.identity);
     }
-    if (this.config.enrollmentToken) await this.transport.request("POST", "/v1/hosts/enroll", { ...this.identity, offer: this.offer }, secret(this.config.enrollmentToken), this.stopController.signal);
+    if (this.config.enrollmentToken) await this.transport.request("POST", "/v1/hosts/enroll", { ...this.identity, offer: this.advertisedOffer(!this.pinnedLibvirtClock || this.heartbeatClock() !== undefined) }, secret(this.config.enrollmentToken), this.stopController.signal);
   }
   async initializeProviders(): Promise<void> {
     const factory = this.dependencies.providerFactory ?? createProvider, provider = String(this.config.provider);
@@ -508,7 +577,7 @@ export class HostRunner {
     // Leased Android guests must not reach the controller's port on this host; the probe needs only the number.
     try { const controller = new URL(String(this.config.url)); clean.leaseControllerPort = Number(controller.port || (controller.protocol === "https:" ? 443 : 80)); } catch { /* no controller URL */ }
     if (Object.hasOwn(HOST_RUNTIMES, provider)) {
-      for (const [kind, options] of Object.entries(enabledRuntimes(this.config))) this.runtimes.set(kind, await factory({ ...clean, ...options, provider: kind,
+      for (const [kind, options] of Object.entries(enabledRuntimes(this.config))) this.runtimes.set(kind, await factory({ ...clean, ...options, provider: kind, deployment: clean.deployment,
         storage: options.storage ?? join(String(clean.storage), kind), templates: (clean.templates as RecordValue[]).filter(i => runtimeFor(this.config, i) === kind) }, String(options.stateDirectory ?? this.state)));
     } else if (provider !== "native") this.runtimes.set(provider, await factory(clean, this.state));
     if (!this.guest && (this.config.templates as RecordValue[]).some(t => t.guestAccess)) this.guest = createGuestAccess(clean, this.state);
@@ -702,10 +771,26 @@ export class HostRunner {
     // Keep private host settings while giving the provider that exact definition.
     return { runtime, image: structuredClone(['android','ios'].includes(String(image.os)) ? { ...image, ...normalizeTemplate(image) } : image), folder };
   }
+  private heartbeatClock(): number | undefined {
+    try { return this.clock.now(); }
+    catch (error) {
+      if (!this.pinnedLibvirtClock) throw error;
+      // Keep reporting cleanup even when the pinned helper has disappeared. A heartbeat without
+      // a trusted clock withdraws lease admission and cannot grant any execution authority.
+      return undefined;
+    }
+  }
+  private advertisedOffer(clockAvailable: boolean): RecordValue {
+    if (clockAvailable) return this.offer;
+    const offer = { ...this.offer };
+    for (const field of ["leaseProtocol", "leaseImages", "leaseTunnelProtocol", "warmPool"]) delete offer[field];
+    return offer;
+  }
   async poll(): Promise<void> {
     if (!this.identity) throw new ServiceError("Host is not connected.", 409);
     const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports), baselineReports = firstReport(this.baselineReports, true);
-    const sent = this.clock.now();
+    const sent = this.heartbeatClock();
+    const offer = this.advertisedOffer(sent !== undefined);
     // Read the current credential on every heartbeat. Rotation delivery may replace
     // identity.json between requests, but cannot change the host/controller binding.
     const identity = readRecord(join(this.state, "identity.json"));
@@ -713,13 +798,13 @@ export class HostRunner {
     this.identity.credential = secret(identity.credential);
     const pending = this.maintenanceProof;
     const proof = pending && pending.challenge === this.maintenanceChallenge && this.fresh() ?
-      { ...pending.proof, ...(!this.idleEligible() ? NOT_IDLE : {}) } : undefined;
+      { ...pending.proof, ...(!this.idleEligible() || this.kubernetes && pending.epoch !== this.updateEpoch ? NOT_IDLE : {}) } : undefined;
     // Dispatch can consume a challenge even if its response is lost.
     this.maintenanceChallenge = null;
     this.maintenanceProof = undefined;
     const upkeep = this.upkeepReport(), hostOperationReports = upkeep ? Object.fromEntries([...this.hostOperationReports].slice(0, 16)) : {};
     const reportedBusy = upkeep ? upkeep.busy as string[] : [];
-    const body = { offer: this.offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
+    const body = { offer, reports: Object.fromEntries(sentReports), deviceReports, inferenceReports, imageReports, installedImages: (this.config.templates as RecordValue[]).map(normalizeTemplate), health: this.health, maintenance: { version: 1, ...(proof ? { proof } : {}) }, ...(this.resourceSample ? { resources: this.resourceSample } : {}),
       ...(this.pressureReport ? { pressure: this.pressureReport } : {}), ...(upkeep ? { upkeep, hostOperationReports } : {}), ...(this.baselines ? { baselines: this.baselines, baselineReports } : {}) };
     if (proof && Buffer.byteLength(JSON.stringify(body)) > MAX_HOST_MESSAGE) delete body.maintenance.proof;
     const response = await this.transport.request("POST", `/v1/hosts/${this.identity.id}/heartbeat`, body, this.identity.credential, this.stopController.signal);
@@ -729,8 +814,10 @@ export class HostRunner {
     const queues = { device: records(response.deviceOperations ?? [], "device operations"), inference: records(response.inferenceJobs ?? [], "inference jobs"), images: records(response.imageTasks ?? [], "image tasks"), sessions: records(response.accessSessions ?? [], "access sessions"), video: records(response.videoSessions ?? [], 'video sessions'), display: records(response.displaySessions ?? [], 'display sessions'), baselines: records(response.baselineTasks ?? [], "baseline tasks"), hostOperations: records(response.hostOperations ?? [], "host operations"), tunnels: records(response.leaseTunnels ?? [], "lease tunnels") ,
       live: records(response.liveViews ?? [], 'live views'), liveCaptures: records(response.liveCaptures ?? [], 'live captures') };
     const maintenance = Object.hasOwn(response, "maintenance") ? maintenanceResponse(response.maintenance) : undefined;
-    this.observeWarm(machines, sent);
-    this.guard.observe(machines, Math.max(0, this.clock.now() - sent));
+    const received = this.heartbeatClock();
+    const timed = sent !== undefined && received !== undefined;
+    if (timed) this.observeWarm(machines, sent);
+    this.guard.observe(machines, timed ? Math.max(0, received - sent) : undefined);
     this.library.acknowledge(object(response.imageAcknowledged ?? {}) as Record<string, string>); this.refreshImages();
     const active = new Set(machines.map(m => String(m.id)));
     for (const [id, report] of sentReports) if (!active.has(id)) {
@@ -742,7 +829,7 @@ export class HostRunner {
     for (const machine of machines) this.updateAssignments.set(String(machine.id), structuredClone(machine));
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
-    this.assignments = machines; this.queues = queues; this.lastContact = sent;
+    this.assignments = machines; this.queues = queues; this.lastContact = timed ? sent : 0;
     // Delivered: work that ended before this heartbeat has now been counted as activity.
     for (const id of reportedBusy) this.recentlyBusy.delete(id);
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
@@ -860,7 +947,7 @@ export class HostRunner {
   private cancelUnauthorized(): void { for (const item of this.active.values()) if (!item.authorized()) item.controller.abort(); }
   private publish(target: Map<string, RecordValue>, id: string, report: RecordValue): void { target.set(id, report); this.saveReports(); }
   private launch(key: string, authorized: () => boolean, work: (context: HostWorkContext) => Promise<void>): void {
-    if (this.active.has(key)) return;
+    if (this.closed || this.active.has(key)) return;
     this.updateEpoch++;
     const controller = new AbortController();
     const context = { signal: controller.signal, authorized, processes: this.processes };
@@ -1001,14 +1088,14 @@ export class HostRunner {
       return result;
     });
   }
-  /** Leased execution runs only on the Android or iOS runtime, for a template this host advertised
+  /** Leased execution runs only on the Android, iOS or libvirt runtime, for a template this host advertised
    * in leaseImages. An iOS entry counts only with its explicit shared-host isolation declaration. */
   leaseEligible(machine: RecordValue): boolean {
     if (this.offer.leaseProtocol !== 1 || !Array.isArray(this.offer.leaseImages)) return false;
     let context: { runtime: Runtime; image: RecordValue };
     try { context = this.context(machine); } catch { return false; }
     const { runtime, image } = context;
-    if (!["android", "ios"].includes(runtime.kind) || image.os !== runtime.kind) return false;
+    if (runtime.kind === "libvirt" ? image.os !== "linux" || !libvirtLeaseTemplate(image) : !["android", "ios"].includes(runtime.kind) || image.os !== runtime.kind) return false;
     return (this.offer.leaseImages as RecordValue[]).some(entry => entry.runtime === runtime.kind && entry.id === image.id && entry.revision === image.revision && entry.arch === image.arch &&
       (runtime.kind === "ios" ? entry.isolation === IOS_LEASE_ISOLATION : !("isolation" in entry)));
   }
@@ -1090,6 +1177,10 @@ export class HostRunner {
     for (const machine of ordered) {
       const id = String(machine.id), key = `machine:${id}`;
       if (machine.leaseCleanup || this.updateAdmissionBlocked && machine.desired !== "stopped") continue;
+      // Stop inspection owns the libvirt reconcile journal. Keep a successful
+      // proof current until the next heartbeat by deferring routine rechecks.
+      if (this.stopInspections.has(id) || this.kubernetes && this.maintenanceProof?.proof.workloadsStopped &&
+          this.maintenanceProof.epoch === this.updateEpoch && this.fresh() && this.settledAdministrativeStop(machine)) continue;
       // Device operations own the same assignment lock. Keep polling/cancellation
       // active, but wait for the owned operation before reconciling this machine.
       if (this.deviceMachines.has(id) || machine.desired === 'running' && this.reports.get(id)?.state === 'running' && this.queues.device?.some(o => o.machineId === id && !TERMINAL.has(String(this.deviceReports.get(String(o.id))?.state)))) continue;
@@ -1100,7 +1191,11 @@ export class HostRunner {
       this.launch(key, authorized, async context => {
         let report: RecordValue;
         try { report = await this.reconcile(machine, context); }
-        catch { report = { state: "unknown", detail: "Assignment reconciliation requires inspection; owned state is retained." }; }
+        catch (error) {
+          const reason = error instanceof Error ? error.message.split(/[\r\n]/, 1)[0]!.slice(0, 256).replace(/[^ -~]/g, "?") : "Unknown error";
+          console.warn("Assignment reconciliation refused:", reason);
+          report = { state: "unknown", detail: "Assignment reconciliation requires inspection; owned state is retained." };
+        }
         if (machine.leaseFenced) report.leaseFenced = true;
         if (machine.powerOffRequest) report.powerOffId = machine.powerOffRequest;
         if (context.signal.aborted && machine.desired === "running" && report.state === "running") report = { state: "unknown", detail: "Reconciliation ended after authorization; positive native stop evidence is required." };
@@ -1597,36 +1692,62 @@ export class HostRunner {
   private machineRoots(): Set<string> {
     return new Set([this.state, ...[...this.runtimes.values()].map(r => r.state ?? this.state)].map(state => resolve(state, "machines")));
   }
-  private async inspectStopped(retained: Map<string, RecordValue>, readOnly = false): Promise<IdleReceipt> {
-    if (!this.idleEligible() || [...retained.values()].some(m => m.desired !== "stopped")) return NOT_IDLE;
-    const epoch = this.updateEpoch;
-    let inspected = 0;
-    for (const machine of retained.values()) {
-      if (readOnly && inspected++ % 32 === 0) await yieldWork();
-      if (epoch !== this.updateEpoch || !this.fresh()) return NOT_IDLE;
-      const { runtime, image, folder } = this.context(machine);
-      if (!helpersClosed(machine, folder)) return NOT_IDLE;
-      const stopped = runtime.updateStopped ? await runtime.updateStopped(machine, image, folder, readOnly) :
-        runtime.confirmExecutionStopped?.(machine, folder, readOnly)?.executionStopped === true;
-      if (!stopped || epoch !== this.updateEpoch || !this.fresh()) return NOT_IDLE;
-    }
-    return this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
+  private settledAdministrativeStop(machine: RecordValue): boolean {
+    return machine.desired === "stopped" && !machine.lease && !machine.warm && !machine.leaseCleanup &&
+      !machine.deletion && !machine.powerOffRequest && this.reports.get(String(machine.id))?.state === "stopped";
   }
-  async updateIdle(): Promise<IdleReceipt> {
+  private async inspectStopped(retained: Map<string, RecordValue>, readOnly = false, current = () => true): Promise<IdleReceipt> {
+    if ([...retained.values()].some(m => m.desired !== "stopped")) return NOT_IDLE;
+    // Kubernetes admin VM probes and routine reconciliation take the same
+    // exclusive libvirt journal lock. Let rechecks already holding it finish.
+    const reserved = this.kubernetes ? [...retained].filter(([, machine]) => this.settledAdministrativeStop(machine)).map(([id]) => id) : [];
+    if (reserved.some(id => this.stopInspections.has(id))) return NOT_IDLE;
+    for (const id of reserved) this.stopInspections.add(id);
+    const epoch = this.updateEpoch;
+    const valid = () => epoch === this.updateEpoch && this.fresh() && current();
+    try {
+      const rechecks = reserved.flatMap(id => {
+        const active = this.active.get(`machine:${id}`);
+        return active ? [active.promise] : [];
+      });
+      if (rechecks.length) await Promise.all(rechecks);
+      if (!valid() || !this.idleEligible()) return NOT_IDLE;
+      let inspected = 0;
+      for (const machine of retained.values()) {
+        if (readOnly && inspected++ % 32 === 0) await yieldWork();
+        if (!valid()) return NOT_IDLE;
+        const { runtime, image, folder } = this.context(machine);
+        if (!helpersClosed(machine, folder)) return NOT_IDLE;
+        const stopped = runtime.updateStopped ? await runtime.updateStopped(machine, image, folder, readOnly) :
+          runtime.confirmExecutionStopped?.(machine, folder, readOnly)?.executionStopped === true;
+        if (!stopped || !valid()) return NOT_IDLE;
+      }
+      return this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
+    } finally {
+      for (const id of reserved) this.stopInspections.delete(id);
+    }
+  }
+  async updateIdle(readOnly = false): Promise<IdleReceipt> {
     if (!this.idleEligible()) return NOT_IDLE;
     const epoch = this.updateEpoch;
     const retained = new Map(this.updateAssignments);
     for (const machine of this.guard.assignments(this.assignments)) retained.set(String(machine.id), machine);
+    if (this.kubernetes && [...retained.values()].some(machine => machine.leaseCleanup || machine.deletion)) return NOT_IDLE;
     try {
       // Unknown older local assignment directories cannot be inferred stopped from an empty heartbeat.
       for (const root of this.machineRoots()) {
         noLinks(root);
-        if (present(root) && readdirSync(root).some(id => !retained.has(id) && !this.guard.records.get(id)?.retired)) return NOT_IDLE;
+        if (present(root) && readdirSync(root).some(id => {
+          const bookkeeping = machineBookkeeping(root, id);
+          return bookkeeping === undefined ? !retained.has(id) && !this.guard.records.get(id)?.retired : bookkeeping === "unexpected";
+        })) return NOT_IDLE;
       }
-      if (!(await this.inspectStopped(retained)).workloadsStopped) return NOT_IDLE;
-      // Only stopped assignments reach helper closure; a live VM is never closed for an update.
-      await this.sweepAccess(new Set());
-      for (const machine of retained.values()) await this.context(machine).runtime.closeShells?.(machine);
+      if (!(await this.inspectStopped(retained, readOnly)).workloadsStopped) return NOT_IDLE;
+      if (!readOnly) {
+        // Only stopped assignments reach helper closure; a live VM is never closed for an update.
+        await this.sweepAccess(new Set());
+        for (const machine of retained.values()) await this.context(machine).runtime.closeShells?.(machine);
+      }
     } catch { return NOT_IDLE; }
     return epoch === this.updateEpoch && this.idleEligible() ? { idle: true, workloadsStopped: true } : NOT_IDLE;
   }
@@ -1637,14 +1758,14 @@ export class HostRunner {
     // Inventory and provider probes never run on the heartbeat's critical path.
     void yieldWork().then(async () => {
       if (challenge !== this.maintenanceChallenge || !this.fresh()) return;
-      const proof = await this.collectMaintenance(challenge);
-      if (proof && challenge === this.maintenanceChallenge && this.fresh()) this.maintenanceProof = { challenge, proof };
+      const result = await this.collectMaintenance(challenge);
+      if (result && challenge === this.maintenanceChallenge && this.fresh()) this.maintenanceProof = { challenge, ...result };
     }).catch(() => this.log("Host maintenance inspection failed; no proof was sent.")).finally(() => {
       this.inspectingMaintenance = false;
       if (challenge !== this.maintenanceChallenge) this.inspectMaintenance();
     });
   }
-  private async collectMaintenance(challenge: MaintenanceFence): Promise<MaintenanceProof | undefined> {
+  private async collectMaintenance(challenge: MaintenanceFence): Promise<{ proof: MaintenanceProof; epoch: number } | undefined> {
     const current = this.assignments, retained = this.retainedAssignments(current);
     const assignments: MaintenanceProof["inventory"]["assignments"] = [];
     const knownFolders = new Set<string>(), knownStorage = new Set<string>(), knownQuarantines = new Set<string>();
@@ -1697,9 +1818,10 @@ export class HostRunner {
     if (!scan) return;
     for (const found of scan.found) unexpected.add(found.name);
     if (!scan.complete) { complete = false; issues.push("Local journal or provider storage inventory could not be completed."); }
+    const epoch = this.updateEpoch;
     const receipt = complete && !unexpected.size && assignments.every(a => a.storage === "present" || a.storage === "unsupported" || a.storage === "notMaterialized") ?
-      await this.inspectStopped(retained, true) : NOT_IDLE;
-    return { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues };
+      await this.inspectStopped(retained, true, () => challenge === this.maintenanceChallenge) : NOT_IDLE;
+    return { proof: { ...challenge, ...receipt, inventory: { complete, assignments, unexpected: [...unexpected].sort() }, issues }, epoch };
   }
   /** Directory entries under the journal and provider storage roots that no known assignment
    * explains. Shared by the maintenance proof and the storage inspection; it changes nothing. */
@@ -1715,14 +1837,15 @@ export class HostRunner {
         for await (const entry of await opendir(root)) {
           if (!live()) return undefined;
           if (++entries > 20_000) { complete = false; break; }
-          if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+          const bookkeeping = journalRoots.has(root) ? machineBookkeeping(root, entry.name) : undefined;
+          if (bookkeeping === "owned" || bookkeeping === undefined && !entry.isDirectory() && !entry.isSymbolicLink()) continue;
           const path = join(root, entry.name);
           const quarantine = storageRoots.has(root) && removalQuarantine.test(entry.name);
           if (quarantine && entry.isDirectory() && known.quarantines.has(path)) continue;
           // Retirement only explains an old journal, never backing storage that still exists.
           const unexplainedJournal = journalRoots.has(root) && !known.folders.has(path) && !this.guard.records.get(entry.name)?.retired;
           const unexplainedStorage = storageRoots.has(root) && !known.storage.has(path) && storageId.test(entry.name);
-          if (!quarantine && !unexplainedJournal && !unexplainedStorage) continue;
+          if (bookkeeping !== "unexpected" && !quarantine && !unexplainedJournal && !unexplainedStorage) continue;
           if (names.size >= 100 && !names.has(entry.name) || entry.name.length > 200) { complete = false; break; }
           names.add(entry.name); found.push({ name: entry.name, path, storage: storageRoots.has(root), quarantine });
         }
@@ -1924,24 +2047,53 @@ export class HostRunner {
     } catch { return undefined; }
   }
   async quiesceForUpdate(): Promise<{ idle: boolean; workloadsStopped: boolean; quiesced: boolean }> {
+    requireManagedUpdates(this.config);
     this.fenceUpdateAdmission();
     const receipt = await this.updateIdle();
     return { ...receipt, quiesced: receipt.idle && receipt.workloadsStopped };
   }
-  async start(): Promise<this> {
+  async start(signal?: AbortSignal): Promise<this> {
+    if (!this.kubernetes || !signal) return this.startWorkers();
+    signal.throwIfAborted();
+    const startup = this.startWorkers();
+    let stop: (() => void) | undefined;
+    const interrupted = new Promise<never>((_, reject) => {
+      stop = () => {
+        this.fenceUpdateAdmission();
+        this.stopController.abort();
+        const fail = () => reject(shutdownIncomplete());
+        void bounded(startup, this.shutdownGraceMs).then(fail, fail);
+      };
+      signal.addEventListener("abort", stop, { once: true });
+    });
+    try {
+      const started = await Promise.race([startup, interrupted]);
+      return signal.aborted ? await interrupted : started;
+    } catch (error) {
+      if (signal.aborted) return await interrupted;
+      throw error;
+    } finally { if (stop) signal.removeEventListener("abort", stop); }
+  }
+  private async startWorkers(): Promise<this> {
     if (this.started || this.closed) throw new ServiceError("Host runner cannot be started twice.", 409);
     modelConfig(this.config);
     this.lock = new StateLock(join(this.state, "host-runner.sqlite")); this.started = true;
     try {
+      // Load the lease checkpoint under the state lock before enrollment can publish a new identity.
+      this.leaseGuard ??= new LeaseGuard(this.state, this.clock);
+      if (this.kubernetes) await this.connect();
       for (const image of this.config.templates as RecordValue[]) if (image.source && !image.catalogueImageId) {
         const runtimeConfig = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? enabledRuntimes(this.config)[runtimeFor(this.config, image)] : undefined;
         const cache = runtimeConfig?.imageCache ?? this.config.imageCache;
         if (typeof cache !== "string") throw new ServiceError("Configure imageCache for verified base sources.", 400);
         image.image = await prepareImage(image.source, cache);
       }
+      this.stopController.signal.throwIfAborted();
       await this.initializeProviders();
+      this.stopController.signal.throwIfAborted();
       this.refreshBaselines();
-      try { await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
+      try { if (!this.kubernetes) await this.connect(); } catch (error) { if (!this.identity || !this.guard.records.size) throw error; this.log("Controller enrollment unavailable; enforcing retained lease deadlines while reconnecting."); }
+      this.stopController.signal.throwIfAborted();
       if (this.updateAdmissionBlocked) { await this.poll(); if (!this.fresh()) throw unknownOutcome("Managed startup needs fresh authenticated controller contact."); }
       this.loops.push(this.loop(async () => { try { await this.poll(); } catch { this.log("Host heartbeat failed; enforcing retained execution deadlines."); } }, this.pollInterval * 1000));
       this.loops.push(this.loop(() => this.step(), 100));
@@ -1951,7 +2103,7 @@ export class HostRunner {
       this.loops.push(this.loop(() => this.samplePressure(), 5000));
       this.loops.push(this.loop(async () => { if (this.checkRequested || this.clock.wall() >= this.nextCheck) { this.checkRequested = false; this.nextCheck = this.clock.wall() + 60; await this.checkEnvironment(); } }, 1000));
       return this;
-    } catch (error) { try { await this.close(); } catch { this.log("Host startup cleanup was not fully confirmed."); } throw error; }
+    } catch (error) { try { await this.closeWorkers(); } catch { this.log("Host startup cleanup was not fully confirmed."); } throw error; }
   }
   private async loop(work: () => Promise<void>, interval: number): Promise<void> {
     while (!this.stopController.signal.aborted) {
@@ -1960,28 +2112,68 @@ export class HostRunner {
     }
   }
   async wait(): Promise<void> { await Promise.all(this.loops); }
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    return this.shutdown ??= this.kubernetes && this.started ? this.closeKubernetes() : this.closeWorkers();
+  }
+  private get shutdownGraceMs(): number { return (this.config.shutdownGraceSeconds ?? DEFAULT_SHUTDOWN_GRACE_SECONDS) * 1000; }
+  private async awaitQuiescence(signal: AbortSignal): Promise<boolean> {
+    while (!signal.aborted) {
+      if ((await this.updateIdle(true)).workloadsStopped) return !signal.aborted;
+      await delay(100, signal);
+    }
+    return false;
+  }
+  private async closeKubernetes(): Promise<void> {
+    this.fenceUpdateAdmission();
+    const quiescence = new AbortController();
+    const proof = this.awaitQuiescence(quiescence.signal).catch(() => false);
+    try {
+      await bounded((async () => {
+        // Set aside time for worker teardown even if a stop probe is slow.
+        const budget = this.shutdownGraceMs - Math.min(20_000, Math.floor(this.shutdownGraceMs / 2));
+        const stopped = await bounded(proof, budget).catch(() => false);
+        quiescence.abort();
+        await this.closeWorkers([proof]);
+        if (!stopped) throw shutdownIncomplete();
+      })(), this.shutdownGraceMs);
+    } catch {
+      this.stopController.abort();
+      for (const work of this.active.values()) work.controller.abort();
+      throw shutdownIncomplete();
+    }
+  }
+  private async closeWorkers(quiescence: Promise<unknown>[] = []): Promise<void> {
     if (this.closed) return; this.closed = true;
     // Live captures stop first, while this runner still holds the authority to stop and prove
     // each guest recorder; afterwards a capture could only be left unknown. With no capture
     // running this is immediate, so a runner without viewers stops as promptly as before.
-    if (this.liveCaptures) await bounded(this.liveCaptures.close(), 20000).catch(() => this.log("Live capture cleanup was not confirmed; its reservation is retained."));
+    let failed = false;
+    const pending: Promise<unknown>[] = [];
+    const cleanup = async (work: () => Promise<unknown>, timeout = 5000): Promise<void> => {
+      try {
+        const operation = work();
+        pending.push(operation);
+        await bounded(operation, timeout);
+      } catch { failed = true; this.log("Host cleanup was not confirmed; inspect retained state."); }
+    };
+    if (this.liveCaptures) await cleanup(() => this.liveCaptures!.close(), 20_000);
     this.stopController.abort();
     for (const work of this.active.values()) work.controller.abort();
-    let failed = false;
-    const cleanup = async (work: () => Promise<unknown>): Promise<void> => { try { await bounded(work(), 5000); } catch { failed = true; this.log("Host cleanup was not confirmed; inspect retained state."); } };
     await cleanup(() => this.processes.close());
     await cleanup(() => this.sweepAccess(new Set()));
-    for (const machine of this.guard.assignments(this.assignments)) await cleanup(() => this.closeAccessShells(machine));
+    for (const machine of this.leaseGuard?.assignments(this.assignments) ?? []) await cleanup(() => this.closeAccessShells(machine));
     if (this.outboundSessions) await cleanup(() => this.outboundSessions!.close());
     if (this.displayControls) await cleanup(async () => this.displayControls!.close());
     for (const adapter of [this.guest, this.inferenceAdapter, this.imageAdapter, this.sessionAdapter, ...new Set([...this.runtimes.values(), ...this.retainedAccess])]) if (adapter?.close) await cleanup(() => adapter.close!());
-    await cleanup(() => Promise.all([...this.loops, ...[...this.active.values()].map(w => w.promise)]));
+    await cleanup(() => Promise.allSettled([...quiescence, ...this.loops, ...[...this.active.values()].map(w => w.promise)]));
     // A still-running in-process adapter could mutate state. Keep the lock until
     // that work settles; do not let another host adopt it after a timeout.
     if (!failed) { this.lock?.close(); this.lock = undefined; }
-    else { void Promise.allSettled([...this.loops, ...[...this.active.values()].map(w => w.promise)]).then(() => { this.lock?.close(); this.lock = undefined; }); throw new ServiceError("Host shutdown was not fully confirmed.", 409, { code: "host_shutdown_incomplete", retryable: false, outcome: "unknown" }); }
+    else { void Promise.allSettled(pending).then(() => { this.lock?.close(); this.lock = undefined; }); throw shutdownIncomplete(); }
   }
+}
+function shutdownIncomplete(): ServiceError {
+  return new ServiceError("Host shutdown was not fully confirmed.", 409, { code: "host_shutdown_incomplete", retryable: false, outcome: "unknown" });
 }
 function maintenanceResponse(value: unknown): MaintenanceFence | null {
   const envelope = object(value);
@@ -2052,7 +2244,10 @@ function firstReport(reports: Map<string, RecordValue>, terminalOnly = false): R
 function delay(ms: number, signal: AbortSignal): Promise<void> { return new Promise(r => { if (signal.aborted) { r(); return; } const done = (): void => { clearTimeout(timer); signal.removeEventListener("abort", done); r(); }; const timer = setTimeout(done, ms); signal.addEventListener("abort", done, { once: true }); }); }
 async function bounded<T>(work: Promise<T>, ms: number): Promise<T> { let timer: NodeJS.Timeout | undefined; try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(unknownOutcome()), ms); })]); } finally { if (timer) clearTimeout(timer); } }
 /** Start outbound workers. The caller owns signals and awaits close() on shutdown. */
-export async function startHost(config: HostConfig, dependencies: HostDependencies = {}): Promise<HostRunner> { return new HostRunner(config, dependencies).start(); }
+export async function startHost(config: HostConfig, dependencies: HostDependencies = {}, signal?: AbortSignal): Promise<HostRunner> {
+  const runner = new HostRunner(config, dependencies);
+  return runner.start(signal);
+}
 export async function checkHost(config: HostConfig, dependencies: HostDependencies = {}, inventory = false): Promise<RecordValue> {
   const runner = new HostRunner(config, dependencies);
   try {
@@ -2096,8 +2291,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const local = setup ? object(setup.config) : loadHostConfig(String(options["--config"]));
   const token = options["--enrollment-token-file"] ? readFileSync(String(options["--enrollment-token-file"]), "utf8").trim() : setup?.enrollmentToken;
   const config: HostConfig = { ...local, url: text(setup?.controllerUrl ?? options["--url"], "controller URL", 8000), stateDir: String(options["--state"]), allowHTTP: options["--allow-http"] === true, ...(token ? { enrollmentToken: secret(token) } : {}), ...(options["--ca-file"] ? { caFile: String(options["--ca-file"]) } : {}) };
-  const runner = await startHost(config);
-  const stop = (): void => { void runner.close().catch(() => { process.exitCode = 1; }); };
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
-  try { await runner.wait(); } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); await runner.close(); }
+  try {
+    const runner = await startHost(config, {}, controller.signal);
+    if (!controller.signal.aborted) await new Promise<void>(done => controller.signal.addEventListener("abort", () => done(), { once: true }));
+    await runner.close();
+  } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
 }

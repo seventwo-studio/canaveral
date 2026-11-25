@@ -12,9 +12,44 @@ export const SOURCE='https://github.com/seventwo-studio/canaveral';
 // Repo-scoped names: packages first pushed by this repository's GITHUB_TOKEN are linked to it
 // and grant its workflows write access. The older top-level packages are not used.
 export const NAMESPACE='ghcr.io/seventwo-studio/canaveral';
-export const IMAGES={orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard'};
+export const IMAGES={orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',canaverald:NAMESPACE+'/canaverald'};
+// Declared deployment sources per image. The workload receives its image
+// digest, and the VM ConfigMap receives the amd64 helper digest.
+export const STAGES={
+  orchestrator:{source:'deploy/orchestrator',workload:'deployment.json',files:['deployment.json','service.json','kustomization.yaml','persistentvolumeclaim.json'],render:['.']},
+  dashboard:{source:'deploy/dashboard',workload:'deployment.json',files:['deployment.json','service.json','kustomization.yaml'],render:['.']},
+  canaverald:{source:'deploy/kubernetes/canaverald',workload:'base/daemonset.json',render:['.','vm'],files:[
+    'kustomization.yaml','base/kustomization.yaml','base/namespace.json','base/admission-policy.json','base/admission-policy-binding.json',
+    'base/serviceaccount.json','base/configmap.json','base/daemonset.json','vm/kustomization.yaml','vm/configmap.json','vm/daemonset.json']},
+};
+/** The daemon's drain budget must end at least 30 seconds before Kubernetes sends SIGKILL. */
+export const DAEMON_GRACE_MARGIN=30;
+export function checkDaemonGrace(daemonSet,configMaps) {
+  const termination=daemonSet.spec?.template?.spec?.terminationGracePeriodSeconds;
+  if(!Number.isSafeInteger(termination)) throw new Error('The canaverald DaemonSet must set terminationGracePeriodSeconds.');
+  for(const config of configMaps) {
+    const grace=uniqueJSON(config.data['host.json']).shutdownGraceSeconds??120;
+    if(!Number.isSafeInteger(grace) || grace>termination-DAEMON_GRACE_MARGIN) throw new Error('canaverald shutdownGraceSeconds must not exceed terminationGracePeriodSeconds minus '+DAEMON_GRACE_MARGIN+'.');
+  }
+}
+function declaredTree(directory,prefix='') {
+  const found=[];
+  for(const name of readdirSync(directory)) {
+    const path=join(directory,name),stat=lstatSync(path),relative=prefix+name;
+    if(stat.isSymbolicLink()) throw new Error('Only declared deployment sources may enter the artifact.');
+    if(stat.isDirectory()) found.push(...declaredTree(path,relative+'/'));
+    else if(stat.isFile()) found.push(relative);
+    else throw new Error('Only declared deployment sources may enter the artifact.');
+  }
+  return found;
+}
 export const DEPLOYMENT=NAMESPACE+'/deploy';
 const DIGEST=/^sha256:[a-f0-9]{64}$/;
+const SHA256=/^[a-f0-9]{64}$/;
+const LINUX_ARCHITECTURES=['amd64','arm64'];
+export const LEASE_HELPER='/usr/local/lib/canaveral/canaveral-libvirt-native';
+const VM_CONFIG='vm/configmap.json';
+const UNRENDERED_HELPER_DIGEST='0'.repeat(64);
 class PublicationFailure extends Error {}
 export class RegistryUnavailable extends PublicationFailure {}
 export function publicationFailure(error) {
@@ -83,12 +118,39 @@ export function checkIdentity(manifest,version,revision,artifact=false) {
   if(artifact) {
     if(manifest.layers?.length!==1 || manifest.layers[0]?.mediaType!=='application/vnd.cncf.flux.content.v1.tar+gzip') throw new Error('A single Flux content layer is required.');
   } else {
-    for(const architecture of ['amd64','arm64']) if(!manifest.manifests?.some(e=>e.platform?.os==='linux' && e.platform?.architecture===architecture)) throw new Error('Both Linux architectures must be published.');
+    for(const architecture of LINUX_ARCHITECTURES) if(!manifest.manifests?.some(e=>e.platform?.os==='linux' && e.platform?.architecture===architecture)) throw new Error('Both Linux architectures must be published.');
   }
 }
-export function bundle(version,revision,images,output,sourceRoot=ROOT) {
+export function pinVmLeaseHelper(configMap,sha256) {
+  const config=uniqueJSON(configMap.data['host.json']);
+  if(!SHA256.test(sha256) || sha256===UNRENDERED_HELPER_DIGEST || config.leaseHelper!==LEASE_HELPER ||
+     config.leaseClockHelper!==LEASE_HELPER || config.leaseHelperSha256!==UNRENDERED_HELPER_DIGEST) {
+    throw new Error('Expected a VM ConfigMap template and a helper digest from the image.');
+  }
+  config.leaseHelperSha256=sha256;
+  configMap.data['host.json']=JSON.stringify(config,null,2)+'\n';
+}
+function imageLeaseHelperDigests(image,temporary,execute) {
+  return Object.fromEntries(LINUX_ARCHITECTURES.map(architecture=>{
+    const platform='linux/'+architecture;
+    // Copy bytes from the immutable image without executing its entrypoint or
+    // requiring either architecture's binary to run in the release job.
+    execute('docker',['pull','--platform',platform,image]);
+    const container=execute('docker',['create','--platform',platform,image]);
+    if(!SHA256.test(container)) throw new Error('Expected a Docker container ID.');
+    const file=join(temporary,'lease-helper-'+architecture);
+    try {
+      execute('docker',['cp',container+':'+LEASE_HELPER,file]);
+      if(!lstatSync(file).isFile()) throw new Error('Expected a regular lease helper in the image.');
+      return [architecture,createHash('sha256').update(readFileSync(file)).digest('hex')];
+    } finally {
+      execute('docker',['rm',container]);
+    }
+  }));
+}
+export function bundle(version,revision,images,helperDigests,output,sourceRoot=ROOT) {
   if(!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error('Semantic version and full source revision required.');
-  if(Object.keys(images).sort().join(',')!==Object.keys(IMAGES).sort().join(',')) throw new Error('Controller and dashboard images are required.');
+  if(Object.keys(images).sort().join(',')!==Object.keys(IMAGES).sort().join(',')) throw new Error('Controller, dashboard and canaverald images are required.');
   for(const [stage,packageName] of Object.entries(IMAGES)) {
     const prefix=packageName+':'+version+'@';
     if(typeof images[stage]!=='string' || !images[stage].startsWith(prefix) || !DIGEST.test(images[stage].slice(prefix.length))) throw new Error('Images must pin their own version and digest.');
@@ -96,20 +158,30 @@ export function bundle(version,revision,images,output,sourceRoot=ROOT) {
   if(existsSync(output) && (lstatSync(output).isSymbolicLink() || readdirSync(output).length)) throw new Error('Release output must be empty.');
   // Validate every input before producing any release files.
   const sources={};
-  for(const stage of ['orchestrator','dashboard']) {
-    const source=join(sourceRoot,'deploy',stage), expected=['deployment.json','service.json','kustomization.yaml'];
-    if(stage==='orchestrator') expected.push('persistentvolumeclaim.json');
-    if(lstatSync(source).isSymbolicLink() || readdirSync(source).sort().join(',')!==expected.sort().join(',') || expected.some(name=>!lstatSync(join(source,name)).isFile() || lstatSync(join(source,name)).isSymbolicLink())) throw new Error('Only declared deployment sources may enter the artifact.');
-    sources[stage]=Object.fromEntries(expected.map(name=>[name,readFileSync(join(source,name),'utf8')]));
+  for(const [stage,{source:relative,files}] of Object.entries(STAGES)) {
+    const source=join(sourceRoot,relative);
+    if(lstatSync(source).isSymbolicLink() || declaredTree(source).sort().join(',')!==[...files].sort().join(',')) throw new Error('Only declared deployment sources may enter the artifact.');
+    sources[stage]=Object.fromEntries(files.map(name=>[name,readFileSync(join(source,name),'utf8')]));
   }
+  const daemon=sources.canaverald;
+  const vmConfig=uniqueJSON(daemon[VM_CONFIG]);
+  checkDaemonGrace(uniqueJSON(daemon['base/daemonset.json']),[uniqueJSON(daemon['base/configmap.json']),vmConfig]);
+  if(Object.keys(helperDigests??{}).sort().join(',')!==LINUX_ARCHITECTURES.join(',') ||
+     !LINUX_ARCHITECTURES.every(arch=>SHA256.test(helperDigests[arch]) && helperDigests[arch]!==UNRENDERED_HELPER_DIGEST)) {
+    throw new Error('Both Linux helper digests are required.');
+  }
+  const libvirtLeaseHelper={path:LEASE_HELPER,sha256:Object.fromEntries(LINUX_ARCHITECTURES.map(arch=>[arch,helperDigests[arch]]))};
+  pinVmLeaseHelper(vmConfig,libvirtLeaseHelper.sha256.amd64);
+  daemon[VM_CONFIG]=JSON.stringify(vmConfig,null,2)+'\n';
   mkdirSync(output,{recursive:true});
-  for(const stage of ['orchestrator','dashboard']) {
+  for(const [stage,{workload}] of Object.entries(STAGES)) {
     const directory=join(output,stage);mkdirSync(directory);
     for(const [name,source] of Object.entries(sources[stage])) {
       let text=source;
-      if(name==='deployment.json') {
+      mkdirSync(join(directory,name,'..'),{recursive:true});
+      if(name===workload) {
         const data=uniqueJSON(text), containers=data.spec.template.spec.containers;
-        if(containers.length!==1) throw new Error('Expected one runtime per stage.');
+        if(containers.length!==1 || !containers[0].image) throw new Error('Expected one runtime per stage.');
         containers[0].image=images[stage];
         for(const init of data.spec.template.spec.initContainers??[]) init.image=images[stage];
         const metadata=data.spec.template.metadata;
@@ -119,7 +191,7 @@ export function bundle(version,revision,images,output,sourceRoot=ROOT) {
       writeFileSync(join(directory,name),text,{flag:'wx'});
     }
   }
-  const result={schemaVersion:1,version,source:SOURCE,revision,images};
+  const result={schemaVersion:1,version,source:SOURCE,revision,images,libvirtLeaseHelper};
   writeFileSync(join(output,'app-release.json'),JSON.stringify(result,null,2)+'\n',{flag:'wx'});return result;
 }
 export function draftRelease(pages,tag,revision) {
@@ -184,8 +256,9 @@ export async function main(finalize=false,{execute=capture,connect=packageName=>
   }
   const temporary=mkdtempSync(join(tmpdir(),'canaveral-release-'));const metadata=join(dist,'release.json');
   try {
-    const output=join(temporary,'bundle'), result=bundle(version,revision,images,output);
-    for(const stage of ['orchestrator','dashboard']) run('kubectl',['kustomize',join(output,stage)]);
+    const helperDigests=imageLeaseHelperDigests(images.canaverald,temporary,execute);
+    const output=join(temporary,'bundle'), result=bundle(version,revision,images,helperDigests,output,root);
+    for(const [stage,{render}] of Object.entries(STAGES)) for(const overlay of render) run('kubectl',['kustomize',join(output,stage,overlay)]);
     const registry=await connect(DEPLOYMENT), candidate='candidate-'+version+'-'+revision;
     let artifact=await registry.manifest(candidate);
     const stable=await registry.manifest(version);

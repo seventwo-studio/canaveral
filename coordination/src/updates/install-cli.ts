@@ -1,3 +1,4 @@
+import { requireManagedUpdates } from "../host-deployment.ts";
 import { promises as fs } from 'node:fs';
 import { join, relative, isAbsolute } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -64,6 +65,7 @@ export async function installMain(argv: string[], io: InstallIO = {}): Promise<n
     const configInfo = await fs.lstat(serviceOptions.hostConfig);
     if (configInfo.uid !== process.getuid?.() || (configInfo.mode & 0o077) !== 0) throw new Error('Host config must be private and owned by this user.');
     const config = updateObject(await readBootstrapJSON(serviceOptions.hostConfig, 1024 * 1024));
+    requireManagedUpdates(config);
     if (typeof config.url !== 'string' || !config.url) throw new Error('Supply the existing controller URL.');
     const updates = updateObject(config.updates), trust = updateObject(updates.trustedKeys);
     if (!Object.keys(trust).length || Object.entries(trust).some(([id, pem]) => !/^[A-Za-z0-9._-]{1,128}$/.test(id) || typeof pem !== 'string' || !pem.startsWith('-----BEGIN PUBLIC KEY-----'))) throw new Error('Pin public PEM keys in updates.trustedKeys.');
@@ -82,6 +84,7 @@ export async function installMain(argv: string[], io: InstallIO = {}): Promise<n
     stdout(JSON.stringify({ ...result, service }) + '\n'); return 0;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'kubernetes_managed_updates_disabled') stderr(code + '\n');
     // Avoid echoing input or config contents: errors may contain secrets.
     stderr(`Bootstrap installation failed${code === 'EEXIST' ? ': destination exists' : ''}. Check explicit paths, pinned trust, target and private ownership.${reserved ? ' Retain installation/state roots and identity for inspection; do not replay into or delete uncertain state.' : ''}\n`);
     return 1;

@@ -11,6 +11,8 @@ Environment=CANAVERAL_ENROLLMENT_TOKEN_FILE=/etc/canaveral/enrollment.token
 ExecStart=/usr/bin/node /opt/canaveral/coordination/dist/src/canaverald.js --config /etc/canaveral/host.json --state /var/lib/canaveral/agent
 Restart=on-failure
 RestartSec=10
+# An OOM-killed libvirt guardian fences its lease without stopping canaverald.
+OOMPolicy=continue
 UMask=0077
 # Hosts that lease Android emulators add the android-leases.conf drop-in (see
 # canaverald.service.d/), so lease supervisors outlive host restarts.

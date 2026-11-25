@@ -121,6 +121,7 @@ Virtualization remain blocked until guest-boot evidence binds their components.
 | `libvirt_kvm_probe_failed` | local | The local libvirt KVM capability check did not pass. | Check KVM and libvirt access as the service account. |
 | `libvirt_tools_missing` | local | At least one of virsh, qemu-img and QEMU is missing. | Install the missing system tools. |
 | `libvirt_uri_invalid` | local | The configured libvirt URI does not select a local connection. | Use qemu:///system or qemu:///session. |
+| `libvirt_vm_storage_access` | local | VM storage or a template lacks the exact daemon owner, QEMU group and mode. | Apply [libvirt VM storage](running.md#libvirt-vm-storage). |
 | `model_executor_config_invalid` | 400, local | The host's model executor block or its paths are invalid. | Check the config fields and file permissions. |
 | `model_executor_invalid_report` | local | The model executor output violated the report contract. | Check that the daemon and executor versions match. |
 | `model_executor_not_configured` | local | The host has no model executor configuration. | Add modelExecutor to the host config. |

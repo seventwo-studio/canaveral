@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -80,4 +81,10 @@ test('writable helper ancestors cannot substitute the executed clock', { skip: !
   assert.deepEqual(readFileSync(f.calls), before);
   chmodSync(f.root, 0o700);
   assert.throws(() => clock.now(), unavailable);
+});
+
+test('a clock for libvirt refuses a daemon-owned executable even with the matching digest', { skip: process.platform !== 'linux' }, t => {
+  const f = fixture(t), digest = createHash('sha256').update(readFileSync(f.helper)).digest('hex');
+  assert.throws(() => nativeExecutionClock(f.helper, digest), unavailable);
+  assert.equal(existsSync(f.calls), false);
 });
