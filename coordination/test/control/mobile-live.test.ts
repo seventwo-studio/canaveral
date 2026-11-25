@@ -1,5 +1,8 @@
+/// <reference lib="es2024.promise" />
+
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { LiveSegmenter, MAX_LIVE_INIT_BYTES, MAX_LIVE_SEGMENT_BYTES, liveSegmentValid, startsWithKeyFrame } from "../../src/mobile-live.ts";
 import type { LiveItem } from "../../src/mobile-live.ts";
 import { LiveCaptureHub, LiveCaptureRefused } from "../../src/live-capture.ts";
@@ -233,6 +236,47 @@ test("a viewer that leaves while its capture is still being opened leaves the ca
   await sleep(300); seen.close(); kept.release(); await receipt(unknown);
   assert.deepEqual(unknown.receipts, [{ hostCleaned: true }]);
   assert.deepEqual([unknown.journal.get(JOB.id)!.state, unknown.journal.get(JOB.id)!.cleaned], ["unknown", false]);
+});
+
+test("the live receipt attributes only a fence that caused the epoch to stop", async t => {
+  for (const first of ["fence", "failure"]) await t.test(first, { timeout: 5000 }, async () => {
+    const stop = { cause: "fence" as const, leaseId: randomUUID(), leaseRevision: 7 };
+    const read = Promise.withResolvers<Uint8Array>(), reading = Promise.withResolvers<void>();
+    const output = Promise.withResolvers<Uint8Array>(), cleanup = Promise.withResolvers<void>();
+    const result = Promise.withResolvers<LiveReceipt>(), journal = new Map<string, Record<string, unknown>>();
+    let fenced = false;
+    const encoder: NativePipe = {
+      read: () => output.promise, async write(data) { return data.length; },
+      async end() {}, async wait() { return 0; }, async close() { output.resolve(Buffer.alloc(0)); },
+    };
+    const source: LiveCaptureSource = {
+      encoder: "/fixture/ffmpeg", guestSource: true, notRunning: () => false,
+      leaseFence: () => fenced ? stop : undefined,
+      async openSource() {
+        return {
+          ...encoder,
+          read() { reading.resolve(); return read.promise; },
+          async close() {
+            // In the failure-first ordering the fence appears only after the pipeline enters cleanup.
+            fenced = true;
+            cleanup.resolve();
+            throw new Error("Guest recorder stop is unproven.");
+          },
+        };
+      },
+      async openEncoder() { return encoder; },
+    };
+    const hub = new LiveCaptureHub({ load: id => journal.get(id), save: (id, value) => journal.set(id, value),
+      async report(_, value) { result.resolve(value); } });
+    const handle = hub.acquire(JOB, source), viewer = handle.subscribe(() => !fenced);
+    await reading.promise;
+    if (first === "fence") { fenced = true; read.resolve(Buffer.alloc(0)); }
+    else read.reject(new Error("Recorder failed before the fence."));
+    await cleanup.promise;
+    viewer.close(); handle.release();
+    assert.deepEqual(await result.promise, first === "fence" ? { hostCleaned: true, stop } : { hostCleaned: true });
+    assert.deepEqual(journal.get(JOB.id)?.stop, first === "fence" ? stop : undefined);
+  });
 });
 
 test("an unproven stop ends the capture as unknown, and a host without capture reports clean without running", async () => {
