@@ -133,7 +133,7 @@ test('SDK streams the exact MP4 through partial writes, verifies digest/cleanup,
   await assert.rejects(video.record({ write: bytes => bytes.length }));
 });
 
-test('EOF after ACK is incomplete without persisted ACK acceptance', async () => {
+test('a null receive after ACK is incomplete without persisted ACK acceptance', async () => {
   for (const inspect of [false, true]) {
     const wire = new Wire();
     wire.queue.push(mp4, finish, null);

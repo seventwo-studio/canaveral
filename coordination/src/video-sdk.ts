@@ -115,6 +115,8 @@ export class VideoClient {
           if (remaining <= 0) throw new SessionError('Video completion timed out.', 'video_incomplete');
           const ended = await bounded(() => this.connection.receive(remaining), { ...this.options, timeoutMs: remaining }, () => this.close());
           if (ended !== null) throw new SessionError('Unexpected data after completed video.', 'video_incomplete');
+          // A null receive can mean timeout. Direct channels need an explicit disconnect.
+          if (!this.inspect) throw new SessionError('Video completion is unconfirmed.', 'video_incomplete');
         } catch (error) {
           if (!transportFailure(error)) throw error;
           if (!this.inspect && error.code !== 'session_disconnected') throw new SessionError('The connection reset before recording completion was confirmed.', 'video_incomplete');
