@@ -124,11 +124,36 @@ fn run() -> Result<(), &'static str> {
 }
 #[cfg(unix)]
 fn main() {
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|arg| arg.starts_with("--runtime-"))
+    {
+        match runtime_management() {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+    }
     if let Err(error) = run() {
         eprintln!("{error}");
         std::process::exit(1);
     }
 }
+#[cfg(unix)]
+fn runtime_management() -> Result<bool, &'static str> {
+    use canaveral_model_execution::{controller::RunnerConfig, runtime_management};
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let request = runtime_management::Request::parse(&args)?;
+    let config: RunnerConfig = serde_json::from_slice(&private_bytes(request.config)?)
+        .map_err(|_| "invalid configuration")?;
+    let (report, succeeded) = runtime_management::execute(&request, &config.execution)?;
+    println!("{report}");
+    Ok(succeeded)
+}
+
 #[cfg(not(unix))]
 fn main() {
     eprintln!("owned model execution is unsupported on this platform");

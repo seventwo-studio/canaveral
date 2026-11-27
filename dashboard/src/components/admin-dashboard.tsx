@@ -259,9 +259,7 @@ export function AdminOverview({
                     </p>
                   </div>
                   <Button asChild variant="outline" size="sm">
-                    <a
-                      href={`#${h.kind === "orchestrator" || h.provider === "kubevirt" ? "orchestrators" : "hosts"}/${encodeURIComponent(h.id)}/resources`}
-                    >
+                    <a href={`#hosts/${encodeURIComponent(h.id)}/resources`}>
                       Review<span className="sr-only"> {h.name}</span>
                     </a>
                   </Button>

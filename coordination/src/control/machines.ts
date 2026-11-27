@@ -10,7 +10,7 @@ import type { ControlModule, ControlOptions, ControlRequest } from "./contracts.
 
 import { initializeLifecycle, isDeleted, computeReserved, deletion, hasPendingPowerOff, lifecycleAssignment, reportLifecycle } from "./lifecycle.ts";
 
-import { legacyJson, legacyDigest, normalizeTemplate } from "./templates.ts";
+import { hostProvider, legacyJson, legacyDigest, normalizeTemplate } from "./templates.ts";
 import { initializeInfrastructure, claimSetup, healthReady, recordInfrastructure, recordHostImages } from "./infrastructure.ts";
 import { recordPreparation } from "./preparation.ts";
 import { initializePressure, pressureAdmission, pressureRefusal, pressureView, recordPressure } from "./pressure.ts";
@@ -64,7 +64,7 @@ export const validateTemplate = normalizeTemplate;
 const platformRuntimes: Record<string, string[]> = { macos: ["apple", "android", "ios"], linux: ["libvirt", "android"], windows: ["hyperv"] };
 export function machineImageRuntime(host: Json, image: Json): string {
   if (!platformRuntimes[host.provider]) {
-    if (!["apple", "libvirt", "hyperv", "android", "ios", "kubevirt"].includes(host.provider) || (image.runtime ?? host.provider) !== host.provider) failure("Lease image runtime differs from its host adapter.");
+    if (!["apple", "libvirt", "hyperv", "android", "ios"].includes(host.provider) || (image.runtime ?? host.provider) !== host.provider) failure("Lease image runtime differs from its host adapter.");
     return host.provider;
   }
   const names: string[] = Array.isArray(host.runtimes) ? host.runtimes : Object.keys(host.runtimes ?? {});
@@ -98,8 +98,8 @@ export function placementSize(image: Json, overrides: Partial<Resources>, preset
 }
 export function validateOffer(value: unknown): Json {
   const input = object(value);
-  const result: Json = { name: text(input.name, "host name"), capacity: machineResources(input.capacity), provider: text(input.provider, "provider") };
-  if (!["macos", "linux", "windows", "libvirt", "hyperv", "apple", "kubevirt", "native", "android", "ios"].includes(result.provider)) failure("Unsupported provider.");
+  const provider = hostProvider(input.provider);
+  const result: Json = { name: text(input.name, "host name"), capacity: machineResources(input.capacity), provider };
   if ("leaseProtocol" in input) { if (input.leaseProtocol !== 1) failure("Unsupported lease execution protocol."); result.leaseProtocol = 1; }
   if (!Array.isArray(input.templates) || input.templates.length > 100) failure("Offer at most 100 installed templates.");
   result.templates = (input.templates as unknown[]).map(validateTemplate);
@@ -178,7 +178,7 @@ export function validateMachineRequest(value: unknown): Json {
   return result;
 }
 
-function persistedOffer(value: unknown): Json | undefined {
+export function persistedOffer(value: unknown): Json | undefined {
   try { return validateOffer(JSON.parse(String(value))); }
   catch (error) { if (error instanceof ServiceError || error instanceof SyntaxError) return undefined; throw error; }
 }
@@ -327,11 +327,12 @@ export class MachineStore implements ControlModule {
       return { id, provider: proposed.provider };
     });
   }
-  enroll(value: Json, token: string): Json {
+  enroll(value: Json, token: string, setupOnly = false): Json {
     const id = machineIdentifier(value.id), credential = machineDigest(secret(value.credential)), offer = validateOffer(value.offer);
     return this.transaction(db => {
       const global = this.options.enrollmentToken !== undefined && secureEqual(token, this.options.enrollmentToken);
-      if (!global && !this.hooks.some(hook => hook.claimSetup?.(db, token, id, offer))) claimSetup(db, token, id, offer, this.store.clock());
+      if (setupOnly) claimSetup(db, token, id, offer, this.store.clock());
+      else if (!global && !this.hooks.some(hook => hook.claimSetup?.(db, token, id, offer))) claimSetup(db, token, id, offer, this.store.clock());
       // New fenced identities and retired runtime aliases cannot be adopted by legacy enrollment.
       if ((table(db, "runner_bindings") && db.prepare("SELECT 1 FROM runner_bindings WHERE runner=?").get(id)) || (table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(id))) failure("Host identity is already fenced or retired.", 403);
       const old = db.prepare("SELECT credential FROM hosts WHERE id=?").get(id);
@@ -398,7 +399,7 @@ export class MachineStore implements ControlModule {
       requireAdmin(req);
       return db.prepare("SELECT * FROM hosts ORDER BY id").all().filter(row => !(table(db, "retired_runners") && db.prepare("SELECT 1 FROM retired_runners WHERE id=?").get(row.id!))).map(row => {
         const offer = persistedOffer(row.offer), maintenance = this.maintenance.summary(db, String(row.id));
-        if (!offer) return { id: row.id, maintenance, online: false, enabled: Boolean(row.enabled), lastSeen: row.seen, placementReady: false, invalidOffer: true, templates: [], reserved: this.used(db, String(row.id)), capacity: { cpu: 0, memoryMiB: 0, diskGiB: 0 }, available: { cpu: 0, memoryMiB: 0, diskGiB: 0 } };
+        if (!offer) return { id: row.id, name: row.id, provider: "unsupported", maintenance, online: false, enabled: Boolean(row.enabled), lastSeen: row.seen, placementReady: false, invalidOffer: true, detail: "Host offer is unsupported. Review any outstanding assignments and resources before cleanup.", templates: [], reserved: this.used(db, String(row.id)), capacity: { cpu: 0, memoryMiB: 0, diskGiB: 0 }, available: { cpu: 0, memoryMiB: 0, diskGiB: 0 } };
         const online = this.store.clock() - Number(row.seen) < this.leaseSeconds;
         const health = table(db, "host_health") ? db.prepare("SELECT * FROM host_health WHERE host=?").get(row.id!) : undefined;
         const sample = table(db, "resource_samples") ? db.prepare("SELECT * FROM resource_samples WHERE host=? ORDER BY captured DESC LIMIT 1").get(row.id!) : undefined;
@@ -406,9 +407,9 @@ export class MachineStore implements ControlModule {
         const system = report?.environment?.system;
         const platforms: Record<string, string> = { Darwin: "macos", Linux: "linux", Windows: "windows", apple: "macos", ios: "macos", hyperv: "windows", libvirt: "linux", macos: "macos", linux: "linux", windows: "windows" };
         const reserved = this.used(db, String(row.id)), limits = this.limits(db, row), physical = physicalBudget(db, { hostId: String(row.id) });
-        return { ...offer, id: row.id, maintenance, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, ...(physical ? { physicalDomainId: physical.domainId, effectiveCapacity: physical.capacity } : {}), kind: offer.provider === "kubevirt" ? "orchestrator" : "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
+        return { ...offer, id: row.id, maintenance, online, enabled: Boolean(row.enabled), lastSeen: row.seen, reserved, ...(physical ? { physicalDomainId: physical.domainId, effectiveCapacity: physical.capacity } : {}), kind: "host", health: report ? { ...report, receivedAt: health!.received, fresh: this.store.clock() - Number(health!.received) < 120 } : null,
           platform: platforms[system] ?? platforms[offer.provider] ?? null, runtimes: [
-            ...(offer.runtimes ?? (offer.provider === "kubevirt" ? [] : [offer.provider])),
+            ...(offer.runtimes ?? [offer.provider]),
             ...(offer.inference || (physical && table(db, "model_runner_approvals")
               && db.prepare("SELECT 1 FROM model_runner_approvals WHERE domain=? AND revoked=0").get(physical.domainId)) ? ["inference"] : []),
             ...(offer.provider === "macos" && this.options.browserHosts?.includes(String(row.id)) ? ["browser"] : []),
@@ -620,6 +621,7 @@ export class MachineStore implements ControlModule {
     const maintenance = this.maintenance.handle(req, operation => this.transaction(operation));
     if (maintenance) return maintenance;
     if (method === "POST" && req.path === "/v1/hosts/enroll") return { body: this.enroll(body, token) };
+    if (method === "POST" && req.path === "/v1/hosts/enroll/setup") return { body: this.enroll(body, token, true) };
     if (parts.length === 4 && parts[0] === "v1" && parts[1] === "hosts" && method === "POST") {
       if (parts[3] === "physical-domain") return { body: this.transaction(db => {
         requireAdmin(req); fields(body, ["domainId"]);

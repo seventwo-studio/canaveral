@@ -76,7 +76,7 @@ For settings, keep related field labels and controls within one divided group. P
 
 ### Page layouts
 
-The Machines and Orchestrators lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area. Editable settings share one outlined group with horizontal row dividers. At a form width of 512px, each row puts its label and control in equal columns. Narrower groups stack each label above its control. Place the submit action beneath the group at its trailing edge.
+The Machines and Hosts lists keep creation actions in the sticky destination header. The Machines list uses horizontal rules on wide screens and labeled rows on phones. Overview opens with the attention list, then groups fleet state and host reservations in one panel. Account and API tokens use a 672px reading area. Editable settings share one outlined group with horizontal row dividers. At a form width of 512px, each row puts its label and control in equal columns. Narrower groups stack each label above its control. Place the submit action beneath the group at its trailing edge.
 
 | Other destinations | Layout |
 | --- | --- |
@@ -100,7 +100,7 @@ Forms use 16px between fields and 6px between a label and its control. Dialog he
 | Machine control | Selected machine | Use the available display, input, accessibility, file and terminal tools. A headless machine can expose files and terminals without a display connection. |
 | Machine sources | Image library (`#images`) | Search downloaded artifacts, inspect provenance and open a blueprint from a source. Administrators can open the registry, import images and inspect image activity. |
 | Machine sources | Machine blueprints (`#blueprints`) | Inspect immutable revisions and create a machine from an eligible offer. Administrators can create blueprints and revisions. |
-| Infrastructure, administrators | Hosts (`#hosts`) and Orchestrators (`#orchestrators`) | Connect a runner or open a named resource at `#hosts/<id>` or `#orchestrators/<id>`. Inspect resource reports, limits and inventory, then return to the parent list. |
+| Infrastructure, administrators | Hosts (`#hosts`) | Connect a runner or open a named resource at `#hosts/<id>`. Inspect resource reports, limits and inventory, then return to the parent list. |
 | Infrastructure, administrators | System (`#system`) | Inspect applications, leases, waiting requests, jobs, operations and access sessions. Leases show their holder's label and the time remaining. |
 | Infrastructure, administrators | Queue (`#queue`) | Read the waiting requests in attempt order with position and the reason each waits, and the leases that hold capacity. Cancel a named request, or open the events of a request, lease or application. |
 | Infrastructure, administrators | Activity (`#activity`) | Follow the event log live, filter by family, kind, attention, application, host or lease, and load older events. `#activity/<subject>/<uuid>` opens it on one application, lease, request, host or machine. |

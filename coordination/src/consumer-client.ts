@@ -360,7 +360,8 @@ export class Transport {
   }
 
   /** `mutating` makes every uncertain failure carry `outcome: "unknown"`. `requestId` is the caller-owned body UUID. */
-  async call(method: "GET" | "POST", path: string, body: unknown, accepted: number[], mutating: boolean, requestId?: string): Promise<{ status: number; json: unknown }> {
+  async call(method: "GET" | "POST", path: string, body: unknown, accepted: number[], mutating: boolean, requestId?: string,
+    limits?: { timeoutMs: number; signal: AbortSignal }): Promise<{ status: number; json: unknown }> {
     const unknownOutcome = mutating ? { outcome: "unknown" as const } : {};
     const identity = requestId === undefined ? {} : { requestId };
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
@@ -372,6 +373,7 @@ export class Transport {
     const options: https.RequestOptions = {
       protocol: this.#base.protocol, hostname: this.#base.hostname.replace(/^\[|\]$/g, ""), port: this.#base.port || undefined,
       method, path: this.#prefix + path, headers, agent: false,
+      ...(limits ? { signal: limits.signal } : {}),
       ...(this.#secure ? { minVersion: "TLSv1.2" as const, rejectUnauthorized: true, ...(this.#ca !== undefined ? { ca: this.#ca } : {}) } : {}),
     };
     const reply = await new Promise<{ response: IncomingMessage; chunks: Buffer[] }>((resolve, reject) => {
@@ -384,7 +386,7 @@ export class Transport {
       const timer = setTimeout(() => {
         timedOut = true;
         fail(new ConsumerTransportError("The request timed out.", "timeout", { ...unknownOutcome, ...identity }));
-      }, this.#timeoutMs);
+      }, limits ? Math.min(limits.timeoutMs, this.#timeoutMs) : this.#timeoutMs);
       request.on("error", (error: NodeJS.ErrnoException) => {
         if (timedOut) return;
         const code = typeof error.code === "string" ? error.code : "";

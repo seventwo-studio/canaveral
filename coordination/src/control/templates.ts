@@ -1,3 +1,4 @@
+import { requireKubernetesBackends } from "../host-deployment.ts";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -129,7 +130,7 @@ function normalizeDefinition(value: unknown, operatorBundle: boolean): Template 
     if (typeof v.artifactSha256 !== "string" || !full(/^[a-f0-9]{64}$/, v.artifactSha256)) throw new ServiceError("A catalogue image requires its artifact checksum.", 400);
     result.artifactSha256 = v.artifactSha256;
   }
-  for (const [key, allowed] of [["mediaType", ["disk", "installer"]], ["imageKind", ["base", "derived"]], ["runtime", ["apple", "libvirt", "hyperv", "android", "ios", "kubevirt"]]] as const) {
+  for (const [key, allowed] of [["mediaType", ["disk", "installer"]], ["imageKind", ["base", "derived"]], ["runtime", ["apple", "libvirt", "hyperv", "android", "ios"]]] as const) {
     if (key in v) { if (!allowed.some(x => x === v[key])) throw new ServiceError(`Invalid ${key}.`, 400); result[key] = v[key]; }
   }
   if ("cloneIdentity" in v) { if (v.cloneIdentity !== "linux-cloud-init" || os !== "linux") throw new ServiceError("Unsupported clone identity provisioning.", 400); result.cloneIdentity = v.cloneIdentity; }
@@ -157,6 +158,19 @@ function normalizeDefinition(value: unknown, operatorBundle: boolean): Template 
   }
   return result;
 }
+const HOST_PROVIDERS: readonly string[] = ["macos", "linux", "windows", "apple", "libvirt", "hyperv", "android", "ios", "native"];
+export function hostProvider(value: unknown): string {
+  if (typeof value !== "string" || !HOST_PROVIDERS.includes(value)) throw new ServiceError("Unsupported host provider. Configure a supported canaverald host provider.", 400, { code: "unsupported_host_provider" });
+  return value;
+}
+/** Historical ledgers can use a partial host offer. Preserve its exact template identities. */
+export function supportedStoredHostOffer(value: unknown): Record<string, unknown> | undefined {
+  try {
+    const offer = object(typeof value === "string" ? JSON.parse(value) : value);
+    hostProvider(offer.provider);
+    return offer;
+  } catch (error) { if (error instanceof ServiceError || error instanceof SyntaxError) return undefined; throw error; }
+}
 export const HOST_RUNTIMES: Readonly<Record<string, readonly string[]>> = { macos: ["apple", "android", "ios"], linux: ["libvirt", "android"], windows: ["hyperv"] };
 export function enabledRuntimes(config: Record<string, unknown>): Record<string, Record<string, unknown>> {
   let runtimes = config.runtimes;
@@ -181,13 +195,15 @@ export function loadHostConfig(path: string): Record<string, unknown> & { templa
   return loadHost(config, dirname(resolve(path)));
 }
 export function loadHost(config: Record<string, unknown>, directory: string): Record<string, unknown> & { templates: Record<string, unknown>[] } {
+  requireKubernetesBackends(config);
+  hostProvider(config.provider);
   if (!Array.isArray(config.templates)) throw new ServiceError("Invalid host template catalogue.", 400);
   const templates = config.templates.map(item => {
     const entry = object(item);
     if (!("templateFile" in entry)) { normalizeOperatorTemplate(entry); return structuredClone(entry); }
     only(entry, ["templateFile", "bindings"]);
     const file = text(entry.templateFile, "template file", 8000), bindings = object(entry.bindings ?? {});
-    only(bindings, ["image", "pvc", "storageClass", "network", "secureBoot", "tpm", "ssh", "macOSRestoreImage", "macOSAuxiliaryStorage", "macOSHardwareModel"]);
+    only(bindings, ["image", "network", "secureBoot", "tpm", "ssh", "macOSRestoreImage", "macOSAuxiliaryStorage", "macOSHardwareModel"]);
     const definition = { ...object(JSON.parse(readFileSync(resolve(directory, file), "utf8")) as unknown), ...bindings };
     normalizeOperatorTemplate(definition); return definition;
   });

@@ -21,7 +21,8 @@ const actions: Record<string, string> = {
   session: "Close the session.",
   update: "Wait for the managed update to finish.",
   unsupportedProof: "Verify the workload has stopped manually.",
-  poolScope: "Verify each physical node separately.",
+  unsupportedHost:
+    "Review outstanding host assignments and resources before cleanup.",
   notIdle: "Wait for runner activity to finish.",
   acknowledgement: "Check runner connectivity and wait for fresh confirmation.",
   agentUnsupported: "Upgrade the host agent through managed updates.",
@@ -155,19 +156,13 @@ export function Maintenance({ host }: { host: string }) {
           <p>No maintenance history.</p>
         ) : (
           <>
-            <p>
-              {status.scope === "pool" ? "KubeVirt pool" : "Direct host"} ·{" "}
-              {status.phase}
-            </p>
+            <p>Direct host · {status.phase}</p>
             <p>Admission owners: {status.owners.join(", ") || "None"}</p>
             <p>Last runner confirmation: {since(status.confirmed)}</p>
             <p>
               {safe ? "Safe to power off" : "Not safe to power off"} ·
               Canaveral-managed workloads on this host.
             </p>
-            {status.scope === "pool" && (
-              <p>The pool verdict cannot cover physical nodes.</p>
-            )}
             <ul className="list-disc pl-5">
               {status.blockers.map((b, i) => (
                 <li key={i}>

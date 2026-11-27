@@ -41,13 +41,46 @@ the user does not install Python, pip packages or a virtual environment.
 
 ## Distribution and lifecycle
 
-Canaveral's trusted release manifest pins platform, architecture, entrypoint,
-required assets and SHA-256 identities. Assets may ship with Canaveral or be
-provisioned automatically from a pinned release source. Installation verifies
-the whole package into private state before claiming model work. Preserve
-relative library and helper paths, reject unsafe paths and links, and publish
-only a fully verified installation. Reuse verified installations between jobs;
-do not fetch an entire engine for every generation.
+The [engine catalog](../crates/model-execution/src/runtime-pins.json) ships inside
+the trusted Canaveral release. It pins the upstream archive URL, compressed and
+installed byte counts, SHA-256 and extracted tree for each engine and host
+combination. The Rust executor owns the package store and provisions the matching
+engine before claiming work. The local [management commands](rust-model-execution.md#runtime-management)
+can prepare and verify the same cache ahead of a job.
+
+| Engine | Pinned release | Catalog hosts |
+| --- | --- | --- |
+| Ollama | v0.40.17 | macOS aarch64, Linux aarch64 and x86_64 (CPU) |
+| llama.cpp | v1.0.0, binary tag b12359 | macOS aarch64, Linux aarch64 and x86_64 |
+
+The Ollama Linux pins use the upstream base Zstandard archives. The installed
+trees omit bundled CUDA and Vulkan libraries. GPU support, including separate
+CUDA/JetPack and ROCm packages, is deferred. The Ollama v0.40.17 assets were
+retrieved on 2026-11-23 and checked against the
+[upstream checksum list](https://github.com/ollama/ollama/releases/download/v0.40.17/sha256sum.txt).
+MLX-LM and vLLM remain unavailable pending qualified hermetic packages. A catalog
+entry is qualified only when a reviewed promotion cites passing evidence from
+runs of `main`; see [runtime qualification](runtime-qualification.md). No entry
+is promoted, so every catalog entry is unqualified. Use Ollama only on
+trusted single-tenant hosts. The importer and server expose an unauthenticated
+loopback API. The deny proxy covers only non-loopback registry traffic. Go's
+default HTTP transport bypasses proxies for localhost and loopback addresses
+on every port, so a local caller can use Ollama's unauthenticated registry API
+to reach other loopback services. Ollama remains unqualified until the host
+enforces ingress, egress and filesystem isolation.
+
+The executor verifies compressed size and SHA-256 before opening an archive and
+publishes only a complete verified tree. Installation preserves relative
+library and helper paths. The upstream library aliases that these releases
+require become regular files. Published versions remain available while a
+live or unresolved journal references them. For older journals without a
+package identity, the executor retains every version until reconciliation.
+Install and verify from the updated executor to select a new catalog pin. The
+registry reports installed versions and references in JSON. Reinstall an
+unreferenced current pin to repair integrity failures, including
+`runtime_cache_entry_unsafe`. Repair preserves the damaged entry in private
+quarantine. See
+[runtime management](rust-model-execution.md#runtime-management) for recovery.
 
 Model artifacts remain separately pinned. GGUF models and model snapshot
 directories require explicit local artifact identities; a public label is never
@@ -65,12 +98,16 @@ an unresolved execution's artifacts or receipts.
 ## Verification boundary
 
 Portable owned-runtime fixtures verify protocol, provisioning and lifecycle
-behavior. They load no model weights and do not qualify the distributed engines.
-Real runtime releases, native library loading, process topology, accelerator use,
-model quality, resource fit and ingress/inventory isolation need separate native
-acceptance. Runtime packages also require maintained release manifests and
-license notices before product distribution. Keep unsupported or unqualified
-combinations explicit rather than advertising them as ready.
+behavior. The [native acceptance workflow](../.github/workflows/model-acceptance.yaml)
+exercises CPU generation through the public job API, using a
+[pinned Apache-2.0 GGUF](../fixtures/model-execution/real-model.json), and
+checks package installation, verification, cleanup and removal. Full runs also
+exercise repair and interrupted archive transport. Use its per-cell JSON
+artifacts to identify the tested runner image and package and model digests.
+Host qualification remains a separate gate for offering model capacity.
+Accelerator use, resource fit and isolation from untrusted local callers
+require separate evidence. Keep release pins and
+[third-party notices](../THIRD_PARTY_NOTICES.md) current.
 
 Implementation details: [Rust execution](rust-model-execution.md),
 [model job wire contract](model-job-contract.md) and

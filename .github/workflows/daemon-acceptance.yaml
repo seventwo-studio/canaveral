@@ -1,0 +1,78 @@
+name: canaverald service acceptance
+
+on:
+  push:
+    branches: ['feat/runtime-acceptance*']
+  pull_request:
+    paths:
+      - '.github/workflows/daemon-acceptance.yaml'
+      - 'fixtures/canaverald/**'
+      - 'deploy/systemd/canaverald.service'
+      - 'deploy/launchd/com.canaveral.canaverald.plist'
+      - 'coordination/src/canaverald.ts'
+      - 'coordination/src/cli.ts'
+      - 'coordination/src/host.ts'
+      - 'coordination/src/host-runtimes/**'
+      - 'coordination/package*.json'
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daemon-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Build coordination
+        run: |
+          npm --prefix coordination ci --ignore-scripts
+          npm --prefix coordination run build
+      - name: Check daemon lifecycle in the foreground
+        run: node fixtures/canaverald/acceptance.mjs foreground "${RUNNER_TEMP}/canaverald-evidence.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: canaverald-smoke
+          path: "${{ runner.temp }}/canaverald-evidence.json"
+
+  service:
+    if: github.event_name != 'pull_request'
+    name: service (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Build coordination
+        run: |
+          npm --prefix coordination ci --ignore-scripts
+          npm --prefix coordination run build
+      - name: Check the native service lifecycle
+        run: node fixtures/canaverald/acceptance.mjs service "${RUNNER_TEMP}/canaverald-evidence.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: canaverald-${{ matrix.runner }}
+          path: "${{ runner.temp }}/canaverald-evidence.json"

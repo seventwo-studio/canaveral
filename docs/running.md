@@ -13,7 +13,6 @@ Keep the production controller in Docker and update its immutable image through 
 | Linux host, libvirt | Native KVM/libvirt and prepared images; service account owns its private state and authorized storage |
 | macOS host, Apple VM | Apple hardware and admitted native runner; native boot/stop/cleanup acceptance remains backend-specific |
 | Windows host, Hyper-V | Supported host edition and Hyper-V authority; operator-provisioned private ACLs require Windows acceptance |
-| Kubernetes worker, KubeVirt | Separate KubeVirt/CDI installation and scoped resource ownership; bounded execution creation remains gated on independent fencing |
 | Android/iOS runners | Installed native SDKs and explicit adapter configuration; helper staging does not prove adoption or device acceptance |
 | Linux direct-boot guest | ARM64 Image/EROFS/bootstrap inputs and trusted per-launch medium; native handoff acceptance remains open |
 | Model runner | Existing enrollment and configured model runtime; real inference and accelerator acceptance are separate |
@@ -44,14 +43,30 @@ existing controller database before its first upgrade to the user account schema
 Copy an example from `examples/` into a private host configuration. Set a deliberate host capacity limit, correct architecture, bootable base image paths and immutable revision IDs. Use reusable template files and preparation recipes as described in [Configurable computers](templates.md). Remove templates that are not installed. On each host:
 
 ```sh
-node coordination/dist/src/cli.js --url https://canaveral.example.internal host \
+node coordination/dist/src/canaverald.js --url https://canaveral.example.internal \
   --config /etc/canaveral/host.json --state /var/lib/canaveral/agent \
   --enrollment-token-file /etc/canaveral/enrollment.token
 ```
 
-Deliver the enrollment file through your normal secret-management channel. After successful enrollment the agent can restart without the enrollment argument using its saved per-host identity. Keep its state private and persistent. Do not reinitialize identity on each launch.
+The npm package installs the same executable as `canaverald`. For first
+enrollment, deliver the enrollment file through your secret-management channel.
+Customize the service example for the host. Set the controller URL and paths,
+and run the daemon under a non-root account that owns the private host
+configuration and persistent state.
 
-For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and access to the template/storage directories. Let the host's libvirt ownership and SELinux/AppArmor policies govern runtime disk access; do not place the disks under the private agent-credential directory. `deploy/systemd/canaveral-host.service` is an editable service example. On a host that offers Android emulator leases, also install `deploy/systemd/canaveral-host.service.d/android-leases.conf`, which sets `KillMode=process` so that stopping or restarting the host does not kill the detached lease supervisors and their emulators (or use an equivalent separate scope). Other hosts keep the default `control-group` cleanup.
+- On Linux, set `User=` in the [systemd unit](../deploy/systemd/canaverald.service). Install the unit, then run `systemctl daemon-reload` and `systemctl start canaverald.service`.
+- On macOS, set `UserName` in the [LaunchDaemon plist](../deploy/launchd/com.canaveral.canaverald.plist). Install it under `/Library/LaunchDaemons`, then run `launchctl bootstrap system /Library/LaunchDaemons/com.canaveral.canaverald.plist` and `launchctl kickstart system/com.canaveral.canaverald`.
+
+After enrollment, remove `CANAVERAL_ENROLLMENT_TOKEN_FILE` from the service
+definition. Reload the unit or re-bootstrap the plist and restart with the
+same state directory to reuse the saved host identity. Run
+`canaverald --inventory` and `canaverald runtimes status --json` as the
+service account, passing the service's `--config` and `--state` paths to both.
+See [host runtime commands](host-runtimes.md) for package management.
+
+For Linux, install KVM, libvirt, `virsh`, `qemu-img` and matching EFI firmware. Desktop guests need graphical prepared images; Windows 11 templates also need suitable firmware and `swtpm`. The configured libvirt network must exist. The service account must have local libvirt access and own the VM storage described in [libvirt VM storage](#libvirt-vm-storage); do not place the disks under the private agent-credential directory. On a host that offers Android emulator leases, also install `deploy/systemd/canaverald.service.d/android-leases.conf`, which sets `KillMode=process` so that stopping or restarting the host does not kill the detached lease supervisors and their emulators (or use an equivalent separate scope). Other hosts keep the default `control-group` cleanup. When switching from the
+previous sample unit, stop and disable it before starting the new unit. Keep the
+same state directory and move any applicable drop-ins with the service name.
 
 For Windows, enable Hyper-V on a supported host edition, install Node.js 24 or later and use prepared Generation 2 VHDX templates plus an existing virtual switch. Run the agent under an account authorized for Hyper-V. Configure private state/storage paths in the Windows example. For first-boot preparation, use a base with Cloudbase-Init enabled and a ConfigDrive recipe. Windows guests require appropriate usage rights; Microsoft's [Enterprise evaluation](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise) lasts 90 days. Canaveral does not bypass activation or licensing.
 
@@ -65,14 +80,90 @@ guest boot failure and cloud-init failure when the hypervisor reports Running
 but no guest preparation receipt arrives. This log is available after rebuilding
 the native runner; controller container updates do not replace native binaries.
 
-New KubeVirt VMs from 0.2.2 pin their NIC MAC to the Canaveral machine identity.
-Earlier VM definitions may have no `macAddress`, allowing a replacement VMI to
-receive a new one. Guests whose saved networking matches the original MAC can
-then lose network access. Upgrading does not rewrite existing VM interfaces:
-record the original MAC from the first VMI or the guest's network configuration,
-stop the legacy VM, and explicitly pin that original address before restarting.
-Preserve the VM, preparation Secret and disk identities. Do not infer the old
-address from an already replaced VMI or recreate its disk to repair networking.
+### Libvirt VM storage
+
+QEMU runs under its own account, never the daemon's. The daemon shares VM
+storage with it through one dedicated group and never changes host-wide
+`qemu.conf` settings. Each domain the daemon defines carries a static DAC label
+without relabelling, so libvirtd neither chowns the daemon's files nor applies
+its dynamic ownership:
+
+```xml
+<seclabel type="static" model="dac" relabel="no"><label>libvirt-qemu:canaveral-vm</label></seclabel>
+```
+
+| Item | Owner and mode | Configuration |
+| --- | --- | --- |
+| Storage group | Group `canaveral-vm`, GID `10002`; the QEMU account is a member | `vmGroup` and `vmGroupId` |
+| QEMU account | Distribution default `libvirt-qemu` (`qemu` on Fedora) | `qemuUser`; a name or `+UID`, never root or the daemon account |
+| Storage root (`storage`) | Daemon UID, group `canaveral-vm`, mode `2750` | Create it before starting the daemon |
+| Templates | Daemon UID, group `canaveral-vm`, mode `0640`, inside a directory QEMU can search | One regular file without hard links |
+| Per-machine directory | Daemon UID, group `canaveral-vm`, mode `2750` | Created by the daemon |
+| Writable disk | Daemon UID, group `canaveral-vm`, mode `0660` | Created by the daemon |
+| Owner marker, daemon state, journals and credentials | Daemon UID, mode `0600`/`0700` | Never readable by the group |
+
+The setgid storage root gives each new machine directory and disk its group,
+so the daemon need not be a member of `canaveral-vm` (the Kubernetes VM profile
+keeps only the libvirt socket group). Checks accept exactly these owners,
+groups and modes and nothing broader; anything else reports
+`libvirt_vm_storage_access` and preparation refuses before it provisions.
+Machines prepared before this contract keep private storage that QEMU cannot
+open; the daemon never widens it in place. Remove and recreate them.
+A UEFI definition keeps its variable store as `nvram.fd` in the machine
+directory. Libvirtd creates that file for its own configured QEMU account, so
+the daemon's ownership checks cover the directory and disk but not that file.
+UEFI and TPM state provisioning is not natively qualified.
+
+### Libvirt VM leases
+
+Consumer VM leases on a libvirt host run as transient domains under a per-lease
+guardian; see [libvirt supervision](libvirt-supervision.md). They need Linux 6.5
+or later, the VM storage above, a non-root daemon account and the released lease
+helper installed root-owned:
+
+```sh
+sudo install -d -m 0755 -o root -g root /usr/local/lib/canaveral
+sudo install -m 0755 -o root -g root canaveral-libvirt-native /usr/local/lib/canaveral/
+sha256sum /usr/local/lib/canaveral/canaveral-libvirt-native   # compare with the release manifest
+```
+
+Add the pinned helper and lease selectors to the host config:
+
+```json
+{
+  "provider": "libvirt", "storage": "/var/lib/libvirt/images/canaveral",
+  "leaseHelper": "/usr/local/lib/canaveral/canaveral-libvirt-native",
+  "leaseHelperSha256": "<sha256 from the release manifest>",
+  "leaseClockHelper": "/usr/local/lib/canaveral/canaveral-libvirt-native",
+  "leaseProtocol": 1,
+  "leaseImages": [{ "id": "lease-linux", "revision": "1", "arch": "amd64", "runtime": "libvirt" }],
+  "templates": [{ "id": "lease-linux", "revision": "1", "os": "linux", "arch": "amd64", "mode": "headless",
+    "firmware": "bios", "image": "/var/lib/libvirt/images/canaveral/lease-linux.qcow2", "network": "default",
+    "minimum": { "cpu": 1, "memoryMiB": 512, "diskGiB": 4 } }]
+}
+```
+
+A lease template must be headless x64 Linux booted by BIOS, without TPM,
+secure boot or guest access. On a physical `linux` host put `leaseHelper` and
+`leaseHelperSha256` under `runtimes.libvirt` instead. `canaverald runtimes
+status` shows `leases: {eligible: true}` on the libvirt row when the helper
+and kernel qualify.
+
+On bare metal, also install
+`deploy/systemd/canaverald.service.d/libvirt-leases.conf` with the service
+account in the libvirt socket group (for example `SupplementaryGroups=libvirt`
+on Debian and Ubuntu). The drop-in grants the daemon ambient `CAP_KILL`. A lease
+guardian uses it only when libvirtd cannot destroy a domain that must end: it
+then kills the recorded QEMU process through a pidfd after checking its start
+time. `CAP_KILL` lets the service signal any process, so grant it only on
+dedicated VM hosts. Without the drop-in such a lease stays fenced but unproven,
+with its reservation held, until libvirtd returns. Keep the default
+`KillMode=control-group`: guardians ignore `SIGTERM` and fence each lease when
+the daemon exits, so stopping or restarting the service always ends its leases.
+Under systemd's default `OOMPolicy=stop`, a kernel OOM kill of any process in
+the unit, a guardian included, stops the service and so fences every lease.
+Kubernetes pods never receive `CAP_KILL`; see
+[libvirt supervision](libvirt-supervision.md#kubernetes) for that gap.
 
 ## Docker
 
@@ -98,30 +189,28 @@ Run initialization once. It intentionally fails if credential files already exis
 
 The [optional web dashboard](dashboard.md) runs separately with `node coordination/dist/src/cli.js dashboard` or `docker compose --profile dashboard up -d`. It is not required by the orchestrator. Kubernetes has a separate opt-in `deploy/kubernetes/dashboard` Deployment and internal Service.
 
-Build the worker images when needed:
+Build the controller and libvirt worker images when needed:
 
 ```sh
 docker build --target orchestrator -t canaveral:local .
 docker build --target libvirt -t canaveral-libvirt:local .
-docker build --target kubevirt -t canaveral-kubevirt:local .
 ```
 
-A Linux libvirt worker container must reach the host's libvirt Unix socket and see image/disk paths at the same absolute paths as the host daemon. Mount only the intended socket, template directory, VM storage and private agent-state volume. The orchestrator itself does not require host virtualization privileges or access to host disks. The KubeVirt image uses `kubectl`; set `KUBECTL_VERSION` at build time to a version compatible with your cluster. The Apple and Hyper-V agents run natively.
+A Linux libvirt worker container must reach the host's libvirt Unix socket and see image/disk paths at the same absolute paths as the host daemon. Mount only the intended socket, template directory, VM storage and private agent-state volume. The orchestrator itself does not require host virtualization privileges or access to host disks. The Apple and Hyper-V agents run natively.
 
 ## Kubernetes
 
 The namespace overlays in `deploy/kubernetes/` use the namespace-free
-`deploy/orchestrator`, `deploy/dashboard` and `deploy/kubevirt` stages as their
+`deploy/orchestrator` and `deploy/dashboard` stages as their
 single source. Build/load the local images or select immutable released image
 references through a site overlay. Configure storage classes before applying if
-your cluster has no default class. The controller and worker need persistent volumes.
+your cluster has no default class. The controller needs a persistent volume.
 
 Provision TLS before starting the pods. Supply a CA-signed server certificate
 (`server.crt`, including intermediates), its key (`server.key`) and the trust root
 (`ca.crt`). Its DNS SANs must include `orchestrator`, `orchestrator.canaveral`,
 and `orchestrator.canaveral.svc`, plus any external ingress name. The dashboard
-uses `https://orchestrator:8765`; the worker uses
-`https://orchestrator.canaveral.svc:8765`. Your existing PKI or cert-manager can
+uses `https://orchestrator:8765`. Your existing PKI or cert-manager can
 issue these files; cert-manager is optional. Keep the key private.
 
 For a fresh installation, run these ordered steps from a built checkout:
@@ -138,10 +227,6 @@ kubectl -n canaveral create secret tls canaveral-controller-tls \
   --cert=./tls/server.crt --key=./tls/server.key
 kubectl -n canaveral create configmap canaveral-controller-ca \
   --from-file=ca.crt=./tls/ca.crt
-kubectl -n canaveral-guests create configmap canaveral-controller-ca \
-  --from-file=ca.crt=./tls/ca.crt
-kubectl -n canaveral-guests create secret generic canaveral-enrollment \
-  --from-file=enrollment.token=./secrets/enrollment.token
 kubectl apply -k deploy/kubernetes/orchestrator
 # Optional dashboard; requires the CA ConfigMap above.
 kubectl apply -k deploy/kubernetes/dashboard
@@ -149,19 +234,9 @@ kubectl apply -k deploy/kubernetes/dashboard
 
 Use one replica with the included Recreate strategy and persistent local/block storage for SQLite. The controller does not need Kubernetes API access. Add a private TLS ingress for external native hosts. For port-forward access, retain a URL hostname covered by the certificate and resolve it to loopback locally; a loopback IP URL needs its own IP SAN. Keep CA verification enabled.
 
-Running VMs inside Kubernetes requires a working KubeVirt + CDI installation, virtualization-capable nodes, suitable firmware, storage and prepared template PVCs. It is separate from merely running the Canaveral orchestrator in a pod. KubeVirt handles KVM access and pod scheduling; the controller pod is not privileged. macOS VM creation continues through separate Apple hosts, not generic Kubernetes Linux nodes.
+The controller's `stage-credentials` init container copies the credential Secret into a memory-backed volume as private regular files with mode `0600`. Its persistent volume must be writable by UID 10001. The pod uses `fsGroupChangePolicy: OnRootMismatch`.
 
-Set the intended templates, architectures and pool capacity in a patch to `deploy/kubevirt/configmap.json`; select the worker image in your site overlay over `deploy/kubernetes/worker-kubevirt`. Its default examples require `linux-server-template` and `linux-desktop-template` PVCs in `canaveral-guests`. Source PVCs must be offline and their sizes must fit the advertised minimums. Build/load the worker image and provision the namespace, CA and enrollment Secret above, then apply:
-
-```sh
-kubectl apply -k deploy/kubernetes/worker-kubevirt
-```
-
-The CLI accepts credentials only as regular files owned by its user with mode `0600`, and keeps host state in a directory with the same ownership and mode `0700`. Kubernetes Secret volumes are root-owned symbolic links, and a fresh volume root is not private to the process user. The controller and worker therefore copy their Secret entries into a memory-backed volume with a `stage-credentials` init container, and the worker keeps its state in `/data/host` on its PVC. An existing worker whose identity was saved at the PVC root needs `--state /data` kept, or a deliberate move of that directory, to keep the same host identity. Both pods set `fsGroupChangePolicy: OnRootMismatch`, so the kubelet adjusts group ownership only while the volume root does not yet match. The default recursive change would add group permissions to `/data/host` on every remount, and the worker would then refuse its own state. Storage drivers that ignore `fsGroup` must still give user 10001 write access to the volume root. CSI drivers that apply `fsGroup` themselves (`VOLUME_MOUNT_GROUP`) bypass this kubelet policy and need their own check that remounts keep `/data/host` private. The policy does not repair state already given group permissions by an earlier recursive mount; restore mode `0700` on such directories and `0600` on their files as user 10001 before restarting.
-
-The worker StatefulSet retains its host identity on a PVC and uses namespace-scoped access to VM resources and source-volume cloning. Its state is separate from individual VM root disks. Do not scale one pool configuration into multiple independent offers with the same capacity; divide the capacity deliberately. The in-cluster example uses HTTPS with an explicit CA file. Template VMs use independent CDI-cloned disks and `Always`/`Halted` run strategies. Console/VNC access uses `virtctl` and your existing Kubernetes credentials. Guest/network access and Windows secure-boot/TPM storage need acceptance against the cluster's actual KubeVirt configuration.
-
-These files are deployment inputs, not evidence of an installed cluster or successful VM boots. The implementation does not automatically deploy into a current kubeconfig context.
+These manifests require an operator to configure and apply them.
 
 ### Private ingress and optional network policies
 
@@ -177,12 +252,9 @@ prefix. See [dashboard proxy and account setup](dashboard.md). Ingress resources
 and controller annotations are installation-specific and are not in the base install.
 
 The separately applied `deploy/kubernetes/network-policies` example denies
-Canaveral namespace ingress except dashboard and worker access to the controller.
-It also restricts worker egress to DNS, the controller and an example API endpoint.
-Copy and edit it for your API server IPs/ports, DNS topology and guest preparation
-or SSH destinations before applying. Service DNAT and NetworkPolicy ordering vary
-by CNI; verify the actual API destination. A conformant cluster may have no
-NetworkPolicy-enforcing CNI, so verify enforcement independently.
+Canaveral namespace ingress except dashboard access to the controller.
+Adapt it to permit the intended ingress and external runner connections.
+Verify enforcement with your cluster network plugin.
 
 ```sh
 # Only after adapting the policy inputs and adding private ingress/runners rules:
@@ -196,13 +268,9 @@ automatically applied by the base overlays or release bundle.
 ### Pod Security and OpenShift
 
 The shipped Canaveral pods use non-root UID/GID 10001, no privilege escalation,
-dropped capabilities and RuntimeDefault seccomp. Worker state and kubectl cache
-live on its PVC; temporary files use an emptyDir at `/tmp` (also HOME). SSH uses
-explicit state paths for keys and known hosts. The root filesystem stays read-only.
-Namespace creation enforces Restricted Pod Security. KubeVirt launcher/importer
-pods may need exemptions managed by the KubeVirt/CDI operator and your cluster
-administrator; verify those before offering VM capacity in `canaveral-guests`.
-These labels do not establish that guest pods meet Restricted.
+dropped capabilities and RuntimeDefault seccomp. Temporary files use an emptyDir
+at `/tmp`. The root filesystem stays read-only. The namespaces enforce
+Restricted Pod Security.
 
 OpenShift restricted-v2 SCC allocates UIDs and groups, so the fixed `runAsUser`,
 `runAsGroup` and `fsGroup` 10001 fields conflict with its defaults. An OpenShift
@@ -213,3 +281,27 @@ Provision writable PVC/emptyDir ownership and readable mounted keys for the
 assigned group, and verify private-state ownership checks under that UID. Otherwise
 use a dedicated narrowly scoped SCC permitting 10001. Neither route has native
 OpenShift acceptance here; do not grant privileged access to the Canaveral pods.
+
+## Run canaverald in Kubernetes
+
+Set `"deployment": "kubernetes"` in the host JSON mounted at
+`/etc/canaverald/host.json`. Start the daemon with
+`--config /etc/canaverald/host.json --state /var/lib/canaverald --url <controller>`.
+Pre-provision `/var/lib/canaverald` on each selected node with mode `0700` and
+the pod's daemon UID as owner. Enroll each node using its
+[bootstrap token file](runner-enrollment.md#kubernetes-node-bootstrap).
+Change the DaemonSet image digest to update the daemon. Managed daemon updates
+and the containerd backend are disabled in this mode.
+
+**Drain the host first.** Drain it in Canaveral and wait for its cleanup proofs
+before replacing the pod or draining the Kubernetes node. SIGTERM on a node that
+still runs work is not a drain: the daemon cannot confirm quiescence, exits with
+status 1 after `shutdownGraceSeconds` and reports `host_shutdown_incomplete`.
+That outcome is the safe, documented behavior; it keeps the state and
+reservations. SIGTERM fences local admission and gives the daemon up to
+`shutdownGraceSeconds` to confirm quiescence and close its workers. The field
+accepts 1–300 seconds and defaults to 120. Set `terminationGracePeriodSeconds`
+above this value and allow time for any preStop hook. A daemon exits with
+status 0 after confirmed shutdown and status 1 when it could not confirm
+shutdown. Keep the node state for reconciliation with the same identity.
+Pod termination does not establish stop evidence or release reservations.

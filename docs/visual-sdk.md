@@ -67,6 +67,17 @@ The writer implements `write(bytes): number | Promise<number>` and may accept
 partial writes. `record()` writes the same MP4 bytes received from the host,
 checks their SHA-256 digest and complete MP4 box envelope, and acknowledges the
 host's completion. The receipt contains `bytes`, `sha256` and `cleaned: true`.
+After the connection ends, the SDK requires a `finished` session with
+`cleaned: true` and `ackReceived: true`. The runner records `ackReceived`
+when it accepts the acknowledgement. The SDK uses the remaining completion
+budget from `timeoutMs` for inspection and cancels the request if the caller
+aborts or the budget runs out. Missing confirmation reports `video_incomplete`.
+An older controller can receive the cleanup receipt and release the reservation
+even when it cannot store ACK acceptance. In that case recording completion
+remains unconfirmed. A caller that connects a raw channel with
+`VideoClient.connect` without an inspector can complete when the channel
+reports `session_disconnected` after the ACK. A reset or a null receive leaves
+completion unconfirmed.
 The sink remains caller-owned: the SDK does not flush, close or atomically publish
 it. A failed, cancelled or interrupted call leaves an incomplete artifact.
 
@@ -177,8 +188,8 @@ to 120.
 The SDK checks this ordering and that each segment consists of exactly the expected
 boxes; a violation is a `session_protocol_error`. It does not decode video. Feed
 the segments in order to a fragmented-MP4 decoder. A browser `SourceBuffer` should
-accept them after the page reads the codec profile from the initialization segment;
-no browser has been tried. The stream
+accept them after the page reads the codec profile from the initialization segment.
+Chromium has played fixture segments. Native browser playback remains open. The stream
 identifies its codec family as `avc1`. Consuming a stream twice is rejected.
 
 The iterator waits without a time limit for the next segment, because Android
@@ -189,8 +200,8 @@ own request timeout. Pass `signal` to cancel.
 **Renewal.** A view lasts `ttlSeconds` and ends with `view_expired` unless renewed.
 With `autoRenew` (default `true`) the stream sends a renewal after every third of
 that lifetime, but only while the caller is waiting in the iterator: a consumer
-that stops pulling stops renewing, and the broker also drops a viewer that reads
-nothing for 30 seconds. `stream.renew()` renews explicitly when `autoRenew` is
+that stops pulling stops renewing. The session also closes if a write to the viewer
+stays blocked for 30 seconds. `stream.renew()` renews explicitly when `autoRenew` is
 `false`. `stream.authorizationDeadline` is the controller's latest answer. Renewal
 never renews, extends or releases a lease.
 
@@ -201,15 +212,16 @@ never renews, extends or releases a lease.
 | --- | --- |
 | `host` | The capturing host ended a stream it was still serving: `capture_failed`, `capture_unavailable` or `capture_ended` |
 | `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed`, `capture_ended`, `preempted_by_recording` (a recording on the host took the capture's slot; open a new view later) or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
-| `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost` (the controller could not be reached) |
+| `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost`: the controller could not be reached, or the connection dropped and the controller recorded no cause. `ended.error` then holds the connection failure |
 
-After a dropped stream the SDK reads the view for up to three seconds, because the
-host enforces a lease deadline slightly before the controller records it; within
-that time `disconnected`, and for a lease `device_stopped` or `host_unavailable`,
-may still give way to the lease's own ending. It does
-the same when the host reports `capture_failed`: if the
-view's lease, credential or device ended in that moment, that cause is reported
-with source `controller`; otherwise the host's reason stands. A worker
+A stream drops when the broker closes its sockets. A connection reset counts as a
+drop too: the viewer's pong or renewal can cross the broker's close and draw a reset
+instead of an orderly end. After a dropped stream the SDK reads the view for up to three seconds, because the
+host can enforce a lease deadline before the controller records it. The controller
+can refine a provisional `disconnected`, `device_stopped` or `host_unavailable`
+within three seconds. It can refine `capture_ended` whenever the capture receipt
+attributes the stop to the matching lease fence and the lease ends. An in-band
+`capture_failed` from the host stays the stream's end reason. A worker
 error, such as `capability_unsupported` from a host without live capture for that
 device, is thrown instead: by `connect` when the host refuses at once, otherwise by
 the iterator. The SDK never reconnects, never opens a new view and never replays

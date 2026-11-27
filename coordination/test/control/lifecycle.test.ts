@@ -342,9 +342,10 @@ test("stale cleanup cannot overwrite a newer blocked attempt or push retry later
   const f = fixture(t), id = f.addMachine(true);
   f.addLease(id);
   const blocked = f.receipt(id, "blocked", 2);
-  (blocked.leaseCleanup as Record<string, unknown>).reason = "storage_removal";
+  (blocked.leaseCleanup as Record<string, unknown>).reason = "libvirt-unconfirmed";
   f.report(id, blocked);
   const first = f.store.transaction(db => cleanupView(leaseCleanup(db, id)!));
+  assert.equal(first.reason, "libvirt-unconfirmed");
   assert.equal(first.retryAt, f.now() + 4);
   f.advance(10);
   f.report(id, blocked);

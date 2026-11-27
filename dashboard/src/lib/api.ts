@@ -119,7 +119,6 @@ const providers: Readonly<Record<string, string>> = {
   apple: "Apple Virtualization",
   libvirt: "libvirt / KVM",
   hyperv: "Hyper-V",
-  kubevirt: "KubeVirt",
   android: "Android Emulator",
   ios: "iOS Simulator",
   browser: "Browsers",

@@ -1,0 +1,75 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "runtime",
+  "backend": "apple-virtualization",
+  "pinId": "15.8.2-4465618b1f910bc40a370450",
+  "identity": {
+    "version": "15.8.2",
+    "source": "host-os"
+  },
+  "scope": {
+    "os": "macos",
+    "arch": "aarch64",
+    "acceleration": "vz",
+    "executionMode": "detect-only"
+  },
+  "outcome": "blocked",
+  "blockers": [
+    {
+      "code": "apple_os_unsupported",
+      "detail": "The Swift runner requires macOS 26 or later."
+    }
+  ],
+  "evidence": {
+    "steps": [
+      {
+        "name": "Build coordination",
+        "outcome": "passed",
+        "durationMs": 27000
+      },
+      {
+        "name": "Check Apple Virtualization registry detection",
+        "outcome": "passed",
+        "durationMs": 1000
+      }
+    ],
+    "observations": {
+      "registryState": "unavailable",
+      "frameworkSupport": null
+    }
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/host-acceptance.yaml",
+    "workflowName": "Host runtime acceptance",
+    "runId": 45231181163,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181163",
+    "event": "push",
+    "ref": "refs/heads/feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890814637,
+      "name": "virtualization (macos-15, apple-virtualization)",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181163/job/137890814637"
+    },
+    "artifact": {
+      "id": 14846417988,
+      "name": "host-apple-virtualization-macos-15",
+      "digest": "sha256:eae35a3a712d1b98493012b7df2782a7dbdde54a3aa2ad1c9bc72d9d1398d645"
+    },
+    "evidenceSha256": "7c86ef4894925576b834d53db2d41b8d0dff45d66a47d269ac8ef9685a989aa2"
+  },
+  "runner": {
+    "label": "macos-15",
+    "imageOS": "macos15",
+    "imageVersion": "20261118.0550.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted macos-15 runner (macos15 20261118.0550.1), not a production host.",
+    "Detection only; no guest was booted."
+  ],
+  "recorded": "2026-11-23"
+}

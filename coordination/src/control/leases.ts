@@ -10,7 +10,8 @@ import type { Application, ApplicationSpec } from "../consumers.ts";
 import { object, secret, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import type { ControlModule, ControlOptions, ControlRequest, ControlResponse } from "./contracts.ts";
-import { MachineStore, SHARED_HOST_ISOLATION, leaseImageReference, machineDigest, machineIdentifier, registerMachineHooks, validateMachineRequest } from "./machines.ts";
+import { MachineStore, SHARED_HOST_ISOLATION, leaseImageReference, machineDigest, machineIdentifier, registerMachineHooks, validateMachineRequest, persistedOffer, validateTemplate } from "./machines.ts";
+import { supportedStoredHostOffer } from "./templates.ts";
 import { cleanupView, computeReserved, ensureLeaseCleanup, initializeLifecycle, isDeleted, leaseCleanup, refreshLeaseCleanup } from "./lifecycle.ts";
 import { createModule as operationModule, initializeConsumerOperations, refreshConsumerOperations } from "./consumer-operations.ts";
 import { applicationArtifactDisk, releaseLeaseArtifacts } from "./install-cleanup.ts";
@@ -61,6 +62,14 @@ export function leaseEligible(offer: Record<string, unknown>, image: Record<stri
 export function leaseIsolation(image: Record<string, unknown>): typeof SHARED_HOST_ISOLATION | undefined {
   return image.os === "ios" ? SHARED_HOST_ISOLATION : undefined;
 }
+function availableTemplate(value: unknown): Record<string, unknown> | undefined {
+  try {
+    const image = object(JSON.parse(String(value)));
+    validateTemplate(image);
+    return image;
+  }
+  catch (error) { if (error instanceof ServiceError || error instanceof SyntaxError) return undefined; throw error; }
+}
 function template(row: LegacyMachineRow): Record<string, unknown> { return object(typeof row.template === "string" ? JSON.parse(row.template) : row.template); }
 /** Inventory is not readiness: guests and leased devices need the runner's positive access check. */
 function observedReady(db: DatabaseSync, row: LegacyMachineRow, now: number): boolean {
@@ -71,9 +80,9 @@ function observedReady(db: DatabaseSync, row: LegacyMachineRow, now: number): bo
 }
 /** SQL input: m.*, h.seen, h.enabled, h.offer AS host_offer. */
 export function legacyMachineReady(db: DatabaseSync, row: LegacyMachineRow, now: number): boolean {
-  const offer = row.host_offer ?? row.offer;
+  const offer = supportedStoredHostOffer(row.host_offer ?? row.offer);
   return Boolean(row.enabled) && row.desired === "running" && observedReady(db, row, now) &&
-    leaseEligible(object(typeof offer === "string" ? JSON.parse(offer) : offer), template(row));
+    !!offer && leaseEligible(offer, template(row));
 }
 export function initializeLeases(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY,consumer TEXT NOT NULL,request TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,created REAL NOT NULL,expires REAL NOT NULL,provision_deadline REAL NOT NULL,credential TEXT,cleanup TEXT NOT NULL);
@@ -126,8 +135,8 @@ export function refreshLegacyLeases(db: DatabaseSync, now: number): void {
     const consumer = db.prepare("SELECT revoked FROM consumers WHERE id=?").get(row.consumer);
     if (!consumer || consumer.revoked) { endLegacyLease(db, row, "released", now); continue; }
     if (now >= row.expires) { endLegacyLease(db, row, "expired", now); continue; }
-    const members = db.prepare("SELECT m.*,h.seen FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=?").all(row.id);
-    if (members.some(m => m.observed === "error" || m.preparation_state === "failed") || (row.state === "provisioning" && now >= row.provision_deadline)) { endLegacyLease(db, row, "failed", now); continue; }
+    const members = db.prepare("SELECT m.*,h.seen,h.offer AS host_offer FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=?").all(row.id);
+    if (members.some(m => !supportedStoredHostOffer(m.host_offer) || m.observed === "error" || m.preparation_state === "failed") || (row.state === "provisioning" && now >= row.provision_deadline)) { endLegacyLease(db, row, "failed", now); continue; }
     if (row.state === "provisioning" && members.length && members.every(m => observedReady(db, m, now))) db.prepare("UPDATE leases SET state='ready',revision=revision+1 WHERE id=?").run(row.id);
   }
   refreshLeaseCleanup(db, now);
@@ -142,10 +151,11 @@ export function legacyLeaseAssignment<T extends { id: string }>(db: DatabaseSync
   return row ? { ...machine, lease: { id: row.id, state: row.state, revision: row.revision, authorizationDeadline: row.expires, controllerNow: now, cleanup: row.cleanup } } : machine;
 }
 export function legacyLeaseView(db: DatabaseSync, row: LegacyLeaseRow, now: number) {
-  const members = db.prepare("SELECT m.*,h.seen,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
+  const members = db.prepare("SELECT m.*,h.seen,h.offer AS host_offer,lm.name AS member_name FROM machines m JOIN lease_members lm ON lm.machine=m.id JOIN hosts h ON h.id=m.host WHERE lm.lease=? ORDER BY lm.name").all(row.id).map(m => {
     const cleanup = leaseCleanup(db, String(m.id)), source = memberSource(db, String(m.id)), isolation = leaseIsolation(template(m));
-    return { name: String(m.member_name), machineId: String(m.id), state: now - Number(m.seen) < 30 ? String(m.observed) : "unknown",
-      ready: ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
+    const online = !!supportedStoredHostOffer(m.host_offer) && now - Number(m.seen) < 30;
+    return { name: String(m.member_name), machineId: String(m.id), state: online ? String(m.observed) : "unknown",
+      ready: online && ACTIVE.includes(row.state) && observedReady(db, m, now), capabilities: capabilities(template(m)), resources: object(JSON.parse(String(m.request))).resources,
       // Whether this device was taken from the warm pool or booted for the lease. Absent while a
       // claimed warm device is still being handed over. Nothing about the host is exposed.
       ...(source ? { source } : {}),
@@ -337,7 +347,9 @@ export class LegacyLeases implements ControlModule {
       if (!app.templates.some(item => sameJson(item, allowed))) throw new ServiceError("Image is not permitted for this application.", 403);
       const imageRow = db.prepare("SELECT definition FROM templates WHERE id=? AND revision=? AND arch=?").get(String(allowed.id), String(allowed.revision), String(allowed.arch));
       if (!imageRow) throw new ServiceError("Permitted image revision is unavailable.", 503);
-      const image = object(JSON.parse(String(imageRow.definition))), caps = capabilities(image);
+      const image = availableTemplate(imageRow.definition);
+      if (!image) throw new ServiceError("Permitted image revision is unavailable.", 503);
+      const caps = capabilities(image);
       if ((required as Capability[]).some(k => !caps[k])) throw new ServiceError("Required capability is unsupported by this image.", 409, { code: "capability_unsupported" });
       const count = applicationLeaseUsage(db, app.id).active;
       if (count >= limits.activeLeases) throw new ServiceError("Application active lease limit exceeded.", 429);
@@ -367,13 +379,15 @@ export class LegacyLeases implements ControlModule {
     const templates = app.templates.flatMap(allowed => {
       const row = db.prepare("SELECT definition FROM templates WHERE id=? AND revision=? AND arch=?").get(allowed.id, allowed.revision, allowed.arch);
       if (!row) return [];
-      const image = object(JSON.parse(String(row.definition)));
+      const image = availableTemplate(row.definition);
+      if (!image) return [];
       const available = db.prepare("SELECT * FROM hosts WHERE enabled=1").all().some(host => {
         if (hostAdmissionClosed(db, String(host.id)).closed || this.store.clock() - Number(host.seen) >= 30) return false;
         const health = legacyTable(db, "host_health") ? db.prepare("SELECT report,received FROM host_health WHERE host=?").get(host.id!) : undefined;
         if (health?.report && (this.store.clock() - Number(health.received) >= 120 || !["passed", "warning"].includes(object(JSON.parse(String(health.report))).status as string))) return false;
         if (pressureAdmission(db, String(host.id), this.store.clock()).blocked) return false;
-        return leaseEligible(object(JSON.parse(String(host.offer))), image);
+        const offer = persistedOffer(host.offer);
+        return !!offer && leaseEligible(offer, image);
       });
       const isolation = leaseIsolation(image);
       return [{ ...image, available, capabilities: capabilities(image), ...(isolation ? { isolation } : {}) }];

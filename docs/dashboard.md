@@ -493,11 +493,10 @@ Inventory refreshes every five seconds while the tab is visible. Connection fail
 Creation pins the template revision and architecture, uses its resource defaults and lets the scheduler choose an eligible host or honor a selected host. Retries of an unchanged creation form reuse the request ID, so a lost response cannot create a second computer. Keep the form open for a retry after an uncertain result. Closing the form, reloading or editing the specification starts a new intent; inspect inventory before creating again. A lifecycle response records requested state; the machine remains pending or transitioning until its host reports the result. Draining prevents new placements and restarts while retaining existing machines.
 
 
-Hosts and external orchestrators have separate inventories. **Add host** and
-**Add orchestrator** create scoped private setup files, followed by runner
+**Add host** creates a scoped private setup file, followed by runner
 preflight and outbound connection. Cards show check status and compact CPU,
 memory and storage reservation meters. A host name or **View resources** opens
-its overview at `#hosts/{id}` or `#orchestrators/{id}`. Older `/resources` links
+its overview at `#hosts/{id}`. Older `/resources` links
 remain valid. CPU, memory and storage bars stack all reservation categories and
 show unreserved capacity or over-limit amounts. The legend retains zero-value
 categories. Machines are scoped to that host, with running machines first,
@@ -513,7 +512,7 @@ resources** requests a fresh report without leaving the overview.
 The page supports direct links and browser history. Details stack on narrow
 screens; the inventory keeps its compact summary. See [infrastructure setup and
 resource accounting](infrastructure.md) for enrollment scope, freshness, per-host
-limits and the distinction between KubeVirt runner and cluster metrics.
+limits and physical host metrics.
 
 ## Owner workspace previews
 
@@ -645,7 +644,7 @@ execution and reconciles its original request without rerunning the command.
 
 Hosts in manual maintenance carry a Maintenance label. Open the host overview and select **Begin maintenance**. Enter an optional reason and confirm to close admission while existing work finishes. The legacy accepting switch controls placement independently.
 
-The panel refreshes the scope, phase, admission owners, runner confirmation and blockers. Read each blocker’s affected actions and next step. The power-off verdict covers Canaveral-managed workloads on a direct host. A KubeVirt pool cannot confirm physical node safety. **Resume admission** becomes available after reconciliation permits resume. If the controller refuses, inspect the returned blockers before retrying.
+The panel refreshes the scope, phase, admission owners, runner confirmation and blockers. Read each blocker’s affected actions and next step. The power-off verdict covers Canaveral-managed workloads on a direct host. **Resume admission** becomes available after reconciliation permits resume. If the controller refuses, inspect the returned blockers before retrying.
 
 ## Administrator model runs
 
