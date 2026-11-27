@@ -1529,7 +1529,15 @@ by the recording path's rules. A wedged encoder never frees capacity.
   and the session becomes clean when the device's host reports the device
   `stopped`. The host reports that only after the emulator process has exited, and
   the recorder ran inside that process. This rule applies to live captures only;
-  recording cleanup is unchanged.
+  recording cleanup is unchanged. After a runner upgrade, an older journal that
+  records the encoder's exit can recover the stop proof from the authenticated
+  controller finish receipt for that capture and generation. An omitted
+  heartbeat entry leaves the proof unresolved.
+- **Journal ownership.** The runner indexes capture journals by device so it
+  reads only that device's journals for subsequent stop reconciliation and
+  capture admission. An unreadable journal holds its device's local capture
+  guard. A legacy journal that was already unreadable before the runner could
+  index it leaves capture admission blocked until its ownership can be verified.
 - **Unknown.** An unconfirmed encoder exit, an iOS source whose stop is unproven,
   a source whose dispatch outcome is uncertain, or a runner that restarted mid-capture leaves the
   session uncleaned. It keeps its reservation and its host slot, blocks further

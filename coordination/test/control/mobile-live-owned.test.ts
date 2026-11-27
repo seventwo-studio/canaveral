@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { startController } from "../../src/main.ts";
 import { startDashboard } from "../../src/dashboard.ts";
 import { HostRunner } from "../../src/host.ts";
+import { readRecord, saveRecord } from "../../src/runtime-process.ts";
 import type { HostConfig } from "../../src/host.ts";
 import { MobileProvider, markCaptureNotRunning } from "../../src/providers/mobile.ts";
 import type { Authorized, NativePipe, RecordValue } from "../../src/providers/mobile.ts";
@@ -518,4 +519,97 @@ test("concurrent admissions select one native capture reservation in either orde
     } finally { pending.destroy(); }
   }
   assert.equal(f.stats.captures, 0, "both races completed before a consumer attached");
+});
+
+test("legacy Android live journals require a matching controller cleanup receipt", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { stop: "unprovable" }), owner = await f.account("owner");
+  const machineId = await f.device(owner.session);
+  const viewer = await f.watch(owner.session, machineId);
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  await until(() => media(viewer.got).length > 0, "the original native capture");
+  const { captureId } = await live.inspect(machineId, viewer.id);
+  const session = async (id: string) => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${id}`, undefined, owner.session)).body;
+  viewer.stream.close(); await viewer.got.done;
+  await until(async () => (await session(captureId)).hostCleaned === true, "the original encoder receipt");
+  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
+  await until(async () => (await session(captureId)).cleaned === true, "the controller's stop proof");
+  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "running" }, owner.session)).status, 200);
+  await until(() => f.runner.reports.get(machineId)?.state === "running", "the restarted device");
+  await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "running", "the controller observing the restarted device");
+
+  const { generation } = await session(captureId);
+  const path = join(f.root, "runner", "work", "live", `${captureId}.json`);
+  // Restore the old runner's journal shape after the proof, as if upgrading with the device running.
+  saveRecord(path, { generation, machineId, state: "unknown", cleaned: false, hostCleaned: true });
+  const send = f.runner.transport.request.bind(f.runner.transport), otherGeneration = randomUUID();
+  let result: "absent" | "mismatch" | "match" = "absent";
+  let requests = 0;
+  t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
+    if (!args[1].endsWith(`/video-sessions/${captureId}/finish`)) return send(...args);
+    requests++;
+    assert.equal(args[3], f.runner.identity!.credential);
+    assert.deepEqual(args[2], { generation, hostCleaned: true });
+    const receipt = await send(...args);
+    assert.equal(receipt.cleaned, true);
+    if (result === "absent") return {};
+    if (result === "mismatch") return { ...receipt, generation: otherGeneration };
+    return receipt;
+  });
+
+  for (const condition of ["absent", "mismatch"] as const) {
+    result = condition;
+    const next = await live.create(machineId, { id: randomUUID() });
+    await assert.rejects(live.connect(next, { timeoutMs: 5000 }), { code: "device_live_view_active" });
+    await until(async () => (await session(next.captureId)).cleaned === true, "the refused capture to release its reservation");
+    assert.equal(readRecord(path).cleaned, false);
+    assert.equal(f.stats.captures, 1);
+  }
+
+  result = "match";
+  const next = await f.watch(owner.session, machineId);
+  await until(() => media(next.got).length > 0, "capture after the legacy cleanup receipt");
+  assert.equal(readRecord(path).cleaned, true);
+  assert.ok(requests >= 3, "each attempt requested explicit proof");
+  next.stream.close(); await next.got.done;
+});
+
+test("an unreadable journal for a removed device leaves other Android stop proofs and captures available", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { stop: "unprovable" }), owner = await f.account("owner");
+  const machineId = await f.device(owner.session);
+  const removed = { id: randomUUID(), machineId: randomUUID(), generation: randomUUID(), state: "finished", cleaned: true };
+  const journal = (id: string) => join(f.root, "runner", "work", "live", `${id}.json`);
+  saveRecord(journal(removed.id), removed);
+  const viewer = await f.watch(owner.session, machineId);
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  await until(() => media(viewer.got).length > 0, "capture on the remaining device");
+  const { captureId } = await live.inspect(machineId, viewer.id);
+  const session = async (id: string) => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${id}`, undefined, owner.session)).body;
+  viewer.stream.close(); await viewer.got.done;
+  await until(async () => (await session(captureId)).hostCleaned === true, "the encoder receipt");
+
+  writeFileSync(journal(removed.id), "unreadable");
+  const proof = Promise.withResolvers<string>();
+  const send = f.runner.transport.request.bind(f.runner.transport);
+  t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
+    if (args[1].endsWith("/heartbeat")) {
+      const report = (args[2].reports as Record<string, RecordValue>)[machineId];
+      if (report?.state === "stopped" || report?.state === "unknown") proof.resolve(String(report.state));
+    }
+    return send(...args);
+  });
+  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
+  assert.equal(await proof.promise, "stopped");
+  await until(async () => (await session(captureId)).cleaned === true, "settlement after the stop proof");
+  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "running" }, owner.session)).status, 200);
+  await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "running", "the controller observing the restarted device");
+
+  const saved = readRecord(journal(captureId));
+  writeFileSync(journal(captureId), "unreadable");
+  const refused = await live.create(machineId, { id: randomUUID() });
+  await assert.rejects(live.connect(refused, { timeoutMs: 5000 }), { code: "device_live_view_active" });
+  await until(async () => (await session(refused.captureId)).cleaned === true, "the refused capture's cleanup");
+  saveRecord(journal(captureId), saved);
+  const next = await f.watch(owner.session, machineId);
+  await until(() => media(next.got).length > 0, "capture with only the removed device's journal unreadable");
+  next.stream.close(); await next.got.done;
 });

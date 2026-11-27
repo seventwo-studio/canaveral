@@ -724,7 +724,9 @@ The machine details of an owned, running iOS or Android device include
   or 180 seconds; 180 is the backend maximum, and its file fits the page's
   memory limit. The page then opens a WebSocket to
   `/api/v1/machines/{machine}/video-sessions/{id}/{generation}` with
-  subprotocol `canaveral-session-v1`.
+  subprotocol `canaveral-session-v1`. Starting a recording returns 409
+  `device_live_view_active` while a live capture holds the same device, including
+  while its cleanup is unproven.
 
 The gateway relays that WebSocket only for a same-origin request carrying the
 session cookie and a matching Origin. A bearer header, missing or foreign Origin,
@@ -780,10 +782,13 @@ Send JSON mutations with the dashboard session cookie and matching Origin.
 | Inspect | GET `/api/v1/machines/{machine}/live-views/{id}` | `state` and, once ended, `endReason` |
 | Close | POST `/api/v1/machines/{machine}/live-views/{id}/close` with `{}` | On leaving the page; use a keepalive request on unload |
 
-Refusals a page should expect when opening: 404 for a device of another account,
-409 for a leased or stopped device or a host without capacity for the capture, 409
-`capture_cleanup_pending` (retryable) while an earlier capture of the device is
-still being cleaned up, 409 `capture_cleanup_unproven` (not retryable) once that
+Refusals a page should expect when opening: 404 for an unowned device or for
+another account's device when the viewer lacks administrator access, 409 for a
+leased or stopped device or a host without capacity for the capture, 409
+`device_recording_active` while a recording holds the same device, including
+while its cleanup is unproven, 409 `capture_cleanup_pending` (retryable) while
+an earlier live capture of the device is still being cleaned up, 409
+`capture_cleanup_unproven` (not retryable) once that
 cleanup was not reported within a minute or was abandoned, 409
 `capability_unsupported` for a device that is not mobile, and 429
 (`live_view_limit`, or all four video sessions of the host held). A view that a

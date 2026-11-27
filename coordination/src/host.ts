@@ -7,6 +7,7 @@ import { serveMobileVideo } from './mobile-video.ts';
 import { LiveCaptureHub, LiveCaptureRefused } from './live-capture.ts';
 import type { LiveCaptureSource } from './live-capture.ts';
 import { LIVE_FPS, captureConflict } from './mobile-live.ts';
+import { CaptureJournals } from './capture-journals.ts';
 import type { GuestHelperBinding } from "./control/session-protocol.ts";
 import type { OwnedGuestAuthority } from "./providers/apple-binding.ts";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -401,15 +402,16 @@ export class HostRunner {
   private readonly liveAttempts = new Set<string>();
   private readonly liveAuthority = new Map<string, { at: number; value: boolean }>();
   private readonly liveRecordings = new Map<string, { at: number; value: boolean }>();
+  private readonly captureJournals: CaptureJournals;
   private readonly videoReceipts = new Map<string, Promise<void>>();
   private liveCaptures: LiveCaptureHub | undefined;
   /** One shared native capture per watched device (live-capture.ts). Its journal lives beside
    * the recording journals; its cleanup receipt uses the recording's finish route. */
   private get liveHub(): LiveCaptureHub {
-    const path = (id: string) => join(this.state, 'work', 'live', `${identifier(id)}.json`);
+    const path = (id: string) => this.captureJournals.path('live', id);
     return this.liveCaptures ??= new LiveCaptureHub({
       load: id => present(path(id)) ? readRecord(path(id)) : undefined,
-      save: (id, value) => saveRecord(path(id), value),
+      save: (id, value) => this.captureJournals.save('live', id, value),
       report: (job, receipt) => this.reportVideoReceipt(job.id, path(job.id), { generation: job.generation, ...receipt }),
       ...(this.dependencies.liveEpochSeconds === undefined ? {} : { epochSeconds: this.dependencies.liveEpochSeconds }),
     });
@@ -539,6 +541,7 @@ export class HostRunner {
     const clock = dependencies.clock ?? (config.leaseClockHelper === undefined ? executionClock() : nativeExecutionClock(config.leaseClockHelper as string, clockPin));
     this.config = structuredClone(config);
     this.state = resolve(config.stateDir);
+    this.captureJournals = new CaptureJournals(this.state);
     if (this.kubernetes) {
       noLinks(this.state);
       const info = present(this.state) ? lstatSync(this.state) : undefined;
@@ -1049,7 +1052,7 @@ export class HostRunner {
         if (!machine.lease && image.os === 'android' && stopped.state === 'stopped') {
           // This is the same positive device-stop proof used by the controller. Only
           // a live guest recorder with a proven encoder exit can settle this way.
-          for (const { path, saved } of this.captureJournals('live', id)) {
+          for (const { path, saved } of this.captureJournals.forDevice('live', id, false)) {
             if (saved.hostCleaned === true && saved.cleaned !== true && saved.deviceStopped !== true) saveRecord(path, { ...saved, deviceStopped: true });
           }
         }
@@ -1274,9 +1277,10 @@ export class HostRunner {
     for (const job of this.queues.video ?? []) {
       const id = identifier(job.id), key = `video:${id}`, machineId = identifier(job.machineId), generation = identifier(job.generation);
       if (this.active.has(key) || !this.fresh() || this.updateAdmissionBlocked) continue;
-      const path = join(this.state, 'work', 'video', `${id}.json`);
+      const path = this.captureJournals.path('video', id);
       if (present(path)) {
-        const saved = readRecord(path);
+        let saved: RecordValue;
+        try { saved = readRecord(path); } catch { continue; }
         // A lease session may repeat its host-only receipt: the encoder exited, and the lease's own
         // proven emulator removal settles the guest recorder on the controller.
         const receipt = saved.cleaned === true || saved.state === 'attaching' ? { generation, cleaned: true, ...(saved.ackReceived === true ? { ackReceived: true } : {}) }
@@ -1301,10 +1305,11 @@ export class HostRunner {
     // a capture this process no longer holds is never resumed. A journal that never left
     // `attaching` belongs to a capture that dispatched nothing native, which is positive cleanup.
     for (const job of this.queues.liveCaptures ?? []) {
-      const id = identifier(job.id), key = `live-capture:${id}`, generation = identifier(job.generation), path = join(this.state, 'work', 'live', `${id}.json`);
+      const id = identifier(job.id), key = `live-capture:${id}`, generation = identifier(job.generation), path = this.captureJournals.path('live', id);
       if (!identity || this.active.has(key) || !this.fresh() || this.liveCaptures?.active(id) || !present(path)) continue;
       if (this.queues.live!.some(view => view.captureId === id && this.active.has(`live:${String(view.id)}`))) continue;
-      const saved = readRecord(path);
+      let saved: RecordValue;
+      try { saved = readRecord(path); } catch { continue; }
       const receipt = saved.cleaned === true || saved.state === 'attaching' ? { cleaned: true } : saved.hostCleaned === true ? { hostCleaned: true } : undefined;
       if (saved.generation !== generation || saved.machineId !== job.machineId || !receipt) continue;
       this.launch(key, () => this.fresh(), () => this.reportVideoReceipt(id, path, { generation, ...receipt, ...(saved.stop ? { stop: saved.stop } : {}) }));
@@ -1342,32 +1347,50 @@ export class HostRunner {
     const capturedAssignment = assignmentFingerprint(machine), capturedLease = leaseOf(machine);
     return () => { const current = this.assignments.find(m => m.id === machine.id); return !!current && assignmentFingerprint(current) === capturedAssignment && leaseOf(current) === capturedLease; };
   }
-  /** Heartbeat work can be stale or come from a controller that still allows sharing.
-   * Consult the durable local state too, including unproven sessions absent from the queue. */
-  private captureJournals(kind: 'live' | 'video', machineId: string): { path: string; saved: RecordValue }[] {
-    const directory = join(this.state, 'work', kind);
-    if (!present(directory)) return [];
-    return readdirSync(directory).filter(name => name.endsWith('.json')).flatMap(name => {
-      const path = join(directory, name), saved = readRecord(path);
-      return saved.machineId === machineId ? [{ path, saved }] : [];
-    });
-  }
   private captureClean(kind: 'live' | 'video', saved: RecordValue): boolean {
     // The device stop clears the runner's local guard. Its receipt still reports
     // only encoder exit, so the controller settles it when it observes the stop.
     return saved.cleaned === true || kind === 'live' && saved.hostCleaned === true && saved.deviceStopped === true;
   }
+  /** Older runners did not record the emulator's proven stop locally. An omitted
+   * heartbeat entry proves nothing. Ask for the authenticated finish receipt. */
+  private async recoverAndroidLiveCleanup(machine: RecordValue, except?: string): Promise<void> {
+    const identity = this.identity;
+    if (!identity || machine.lease != null || object(machine.template).os !== 'android') return;
+    const machineId = identifier(machine.id);
+    let journals: ReturnType<CaptureJournals['forDevice']>;
+    try { journals = this.captureJournals.forDevice('live', machineId); } catch { return; }
+    const legacy = journals.filter(({ id, saved }) => id !== except && saved.hostCleaned === true &&
+      !this.captureClean('live', saved) && !this.liveCaptures?.active(id));
+    for (const { id, path, saved } of legacy) {
+      try {
+        const generation = identifier(saved.generation);
+        const receipt = await this.transport.request('POST', `/v1/hosts/${identity.id}/video-sessions/${id}/finish`,
+          { generation, hostCleaned: true }, identity.credential, this.stopController.signal);
+        if (receipt.id !== id || receipt.generation !== generation || receipt.machineId !== machineId ||
+            receipt.kind !== 'live' || receipt.hostCleaned !== true || receipt.cleaned !== true) return;
+        const current = readRecord(path);
+        if (current.machineId === machineId && current.generation === generation && current.hostCleaned === true) {
+          saveRecord(path, { ...current, cleaned: true });
+        }
+      } catch { return; } // Keep the local reservation until a matching positive receipt is available.
+    }
+  }
+  /** A heartbeat can be stale or come from an older controller. Retain unproven
+   * sessions even when they are absent from the queue. */
   private capturePending(kind: 'live' | 'video', machineId: string): boolean {
-    const journals = this.captureJournals(kind, machineId);
+    let journals: ReturnType<CaptureJournals['forDevice']>;
+    try { journals = this.captureJournals.forDevice(kind, machineId); } catch { return true; }
     if (journals.some(({ saved }) => saved.state !== 'attaching' && !this.captureClean(kind, saved))) return true;
     const queue = kind === 'video' ? this.queues.video : this.queues.liveCaptures;
-    return (queue ?? []).some(job => job.machineId === machineId && !journals.some(({ path, saved }) =>
-      path === join(this.state, "work", kind, identifier(job.id) + ".json") && saved.generation === job.generation && this.captureClean(kind, saved)));
+    return (queue ?? []).some(job => job.machineId === machineId && !journals.some(({ id, saved }) =>
+      id === job.id && saved.generation === job.generation && this.captureClean(kind, saved)));
   }
   private unprovenCapture(kind: 'live' | 'video', machineId: string, except: string): boolean {
-    const ownJournal = join(this.state, 'work', kind, except + '.json');
-    return this.captureJournals(kind, machineId).some(({ path, saved }) =>
-      path !== ownJournal && saved.state !== 'attaching' && !this.captureClean(kind, saved));
+    try {
+      return this.captureJournals.forDevice(kind, machineId).some(({ id, saved }) =>
+        id !== except && saved.state !== 'attaching' && !this.captureClean(kind, saved));
+    } catch { return true; }
   }
   private recordingPending(machineId: string): boolean {
     const now = performance.now(), cached = this.liveRecordings.get(machineId);
@@ -1402,8 +1425,9 @@ export class HostRunner {
     let refusal: ServiceError | undefined;
     let channel: SessionConnection | undefined, handle: ReturnType<LiveCaptureHub['acquire']> | undefined;
     const authorized = () => !context.signal.aborted && context.authorized();
+    const ownerAuthorized = () => machine.lease != null || typeof machine.ownerId === 'string' &&
+      this.assignments.some(current => current.id === machine.id && current.lease == null && current.ownerId === machine.ownerId);
     try {
-      const source = this.liveSource(machine);
       // Journals the capture before this runner attaches for it; native dispatch is journaled again.
       // The controller treats a capture as needing a cleanup receipt from the moment its host
       // attaches, so this runner never attaches for a capture it holds no journal for: its view
@@ -1411,14 +1435,19 @@ export class HostRunner {
       // that is ending, or was attempted before a restart, has a journal and will be reported;
       // it is never joined or repeated, and the viewer is told so.
       const capture = { id: identifier(job.captureId), generation: identifier(job.captureGeneration), machineId: String(machine.id) };
+      let source: LiveCaptureSource | undefined;
       try {
+        if (ownerAuthorized()) await this.recoverAndroidLiveCleanup(machine, capture.id);
+        if (!authorized()) return;
+        if (!ownerAuthorized()) throw new ServiceError('Live view rejected.', 404);
+        source = this.liveSource(machine);
         // The hub checks its live reservation synchronously even if this queue snapshot
         // was cached before a recording reached native dispatch.
         if (this.recordingPending(capture.machineId)) throw captureConflict('record');
         if (this.unprovenCapture('live', capture.machineId, capture.id)) throw captureConflict('live');
         handle = this.liveHub.acquire(capture, source);
       } catch (error) {
-        if (error instanceof ServiceError && ['device_recording_active', 'device_live_view_active'].includes(error.code)) {
+        if (error instanceof ServiceError && ['device_recording_active', 'device_live_view_active', 'not_found'].includes(error.code)) {
           // Attaching this refused view starts nothing, but the broker still expects a
           // receipt for its capture. Never overwrite evidence from an earlier attempt.
           const saved = this.liveHub.options.load(capture.id);
@@ -1434,13 +1463,14 @@ export class HostRunner {
       const ready = await channel.receive(30), stream = channel;
       if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'live') return;
       if (refusal) { await this.sendCaptureRefusal(stream, refusal); return; }
+      if (!ownerAuthorized()) { await this.sendCaptureRefusal(stream, new ServiceError('Live view rejected.', 404)); return; }
       if (!source) { await stream.sendControl({ type: 'error', code: 'capability_unsupported', message: 'This host has no live screen capture for this device.', outcome: 'unknown' }); return; }
       if (!handle) { await stream.sendControl({ type: 'end', reason: 'capture_ended' }); return; }
       await stream.sendControl({ type: 'live', mediaType: 'video/mp4', codec: 'avc1', fps: LIVE_FPS });
       // A view feeds the capture only while its own socket and authority hold.
-      const subscription = handle.subscribe(() => authorized() && stream.open);
+      const subscription = handle.subscribe(() => authorized() && ownerAuthorized() && stream.open);
       try {
-        while (authorized() && stream.open) {
+        while (authorized() && ownerAuthorized() && stream.open) {
           const item = await subscription.next(250);
           if (!item) continue;
           if (item.type === 'end') { await stream.sendControl({ type: 'end', reason: item.reason }); break; }
@@ -1646,8 +1676,8 @@ export class HostRunner {
     let channel: SessionConnection | undefined, captureStarted = false, cleaned = false, hostCleaned = true, ackReceived = false;
     let release: (() => void) | undefined;
     const leased = machine.lease != null;
-    saveRecord(path, { generation: job.generation, machineId: machine.id, state: 'attaching' });
     const recordingId = identifier(job.id), machineId = identifier(machine.id);
+    this.captureJournals.save('video', recordingId, { generation: job.generation, machineId, state: 'attaching' });
     try {
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/video-sessions/${identifier(job.id)}/${identifier(job.generation)}`, identity.credential,
         { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
@@ -1662,13 +1692,14 @@ export class HostRunner {
       // and only the same assignment that started the capture.
       const sameAssignment = this.assignmentUnchanged(machine);
       const recording = channel, live = () => !context.signal.aborted && recording.open;
+      await this.recoverAndroidLiveCleanup(machine);
       if (!live()) throw new ServiceError('Video authorization ended before capture.', 410);
       if (this.capturePending('live', machineId) || this.queues.live?.some(view => view.machineId === machineId)) throw captureConflict('live');
       if (this.unprovenCapture('video', machineId, recordingId)) throw captureConflict('record');
       release = this.liveHub.reserveRecording(machineId);
       // A restart can report an attaching journal clean. Only a started journal may
       // have opened native capture and must retain the reservation without proof.
-      saveRecord(path, { generation: job.generation, machineId, state: 'started' });
+      this.captureJournals.save('video', recordingId, { generation: job.generation, machineId, state: 'started' });
       captureStarted = true;
       const source = await runtime.openVideo(machine, image, folder, options, live, () => this.machineAuthorized(machineId) && sameAssignment());
       await serveMobileVideo(recording, source, argv => runtime.pipe!(argv), encoder, options, live, (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });

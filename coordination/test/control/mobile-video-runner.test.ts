@@ -216,6 +216,9 @@ test('the runner refuses a recording when an old controller queues an overlappin
   assert.equal(f.captures, 0);
 });
 
+const liveOwner = randomUUID();
+const ownedAssignments = (response: RecordValue) => (response.machines as RecordValue[]).map(machine => ({ ...machine, ownerId: liveOwner }));
+
 test('the runner refuses a late live view after a heartbeat replaces the cached absence of a recording', { timeout: 15000 }, async t => {
   const f = await fixture(t), runner = f.runner;
   const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
@@ -242,7 +245,7 @@ test('the runner refuses a late live view after a heartbeat replaces the cached 
     const response = await send(...args);
     if (!args[1].endsWith('/heartbeat')) return response;
     cached.liveRecordings.set(f.machineId, { at: performance.now(), value: false });
-    return { ...response, liveViews: [view] };
+    return { ...response, machines: ownedAssignments(response), liveViews: [view] };
   });
   await runner.poll(); await runner.step();
   assert.deepEqual(await control.promise, {
@@ -278,7 +281,7 @@ for (const kind of ['live', 'video'] as const) {
       const send = f.runner.transport.request.bind(f.runner.transport);
       t.mock.method(f.runner.transport, 'request', async (...args: Parameters<typeof send>) => {
         const response = await send(...args);
-        return args[1].endsWith('/heartbeat') ? { ...response, liveViews: [view] } : response;
+        return args[1].endsWith('/heartbeat') ? { ...response, machines: ownedAssignments(response), liveViews: [view] } : response;
       });
       await f.runner.poll(); await f.runner.step();
       assert.equal(object(await reply.promise).code, 'device_recording_active');
@@ -286,3 +289,30 @@ for (const kind of ['live', 'video'] as const) {
     assert.equal(f.captures, 0);
   });
 }
+
+test('the runner refuses an unowned live assignment from an older controller', { timeout: 15000 }, async t => {
+  const f = await fixture(t), runner = f.runner;
+  const view = { id: randomUUID(), generation: randomUUID(), captureId: randomUUID(), captureGeneration: randomUUID(), machineId: f.machineId, state: 'pending' };
+  const reply = Promise.withResolvers<RecordValue>();
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
+    if (!args[1].includes('/live-views/')) return connect(...args);
+    return {
+      open: false,
+      receive: async () => ({ type: 'ready', sessionId: view.id, generation: view.generation, capability: 'live' }),
+      sendControl: async (message: RecordValue) => { reply.resolve(message); },
+      close: () => {},
+    } as unknown as SessionConnection;
+  });
+  const send = runner.transport.request.bind(runner.transport);
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    const response = await send(...args);
+    if (!args[1].endsWith('/heartbeat')) return response;
+    assert.equal((response.machines as RecordValue[]).find(machine => machine.id === f.machineId)?.ownerId, null);
+    return { ...response, liveViews: [view] };
+  });
+  await runner.poll(); await runner.step();
+  const message = await reply.promise;
+  assert.deepEqual([message.type, message.code], ['error', 'not_found']);
+  assert.equal(f.captures, 0);
+});
