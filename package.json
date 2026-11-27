@@ -1,13 +1,14 @@
 {
   "name": "canaveral-machines",
-  "version": "0.6.0",
+  "version": "0.7.1",
   "description": "Canaveral TypeScript controller, SDKs and native Rust execution tools",
   "type": "module",
   "engines": {
     "node": ">=24.11.0"
   },
   "bin": {
-    "canaveral": "coordination/dist/src/cli.js"
+    "canaveral": "coordination/dist/src/cli.js",
+    "canaverald": "coordination/dist/src/canaverald.js"
   },
   "exports": {
     ".": {

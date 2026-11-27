@@ -1,3 +1,4 @@
+import { requireManagedUpdates } from "../host-deployment.ts";
 import { createPublicKey } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -19,6 +20,7 @@ export interface ManagedRuntimeOptions {
 /** Parent-owned polling survives replacing the host child. Identity is reread for rotation. */
 export function startManagedUpdateRuntime(options: ManagedRuntimeOptions): { updater: ManagedUpdater; close(): Promise<void>; wait(): Promise<void> } {
   const { config, launcher } = options;
+  requireManagedUpdates(config);
   const interval = options.intervalMs ?? 5000;
   if (!Number.isSafeInteger(interval) || interval < 10 || interval > 60_000) throw new Error('Invalid managed update interval');
   const settings = config.updates === undefined ? {} : updateObject(config.updates);
@@ -84,6 +86,7 @@ export function readManagedRunnerIdentity(config: HostConfig): HostIdentity {
 export interface UpdateContext { releaseId: string; installationId: string }
 /** No constructors, enrollment, directories, locks, provider probes or network requests. */
 export function preflightManagedHost(config: HostConfig, env: NodeJS.ProcessEnv = process.env): UpdateContext {
+  requireManagedUpdates(config);
   if (env.CANAVERAL_UPDATE_CANDIDATE !== '1') throw new Error('Managed candidate context is required');
   const releaseId = updateUUID(env.CANAVERAL_UPDATE_RELEASE), installationId = updateUUID(env.CANAVERAL_UPDATE_INSTALLATION);
   const root = env.CANAVERAL_UPDATE_ROOT, state = env.CANAVERAL_UPDATE_STATE;
@@ -125,6 +128,7 @@ function phase(context: UpdateContext, outgoing: string, incoming: string, timeo
 }
 /** Bind only fixed read/status and admission-fence commands, never remote shell commands. */
 export function bindManagedHost(runner: HostRunner): () => void {
+  requireManagedUpdates(runner.config);
   let closed = false, busy = false;
   const message = (raw: unknown): void => {
     let value: Record<string, unknown>;

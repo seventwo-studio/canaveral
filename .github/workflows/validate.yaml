@@ -14,6 +14,10 @@ on:
         description: Optional existing HTTPS controller for read-only acceptance
         required: false
         type: string
+      lease_helper_image:
+        description: Optional digest-pinned canaverald image for read-only lease helper export
+        required: false
+        type: string
   pull_request:
   push:
     branches: [main]
@@ -60,8 +64,40 @@ jobs:
         run: |
           cargo build --manifest-path ../Cargo.toml -p canaveral-mobile-native -p canaveral-apple-native --locked
           node ../script/prepare_native.mjs debug
-      - run: npm run typecheck && npm run build && npm test
+      # Suites with wall-clock budgets run in the separate typescript-timed job.
+      - run: npm run typecheck && npm run build && npm run test:parallel
       - run: node --test ../crates/guest-agent/worker.test.ts ../VirtualMachines/GuestHelpers/linux_desktop.test.ts
+  typescript-timed:
+    name: TypeScript timing-sensitive suites
+    runs-on: ubuntu-24.04
+    # Tunnel, live view, recording and waiting-request suites that assert wall-clock budgets, one
+    # file at a time, beside the typescript job instead of within its time and CPU.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: coordination
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      - run: npm ci --ignore-scripts
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-typescript-fixtures
+      - name: Build and install Rust helpers for disposable process and filesystem fixtures
+        run: |
+          cargo build --manifest-path ../Cargo.toml -p canaveral-mobile-native -p canaveral-apple-native --locked
+          node ../script/prepare_native.mjs debug
+      - run: npm run build && npm run test:timed
   rust:
     name: Rust execution (${{ matrix.os }})
     strategy:
@@ -131,7 +167,7 @@ jobs:
           sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
       - name: Render every stage and overlay and validate offline
         run: |
-          for stage in deploy/orchestrator deploy/dashboard deploy/kubevirt deploy/kubernetes/*/; do
+          for stage in deploy/orchestrator deploy/dashboard deploy/kubernetes/*/; do
             kubectl kustomize "$stage" > /tmp/rendered.yaml
             kubeconform -strict -summary -kubernetes-version 1.34.0 -schema-location '.validation-schemas/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}{{.KindSuffix}}.json' /tmp/rendered.yaml
           done
@@ -292,7 +328,6 @@ jobs:
           node script/check_guest_bootstrap.mjs
       - if: runner.os == 'Linux'
         run: |
-          node script/build_linux_lease_deadline.mjs --output "$RUNNER_TEMP/deadline.so"
           test -n "$ANDROID_NDK_LATEST_HOME"
           cat "$ANDROID_NDK_LATEST_HOME/source.properties"
           node script/build_android_transfer.mjs --ndk "$ANDROID_NDK_LATEST_HOME" --output-dir "$RUNNER_TEMP/android-transfer"
@@ -329,16 +364,33 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Verify helper export from both published architectures
+        if: github.event_name == 'workflow_dispatch' && inputs.lease_helper_image != ''
+        env:
+          CANAVERAL_LEASE_HELPER_IMAGE: ${{ inputs.lease_helper_image }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdtempSync, rmSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { imageLeaseHelperDigests } from './script/publish_release.mjs';
+          const temporary = mkdtempSync(join(tmpdir(), 'canaveral-helper-export-'));
+          try {
+            console.log(JSON.stringify(imageLeaseHelperDigests(process.env.CANAVERAL_LEASE_HELPER_IMAGE, temporary)));
+          } finally {
+            rmSync(temporary, { recursive: true, force: true });
+          }
+          NODE
       # Build every published target for one platform without pushing, so a release
       # cannot be the first place a Dockerfile change is exercised.
-      - name: Build orchestrator, dashboard and KubeVirt worker targets
+      - name: Build orchestrator and dashboard targets
         run: |
-          for target in orchestrator dashboard kubevirt; do
+          for target in orchestrator dashboard; do
             docker buildx build . --target "$target" --platform linux/amd64 --progress plain --output type=cacheonly
           done
   ci-required:
     if: ${{ always() }}
-    needs: [typescript, rust, validate, dashboard, container-images, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance, remote-tls-acceptance, browser-vm-image]
+    needs: [typescript, typescript-timed, rust, validate, dashboard, container-images, native-compile, workflow-lint, runner-conformance, model-conformance, apple-satellite-conformance, remote-tls-acceptance, browser-vm-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

@@ -6,12 +6,15 @@ The existing runner onboarding flow is the foundation for the helper path.
 **Hosts → Add host** should offer two choices. Both enroll with the same
 Canaveral controller and use the same host inventory, scheduling, health and
 maintenance controls. Placement depends on each host's verified runtime
-capabilities. External orchestrators continue to enroll under **Orchestrators**.
+capabilities. On Kubernetes, [canaverald enrolls selected nodes](cluster-hosts.md)
+as hosts and uses host libvirt for VMs.
 
 | Path | Onboarding | Update ownership |
 | --- | --- | --- |
 | **Install Canaveral Helper** | Install the runner on an existing Linux, macOS or Windows host. Select supported runtimes, check prerequisites and enroll using a scoped setup credential. | Canaveral can update supported Canaveral components under the operator's policy. The operator manages the OS, system dependencies and reboots. |
 | **Install Canaveral OS** | Boot a signed Linux installer on a dedicated node, confirm the target disk locally, apply declarative node configuration and enroll the built-in runner. | Canaveral manages the OS and its bundled runtime as a release. The operator selects the release channel and rollout policy. |
+
+Kubernetes owns daemon updates for DaemonSet installations.
 
 See [runner onboarding](infrastructure.md#connect-a-runner) and
 [managed runtime updates](runtime-updates.md) for current implementation and
@@ -60,8 +63,9 @@ operator-configured off-host object storage. Restore into a fresh volume on a
 compatible replacement host, verify its contents and measure recovery time and
 the amount of data lost since the last backup. Test with the source host offline.
 
-Evaluate Longhorn as a KubeVirt storage backend. Automatic failover of the same
-volume requires a backend that can revoke the old host's write access before
+Evaluate whether Longhorn can provide recoverable volumes for the current
+host-libvirt deployment on Kubernetes. Automatic failover of the same volume
+requires a backend that can revoke the old host's write access before
 reattachment, including when the old host is unreachable. A missed heartbeat
 does not establish that fence. See [current host recovery limits](power-and-recovery.md#planned-maintenance-and-same-host-recovery)
 and [cold capture](images.md#cold-capture).

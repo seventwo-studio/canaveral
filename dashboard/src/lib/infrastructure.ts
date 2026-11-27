@@ -2,43 +2,6 @@ import { record } from "./types";
 import { resources } from "./catalogue";
 import type { CatalogueHost, Resources } from "./catalogue";
 
-export interface MetricCoverage {
-  status: "complete" | "incomplete" | "unavailable";
-  activePods?: number;
-  measuredPods?: number;
-}
-export type PodMetrics =
-  | { status: "unavailable"; coverage?: MetricCoverage }
-  | {
-      status: "available";
-      cpuCores: number;
-      memoryMiB: number;
-      podCount: number;
-      sampledAt?: number;
-      coverage?: MetricCoverage;
-    };
-export interface NamespaceObservation {
-  namespace: string;
-  sampledAt: number;
-  metrics: PodMetrics;
-  quotas: {
-    status: "available" | "unavailable";
-    items: Array<{
-      name: string;
-      hard: Record<string, number>;
-      used: Record<string, number>;
-    }>;
-  };
-  canaveral?: {
-    scope?: string;
-    ownership: {
-      status: "complete" | "unavailable";
-      verifiedMachines?: number;
-      assignedMachines?: number;
-    };
-    metrics: PodMetrics;
-  };
-}
 export interface ResourceSample {
   receivedAt: number;
   cpuPercent?: number | null;
@@ -57,12 +20,12 @@ export interface HostUsage extends ResourceSample {
       memoryMiB?: number | null;
     }>;
   };
-  cluster?: NamespaceObservation;
 }
 export interface Host extends CatalogueHost {
   maintenance?: import("./maintenance").MaintenanceSummary | null;
   enabled: boolean;
   placementReady?: boolean;
+  detail?: string;
   overcommitted?: boolean;
   capacity: Resources;
   effectiveCapacity?: Resources;

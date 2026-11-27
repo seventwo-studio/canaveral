@@ -13,7 +13,7 @@ import { pendingBaselineSave, requireNotPooled } from "./pool-ledger.ts";
 export const HOST_LEASE_SECONDS = 30;
 const terminal = new Set(["failed", "released", "expired"]);
 const observedStates = new Set(["pending", "starting", "running", "stopping", "stopped", "error", "unknown"]);
-const reasons = new Set(["execution_pending", "operations_pending", "sessions_pending", "ownership",
+const reasons = new Set(["execution_pending", "libvirt-unconfirmed", "operations_pending", "sessions_pending", "ownership",
   "storage_removal", "credential_erasure", "unsupported", "recovery"]);
 const completionFlags = ["executionStopped", "storageRemoved", "credentialsErased"] as const;
 

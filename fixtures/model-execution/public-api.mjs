@@ -4,13 +4,15 @@ import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID, randomBytes, createHash} from 'node:crypto';
 import {mkdtempSync,mkdirSync,chmodSync,realpathSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {homedir,tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import http from 'node:http';
 const [main,runner,runtime]=process.argv.slice(2).map(p=>resolve(p));
+const realEngine=process.argv[4]==='--real-engine';
 const backendRuntime=process.argv[5] && resolve(process.argv[5]);
-assert(main&&runner&&runtime,'controller main.js, Rust executable and owned test executable required');
-const dir=realpathSync(mkdtempSync(join(tmpdir(),'canaveral-rust-model-fixture-')));
+assert(main&&runner&&(realEngine||runtime),'controller main.js, Rust executor and runtime fixture or --real-engine required');
+// The host CLI requires a non-writable ancestor chain, including the fixture root.
+const dir=realpathSync(mkdtempSync(join(realEngine?homedir():tmpdir(),'canaveral-rust-model-fixture-')));
 mkdirSync(join(dir,'models'),{mode:0o700});
 const admin=randomBytes(32).toString('base64url'),controllerId=randomUUID();
 writeFileSync(join(dir,'admin'),admin,{mode:0o600});
@@ -23,6 +25,10 @@ try {
  const port=await new Promise((resolve,reject)=>{let text='';controller.stdout.on('data',b=>{text+=b;if(text.includes('\n'))resolve(JSON.parse(text.split('\n')[0]).listening.port);});controller.on('exit',code=>reject(new Error('controller exited '+code)));});
  const origin=`http://127.0.0.1:${port}`;
  async function call(route,body,token=admin,method='POST'){const r=await fetch(origin+route,{method,headers:{Authorization:'Bearer '+token,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});const value=await r.json();assert(r.ok,`${route}: ${r.status} ${JSON.stringify(value)}`);return value;}
+ if (realEngine) {
+   const {runRealEngine}=await import('./real-engine.mjs');
+   await runRealEngine({dir, origin, call, controllerId, runner});
+ } else {
  const model='fixture-model:1',digest='sha256:'+'ab'.repeat(32),resources={cpu:1,memoryMiB:16,diskGiB:1};
  await call('/v1/model-catalog',{model,digest,adapter:'ollama',resources});
  const appId=randomUUID();const app=await call('/v1/consumers',{id:appId,name:'disposable Rust fixture',templates:[],limits:{resources,activeLeases:1}});
@@ -170,4 +176,5 @@ try {
  assert.equal((await run()).code,0);view=await inspect(fourth);assert.equal(view.state,'unknown');assert.equal(view.reservationHeld,true);
  assert.equal((await run()).code,1);assert.equal((await inspect(fourth)).reservationHeld,true);
  console.log('PASS public API: admission, owned generation, measured tokens, cancellation, cleanup, stalled-controller deadline, fresh-job isolation, shared-domain contention, lost claim and report, exact restart replay, crash unknown reservation retention');
+ }
 } finally {if(proxy)await new Promise(r=>proxy.close(r));for(const c of children){if(c.exitCode===null&&c.signalCode===null){c.kill('SIGKILL');await once(c,'exit');}}rmSync(dir,{recursive:true,force:true});}

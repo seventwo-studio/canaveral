@@ -1,6 +1,6 @@
 # Technical guide
 
-These documents define the TypeScript controller, TypeScript host and SDK, Rust execution components and native bridge contracts. Node.js 24 or later is required for the controller and host. No Python runtime is required by Canaveral services. Swift and C platform bridges remain intentional native dependencies. Native acceptance, provider binding and recovery limits remain explicit; a portable fixture or successful build does not establish platform parity.
+These documents define the TypeScript controller, `canaverald` host daemon and SDK, Rust execution components and native bridge contracts. Node.js 24 or later is required for the controller and host. No Python runtime is required by Canaveral services. Swift and C platform bridges remain intentional native dependencies. Native acceptance, provider binding and recovery limits remain explicit; a portable fixture or successful build does not establish platform parity.
 
 Optional Python-based model engines require Canaveral-managed hermetic runtime
 packages with their interpreter and dependencies. They add no user-installed
@@ -38,7 +38,8 @@ interpreter dependency to the controller, host or SDK; see
 - [Bounded Linux command operations](linux-command-operations.md)
 - [infrastructure](infrastructure.md)
 - [host installation paths](host-installation-paths.md) (helper enrollment and planned Canaveral OS rollout)
-- [kubevirt resource ownership](kubevirt-resource-ownership.md)
+- [Host runtime backends](host-runtimes.md) (local inventory, model package management and native acceptance suites)
+- [Runtime qualification](runtime-qualification.md) (durable evidence records and reviewed promotion of exact pins; nothing promoted)
 - [lease eligibility](lease-eligibility.md)
 - [leases](leases.md)
 - [durable waiting requests](requests.md)
@@ -53,12 +54,14 @@ interpreter dependency to the controller, host or SDK; see
 - [orchestration](orchestration.md)
 - [power and recovery](power-and-recovery.md)
 - [running](running.md)
+- [Getting started](getting-started.md) (source quickstart, installation and contributing)
 - [managed runtime updates](runtime-updates.md) (Unix offline bootstrap, generated service definitions, separate component receipts and operator acceptance; no automatic service installation)
 - [runner enrollment](runner-enrollment.md)
 - [Rust runner identity client](../crates/runner-client/README.md)
 - [Rust Apple satellite](../crates/apple-satellite/README.md)
 - [scoped accessibility](scoped-accessibility.md)
 - [self hosting](self-hosting.md)
+- [Kubernetes hosts](cluster-hosts.md) (node-local canaverald deployment and acceptance limits)
 - [simlock parity](simlock-parity.md) (comparison, scope and decisions accepted on 21 November 2026, and where each area is delivered)
 - [session protocol](session-protocol.md)
 - [templates](templates.md)
@@ -71,8 +74,6 @@ interpreter dependency to the controller, host or SDK; see
 - [windows guest display](windows-guest-display.md)
 - [windows guest files](windows-guest-files.md)
 - [windows guest terminals](windows-guest-terminals.md)
-
-- [Bounded KubeVirt execution adapter](../crates/kubevirt-execution/README.md) (fixture-covered ownership and transport; production creation disabled pending independent fencing)
 
 - [Linux agent boot bundle](linux-boot-bundle.md) and [guest wire protocol](guest-wire.md) (Rust guest core, deterministic local bundle/initrd assembly, read-only digest preflight and bootstrap source; satellite readiness and consumer commands fixture-covered; kernel/rootfs construction and native acceptance remain outstanding)
 

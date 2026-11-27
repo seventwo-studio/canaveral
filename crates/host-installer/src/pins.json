@@ -1,0 +1,36 @@
+{
+  "retrieved": "2026-11-23",
+  "source": "GitHub latest stable releases. Sizes and SHA-256 were computed from the assets and compared with containerd's per-asset .sha256sum files and upstream runc.sha256sum.",
+  "x86_64": [
+    {
+      "name": "containerd",
+      "version": "2.4.2",
+      "url": "https://github.com/containerd/containerd/releases/download/v2.4.2/containerd-static-2.4.2-linux-amd64.tar.gz",
+      "bytes": 34415353,
+      "sha256": "da656542e754c699a0f438eab925e6ffdbd6346a4428e659f83dc058f04dcffe"
+    },
+    {
+      "name": "runc",
+      "version": "1.5.3",
+      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.3/runc.amd64",
+      "bytes": 10866576,
+      "sha256": "50dcc0b257d724fe07f3852c2dda52340223f038227c7572644eec870741223e"
+    }
+  ],
+  "aarch64": [
+    {
+      "name": "containerd",
+      "version": "2.4.2",
+      "url": "https://github.com/containerd/containerd/releases/download/v2.4.2/containerd-static-2.4.2-linux-arm64.tar.gz",
+      "bytes": 30823894,
+      "sha256": "37b84b9534533672528141b9d815f58621a2fe5deee2daa84317800255756689"
+    },
+    {
+      "name": "runc",
+      "version": "1.5.3",
+      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.3/runc.arm64",
+      "bytes": 10092000,
+      "sha256": "07b52aee923cc432c38fe4fb6809a08fc6471994efed650af3635350588a20be"
+    }
+  ]
+}

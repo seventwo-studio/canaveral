@@ -32,9 +32,7 @@ export function BaseImageRegistry({
   onImportFile: (entry: RegistryEntry) => void;
   onRefresh: Refresh;
 }) {
-  const candidates = hosts.filter(
-    (h) => h.online && h.kind !== "orchestrator" && h.provider !== "kubevirt",
-  );
+  const candidates = hosts.filter((h) => h.online);
   const [entries, setEntries] = useState<RegistryEntry[] | null>(null),
     [query, setQuery] = useState(""),
     [os, setOs] = useState("all"),
@@ -209,7 +207,9 @@ export function BaseImageRegistry({
                       : task.result?.detail ||
                         "Inspect the image task before retrying."}
               </p>
-              <p className="text-muted-foreground">Task <code className="break-all">{task.id}</code></p>
+              <p className="text-muted-foreground">
+                Task <code className="break-all">{task.id}</code>
+              </p>
             </section>
           </Card>
         )}

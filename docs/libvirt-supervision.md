@@ -1,312 +1,241 @@
-# Libvirt lease supervision component
+# Libvirt lease supervision
 
-`coordination/src/providers/libvirt.ts` implements a one-use deadline supervisor,
-domain ownership validation, private execution journals and a dedicated native
-libvirt connection. A companion C source implements Linux kernel deadlines.
-The provider requires an injected native connection and dedicated child-launch
-adapter for leased assignments. Missing native clock, kernel deadline or ownership
-bridges must fail closed; source fixtures do not provide those production adapters.
-Linux kernel behavior, real libvirt/QEMU behavior and native lease acceptance
-remain unverified. Ordinary consumer lease admission remains disabled.
+Consumer VM leases on canaverald hosts run as **transient** libvirt domains, one
+per lease, each supervised by a native Rust guardian. Every way a lease can end
+finishes in a destroyed domain and removed overlay with proof, or in a retained
+reservation whose state stays unknown until proof exists. Nothing is freed or
+forgotten silently.
 
-## Execution ownership
+Administrative VMs are separate: they keep a persistent definition and ordinary
+`virsh start` and shutdown, and their lifecycle is operator-owned across daemon
+restarts and pod replacement. Nothing on this page applies to them except the
+[VM storage contract](running.md#libvirt-vm-storage).
 
-`LibvirtLeaseBinding` binds a machine, lease, supervisor boot, host boot,
-assignment fingerprint and absolute owned disk path. The journal stores a digest
-of the path rather than its text. `bindDomainXML` adds namespaced ownership to
-a new definition; it refuses rebinding an existing lease marker. It does not
-write a domain or modify a live definition.
+## Components
 
-Before execution the supervisor validates the UUID, name, exact boot/lease
-metadata and one owned writable disk. Additional media must be read-only CD-ROMs
-in that storage directory. Filesystem and host-device passthrough are refused.
-The native connection also requires an inactive domain with no managed save,
-snapshot or checkpoint state. Unknown native query results prevent boot.
-Provider and child wiring verify assignment/storage receipts, lease identity and
-the original storage-directory/disk device and inode through the ownership
-predicate. XML matching alone is not that proof. A changed URI or storage location
-fences the previous owned execution rather than querying another namespace.
+| Piece | Where | Role |
+| --- | --- | --- |
+| Lease helper `canaveral-libvirt-native` | `crates/libvirt-native` | Guardian, connection worker, proof probes, `fence`, `erase`, `check` and `clock` commands. Loads `libvirt.so.0` and `libvirt-qemu.so.0` at run time |
+| Provider lease path | `coordination/src/providers/libvirt.ts` | Preparation, launch, deadline publication, reconciliation, stop and removal |
+| Production adapter | `coordination/src/providers/libvirt-native.ts` | Verifies and executes the pinned helper; bound in `providers/index.ts` |
+| Host gate | `coordination/src/host.ts` (`leaseOffer`, `hostOffer`, `leaseEligible`) | Advertises libvirt lease images only when every prerequisite holds |
 
-The state directory must already be private and owned. `SupervisorJournal` holds
-an exclusive process-lifetime lock and pins a directory descriptor. Reads refuse
-linked, public, nonregular, malformed or oversized records. Publication writes a
-private temporary file through that descriptor, synchronizes it, renames it and
-synchronizes the directory. Directory replacement cannot redirect a write.
+## Helper identity
 
-Preparation explicitly creates one `prepared` receipt. Startup requires that
-exact unused receipt and persists its attempt before native creation. Missing,
-foreign, interrupted and retired history cannot authorize a restart. Failed
-pending publication prevents creation; lost create/resume acknowledgements are
-never replayed. Receipts contain identifiers, hashes, phases and bounded reasons,
-not native error text or guest data. They do not claim positive runtime cleanup.
+Configure the libvirt runtime with `leaseHelper` (absolute path) and
+`leaseHelperSha256`. The helper must be a regular root-owned file without hard
+links or group/other write permission, in root-owned directories that are not
+group/other writable, and the daemon must not run as root. Pin the digest from
+the release or image manifest. For every execution the daemon opens the file,
+hashes those bytes, rechecks the descriptor, and runs the child through
+`/proc/self/fd/3`, the same descriptor. It never runs the configured path after
+hashing it. For libvirt lease offers, set `leaseClockHelper` to the same pinned
+binary. The host verifies the image and the kernel's peer pidfd support before
+advertising leases. Every clock sample reopens and verifies the image and runs
+its `clock` command through the verified descriptor. If that fails, the host
+withdraws lease offers, fences lease authority and continues reporting cleanup.
+Restore the matching helper and restart the daemon to resume admission.
 
-## Deadline and connection lifetime
+The helper's `dlopen` calls depend on root-owned system loader configuration,
+search paths and libraries, including inside the pod image. The daemon strips
+inherited loader environment variables before invoking the helper.
 
-The supervisor checks the current host boot, owned assignment, suspend-aware
-clock and exact authorization binding before execution. Same-revision updates
-cannot extend the deadline. Revision rollback, clock rollback, late renewal,
-revocation and expiry fence execution. Authority is sampled again after slow
-metadata reads and between paused creation and resume.
+`canaverald runtimes status` reports `leases: {eligible: true}` on the libvirt
+row when the helper verifies and the kernel supports peer pidfds. Otherwise it
+reports `libvirt_lease_helper_unverified` or `libvirt_lease_kernel_unsupported`.
+The host refuses to start with libvirt lease images declared on a kernel older
+than Linux 6.5 (`libvirt_lease_kernel_unsupported`) or without the helper.
 
-The native C adapter opens a new local QEMU connection and requests
-`PAUSED | AUTODESTROY` together. Every temporary domain handle is explicitly
-freed before connection closure. Libvirt documents connection-bound destruction,
-including client crash or disconnect, in
-[`virDomainCreateWithFlags`](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainCreateWithFlags).
-Its [connection reference counting](https://libvirt.org/html/libvirt-libvirt-host.html#virConnectClose)
-is why releasing the connection handle alone must not leave domain references.
-The component never attempts destruction by a saved PID or a new connection's
-UUID lookup after losing ownership. Real driver behavior still needs proof.
+## Eligibility
 
-`linux_lease_deadline.c` is intended only for the dedicated child process holding
-that connection. It installs a parent-death signal with a parent-identity recheck,
-then an absolute `CLOCK_BOOTTIME` timer delivering `SIGKILL`. The Linux interfaces
-document [suspend-aware timers](https://man7.org/linux/man-pages/man2/timer_create.2.html),
-[absolute expiration](https://man7.org/linux/man-pages/man2/timer_settime.2.html)
-and [parent-death signaling](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html).
-Parent-death signaling follows the creating thread, and credential changes can
-clear it; production wiring must preserve those constraints. The C shim refuses
-reuse in a forked process, does not expose disarming, and prevents renewal after
-its previous deadline has elapsed. Revocation attempts to shorten the armed
-deadline before journal publication or native close, so either may block without
-consuming the previous authorization duration. A failed update retains the prior
-timer. This source-level mechanism is not yet accepted Linux behavior.
+A host advertises a libvirt lease image only when all of these hold:
 
-## Evidence and remaining integration
+- the selector `{id, revision, arch, runtime: "libvirt"}` names an offered
+  template on the libvirt runtime;
+- the template is headless x64 Linux with `firmware: "bios"`, without TPM,
+  secure boot, guest access or a preparation recipe (the natively accepted
+  template; UEFI and TPM state provisioning is not qualified for leases);
+- the host is Linux 6.5 or later with the pinned helper and `leaseClockHelper`,
+  and the daemon runs on the same kernel as libvirtd.
 
-Twenty-five fixtures exercise ownership, paused-start ordering, renewal/expiry,
-clock changes, startup interruption, lost acknowledgements, kernel-arm failure,
-journal recovery and native C API argument/handle behavior. The C API fixtures
-use fake libvirt functions and real temporary memory allocations. On macOS the
-kernel source compiles with warnings treated as errors and its unsupported branch
-refuses execution. This is not Linux timer or real libvirt evidence.
+The host also enforces this itself: an assignment outside its advertised
+libvirt lease images is never started.
 
-The Linux branch of the kernel fixture is prepared to terminate only its own
-disposable child at expiry. Its Linux behavior requires a separately authorized acceptance lane. No real
-libvirt connection was opened and no device was started, stopped or inspected.
+Run Kubernetes lease pods with a host-kernel runtime. A gVisor sandbox or Kata
+guest can reboot while libvirtd and QEMU continue on the node. The helper
+refuses detected sandboxes with `libvirt_lease_sandbox_unsupported`. It checks
+gVisor's optional proc marker and its synthetic kernel log, plus Kata agent
+kernel parameters and Kata shared mounts. These signals identify standard
+configurations. Operators must keep lease pods off sandboxed runtimes even when
+a custom configuration hides those signals.
+[gVisor detection](https://gvisor.dev/docs/user_guide/quick_start/docker/),
+[gVisor proc marker](https://github.com/google/gvisor/blob/master/runsc/config/flags.go),
+[Kata agent and shared mounts](https://github.com/kata-containers/kata-containers/blob/main/src/runtime/virtcontainers/kata_agent.go).
 
-## Provider and dedicated child
+## Lease lifecycle
 
-The provider requires an explicit absolute `leaseDeadlineLibrary` path for leased
-preparation. The private artifact is bound to its SHA-256 and checked for ownership,
-unsafe aliases/permissions, bounded size and changes during hashing. The child
-opens it without following a leaf symlink and loads through its pinned descriptor,
-so path replacement cannot substitute another inode after verification.
+**Preparation.** The daemon checks the lease authorization, creates the machine
+directory and qcow2 overlay with the [VM storage modes](running.md#libvirt-vm-storage),
+binds the domain XML to a random per-launch nonce (the binding's `bootId`),
+the lease and the assignment UUID in namespaced `<metadata>`, and adds the
+static DAC label. It journals that XML, the URI and the identity in
+`libvirt-native-spec.json` before anything is created. Nothing is defined in
+libvirt.
 
-`node script/build_linux_lease_deadline.mjs --output /absolute/private/new/deadline.so`
-prepares an uninstalled Linux build. It refuses an existing destination, publishes
-without overwriting a race-created file and prints artifact/source hashes. The Linux build and installed artifact delivery remain native gates. This option grants no lease eligibility.
+**Launch.** The daemon publishes the deadline in `CLOCK_BOOTTIME` seconds,
+records the launch attempt, then starts one guardian with a daemon-created Unix
+socket as stdin. A launch is never replayed: a failed or uncertain spawn is
+fenced like any other end.
 
-Environment reports now distinguish deadline artifact inspection from native
-consumer lease acceptance. `deadlineArtifact` in `libvirt-ownership.ts` reads a bounded,
-owned, unlinked-alias-free ELF snapshot without loading code. It checks the
-64-bit little-endian shared-library layout, host architecture, table bounds and
-the two required exported functions in executable code sections, then binds the
-snapshot to SHA-256. This does not verify dynamic dependencies, function ABI or
-timer behavior. The `libvirtLeaseArtifact` health capability means only that this
-inspection passed. A missing artifact warns; a configured invalid artifact fails
-checks without exposing its private path or contents. A separate native-verification
-warning keeps expiry, suspend, teardown, restart and fresh-lease isolation open.
-Ordinary consumer admission remains disabled regardless of this artifact check.
+**Guardian.** The guardian:
 
-Eight fixtures use synthetic ELF metadata and malformed/private-file cases. They
-explicitly refuse library loading during inspection and cover both host
-architectures, mutation, aliases, special files and redacted health reports.
-Native Linux artifact execution and installation remain unaccepted.
+1. takes the daemon's pidfd from its socket peer with `SO_PEERPIDFD`, after
+   checking the peer's PID and UID;
+2. takes the lease lock (`libvirt-native.lock`, `flock`) for its lifetime;
+3. waits for the launch record that names its own PID and start time;
+4. starts a connection worker whose `PR_SET_PDEATHSIG` is armed before exec;
+5. persists that a create may be submitted, then grants permission to call
+   `virDomainCreateXML(PAUSED|AUTODESTROY)`. After a successful reply the worker
+   journals completion in `libvirt-native-create.json` and adds the proven UUID,
+   nonce, lease, domain ID and (on bare metal) QEMU process birth. The guardian
+   durably records the paused instance and rechecks authority before resuming it.
 
-Preparation refuses existing domains, partial disks and unexplained prior state.
-It binds newly prepared storage and a single domain definition before requesting
-definition through libvirt. A lost definition acknowledgement does not repeat disk
-creation or definition: reconciliation must find the exact owned inactive domain
-before it can launch its unused supervisor. Per-assignment reconciliation is
-exclusive; deadline publication uses a separate lock and remains independent.
+The worker runs the libvirt default event loop with keepalive (5 s, 3 probes)
+and a close callback. Connection loss, including a libvirtd restart, ends the
+worker and so fences the lease. The guardian ignores `SIGTERM`, `SIGINT` and
+`SIGHUP` and ends the lease on the first of: daemon exit (pidfd), worker or
+connection loss, a fenced or expired deadline, a host boot change, or the
+domain leaving the running state (guest shutdown or crash). The deadline is
+checked against `CLOCK_BOOTTIME` every 100 ms. It is independent of the daemon,
+the controller and libvirt RPCs: the same revision can never extend it.
 
-The parent must persist its launch attempt before spawning the dedicated native
-supervisor child, then record that child's PID and creation time. The TypeScript host
-must refuse leased execution if this child entry point or its deadline bridge is unavailable. A failed spawn or unconfirmed birth is never automatically retried.
-The child checks its parent, private launch/preparation history, host boot and
-assignment ownership before entering the core. It closes inherited helper and
-reconciliation descriptors at spawn. The native connection is confined to this
-child, which must not fork after opening it.
+**Fence.** Ending the worker closes its connection, so AUTODESTROY destroys a
+domain still bound to it. The fence does not rely on that. Through a fresh
+connection it destroys a remaining domain only after the UUID, nonce and lease
+in its metadata, the recorded domain ID and, on bare metal, the QEMU birth all
+match on the same host boot. It records `stopped` with `stopProven` and
+`stopEvidence` after a fresh lookup returns `VIR_ERR_NO_DOMAIN` and one of these
+conditions holds. The create was never submitted, the libvirt host rebooted,
+or the complete domain identity was recorded and, on bare metal, the recorded
+QEMU birth is confirmed gone. The worker publishes the complete identity in one
+atomic journal write. Older stop receipts without `stopEvidence` require fresh
+proof. Each probe runs in
+its own child, bounded to 10 seconds. If libvirt cannot complete the proof on
+bare metal, the guardian opens a pidfd on the recorded QEMU process, checks its
+start time and sends `SIGKILL` through the pidfd. That needs `CAP_KILL` from the
+[systemd drop-in](running.md#libvirt-vm-leases); without it the receipt reports
+`qemu-kill-denied`. It retries for 30 seconds, then exits with the receipt
+unconfirmed.
 
-The publisher converts the existing guard's remaining duration into the shared
-suspend-aware clock, subtracting sampling time and the existing 250 ms safety
-margin. It checks the host boot before and after sampling, preserves same-revision
-deadlines, latches expiry/revocation and synchronizes bounded private JSON. A slow
-ordinary reconciliation cannot prevent independent publication. Stopped assignments
-publish a fence without guest preparation or a `virsh shutdown/start` fallback.
+**Reconciler backstop.** A restarted daemon, or the periodic refresh, runs the
+helper's `fence` command for any lease whose guardian is gone, fenced or on an
+old boot. `fence` first takes the same lease lock: a live guardian makes it
+return busy, so there is never a second destroyer, and acquiring it proves the
+guardian is gone. An RPC submitted by its worker can still be in flight on
+the server. A dead worker or repeated `VIR_ERR_NO_DOMAIN` replies provide no
+completion evidence. With an uncertain create the reconciler records
+`unknown`, retains the reservation and keeps probing the per-lease UUID.
+Even a definite create refusal leaves the reservation held once the attempt
+was recorded. The worker journals only verified successful creates, so cleanup
+needs a proven host reboot or fresh evidence that settles the attempt.
+If a domain appears, explicit destruction requires the durable instance
+identity. A same-boot libvirtd restart does not settle a missing create reply
+because the journal does not identify the libvirtd process. The reconciler
+runs the same proof-gated fence with the same
+`CAP_KILL` fallback. A transient domain cannot survive a host reboot or be
+resurrected by `virsh start`, autostart or libvirt-guests.
 
-Readiness requires both a running owned domain and the specifically recorded
-supervisor's process birth, parent, user, executable and arguments. Observation
-never signals a recovered PID. Lost ownership and a fenced child record propagate
-a sticky fence through the independent updater. An in-progress parent birth
-publication is distinguished by its lock. Reaping uses only retained child process
-objects. These are isolated wiring checks, not native process attribution proof.
+**Removal.** After a durable stopped receipt (or a launch that never happened),
+cleanup records its removal intent, renames the machine directory to
+`.removing-<machine>-<cleanup>` and runs the helper's `erase` under the lease
+lock. `erase` repeats the fresh absence lookup and takes a Linux write lease on
+every file, which the kernel grants only when no other process has it open.
+It accepts only the owner marker and the disk with their exact owner, group and
+mode, then records `verified` with the marker's device and inode and the exact
+removal intent before truncating either file. It truncates and syncs both
+files, records `cleared`, unlinks them, removes the directory and records
+`removed`. A retry uses the verified inodes even if the marker is already empty.
+If the directory is already absent after `cleared`, the helper synchronizes
+its parent and publishes `removed`. The generic cleanup then erases the assignment's journals and
+credentials, and only then does the controller release the reservation.
+Maintenance keeps the assignment lock databases and cleanup journals on disk.
+These directories qualify as idle bookkeeping when their ownership, permissions
+and entries match the daemon layout and every cleanup receipt is complete.
 
-## Stopped observation and auxiliary state
+## End paths
 
-New leased definitions explicitly place NVRAM at `nvram.fd` and emulator TPM
-state at `tpm-state` within their owned storage directory. The TPM backend retains
-that state until explicit cleanup. The XML validator rejects external firmware
-or TPM paths, unimplemented varstore, additional TPM backends and external TPM
-encryption secrets. Administrative definitions retain their existing path.
-The [domain XML contract](https://libvirt.org/formatdomain.html) documents these
-separate writable resources; explicit emulator TPM source placement requires
-libvirt 10.10 or later and the documented swtpm prerequisites. Actual installed
-compatibility remains a native environment/readiness gate.
+| End | What ends the domain | Proof of stop |
+| --- | --- | --- |
+| Release, cancel | Published fence, then guardian fence | Guardian receipt |
+| Expiry | Guardian deadline (and the published fence) | Guardian receipt |
+| Daemon crash or service stop | Guardian sees the pidfd and fences | Guardian receipt; reconciler on restart otherwise |
+| Pod stop (Kubernetes) | Container exit kills the guardian and worker; AUTODESTROY | Reconciler fence on the next pod |
+| Guardian killed or OOM-killed | Worker dies (PDEATHSIG); AUTODESTROY | Reconciler fence under the lock |
+| Controller loss | Host guard stops renewing; deadline expires | Guardian receipt |
+| libvirtd restart | Connection loss fences | Guardian fence through the restarted libvirtd |
+| libvirtd down past the deadline | Bare metal: pidfd `SIGKILL` of QEMU with `CAP_KILL` | Fresh lookup once libvirtd returns |
+| Host reboot | Reboot | Fresh lookup on the new boot |
 
-`LibvirtProvider.confirmExecutionStopped` requires a matching fenced authorization, unchanged
-assignment/storage and namespace, and the original supervisor's exit with an
-exclusive execution-journal lock. A PID with a different creation time proves
-only that the original child is gone; it never authorizes signalling its
-replacement. Missing birth publication remains unknown. An unused preparation
-without any launch intent can instead be observed and permanently retired while
-the lock prevents a delayed child from entering.
+Until the proof exists, the lease's reservation, storage and journals stay and
+the controller reports the cleanup as blocked with `libvirt-unconfirmed` in
+Kubernetes and `execution_pending` on bare metal.
 
-The observer validates the exact inactive domain and absence of saved execution,
-snapshot and checkpoint state through the native adapter. It rechecks launch,
-storage, context and host boot after observation and requires connection closure.
-Missing, unreadable, changed or uncertain evidence produces no stop receipt.
-Provider stop reports use this observation where available. It reports storage
-handles as **unknown** and performs no erasure. The separate remover below must
-establish its own storage-handle and teardown evidence.
-Reboot recovery requires the separate evidence path below. A missing domain
-before initial positive stop remains unproven rather than adopted.
+## Kubernetes
 
-The controller now holds CPU/RAM as well as disk reservations for unreclaimed
-leases. A stopped runtime report cannot bypass application quotas or host/shared
-host limits; only matching cleanup completion releases the reservation.
-Physical usage samples and administrative stop behavior remain distinct.
+In a pod there is no host PID view and no capability to signal QEMU. Ownership
+proof is the UUID, nonce and lease in the metadata plus the domain ID. This
+relies on the accepted trust model that every principal with the mounted
+libvirt socket is trusted with host administration. A guest reaches neither
+the socket nor the journal. If libvirtd is down past a lease deadline in a pod,
+the guest keeps running until libvirtd returns and the fence completes: an
+accepted gap. The receipt reports `libvirt-unconfirmed` and the reservation
+stays held. The node-local journal survives pod replacement, so the next pod's
+reconciler completes the fence. In-cluster native acceptance has not run.
 
-Twenty-two additional fixtures cover publishing, child setup and provider wiring,
-including unknown spawn/birth, lost definition acknowledgements, private artifact
-checks, namespace changes, concurrent reconciliation and independent fencing.
-All drivers, spawns and child native factories are injected fakes. The fixtures
-neither open libvirt nor install a fatal kernel timer in the test process.
+## Evidence
 
-The storage transaction below now implements owned erasure and interruption
-recovery, including host reboot, with isolated coverage. Native QMP/cgroup-v2
-resource attribution also has [isolated coverage](libvirt-resource-ownership.md);
-actual helper placement and restart accounting remain unverified. Reviewed Linux shim delivery and environment readiness still need
-target-platform verification.
-Then verify blocked RPCs, parent loss, disconnect, suspend and actual VM/detached
-command fencing on approved disposable Linux capacity. Positive runtime exit,
-closed handles and owned disk/NVRAM/TPM/saved-state removal must precede quota
-release and fresh-lease isolation. The complete acceptance plan
-and its runtime authorization boundary remain in force.
+Portable fixtures (`coordination/test/control/libvirt-leases.test.ts`) drive
+the provider with a fake helper through preparation, launch, release, expiry,
+revocation, daemon crash, guardian kill and OOM, a kill mid-fence,
+unconfirmed proof, removal and its interruption, a fence before launch, a
+host reboot, guest shutdown, foreign metadata, template refusal, helper
+changes and host eligibility. Rust unit tests (`crates/libvirt-native`) cover
+authority monotonicity and fencing, lock exclusivity, record privacy, pidfd
+birth checks, peer pidfds, owner metadata parsing and erasure under file
+leases (on Linux).
 
-## Storage handle guard
+Native acceptance runs in `.github/workflows/vm-acceptance.yaml` on hosted
+ubuntu-24.04 x64 with host libvirtd and KVM, canaverald as a systemd service and
+a digest-pinned CirrOS guest; see [fixtures/libvirt](../fixtures/libvirt/README.md).
+It covers boot evidence, release, expiry, daemon SIGKILL, a guardian OOM kill,
+a guardian killed mid-fence, a libvirtd restart, a deadline while libvirtd is
+frozen (the `CAP_KILL` path), an idle lease across many keepalive intervals,
+refused `virsh start` and autostart, and the `CLOCK_BOOTTIME` time-namespace
+offset.
 
-The internal `StorageHandleGuard` component now pins a private storage tree
-and attempts a Linux write lease on every regular file. It requires the original
-root device/inode, owned directories/files, one link per file and unchanged
-descriptor/path metadata. It refuses symlinks, special files, device boundaries,
-unsafe permissions and unsupported environments. Descriptor exhaustion or partial
-acquisition closes the partial guard and leaves storage untouched.
+[Run 45442285242](https://github.com/seventwo-studio/canaveral/actions/runs/45442285242)
+(commit `9348874`, ubuntu-24.04 image 20261116.376.1, kernel 7.0.0-1017-azure,
+libvirt 10.0.0, QEMU 8.2.2) passed every step. QEMU ran as `libvirt-qemu` with
+group `canaveral-vm` and the guest took a DHCP lease. The domain was destroyed
+0.3 s after an expiry deadline. With libvirtd frozen past the deadline, the
+guardian killed QEMU through a pidfd 10.5 s after the deadline (one bounded
+probe), and stop was proven once libvirtd resumed. The kernel OOM killer chose
+the guardian (`oom_score_adj` 1000) inside the service cgroup, and systemd's
+`OOMPolicy=stop` then stopped the unit. Under memory-cgroup pressure a guardian
+can instead fence itself when its reads fail. The current acceptance step
+requires a fresh kernel OOM-kill record for the guardian PID and records
+self-fencing separately.
 
-Linux documents that a [write file lease](https://man7.org/linux/man-pages/man2/F_SETLEASE.2const.html)
-requires no other open descriptors for that file. The kernel exposes a requested
-break through `F_GETLEASE` before forced downgrade or release. The guard checks
-that state; it does not infer exclusivity from an empty process scan. It selects
-SIGURG notification only when its disposition is default or ignored, without
-changing a process-wide handler. Forked copies cannot validate or explicitly
-unlock the parent's lease. Descriptors are closed on execution of another program.
+That proves one hosted kernel and libvirt build. Kubernetes pods, UEFI or TPM
+guests, other distributions, arm64, suspend and real host reboots remain
+unaccepted.
 
-Eighteen isolated fixtures exercise tree races, existing-open acquisition failure,
-break detection, changed signal/owner, descriptor exhaustion, partial release,
-fork identity and unsupported-platform refusal. File-lease operations are fakes
-over real temporary files; no Linux kernel contention test has run. All 74
-libvirt-focused fixtures must be run against the installed implementation.
+## Mounted host socket in Kubernetes
 
-The guard is now used by the provider's teardown transaction below. A held guard
-gives only a temporary check, not reusable stop or deletion evidence. QEMU-owned
-files or filesystems that cannot grant the lease remain
-unconfirmed. Actual driver, filesystem, mapping, break-timeout and late native
-operation behavior still require approved disposable Linux acceptance. Consumer
-lease admission remains disabled; native cleanup acceptance is outstanding.
-
-## Owned storage transaction and recovery
-
-`LibvirtProvider.removeOwnedStorage` requires a terminal, stopped lease and its exact
-cleanup intent. It retains the execution-journal lock throughout teardown, binds
-the immutable specification and launch history to the deletion receipt, and
-requires the same host boot, fenced authorization, namespace and assignment.
-Initial stop observation must succeed before any rename. A private pinned parent
-and the original storage/disk inodes bind the same-filesystem quarantine.
-
-The remover acquires file leases on the quarantined tree before native teardown.
-The native adapter validates the exact inactive persistent domain and refuses
-managed-save, snapshot or checkpoint state. It undefines using KEEP_NVRAM and
-KEEP_TPM, leaving owned files for the guarded eraser. An active-domain race would
-leave a transient domain and fail the subsequent UUID-absence check. Only a fresh
-VIR_ERR_NO_DOMAIN lookup establishes absence; RPC, permission and connection
-errors do not. The [undefine contract](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainUndefineFlags)
-documents why undefine alone is not positive stop evidence.
-
-Before changing file contents, the transaction synchronizes an external JSONL
-manifest of every owned path and inode and binds its digest into the receipt.
-There is no total file-count limit; each metadata record has a bounded path
-envelope. All files are truncated and synchronized while their leases remain
-held. This is logical erasure, not physical media sanitization. The transaction
-persists cleared-content evidence before allowing unlink. Path removal uses the
-platform's protected directory remover, verifies pinned files are empty and
-unlinked, synchronizes the parent, and rechecks fencing and native absence before
-publishing storage completion.
-
-Recovery before unlink requires the complete original inode manifest. Recovery
-after unlink began permits only remaining empty manifest-owned entries; missing
-storage counts only with the exact durable cleared-content/removing receipt.
-Uncertain file synchronization, changed context, new contents, replaced inodes,
-unknown handles and conflicting paths retain an incomplete receipt. A changed
-kernel boot requires the separate recovery path below, never reuse of old process
-or clock evidence.
-
-The generic cleanup pipeline now calls this libvirt remover and erases assignment
-credentials only after storage completion. A dedicated cleanup fencer publishes
-revocation without entering preparation or reacquiring the shared assignment
-gate; it reaps only retained supervisor process handles. Ordinary consumer
-admission remains disabled. This wiring and its interruption fixtures establish
-source behavior only; actual Linux lease, QEMU, swtpm and filesystem acceptance,
-detached-command fencing and fresh-lease isolation remain required.
-
-## Host-reboot recovery
-
-The `LibvirtProvider` reboot journal keeps the original binding's host boot ID and records the observed
-kernel boot separately. The production source remains the fixed Linux
-`/proc/sys/kernel/random/boot_id` file. The [Linux random interface](https://man7.org/linux/man-pages/man4/random.4.html)
-documents this kernel-generated value. A different boot ID establishes that old
-processes cannot survive; it does not establish native domain state, closed file
-handles or storage erasure.
-
-Before initial teardown, recovery requires a matching terminal cleanup intent,
-current fenced local authorization, original owned storage and exclusive execution
-ownership. It publishes a zero-deadline fence and retires the execution preparation,
-then synchronizes a private reboot receipt bound to assignment, specification,
-launch history, cleanup ID and fenced authorization digest. It never converts an
-old monotonic deadline into time on the new boot, restarts a supervisor or queries
-a historical PID. Same-boot deadline publication remains independent of the
-supervisor's execution lock.
-
-Positive reboot stop evidence additionally requires a fresh exact inactive-domain
-observation without saved execution state, successful connection closure, unchanged
-kernel boot and context, and synchronized execution/reboot stop receipts. An
-active domain, missing initial domain, malformed history or uncertain publication
-leaves stop unconfirmed. Restoring the original boot ID after reboot history has
-been recorded is rejected.
-
-For an existing validated removal intent, a later reboot refreshes native evidence
-for that intent's phase: planned quarantine requires the exact inactive domain;
-quarantined storage permits typed absence after a lost retirement acknowledgement;
-retired/clearing/removing/completed storage requires fresh typed absence. Every
-phase retains the original manifest, inode, empty-content and handle requirements.
-The deletion receipt advances its observed boot only after fresh stop evidence.
-Repeated reboots and interrupted receipt publication can retry this sequence;
-no missing path or old PID substitutes for evidence.
-
-Twenty-three new isolated fixtures cover initial reboot fencing, unknown native
-state, lost fence/stop publication, changed kernel context, stale history,
-preparation retirement, lock contention and recovery during quarantine, content
-clearing and partial unlink. Kernel boot IDs, native drivers and file leases are
-injected; filesystem/journal transitions use real private temporary files. No
-actual host was rebooted. Linux kernel/driver acceptance, real host restart and
-fresh-lease isolation remain open, and ordinary consumer admission stays disabled.
+On a VM node, configure `provider: "libvirt"` or select `libvirt` under
+`provider: "linux"` in the host config. The provider uses the system libvirt
+namespace. Set `socketPath` when the socket is mounted somewhere other than
+`/var/run/libvirt/libvirt-sock`. Libvirt operations and capability probes use
+the explicit local Unix transport. Keep the socket path stable across restarts
+and mount VM storage and templates at the same absolute paths that host
+libvirtd sees.
