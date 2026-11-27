@@ -94,7 +94,7 @@ Reference it in a host configuration as shown in `examples/host-with-templates.j
 }
 ```
 
-Paths in `templateFile` are relative to the host configuration file. Bindings provide provider-local paths, networks, PVCs and SSH connection settings; they cannot replace the public recipe. A host can retain multiple revisions of an ID, and cluster pools can offer different architecture variants. Retain definitions for VMs already assigned to that host. Changing the recipe, defaults or verified artifact under an existing ID/revision/architecture is rejected; publish a new revision.
+Paths in `templateFile` are relative to the host configuration file. Bindings provide provider-local paths, networks and SSH connection settings; they cannot replace the public recipe. A host can retain multiple revisions of an ID. Retain definitions for VMs already assigned to that host. Changing the recipe, defaults or verified artifact under an existing ID/revision/architecture is rejected; publish a new revision.
 
 The host advertises resource defaults, preparation driver and a digest of the recipe/artifact contract. It keeps image paths, preparation command contents and SSH key paths local. The digest of a checksum-pinned source depends on its hash/format, so mirrors or local paths can differ across hosts.
 
@@ -122,8 +122,6 @@ retry; a visible entry is retained. Native Windows/filesystem and power-loss
 acceptance remain open. Checksum validation alone does not establish a bootable
 image or an atomic snapshot of a changing source.
 
-KubeVirt templates use a `pvc` binding and omit `source`; import the base PVC through your cluster's image workflow. Canaveral/CDI clones it into an independent VM root disk. The same guest preparation recipe can then run on that clone.
-
 ## Linux preparation
 
 Set `prepare.driver` to `cloud-init`. The base needs cloud-init with NoCloud support
@@ -139,13 +137,13 @@ not a Canaveral controller, host or SDK runtime. Canaveral attaches a per-instan
 
 The generated guest script installs packages, creates the account, writes files and runs commands in that order. Include application-specific checks in the final commands if readiness requires a service to be healthy. The desktop example installs XFCE and xrdp; configure the intended desktop authentication/access in the recipe or base image. Enabling RDP alone does not create a usable login credential.
 
-Native Linux hosts need `genisoimage` or `mkisofs` for seed media; the Docker libvirt target includes it. Apple hosts use `hdiutil`. KubeVirt references a per-VM Secret via cloud-init rather than embedding the preparation credential in its public VM definition.
+Native Linux hosts need `genisoimage` or `mkisofs` for seed media; the Docker libvirt target includes it. Apple hosts use `hdiutil`.
 
 ## Windows preparation
 
 Set `prepare.driver` to `cloudbase-init`. Supply a bootable Windows base with Cloudbase-Init's ConfigDrive metadata service and user-data plugin enabled. Canaveral supplies a CONFIG-2 disk with OpenStack metadata and `#ps1_sysnative` PowerShell user data. Files and ordered PowerShell commands prepare the guest; use native Windows commands for package installation and user/remote-access setup. POSIX file modes do not configure Windows ACLs.
 
-The Hyper-V agent builds seed media with Windows IMAPI; libvirt uses ISO tools and KubeVirt uses a ConfigDrive Secret. Windows base installation, licensing and physical Hyper-V/Cloudbase-Init acceptance remain separate from recipe generation. Canaveral does not bypass product activation or provide a permanently licence-free Windows image.
+The Hyper-V agent builds seed media with Windows IMAPI; libvirt uses ISO tools. Windows base installation, licensing and physical Hyper-V/Cloudbase-Init acceptance remain separate from recipe generation. Canaveral does not bypass product activation or provide a permanently licence-free Windows image.
 
 ## SSH preparation and macOS
 
@@ -188,4 +186,4 @@ Windows PowerShell callbacks disable `Expect: 100-continue` in their parent proc
 
 ## Source contracts
 
-The implementation uses [cloud-init NoCloud](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html), [Cloudbase-Init user data](https://cloudbase-init.readthedocs.io/en/master/userdata.html) and [KubeVirt startup data](https://kubevirt.io/user-guide/user_workloads/startup_scripts/). Apple requires preserving a macOS VM's [auxiliary storage alongside its disk](https://developer.apple.com/documentation/virtualization/vzmacauxiliarystorage). These contracts guide preparation; generated configuration and local fixture checks do not replace real guest boot, application and login acceptance.
+The implementation uses [cloud-init NoCloud](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html) and [Cloudbase-Init user data](https://cloudbase-init.readthedocs.io/en/master/userdata.html). Apple requires preserving a macOS VM's [auxiliary storage alongside its disk](https://developer.apple.com/documentation/virtualization/vzmacauxiliarystorage). These contracts guide preparation; generated configuration and local fixture checks do not replace real guest boot, application and login acceptance.

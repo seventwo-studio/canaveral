@@ -240,7 +240,7 @@ export function FleetPulse({
                       <div className="min-w-0 space-y-1">
                         <a
                           className="block break-words text-ui font-medium underline-offset-4 hover:underline"
-                          href={`#${host.kind === "orchestrator" || host.provider === "kubevirt" ? "orchestrators" : "hosts"}/${encodeURIComponent(host.id)}/resources`}
+                          href={`#hosts/${encodeURIComponent(host.id)}/resources`}
                         >
                           {host.name}
                         </a>

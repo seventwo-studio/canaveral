@@ -2,12 +2,7 @@ import { maintenanceSummary } from "./maintenance";
 import { deletionStates, record } from "./types";
 import { resources } from "./catalogue";
 import type { Resources } from "./catalogue";
-import type {
-  Host,
-  HostUsage,
-  NamespaceObservation,
-  PodMetrics,
-} from "./infrastructure";
+import type { Host, HostUsage } from "./infrastructure";
 import type { HostAvailability } from "./types";
 import type { WorkspaceMachine } from "./workspace";
 
@@ -90,80 +85,6 @@ function list(value: unknown, key: string): unknown[] {
   if (!Array.isArray(r[key])) throw new Error("Invalid inventory collection.");
   return r[key];
 }
-function podMetrics(value: unknown): PodMetrics {
-  const r = record(value);
-  if (r.status !== "available" && r.status !== "unavailable")
-    throw new Error("Invalid namespace metric state.");
-  if (
-    r.status === "available" &&
-    [r.cpuCores, r.memoryMiB, r.podCount].some((v) => !finite(v))
-  )
-    throw new Error("Incomplete namespace metrics.");
-  optionalNumbers(r, ["sampledAt"]);
-  if (r.coverage !== undefined) {
-    const c = record(r.coverage);
-    if (!["complete", "incomplete", "unavailable"].includes(String(c.status)))
-      throw new Error("Invalid namespace coverage.");
-    if (
-      c.status !== "unavailable" &&
-      (!finite(c.activePods) ||
-        !finite(c.measuredPods) ||
-        c.measuredPods > c.activePods ||
-        (c.status === "complete"
-          ? c.activePods !== c.measuredPods
-          : c.activePods === c.measuredPods))
-    )
-      throw new Error("Incomplete namespace coverage.");
-    if (
-      r.status === "available" &&
-      (c.status !== "complete" || c.measuredPods !== r.podCount)
-    )
-      throw new Error("Namespace metric coverage mismatch.");
-  }
-  return r as unknown as PodMetrics;
-}
-function namespaceObservation(value: unknown): NamespaceObservation {
-  const r = record(value);
-  requiredStrings(r, ["namespace"]);
-  if (!finite(r.sampledAt)) throw new Error("Invalid namespace timestamp.");
-  podMetrics(r.metrics);
-  const q = record(r.quotas);
-  if (
-    !["available", "unavailable"].includes(String(q.status)) ||
-    !Array.isArray(q.items)
-  )
-    throw new Error("Invalid namespace quotas.");
-  for (const value of q.items) {
-    const item = record(value);
-    requiredStrings(item, ["name"]);
-    if (
-      [
-        ...Object.values(record(item.hard)),
-        ...Object.values(record(item.used)),
-      ].some((v) => !finite(v))
-    )
-      throw new Error("Invalid quota amounts.");
-  }
-  if (r.canaveral !== undefined) {
-    const owned = record(r.canaveral),
-      ownership = record(owned.ownership);
-    if (
-      owned.scope !== "assigned-vm-pods" ||
-      !["complete", "unavailable"].includes(String(ownership.status))
-    )
-      throw new Error("Invalid workload ownership.");
-    const metrics = podMetrics(owned.metrics);
-    if (ownership.status === "complete") {
-      if (
-        !finite(ownership.assignedMachines) ||
-        ownership.assignedMachines !== ownership.verifiedMachines
-      )
-        throw new Error("Unverified workload ownership.");
-    } else if (metrics.status === "available")
-      throw new Error("Usage lacks ownership evidence.");
-  }
-  return r as unknown as NamespaceObservation;
-}
 function hostUsage(value: unknown): HostUsage {
   const r = record(value);
   requiredStrings(r, ["scope"]);
@@ -184,11 +105,9 @@ function hostUsage(value: unknown): HostUsage {
       optionalNumbers(c, ["cpuPercent", "memoryMiB"]);
     }
   }
-  if (r.cluster != null) namespaceObservation(r.cluster);
   return {
     ...r,
     canaveral: r.canaveral ?? undefined,
-    cluster: r.cluster ?? undefined,
   } as unknown as HostUsage;
 }
 export function hostsResponse(value: unknown): Host[] {
@@ -197,7 +116,7 @@ export function hostsResponse(value: unknown): Host[] {
     requiredStrings(h, ["id", "name", "provider"]);
     booleans(h, ["online", "enabled"]);
     optionalStrings({ ...h, platform: h.platform ?? undefined }, [
-      "kind",
+      "detail",
       "platform",
     ]);
     booleans(h, ["placementReady", "overcommitted"], true);

@@ -215,7 +215,7 @@ function transport(paths: { sdk: string; registry: string }, counters: Map<strin
 interface Harness {
   url: string; admin: string; enrollment: string; root: string; image: RecordValue; registry: string; counters: Map<string, number>; devices: Map<string, Device>; fixture: Fixture;
   runner(): HostRunner; restartRunner(): Promise<void>; stopController(): Promise<void>; startController(): Promise<void>;
-  api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any }>;
+  api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any; acknowledgedAt: number }>;
   application(tunnelsPerLease?: number): Promise<string>;
   storage(machineId: string): string;
   reserved(): Promise<RecordValue>;
@@ -256,7 +256,8 @@ async function harness(t: TestContext, capacity = 1, fixture: Fixture = { tunnel
   });
   const api = async (method: string, route: string, body?: unknown, token = admin) => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    return { status: response.status, body: await response.json() as any };
+    const acknowledgedAt = performance.now();
+    return { status: response.status, body: await response.json() as any, acknowledgedAt };
   };
   return { url, admin, enrollment, root, image, registry: paths.registry, counters, devices, fixture, api,
     runner: () => runner!,
@@ -295,9 +296,12 @@ function client(h: Harness, lease: { id: string; key: string }): LeaseClient {
 class Reader {
   private chunks: Buffer[] = []; private size = 0; private waiters: (() => void)[] = [];
   ended = false; closed = false;
+  finishedAt?: number;
   constructor(readonly socket: Socket) {
     socket.on("data", (chunk: Buffer) => { this.chunks.push(chunk); this.size += chunk.length; this.wake(); });
-    socket.on("end", () => { this.ended = true; this.wake(); }); socket.on("close", () => { this.closed = true; this.wake(); }); socket.on("error", () => {});
+    socket.on("end", () => { this.finishedAt ??= performance.now(); this.ended = true; this.wake(); });
+    socket.on("close", () => { this.finishedAt ??= performance.now(); this.closed = true; this.wake(); });
+    socket.on("error", () => {});
   }
   private wake(): void { for (const waiter of this.waiters.splice(0)) waiter(); }
   private wait(): Promise<void> { return new Promise(resolve => { const timer = setTimeout(resolve, 100); this.waiters.push(() => { clearTimeout(timer); resolve(); }); }); }
@@ -1134,17 +1138,17 @@ test("a tunnel ends with its lease: key rotation and release within a second, su
     reader.socket.write("ECHO up\n"); assert.equal(await reader.line(), "echo up");
     return { tunnel, reader };
   };
-  /** Times the device's connection from the moment the cause took effect until it is closed, and
+  /** Times the device's connection from the confirmed cause to the socket's first end event, and
    * asserts the documented bound: one second for an end the controller can see (a 250 ms check
    * interval), two for one only the device shows (a one-second check). These are measured on a
    * single event loop shared by the controller, the runner and the reconcile loop of every
    * emulator; what makes each mechanism fire is asserted separately, in the component tests and
    * in the runner's-own-evidence test below. */
-  const ends = async (active: { tunnel: LeaseTunnel; reader: Reader }, cause: () => Promise<unknown> | unknown, bound: number, label: string): Promise<void> => {
-    await cause();
-    const started = Date.now();
+  const ends = async (active: { tunnel: LeaseTunnel; reader: Reader }, cause: () => Promise<number> | number, bound: number, label: string): Promise<void> => {
+    assert.equal(active.reader.finishedAt, undefined, "the connection was open before the cause");
+    const started = await cause();
     await active.reader.finished(15000);
-    const elapsed = Date.now() - started;
+    const elapsed = Math.max(0, active.reader.finishedAt! - started);
     t.diagnostic(`${label}: the device's connection closed after ${elapsed} ms`);
     const end = await Promise.race([active.tunnel.closed, sleep(15000).then(() => undefined)]);
     assert.ok(end, "the tunnel ended"); assert.notEqual(end.reason, "closed");
@@ -1155,7 +1159,12 @@ test("a tunnel ends with its lease: key rotation and release within a second, su
   // Key rotation: the old key's tunnel ends at once; the lease and device stay, so the runner removes and proves the mapping.
   const first = await open(rotated);
   let key = "";
-  await ends(first, async () => { key = (await h.api("POST", `/v1/leases/${rotated.id}/credential`, {}, app)).body.credential; }, 1000, "key rotation");
+  await ends(first, async () => {
+    const response = await h.api("POST", `/v1/leases/${rotated.id}/credential`, {}, app);
+    assert.equal(response.status, 200);
+    key = response.body.credential;
+    return response.acknowledgedAt;
+  }, 1000, "key rotation");
   const holder = client(h, { id: rotated.id, key });
   await until(async () => { const saved = await holder.tunnels.inspect(first.tunnel.id); return saved.state === "revoked" && saved.mappingRemoved; }, "the rotated tunnel's removal receipt");
   assert.deepEqual(mappingsOf(h, rotated.machineId), { reverse: [], forward: [] });
@@ -1166,7 +1175,11 @@ test("a tunnel ends with its lease: key rotation and release within a second, su
 
   // Release: the tunnel ends with the lease, and the lease's cleanup settles its mapping.
   const releasing = await open(released);
-  await ends(releasing, () => h.api("POST", `/v1/leases/${released.id}/release`, { id: randomUUID() }, released.key), 1000, "release");
+  await ends(releasing, async () => {
+    const response = await h.api("POST", `/v1/leases/${released.id}/release`, { id: randomUUID() }, released.key);
+    assert.equal(response.status, 200);
+    return response.acknowledgedAt;
+  }, 1000, "release");
   assert.equal((await client(h, released).tunnels.inspect(releasing.tunnel.id)).state, "revoked");
   await cleaned(h, app, released.id);
   await until(async () => (await client(h, released).tunnels.inspect(releasing.tunnel.id)).mappingRemoved === true, "settlement by lease cleanup");
@@ -1175,7 +1188,10 @@ test("a tunnel ends with its lease: key rotation and release within a second, su
   // Supervisor loss: nothing enforces the deadline any more, so the tunnel ends with device access.
   const orphaned = await acquire(h, app, 300);
   const lost = await open(orphaned), group = JSON.parse(readFileSync(join(h.storage(orphaned.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
-  await ends(lost, () => process.kill(group.supervisorPid, "SIGKILL"), 2000, "supervisor loss");
+  await ends(lost, () => {
+    process.kill(group.supervisorPid, "SIGKILL");
+    return performance.now();
+  }, 2000, "supervisor loss");
   await until(async () => (await h.api("GET", `/v1/leases/${orphaned.id}`, undefined, app)).body.state === "failed", "the failed lease", 15000);
   await until(async () => (await h.api("GET", `/v1/leases/${orphaned.id}`, undefined, app)).body.cleanup.state === "blocked", "blocked cleanup");
   // The emulator survives unsupervised, so its stop is unproven and the tunnel's mapping is not claimed removed.
@@ -1304,9 +1320,19 @@ test("the isolation probe still fences a leaky guest on a host that offers tunne
 });
 
 test("the runner ends a tunnel on its own evidence before the controller can know, and no other host can attach to or report for a tunnel", { skip, timeout: 240000 }, async t => {
-  // Heartbeats five seconds apart, as on a default host: whatever happens within a second or two of
-  // a heartbeat was decided by the runner alone.
   const h = await harness(t, 2, { tunnels: true, poll: 5 }), app = await h.application(2);
+  const runner = h.runner(), poll = runner.poll.bind(runner);
+  let paused = false, inFlight: Promise<void> | undefined;
+  t.mock.method(runner, "poll", async () => {
+    if (paused) return;
+    const current = inFlight = poll();
+    try { await current; } finally { inFlight = undefined; }
+  });
+  // Drain a heartbeat already in flight. The other runner loops keep enforcing local authority.
+  const withoutHeartbeat = async <T>(check: () => Promise<T>): Promise<T> => {
+    paused = true;
+    try { await inFlight; return await check(); } finally { paused = false; }
+  };
   const echo = await listening(serve); t.after(() => echo.close());
   const [fenced, orphaned] = await Promise.all([acquire(h, app, 300), acquire(h, app, 300)]);
   const heartbeat = async () => { const last = h.runner().lastContact; await until(() => h.runner().lastContact !== last, "the next heartbeat", 15000); };
@@ -1316,14 +1342,18 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
   assert.equal((await h.api("POST", "/v1/hosts/enroll", { ...other, orchestrator: h.url, offer: { ...h.runner().offer, name: "another-android-host" } }, h.enrollment)).status, 200);
   // A new tunnel waits for its own host's next heartbeat. Until then nobody else can take the host's place.
   await heartbeat();
-  const holder = client(h, fenced), pending = (await holder.tunnels.create({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081 })).tunnel;
-  for (const [host, credential] of [[other.id, other.credential], [hostId, other.credential], [hostId, fenced.key], [other.id, fenced.key], [hostId, app]] as const) {
-    await assert.rejects(PeerConnection.connect(h.url, `/v1/hosts/${host}/tunnels/${pending.id}/${pending.generation}`, credential), `${host === hostId ? "the tunnel's host id" : "another host"} with a foreign credential`);
-    assert.ok([401, 403].includes((await h.api("POST", `/v1/hosts/${host}/tunnels/${pending.id}/finish`, { generation: pending.generation, mappingRemoved: true }, credential)).status));
-  }
-  const untouched = await holder.tunnels.inspect(pending.id);
-  assert.deepEqual([untouched.state, untouched.mappingRemoved], ["pending", false]);
-  assert.equal(h.calls(fenced.machineId, "reverse --no-rebind"), 0);
+  const holder = client(h, fenced);
+  const pending = await withoutHeartbeat(async () => {
+    const { tunnel: pending } = await holder.tunnels.create({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081 });
+    for (const [host, credential] of [[other.id, other.credential], [hostId, other.credential], [hostId, fenced.key], [other.id, fenced.key], [hostId, app]] as const) {
+      await assert.rejects(PeerConnection.connect(h.url, `/v1/hosts/${host}/tunnels/${pending.id}/${pending.generation}`, credential), `${host === hostId ? "the tunnel's host id" : "another host"} with a foreign credential`);
+      assert.ok([401, 403].includes((await h.api("POST", `/v1/hosts/${host}/tunnels/${pending.id}/finish`, { generation: pending.generation, mappingRemoved: true }, credential)).status));
+    }
+    const untouched = await holder.tunnels.inspect(pending.id);
+    assert.deepEqual([untouched.state, untouched.mappingRemoved], ["pending", false]);
+    assert.equal(h.calls(fenced.machineId, "reverse --no-rebind"), 0);
+    return pending;
+  });
   // Its own host attaches at the next heartbeat, and the tunnel works.
   const first = await holder.tunnels.connect(pending, { target: { port: echo.port } });
   const firstReader = new Reader(await deviceConnect(h, fenced.machineId, 8081));
@@ -1333,28 +1363,34 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
   secondReader.socket.write("ECHO up\n"); assert.equal(await secondReader.line(), "echo up");
 
   // The runner's lease guard fences the lease locally, as it does at its own deadline or without
-  // controller contact. The controller hears of it only with the next heartbeat, seconds away.
+  // controller contact. Hold the heartbeat so only local evidence can close the tunnel.
   await heartbeat();
-  let since = Date.now();
-  h.runner().guard.records.get(fenced.machineId)!.fenced = true;
-  await firstReader.finished(10000);
-  let elapsed = Date.now() - since;
-  t.diagnostic(`local fence: the device's connection closed after ${elapsed} ms`);
-  assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
-  assert.notEqual((await first.closed).reason, "closed");
-  assert.equal(await leaseState(fenced), "ready", "the controller had not been told yet");
+  await withoutHeartbeat(async () => {
+    assert.equal(firstReader.finishedAt, undefined);
+    const since = performance.now();
+    runner.guard.records.get(fenced.machineId)!.fenced = true;
+    await firstReader.finished(10000);
+    const elapsed = firstReader.finishedAt! - since;
+    t.diagnostic(`local fence: the device's connection closed after ${elapsed} ms`);
+    assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
+    assert.notEqual((await first.closed).reason, "closed");
+    assert.equal(await leaseState(fenced), "ready", "the controller had not been told yet");
+  });
 
   // The supervisor dies. The runner's once-a-second device check sees the free lock and ends the tunnel.
   await heartbeat();
   const group = JSON.parse(readFileSync(join(h.storage(orphaned.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
-  since = Date.now();
-  process.kill(group.supervisorPid, "SIGKILL");
-  await secondReader.finished(10000);
-  elapsed = Date.now() - since;
-  t.diagnostic(`supervisor loss: the device's connection closed after ${elapsed} ms`);
-  assert.ok(elapsed < 2000, `the runner's own device check took ${elapsed} ms`);
-  assert.notEqual((await second.closed).reason, "closed");
-  assert.equal(await leaseState(orphaned), "ready", "the controller had not been told yet");
+  await withoutHeartbeat(async () => {
+    assert.equal(secondReader.finishedAt, undefined);
+    const since = performance.now();
+    process.kill(group.supervisorPid, "SIGKILL");
+    await secondReader.finished(10000);
+    const elapsed = secondReader.finishedAt! - since;
+    t.diagnostic(`supervisor loss: the device's connection closed after ${elapsed} ms`);
+    assert.ok(elapsed < 2000, `the runner's own device check took ${elapsed} ms`);
+    assert.notEqual((await second.closed).reason, "closed");
+    assert.equal(await leaseState(orphaned), "ready", "the controller had not been told yet");
+  });
   // Both leases then fail through the ordinary path, and nothing of the tunnels survives cleanup.
   await until(async () => await leaseState(fenced) !== "ready" && await leaseState(orphaned) !== "ready", "the leases' own failure", 30000);
   process.kill(-group.childPid, "SIGKILL");
