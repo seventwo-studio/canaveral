@@ -19,7 +19,7 @@ import { collect, ordered, stoppedWithin } from "./live-fixture.ts";
 const LEASE = { cpu: 2, memoryMiB: 2048, diskGiB: 8 };
 type Viewer = { id: string; stream: LiveStream; got: ReturnType<typeof collect> };
 const media = (viewer: Viewer) => viewer.got.segments.filter(s => s.kind === "media");
-const journal = (h: Harness, capture: string) => JSON.parse(readFileSync(join(h.root, "runner", "work", "live", `${capture}.json`), "utf8")) as { state: string; cleaned?: boolean; hostCleaned?: boolean; deviceStopped?: boolean };
+const journal = (h: Harness, machine: string, capture: string) => JSON.parse(readFileSync(join(h.root, "runner", "work", "live", `${machine}.${capture}.json`), "utf8")) as { state: string; cleaned?: boolean; hostCleaned?: boolean; deviceStopped?: boolean };
 
 test("a view closed during preflight, recorder spawn, streaming or rollover leaves the capture proven clean", { skip, timeout: 240000 }, async t => {
   // Three-second capture runs, so a rollover is reached quickly (natively a run lasts 180 seconds).
@@ -54,7 +54,7 @@ test("a view closed during preflight, recorder spawn, streaming or rollover leav
     // Positive cleanup, reported by the runner itself: nothing was left for an administrator.
     await until(async () => (await lease.video.inspect(capture)).cleaned === true, `positive cleanup of a capture left ${label}`, 20000);
     t.diagnostic(`left ${label}: ${segments} segment(s) received, clean ${Date.now() - left} ms later, ${recorders().length} recorder(s) started so far`);
-    assert.deepEqual([journal(h, capture).state, journal(h, capture).cleaned], ["finished", true], label);
+    assert.deepEqual([journal(h, a.machineId, capture).state, journal(h, a.machineId, capture).cleaned], ["finished", true], label);
     assert.equal(recorders().some(recorder => recorder.running), false, `no recorder runs after a capture left ${label}`);
     assert.equal(h.media.encodersOpen, 0);
     assert.deepEqual(await h.reserved(), LEASE, `the capture's reservation is released after it was left ${label}`);
@@ -138,8 +138,8 @@ test("the live capture of an owned Android device that its runner cannot prove s
   // The runner reported only its own encoder's exit; the device's observed stop completes the proof.
   await until(async () => (await session()).cleaned === true, "cleanup settled by the device's observed stop");
   assert.equal((await session()).hostCleaned, true);
-  await until(() => journal(h, capture).deviceStopped === true, "the runner to retain the proven emulator stop");
-  assert.deepEqual([journal(h, capture).state, journal(h, capture).cleaned, journal(h, capture).hostCleaned], ["unknown", false, true]);
+  await until(() => journal(h, machine, capture).deviceStopped === true, "the runner to retain the proven emulator stop");
+  assert.deepEqual([journal(h, machine, capture).state, journal(h, machine, capture).cleaned, journal(h, machine, capture).hostCleaned], ["unknown", false, true]);
   await until(() => recorder.running === false, "the recorder to end with its emulator");
   assert.equal(h.media.encodersOpen, 0);
   await until(async () => { const reserved = await h.reserved(); return reserved.cpu === base.cpu - 2 && reserved.memoryMiB === base.memoryMiB - 2048; }, "neither the stopped device nor its capture reserved");
@@ -153,5 +153,5 @@ test("the live capture of an owned Android device that its runner cannot prove s
   assert.notEqual(next, capture);
   again.stream.close(); await again.got.done;
   await until(async () => (await h.api("GET", `/v1/machines/${machine}/video-sessions/${next}`)).body.cleaned === true, "the runner's own recorder proof");
-  assert.deepEqual([journal(h, next).state, journal(h, next).cleaned], ["finished", true]);
+  assert.deepEqual([journal(h, machine, next).state, journal(h, machine, next).cleaned], ["finished", true]);
 });

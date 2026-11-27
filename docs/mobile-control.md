@@ -379,7 +379,8 @@ Recover in this order:
 4. **Delete** the machine. Abandonment unblocks only this deletion. It still
    blocks another capture on that machine, and the session keeps its 1 CPU and
    256 MiB reservation, and its host slot, until the deletion completes. The
-   operator owns any residue, which the device's deletion removes.
+   operator owns any residue, which the device's deletion removes. A confirmed
+   device stop permits this recovery even if the capture journal is unreadable.
 
 A positive cleanup receipt that arrives after abandonment is still recorded and
 releases the reservation as usual. Sessions left uncleaned on machines deleted
@@ -1515,7 +1516,8 @@ A live capture holds its slot and reservation from its first view until proof,
 by the recording path's rules. A wedged encoder never frees capacity.
 
 - **The runner's proof.** The runner journals the capture before its first
-  attachment and again before native dispatch (`work/live/{capture}.json`). When
+  attachment and again before native dispatch
+  (`work/live/{machine}.{capture}.json`). When
   the last viewer leaves, each epoch has either ended by itself or been stopped
   with the exact-recorder proof, and each encoder's exit was confirmed. The runner
   then reports positive cleanup through the recording's finish route. A capture
@@ -1531,13 +1533,16 @@ by the recording path's rules. A wedged encoder never frees capacity.
   the recorder ran inside that process. This rule applies to live captures only;
   recording cleanup is unchanged. After a runner upgrade, an older journal that
   records the encoder's exit can recover the stop proof from the authenticated
-  controller finish receipt for that capture and generation. An omitted
-  heartbeat entry leaves the proof unresolved.
-- **Journal ownership.** The runner indexes capture journals by device so it
-  reads only that device's journals for subsequent stop reconciliation and
-  capture admission. An unreadable journal holds its device's local capture
-  guard. A legacy journal that was already unreadable before the runner could
-  index it leaves capture admission blocked until its ownership can be verified.
+  controller finish receipt for that capture and generation. Receipt-based
+  recovery requires verified HTTPS or loopback. An omitted heartbeat entry
+  and a remote HTTP controller both leave the guard held.
+- **Journal ownership.** New live and recording journal filenames contain both
+  the device ID and the capture ID. An unreadable journal keeps that device's
+  local capture guard held. At startup, the runner reads legacy journals to
+  establish their ownership and ignores legacy ownership sidecars. A legacy
+  journal with unknown ownership, or a journal whose device ID conflicts with
+  its filename on restore, blocks capture admission across the host. These
+  guards do not prevent the runner from reporting a verified device stop.
 - **Unknown.** An unconfirmed encoder exit, an iOS source whose stop is unproven,
   a source whose dispatch outcome is uncertain, or a runner that restarted mid-capture leaves the
   session uncleaned. It keeps its reservation and its host slot, blocks further

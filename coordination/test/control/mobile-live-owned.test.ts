@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
 import type { TestContext } from "node:test";
@@ -80,6 +81,10 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
       }
       return { state: "stopping" };
     }
+    async removeOwnedStorage(machine: RecordValue, _image: RecordValue, _folder: string, requestId: string) {
+      assert.equal(devices.has(String(machine.id)), false);
+      return { state: "complete", id: requestId, machineId: machine.id };
+    }
     /** A frame every 40 ms until the run's time limit, then a clean end, as a native source does. */
     async openVideo(machine: RecordValue, _image: RecordValue, _folder: string, video: { fps: number; durationSeconds: number; bitRate: number }, check: Authorized, cleanupCheck?: Authorized): Promise<NativePipe> {
       assert.equal(video.fps, 30);
@@ -157,6 +162,9 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
       return { id, stream, got: collect(stream) };
     },
   };
+}
+function captureJournal(root: string, machineId: string, id: string): string {
+  return join(root, "runner", "work", "live", `${machineId}.${id}.json`);
 }
 const media = (stream: ReturnType<typeof collect>) => stream.segments.filter(s => s.kind === "media");
 
@@ -238,7 +246,7 @@ test("an Android capture whose recorder stop is unproven stays reserved until it
   viewer.stream.close(); await viewer.got.done;
   // The runner could not prove the guest recorder stopped: it reports only its own encoder's exit.
   await until(async () => (await session()).body.hostCleaned === true, "the runner's encoder receipt");
-  const journal = JSON.parse(readFileSync(join(f.root, "runner", "work", "live", `${capture}.json`), "utf8"));
+  const journal = JSON.parse(readFileSync(captureJournal(f.root, machineId, capture), "utf8"));
   assert.deepEqual([journal.state, journal.cleaned, journal.hostCleaned], ["unknown", false, true]);
   // That alone releases nothing while the device, and so possibly its recorder, still runs.
   await sleep(2000);
@@ -451,7 +459,6 @@ test("a runner that stops proves its running capture clean first, and a view tha
   const f = await fixture(t), owner = await f.account("owner");
   const watched = await f.device(owner.session), other = await f.device(owner.session), base = await f.reserved();
   const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
-  const journal = (capture: string) => join(f.root, "runner", "work", "live", `${capture}.json`);
   const session = async (machineId: string, capture: string) => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${capture}`, undefined, owner.session)).body;
   const viewer = await f.watch(owner.session, watched);
   await until(() => media(viewer.got).length >= 3, "live segments");
@@ -463,12 +470,12 @@ test("a runner that stops proves its running capture clean first, and a view tha
   // Its viewer is told by the host, in-band, that the capture is ending.
   assert.deepEqual(viewer.stream.ended, { reason: "capture_ended", source: "host" });
   // The running capture was stopped and proven while the runner still could, and reported.
-  const saved = JSON.parse(readFileSync(journal(capture), "utf8"));
+  const saved = JSON.parse(readFileSync(captureJournal(f.root, watched, capture), "utf8"));
   assert.deepEqual([saved.state, saved.cleaned], ["finished", true]);
   assert.deepEqual([f.stats.open, f.stats.encodersOpen], [0, 0]);
   assert.equal((await session(watched, capture)).cleaned, true, "the receipt reached the controller before the runner let go");
   // The late view was taken by no one: no journal, no attachment, nothing native.
-  assert.equal(existsSync(journal(late.captureId)), false);
+  assert.equal(existsSync(captureJournal(f.root, other, late.captureId)), false);
   assert.equal(f.stats.captures, 1);
   assert.equal((await live.inspect(other, late.id)).state, "pending");
   assert.equal((await session(other, late.captureId)).state, "pending");
@@ -544,8 +551,10 @@ test("legacy Android live journals require a matching controller cleanup receipt
 
   const { generation } = await session(captureId);
   const path = join(f.root, "runner", "work", "live", `${captureId}.json`);
+  rmSync(captureJournal(f.root, machineId, captureId));
   // Restore the old runner's journal shape after the proof, as if upgrading with the device running.
   saveRecord(path, { generation, machineId, state: "unknown", cleaned: false, hostCleaned: true });
+  await f.restartRunner();
   const send = f.runner.transport.request.bind(f.runner.transport), otherGeneration = randomUUID();
   let result: "absent" | "mismatch" | "match" = "absent";
   let requests = 0;
@@ -580,10 +589,10 @@ test("legacy Android live journals require a matching controller cleanup receipt
 
 test("an unreadable journal for a removed device leaves other Android stop proofs and captures available", { timeout: 30000 }, async t => {
   const removed = { id: randomUUID(), machineId: randomUUID(), generation: randomUUID(), state: "finished", cleaned: true };
-  const journalAt = (state: string, id: string) => join(state, "work", "live", `${id}.json`);
-  const f = await fixture(t, { stop: "unprovable", beforeStart: state => saveRecord(journalAt(state, removed.id), removed) });
+  const removedJournal = (state: string) => join(state, "work", "live", `${removed.machineId}.${removed.id}.json`);
+  const f = await fixture(t, { stop: "unprovable", beforeStart: state => saveRecord(removedJournal(state), removed) });
   const owner = await f.account("owner"), machineId = await f.device(owner.session);
-  const journal = (id: string) => journalAt(join(f.root, "runner"), id);
+  const journal = (id: string) => captureJournal(f.root, machineId, id);
   const viewer = await f.watch(owner.session, machineId);
   const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
   await until(() => media(viewer.got).length > 0, "capture on the remaining device");
@@ -592,8 +601,8 @@ test("an unreadable journal for a removed device leaves other Android stop proof
   viewer.stream.close(); await viewer.got.done;
   await until(async () => (await session(captureId)).hostCleaned === true, "the encoder receipt");
 
-  writeFileSync(journal(removed.id), "unreadable");
-  // The new runner must scope even an unreadable journal using the durable ownership index.
+  writeFileSync(removedJournal(join(f.root, "runner")), "unreadable");
+  // The filename still identifies the device when the journal body is unreadable.
   await f.restartRunner();
   const proof = Promise.withResolvers<string>();
   const send = f.runner.transport.request.bind(f.runner.transport);
@@ -619,4 +628,99 @@ test("an unreadable journal for a removed device leaves other Android stop proof
   const next = await f.watch(owner.session, machineId);
   await until(() => media(next.got).length > 0, "capture with only the removed device's journal unreadable");
   next.stream.close(); await next.got.done;
+});
+
+test("a restored flat journal fences its recorded device even when the sidecar names another", { timeout: 30000 }, async t => {
+  const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
+  const journalId = randomUUID(), work = join(f.root, "runner", "work", "live");
+  saveRecord(join(work, `${journalId}.json`), { machineId, generation: randomUUID(), state: "started" });
+  saveRecord(join(work, "owners", `${journalId}.json`), { machineId: randomUUID() });
+  await f.restartRunner();
+
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  const view = await live.create(machineId, { id: randomUUID() });
+  await assert.rejects(live.connect(view, { timeoutMs: 5000 }), { code: "device_live_view_active" });
+  assert.equal(f.stats.captures, 0);
+});
+
+test("an unreadable capture retains its reservation but allows stop proof and deletion after abandonment", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { stop: "unprovable" }), owner = await f.account("owner"), machineId = await f.device(owner.session);
+  const route = `/v1/machines/${machineId}`;
+  const viewer = await f.watch(owner.session, machineId), { captureId } = viewer.stream.view;
+  const session = () => f.api("GET", `${route}/video-sessions/${captureId}`, undefined, owner.session);
+  await until(() => media(viewer.got).length > 0, "live capture before journal damage");
+  const send = f.runner.transport.request.bind(f.runner.transport), receipt = Promise.withResolvers<void>();
+  const stop = Promise.withResolvers<string>();
+  t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
+    if (args[1].endsWith(`/video-sessions/${captureId}/finish`)) {
+      receipt.resolve();
+      throw new Error("Capture receipt unavailable.");
+    }
+    if (args[1].endsWith("/heartbeat")) {
+      const state = (args[2].reports as Record<string, RecordValue>)[machineId]?.state;
+      if (state === "stopped" || state === "unknown") stop.resolve(state);
+    }
+    return send(...args);
+  });
+  viewer.stream.close(); await viewer.got.done; await receipt.promise;
+  await until(async () => (await session()).body.state === "disconnected", "the ended capture");
+  const path = captureJournal(f.root, machineId, captureId);
+  writeFileSync(path, "unreadable");
+  // Advance the ended session's abandonment deadline without a wall-clock wait.
+  using db = new DatabaseSync(join(f.root, "controller.sqlite"));
+  db.exec("PRAGMA busy_timeout=5000");
+  db.prepare("UPDATE mobile_video_sessions SET deadline=0 WHERE id=?").run(captureId);
+  assert.equal((await f.api("POST", `${route}/video-sessions/${captureId}/abandon`, { reason: "Journal unreadable" })).status, 200);
+  const refused = await f.api("POST", `${route}/live-views`, { id: randomUUID() }, owner.session);
+  assert.deepEqual([refused.status, refused.body.code], [409, "capture_cleanup_unproven"]);
+
+  assert.equal((await f.api("POST", `${route}/desired`, { state: "stopped" }, owner.session)).status, 200);
+  assert.equal(await stop.promise, "stopped");
+  await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.some((m: RecordValue) => m.id === machineId && m.observed === "stopped"), "published device stop");
+  assert.equal((await session()).body.cleaned, false);
+  const guard = f.runner as unknown as { unprovenCapture(kind: "live", machineId: string, except: string): boolean };
+  assert.equal(guard.unprovenCapture("live", machineId, randomUUID()), true);
+  assert.equal((await f.reserved()).cpu, 1, "the abandoned capture still reserves capacity");
+  assert.equal((await f.api("POST", `${route}/delete`, { id: randomUUID() }, owner.session)).status, 200);
+  await until(async () => (await f.reserved()).cpu === 0, "deletion to release the abandoned capture reservation");
+  assert.equal(f.stats.captures, 1);
+});
+
+test("a runner refuses an older controller's unowned live assignment through the broker", { timeout: 30000 }, async t => {
+  const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
+  const send = f.runner.transport.request.bind(f.runner.transport);
+  t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
+    const reply = await send(...args);
+    if (args[1].endsWith("/heartbeat")) {
+      for (const machine of reply.machines as RecordValue[]) if (machine.id === machineId) delete machine.ownerId;
+    }
+    return reply;
+  });
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  const view = await live.create(machineId, { id: randomUUID() });
+  await assert.rejects(live.connect(view, { timeoutMs: 5000 }), { code: "session_incomplete" });
+  await until(async () => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${view.captureId}`, undefined, owner.session)).body.cleaned === true, "receipt for the refused capture");
+  assert.equal(f.stats.captures, 0);
+});
+
+test("unattributed legacy journals and conflicting scoped journals block admission host-wide", { timeout: 30000 }, async t => {
+  for (const damage of ["unreadable legacy", "wrong device"] as const) await t.test(damage, async t => {
+    const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
+    const work = join(f.root, "runner", "work", "live");
+    const id = randomUUID(), recorded = { machineId, generation: randomUUID(), state: "started" };
+    if (damage === "unreadable legacy") {
+      const path = join(work, `${id}.json`);
+      saveRecord(path, recorded);
+      writeFileSync(path, "unreadable");
+    } else {
+      saveRecord(join(work, `${randomUUID()}.${id}.json`), recorded);
+    }
+    await f.restartRunner();
+    const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+    const view = await live.create(machineId, { id: randomUUID() });
+    await assert.rejects(live.connect(view, { timeoutMs: 5000 }), { code: "device_live_view_active" });
+    assert.equal(f.stats.captures, 0);
+    assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
+    await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.some((m: RecordValue) => m.id === machineId && m.observed === "stopped"), "independent device stop proof");
+  });
 });

@@ -592,7 +592,7 @@ test("a finished recording whose receipt the runner repeats does not hold back t
   const runner = new HostRunner(config, { clock, transport, providerFactory });
   t.after(() => runner.close().catch(() => {}));
   await runner.initializeProviders(); await runner.connect(); await runner.poll();
-  saveRecord(join(config.stateDir, "work", "video", `${finished.id}.json`), { generation: finished.generation, machineId: m.id, state: "finished", cleaned: true });
+  saveRecord(join(config.stateDir, "work", "video", `${m.id}.${finished.id}.json`), { generation: finished.generation, machineId: m.id, state: "finished", cleaned: true });
   const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean; active: Map<string, unknown>; liveRecordings: Map<string, unknown> };
   internals.stepVideo(); await drain();
   assert.equal(receipts, 1); assert.ok(internals.active.has(`video:${finished.id}`), "the receipt repeat is in flight");
@@ -649,7 +649,7 @@ test("a host-only recording receipt keeps the device held even when a heartbeat 
   const runner = new HostRunner(config, { clock, transport, providerFactory });
   t.after(() => runner.close().catch(() => {}));
   await runner.initializeProviders(); await runner.connect(); await runner.poll();
-  saveRecord(join(config.stateDir, "work", "video", `${unproven.id}.json`), { generation: unproven.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true });
+  saveRecord(join(config.stateDir, "work", "video", `${m.id}.${unproven.id}.json`), { generation: unproven.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true });
   const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean };
   internals.stepVideo(); await drain();
   assert.equal(receipts, 1, "the host-only receipt is in flight");
@@ -661,9 +661,45 @@ test("a host-only recording receipt keeps the device held even when a heartbeat 
   // clears its durable native reservation.
   videoSessions = []; await runner.poll();
   assert.equal(internals.recordingPending(String(m.id)), true);
-  saveRecord(join(config.stateDir, "work", "video", unproven.id + ".json"), {
+  saveRecord(join(config.stateDir, "work", "video", `${m.id}.${unproven.id}.json`), {
     generation: unproven.generation, machineId: m.id, state: "finished", cleaned: true,
   });
   await runner.poll();
   assert.equal(internals.recordingPending(String(m.id)), false);
+});
+
+test("legacy live cleanup receipts require TLS or loopback", async t => {
+  for (const [url, trusted] of [
+    ["http://192.0.2.1:8080", false],
+    ["http://127.0.0.1:8080", true],
+    ["https://controller.example.test", true],
+  ] as const) await t.test(url, async t => {
+    const { config, image, clock } = setup(t);
+    const m: RecordValue = { ...machine(image), template: { ...image, os: "android" } };
+    const id = randomUUID(), generation = randomUUID(), machineId = String(m.id);
+    const path = join(config.stateDir, "work", "live", `${id}.json`);
+    saveRecord(path, { machineId, generation, state: "unknown", cleaned: false, hostCleaned: true });
+    const logs: string[] = [];
+    let receiptRequests = 0;
+    const transport: HostTransport = { request: async (_method, route) => {
+      if (route.endsWith(`/video-sessions/${id}/finish`)) {
+        receiptRequests++;
+        return { id, generation, machineId, kind: "live", cleaned: true, hostCleaned: true };
+      }
+      return {};
+    } };
+    const runner = new HostRunner({ ...config, url, allowHTTP: true }, { clock, transport, providerFactory, log: message => logs.push(message) });
+    t.after(() => runner.close());
+    await runner.connect();
+    const recovery = runner as unknown as {
+      recoverAndroidLiveCleanup(machine: RecordValue): Promise<void>;
+      capturePending(kind: "live", machineId: string): boolean;
+    };
+    assert.equal(recovery.capturePending("live", machineId), true);
+    await recovery.recoverAndroidLiveCleanup(m);
+    assert.equal(receiptRequests, Number(trusted));
+    assert.equal(readRecord(path).cleaned, trusted);
+    assert.equal(recovery.capturePending("live", machineId), !trusted);
+    if (!trusted) assert.ok(logs.some(message => message.includes("remote HTTP")));
+  });
 });

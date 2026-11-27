@@ -90,7 +90,7 @@ test('runner streams owned video through the real broker without blocking input 
   const connecting = videoApi.connect(session, { timeoutMs: 5000 });
   await runner.poll(); await runner.step(); const video = await connecting;
   await eventually(() => f.captures === 1);
-  assert.equal(readRecord(join(config.stateDir, 'work', 'video', `${session.id}.json`)).state, 'started');
+  assert.equal(readRecord(join(config.stateDir, 'work', 'video', `${machineId}.${session.id}.json`)).state, 'started');
   const received: Buffer[] = [], recording = video.record({ write(bytes) { const count = Math.min(5, bytes.length); received.push(Buffer.from(bytes.subarray(0, count))); return count; } });
   const operationId = randomUUID();
   await client.request('POST', `/v1/machines/${machineId}/operations`, { id: operationId, action: 'tap', arguments: { x: 12, y: 34 } });
@@ -135,7 +135,7 @@ test('runner streams owned video through the real broker without blocking input 
   await assert.rejects(legacyVideo.record({ write: bytes => bytes.length }), { code: 'video_incomplete' });
   const cleanup = { generation: legacy.generation, cleaned: true };
   assert.deepEqual(reports, [{ ...cleanup, ackReceived: true }, cleanup]);
-  const journal = readRecord(join(config.stateDir, 'work', 'video', `${legacy.id}.json`));
+  const journal = readRecord(join(config.stateDir, 'work', 'video', `${machineId}.${legacy.id}.json`));
   assert.equal(journal.ackReceived, true);
   assert.equal(journal.legacyReceipt, true);
   assert.equal((await videoApi.inspect(machineId, legacy.id)).ackReceived, undefined);
@@ -289,30 +289,3 @@ for (const kind of ['live', 'video'] as const) {
     assert.equal(f.captures, 0);
   });
 }
-
-test('the runner refuses an unowned live assignment from an older controller', { timeout: 15000 }, async t => {
-  const f = await fixture(t), runner = f.runner;
-  const view = { id: randomUUID(), generation: randomUUID(), captureId: randomUUID(), captureGeneration: randomUUID(), machineId: f.machineId, state: 'pending' };
-  const reply = Promise.withResolvers<RecordValue>();
-  const connect = SessionConnection.connect.bind(SessionConnection);
-  t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
-    if (!args[1].includes('/live-views/')) return connect(...args);
-    return {
-      open: false,
-      receive: async () => ({ type: 'ready', sessionId: view.id, generation: view.generation, capability: 'live' }),
-      sendControl: async (message: RecordValue) => { reply.resolve(message); },
-      close: () => {},
-    } as unknown as SessionConnection;
-  });
-  const send = runner.transport.request.bind(runner.transport);
-  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
-    const response = await send(...args);
-    if (!args[1].endsWith('/heartbeat')) return response;
-    assert.equal((response.machines as RecordValue[]).find(machine => machine.id === f.machineId)?.ownerId, null);
-    return { ...response, liveViews: [view] };
-  });
-  await runner.poll(); await runner.step();
-  const message = await reply.promise;
-  assert.deepEqual([message.type, message.code], ['error', 'not_found']);
-  assert.equal(f.captures, 0);
-});

@@ -177,12 +177,16 @@ export function upkeepPolicy(value: unknown, templateIds: readonly string[]): Id
   return { defaultSeconds: seconds(input.idleStopSeconds), templates };
 }
 
+function loopbackController(base: URL): boolean {
+  return ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+}
+
 /** Bounded JSON HTTP, no redirects or ambient proxy, optional host-scoped trust bundle. */
 export function hostTransport(config: HostConfig): HostTransport {
   let base: URL;
   try { base = new URL(config.url); } catch { throw new ServiceError("Invalid controller URL.", 400); }
   if (base.username || base.password || base.search || base.hash || base.pathname !== "/" || !base.hostname ||
-      (base.protocol !== "https:" && !(base.protocol === "http:" && (config.allowHTTP === true || ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname))))) throw new ServiceError("Remote hosts require HTTPS without embedded credentials or URL parameters.", 400);
+      (base.protocol !== "https:" && !(base.protocol === "http:" && (config.allowHTTP === true || loopbackController(base))))) throw new ServiceError("Remote hosts require HTTPS without embedded credentials or URL parameters.", 400);
   let ca: Buffer | undefined;
   if (config.caFile) {
     try { ca = readFileSync(config.caFile); if (!ca.toString("ascii").includes("-----BEGIN CERTIFICATE-----")) throw new Error(); createSecureContext({ ca }); }
@@ -197,7 +201,7 @@ export function hostTransport(config: HostConfig): HostTransport {
       let settled = false;
       const finish = (error: Error | undefined, result?: RecordValue): void => { if (settled) return; settled = true; clearTimeout(deadline); if (error) reject(error); else accept(result!); };
       const invoke = base.protocol === "https:" ? httpsRequest : httpRequest;
-      const request = invoke(new URL(path, base), { method, ...(ca ? { ca } : {}), ...(signal ? { signal } : {}), headers: { Authorization: `Bearer ${token}`, ...(data ? { "Content-Type": "application/json", "Content-Length": data.length } : {}) } }, response => {
+      const request = invoke(new URL(path, base), { method, ...(base.protocol === "https:" ? { rejectUnauthorized: true, ca } : {}), ...(signal ? { signal } : {}), headers: { Authorization: `Bearer ${token}`, ...(data ? { "Content-Type": "application/json", "Content-Length": data.length } : {}) } }, response => {
         const chunks: Buffer[] = []; let size = 0;
         response.on("data", (chunk: Buffer) => {
           size += chunk.length;
@@ -408,11 +412,14 @@ export class HostRunner {
   /** One shared native capture per watched device (live-capture.ts). Its journal lives beside
    * the recording journals; its cleanup receipt uses the recording's finish route. */
   private get liveHub(): LiveCaptureHub {
-    const path = (id: string) => this.captureJournals.path('live', id);
+    const path = (id: string, machineId: string) => this.captureJournals.path('live', machineId, id);
     return this.liveCaptures ??= new LiveCaptureHub({
-      load: id => present(path(id)) ? readRecord(path(id)) : undefined,
+      load: (id, machineId) => {
+        const journal = path(id, machineId);
+        return present(journal) ? this.captureJournals.read(journal, machineId) : undefined;
+      },
       save: (id, value) => this.captureJournals.save('live', id, value),
-      report: (job, receipt) => this.reportVideoReceipt(job.id, path(job.id), { generation: job.generation, ...receipt }),
+      report: (job, receipt) => this.reportVideoReceipt(job.id, path(job.id, job.machineId), { generation: job.generation, ...receipt }),
       ...(this.dependencies.liveEpochSeconds === undefined ? {} : { epochSeconds: this.dependencies.liveEpochSeconds }),
     });
   }
@@ -1052,9 +1059,11 @@ export class HostRunner {
         if (!machine.lease && image.os === 'android' && stopped.state === 'stopped') {
           // This is the same positive device-stop proof used by the controller. Only
           // a live guest recorder with a proven encoder exit can settle this way.
-          for (const { path, saved } of this.captureJournals.forDevice('live', id, false)) {
-            if (saved.hostCleaned === true && saved.cleaned !== true && saved.deviceStopped !== true) saveRecord(path, { ...saved, deviceStopped: true });
-          }
+          try {
+            for (const { path, saved } of this.captureJournals.forDevice('live', id, false)) {
+              if (saved.hostCleaned === true && saved.cleaned !== true && saved.deviceStopped !== true) saveRecord(path, { ...saved, deviceStopped: true });
+            }
+          } catch { /* The local guard stays held. Device shutdown is already proven. */ }
         }
         if (!refused && !unfenced) return stopped;
         const detail = unfenced ? "This host declares lease tunnels and runs only supervised, network-isolated Android emulators."
@@ -1277,10 +1286,12 @@ export class HostRunner {
     for (const job of this.queues.video ?? []) {
       const id = identifier(job.id), key = `video:${id}`, machineId = identifier(job.machineId), generation = identifier(job.generation);
       if (this.active.has(key) || !this.fresh() || this.updateAdmissionBlocked) continue;
-      const path = this.captureJournals.path('video', id);
-      if (present(path)) {
-        let saved: RecordValue;
-        try { saved = readRecord(path); } catch { continue; }
+      let path: string, saved: RecordValue | undefined;
+      try {
+        path = this.captureJournals.path('video', machineId, id);
+        if (present(path)) saved = this.captureJournals.read(path, machineId);
+      } catch { continue; }
+      if (saved) {
         // A lease session may repeat its host-only receipt: the encoder exited, and the lease's own
         // proven emulator removal settles the guest recorder on the controller.
         const receipt = saved.cleaned === true || saved.state === 'attaching' ? { generation, cleaned: true, ...(saved.ackReceived === true ? { ackReceived: true } : {}) }
@@ -1305,11 +1316,15 @@ export class HostRunner {
     // a capture this process no longer holds is never resumed. A journal that never left
     // `attaching` belongs to a capture that dispatched nothing native, which is positive cleanup.
     for (const job of this.queues.liveCaptures ?? []) {
-      const id = identifier(job.id), key = `live-capture:${id}`, generation = identifier(job.generation), path = this.captureJournals.path('live', id);
-      if (!identity || this.active.has(key) || !this.fresh() || this.liveCaptures?.active(id) || !present(path)) continue;
+      const id = identifier(job.id), key = `live-capture:${id}`, generation = identifier(job.generation), machineId = identifier(job.machineId);
+      if (!identity || this.active.has(key) || !this.fresh() || this.liveCaptures?.active(id)) continue;
       if (this.queues.live!.some(view => view.captureId === id && this.active.has(`live:${String(view.id)}`))) continue;
-      let saved: RecordValue;
-      try { saved = readRecord(path); } catch { continue; }
+      let path: string, saved: RecordValue;
+      try {
+        path = this.captureJournals.path('live', machineId, id);
+        if (!present(path)) continue;
+        saved = this.captureJournals.read(path, machineId);
+      } catch { continue; }
       const receipt = saved.cleaned === true || saved.state === 'attaching' ? { cleaned: true } : saved.hostCleaned === true ? { hostCleaned: true } : undefined;
       if (saved.generation !== generation || saved.machineId !== job.machineId || !receipt) continue;
       this.launch(key, () => this.fresh(), () => this.reportVideoReceipt(id, path, { generation, ...receipt, ...(saved.stop ? { stop: saved.stop } : {}) }));
@@ -1362,6 +1377,12 @@ export class HostRunner {
     try { journals = this.captureJournals.forDevice('live', machineId); } catch { return; }
     const legacy = journals.filter(({ id, saved }) => id !== except && saved.hostCleaned === true &&
       !this.captureClean('live', saved) && !this.liveCaptures?.active(id));
+    if (legacy.length === 0) return;
+    const controller = new URL(this.config.url);
+    if (controller.protocol !== 'https:' && !loopbackController(controller)) {
+      this.log('Holding capture cleanup because remote HTTP cannot authenticate the controller receipt.');
+      return;
+    }
     for (const { id, path, saved } of legacy) {
       try {
         const generation = identifier(saved.generation);
@@ -1450,7 +1471,7 @@ export class HostRunner {
         if (error instanceof ServiceError && ['device_recording_active', 'device_live_view_active', 'not_found'].includes(error.code)) {
           // Attaching this refused view starts nothing, but the broker still expects a
           // receipt for its capture. Never overwrite evidence from an earlier attempt.
-          const saved = this.liveHub.options.load(capture.id);
+          const saved = this.liveHub.options.load(capture.id, capture.machineId);
           if (!saved) this.liveHub.journal(capture, { state: 'attaching' });
           if (!this.liveHub.active(capture.id) && (!saved || saved.state === 'attaching')) {
             this.liveHub.journal(capture, { state: 'finished', cleaned: true });
@@ -1662,7 +1683,8 @@ export class HostRunner {
     } finally { channel?.close(); }
   }
   private async sendCaptureRefusal(channel: SessionConnection, error: ServiceError): Promise<void> {
-    await channel.sendControl({ type: 'error', code: error.code, message: error.message, outcome: 'unknown' });
+    const code = Object.hasOwn(WORKER_MESSAGES, error.code) ? error.code : 'session_incomplete';
+    await channel.sendControl({ type: 'error', code, message: WORKER_MESSAGES[code]!, outcome: 'unknown' });
     // The broker checks authority before forwarding. Keep the socket open until the
     // consumer processes the error and closes, with a bound for abandoned peers.
     await channel.receive(2);
