@@ -139,7 +139,7 @@ async function dispatch(command: ControlCommand): Promise<unknown> {
     authenticateHost(command.hostId, command.token);
     return { authenticated: true };
   }
-  if (command.type === 'video-sessions.attach' || command.type === 'video-sessions.authorized' || command.type === 'video-sessions.disconnect') return videoSessions.command(command);
+  if (command.type === 'video-sessions.attach' || command.type === 'video-sessions.authorized' || command.type === 'video-sessions.start' || command.type === 'video-sessions.disconnect') return videoSessions.command(command);
   if (command.type === 'display-sessions.attach' || command.type === 'display-sessions.authorized' || command.type === 'display-sessions.disconnect') return displaySessions.command(command);
   if (command.type === 'live-views.attach' || command.type === 'live-views.authorized' || command.type === 'live-views.disconnect' || command.type === 'live-views.renew') return liveViews.command(command);
   if (command.type === 'tunnels.attach' || command.type === 'tunnels.authorized' || command.type === 'tunnels.disconnect') return leaseTunnels.command(command);

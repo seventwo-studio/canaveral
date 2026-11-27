@@ -70,6 +70,8 @@ export interface RecordingTap {
   /** How long the recording waited for the device's live epoch to stop, and whether that stop
    * was proven in time. */
   waitedMs: number; proven: boolean;
+  /** Identity of the paused capture or the prior capture whose stop was proven. */
+  liveStop?: Pick<LiveCaptureJob, 'id' | 'generation'>;
   push(data: Uint8Array): void; end(cleaned: boolean): void;
 }
 /** Thrown by `acquire`. `journaled` tells whether this runner holds a journal for the capture:
@@ -292,7 +294,9 @@ class Capture {
       let release!: () => void;
       this.running = new Promise<void>(resolve => { release = resolve; });
       let outcome: Awaited<ReturnType<Capture['runEpoch']>>;
-      try { outcome = await this.runEpoch(this.source); } finally { this.running = undefined; release(); }
+      try { outcome = await this.runEpoch(this.source); }
+      catch (error) { this.unknown = this.nativeStarted; throw error; }
+      finally { this.running = undefined; release(); }
       if (outcome.fence) { this.fence = outcome.fence; this.unknown = !outcome.cleaned; this.halted = true; }
       else if (!outcome.cleaned) { this.unknown = true; await this.fail(); }
       // An epoch that stopped while its viewers still held authority failed; it is not retried.
@@ -363,8 +367,10 @@ export class LiveCaptureHub {
       } catch { proven = false; }
     }
     let ended = false;
+    const stopped = capture?.job ?? prior;
     return {
       waitedMs: performance.now() - began, proven,
+      ...(proven && stopped ? { liveStop: { id: stopped.id, generation: stopped.generation } } : {}),
       // A stream the segmenter refuses ends the tee for the viewers, never the recording.
       push: data => { if (!ended && feed) try { feed.push(data); } catch { /* viewers simply receive no more of this stream */ } },
       end: cleaned => {

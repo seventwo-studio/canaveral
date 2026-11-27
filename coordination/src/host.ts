@@ -320,7 +320,7 @@ export function hostOffer(config: RecordValue, platform: NodeJS.Platform = proce
     if (!Array.isArray(selected) || !selected.length || selected.some(x => typeof x !== "string" || !templates.some(t => `${t.id}@${t.revision}:${t.arch}` === x))) throw new ServiceError("Offered revisions must be installed locally.", 400);
     templates = templates.filter(t => selected.includes(`${t.id}@${t.revision}:${t.arch}`));
   }
-  const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates };
+  const offer: RecordValue = { name: text(config.name, "host name"), provider, capacity: resources(config.capacity), templates, videoHandoverProtocol: 1 };
   if (Object.hasOwn(HOST_RUNTIMES, provider)) offer.runtimes = Object.keys(enabledRuntimes(config)).sort();
   for (const entry of (leases.leaseImages ?? []) as RecordValue[]) {
     if (entry.runtime === "libvirt") {
@@ -856,6 +856,7 @@ export class HostRunner {
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
     this.assignments = machines; this.queues = queues; this.lastContact = timed ? sent : 0;
+    this.liveRecordings.clear();
     // Delivered: work that ended before this heartbeat has now been counted as activity.
     for (const id of reportedBusy) this.recentlyBusy.delete(id);
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
@@ -1633,6 +1634,15 @@ export class HostRunner {
       const recording = channel, viewers = tap;
       const live = () => !context.signal.aborted && recording.open;
       if (!live()) throw new ServiceError('Video authorization ended before capture.', 410);
+      if (current.videoHandoverProtocol === 1) {
+        await recording.sendControl({ type: 'start', ...(tap.liveStop ? { liveStop: tap.liveStop } : {}) });
+        const committed = await recording.receive(10);
+        if (!committed || committed instanceof Uint8Array || committed.type !== 'start-committed' || !live()) {
+          throw new ServiceError('The video broker did not commit capture.', 409);
+        }
+      } else if (prior || tap.liveStop || this.queues.liveCaptures!.some(c => c.machineId === machine.id) || this.queues.live!.some(v => v.machineId === machine.id)) {
+        throw new ServiceError('Both the controller and runner must support live capture handover.', 409, { code: 'capability_unsupported' });
+      }
       captureStarted = true;
       // The recording receives exactly its own bytes; live viewers are fed a copy of them.
       const tee = { receive: (seconds?: number) => recording.receive(seconds), sendControl: (value: RecordValue) => recording.sendControl(value), close: () => recording.close(),

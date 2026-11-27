@@ -12,7 +12,7 @@ import { ConsumerIdentities, identifier } from "../consumers.ts";
 import { RunnerEnrollment } from "../enrollment.ts";
 import type { Binding } from "../enrollment.ts";
 import { LinuxLeases } from "../linux-leases.ts";
-import { secret, ServiceError } from "../errors.ts";
+import { object, secret, ServiceError } from "../errors.ts";
 import type { SqliteStore } from "../sqlite.ts";
 import type { ControlModule, ControlOptions, ControlRequest, ControlResponse } from "./contracts.ts";
 import { registerMachineHooks } from "./machines.ts";
@@ -296,7 +296,9 @@ export type SessionFamily = 'video' | 'display' | 'live' | 'tunnel';
 /** Route segment and command prefix of each family, and who may attach its consumer side. */
 const FAMILIES = { video: { segment: 'video-sessions', owners: 'hosts|machines|leases' }, display: { segment: 'display-sessions', owners: 'hosts|machines' }, live: { segment: 'live-views', owners: 'hosts|machines|leases' }, tunnel: { segment: 'tunnels', owners: 'hosts|leases' } } as const;
 interface Pair {
-  view: { id: string; generation: string; capability: RelayCapability; direction?: string }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
+  view: { id: string; generation: string; capability: RelayCapability; direction?: string; videoHandoverProtocol?: number }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
+  /** Negotiated on host attachment. A start is committed at most once per pair. */
+  videoStart?: 'required' | 'committed';
   /** Video: the host's finish was relayed, so the consumer may acknowledge it. */
   finished?: boolean;
   /** Tunnel pairs only. */
@@ -551,6 +553,7 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
           pair = { view, peers: {}, started, start, closed: false, ...(family === 'tunnel' ? { gate: { checked: 0, ready: false, used: unusedBudget() } } : {}) }; pairs.set(identity, pair);
         }
         if (pair.closed || pair.peers[command.side]) throw new ServiceError("Session peer cannot be replaced.", 409);
+        if (view.capability === 'video' && command.side === 'host' && view.videoHandoverProtocol === 1) pair.videoStart = 'required';
         peer = new SocketPeer(socket, true, heartbeat); pair.peers[command.side] = peer;
         const currentPair = pair;
         socket.once("close", () => disconnect(currentPair));
@@ -570,7 +573,23 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
         await pair.started;
         while (!pair.closed) {
           const message = await peer.message(); if (!message) break;
+          if (pair.closed) break;
           const relayed = validateRelayMessage(view.capability, command.side, message.data, message.binary);
+          if (view.capability === 'video' && command.side === 'host' && !(relayed instanceof Uint8Array) && relayed.type === 'start') {
+            if (pair.videoStart !== 'required') throw new ServiceError('Unexpected video start request.', 409);
+            const proof = relayed.liveStop === undefined ? undefined : object(relayed.liveStop);
+            const result = await client.request({ type: 'video-sessions.start', sessionId: view.id, generation: view.generation,
+              ...(proof ? { liveStop: { id: identifier(proof.id), generation: identifier(proof.generation) } } : {}) }) as { committed?: boolean };
+            // The controller check can yield to a socket close. Commit on this pair before
+            // replying, with no yield between checking closure and changing its state.
+            if (pair.closed || result?.committed !== true) throw new ServiceError('Video start is no longer authorized.', 410);
+            pair.videoStart = 'committed';
+            await peer.send(Buffer.from(JSON.stringify({ type: 'start-committed' })));
+            continue;
+          }
+          if (pair.videoStart === 'required' && command.side === 'host' && (relayed instanceof Uint8Array || relayed.type !== 'error')) {
+            throw new ServiceError('Video data preceded start commitment.', 409);
+          }
           // The video consumer may only acknowledge a relayed finish. An early message would sit
           // unread in the capturing runner and is never a valid completion proof.
           if (view.capability === "video" && command.side === "consumer" && !pair.finished) throw new ServiceError("Video acknowledgement preceded completion.", 409);

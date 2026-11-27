@@ -1423,8 +1423,13 @@ A device never runs two native captures at once; the regime the
 a recording of one device therefore coexist as follows.
 
 - The "one per machine" rule keeps its meaning for each kind: one recording, and
-  one live capture. A live capture that is still running does not refuse a
-  recording. Both share one host slot and reservation on the same device. A recording
+  one live capture. They can share a host slot and reservation on the same device
+  when both the runner and controller support handover proof. The runner advertises
+  `videoHandoverProtocol: 1` and the controller confirms it on the recording
+  assignment. With an older runner, the controller refuses the second capture
+  with 409 `capability_unsupported`. A new runner refuses to start a recording
+  alongside a live capture if its controller did not confirm support. A standalone
+  recording works across versions. A recording
   short of host capacity can end the oldest eligible live capture on another device.
   That capture keeps its reservation until its own cleanup is proven.
 - **A recording takes the device.** Before a recording opens its native source,
@@ -1437,9 +1442,15 @@ a recording of one device therefore coexist as follows.
   the requested recording duration.
   The recording retains the ID and generation of the live capture present at
   admission. If that capture ends before the recording attaches, the runner
-  still requires its cleanup proof. If the stop cannot be proven, the recording
-  captures nothing and ends with `session_incomplete`. Its session is cleaned
-  because it started no capture, and the prior capture keeps its reservation.
+  still requires its cleanup proof. Before dispatch, the runner requests a start
+  commitment from the broker. The controller checks every live capture on the
+  device, including one admitted after the recording. An attached live capture
+  needs either a final cleanup receipt or positive stop proof for its ID and
+  generation. If the pair closes before commitment, the recording cannot open
+  a source. A later close cancels the committed recording and uses the normal
+  stop and cleanup proof. If the live stop cannot be proven, the recording
+  captures nothing and ends incomplete. Its session is cleaned because it started
+  no capture, and the unproven capture keeps its reservation.
 - **Viewers follow the recording.** While it runs, the runner also feeds the
   recording's own stream to the device's viewers, as a new epoch. A viewer who joins
   during a recording joins that stream. The recording receives exactly the bytes it
@@ -1465,6 +1476,9 @@ a recording of one device therefore coexist as follows.
 
   A recording beside another recording of the device that is running or not proven
   clean keeps its earlier answer, a plain 409.
+
+The handover negotiation, start commitment and broker-close races are covered by
+portable fixtures. Native handover and cancellation timing still need acceptance.
 
 ### Endings
 

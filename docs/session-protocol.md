@@ -105,7 +105,15 @@ carried a tunnel.
 Administrative `video` is a separate relay capability from consumer lease access.
 Its session identities, finite capture limits, credential revalidation and cleanup
 reservations follow [remote mobile control](mobile-control.md#native-video-sessions).
-Validate `videoConsumer` and `videoHost` for its controls.
+Validate `videoConsumer`, `videoHost` and `videoBroker` for its controls. When
+the recording assignment declares `videoHandoverProtocol: 1`, the runner
+sends `{type:"start", liveStop?: {id, generation}}` after `ready`, optionally
+including the identity of the live capture it proved stopped. The broker checks
+current authority and capture cleanup, commits only while the pair is open, and
+replies to the runner with `{type:"start-committed"}`. These controls stay
+between the broker and runner. The runner waits for the reply before opening a
+native source. The broker permits video data only after commitment for those
+pairs.
 
 `live` is the relay capability of a [live view](mobile-control.md#live-screen), for
 a lease key on its own emulator or an owner on an account-owned device. Validate
