@@ -27,13 +27,8 @@ const removed = `(EXISTS (SELECT 1 FROM machine_deletions d WHERE d.machine=v.ma
 /** Host-level predicate over alias `v`: the session still holds host capacity and a slot. */
 export const HELD_VIDEO_SESSION = `v.cleaned=0 AND NOT (${abandoned} AND ${removed})`;
 
-/** Capacity predicate over alias `v`: a held session that takes a host slot and a reservation of
- * its own. A device runs one native capture, so a running live capture shares the slot and
- * reservation of a recording of the same device and counts by itself again once that recording
- * is clean. An ended live capture always counts until its cleanup is proven: its encoder may
- * still run. Use HELD_VIDEO_SESSION to ask what still awaits cleanup. */
-export const COUNTED_VIDEO_SESSION = `${HELD_VIDEO_SESSION} AND NOT (v.kind='live' AND v.state IN ('pending','attaching','ready')
-  AND EXISTS (SELECT 1 FROM mobile_video_sessions o WHERE o.machine=v.machine AND o.kind='record' AND o.cleaned=0))`;
+/** Each held session counts until its own cleanup is proven. */
+export const COUNTED_VIDEO_SESSION = HELD_VIDEO_SESSION;
 
 function tableExists(db: DatabaseSync, name: string): boolean { return db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined; }
 

@@ -192,6 +192,18 @@ it("treats checksum, truncation, early close and host errors as failures without
       /closed before a verified completion/,
     ],
     [
+      "live view holds the device",
+      (s) =>
+        s.control({
+          type: "error",
+          code: "device_live_view_active",
+          message: "A live view still holds this device.",
+          outcome: "unknown",
+        }),
+      /Close the device's live views and wait for cleanup/,
+    ],
+    [
+
       "host error",
       (s) =>
         s.control({

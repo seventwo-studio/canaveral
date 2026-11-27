@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -288,9 +289,9 @@ test("a view ends when its credential is revoked, and an unprovable capture stop
   assert.deepEqual(await f.reserved(), { ...base, cpu: Number(base.cpu) + 1, memoryMiB: Number(base.memoryMiB) + 256 });
   const refused = await f.api("POST", `/v1/machines/${machineId}/live-views`, { id: randomUUID() }, owner.session);
   assert.equal(refused.status, 409); assert.equal(refused.body.code, "capture_cleanup_pending");
-  // A recording is told the same, with the same honest retry guidance, while the runner may still report.
+  // A recording is refused while the unproven live capture still holds the device.
   const recording = await f.api("POST", `/v1/machines/${machineId}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 4_000_000 }, owner.session);
-  assert.deepEqual([recording.status, recording.body.code, recording.body.retryable], [409, "capture_cleanup_pending", true]);
+  assert.deepEqual([recording.status, recording.body.code, recording.body.retryable], [409, "device_live_view_active", false]);
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
   await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "stopped", "a stopped device");
   assert.equal((await session()).body.cleaned, false);
@@ -312,23 +313,20 @@ test("iOS live view is off unless the host opts in, and a host without an encode
   assert.deepEqual(await f.reserved(), base);
 });
 
-test("an opted-in iOS host streams an owned simulator, and a recording shares the device's one capture with its viewers", { timeout: 120000 }, async t => {
+test("an opted-in iOS host streams an owned simulator, and recording waits for the view's proven cleanup", { timeout: 120000 }, async t => {
   const f = await fixture(t, { os: "ios", config: { liveView: true } }), owner = await f.account("owner");
   const machineId = await f.device(owner.session), base = await f.reserved();
   const viewer = await f.watch(owner.session, machineId);
   await until(() => media(viewer.got).length >= 3, "live segments");
-  // The owner records while watching: the recording takes the capture and the viewer follows it.
   const video = new MobileVideoClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
-  const session = await video.create(machineId, { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 2_000_000 });
+  const request = { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 2_000_000 };
+  await assert.rejects(video.create(machineId, request), { code: "device_live_view_active" });
+  viewer.stream.close(); await viewer.got.done;
+  await until(async () => JSON.stringify(await f.reserved()) === JSON.stringify(base), "the live reservation released");
+  const session = await video.create(machineId, request);
   const chunks: Buffer[] = [], finish = await (await video.connect(session, { timeoutMs: 20000 })).record({ write(bytes) { chunks.push(Buffer.from(bytes)); return bytes.length; } });
   assert.equal(finish.bytes, Buffer.concat(chunks).length); assert.equal(finish.cleaned, true);
-  const inits = () => viewer.got.segments.filter(s => s.kind === "init").map(s => s.epoch);
-  await until(() => inits().length >= 3 && media(viewer.got).some(s => s.epoch === inits()[2]), "the viewer's own capture resumed");
-  const during = media(viewer.got).filter(s => s.epoch === inits()[1]);
-  assert.ok(during.length >= 2); for (const segment of during) assert.ok(Buffer.concat(chunks).includes(segment.data));
-  assert.equal(f.stats.peak, 1, "never two native captures of one device"); assert.ok(ordered(viewer.got.segments));
-  viewer.stream.close(); await viewer.got.done;
-  await until(async () => JSON.stringify(await f.reserved()) === JSON.stringify(base), "every reservation released");
+  assert.equal(f.stats.peak, 1);
   // The host reaches the SDK only through the controller: a host credential opens no view.
   await assert.rejects(new MachineLiveClient({ baseUrl: f.url, credential: f.runner.identity!.credential, allowLoopbackHttp: true }).create(machineId, { id: randomUUID() }), (error: unknown) => error instanceof ConsumerServiceError && error.status === 401);
 });
@@ -474,4 +472,50 @@ test("a runner that stops proves its running capture clean first, and a view tha
   const released = await session(other, late.captureId);
   assert.deepEqual([released.state, released.cleaned], ["disconnected", true]);
   assert.deepEqual(await f.reserved(), base);
+});
+
+test("concurrent admissions select one native capture reservation in either order", { timeout: 30000 }, async t => {
+  const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
+  const base = await f.reserved();
+  const paths = {
+    live: `/v1/machines/${machineId}/live-views`,
+    record: `/v1/machines/${machineId}/video-sessions`,
+  };
+  const request = (kind: keyof typeof paths) => kind === "live"
+    ? { id: randomUUID() }
+    : { id: randomUUID(), fps: 30, durationSeconds: 3, bitRate: 4_000_000 };
+  for (const first of ["live", "record"] as const) {
+    const second = first === "live" ? "record" : "live";
+    const data = Buffer.from(JSON.stringify(request(second))), started = Promise.withResolvers<void>();
+    const late = Promise.withResolvers<{ status: number; code: string }>();
+    const pending = httpRequest(f.url + paths[second], {
+      method: "POST", headers: {
+        Authorization: "Bearer " + owner.session, "Content-Type": "application/json", "Content-Length": data.length,
+      },
+    }, response => {
+      const chunks: Buffer[] = [];
+      response.on("data", data => chunks.push(data));
+      response.on("error", late.reject);
+      response.on("end", () => {
+        try { late.resolve({ status: response.statusCode!, code: JSON.parse(Buffer.concat(chunks).toString()).code }); }
+        catch (error) { late.reject(error); }
+      });
+    });
+    pending.once("error", error => { started.reject(error); late.reject(error); });
+    pending.write(data.subarray(0, 1), () => started.resolve());
+    void late.promise.catch(() => {});
+    await started.promise;
+    try {
+      const winner = await f.api("POST", paths[first], request(first), owner.session);
+      assert.equal(winner.status, 201);
+      pending.end(data.subarray(1));
+      const refused = await late.promise;
+      assert.equal(refused.status, 409);
+      assert.equal(refused.code, first === "live" ? "device_live_view_active" : "device_recording_active");
+      assert.equal(Number((await f.reserved()).cpu), Number(base.cpu) + 1);
+      assert.equal((await f.api("POST", paths[first] + `/${winner.body.id}/close`, {}, owner.session)).status, 200);
+      await until(async () => Number((await f.reserved()).cpu) === Number(base.cpu), "the winner's reservation released");
+    } finally { pending.destroy(); }
+  }
+  assert.equal(f.stats.captures, 0, "both races completed before a consumer attached");
 });

@@ -307,6 +307,11 @@ test("refusals when opening are explained and attach nothing", async () => {
       "capture_cleanup_pending",
       { reason: "capture_cleanup_pending", again: "later" },
     ],
+    [
+      409,
+      "device_recording_active",
+      { reason: "device_recording_active", again: "later" },
+    ],
     // Waiting does not clear this one, so the page must not offer to try again.
     [
       409,

@@ -151,6 +151,8 @@
           "enum": [
             "capability_unsupported",
             "session_incomplete",
+            "device_live_view_active",
+            "device_recording_active",
             "upload_publication_uncertain",
             "tunnel_mapping_failed",
             "tunnel_mapping_lost",

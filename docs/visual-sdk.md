@@ -108,7 +108,7 @@ key, the application key and administrative credentials are refused.
 
 To play a recording while it is captured, `video.chunks()` is a pull-driven async
 iterator of MP4 byte chunks; boundaries are neither decoded frames nor complete MP4
-boxes. To watch a device without recording it, use a [live screen view](#live-screen-views). Feed them
+boxes. To watch a device live, use a [live screen view](#live-screen-views). Feed them
 to an appropriate fragmented-MP4 player or decoder with backpressure. Initialization
 precedes media fragments, and the stream identifies its codec family as `avc1`.
 A browser MediaSource adapter must inspect the initialization segment for the
@@ -146,6 +146,13 @@ handling and recovery; they do not establish a working native 30 fps recording.
 
 ## Live screen views
 
+Watching and recording the same device are mutually exclusive. A recording
+request returns `device_live_view_active` while a live view or unproven live
+capture still holds the device. A watch request returns
+`device_recording_active` while a recording or its unproven cleanup still holds
+it. Both return HTTP 409. Retry after the other session ends and cleanup is
+confirmed. The SDK exposes the code on the error.
+
 `LeaseLiveClient` (also `LeaseClient.live` in `coordination/src/sdk.ts`) and
 `MachineLiveClient`, both exported from `canaveral-machines/video-sdk`, watch a
 device's screen as it happens. The contract, its limits and its open native
@@ -178,8 +185,7 @@ to 120.
 
 - `kind: 'init'` is the initialization segment (`ftyp` and `moov`) that opens an
   epoch. An epoch is one run of the device's native capture, at most 180 seconds;
-  a longer view receives a new `init` and continues. A recording of the same device
-  also appears as an epoch.
+  a longer view receives a new `init` and continues.
 - `kind: 'media'` is one `moof` with its `mdat`. `sequence` only increases within an
   epoch. The first media segment of an epoch, and the first after any gap in
   `sequence`, has `keyframe: true`. A gap means the runner skipped this viewer

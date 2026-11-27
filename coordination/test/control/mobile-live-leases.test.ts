@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { LeaseClient } from "../../src/sdk.ts";
 import { LeaseLiveClient, MobileVideoClient } from "../../src/video-sdk.ts";
 import type { LiveStream } from "../../src/video-sdk.ts";
@@ -62,13 +62,17 @@ test("a lease key watches its own emulator live: ordered segments, one shared ca
   assert.deepEqual([capture.leaseId, capture.state, capture.cleaned], [a.id, "ready", false]);
   // The application key, the operator and another lease's key reach none of it.
   const b = await acquire(h, app, 300);
+  const unclaimed = await live.create({ id: randomUUID(), member: "primary" });
   for (const token of [app, h.admin, b.key]) {
     assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "primary" }, token)).status, 401);
     assert.equal((await h.api("GET", `/v1/leases/${a.id}/live-views/${first.id}`, undefined, token)).status, 401);
     assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views/${first.id}/close`, {}, token)).status, 401);
-    // Nor can they attach to the existing view's stream.
-    await assert.rejects(new LeaseLiveClient({ baseUrl: h.url, leaseId: a.id, leaseKey: token, allowLoopbackHttp: true }).connect(view, { timeoutMs: 5000 }));
+    // The view has no consumer yet, so duplicate attachment cannot explain a refusal.
+    await assert.rejects(new LeaseLiveClient({ baseUrl: h.url, leaseId: a.id, leaseKey: token, allowLoopbackHttp: true }).connect(unclaimed, { timeoutMs: 5000 }));
   }
+  const claimed = await live.connect(unclaimed, { timeoutMs: 5000 });
+  claimed.close();
+  await until(async () => (await live.inspect(unclaimed.id)).state === "ended", "the unclaimed view closed by its rightful viewer");
   assert.equal((await h.api("GET", `/v1/leases/${b.id}/live-views/${first.id}`, undefined, b.key)).status, 404);
   // No operator or owner view of a leased device exists: the machine route refuses it.
   assert.equal((await h.api("POST", `/v1/machines/${a.machineId}/live-views`, { id: randomUUID() }, h.admin)).status, 409);
@@ -288,7 +292,7 @@ test("a wedged encoder keeps the live capture reserved, blocks another capture o
   const again = await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "primary" }, a.key);
   assert.deepEqual([again.status, again.body.code, again.body.retryable], [409, "capture_cleanup_pending", true]);
   const recording = await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, a.key);
-  assert.deepEqual([recording.status, recording.body.code, recording.body.retryable], [409, "capture_cleanup_pending", true]);
+  assert.deepEqual([recording.status, recording.body.code, recording.body.retryable], [409, "device_live_view_active", false]);
   // Lease cleanup proves the emulator gone, but not this host's encoder: still held.
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, a.key)).status, 200);
   await cleaned(h, app, a.id);
@@ -300,63 +304,26 @@ test("a wedged encoder keeps the live capture reserved, blocks another capture o
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
 });
 
-test("a recording takes the device's one native capture and feeds the live viewers: both are complete and no second recorder ever runs", { skip, timeout: 180000 }, async t => {
-  let viewerSawRecording = false;
-  const h = await harness(t, 1, {
-    extra: { cpu: 2, memoryMiB: 512 }, encoder: "fragments",
-    allowRecorderEof: run => run !== 2 || viewerSawRecording,
-  }), app = await h.application();
-  const a = await acquire(h, app, 300), name = `cvm-${a.machineId}`, lease = client(h, a);
-  const inits = (got: ReturnType<typeof collect>) => got.segments.filter(s => s.kind === "init").map(s => s.epoch);
-  // A viewer is watching its own live capture when a recording starts.
-  const viewer = await watching(h, a);
-  await until(() => media(viewer.got).length >= 4, "live segments");
-  const out = sink(), recording = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 3, ...VIDEO }, out, { timeoutMs: 30000 });
-  const recordingSegments = () => media(viewer.got).filter(s => s.epoch === inits(viewer.got)[1]);
-  try {
-    // Hold the fake recorder's EOF until the viewer has actually consumed the tee.
-    await Promise.race([
-      until(() => recordingSegments().length >= 3, "the viewer's recording segments"),
-      recording.then(() => assert.fail("the recording ended before the handover was observed")),
-    ]);
-    assert.equal(h.media.started.get(name)!.length, 2);
-    assert.deepEqual(await h.reserved(), WITH_CAPTURE);
-    assert.equal(h.media.started.get(name)!.filter(recorder => recorder.running).length, 1);
-  } finally {
-    viewerSawRecording = true;
-  }
-  const finish = await recording, recorded = Buffer.concat(out.chunks);
-  // The recording is exactly what it would have been alone: verified bytes, digest and cleanup.
-  assert.deepEqual(finish, { type: "finish", bytes: recorded.length, sha256: createHash("sha256").update(recorded).digest("hex"), cleaned: true });
-  // The viewer stayed attached: its own capture, then the recording's stream, then its own again.
-  await until(() => inits(viewer.got).length >= 3 && media(viewer.got).filter(s => s.epoch === inits(viewer.got)[2]).length >= 2, "the viewer's capture resumed");
-  assert.equal(viewer.stream.ended, undefined); assert.ok(ordered(viewer.got.segments));
-  const during = recordingSegments();
-  assert.ok(during.length >= 3, "the viewer watched the recording's stream");
-  for (const segment of during) assert.ok(recorded.includes(segment.data), "a viewer segment is a fragment of the recording");
-  assert.equal(h.media.started.get(name)!.length, 3); assert.equal(h.media.peak, 1);
-  await until(async () => (await h.reserved()).cpu === 3, "the live capture retained its reservation after recording");
-  // The other order: a viewer joins a recording already in progress.
-  viewer.stream.close(); await viewer.got.done;
-  await until(async () => (await h.reserved()).cpu === 2, "the live capture's reservation released");
-  const second = sink(), long = lease.video.record({ id: randomUUID(), member: "primary", durationSeconds: 20, ...VIDEO }, second, { timeoutMs: 45000 });
-  await Promise.race([
-    until(() => h.media.started.get(name)!.length === 4 && second.chunks.length > 0, "a recording in progress"),
-    long.then(() => assert.fail("the recording ended before the viewer could join")),
-  ]);
-  const late = await watching(h, a);
-  await until(() => media(late.got).length >= 3, "segments from the recording in progress");
-  assert.equal(h.media.started.get(name)!.length, 4, "the viewer started no capture of its own");
-  assert.equal(media(late.got)[0]!.keyframe, true);
-  const done = await long, bytes = Buffer.concat(second.chunks);
-  assert.equal(done.sha256, createHash("sha256").update(bytes).digest("hex"));
-  for (const segment of media(late.got).filter(s => s.epoch === inits(late.got)[0])) assert.ok(bytes.includes(segment.data));
-  // When the recording ends, the viewer's own capture takes over.
-  await until(() => inits(late.got).length >= 2 && media(late.got).filter(s => s.epoch === inits(late.got)[1]).length >= 2, "the viewer's own capture");
-  assert.ok(ordered(late.got.segments)); assert.equal(h.media.peak, 1);
-  late.stream.close(); await late.got.done;
-  await until(async () => (await h.reserved()).cpu === 2, "every capture released");
-  assert.equal(h.media.encodersOpen, 0);
+test("a lease recording and live watch refuse each other while their native source is open", { skip, timeout: 45000 }, async t => {
+  const h = await harness(t, 1, { extra: { cpu: 1, memoryMiB: 256 }, encoder: "fragments" });
+  const a = await acquire(h, await h.application(), 300), lease = client(h, a), name = `cvm-${a.machineId}`;
+  const request = () => ({ id: randomUUID(), member: "primary", durationSeconds: 3, ...VIDEO });
+  const view = await watching(h, a);
+  await until(() => media(view.got).length >= 2, "the live recorder to start");
+  await assert.rejects(lease.video.create(request()), { code: "device_live_view_active" });
+  view.stream.close(); await view.got.done;
+  await until(async () => (await lease.video.inspect(view.stream.view.captureId)).cleaned === true, "positive live cleanup");
+
+  const recording = await lease.video.create(request());
+  const done = (await lease.video.connect(recording, { timeoutMs: 20000 })).record(sink());
+  void done.catch(() => {});
+  await until(() => h.media.started.get(name)?.length === 2, "the recording to start");
+  await assert.rejects(lease.live.create({ id: randomUUID(), member: "primary" }), { code: "device_recording_active" });
+  assert.equal((await done).cleaned, true);
+  const later = await watching(h, a);
+  await until(() => media(later.got).length >= 2, "the next live view to start");
+  later.stream.close(); await later.got.done;
+  assert.equal(h.media.peak, 1);
 });
 
 test("a long view continues across capture runs, and the live capture counts against the application's limits", { skip, timeout: 120000 }, async t => {

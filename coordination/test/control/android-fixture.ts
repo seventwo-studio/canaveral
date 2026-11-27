@@ -161,7 +161,6 @@ export function transport(paths: { sdk: string; registry: string; events: string
         return encoder;
       }
       assert.equal(argv[1], "-s");
-      if (fixture.adbDelayMs) await sleep(fixture.adbDelayMs);
       const serial = argv[2]!, args = argv.slice(3), live = () => emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
       const device = live(); if (!device) throw new Error("device offline");
       if (args.includes("install-write")) {
@@ -193,6 +192,7 @@ export function transport(paths: { sdk: string; registry: string; events: string
           }
           if (!recorder.closed) recorder.push(Buffer.from([0, 0, 0, 1, 0x65, 1, 2, 3]));
         }, 100);
+        await fixture.afterRecorderSpawn?.(run);
         return recorder;
       }
       throw new Error("Unexpected pipe " + args.join(" "));
@@ -217,7 +217,6 @@ export function transport(paths: { sdk: string; registry: string; events: string
       if (argv[1] === "start-server") return ok("");
       if (argv[1] === "devices") return ok("List of devices attached\n" + emulators(paths.registry).map(e => `emulator-${e.port}\tdevice\n`).join(""));
       assert.equal(argv[1], "-s");
-      if (fixture.adbDelayMs) await sleep(fixture.adbDelayMs);
       const serial = argv[2]!, args = argv.slice(3), device = emulators(paths.registry).find(e => `emulator-${e.port}` === serial);
       if (!device) return { stdout: "", exitCode: 1 };
       // A hung emulator is still listed by adb but answers nothing.
@@ -287,11 +286,9 @@ export interface HarnessOptions {
   qemuImg?: "ok" | "fail" | "noop"; avdmanager?: "ok" | "fail";
   /** Emulators (by AVD name) that adb still lists but that answer no command. */
   hung?: Set<string>;
-  /** Milliseconds each device answer of the stand-in adb takes. Read at every call, so a test may
-   * change it while the harness runs, for example to leave a capture while it is being opened. */
-  adbDelayMs?: number;
   /** The exact-recorder probe fails, so no stop of a guest recorder can be proven. Read at every call. */
   recorderProbe?: "uncertain";
+  afterRecorderSpawn?: (run: number) => Promise<void>;
 }
 
 export interface Harness {

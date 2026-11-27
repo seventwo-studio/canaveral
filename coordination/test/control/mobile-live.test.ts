@@ -87,7 +87,7 @@ test("the live wire contract: the relay and the packaged schema accept the same 
   const error = { type: "error", code: "capability_unsupported", message: "This host has no live screen capture for this device.", outcome: "unknown" };
   const accepted = [{ type: "live", mediaType: "video/mp4", codec: "avc1", fps: 30 }, { type: "init", epoch: 0, bytes: 700 }, { type: "init", epoch: 4, bytes: MAX_LIVE_INIT_BYTES },
     { type: "segment", epoch: 0, sequence: 0, keyframe: true, bytes: 16 }, { type: "segment", epoch: 2, sequence: 9000, keyframe: false, bytes: MAX_LIVE_SEGMENT_BYTES },
-    { type: "end", reason: "capture_failed" }, { type: "end", reason: "capture_ended" }, { type: "end", reason: "capture_unavailable" }, error];
+    { type: "end", reason: "capture_failed" }, { type: "end", reason: "capture_ended" }, { type: "end", reason: "capture_unavailable" }, error, { ...error, code: "device_recording_active" }];
   const refused = [{ type: "live", mediaType: "video/mp4", codec: "avc1", fps: 60 }, { type: "live", mediaType: "video/mp4", codec: "avc1", fps: 30, bitRate: 1 }, { type: "init", epoch: -1, bytes: 700 },
     { type: "init", epoch: 0, bytes: MAX_LIVE_INIT_BYTES + 1 }, { type: "init", epoch: 0 }, { type: "segment", epoch: 0, sequence: 0, keyframe: 1, bytes: 16 }, { type: "segment", epoch: 0, sequence: 0.5, keyframe: true, bytes: 16 },
     { type: "segment", epoch: 0, sequence: 0, keyframe: true, bytes: MAX_LIVE_SEGMENT_BYTES + 1 }, { type: "segment", epoch: 0, sequence: 0, keyframe: true, bytes: 16, data: "x" },
@@ -112,6 +112,9 @@ test("the live wire contract: the relay and the packaged schema accept the same 
   }
   assert.equal(schemaValid(api, api.components.schemas.CreateLiveView, { id: "0b0b0b0b-0000-4000-8000-000000000001", member: "primary", ttlSeconds: 30 }), true);
   for (const body of [{ id: "0b0b0b0b-0000-4000-8000-000000000001" }, { id: "0b0b0b0b-0000-4000-8000-000000000001", member: "primary", ttlSeconds: 9 }, { id: "0b0b0b0b-0000-4000-8000-000000000001", member: "primary", bitRate: 1 }]) assert.equal(schemaValid(api, api.components.schemas.CreateLiveView, body), false);
+  const conflict = { ...error, code: "device_live_view_active" };
+  assert.equal(valid(defs.WorkerError, conflict), true);
+  assert.deepEqual(validateRelayMessage("video", "host", Buffer.from(JSON.stringify(conflict)), false), conflict);
   // Other capabilities are untouched by the live family.
   assert.throws(() => validateRelayMessage("video", "host", Buffer.from(JSON.stringify({ type: "segment", epoch: 0, sequence: 0, keyframe: true, bytes: 16 })), false));
 });
@@ -120,7 +123,7 @@ test("the live wire contract: the relay and the packaged schema accept the same 
  * Its opening models a provider's preflight: it takes `openMs`, checks authorization at its end
  * as the providers do before they spawn anything, and marks such a refusal. */
 interface HubOptions {
-  epochSeconds?: number; handoverMs?: number; guestSource?: boolean;
+  epochSeconds?: number; guestSource?: boolean; nextFrame?: () => Promise<Buffer>;
   /** An early-ended source cannot be proven stopped, or its stop never returns. */
   stop?: "unprovable" | "hangs";
   /** The time the source takes to open, and how its opening fails. */
@@ -128,9 +131,9 @@ interface HubOptions {
 }
 function hubFixture(options: HubOptions = {}) {
   const journal = new Map<string, Record<string, unknown>>(), receipts: LiveReceipt[] = [], stats = { sources: 0, open: 0, peak: 0, encoders: 0, opening: 0 };
-  const control = { queued: false, saveFails: false };
+  const control = { saveFails: false };
   const source: LiveCaptureSource = {
-    encoder: "/fixture/ffmpeg", guestSource: options.guestSource ?? true, notRunning: captureNotRunning, recordingQueued: () => control.queued,
+    encoder: "/fixture/ffmpeg", guestSource: options.guestSource ?? true, notRunning: captureNotRunning,
     openEncoder: async () => { stats.encoders++; return new FragmentEncoder(); },
     openSource: async (video, authorized): Promise<NativePipe> => {
       stats.opening++;
@@ -145,6 +148,7 @@ function hubFixture(options: HubOptions = {}) {
           for (;;) {
             if (closed || !authorized()) throw new Error("ended");
             if (Date.now() - started >= video.durationSeconds * 1000) { if (!completed) { completed = true; stats.open--; } return Buffer.alloc(0); }
+            if (options.nextFrame) return options.nextFrame();
             await sleep(20); if (!closed) return Buffer.alloc(1, frame++ & 0xff);
           }
         },
@@ -160,7 +164,7 @@ function hubFixture(options: HubOptions = {}) {
     },
   };
   const hub = new LiveCaptureHub({ load: id => journal.get(id), save: (id, value) => { if (control.saveFails) throw new Error("disk full"); journal.set(id, value); }, report: async (_job, receipt) => { receipts.push(receipt); },
-    ...(options.epochSeconds ? { epochSeconds: options.epochSeconds } : {}), ...(options.handoverMs ? { handoverMs: options.handoverMs } : {}) });
+    ...(options.epochSeconds ? { epochSeconds: options.epochSeconds } : {}) });
   return { hub, source, journal, receipts, stats, control };
 }
 const JOB = { id: "0b0b0b0b-0000-4000-8000-000000000001", generation: "0b0b0b0b-0000-4000-8000-000000000002", machineId: "0b0b0b0b-0000-4000-8000-000000000003" };
@@ -298,86 +302,38 @@ test("an unproven stop ends the capture as unknown, and a host without capture r
   assert.deepEqual(none.receipts, [{ cleaned: true }]); assert.equal(none.stats.sources, 0);
 });
 
-test("a recording stops the live run first, feeds the viewers its own stream, and hands the device back", async () => {
-  const f = hubFixture(), handle = f.hub.acquire(JOB, f.source), viewer = handle.subscribe(() => true);
-  const before = await take(viewer, 4);
-  assert.equal((before[0] as { epoch: number }).epoch, 0);
-  const tap = await f.hub.beginRecording(JOB.machineId);
-  assert.equal(tap.proven, true); assert.ok(tap.waitedMs < 2000);
-  assert.equal(f.stats.open, 0, "the live run was stopped before the recording starts");
-  const recording = Buffer.concat([initSegment(), fragment(0, true, Buffer.from("rec-0")), fragment(1, false, Buffer.from("rec-1")), fragment(2, true, Buffer.from("rec-2"))]);
-  for (let offset = 0; offset < recording.length; offset += 11) tap.push(recording.subarray(offset, offset + 11));
-  const epoch = (item: LiveViewItem) => (item as { epoch: number }).epoch;
-  let item: LiveViewItem | null; const during: LiveViewItem[] = [];
-  while (during.length < 4 && (item = await viewer.next(1000))) if (epoch(item) === 1) during.push(item);
-  assert.deepEqual(during.map(i => i.type), ["init", "segment", "segment", "segment"]);
-  assert.deepEqual((during[0] as { data: Buffer }).data, initSegment());
-  assert.deepEqual((during[3] as { data: Buffer }).data, fragment(2, true, Buffer.from("rec-2")));
-  assert.equal(f.stats.sources, 1, "no native run of the live capture during the recording");
-  // A stream the segmenter refuses ends the tee for viewers; the recording's push never throws.
-  tap.push(Buffer.from("garbage that is not a box header at all"));
-  tap.end(true);
-  const after: LiveViewItem[] = [];
-  while (after.length < 2 && (item = await viewer.next(2000))) if (epoch(item) === 2) after.push(item);
-  assert.deepEqual(after.map(i => i.type), ["init", "segment"]); assert.equal(f.stats.sources, 2); assert.equal(f.stats.peak, 1);
-  // While a recording of the device is only queued, no live run starts: the recording finds the device free.
-  f.control.queued = true;
-  await sleep(700); assert.equal(f.stats.open, 0, "the live run stopped for the queued recording");
-  const runs = f.stats.sources;
-  await sleep(600); assert.equal(f.stats.sources, runs);
-  f.control.queued = false;
-  for (const deadline = Date.now() + 3000; Date.now() < deadline && f.stats.sources === runs;) await sleep(20);
-  assert.equal(f.stats.sources, runs + 1, "the viewer's capture resumed once no recording was queued");
-  // A recording whose own stop is unproven leaves the device without a provable state: the view ends.
-  const second = await f.hub.beginRecording(JOB.machineId);
-  second.end(false);
-  let ended: LiveViewItem | null = null;
-  for (let i = 0; i < 50 && ended?.type !== "end"; i++) ended = await viewer.next(100);
-  assert.deepEqual(ended, { type: "end", reason: "capture_unavailable" });
-  viewer.close(); handle.release();
+test("the runner's device reservation excludes recordings and live captures in either order", async () => {
+  const f = hubFixture(), live = f.hub.acquire(JOB, f.source);
+  try {
+    assert.throws(() => f.hub.reserveRecording(JOB.machineId), { code: "device_live_view_active" });
+    const other = f.hub.reserveRecording(OTHER.machineId);
+    other();
+  } finally { live.release(); }
   await receipt(f);
-  assert.deepEqual(f.receipts, [{ cleaned: true }], "the live capture's own runs were all proven clean");
-});
-
-test("recording hand-over reports an unproven live stop within the wait bound", async () => {
-  // The live run's stop never returns, so hand-over returns without proof.
-  const stuck = hubFixture({ stop: "hangs", handoverMs: 400 }), handle = stuck.hub.acquire(JOB, stuck.source), viewer = handle.subscribe(() => true);
-  await take(viewer, 3);
-  const began = Date.now(), tap = await stuck.hub.beginRecording(JOB.machineId);
-  assert.equal(tap.proven, false); assert.ok(tap.waitedMs >= 350 && Date.now() - began < 2000, `waited ${tap.waitedMs} ms`);
-  tap.push(initSegment()); tap.end(true);
-  // The stop is unprovable and the live capture ends unknown.
-  const unprovable = hubFixture({ stop: "unprovable" }), held = unprovable.hub.acquire(JOB, unprovable.source), watching = held.subscribe(() => true);
-  await take(watching, 3);
-  const taken = await unprovable.hub.beginRecording(JOB.machineId);
-  assert.equal(taken.proven, false); assert.ok(taken.waitedMs < 2000);
-  let ended: LiveViewItem | null = null;
-  for (let i = 0; i < 50 && ended?.type !== "end"; i++) ended = await watching.next(100);
-  assert.deepEqual(ended, { type: "end", reason: "capture_failed" });
-  taken.end(true); watching.close(); held.release();
-  await receipt(unprovable);
-  assert.deepEqual(unprovable.receipts, [{ hostCleaned: true }]);
-  // Afterwards, and with no live capture at all, a recording starts without any wait.
-  for (const hub of [unprovable.hub, hubFixture().hub]) { const next = await hub.beginRecording(JOB.machineId); assert.deepEqual([next.proven, next.waitedMs < 100], [true, true]); next.end(true); }
-  // A second recording of one device is not the hub's to refuse; it is simply not fed to viewers.
-  const f = hubFixture(), one = await f.hub.beginRecording(JOB.machineId), two = await f.hub.beginRecording(JOB.machineId);
-  two.push(initSegment()); two.end(true); one.end(true);
+  const release = f.hub.reserveRecording(JOB.machineId);
+  try {
+    assert.throws(() => f.hub.acquire(JOB, f.source), { code: "device_recording_active" });
+    assert.throws(() => f.hub.reserveRecording(JOB.machineId), { code: "device_recording_active" });
+    assert.equal(f.stats.sources, 0);
+  } finally { release(); await f.hub.close(); }
 });
 
 test("a viewer that cannot keep up is skipped ahead to a key frame instead of holding the capture back", async () => {
-  const f = hubFixture();
-  const tap = await f.hub.beginRecording(JOB.machineId);
-  tap.push(initSegment());
+  let frame = Promise.withResolvers<Buffer>();
+  const f = hubFixture({ nextFrame: () => {
+    const pending = frame.promise;
+    void pending.then(() => { frame = Promise.withResolvers<Buffer>(); });
+    return pending;
+  } });
   const handle = f.hub.acquire(JOB, f.source);
   const slow = handle.subscribe(() => true), fast = handle.subscribe(() => true);
   try {
-    assert.equal((await fast.next(5000))?.type, "init");
     // Send an exact number of frames through the same queue as native live capture. The fast
     // viewer reads every frame while the slow viewer falls more than four MiB behind.
-    const payload = Buffer.alloc(28_000);
     for (let sequence = 0; sequence < 256; sequence++) {
-      tap.push(fragment(sequence, sequence % 4 === 0, payload));
-      const item = await fast.next(100);
+      frame.resolve(Buffer.alloc(28_000));
+      if (sequence === 0) assert.equal((await fast.next(5000))?.type, "init");
+      const item = await fast.next(5000);
       assert.equal(item?.type, "segment");
       assert.equal(item.sequence, sequence);
     }
@@ -389,17 +345,18 @@ test("a viewer that cannot keep up is skipped ahead to a key frame instead of ho
     assert.ok(media.reduce((bytes, item) => bytes + item.data.length, 0) <= 4 * 1_048_576, "the backlog stays bounded");
     assert.ok(media.every((item, i) => i === 0 || item.sequence === media[i - 1]!.sequence + 1 || item.keyframe), "every gap resumes on a key frame");
   } finally {
-    slow.close(); fast.close(); handle.release(); tap.end(true);
+    slow.close(); fast.close(); handle.release();
+    frame.resolve(Buffer.alloc(0));
     await f.hub.close();
   }
   assert.deepEqual(f.receipts, [{ cleaned: true }]);
-  assert.equal(f.stats.sources, 0, "viewers share the recording feed");
+  assert.equal(f.stats.sources, 1, "viewers share the native live capture");
 });
 
 test("a stopping or journal-less hub refuses captures without a journal, and stopping leaves no timer behind", async () => {
   // Nothing captured: closing is immediate and arms no timer, so the process can exit at once.
   const idle = hubFixture(), before = timers();
-  const tap = await idle.hub.beginRecording(JOB.machineId); tap.end(true);
+  idle.hub.reserveRecording(JOB.machineId)();
   let began = Date.now(); await idle.hub.close();
   assert.ok(Date.now() - began < 100); assert.equal(timers(), before);
   // Stopping with a capture: its stop is proven first, and no timer outlives the close.

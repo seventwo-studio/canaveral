@@ -115,6 +115,11 @@ const endings: Record<string, Omit<LiveEnding, "reason">> = {
     again: "no",
     state: "Not offered",
   },
+  device_recording_active: {
+    message:
+      "This device is recording or awaiting recording cleanup. Try again after recording ends and cleanup is confirmed.",
+    again: "later",
+  },
   capture_cleanup_pending: {
     message:
       "An earlier capture of this device is still being cleaned up. Try again shortly.",
@@ -122,7 +127,7 @@ const endings: Record<string, Omit<LiveEnding, "reason">> = {
   },
   capture_cleanup_unproven: {
     message:
-      "An earlier capture of this device was never confirmed stopped. Its screen cannot be captured until the device is stopped or an administrator resolves that.",
+      "Cleanup of an earlier capture of this device is unproven. Its screen stays unavailable until cleanup is confirmed.",
     again: "no",
   },
   live_view_limit: {
