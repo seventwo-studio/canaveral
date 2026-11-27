@@ -23,8 +23,6 @@ source checkout before importing either package.
   means evidence was invalid or unreadable. It never changes the inputs.
 - `node script/build_android_transfer.mjs --ndk /installed/ndk --output-dir dist/android-transfer`
   compiles both Android ABIs, verifies architecture and excludes test injection.
-- `node script/build_linux_lease_deadline.mjs --output /new/absolute/deadline.so`
-  builds an uninstalled library on Linux. It refuses to replace existing artifacts.
 - `node fixtures/migration/verify_lease_guard.mjs` runs the Rust shared trace and
   persisted wire assertions against disposable fixture state.
 - `npm run check:no-python` scans tracked and new files for forbidden extensions,
@@ -64,26 +62,32 @@ inputs are examples requiring operator provisioning, not deployment acceptance.
 
 ## Release procedure
 
-The next source release is 0.4.1. Internal coordination/dashboard npm packages
-keep their independent private 0.1.0 versions. Historical version tags are not
-reused: immutable identity guards reject another source revision.
+The public version is the root npm package version. The private coordination
+and dashboard packages have their own versions. Each stable tag identifies one
+source revision for its lifetime. The steps below use `0.7.1` as the version.
+
+Stable Flux subscriptions can select a version as soon as the publisher promotes
+its deployment artifact. Before publishing a release that removes KubeVirt,
+verify that dependent installations are pinned to a compatible release or have
+completed their cutover. [Existing KubeVirt installations](../docs/getting-started.md#install-a-release)
 
 1. Merge the reviewed release preparation into main and require green validation
    at the selected full commit. Verify root package.json and package-lock.json,
-   including the lockfile root package entry, all declare 0.4.1.
-2. With separate release authorization, create v0.4.1 on that exact commit and
+   including the lockfile root package entry, all declare `0.7.1`.
+2. With separate release authorization, create `v0.7.1` on that exact commit and
    push it. This push authorizes automatic publication. An optional pre-existing
    draft must target the full commit SHA, never the string main. The workflow
    otherwise creates an exact-commit draft after validating release identity.
 3. To retry a failed unfinished release, dispatch **Publish Canaveral release**
    on the same tag, supplying that tag as input:
-   `gh workflow run release.yaml --ref v0.4.1 -f tag=v0.4.1`.
+   `gh workflow run release.yaml --ref v0.7.1 -f tag=v0.7.1`.
    Dispatch from main or a different tag is rejected, preserving one signing
    identity for automatic and manual runs. No run creates or moves a Git tag.
 4. The runner fetches main and checks ancestry, package/lock versions and local
    and remote tag resolution against the immutable workflow event SHA. It builds three repo-scoped GHCR images for
-   linux/amd64 and linux/arm64, then a namespace-free Flux deployment artifact
-   under candidate-0.4.1-FULL_SOURCE_SHA in ghcr.io/seventwo-studio/canaveral/deploy.
+   linux/amd64 and linux/arm64, then a Flux deployment artifact with
+   controller, dashboard and canaverald stages. The candidate tag is
+   `candidate-0.7.1-FULL_SOURCE_SHA` in `ghcr.io/seventwo-studio/canaveral/deploy`.
    This non-semver staging tag cannot enter the stable subscription. The deployment bundle pins
    each image by digest; kubectl, Flux and Cosign are version-pinned.
 5. After attaching signed SLSA provenance for all four digests, the workflow
@@ -91,11 +95,23 @@ reused: immutable identity guards reject another source revision.
    --finalize verifies that signature with the exact issuer and tag-scoped
    workflow identity, revalidates release/registry identity and prepared metadata,
    compares the complete artifact against the rebuilt source with no ignored paths,
-   then promotes the same digest to the stable 0.4.1 tag. It confirms promotion,
+   then promotes the same digest to the stable `0.7.1` tag. It confirms promotion,
    uploads release.json and publishes the draft. Reused artifacts get the same
    source-content check; matching annotations alone are insufficient.
    `node script/publish_release.mjs` only prepares artifacts; --finalize is the
    workflow's final step, not a substitute for signing and provenance.
+
+The workflow builds each image under a candidate tag and checks the registry
+digest against Buildx metadata. It signs that digest before assigning the
+version tag. Its signed image index identifies the build target. Retries
+verify that target and the signature from the release workflow's exact tag
+identity before reusing a version image.
+
+The publisher exports the lease helper from both platforms of the verified
+`canaverald` image index through BuildKit, then hashes the two files. The
+**Validate Canaveral** workflow accepts an optional `lease_helper_image` input
+such as `ghcr.io/seventwo-studio/canaveral/canaverald@sha256:<digest>`. Use it
+to check both helper digests on a runner without publishing a release.
 
 A failed run may leave some immutable images or an unsigned deployment artifact
 and an unfinished draft. After a completed push, the publisher makes at most six

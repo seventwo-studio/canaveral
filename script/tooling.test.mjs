@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -68,18 +68,19 @@ test('bounded evidence parser rejects duplicates, nonfinite numbers, symlinks an
  assert.throws(()=>uniqueJSON('{"a":1,}'));assert.throws(()=>uniqueJSON('[1,]'));
 });
 const images=()=>Object.fromEntries(Object.entries(IMAGES).map(([stage,p],i)=>[stage,p+':0.1.0@sha256:'+String.fromCharCode(97+i).repeat(64)]));
+const helperDigests={amd64:'d'.repeat(64),arm64:'e'.repeat(64)};
 test('draft discovery requires one exact reviewed unfinished target',()=>{
  const release={id:1,tag_name:'v0.1.1',draft:true,target_commitish:'c'.repeat(40)};
  assert.equal(draftRelease([[],[release]],release.tag_name,release.target_commitish),release);
  for(const pages of [[],[[release,release]],[[{...release,draft:false}]],[[{...release,target_commitish:'d'.repeat(40)}]],[[{...release,tag_name:'v0.1.0'}]]]) assert.throws(()=>draftRelease(pages,release.tag_name,release.target_commitish));
 });
 test('release bundle preserves optional stage, protected storage and scoped pod permissions',t=>{
- const root=directory(t),metadata=bundle('0.1.0','c'.repeat(40),images(),root);
- assert.deepEqual(metadata.images,images());assert.equal(metadata.source,SOURCE);assert.deepEqual(readdirSync(root).sort(),['app-release.json','dashboard','kubevirt','orchestrator']);
- for(const stage of ['orchestrator','dashboard','kubevirt']) for(const name of readdirSync(join(root,stage)).filter(n=>n.endsWith('.json'))) {
+ const root=directory(t),metadata=bundle('0.1.0','c'.repeat(40),images(),helperDigests,root);
+ assert.deepEqual(metadata.images,images());assert.equal(metadata.source,SOURCE);assert.deepEqual(readdirSync(root).sort(),['app-release.json','canaverald','dashboard','orchestrator']);
+ for(const stage of ['orchestrator','dashboard']) for(const name of readdirSync(join(root,stage)).filter(n=>n.endsWith('.json'))) {
   const value=JSON.parse(readFileSync(join(root,stage,name)));assert.equal(value.metadata.namespace,undefined);assert.ok(!['Secret','Namespace'].includes(value.kind));
-  if(['Deployment','StatefulSet'].includes(value.kind)) {
-   const pod=value.spec.template.spec;if(stage!=='kubevirt')assert.equal(pod.automountServiceAccountToken,false);assert.equal(pod.containers[0].image,images()[stage]);for(const init of pod.initContainers??[])assert.equal(init.image,images()[stage]);
+  if(value.kind==='Deployment') {
+   const pod=value.spec.template.spec;assert.equal(pod.automountServiceAccountToken,false);assert.equal(pod.containers[0].image,images()[stage]);for(const init of pod.initContainers??[])assert.equal(init.image,images()[stage]);
    assert.equal(pod.securityContext.seccompProfile.type,'RuntimeDefault');assert.equal(pod.securityContext.runAsNonRoot,true);assert.equal(pod.containers[0].securityContext.allowPrivilegeEscalation,false);
    if(stage==='dashboard')assert.ok(!pod.volumes?.some(v=>v.secret));
   }
@@ -88,12 +89,14 @@ test('release bundle preserves optional stage, protected storage and scoped pod 
 });
 test('release refuses mutable, wrong-package and wrong-version images plus occupied output',t=>{
  const root=directory(t);let i=0;
- for(const value of [{orchestrator:IMAGES.orchestrator+':latest',dashboard:images().dashboard},{...images(),dashboard:IMAGES.dashboard+':0.2.0@sha256:'+'b'.repeat(64)},{...images(),kubevirt:IMAGES.kubevirt+':latest'},{...images(),kubevirt:images().dashboard}])assert.throws(()=>bundle('0.1.0','c'.repeat(40),value,join(root,String(i++))));
- writeFileSync(join(root,'unreviewed'),'');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),root));
+ for(const value of [{orchestrator:IMAGES.orchestrator+':latest',dashboard:images().dashboard},{...images(),dashboard:IMAGES.dashboard+':0.2.0@sha256:'+'b'.repeat(64)},{...images(),dashboard:images().orchestrator},{...images(),extra:images().dashboard}])assert.throws(()=>bundle('0.1.0','c'.repeat(40),value,helperDigests,join(root,String(i++))));
+ writeFileSync(join(root,'unreviewed'),'');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),helperDigests,root));
 });
 test('release rejects undeclared or symlinked deployment inputs',t=>{
- const root=directory(t);for(const stage of ['orchestrator','dashboard','kubevirt']) {const d=join(root,'deploy',stage);mkdirSync(d,{recursive:true});for(const name of readdirSync(new URL('../deploy/'+stage+'/',import.meta.url)))copyFileSync(new URL('../deploy/'+stage+'/'+name,import.meta.url),join(d,name));}
- writeFileSync(join(root,'deploy/dashboard/extra'),'unreviewed');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),join(root,'out'),root));
+ const root=directory(t);for(const stage of ['orchestrator','dashboard']) {const d=join(root,'deploy',stage);mkdirSync(d,{recursive:true});for(const name of readdirSync(new URL('../deploy/'+stage+'/',import.meta.url)))copyFileSync(new URL('../deploy/'+stage+'/'+name,import.meta.url),join(d,name));}
+ cpSync(new URL('../deploy/kubernetes/canaverald/',import.meta.url),join(root,'deploy/kubernetes/canaverald'),{recursive:true});
+ bundle('0.1.0','c'.repeat(40),images(),helperDigests,join(root,'reviewed'),root);
+ writeFileSync(join(root,'deploy/dashboard/extra'),'unreviewed');assert.throws(()=>bundle('0.1.0','c'.repeat(40),images(),helperDigests,join(root,'out'),root));
 });
 test('publication identity checks source, version, revision, both architectures and Flux layer',()=>{
  const manifest={annotations:{'org.opencontainers.image.source':SOURCE,'org.opencontainers.image.version':'0.1.0','org.opencontainers.image.revision':'c'.repeat(40)},manifests:['amd64','arm64'].map(architecture=>({platform:{os:'linux',architecture}}))};
@@ -122,10 +125,6 @@ test('Android builder uses installed fixture compiler, validates both ABIs and e
  const compiler=join(bin,'clang');writeFileSync(compiler,`#!/usr/bin/env node\nconst fs=require('node:fs');const a=process.argv.slice(2),b=Buffer.alloc(64);Buffer.from([127,69,76,70,2,1]).copy(b);b.writeUInt16LE(a.some(x=>x.includes('aarch64'))?183:62,18);fs.writeFileSync(a[a.indexOf('-o')+1],b);\n`);chmodSync(compiler,0o755);
  const out=join(root,'output with spaces'),r=spawnSync(process.execPath,['script/build_android_transfer.mjs','--ndk',join(root,'ndk'),'--output-dir',out],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);
  const manifest=JSON.parse(readFileSync(join(out,'manifest.json')));assert.equal(manifest.minimumAPI,26);for(const [arch,machine]of[['arm64',183],['amd64',62]]) {const record=manifest.artifacts[arch];assert.deepEqual(inspectArtifact(readFileSync(join(out,record.file)),machine),{sha256:record.sha256,bytes:record.bytes});}
-});
-test('deadline builder refuses unsupported host or occupied destination before compiler invocation',t=>{
- const root=directory(t),out=join(root,'deadline.so');writeFileSync(out,'retained');
- const r=spawnSync(process.execPath,['script/build_linux_lease_deadline.mjs','--output',out],{encoding:'utf8'});assert.equal(r.status,1);assert.equal(readFileSync(out,'utf8'),'retained');assert.match(r.stderr,/Linux|retained/);
 });
 test('dependency scanner detects forbidden extensions, shebangs and embedded source without executing it',t=>{
  const interpreter=['py','thon'].join(''),extension=['.','py'].join('');
@@ -161,8 +160,8 @@ test('native packaging breaks Cargo artifact hardlinks before owned runtime admi
   if(process.platform!=='win32')assert.equal(lstatSync(installed).mode&0o777,0o755);
  }
 });
-test('controller and worker stage Secret credentials as private regular files',()=>{
- for(const [path,files] of [['../deploy/orchestrator/deployment.json',['admin.token','enrollment.token']],['../deploy/kubevirt/statefulset.json',['enrollment.token']]]) {
+test('controller stages Secret credentials as private regular files',()=>{
+ for(const [path,files] of [['../deploy/orchestrator/deployment.json',['admin.token','enrollment.token']]]) {
   const pod=JSON.parse(readFileSync(new URL(path,import.meta.url))).spec.template.spec,[init]=pod.initContainers,main=pod.containers[0];
   assert.equal(pod.securityContext.fsGroupChangePolicy,'OnRootMismatch');assert.equal(pod.initContainers.length,1);assert.equal(init.image,main.image);assert.deepEqual(init.securityContext,main.securityContext);
   assert.deepEqual(init.command,['install','-m','0600','-t','/run/credentials',...files.map(f=>'/run/credential-source/'+f)]);
@@ -170,25 +169,10 @@ test('controller and worker stage Secret credentials as private regular files',(
   assert.ok(main.volumeMounts.some(v=>v.name==='credentials' && v.mountPath==='/run/credentials' && v.readOnly));assert.ok(!main.volumeMounts.some(v=>v.name==='credential-source'));
  }
 });
-test('KubeVirt deployment keeps restricted pods, namespace-scoped observation and durable identity',()=>{
- const load=name=>JSON.parse(readFileSync(new URL('../deploy/kubevirt/'+name+'.json',import.meta.url)));
- const pod=load('statefulset').spec.template.spec,container=pod.containers[0];
- assert.deepEqual(pod.securityContext,{runAsNonRoot:true,runAsUser:10001,runAsGroup:10001,fsGroup:10001,fsGroupChangePolicy:'OnRootMismatch',seccompProfile:{type:'RuntimeDefault'}});
- assert.equal(container.securityContext.readOnlyRootFilesystem,true);
- assert.deepEqual(container.securityContext.capabilities.drop,['ALL']);
- assert.equal(container.securityContext.allowPrivilegeEscalation,false);
- assert.ok(pod.volumes.some(v=>v.name==='tmp' && v.emptyDir));
- assert.ok(container.volumeMounts.some(v=>v.name==='tmp' && v.mountPath==='/tmp'));
- assert.equal(container.args[container.args.indexOf('--state')+1],'/data/host');
- const rules=load('role').rules;
- for(const [group,resource,verbs] of [['','pods',['get','list']],['','resourcequotas',['get','list']],['metrics.k8s.io','pods',['get','list']],['kubevirt.io','virtualmachines',['get','list','create','patch']],['kubevirt.io','virtualmachineinstances',['get','list']],['','persistentvolumeclaims',['get','list']],['','secrets',['get','create']],['cdi.kubevirt.io','datavolumes/source',['create']]]) {
-  const rule=rules.find(r=>r.apiGroups.includes(group)&&r.resources.includes(resource));assert.ok(rule,resource);assert.deepEqual(rule.verbs,verbs);
- }
- assert.ok(rules.every(r=>!r.apiGroups.includes('*')&&!r.resources.includes('*')&&!r.verbs.includes('*')));
- assert.equal(load('role').kind,'Role');
+test('Kubernetes namespaces and release identities stay pinned',()=>{
  const namespaces=JSON.parse(readFileSync(new URL('../deploy/kubernetes/namespaces/namespaces.json',import.meta.url))).items;
  assert.ok(namespaces.every(n=>n.metadata.labels['pod-security.kubernetes.io/enforce']==='restricted'));
- assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(NAMESPACE,'ghcr.io/seventwo-studio/canaveral');assert.deepEqual(IMAGES,{orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',kubevirt:NAMESPACE+'/kubevirt'});assert.equal(DEPLOYMENT,NAMESPACE+'/deploy');
+ assert.equal(SOURCE,'https://github.com/seventwo-studio/canaveral');assert.equal(NAMESPACE,'ghcr.io/seventwo-studio/canaveral');assert.deepEqual(IMAGES,{orchestrator:NAMESPACE+'/orchestrator',dashboard:NAMESPACE+'/dashboard',canaverald:NAMESPACE+'/canaverald'});assert.equal(DEPLOYMENT,NAMESPACE+'/deploy');
 });
 test('registry failures report status, path and registry codes without credentials',()=>{
  const url=new URL('https://ghcr.io/v2/seventwo-studio/canaveral/manifests/0.3.1?token=secret');

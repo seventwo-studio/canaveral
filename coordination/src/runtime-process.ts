@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync, readdirSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { identifier } from "./consumers.ts";
@@ -64,6 +64,61 @@ export class StateLock {
   }
   close(): void { const db = this.db; this.db = undefined; if (db) { try { db.exec("ROLLBACK"); } finally { db.close(); } } }
 }
+const ASSIGNMENT_LOCKS = ".assignment-locks";
+const LEASE_CLEANUP = ".lease-cleanup";
+const ASSIGNMENT_LOCK_SCHEMA = "CREATE TABLE runner_lock (id INTEGER PRIMARY KEY)";
+
+/** Recognizes the private bookkeeping layout without mutating journals or taking locks. */
+export function machineBookkeeping(root: string, name: string): "owned" | "unexpected" | undefined {
+  if (name !== ASSIGNMENT_LOCKS && name !== LEASE_CLEANUP) return undefined;
+  const path = join(root, name), uid = process.getuid?.();
+  try {
+    const before = lstatSync(path, { bigint: true });
+    if (uid === undefined || !before.isDirectory() || before.uid !== BigInt(uid) || (before.mode & 0o7777n) !== 0o700n) return "unexpected";
+    const dir = opendirSync(path);
+    try {
+      let entries = 0;
+      for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+        if (++entries > 20_000 || !entry.isFile()) return "unexpected";
+        const suffix = name === ASSIGNMENT_LOCKS ? ".sqlite" : entry.name.endsWith(".json.sqlite") ? ".json.sqlite" : ".json";
+        if (!entry.name.endsWith(suffix)) return "unexpected";
+        const id = entry.name.slice(0, -suffix.length);
+        if (identifier(id) !== id || !bookkeepingFile(join(path, entry.name), uid, id, suffix === ".json")) return "unexpected";
+      }
+    } finally { dir.closeSync(); }
+    const after = lstatSync(path, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.ctimeNs !== after.ctimeNs || before.mtimeNs !== after.mtimeNs) return "unexpected";
+    return "owned";
+  } catch { return "unexpected"; }
+}
+
+function bookkeepingFile(path: string, uid: number, id: string, cleanup: boolean): boolean {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== uid || stat.nlink !== 1) return false;
+    const mode = stat.mode & 0o7777;
+    if (!cleanup) {
+      if (![0o600, 0o640, 0o644].includes(mode) || stat.size > 2 * 65536) return false;
+      const db = new DatabaseSync(path, { readOnly: true, timeout: 0 });
+      try {
+        const schema = db.prepare("SELECT sql FROM sqlite_schema LIMIT 2").all();
+        const current = lstatSync(path);
+        return current.dev === stat.dev && current.ino === stat.ino && current.ctimeMs === stat.ctimeMs &&
+          schema.length === 1 && schema[0]?.sql === ASSIGNMENT_LOCK_SCHEMA;
+      } finally { db.close(); }
+    }
+    if (mode !== 0o600 || stat.size > 4096) return false;
+    const bytes = Buffer.alloc(stat.size + 1);
+    const size = readSync(fd, bytes, 0, bytes.length, 0);
+    if (size !== stat.size) return false;
+    const proof = object(JSON.parse(bytes.toString("utf8", 0, size)));
+    return proof.machineId === id && identifier(proof.id) === proof.id && identifier(proof.leaseId) === proof.leaseId &&
+      typeof proof.fingerprint === "string" && /^[a-f0-9]{64}$/.test(proof.fingerprint) &&
+      Number.isSafeInteger(proof.attempt) && Number(proof.attempt) >= 0 && proof.phase === "complete";
+  } finally { closeSync(fd); }
+}
+
 export interface AssignmentContext { machine: RecordValue; folder: string }
 const assignmentContext = new AsyncLocalStorage<AssignmentContext>();
 export const currentAssignment = (): AssignmentContext | undefined => assignmentContext.getStore();
@@ -71,9 +126,9 @@ export async function assignmentAccess<T>(machine: RecordValue, folder: string, 
   if (!machine.lease) return work();
   if (process.platform === "win32") throw new ServiceError("Lease assignment locking is unavailable on Windows.", 409, { code: "capability_unsupported" });
   const id = identifier(machine.id), parent = dirname(folder);
-  const lock = new StateLock(join(parent, ".assignment-locks", `${id}.sqlite`), !options.exclusive);
+  const lock = new StateLock(join(parent, ASSIGNMENT_LOCKS, `${id}.sqlite`), !options.exclusive);
   try {
-    if (present(join(parent, ".lease-cleanup", `${id}.json`)) && !options.exclusive && !options.fencing) throw new ServiceError("Assignment has a durable cleanup intent.", 410);
+    if (present(join(parent, LEASE_CLEANUP, `${id}.json`)) && !options.exclusive && !options.fencing) throw new ServiceError("Assignment has a durable cleanup intent.", 410);
     return await assignmentContext.run({ machine, folder }, work);
   } finally { lock.close(); }
 }
@@ -137,9 +192,12 @@ export class LeaseGuard {
     if (changed || this.checkpointDirty) this.save();
     return undefined;
   }
-  observe(machines: RecordValue[], roundTrip: number): void {
-    if (!Number.isFinite(roundTrip) || roundTrip < 0) throw new ServiceError("Invalid heartbeat timing.", 400);
-    const now = this.sample(); if (now === undefined) throw unknownOutcome('Lease clock failed; retained assignments remain fenced.');
+  observe(machines: RecordValue[], roundTrip: number | undefined): void {
+    if (roundTrip !== undefined && (!Number.isFinite(roundTrip) || roundTrip < 0)) throw new ServiceError("Invalid heartbeat timing.", 400);
+    // A heartbeat without a trusted clock can deliver terminal cleanup and only fenced leases.
+    const now = roundTrip === undefined ? 0 : this.sample();
+    if (now === undefined) throw unknownOutcome('Lease clock failed; retained assignments remain fenced.');
+    if (roundTrip === undefined) for (const record of this.records.values()) record.fenced = true;
     const wall = this.clock.wall(), seen = new Set<string>();
     for (const machine of machines) {
       const id = identifier(machine.id), previous = this.records.get(id); seen.add(id);
@@ -148,10 +206,10 @@ export class LeaseGuard {
       if (previous && object(previous.machine.lease).id !== lease.id) { previous.fenced = true; this.save(); throw new ServiceError("Machine lease ownership changed.", 409); }
       if (previous?.retired) continue;
       if (previous && Number(lease.revision) < Number(object(previous.machine.lease).revision)) continue;
-      let deadline = now + Math.max(0, Number(lease.authorizationDeadline) - Number(lease.controllerNow) - roundTrip);
+      let deadline = now + Math.max(0, Number(lease.authorizationDeadline) - Number(lease.controllerNow) - (roundTrip ?? 0));
       if (previous && Number(lease.authorizationDeadline) <= Number(object(previous.machine.lease).authorizationDeadline)) deadline = Math.min(deadline, this.deadlines.get(id)!);
-      const fenced = !!previous && (previous.fenced || now >= this.deadlines.get(id)!) ||
-        !["provisioning", "ready"].includes(String(lease.state)) || Math.abs(wall - Number(lease.controllerNow)) > 5 + roundTrip || deadline <= now || !this.clock.suspendAware;
+      const fenced = roundTrip === undefined || !!previous && (previous.fenced || now >= this.deadlines.get(id)!) ||
+        !["provisioning", "ready"].includes(String(lease.state)) || Math.abs(wall - Number(lease.controllerNow)) > 5 + (roundTrip ?? 0) || deadline <= now || !this.clock.suspendAware;
       this.records.set(id, { machine: structuredClone(machine), receivedAt: wall, fenced, executionStarted: previous ? previous.executionStarted : !this.historyKnown,
         ...(this.clock.bootId === undefined ? {} : { bootId: this.clock.bootId, elapsedDeadline: deadline }) });
       this.deadlines.set(id, deadline);
@@ -572,11 +630,11 @@ export interface LeaseCleanupOptions {
 }
 /** External intent survives assignment credential erasure; only positive proofs complete it. */
 /** The blocked-cleanup reasons the controller's lifecycle contract accepts. */
-const CLEANUP_REASONS = new Set(["execution_pending", "operations_pending", "sessions_pending", "ownership", "storage_removal", "credential_erasure", "unsupported", "recovery"]);
+const CLEANUP_REASONS = new Set(["execution_pending", "libvirt-unconfirmed", "operations_pending", "sessions_pending", "ownership", "storage_removal", "credential_erasure", "unsupported", "recovery"]);
 export async function cleanupLease(options: LeaseCleanupOptions): Promise<RecordValue> {
   const { machine, folder, guard } = options, id = identifier(machine.id), lease = object(machine.lease), intent = object(machine.leaseCleanup), request = identifier(intent.id);
   if (identifier(intent.leaseId) !== identifier(lease.id) || !["released", "expired", "failed"].includes(String(lease.state)) || machine.desired !== "stopped") throw new ServiceError("Cleanup requires its terminal pinned lease and stopped intent.", 409);
-  const fingerprint = assignmentFingerprint(machine), receipt = join(dirname(folder), ".lease-cleanup", `${id}.json`), storage = join(resolve(options.storageRoot), id), quarantine = join(dirname(folder), `.erasing-${id}-${request}`);
+  const fingerprint = assignmentFingerprint(machine), receipt = join(dirname(folder), LEASE_CLEANUP, `${id}.json`), storage = join(resolve(options.storageRoot), id), quarantine = join(dirname(folder), `.erasing-${id}-${request}`);
   const expected = { id: request, machineId: id, leaseId: lease.id, fingerprint }, lock = new StateLock(`${receipt}.sqlite`);
   try {
     let proof: RecordValue = present(receipt) ? readRecord(receipt) : { ...expected, phase: "planned", attempt: 0 };

@@ -15,7 +15,6 @@ import {
   Monitor,
   MonitorPlay,
   Server,
-  Orbit,
   Layers,
   User,
   Sparkles,
@@ -105,13 +104,6 @@ export const destinations = {
     label: "Hosts",
     href: "#hosts",
     icon: Server,
-    adminOnly: true,
-  },
-  orchestrators: {
-    group: "Infrastructure",
-    label: "Orchestrators",
-    href: "#orchestrators",
-    icon: Orbit,
     adminOnly: true,
   },
   system: {

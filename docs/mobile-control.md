@@ -505,7 +505,7 @@ fails the lease. Consumer operations and sessions for such an assignment are ref
 
 Run the host so that stopping or restarting it does not kill the detached lease
 supervisors. On Linux, add the drop-in
-`deploy/systemd/canaveral-host.service.d/android-leases.conf` (`KillMode=process`)
+`deploy/systemd/canaverald.service.d/android-leases.conf` (`KillMode=process`)
 to the example unit on hosts that lease Android emulators; the default
 `control-group` mode would kill every supervisor and emulator on a service restart.
 The base unit keeps `control-group`, so hosts without Android leases still clean up
@@ -824,6 +824,7 @@ native authorization. Expiry, release, a fence, supervisor loss or a key rotatio
 therefore ends a recording within about a second: the stream stops without a finish
 receipt, and the SDK reports `session_disconnected` or `video_incomplete`. Reading receipts and deleting
 clean uploads remain available to the current key after the lease ends.
+Like the tunnel bounds below, this holds under normal load and is not hard real-time.
 
 #### Reservations and cleanup proof
 
@@ -1053,13 +1054,22 @@ rotation, a release, a local fence and lost controller contact, and under two fo
 supervisor loss, which only the once-a-second device check shows. They run on one shared
 event loop; the native timing is not measured.
 
+**These bounds hold under normal load; they are not hard real-time.** A starved CPU or
+event loop can exceed them: in a fixture run at background CPU priority, the shared
+controller and runner event loop stalled for up to 1.4 seconds, and key rotation took up to
+2.5 seconds to close a tunnel. The same applies to live views and recordings. A live
+view ends with its lease, key or device within about a second, and a recording's own
+duration and exit grace are counted in wall time. The test suite runs its timing-budget
+files as their own group, one file at a time (`npm run test:timed`, which `npm test`
+runs after the rest and CI runs as a separate job; see `script/coordination_tests.mjs`).
+
 - The broker checks a tunnel's authority on an interval, not for every relayed message:
   the lease key, application, lease, assignment and host state, at most about five times
   a second per tunnel. It relays nothing unless a check succeeded within the last 250 ms,
   and between two checks it forwards at most 2 MiB, 256 messages and 32 stream opens per
-  direction. **So after the controller's state says a tunnel's authority ended, at most
-  250 ms and 2 MiB per direction can still pass.** That is weaker than the per-message
-  check every other session family keeps; a controller round trip for every tunnel
+  direction. A revocation can leave the last successful check's remaining interval
+  and budget in flight: up to 250 ms and 2 MiB per direction. Other session families
+  check each message; a controller round trip for every tunnel
   message would let one lease starve the control worker that requests, heartbeats and
   all other sessions share. The check reads a snapshot and takes no write lock; only
   an end of authority writes. A busy or briefly unavailable controller is backpressure,
@@ -1374,10 +1384,10 @@ mapped ports to the runner's Unix sockets, and can drop a mapping. They cover:
 
 **Which run executes the integration tests.** They need the built
 `canaveral-mobile-native` helper and are skipped without it, so a plain local `npm test`
-runs the component tests only. The "TypeScript controller, SDK and guest services" job
-of the validation workflow builds that helper before `npm test` and therefore runs all
-of them; the file's first test fails in CI when the helper is missing, so a broken build
-step cannot turn them into silent skips.
+runs the tunnel component tests only. The "TypeScript timing-sensitive suites" job
+of the validation workflow builds that helper before `npm run test:timed`. The file's
+first test fails in CI when the helper is missing, so a broken build step cannot turn
+the integration tests into silent skips.
 
 The fixtures establish nothing about a real adb, emulator or app. The one native run is
 the [trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels) named
@@ -1594,23 +1604,25 @@ cleanup) or `capture_ended` (the capture this view belongs to is ending, or was
 attempted before a runner restart; open a new view). A host whose own authority
 ended sends nothing more; the controller records that cause.
 
-A device's native side can stop a moment before the runner observes the same
-ending: a lease deadline is also enforced by the native supervisor. After a failed
-epoch the runner therefore waits up to a second for its viewers' own authority to
-lapse before it tells the remaining ones `capture_failed`, and the SDK prefers the
-controller's finding that the view's lease, credential or device ended over a
-reported capture failure.
+A device's native side can stop before the runner observes the same ending. After
+a failed epoch, the runner waits up to a second for its viewers' authority to
+lapse before it sends `capture_failed` to the remaining viewers. The SDK preserves
+an explicit `capture_failed` from the host.
 
 The runner enforces a lease deadline and its own assignment slightly before the
 controller observes the same ending. A view is therefore first recorded as
 `disconnected` when its sockets dropped, or for a lease as `device_stopped` or
-`host_unavailable` when the runner had already reported its fenced emulator. Both
-are provisional for three seconds: any cause the controller then finds replaces
-`disconnected`, and the lease's or its key's own ending replaces a lease's device
-cause. At expiry a viewer thus reads `lease_expired`, or `lease_failed` when the
-runner's fence report arrived first. The SDK waits out that window before it
-reports a provisional reason. A credential that was rotated or revoked can no longer
-read its view; the SDK reports `credential_rejected`.
+`host_unavailable` when the runner had already reported its fenced emulator, or as
+`capture_ended` when the runner had already stopped the capture and reported its
+encoder gone. For three seconds, a cause found by the controller can replace
+`disconnected`, and the lease's or its key's ending can replace a device cause.
+The runner records the lease ID and revision in the capture's stop receipt when
+its local fence caused the epoch to stop. The controller can then refine
+`capture_ended` to `lease_expired` or `lease_failed` when the lease and revision
+match, regardless of how long ago the capture ended. A receipt that records only
+cleanup leaves `capture_ended` in place. After a dropped stream, the SDK polls
+the view briefly for an updated reason. A rotated or revoked credential can no
+longer read its view, so the SDK reports `credential_rejected`.
 
 ### Reservations and cleanup proof
 

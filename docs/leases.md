@@ -8,11 +8,13 @@ worker and provider-independent unstarted-assignment cleanup have fixture covera
 Full provider deadline enforcement, paired environments and live consumer acceptance
 remain open. [Durable consumer operations](consumer-operations.md) have controller/runner
 fixture coverage. Ordinary runners do not advertise lease execution protocol 1. There are
-two exceptions, both with the native lease clock and lease supervisor: a supervised Android
-emulator host ([Android emulator leases](mobile-control.md#android-emulator-leases)), and,
+three exceptions, each with the native lease clock and a native lease supervisor: a supervised
+Android emulator host ([Android emulator leases](mobile-control.md#android-emulator-leases));
 since 21 November 2026, a macOS host whose iOS lease images each declare the `shared-host`
-isolation class ([iOS simulator leases](mobile-control.md#ios-simulator-leases)). Every
-other runtime still refuses the declaration. Fixture hosts explicitly opt into that
+isolation class ([iOS simulator leases](mobile-control.md#ios-simulator-leases)); and since
+24 November 2026, a Linux 6.5+ libvirt host with the pinned lease helper and a headless x64
+BIOS Linux template ([libvirt supervision](libvirt-supervision.md)). Every other runtime
+still refuses the declaration. Fixture hosts explicitly opt into that
 protocol for lifecycle tests.
 
 Leases do not all isolate equally. An iOS simulator lease is not isolated from the Mac host
@@ -287,7 +289,10 @@ before the same owned removal and erasure, also for a device that was adopted fr
 warm pool or claimed and never adopted. iOS simulator leases use the same supervisor,
 whose proof is CoreSimulator reporting the lease's own simulator shut down together with the
 absence of that simulator's process tree, both held across a settling period; that proof has
-no native acceptance. Other provider cleanup remains unimplemented. The
+no native acceptance. Libvirt VM leases are transient domains: their guardian's
+stopped receipt, written only after a fresh `VIR_ERR_NO_DOMAIN` lookup, is the stop
+proof, and their overlay is erased under file write leases before the same credential
+erasure. Other provider cleanup remains unimplemented. The
 runner explicitly rejects configuration that attempts to advertise protocol 1
 for any other runtime until those gates are complete. It must not be enabled just to make admission pass.
 
@@ -295,18 +300,16 @@ Controller eligibility now also requires explicit image revision, architecture
 and runtime selectors; a host-wide protocol flag alone grants no execution.
 Withdrawal closes affected sessions without claiming cleanup or freeing their
 reservations. Ordinary runners also reject selector configuration until native
-acceptance is complete; supervised Android hosts accept Android selectors, and macOS hosts
-accept iOS selectors only with their explicit `shared-host` declaration. See the [eligibility contract](lease-eligibility.md).
+acceptance is complete; supervised Android hosts accept Android selectors, macOS hosts
+accept iOS selectors only with their explicit `shared-host` declaration, and qualified
+libvirt hosts accept libvirt selectors for BIOS lease templates. See the [eligibility contract](lease-eligibility.md).
 
 ### Owned lease cleanup
 
-The separate [libvirt supervision component](libvirt-supervision.md) now has
-isolated ownership, connection-lifetime and deadline-state fixtures, plus a
-dedicated child entry point, private authorization publisher and provider wiring.
-Its Linux kernel timer, real driver behavior and stop/storage-removal path are
-not yet natively verified. Native libvirt acceptance and teardown remain open;
-this does not enable ordinary consumer admission or reclamation of a possibly
-executed libvirt assignment.
+Libvirt VM leases end through their [guardian and reconciler fence](libvirt-supervision.md):
+release, expiry, daemon or guardian loss, a libvirtd restart and controller loss all
+finish in a destroyed transient domain and removed overlay with proof, or keep the
+reservation with cleanup blocked as `execution_pending`.
 
 Release, expiry and terminal provisioning/runtime failure transactionally issue
 one stable cleanup UUID per member. The lifecycle remains released/expired/failed
@@ -379,11 +382,9 @@ cleanup; an erasure failure keeps reservations held.
 Twelve disposable fixtures cover this path, including real controller HTTP
 release, failed credential erasure, retained quota, retry acknowledgement and a
 new assignment. They launch no device or native provider. This is not teardown
-of an assignment that may have run. The gated libvirt adapter now separately
-implements native-stop observation, owned storage erasure and interruption/reboot recovery
-with isolated fixtures; actual Linux kernel/driver acceptance remains open.
-Windows host assignment locking remains unfinished and ordinary consumer lease
-admission remains disabled. See [libvirt teardown](libvirt-supervision.md#owned-storage-transaction-and-recovery).
+of an assignment that may have run. Libvirt lease teardown has its own fixtures and
+native acceptance; see [libvirt supervision](libvirt-supervision.md#evidence).
+Windows host assignment locking remains unfinished.
 
 New Apple lease assignments persist a bound `preparing` journal before generating
 guest credentials or starting storage preparation. A durable `bootRequested`

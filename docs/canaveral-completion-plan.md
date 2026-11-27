@@ -10,7 +10,7 @@ This plan describes remaining delivery work. Passing fixtures, controller routes
 
 ## Platform scope agreed on 18 November 2026
 
-Canaveral is a self-hosted compute platform. Operators can place the controller independently of the machines that execute work. Nodes connect back to the controller and advertise what they can run. The deployment target includes native machines, Docker and Kubernetes, with KubeVirt as a possible VM backend. A workload can require a particular OS, runtime or device.
+Canaveral is a self-hosted compute platform. Operators can place the controller independently of the machines that execute work. Nodes connect back to the controller and advertise what they can run. The deployment target includes native machines, Docker and Kubernetes for the controller. A workload can require a particular OS, runtime or device.
 
 | Workload | Intended use |
 | --- | --- |

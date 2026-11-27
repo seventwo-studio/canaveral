@@ -71,6 +71,8 @@ pub struct Journal {
     pub stop_confirmed: bool,
     #[serde(default)]
     pub cleanup_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_package_digest: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,10 +80,65 @@ struct Store {
     current: String,
     entries: BTreeMap<String, Journal>,
 }
+#[derive(Default)]
+struct PackageReferences {
+    all: bool,
+    digests: std::collections::BTreeSet<String>,
+}
+impl PackageReferences {
+    fn from_history(history: &BTreeMap<String, Journal>) -> Self {
+        let mut references = Self::default();
+        for journal in history
+            .values()
+            .filter(|j| j.launch_intent || j.pending || !j.receipt.can_release())
+        {
+            match &journal.runtime_package_digest {
+                Some(digest) => {
+                    references.digests.insert(digest.clone());
+                }
+                // A journal predating package identities can refer to any cached version.
+                None => references.all = true,
+            }
+        }
+        references
+    }
+    fn contains(&self, cache: &str) -> bool {
+        self.all
+            || cache
+                .strip_prefix("runtime-package.")
+                .is_some_and(|digest| self.digests.contains(digest))
+    }
+}
+
+fn load_history(directory: &private::Directory) -> Result<Option<Store>> {
+    let store = directory
+        .read_optional("receipt.json")?
+        .map(|bytes| serde_json::from_slice::<Store>(&bytes).map_err(|_| "corrupt receipt"))
+        .transpose()?;
+    if let Some(store) = &store {
+        if !store.entries.contains_key(&store.current) {
+            return Err("corrupt current receipt");
+        }
+        for journal in store.entries.values() {
+            journal.assignment.job.validate()?;
+            journal.receipt.validate()?;
+            if !journal.assignment.job.receipt_matches(&journal.receipt)
+                || journal
+                    .runtime_package_digest
+                    .as_deref()
+                    .is_some_and(|digest| !runtime_package::hash_valid(digest))
+            {
+                return Err("corrupt receipt binding");
+            }
+        }
+    }
+    Ok(store)
+}
+
 pub struct Executor {
     config: Config,
     directory: private::Directory,
-    staged: Result<PathBuf>,
+    staged: Result<runtime_package::StagedRuntime>,
     journal: Option<Journal>,
     history: BTreeMap<String, Journal>,
     poisoned: bool,
@@ -137,10 +194,7 @@ impl Executor {
             return Err("explicit positive budgets required");
         }
         let directory = private::Directory::open(&config.state_dir)?;
-        let stored: Option<Store> = directory
-            .read_optional("receipt.json")?
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| "corrupt receipt"))
-            .transpose()?;
+        let stored = load_history(&directory)?;
         let (journal, history) = if let Some(store) = stored {
             (
                 Some(
@@ -163,13 +217,6 @@ impl Executor {
             history,
             poisoned: false,
         };
-        for j in this.history.values() {
-            j.assignment.job.validate()?;
-            j.receipt.validate()?;
-            if !j.assignment.job.receipt_matches(&j.receipt) {
-                return Err("corrupt receipt binding");
-            }
-        }
         if let Some(mut j) = this.journal.clone() {
             if j.launch_intent && !j.pending && !j.receipt.can_release() {
                 if !matches!(
@@ -275,6 +322,19 @@ impl Executor {
             launch_intent: true,
             stop_confirmed: false,
             cleanup_confirmed: false,
+            runtime_package_digest: self.staged.as_ref().ok().and_then(|staged| {
+                let relative = staged
+                    .entrypoint
+                    .strip_prefix(&self.config.state_dir)
+                    .ok()?;
+                relative
+                    .components()
+                    .next()?
+                    .as_os_str()
+                    .to_str()?
+                    .strip_prefix("runtime-package.")
+                    .map(str::to_owned)
+            }),
         };
         self.persist(j.clone())?; // Durable launch intent precedes every process effect.
         let work = self.config.state_dir.join("workspace");
@@ -290,7 +350,13 @@ impl Executor {
         if let Err(code) = &outcome {
             eprintln!("model execution: {code}");
         }
-        let stopped = scope.as_mut().is_none_or(|s| s.stop(self.config.stop_ms));
+        let stopped = scope.as_mut().is_none_or(|s| {
+            s.stop(
+                self.config.stop_ms,
+                self.config.backend == runtime_backend::Backend::Ollama
+                    && self.config.executable.as_os_str().is_empty(),
+            )
+        });
         let cleanup = stopped && self.directory.cleanup_workspace().is_ok();
         let cancelled = a.cancel_requested || matches!(outcome, Err("cancelled"));
         let uncertain = matches!(
@@ -332,11 +398,28 @@ impl Executor {
             self.staged = self.stage_runtime();
         }
     }
-    fn stage_runtime(&self) -> Result<PathBuf> {
+    fn stage_runtime(&self) -> Result<runtime_package::StagedRuntime> {
         validate_models(&self.config.models_dir)?;
         self.config.backend.verify_models(&self.config)?;
+        let references = PackageReferences::from_history(&self.history);
         if let Some(package) = runtime_package::select(&self.config.runtime_packages)? {
-            return runtime_package::stage(package, &self.directory, &self.config.state_dir);
+            return runtime_package::stage(
+                package,
+                &self.directory,
+                &self.config.state_dir,
+                &references,
+            );
+        }
+        if self.config.executable.as_os_str().is_empty() {
+            let pin = runtime_archive::host_pin(self.config.backend)
+                .ok_or("no runtime package for this host")?;
+            return runtime_archive::stage(
+                pin,
+                &self.directory,
+                &self.config.state_dir,
+                &references,
+                false,
+            );
         }
         let mut executable = OpenOptions::new()
             .read(true)
@@ -350,7 +433,6 @@ impl Executor {
             return Err("unsafe runtime permissions");
         }
         // Stage the verified bytes privately: macOS cannot execute /dev/fd artifacts.
-        let staged = self.config.state_dir.join("runtime");
         let mut output = self.directory.runtime_output()?;
         let mut hash = Sha256::new();
         let mut buffer = [0; 65536];
@@ -367,13 +449,22 @@ impl Executor {
                 .map_err(|_| "runtime staging failed")?;
         }
         output.sync_all().map_err(|_| "runtime sync failed")?;
+        let staged_metadata = output
+            .metadata()
+            .map_err(|_| "runtime metadata unavailable")?;
         drop(output);
         if format!("{:x}", hash.finalize()) != self.config.executable_sha256 {
             return Err("runtime identity mismatch");
         }
         self.directory.check()?;
-        Ok(staged)
+        let identity = runtime_package::ExecutableIdentity::from_metadata(&staged_metadata);
+        Ok(runtime_package::StagedRuntime::new(
+            self.config.state_dir.clone(),
+            "runtime",
+            [("runtime".to_owned(), identity)].into_iter().collect(),
+        ))
     }
+
     fn generate<F: FnMut() -> Control>(
         &self,
         job: &ModelJob,
@@ -386,26 +477,13 @@ impl Executor {
         };
         self.directory.check()?;
         let staged = self.staged.as_ref().map_err(|e| *e)?;
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "loopback unavailable")?;
-        let port = listener
-            .local_addr()
-            .map_err(|_| "loopback unavailable")?
-            .port();
-        let host = format!("127.0.0.1:{port}");
-        let mut cmd = Command::new(staged);
-        cmd.env_clear()
-            .env("HOME", work)
-            .env("TMPDIR", work)
-            .current_dir(work)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
+        let backend = self.config.backend;
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|_| "runtime secret unavailable")?;
         let key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let key_file = work.join("runtime.key");
-        if self.config.backend.authenticated() {
+        let auth = backend.authenticated().then_some(key.as_str());
+        if auth.is_some() {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -416,73 +494,139 @@ impl Executor {
                 .map_err(|_| "runtime key write failed")?;
             file.sync_all().map_err(|_| "runtime key sync failed")?;
         }
-        self.config
-            .backend
-            .configure(&mut cmd, &self.config, model, port, &key, &key_file)?;
-        check(control)?;
-        drop(listener);
-        let start = clock::Clock::now();
-        let child = cmd.spawn().map_err(|_| "runtime launch failed")?;
-        *scope = Some(Scope {
-            pgid: child.id() as i32,
-            child,
-            signalled: false,
-            reaped: false,
-        });
-        let client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .timeout(Duration::from_millis(200))
-            .build()
-            .map_err(|_| "HTTP client failed")?;
-        let base = format!("http://{host}");
-        let mut pending_tags = None;
-        let tags = loop {
-            self.directory.check()?;
-            check(control)?;
-            if scope.as_ref().unwrap().exited()? {
-                return Err("runtime exited");
-            }
-            if start.elapsed() >= Duration::from_millis(self.config.startup_ms) {
-                return Err("startup deadline");
-            }
-            if !socket_owner::owned(scope.as_ref().unwrap().child.id(), port) {
-                std::thread::sleep(Duration::from_millis(20));
-                continue;
-            }
-            if pending_tags.is_none() {
-                let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                let c = client.clone();
-                let url = format!("{base}{}", self.config.backend.inventory_route());
-                let auth = self.config.backend.authenticated().then(|| key.clone());
-                let bound = self.config.response_bytes;
-                std::thread::spawn(move || {
-                    let _ = tx.send(get_json(&c, &url, bound, auth.as_deref()));
-                });
-                pending_tags = Some(rx);
-            }
-            match pending_tags.as_ref().unwrap().try_recv() {
-                Ok(Ok(r)) => break r,
-                Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    pending_tags = None
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let import = if backend == runtime_backend::Backend::Ollama {
+            self.config.model_files.get(model)
+        } else {
+            None
         };
-        let installed = self
-            .config
-            .backend
-            .inventory_matches(&self.config, &tags, model, digest);
-        if !installed {
+        let store = work.join("ollama-models");
+        if import.is_some() {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&store)
+                .map_err(|_| "Ollama private store unavailable")?;
+        }
+        let launch = |scope: &mut Option<Scope>| -> Result<u16> {
+            let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "loopback unavailable")?;
+            let port = listener
+                .local_addr()
+                .map_err(|_| "loopback unavailable")?
+                .port();
+            let mut cmd = Command::new(&staged.entrypoint);
+            cmd.env_clear()
+                .env("HOME", work)
+                .env("TMPDIR", work)
+                .current_dir(work)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0);
+            backend.configure(&mut cmd, &self.config, model, port, &key, &key_file)?;
+            if self.config.executable.as_os_str().is_empty()
+                && self.config.runtime_packages.is_empty()
+            {
+                staged.configure_loader(&mut cmd)?;
+            }
+            if import.is_some() {
+                cmd.env("OLLAMA_MODELS", &store);
+            }
+            staged.verify_executables(&self.directory)?;
+            drop(listener);
+            let child = cmd.spawn().map_err(|_| "runtime launch failed")?;
+            *scope = Some(Scope {
+                pgid: child.id() as i32,
+                child,
+                signalled: false,
+                reaped: false,
+            });
+            Ok(port)
+        };
+
+        let start = clock::Clock::now();
+        let budget = Duration::from_millis(self.config.startup_ms);
+        let mut startup = Startup {
+            directory: &self.directory,
+            start,
+            budget,
+            control,
+        };
+        startup.check()?;
+        let import_file = import
+            .map(|artifact| {
+                runtime_backend::open_model_file(&self.config.models_dir.join(&artifact.path))
+            })
+            .transpose()?;
+        startup.check()?;
+        let mut port = launch(scope)?;
+        let mut inventory_model = model.as_str();
+        let mut inventory_digest = digest.clone();
+        if let Some(file) = import_file {
+            let server = scope.as_mut().unwrap();
+            startup.probe(
+                server,
+                port,
+                "/api/version",
+                None,
+                self.config.response_bytes,
+            )?;
+            let remaining = budget.saturating_sub(start.elapsed());
+            let client = runtime_client(remaining)?;
+            let expected = digest.clone();
+            let pid = server.child.id();
+            let base = format!("http://127.0.0.1:{port}");
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let _ = tx.send(ollama_import::create(
+                    &client, &base, pid, port, file, &expected,
+                ));
+            });
+            startup.wait(Some(server), &rx)??;
+            if !server.stop(self.config.stop_ms, true) {
+                return Err("Ollama importer stop unconfirmed");
+            }
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let (store, digest) = (store.clone(), digest.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(ollama_import::verify(&store, &digest));
+            });
+            inventory_digest = startup.wait(None, &rx)??;
+            inventory_model = ollama_import::ALIAS;
+            startup.check()?;
+            port = launch(scope)?;
+        }
+        let server = scope.as_ref().unwrap();
+        if backend == runtime_backend::Backend::LlamaCpp {
+            let health =
+                startup.probe(server, port, "/health", auth, self.config.response_bytes)?;
+            if health["status"] != "ok" {
+                return Err("unexpected runtime health response");
+            }
+        }
+        let tags = startup.probe(
+            server,
+            port,
+            backend.inventory_route(),
+            auth,
+            self.config.response_bytes,
+        )?;
+        if !backend.inventory_matches(&self.config, &tags, inventory_model, &inventory_digest) {
             return Err("runtime model identity mismatch");
         }
-        if !socket_owner::owned(scope.as_ref().unwrap().child.id(), port) {
+        if !socket_owner::owned(server.child.id(), port) {
             return Err("runtime socket ownership lost");
         }
+        let base = format!("http://127.0.0.1:{port}");
         let url = format!("{base}{}", self.config.backend.generation_route());
-        let body = self.config.backend.request(&self.config, job)?;
+        let manifest_reference;
+        let runtime_model = if import.is_some() {
+            // Ollama resolves this request directly to the verified manifest blob.
+            manifest_reference = inventory_digest.replacen(':', "-", 1);
+            &manifest_reference
+        } else {
+            backend.alias(model)
+        };
+        let body = backend.request(&self.config, job, runtime_model)?;
         let auth = self.config.backend.authenticated().then_some(key);
         let timeout = self.config.execution_ms;
         let bound = self.config.response_bytes;
@@ -491,13 +635,7 @@ impl Executor {
         let began = clock::Clock::now();
         let worker = std::thread::spawn(move || {
             let result = (|| {
-                let c = Client::builder()
-                    .retry(reqwest::retry::never())
-                    .no_proxy()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(Duration::from_millis(timeout))
-                    .build()
-                    .map_err(|_| "HTTP client failed")?;
+                let c = runtime_client(Duration::from_millis(timeout))?;
                 decode(
                     {
                         let request = c.post(url).json(&body);
@@ -545,7 +683,32 @@ impl Executor {
                 e
             }
         })?;
-        let r = self.config.backend.result(job, &v)?;
+        self.directory.check()?;
+        check(control)?;
+        if began.elapsed() >= Duration::from_millis(timeout) {
+            return Err("generation deadline");
+        }
+        let r = backend.result(job, runtime_model, &v)?;
+        if import.is_some() {
+            if !scope.as_mut().unwrap().stop(self.config.stop_ms, true) {
+                return Err("Ollama server stop unconfirmed");
+            }
+            let mut verification = Startup {
+                directory: &self.directory,
+                start: clock::Clock::now(),
+                budget,
+                control,
+            };
+            verification.check()?;
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let digest = digest.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(ollama_import::verify(&store, &digest));
+            });
+            if verification.wait(None, &rx)?? != inventory_digest {
+                return Err("Ollama manifest identity changed during generation");
+            }
+        }
         receipt(
             job,
             State::Succeeded,
@@ -562,6 +725,84 @@ fn check<F: FnMut() -> Control>(f: &mut F) -> Result<()> {
         Control::Continue => Ok(()),
         Control::Cancel => Err("cancelled"),
         Control::Fence => Err("controller contact deadline"),
+    }
+}
+
+fn runtime_client(timeout: Duration) -> Result<Client> {
+    Client::builder()
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|_| "HTTP client failed")
+}
+
+struct Startup<'a, F> {
+    directory: &'a private::Directory,
+    start: clock::Clock,
+    budget: Duration,
+    control: &'a mut F,
+}
+
+impl<F: FnMut() -> Control> Startup<'_, F> {
+    fn check(&mut self) -> Result<()> {
+        self.directory.check()?;
+        check(self.control)?;
+        if self.start.elapsed() >= self.budget {
+            return Err("startup deadline");
+        }
+        Ok(())
+    }
+
+    fn wait<T>(
+        &mut self,
+        server: Option<&Scope>,
+        response: &std::sync::mpsc::Receiver<T>,
+    ) -> Result<T> {
+        loop {
+            self.check()?;
+            if let Some(server) = server {
+                server.check_running()?;
+            }
+            match response.recv_timeout(Duration::from_millis(20)) {
+                Ok(value) => {
+                    self.check()?;
+                    return Ok(value);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("runtime startup request lost");
+                }
+            }
+        }
+    }
+
+    fn probe(
+        &mut self,
+        server: &Scope,
+        port: u16,
+        route: &str,
+        auth: Option<&str>,
+        bound: u64,
+    ) -> Result<serde_json::Value> {
+        let client = runtime_client(Duration::from_millis(200))?;
+        let url = format!("http://127.0.0.1:{port}{route}");
+        loop {
+            self.check()?;
+            server.check_running()?;
+            if socket_owner::owned(server.child.id(), port) {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let (client, url, auth) = (client.clone(), url.clone(), auth.map(str::to_owned));
+                std::thread::spawn(move || {
+                    let _ = tx.send(get_json(&client, &url, bound, auth.as_deref()));
+                });
+                if let Ok(value) = self.wait(Some(server), &rx)? {
+                    return Ok(value);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 fn decode(response: reqwest::blocking::Response, bound: u64) -> Result<serde_json::Value> {
@@ -606,6 +847,13 @@ struct Scope {
     reaped: bool,
 }
 impl Scope {
+    fn check_running(&self) -> Result<()> {
+        if self.exited()? {
+            return Err("runtime exited before readiness");
+        }
+        Ok(())
+    }
+
     fn exited(&self) -> Result<bool> {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         if unsafe {
@@ -629,7 +877,7 @@ impl Scope {
             self.signalled = true;
         }
     }
-    fn stop(&mut self, budget: u64) -> bool {
+    fn stop(&mut self, budget: u64, drain_helpers: bool) -> bool {
         if self.pgid == 0 {
             return true;
         }
@@ -637,10 +885,18 @@ impl Scope {
         // Keep the leader waitable through both signals. A short graceful phase
         // lets supported runtimes reap descendants before the final group fence.
         if !self.signalled && !self.reaped {
-            unsafe {
-                libc::kill(-self.pgid, libc::SIGTERM);
+            if drain_helpers {
+                // Ollama shuts down and reaps its own helpers on SIGTERM.
+                // Keep them alive for that handshake before fencing the group.
+                unsafe { libc::kill(self.pgid, libc::SIGTERM) };
+                let grace = Duration::from_millis((budget / 2).min(2000));
+                while start.elapsed() < grace && self.exited() == Ok(false) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            } else {
+                unsafe { libc::kill(-self.pgid, libc::SIGTERM) };
+                std::thread::sleep(Duration::from_millis((budget / 4).min(50)));
             }
-            std::thread::sleep(Duration::from_millis((budget / 4).min(50)));
         }
         self.signal();
         loop {
@@ -668,7 +924,9 @@ impl Drop for Scope {
     }
 }
 pub mod controller;
+mod runtime_archive;
 pub mod runtime_backend;
+pub mod runtime_management;
 pub mod runtime_package;
 pub mod runtime_policy;
 mod socket_owner;
@@ -677,6 +935,7 @@ mod clock;
 
 mod json;
 
+mod ollama_import;
 mod private;
 
 fn validate_models(path: &Path) -> Result<()> {
@@ -700,4 +959,44 @@ fn validate_models(path: &Path) -> Result<()> {
         Ok(())
     }
     visit(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn verification_result_cannot_pass_a_control_change_during_receive() {
+        let root = tempfile::tempdir().unwrap();
+        let directory =
+            private::Directory::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+
+        for (stop, expected) in [
+            (Control::Cancel, "cancelled"),
+            (Control::Fence, "controller contact deadline"),
+        ] {
+            let (sender, receiver) = sync_channel(0);
+            let mut sender = Some(sender);
+            let mut worker = None;
+            let mut control = || {
+                if let Some(sender) = sender.take() {
+                    // Release the result only after the pre-receive control check starts.
+                    worker = Some(std::thread::spawn(move || sender.send("verified manifest")));
+                    Control::Continue
+                } else {
+                    stop
+                }
+            };
+            let mut verification = Startup {
+                directory: &directory,
+                start: clock::Clock::now(),
+                budget: Duration::from_secs(5),
+                control: &mut control,
+            };
+            assert_eq!(verification.wait(None, &receiver), Err(expected));
+            drop(receiver);
+            worker.unwrap().join().unwrap().unwrap();
+        }
+    }
 }

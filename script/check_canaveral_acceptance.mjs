@@ -12,7 +12,6 @@ const scopes = {
   'android': { platform: null, tools: ['node', 'adb'], files: ['config', 'bundle'] },
   'inference': { platform: null, tools: ['node', 'ollama'], files: ['config', 'bundle'] },
   'libvirt': { platform: 'linux', tools: ['node', 'virsh'], files: ['config', 'bundle'] },
-  'kubevirt': { platform: null, tools: ['node', 'kubectl'], files: ['config', 'bundle'] },
 };
 
 function regular(path, executable = false) {
@@ -60,7 +59,7 @@ export function main(argv) {
     console.log(JSON.stringify(result));
     return result.status === 'prerequisites-present' ? 0 : 2;
   } catch {
-    console.error('Acceptance preflight requires --scope linux-guest|macos-helper|windows-helper|android|inference|libvirt|kubevirt and explicit prerequisite file paths. Paths and file contents are withheld. --authorized records existing operator authorization; it does not run a test.');
+    console.error('Acceptance preflight requires --scope linux-guest|macos-helper|windows-helper|android|inference|libvirt and explicit prerequisite file paths. Paths and file contents are withheld. --authorized records existing operator authorization; it does not run a test.');
     return 1;
   }
 }

@@ -40,9 +40,7 @@ export function ImageImport({
   onRefresh: Refresh;
   preset?: RegistryEntry | null;
 }) {
-  const candidates = hosts.filter(
-    (h) => h.kind !== "orchestrator" && h.provider !== "kubevirt" && h.online,
-  );
+  const candidates = hosts.filter((h) => h.online);
   const [host, setHost] = useState(candidates[0]?.id || ""),
     [name, setName] = useState(preset?.name || ""),
     [os, setOs] = useState(preset?.os || "linux"),

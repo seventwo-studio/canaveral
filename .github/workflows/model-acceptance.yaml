@@ -1,0 +1,98 @@
+name: Native model acceptance
+
+on:
+  push:
+    branches: ['feat/runtime-acceptance*']
+  pull_request:
+    paths:
+      - '.github/workflows/model-acceptance.yaml'
+      - 'crates/model-execution/**'
+      - 'crates/execution-core/**'
+      - 'crates/runner-client/**'
+      - 'fixtures/model-execution/**'
+      - 'coordination/src/host-runtimes/**'
+      - 'coordination/src/control/**'
+      - 'coordination/src/canaverald.ts'
+      - 'coordination/src/cli.ts'
+      - 'coordination/src/http.ts'
+      - 'coordination/src/requests.ts'
+      - 'coordination/package-lock.json'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  schedule:
+    - cron: '18 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: ${{ matrix.image }} / ${{ matrix.backend }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"image":"ubuntu-24.04","backend":"llama.cpp","cold":false}]' || '[{"image":"ubuntu-24.04","backend":"llama.cpp","cold":true},{"image":"ubuntu-24.04","backend":"ollama","cold":false},{"image":"ubuntu-24.04-arm","backend":"llama.cpp","cold":false},{"image":"ubuntu-24.04-arm","backend":"ollama","cold":false},{"image":"macos-15","backend":"llama.cpp","cold":false},{"image":"macos-15","backend":"ollama","cold":false}]') }}
+    env:
+      MODEL_BACKEND: ${{ matrix.backend }}
+      MODEL_SMOKE: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: coordination/package-lock.json
+      - name: Record model and runner identity
+        id: pins
+        env:
+          MODEL_EVIDENCE: ${{ runner.temp }}/model-evidence.json
+        run: |
+          printf 'MODEL_CACHE=%s\nMODEL_EVIDENCE=%s\n' "$RUNNER_TEMP/verified-models" "$MODEL_EVIDENCE" >> "$GITHUB_ENV"
+          node fixtures/model-execution/real-engine.mjs --init-evidence
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !matrix.cold }}
+        with:
+          path: ${{ runner.temp }}/verified-models/${{ steps.pins.outputs.modelDigest }}
+          key: model-gguf-${{ steps.pins.outputs.modelDigest }}
+      - name: Build controller and host CLI
+        id: controller
+        run: npm --prefix coordination ci --ignore-scripts && npm --prefix coordination run build
+      - name: Build executor
+        id: executor
+        run: cargo build --locked --release -p canaveral-model-execution
+      - name: Exercise native management and public generation
+        id: acceptance
+        run: node fixtures/model-execution/public-api.mjs coordination/dist/src/main.js target/release/canaveral-model-execution --real-engine
+      - name: Record workflow outcomes
+        if: ${{ always() && steps.pins.outcome == 'success' }}
+        env:
+          CONTROLLER_OUTCOME: ${{ steps.controller.outcome }}
+          EXECUTOR_OUTCOME: ${{ steps.executor.outcome }}
+          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const file = process.env.MODEL_EVIDENCE;
+          const evidence = JSON.parse(readFileSync(file, 'utf8'));
+          evidence.workflow = {
+            controllerBuild: process.env.CONTROLLER_OUTCOME,
+            executorBuild: process.env.EXECUTOR_OUTCOME,
+            acceptance: process.env.ACCEPTANCE_OUTCOME,
+          };
+          writeFileSync(file, JSON.stringify(evidence, null, 2) + '\n');
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: model-acceptance-${{ matrix.image }}-${{ matrix.backend }}
+          path: ${{ runner.temp }}/model-evidence.json
+          if-no-files-found: error
