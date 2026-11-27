@@ -200,6 +200,11 @@ class Capture {
     };
     if (feed.init) for (const s of this.subscribers) s.begin(this.epoch, feed.init, feed.gop);
   }
+  followRecording(feed: Feed): void {
+    if (this.closing || this.ended || !this.source) return;
+    this.attach(feed);
+    this.poke();
+  }
   detach(feed?: Feed): void {
     if (!this.feed || feed && this.feed !== feed) return;
     this.feed.listener = undefined; this.feed.wanted = () => false; this.feed = undefined;
@@ -380,7 +385,8 @@ export class LiveCaptureHub {
       allowViewers: () => {
         if (!proven || ended || !recording || recording.feed) return;
         recording.feed = new Feed();
-        this.captures.get(machineId)?.poke();
+        // Bind existing viewers before the recording can emit its first fragment.
+        this.captures.get(machineId)?.followRecording(recording.feed);
       },
       // A stream the segmenter refuses ends the tee for the viewers, never the recording.
       push: data => { if (!ended) try { recording?.feed?.push(data); } catch { /* viewers simply receive no more of this stream */ } },
