@@ -114,6 +114,7 @@ test("the live wire contract: the relay and the packaged schema accept the same 
   for (const body of [{ id: "0b0b0b0b-0000-4000-8000-000000000001" }, { id: "0b0b0b0b-0000-4000-8000-000000000001", member: "primary", ttlSeconds: 9 }, { id: "0b0b0b0b-0000-4000-8000-000000000001", member: "primary", bitRate: 1 }]) assert.equal(schemaValid(api, api.components.schemas.CreateLiveView, body), false);
   const admission = api.paths["/v1/leases/{leaseId}/live-views"].post.description;
   assert.match(admission, /409 device_recording_active/);
+  assert.match(admission, /409 device_live_view_active/);
   assert.match(admission, /409 capture_cleanup_pending.*earlier live capture/);
   const conflict = { ...error, code: "device_live_view_active" };
   assert.equal(valid(defs.WorkerError, conflict), true);

@@ -11,6 +11,11 @@ export class CaptureJournals {
 
   constructor(private readonly state: string) {}
 
+  initialize(): void {
+    this.index('live');
+    this.index('video');
+  }
+
   path(kind: Kind, id: string): string {
     return join(this.state, 'work', kind, identifier(id) + '.json');
   }
@@ -24,8 +29,16 @@ export class CaptureJournals {
     if (existing) return existing;
     const index = { devices: new Map<string, Set<string>>(), unidentified: false };
     const directory = join(this.state, 'work', kind);
-    noLinks(directory);
-    for (const name of present(directory) ? readdirSync(directory) : []) {
+    this.indexes.set(kind, index);
+    let names: string[];
+    try {
+      noLinks(directory);
+      names = present(directory) ? readdirSync(directory) : [];
+    } catch {
+      index.unidentified = true;
+      return index;
+    }
+    for (const name of names) {
       if (!name.endsWith('.json')) continue;
       try {
         const id = identifier(name.slice(0, -5)), owner = this.ownerPath(kind, id);
@@ -40,7 +53,6 @@ export class CaptureJournals {
         index.unidentified = true;
       }
     }
-    this.indexes.set(kind, index);
     return index;
   }
 

@@ -2195,6 +2195,7 @@ export class HostRunner {
     try {
       // Load the lease checkpoint under the state lock before enrollment can publish a new identity.
       this.leaseGuard ??= new LeaseGuard(this.state, this.clock);
+      this.captureJournals.initialize();
       if (this.kubernetes) await this.connect();
       for (const image of this.config.templates as RecordValue[]) if (image.source && !image.catalogueImageId) {
         const runtimeConfig = Object.hasOwn(HOST_RUNTIMES, String(this.config.provider)) ? enabledRuntimes(this.config)[runtimeFor(this.config, image)] : undefined;

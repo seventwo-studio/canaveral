@@ -40,9 +40,11 @@ interface Options {
   stop?: "unprovable";
   /** How long a device takes to exit once its stop was requested; 400 ms unless given. */
   stopMs?: number;
+  beforeStart?: (stateDir: string) => void;
 }
 interface Fixture {
   url: string; admin: string; hostId: string; stats: Stats; runner: HostRunner; image: RecordValue; root: string;
+  restartRunner(): Promise<void>;
   api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any }>;
   account(username: string): Promise<{ session: string; id: string }>;
   device(owner: string): Promise<string>;
@@ -123,7 +125,9 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
   }
   const config: HostConfig = { url, stateDir: join(root, "runner"), enrollmentToken: enrollment, name: "remote-device-host", provider: os, storage: join(root, "devices"),
     videoEncoder: "/fixture/ffmpeg", templates: [image], capacity: { cpu: 8, memoryMiB: 8192, diskGiB: 32 }, pollIntervalSeconds: .25, concurrency: 4, ...options.config };
-  const runner = new HostRunner(config, { providerFactory: (settings, state) => new Device({ ...settings, transport: { run: async () => { throw new Error("Native SDK execution is forbidden in this fixture."); } } }, state) });
+  const makeRunner = () => new HostRunner(config, { providerFactory: (settings, state) => new Device({ ...settings, transport: { run: async () => { throw new Error("Native SDK execution is forbidden in this fixture."); } } }, state) });
+  options.beforeStart?.(config.stateDir);
+  let runner = makeRunner();
   await runner.start();
   t.after(async () => { await runner.close().catch(() => {}); await controller.close().catch(() => {}); rmSync(root, { recursive: true, force: true }); });
   const api = async (method: string, route: string, body?: unknown, token = admin) => {
@@ -132,7 +136,8 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
   };
   const password = randomBytes(24).toString("hex");
   const manager = (await api("POST", "/v1/auth/setup", { username: "admin", password })).body.token as string;
-  return { url, admin: manager, hostId: runner.identity!.id, stats, runner, image, api, root,
+  return { url, admin: manager, hostId: runner.identity!.id, stats, get runner() { return runner; }, image, api, root,
+    async restartRunner() { await runner.close(); runner = makeRunner(); await runner.start(); },
     async account(username) {
       const user = (await api("POST", "/v1/users", { id: randomUUID(), username }, manager)).body, invite = (await api("POST", `/v1/users/${user.id}/invite`, {}, manager)).body;
       return { session: (await api("POST", "/v1/auth/claim", { token: invite.token, password }, "")).body.token as string, id: user.id as string };
@@ -574,11 +579,11 @@ test("legacy Android live journals require a matching controller cleanup receipt
 });
 
 test("an unreadable journal for a removed device leaves other Android stop proofs and captures available", { timeout: 30000 }, async t => {
-  const f = await fixture(t, { stop: "unprovable" }), owner = await f.account("owner");
-  const machineId = await f.device(owner.session);
   const removed = { id: randomUUID(), machineId: randomUUID(), generation: randomUUID(), state: "finished", cleaned: true };
-  const journal = (id: string) => join(f.root, "runner", "work", "live", `${id}.json`);
-  saveRecord(journal(removed.id), removed);
+  const journalAt = (state: string, id: string) => join(state, "work", "live", `${id}.json`);
+  const f = await fixture(t, { stop: "unprovable", beforeStart: state => saveRecord(journalAt(state, removed.id), removed) });
+  const owner = await f.account("owner"), machineId = await f.device(owner.session);
+  const journal = (id: string) => journalAt(join(f.root, "runner"), id);
   const viewer = await f.watch(owner.session, machineId);
   const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
   await until(() => media(viewer.got).length > 0, "capture on the remaining device");
@@ -588,6 +593,8 @@ test("an unreadable journal for a removed device leaves other Android stop proof
   await until(async () => (await session(captureId)).hostCleaned === true, "the encoder receipt");
 
   writeFileSync(journal(removed.id), "unreadable");
+  // The new runner must scope even an unreadable journal using the durable ownership index.
+  await f.restartRunner();
   const proof = Promise.withResolvers<string>();
   const send = f.runner.transport.request.bind(f.runner.transport);
   t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
