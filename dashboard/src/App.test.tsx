@@ -26,7 +26,7 @@ const host = {
   name: "Arctic",
   online: true,
   enabled: true,
-  provider: "kubevirt",
+  provider: "libvirt",
   capacity: { cpu: 4, memoryMiB: 4096, diskGiB: 64 },
   reserved: { cpu: 2, memoryMiB: 1024, diskGiB: 8 },
 };
@@ -396,7 +396,6 @@ describe("dashboard contracts", () => {
     expect(calls.some((c) => c.path === "hosts")).toBe(false);
     expect(calls.some((c) => c.path === "templates")).toBe(true);
     expect(screen.queryByRole("link", { name: "Hosts" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Orchestrators" })).toBeNull();
     expect(
       screen.queryByRole("button", { name: /Capture Voyager/ }),
     ).toBeNull();

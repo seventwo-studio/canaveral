@@ -16,7 +16,6 @@ export interface CatalogueHost {
   name: string;
   provider: string;
   online: boolean;
-  kind?: string;
   platform?: string;
   runtimes?: string[];
   health?: { environment?: { arch?: string } };

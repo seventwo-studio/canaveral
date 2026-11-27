@@ -16,7 +16,7 @@ import type { SqliteStore } from "./sqlite.ts";
 import { recordLeaseRefusal } from "./observability.ts";
 
 /** Execution backends that can host a Linux guest. The guest OS is always Linux. */
-export const BACKENDS = ["kubevirt", "appleVirtualization"] as const;
+export const BACKENDS = ["appleVirtualization"] as const;
 export type Backend = typeof BACKENDS[number];
 const CAPABILITIES = ["command", "pty", "files", "screenshot", "displayStream", "input", "hierarchy"] as const;
 type Capability = typeof CAPABILITIES[number];
@@ -35,10 +35,10 @@ const MAX_ACTIVE_ASSIGNMENTS = 32;
 const keys = ["cpu", "memoryMiB", "diskGiB"] as const;
 
 interface WorkspaceRow { workspace_version: number | null; workspace: string | null; egress: string | null }
-interface ImageRow { workspace_version: number | null; id: string; revision: string; arch: string; backend: Backend; digest: string; resources: string; capabilities: string }
-interface ApprovalRow { workspace_version: number | null; controller: string; runner: string; generation: number; incarnation: string; domain: string; backend: Backend; images: string; revoked: number }
+interface ImageRow { workspace_version: number | null; id: string; revision: string; arch: string; backend: string; digest: string; resources: string; capabilities: string }
+interface ApprovalRow { workspace_version: number | null; controller: string; runner: string; generation: number; incarnation: string; domain: string; backend: string; images: string; revoked: number }
 interface LeaseRow extends WorkspaceRow {
-  id: string; application: string; request: string; image_id: string; image_revision: string; arch: string; backend: Backend; digest: string;
+  id: string; application: string; request: string; image_id: string; image_revision: string; arch: string; backend: string; digest: string;
   resources: string; capabilities: string; required: string; member: string; domain: string; reservation: string;
   failure_reason: string | null; state: string; runtime: string; cleanup: string; cleanup_id: string | null; revision: number;
   created: number; expires: number; max_expires: number; provision_deadline: number; credential: string | null;
@@ -80,7 +80,7 @@ function arch(value: unknown): "arm64" | "amd64" {
   return value;
 }
 function backend(value: unknown): Backend {
-  if (!BACKENDS.includes(value as Backend)) throw new ServiceError("Backend must be kubevirt or appleVirtualization.", 400);
+  if (!BACKENDS.includes(value as Backend)) throw new ServiceError("Backend must be appleVirtualization.", 400);
   return value as Backend;
 }
 function bool(value: unknown, what: string): boolean {
@@ -141,7 +141,7 @@ function canonical(r: Receipt): string {
     r.ready.command, r.ready.pty, r.ready.files, r.failure, r.executionStopped, r.storageRemoved, r.credentialsErased, r.cleanup, ...(r.workspaceRemoved === undefined ? [] : [r.workspaceRemoved, r.dataPlaneClosed]), ...(r.ready.preview ? [true] : [])]);
 }
 
-/** Headless Linux guest leases on explicitly approved kubevirt or Apple Virtualization runner
+/** Headless Linux guest leases on an explicitly approved Apple Virtualization runner
  * bindings. Admission, quota, placement, lifecycle, replay and runner reports each run in one
  * BEGIN IMMEDIATE transaction that re-verifies the caller and refreshes expiry first. VM resources
  * are reserved once, at admission, in the same ResourceDomains ledger model-job claims use, and
@@ -196,11 +196,12 @@ export class LinuxLeases {
   }
 
   /** Safe derived status for the administrator, retaining binding fencing. */
-  administrativeStatus(db: DatabaseSync, id: string): {runtimeState:string; ready:boolean} {
+  administrativeStatus(db: DatabaseSync, id: string): { runtimeState: string; ready: boolean; cleanupReason?: "recovery" } {
     const lease = this.row(db, identifier(id));
     if (!lease) throw new ServiceError("Unknown lease.",404);
     const view = this.view(db,lease) as {runtimeState:string;members:{ready:boolean}[]};
-    return {runtimeState:view.runtimeState,ready:view.members[0]!.ready};
+    return { runtimeState: view.runtimeState, ready: view.members[0]!.ready,
+      ...(lease.backend !== "appleVirtualization" && lease.cleanup !== "complete" ? { cleanupReason: "recovery" } : {}) };
   }
 
   /** Refresh lifecycle without accepting or minting a consumer credential. */
@@ -271,7 +272,7 @@ export class LinuxLeases {
       }
       if (!this.applications.active(db, application)) throw new ServiceError("Grants require an existing unrevoked application.", 404);
       const image = this.imageRow(db, id, revision, a);
-      if (!image || image.digest !== digest) throw new ServiceError("Grants require the exact catalogued image digest.", 404);
+      if (!image || image.backend !== "appleVirtualization" || image.digest !== digest) throw new ServiceError("Grants require the exact catalogued image digest.", 404);
       if (existing && (existing.revoked || existing.digest !== digest)) throw new ServiceError("Grant already exists with a different definition or was revoked.", 409);
       if (!existing) db.prepare("INSERT INTO linux_lease_grants VALUES (?,?,?,?,?,0,?)").run(application, id, revision, a, digest, this.now());
       return { applicationId: application, imageId: id, revision, arch: a, digest, revoked: false };
@@ -330,11 +331,11 @@ export class LinuxLeases {
     return this.transaction(db => {
       const application = this.applications.verify(db, token);
       const rows = db.prepare(`SELECT i.* FROM linux_lease_images i JOIN linux_lease_grants g ON g.image_id=i.id AND g.image_revision=i.revision AND g.arch=i.arch AND g.digest=i.digest
-        WHERE g.application=? AND g.revoked=0 ORDER BY i.id,i.revision,i.arch`).all(application.id) as unknown as ImageRow[];
+        WHERE g.application=? AND g.revoked=0 AND i.backend='appleVirtualization' ORDER BY i.id,i.revision,i.arch`).all(application.id) as unknown as ImageRow[];
       return { templates: rows.map(row => {
         const amount = JSON.parse(row.resources) as Resources;
         return { id: row.id, revision: row.revision, os: "linux", arch: row.arch, mode: "headless", minimum: amount, defaults: amount, memoryStepMiB: 1,
-          digest: row.digest, workspaceIOVersion: row.workspace_version, available: this.placements(db, row).length > 0, capabilities: this.capabilities(row.capabilities), runtime: row.backend === "kubevirt" ? "kubevirt" : "apple" };
+          digest: row.digest, workspaceIOVersion: row.workspace_version, available: this.placements(db, row).length > 0, capabilities: this.capabilities(row.capabilities), runtime: "apple" };
       }), limits: application.limits };
     });
   }
@@ -366,7 +367,7 @@ export class LinuxLeases {
     let parsed: ReturnType<LinuxLeases["validateAcquisition"]>;
     try { parsed = this.validateAcquisition(value); } catch { return undefined; }
     const image = this.imageRow(db, parsed.imageId, parsed.revision, parsed.a);
-    if (!image) return undefined;
+    if (!image || image.backend !== "appleVirtualization") return undefined;
     const minimum = JSON.parse(image.resources) as Resources, need = { ...minimum, ...parsed.overrides } as Resources;
     if (keys.some(key => need[key] < minimum[key])) return undefined;
     const domains = this.placements(db, image);
@@ -392,7 +393,7 @@ export class LinuxLeases {
       }
       if (legacyTable(db, "leases") && db.prepare("SELECT 1 FROM leases WHERE id=?").get(id)) throw new ServiceError("Lease ID is already in use and cannot be taken over.", 409);
       const grant = db.prepare("SELECT digest FROM linux_lease_grants WHERE application=? AND image_id=? AND image_revision=? AND arch=? AND revoked=0").get(application.id, imageId, revision, a) as { digest: string } | undefined;
-      if (!image || !minimum || !amount || !grant || grant.digest !== image.digest) throw new ServiceError("Image is not permitted for this application.", 403);
+      if (!image || image.backend !== "appleVirtualization" || !minimum || !amount || !grant || grant.digest !== image.digest) throw new ServiceError("Image is not permitted for this application.", 403);
       const offered = JSON.parse(image.capabilities) as string[];
       if (required.some(c => !offered.includes(c))) unsupported();
       for (const key of keys) if (amount[key] < minimum[key]) throw new ServiceError(`Requested ${key} is below the image minimum.`, 400);
@@ -502,7 +503,7 @@ export class LinuxLeases {
     const input = exact(value, ["binding"], "assignment listing");
     return this.transaction((db, now) => {
       const b = runners.verify(db, token, input.binding);
-      const rows = db.prepare("SELECT * FROM linux_lease_assignments WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND closed=0 ORDER BY created,id")
+      const rows = db.prepare("SELECT a.* FROM linux_lease_assignments a JOIN linux_leases l ON l.id=a.lease WHERE a.controller=? AND a.runner=? AND a.generation=? AND a.incarnation=? AND a.closed=0 AND l.backend='appleVirtualization' ORDER BY a.created,a.id")
         .all(b.controllerId, b.runnerId, b.generation, b.incarnationId) as unknown as AssignmentRow[];
       return { assignments: rows.map(row => this.assignmentView(db, row, now)) };
     });
@@ -833,7 +834,8 @@ export class LinuxLeases {
   /** Expiry wins at now >= expiresAt; revoked applications release; provisioning deadlines fail. */
   private refresh(db: DatabaseSync, now: number): void {
     for (const lease of db.prepare("SELECT * FROM linux_leases WHERE state IN ('provisioning','ready')").all() as unknown as LeaseRow[]) {
-      if (!this.applications.active(db, lease.application)) this.end(db, lease, "released", now);
+      if (lease.backend !== "appleVirtualization") this.end(db, lease, "failed", now, "unsupported_backend");
+      else if (!this.applications.active(db, lease.application)) this.end(db, lease, "released", now);
       else if (now >= lease.expires) this.end(db, lease, "expired", now);
       else if (lease.state === "provisioning" && now >= lease.provision_deadline) this.end(db, lease, "failed", now);
     }
@@ -872,7 +874,7 @@ export class LinuxLeases {
   }
 
   private approval(db: DatabaseSync, b: Binding): ApprovalRow | undefined {
-    return db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND revoked=0")
+    return db.prepare("SELECT * FROM linux_lease_runner_approvals WHERE controller=? AND runner=? AND generation=? AND incarnation=? AND revoked=0 AND backend='appleVirtualization'")
       .get(b.controllerId, b.runnerId, b.generation, b.incarnationId) as unknown as ApprovalRow | undefined;
   }
 
@@ -915,7 +917,7 @@ export class LinuxLeases {
   private view(db: DatabaseSync, lease: LeaseRow): unknown {
     const assignment = db.prepare("SELECT * FROM linux_lease_assignments WHERE lease=?").get(lease.id) as unknown as AssignmentRow | undefined;
     // A revoked or superseded binding cannot report: its runtime is unknown and its reservation stays held.
-    const stale = !!assignment && !assignment.closed && !this.runners?.current(db, bindingOf(assignment));
+    const stale = !!assignment && !assignment.closed && (lease.backend !== "appleVirtualization" || !this.runners?.current(db, bindingOf(assignment)));
     const runtime = stale ? "unknown" : lease.runtime;
     const capabilities = this.capabilities(lease.capabilities);
     // Reports use the fixed canonical tuple above; readiness occupies slots 6–8.
@@ -941,6 +943,7 @@ export class LinuxLeases {
   }
   private assignmentView(db: DatabaseSync, row: AssignmentRow, now: number): unknown {
     const lease = this.row(db, row.lease)!;
+    if (lease.backend !== "appleVirtualization") throw new ServiceError("Assignment backend is unsupported. Operator recovery is required.", 409);
     return { id: row.id, claimId: row.claim, leaseId: lease.id, memberId: lease.member, domainId: lease.domain, sequence: row.sequence, closed: Boolean(row.closed),
       image: { id: lease.image_id, revision: lease.image_revision, arch: lease.arch, backend: lease.backend, digest: lease.digest },
       ...(row.workspace_version === 1 ? { workspaceIOVersion: 1, workspace: JSON.parse(row.workspace!), egress: JSON.parse(row.egress!) } : {}),

@@ -3446,8 +3446,7 @@
               "libvirt",
               "hyperv",
               "android",
-              "ios",
-              "kubevirt"
+              "ios"
             ]
           },
           "guestAccess": {

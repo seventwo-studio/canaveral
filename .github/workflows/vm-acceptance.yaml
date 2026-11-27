@@ -1,0 +1,103 @@
+name: Libvirt VM lease acceptance
+
+on:
+  push:
+    branches: ['feat/libvirt-*']
+  pull_request:
+    paths:
+      - '.github/workflows/vm-acceptance.yaml'
+      - 'crates/libvirt-native/**'
+      - 'coordination/src/providers/libvirt*.ts'
+      - 'coordination/src/host.ts'
+      - 'coordination/src/native-clock.ts'
+      - 'coordination/src/runtime-process.ts'
+      - 'coordination/src/control/lifecycle.ts'
+      - 'coordination/test/control/libvirt*.ts'
+      - 'fixtures/libvirt/**'
+      - 'deploy/systemd/canaverald.service.d/libvirt-leases.conf'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Check the lease helper
+        run: |
+          cargo fmt --check -p canaveral-libvirt-native
+          cargo clippy --locked -p canaveral-libvirt-native --all-targets -- -D warnings
+          cargo test --locked -p canaveral-libvirt-native
+      - name: Run the portable libvirt lease tests
+        working-directory: coordination
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm run build
+          node --test dist/test/control/{libvirt,libvirt-leases,host-runner,kubernetes-host,native-clock,lifecycle}.test.js dist/test/error-catalogue.test.js
+
+  native:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Install host libvirt, QEMU and KVM access
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libvirt-daemon-system libvirt-daemon-driver-qemu \
+            libvirt-daemon-config-network libvirt-clients qemu-system-x86 qemu-utils dnsmasq-base
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0660", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-canaveral-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo systemctl start libvirtd.service
+          ls -l /dev/kvm
+          uname -r
+      - name: Check and build the lease helper
+        run: |
+          cargo fmt --check -p canaveral-libvirt-native
+          cargo clippy --locked -p canaveral-libvirt-native --all-targets -- -D warnings
+          cargo test --locked -p canaveral-libvirt-native
+          cargo build --locked --release -p canaveral-libvirt-native
+          sha256sum target/release/canaveral-libvirt-native
+      - name: Build coordination and run the portable lease tests
+        working-directory: coordination
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm run build
+          node --test dist/test/control/{libvirt,libvirt-leases,host-runner,kubernetes-host,native-clock,lifecycle}.test.js dist/test/error-catalogue.test.js
+      - name: Run the native lease acceptance
+        run: node fixtures/libvirt/acceptance.mjs "$GITHUB_WORKSPACE/target/release/canaveral-libvirt-native" "$RUNNER_TEMP/vm-evidence.json"
+      - name: Collect libvirt diagnostics
+        if: failure()
+        run: |
+          sudo virsh --connect qemu:///system list --all || true
+          sudo journalctl -u libvirtd --no-pager -n 100 || true
+          sudo sh -c 'tail -n 30 /var/log/libvirt/qemu/*.log' || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: vm-acceptance-evidence
+          path: ${{ runner.temp }}/vm-evidence.json

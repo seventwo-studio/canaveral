@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkHost, HostRunner, hostOffer, hostTransport, startHost } from "../../src/host.ts";
@@ -15,7 +16,6 @@ import { ServiceError } from "../../src/errors.ts";
 import { AndroidProvider } from "../../src/providers/android.ts";
 import { IosProvider } from "../../src/providers/ios.ts";
 import { digest } from "../../src/providers/mobile.ts";
-import { beginCreation, creationAnnotations, KubevirtProvider, manifest, rememberCreation } from "../../src/providers/kubevirt.ts";
 const token = "a".repeat(43);
 function setup(t: { after(fn: () => void | Promise<void>): void }): { config: HostConfig; image: RecordValue; clock: ExecutionClock & { mono: number; wallTime: number } } {
   const state = realpathSync(mkdtempSync(join(tmpdir(), "canaveral-host-runner-"))); t.after(() => rmSync(state, { recursive: true, force: true }));
@@ -224,53 +224,55 @@ test("maintenance inventories stopped backing storage after runner restart and r
   assert.equal(proof.idle, false); assert.equal(reconciles, 0);
 });
 
-test("a runner journal does not prove KubeVirt backing storage", async t => {
-  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
-  const m: RecordValue = { ...machine(image), desired: "stopped", observed: "stopped" };
-  saveRecord(join(config.stateDir, "machines", String(m.id), "assignment.json"), { fingerprint: assignmentFingerprint(m) });
-  const runner = new HostRunner({ ...config, provider: "kubevirt" }, { clock, transport: fixture.transport,
-    providerFactory: () => ({ kind: "kubevirt", check: async () => ({}), reconcile: async () => assert.fail("Inspection must not reconcile") }) });
+test("maintenance and update idle verify assignment bookkeeping before excluding it", async t => {
+  const { config, clock } = setup(t), fixture = maintenanceReplies();
+  const runner = new HostRunner(config, { clock, transport: fixture.transport, providerFactory });
   t.after(() => runner.close());
+  const root = join(config.stateDir, "machines"), locks = join(root, ".assignment-locks"), cleanups = join(root, ".lease-cleanup");
+  const id = randomUUID(), receipt = join(cleanups, `${id}.json`);
+  const proof = { id: randomUUID(), machineId: id, leaseId: randomUUID(), attempt: 1, phase: "complete", fingerprint: "f".repeat(64) };
+  const lockPath = join(locks, `${id}.sqlite`);
+  new StateLock(lockPath).close();
+  new StateLock(`${receipt}.sqlite`).close();
+  saveRecord(receipt, proof);
   await runner.initializeProviders(); await runner.connect();
-  const proof = await inventoryProof(runner, fixture, [m]);
-  assert.deepEqual(proof.inventory, { complete: true, unexpected: [], assignments: [{ id: m.id, storage: "unsupported", stopProof: "unsupported" }] });
-});
 
-test("KubeVirt maintenance probes the assigned PVC read-only and distinguishes absence from failure", async t => {
-  const { config, image, clock } = setup(t), fixture = maintenanceReplies();
-  const m = { ...machine(image), desired: "stopped", observed: "stopped" } as RecordValue;
-  const folder = join(config.stateDir, "machines", String(m.id)), namespace = "guests", name = `cvm-${m.id}`;
-  saveRecord(join(folder, "assignment.json"), { fingerprint: assignmentFingerprint(m) });
-  const creation = beginCreation(m, namespace, folder), vm = manifest(m, { ...image, pvc: "base" }, namespace);
-  Object.assign(vm.metadata as RecordValue, { uid: randomUUID(), annotations: creationAnnotations(creation) });
-  rememberCreation(m, namespace, folder, vm);
-  const provider = new KubevirtProvider({ namespace }, config.stateDir);
-  let observed = "present";
-  const commands: string[][] = [];
-  provider.kubectl = async (args, options) => {
-    commands.push(args);
-    assert.equal(options?.timeoutMs, 5000);
-    if (args[1] === "virtualmachine") return JSON.stringify(vm);
-    if (observed === "absent") return ""; // kubectl --ignore-not-found on a named object
-    if (observed === "unknown") throw new Error("Forbidden");
-    return JSON.stringify({ apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: { namespace, name, uid: randomUUID() }, status: { phase: "Bound" } });
+  const inventory = async (unexpected: string[]) => {
+    fixture.set({ machines: [], maintenance: fixture.draining() }); await runner.poll();
+    const report = await inventoryProof(runner, fixture, []);
+    assert.deepEqual(report.inventory, { complete: true, assignments: [], unexpected });
+    const idle = unexpected.length === 0;
+    assert.equal(report.idle, idle);
+    assert.deepEqual(await runner.updateIdle(true), { idle, workloadsStopped: idle });
   };
-  provider.reconcile = async () => assert.fail("Inspection must not reconcile");
-  const runner = new HostRunner({ ...config, provider: "kubevirt" }, { clock, transport: fixture.transport, providerFactory: () => provider });
-  t.after(() => runner.close());
-  await runner.initializeProviders(); await runner.connect();
-  for (observed of ["present", "absent", "unknown"]) {
-    commands.length = 0;
-    const proof = await inventoryProof(runner, fixture, [m]);
-    assert.deepEqual((proof.inventory as RecordValue).assignments, [{ id: m.id, storage: observed, stopProof: "unsupported" }]);
-    assert.ok(commands.some(args => args.join(" ") === `get pvc ${name} --ignore-not-found -o json`));
-    assert.ok(commands.every(args => args[0] === "get" && args[2] === name));
+
+  await inventory([]);
+  assert.deepEqual(readRecord(receipt), proof, "inspection leaves the cleanup receipt intact");
+
+  for (const phase of ["planned", "unstarted", "preboot", "storageRemoved", "erasing", "removing"]) {
+    saveRecord(receipt, { ...proof, phase });
+    await inventory([".lease-cleanup"]);
   }
-  observed = "present";
-  Object.assign(vm.metadata as RecordValue, { uid: randomUUID() });
-  fixture.set({ machines: [m], maintenance: fixture.draining() }); await runner.poll();
-  const foreign = await inventoryProof(runner, fixture, [m]);
-  assert.deepEqual((foreign.inventory as RecordValue).assignments, [{ id: m.id, storage: "unknown", stopProof: "unsupported" }]);
+  saveRecord(receipt, proof);
+  await inventory([]);
+
+  chmodSync(locks, 0o755);
+  saveRecord(receipt, { ...proof, machineId: randomUUID() });
+  await inventory([".assignment-locks", ".lease-cleanup"]);
+
+  chmodSync(locks, 0o700);
+  rmSync(lockPath);
+  const unrelated = new DatabaseSync(lockPath);
+  try { unrelated.exec("CREATE TABLE foreign_data (id INTEGER PRIMARY KEY)"); } finally { unrelated.close(); }
+  await inventory([".assignment-locks", ".lease-cleanup"]);
+
+  rmSync(locks, { recursive: true });
+  rmSync(cleanups, { recursive: true });
+  const foreign = join(config.stateDir, "foreign");
+  mkdirSync(foreign, { mode: 0o700 });
+  symlinkSync(foreign, locks);
+  writeFileSync(cleanups, "foreign entry", { mode: 0o600 });
+  await inventory([".assignment-locks", ".lease-cleanup"]);
 });
 
 test("maintenance reports unexplained removal quarantines in Apple and libvirt storage", async t => {
@@ -572,4 +574,101 @@ test("owner display sessions attach once, only for unleased desktop assignments"
   assert.equal([...(runner as unknown as { active: Map<string, unknown> }).active.keys()].some(key => key.startsWith("display:")), false);
   sessions = []; await runner.poll(); await runner.step();
   assert.equal(attempts.size, 0, "attempts are forgotten once the controller drops the session");
+});
+
+test("a finished recording whose receipt the runner repeats does not hold back the device's live capture", async t => {
+  const { config, image, clock } = setup(t);
+  const m = machine(image), finished = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "ready" }, queued = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "pending" };
+  // The controller's list trails the recording that just ended here: it is still `ready`.
+  let videoSessions: RecordValue[] = [finished], receipts = 0, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  const transport: HostTransport = { request: async (_method, path) => {
+    if (path.endsWith("heartbeat")) return { machines: [m], videoSessions };
+    // Hold the repeated receipt, so its `video:` work stays active.
+    if (path.endsWith(`/video-sessions/${finished.id}/finish`)) { receipts++; await held; }
+    return {};
+  } };
+  const runner = new HostRunner(config, { clock, transport, providerFactory });
+  t.after(() => runner.close().catch(() => {}));
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  saveRecord(join(config.stateDir, "work", "video", `${finished.id}.json`), { generation: finished.generation, machineId: m.id, state: "finished", cleaned: true });
+  const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean; active: Map<string, unknown>; liveRecordings: Map<string, unknown> };
+  internals.stepVideo(); await drain();
+  assert.equal(receipts, 1); assert.ok(internals.active.has(`video:${finished.id}`), "the receipt repeat is in flight");
+  assert.equal(internals.recordingPending(String(m.id)), false, "a recording that ended here does not stop the device's live epoch");
+  // A recording the runner has not started yet still keeps live capture off the device.
+  videoSessions = [finished, queued]; await runner.poll(); internals.liveRecordings.clear();
+  assert.equal(internals.recordingPending(String(m.id)), true);
+});
+
+test("an older controller receives live cleanup without fence attribution, including on retry", async t => {
+  const { config, image, clock } = setup(t);
+  const m = machine(image), capture = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "disconnected" };
+  const stop = { cause: "fence", leaseId: randomUUID(), leaseRevision: 1 }, reports: RecordValue[] = [];
+  const transport: HostTransport = { request: async (_method, route, body) => {
+    if (route.endsWith("heartbeat")) return { machines: [m], liveCaptures: [capture] };
+    if (route.endsWith(`/video-sessions/${capture.id}/finish`)) {
+      reports.push(body);
+      if (body.stop) throw new ServiceError("Mobile video session rejected.", 400);
+      if (reports.length === 2) throw new ServiceError("Lost response.", 503, { outcome: "unknown" });
+    }
+    return {};
+  } };
+  const runner = new HostRunner(config, { clock, transport, providerFactory });
+  t.after(() => runner.close());
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  const path = join(config.stateDir, "work", "live", `${capture.id}.json`);
+  saveRecord(path, { generation: capture.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true, stop });
+  const internals = runner as unknown as { stepLive(): void; active: Map<string, { promise: Promise<void> }> };
+  const repeat = () => {
+    internals.stepLive();
+    return internals.active.get(`live-capture:${capture.id}`)!.promise;
+  };
+  await repeat();
+  assert.equal(readRecord(path).legacyReceipt, true);
+  assert.deepEqual(readRecord(path).stop, stop);
+  await repeat();
+  const cleanup = { generation: capture.generation, hostCleaned: true };
+  assert.deepEqual(reports, [{ ...cleanup, stop }, cleanup, cleanup]);
+});
+
+test("a recording whose native stop is unproven keeps a late viewer's capture off the device while its receipt is held", async t => {
+  const { config, image, clock } = setup(t);
+  const m: RecordValue = { ...machine(image), lease: { id: randomUUID(), revision: 1, state: "ready", controllerNow: 1000, authorizationDeadline: 1060 } };
+  // The lease recording ended here with only its encoder's exit confirmed; the controller lists it until the lease's cleanup proves the guest recorder gone.
+  const unproven = { id: randomUUID(), machineId: m.id, generation: randomUUID(), state: "disconnected" };
+  let videoSessions: RecordValue[] = [unproven], receipts = 0, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  const transport: HostTransport = { request: async (_method, path) => {
+    if (path.endsWith("heartbeat")) return { machines: [m], videoSessions };
+    if (path.endsWith(`/video-sessions/${unproven.id}/finish`)) { receipts++; await held; }
+    return {};
+  } };
+  const runner = new HostRunner(config, { clock, transport, providerFactory });
+  t.after(() => runner.close().catch(() => {}));
+  await runner.initializeProviders(); await runner.connect(); await runner.poll();
+  saveRecord(join(config.stateDir, "work", "video", `${unproven.id}.json`), { generation: unproven.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true });
+  const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean; liveRecordings: Map<string, unknown>;
+    liveHub: import("../../src/live-capture.ts").LiveCaptureHub };
+  internals.stepVideo(); await drain();
+  assert.equal(receipts, 1, "the host-only receipt is in flight");
+  // A viewer attaches late, after the recording ended. Its capture consults the runner before every epoch.
+  let consulted = 0, opened = 0, enough!: () => void;
+  const consultedEnough = new Promise<void>(resolve => { enough = resolve; });
+  const source = { encoder: "/fixture/ffmpeg", guestSource: true, notRunning: () => true,
+    recordingQueued: () => { internals.liveRecordings.clear(); const pending = internals.recordingPending(String(m.id)); if (++consulted >= 3) enough(); return pending; },
+    openSource: async () => { opened++; enough(); throw new Error("no native capture in this fixture"); }, openEncoder: async () => { throw new Error("no encoder in this fixture"); } };
+  const handle = internals.liveHub.acquire({ id: randomUUID(), generation: randomUUID(), machineId: String(m.id) }, source);
+  const viewer = handle.subscribe(() => true);
+  await consultedEnough;
+  assert.equal(opened, 0, "no second recorder starts beside the unproven one");
+  // The receipt is acknowledged, but the controller still lists the session unproven: still held.
+  release(); await drain(); await runner.poll(); internals.liveRecordings.clear();
+  assert.equal(internals.recordingPending(String(m.id)), true);
+  // The lease's cleanup settles it and the controller stops listing it: the device is free again.
+  videoSessions = []; await runner.poll(); internals.liveRecordings.clear();
+  assert.equal(internals.recordingPending(String(m.id)), false);
+  viewer.close(); handle.release();
 });

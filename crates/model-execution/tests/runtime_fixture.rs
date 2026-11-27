@@ -59,7 +59,9 @@ fn main() {
             }
             bytes.extend_from_slice(&buffer[..n]);
         }
-        let value = if bytes.starts_with(b"GET /v1/models ") {
+        let value = if bytes.starts_with(b"GET /health ") {
+            json!({"status":"ok"})
+        } else if bytes.starts_with(b"GET /v1/models ") {
             json!({"data":[{"id":inventory_id}]})
         } else {
             assert!(bytes.starts_with(b"POST /v1/completions "));

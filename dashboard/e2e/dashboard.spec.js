@@ -99,7 +99,7 @@ const t = {
 const h = {
   id: "h1",
   name: "Arctic",
-  provider: "kubevirt",
+  provider: "libvirt",
   online: true,
   enabled: true,
   capacity: { cpu: 8, memoryMiB: 16384, diskGiB: 256 },
@@ -365,13 +365,13 @@ for (const width of [1440, 1133, 390, 320])
     await expect(create).toBeFocused();
     if (width < 768)
       await page.getByRole("button", { name: "Toggle Sidebar" }).click();
-    await page.getByRole("link", { name: /Orchestrators/ }).click();
+    await page.getByRole("link", { name: /Hosts/ }).click();
     if (width < 768)
       await expect(
         page.getByRole("dialog", { name: "Sidebar" }),
       ).not.toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Drain pool" }),
+      page.getByRole("button", { name: "Drain host" }),
     ).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("hosts.png"),

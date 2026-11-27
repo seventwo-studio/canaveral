@@ -16,7 +16,7 @@ with VMs or simulators, add the same `inference` section to its existing `apple`
 `libvirt`, physical `macos` or physical `linux` configuration. Physical hosts keep
 their existing enabled runtimes. Keep one agent identity and one set of host limits
 for that physical host. Enrolling the same physical capacity twice would bypass
-shared accounting. KubeVirt, Windows and Hyper-V do not support this embedded runner.
+shared accounting. Windows and Hyper-V do not support this embedded runner.
 
 The model's `resources` reserve CPU, RAM and temporary disk for each admitted job.
 Set a conservative RAM budget covering weights, the bounded 8,192-token context,

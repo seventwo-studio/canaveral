@@ -201,9 +201,6 @@ const views = {
   hosts: {
     filters: ["all", "online", "offline", "draining"],
   },
-  orchestrators: {
-    filters: ["all", "online", "offline", "draining"],
-  },
   screens: { filters: [] },
   builds: { filters: [] },
   previews: { filters: [] },
@@ -249,7 +246,7 @@ const currentActivitySubject = () => {
 const currentInfrastructure = () => {
   const parts = location.hash.slice(1).split("/");
   if (
-    !["hosts", "orchestrators"].includes(parts[0] ?? "") ||
+    parts[0] !== "hosts" ||
     ![2, 3].includes(parts.length) ||
     (parts.length === 3 && parts[2] !== "resources")
   )
@@ -317,9 +314,7 @@ export function App() {
     requestedView,
   );
   const [controlId, setControlId] = useState<string | null>(null);
-  const [connectionSetup, setConnectionSetup] = useState<
-      "host" | "orchestrator" | null
-    >(null),
+  const [connectionSetup, setConnectionSetup] = useState(false),
     [infrastructureId, setInfrastructureId] = useState(currentInfrastructure);
   const [activitySubject, setActivitySubject] = useState(
     currentActivitySubject,
@@ -337,7 +332,6 @@ export function App() {
     user?.role !== "admin" &&
     [
       "hosts",
-      "orchestrators",
       "users",
       "admin",
       "api-access",
@@ -350,14 +344,8 @@ export function App() {
     ].includes(requestedView)
       ? "machines"
       : requestedView;
-  const isInfrastructure = view === "hosts" || view === "orchestrators";
-  const infrastructureKind = (h: Host) =>
-    h.kind || (h.provider === "kubevirt" ? "orchestrator" : "host");
-  const infrastructureHosts = inventory.hosts.filter(
-    (h) =>
-      infrastructureKind(h) ===
-      (view === "orchestrators" ? "orchestrator" : "host"),
-  );
+  const isInfrastructure = view === "hosts";
+  const infrastructureHosts = inventory.hosts;
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const deleting = useRef(new Map<string, string>());
   // One deletion request UUID per machine, kept across dialog reopenings so an
@@ -386,7 +374,7 @@ export function App() {
     setCreate(null);
     setDetailId(null);
     setControlId(null);
-    setConnectionSetup(null);
+    setConnectionSetup(false);
     setImageImport(false);
     setRegistryOpen(false);
     setBlueprintSource(null);
@@ -778,12 +766,7 @@ export function App() {
           loaded && !stale
             ? {
                 machines: inventory.machines.length,
-                hosts: inventory.hosts.filter(
-                  (h) => infrastructureKind(h) === "host",
-                ).length,
-                orchestrators: inventory.hosts.filter(
-                  (h) => infrastructureKind(h) === "orchestrator",
-                ).length,
+                hosts: inventory.hosts.length,
               }
             : {}
         }
@@ -870,16 +853,11 @@ export function App() {
             {isInfrastructure && !resourcePage && (
               <Button
                 data-header-primary
-                onClick={() =>
-                  setConnectionSetup(view === "hosts" ? "host" : "orchestrator")
-                }
+                onClick={() => setConnectionSetup(true)}
                 disabled={busy}
               >
                 <Plus />
-                Add
-                <span className="max-sm:sr-only">
-                  {view === "hosts" ? " host" : " orchestrator"}
-                </span>
+                Add<span className="max-sm:sr-only"> host</span>
               </Button>
             )}
             {view === "templates" && user.role === "admin" && (
@@ -1048,7 +1026,7 @@ export function App() {
                 <p className="text-sm text-muted-foreground">
                   {provider(resourceHost.platform || resourceHost.provider)} ·{" "}
                   {(resourceHost.runtimes || []).map(provider).join(" · ") ||
-                    (view === "hosts" ? "Direct host" : "Orchestrator pool")}
+                    "Direct host"}
                 </p>
               )}
               <Notice error>{stale}</Notice>
@@ -1079,7 +1057,7 @@ export function App() {
                     <EmptyDescription>
                       {loaded
                         ? "This connection is no longer in the inventory."
-                        : `Fetching the current ${view === "hosts" ? "host" : "orchestrator"} inventory.`}
+                        : "Fetching the current host inventory."}
                     </EmptyDescription>
                   </EmptyHeader>
                 </Empty>
@@ -1441,9 +1419,8 @@ export function App() {
       )}
       {connectionSetup && (
         <ConnectionSetup
-          initialKind={connectionSetup}
           hosts={inventory.hosts}
-          onClose={() => setConnectionSetup(null)}
+          onClose={() => setConnectionSetup(false)}
           onRefresh={refresh}
         />
       )}
@@ -1519,7 +1496,9 @@ export function App() {
                     key={k}
                     className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-2 text-ui"
                   >
-                    <dt className="self-baseline text-xs text-muted-foreground">{k}</dt>
+                    <dt className="self-baseline text-xs text-muted-foreground">
+                      {k}
+                    </dt>
                     <dd
                       className={
                         k === "Machine ID"

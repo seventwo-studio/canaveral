@@ -29,7 +29,7 @@ export function maintenanceStatus(value: unknown, host: string) {
   const s = record(value);
   if (
     s.hostId !== host ||
-    (s.scope !== "directHost" && s.scope !== "pool") ||
+    s.scope !== "directHost" ||
     !Array.isArray(s.owners) ||
     !s.owners.every((owner) => typeof owner === "string") ||
     !Array.isArray(s.blockers) ||

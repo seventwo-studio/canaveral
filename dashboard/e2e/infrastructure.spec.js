@@ -56,14 +56,6 @@ for (const width of [320, 390, 1440])
       enabled: true,
       placementReady: true,
     };
-    const pool = {
-      ...host,
-      id: "pool",
-      name: "Development cluster",
-      provider: "kubevirt",
-      kind: "orchestrator",
-      usage: { ...usage, scope: "runner" },
-    };
     let setups = [];
     await page.route("**/api/v1/**", async (route) => {
       const path = new URL(route.request().url()).pathname.replace(
@@ -73,7 +65,7 @@ for (const width of [320, 390, 1440])
       let result = {};
       if (["auth/status", "auth/session"].includes(path))
         result = { setupRequired: false, user: adminUser };
-      if (path === "hosts") result = { hosts: [host, pool] };
+      if (path === "hosts") result = { hosts: [host] };
       if (path === "machines") result = { machines: [] };
       if (path === "templates") result = { templates: [] };
       if (path === "connection-setups") {
@@ -126,9 +118,6 @@ for (const width of [320, 390, 1440])
     });
     await page.goto("/#hosts");
     await expect(page.getByText("Build host", { exact: true })).toBeVisible();
-    await expect(
-      page.getByText("Development cluster", { exact: true }),
-    ).toHaveCount(0);
     await page
       .getByRole("link", { name: "View resources for Build host" })
       .click();
@@ -216,20 +205,6 @@ for (const width of [320, 390, 1440])
     ).toBeEnabled();
     await page.keyboard.press("Escape");
     await expect(dialog).not.toBeVisible();
-    if (width < 768)
-      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
-    await page.getByRole("link", { name: /Orchestrators/ }).click();
-    await expect(
-      page.getByText("Development cluster", { exact: true }),
-    ).toBeVisible();
-    await expect(page.getByText("Build host", { exact: true })).toHaveCount(0);
-    await page
-      .getByRole("link", { name: "View resources for Development cluster" })
-      .click();
-    await expect(page).toHaveURL(/#orchestrators\/pool$/);
-    await expect(
-      page.getByRole("heading", { name: "Development cluster", exact: true }),
-    ).toBeVisible();
     await page.goto("/#hosts/missing/resources");
     await expect(
       page.getByText("Connection not found", { exact: true }),

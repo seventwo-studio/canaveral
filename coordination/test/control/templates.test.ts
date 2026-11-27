@@ -61,3 +61,11 @@ test("guestAccess admits Linux and Apple-silicon macOS desktops only", () => {
     assert.throws(() => normalizeTemplate({ ...plain, ...change, guestAccess: true }), /Linux and Apple-silicon macOS desktops only/);
   for (const os of ["ios", "android"]) assert.throws(() => normalizeTemplate({ ...plain, os, guestAccess: true }));
 });
+
+test("retired host providers are rejected before loading private template bindings", t => {
+  const dir = mkdtempSync(join(tmpdir(), "canaveral-template-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "host.json");
+  writeFileSync(path, JSON.stringify({ provider: "kubevirt", templates: [{ templateFile: "unavailable.json" }] }));
+  assert.throws(() => loadHostConfig(path), { code: "unsupported_host_provider", status: 400 });
+});

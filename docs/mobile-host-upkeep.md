@@ -369,8 +369,7 @@ Every five seconds a direct host samples, whatever runtimes it has:
 | Linux | PSI `some avg10` from `/proc/pressure/memory` where the kernel provides it, and `MemAvailable` as a share of `MemTotal` |
 | Other | None (`unsupported`); only disk is evaluated |
 
-Disk is the free space of the tightest filesystem among the host's storage roots. A
-KubeVirt pool runner reports no pressure, because its own pod is not the pool.
+Disk is the free space of the tightest filesystem among the host's storage roots.
 
 The runner debounces changes between collected pressure samples. Thresholds are configurable in the host
 file; these are the defaults:
@@ -416,7 +415,7 @@ A host with `gatePlacement` alone therefore takes no new work under pressure whi
 owner can still start a device that is already there. Setting `gateRestart` as well
 accepts that an owner may have to wait for the pressure to clear, also after an idle
 stop. Stopping is always allowed. A gate cannot be set on a host that disabled its
-report, or on a KubeVirt pool.
+report.
 
 With a gate on, the host's state decides:
 

@@ -1,3 +1,4 @@
+import { requireManagedUpdates } from "../host-deployment.ts";
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
@@ -41,6 +42,7 @@ export class StableLauncher implements ActivationDriver {
   constructor(readonly options: StableLauncherOptions) {
     if (!isAbsolute(options.hostConfigPath) || !isAbsolute(options.hostStateDirectory)) throw new Error('Launcher config and host state paths must be absolute');
     const config = updateObject(readUpdateJSON(options.hostConfigPath));
+    requireManagedUpdates(config);
     const nativeConfig = config.updates && updateObject(config.updates).nativeConfigFile;
     if (nativeConfig !== undefined && (typeof nativeConfig !== 'string' || !isAbsolute(nativeConfig))) throw new Error('Native config path must be absolute');
     this.nativeConfigFile = nativeConfig as string | undefined;
@@ -298,7 +300,9 @@ async function main(): Promise<void> {
   for (let i = 0; i < args.length; i += 2) { const key = args[i], value = args[i + 1]; if (!key || !['--installation', '--host-config', '--state'].includes(key) || !value || values[key]) throw new Error('Usage: launcher --installation /private/root --host-config /absolute/host.json --state /private/update-state'); values[key] = value; }
   const installationRoot = values['--installation'], hostConfigPath = values['--host-config'], stateDirectory = values['--state'];
   if (!installationRoot || !hostConfigPath || !stateDirectory || !isAbsolute(hostConfigPath)) throw new Error('Launcher requires absolute installation, host-config and state paths');
-  const config = updateObject(readUpdateJSON(hostConfigPath)), updates = updateObject(config.updates);
+  const config = updateObject(readUpdateJSON(hostConfigPath));
+  requireManagedUpdates(config);
+  const updates = updateObject(config.updates);
   const hostStateDirectory = typeof config.stateDir === 'string' && isAbsolute(config.stateDir) ? config.stateDir : typeof config.agentStateDirectory === 'string' && isAbsolute(config.agentStateDirectory) ? config.agentStateDirectory : undefined;
   if (!hostStateDirectory || typeof config.url !== 'string') throw new Error('Explicit persistent host state and controller URL are required');
   const target = { os: process.platform, arch: process.arch === 'x64' ? 'amd64' : process.arch }, trustedKeys = updateObject(updates.trustedKeys);
@@ -318,4 +322,4 @@ async function main(): Promise<void> {
   try { await launcher.wait(); }
   finally { await runtime.close(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); await launcher.close(); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) void main().catch(() => { process.stderr.write('Managed launcher failed; retain installation, workload state and saved receipts for inspection.\n'); process.exitCode = 1; });
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) void main().catch(error => { if (error?.code === 'kubernetes_managed_updates_disabled') process.stderr.write(error.code + '\n'); process.stderr.write('Managed launcher failed; retain installation, workload state and saved receipts for inspection.\n'); process.exitCode = 1; });

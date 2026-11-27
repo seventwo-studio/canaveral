@@ -47,6 +47,8 @@ const TEMPLATE_CODES: Record<string, string[]> = {
 /** Code positions that are not error codes, or that this scan cannot follow. Each says why, and names
  * the codes it stands for when the value comes from somewhere the scan does not look. */
 const ACKNOWLEDGED: Record<string, { why: string; codes?: string[] }> = {
+  "src/host-runtimes/model.ts reasonCode": { why: "Validated blocker code forwarded from the Rust model executor." },
+  "src/host-runtimes/model.ts resultCode": { why: "Validated operation result code forwarded from the Rust model executor." },
   "src/providers/mobile-runtimes.ts outcome.kind": { why: "Non-exit tool outcomes; unstarted is translated to tool_unavailable.", codes: ["timeout", "interrupted", "error"] },
   "src/control/event-stream.ts stream_lifetime": { why: "end-of-stream code of the event stream, documented in docs/events.md" },
   "src/control/event-stream.ts controller_closing": { why: "end-of-stream code of the event stream, documented in docs/events.md" },
@@ -236,7 +238,7 @@ const repository = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (path: string) => readFileSync(join(repository, path), "utf8");
 
 test("every stable error code used in source is catalogued with a status, meaning and retry guidance", () => {
-  const scan = scanErrorCodes(join(repository, "coordination/src")), catalogue = catalogued(read("docs/error-codes.md"));
+  const scan = scanErrorCodes(join(repository, "coordination/src")), catalogue = catalogued(read("docs/error-codes.md") + "\n" + read("docs/host-runtimes.md"));
   assert.deepEqual(scan.problems, [], "every code position must be readable by the scan");
   assert.ok(scan.codes.size > 80, "the scan still finds the controller's codes");
   // One code per way of writing it: an option, a constructor argument, a `??` fallback, a helper argument, a template,
@@ -244,12 +246,12 @@ test("every stable error code used in source is catalogued with a status, meanin
   for (const expected of ["capacity_unavailable", "tls_verification_failed", "operation_incomplete", "invalid_cursor", "upload_temporary_cleanup_failed",
     "download_destination_failed", "connection_failed", "invalid_configuration", "request_failed", "content_type_invalid", "authorization_lost", "data_channel_lost"]) assert.ok(scan.codes.has(expected), expected);
   const missing = [...scan.codes].filter(([code]) => !catalogue.has(code)).map(([code, files]) => `${code} (${[...files].join(", ")})`).sort();
-  assert.deepEqual(missing, [], "add these codes to docs/error-codes.md");
+  assert.deepEqual(missing, [], "add these codes to their contract documentation");
   const stale = [...catalogue.keys()].filter(code => !scan.codes.has(code));
-  assert.deepEqual(stale, [], "docs/error-codes.md lists codes that no source uses");
+  assert.deepEqual(stale, [], "the error catalogues list codes that no source uses");
   for (const [code, cells] of catalogue) {
     assert.equal(cells.length, 3, `${code} needs status, meaning and retry columns`);
-    assert.match(cells[0]!, /^(?:\d{3}|client|receipt)(?:, (?:\d{3}|client|receipt))*$/, `${code} status`);
+    assert.match(cells[0]!, /^(?:\d{3}|client|receipt|local)(?:, (?:\d{3}|client|receipt|local))*$/, `${code} status`);
     assert.ok(cells[1]!.length >= 20 && cells[2]!.length >= 10, `${code} needs a meaning and retry guidance`);
   }
   // Declared expansions and acknowledgements must still correspond to something in the source.

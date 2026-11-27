@@ -1,0 +1,98 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "service",
+  "backend": "canaverald",
+  "identity": {
+    "manager": "launchd",
+    "node": "v24.11.0",
+    "account": "hosted runner account"
+  },
+  "scope": {
+    "os": "macos",
+    "arch": "aarch64",
+    "acceleration": "none",
+    "executionMode": "service"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "steps": [
+      {
+        "name": "start loopback controller and mint credentials",
+        "outcome": "passed",
+        "durationMs": 337
+      },
+      {
+        "name": "install service definition",
+        "outcome": "passed",
+        "durationMs": 1373
+      },
+      {
+        "name": "start, enroll, and receive healthy offer",
+        "outcome": "passed",
+        "durationMs": 857
+      },
+      {
+        "name": "advance heartbeat under the service account",
+        "outcome": "passed",
+        "durationMs": 291
+      },
+      {
+        "name": "run inventory and runtime status with the service config and state",
+        "outcome": "passed",
+        "durationMs": 5645
+      },
+      {
+        "name": "restart without the enrollment credential",
+        "outcome": "passed",
+        "durationMs": 6182
+      },
+      {
+        "name": "stop cleanly and reacquire the state lock",
+        "outcome": "passed",
+        "durationMs": 5227
+      },
+      {
+        "name": "uninstall and verify service registration is gone",
+        "outcome": "passed",
+        "durationMs": 99
+      }
+    ],
+    "observations": {}
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/daemon-acceptance.yaml",
+    "workflowName": "canaverald service acceptance",
+    "runId": 45231181144,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181144",
+    "event": "push",
+    "ref": "refs/heads/feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890815073,
+      "name": "service (macos-15)",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181144/job/137890815073"
+    },
+    "artifact": {
+      "id": 14847057814,
+      "name": "canaverald-macos-15",
+      "digest": "sha256:dbbc80cda5b9868decf0c3cb0f9adfebc693790bdb16018097ce9c613e2ee312"
+    },
+    "evidenceSha256": "39f0603d3c26343a3438963e3226d98d16d666051781c979b0234f96ec6ba4d6"
+  },
+  "runner": {
+    "label": "macos-15",
+    "imageOS": "macos15",
+    "imageVersion": "20261118.0550.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted macos-15 runner (macos15 20261118.0550.1), not a production host.",
+    "The daemon enrolled with a loopback controller started by the test.",
+    "The service ran as the hosted runner account, not a dedicated service account."
+  ],
+  "recorded": "2026-11-23"
+}

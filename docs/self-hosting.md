@@ -80,7 +80,7 @@ node coordination/dist/src/cli.js --token-file ./secrets/admin.token machines
 Choose a new UUID for each computer; keep the same UUID and specification when
 retrying that creation. Inspect the inventory before starting another request.
 Run the controller and runner under your service manager for unattended use;
-`deploy/systemd/canaveral-host.service` is a host-service example.
+`deploy/systemd/canaverald.service` is a host-service example.
 
 ### Docker on the same server
 
@@ -120,9 +120,13 @@ using [dashboard.md](dashboard.md).
 
 ## Kubernetes
 
+For node-local execution through a DaemonSet, see [Kubernetes hosts](cluster-hosts.md).
+The release artifact's `canaverald/` stage pins the daemon image digest recorded
+in `release.json` under `images.canaverald`; unlike the controller stages it
+creates its namespace and a cluster-scoped admission policy.
+
 The controller needs one persistent volume, its operator/enrollment Secret, TLS Secret and
-one replica with a Recreate strategy. It does not need Kubernetes API access or
-KubeVirt. Use `deploy/kubernetes/orchestrator` for a direct installation,
+one replica with a Recreate strategy. It does not need Kubernetes API access. Use `deploy/kubernetes/orchestrator` for a direct installation,
 or the release artifact's namespace-free `orchestrator/` Kustomization for your
 own GitOps setup. Select the matching immutable image digest from `release.json`.
 For published releases from 0.4.0, configure Cosign keyless verification before
@@ -130,33 +134,16 @@ consuming the deployment OCI artifact. The [release signature contract](../scrip
 specifies the exact GitHub issuer, workflow subject, stable polling example and
 verification conditions. CI publishes artifacts without cluster access; operators
 own reconciliation, credentials, backups and runtime acceptance.
-The `dashboard/` and `kubevirt/` stages are optional. Follow the concrete namespace, credential,
+The `dashboard/` stage is optional. Follow the concrete namespace, credential,
 TLS and persistent-storage steps in [running.md](running.md#kubernetes).
 
-The ordered setup creates both namespaces, runs `init` once, creates
+The ordered setup creates the `canaveral` namespace, runs `init` once, creates
 `canaveral-credentials`, then `canaveral-controller-tls`, then
-`canaveral-controller-ca` in both namespaces, then the enrollment-only
-`canaveral-enrollment` Secret before applying workloads. Certificate SANs must
+`canaveral-controller-ca` in the controller namespace before applying workloads. Certificate SANs must
 cover `orchestrator`, `orchestrator.canaveral`, `orchestrator.canaveral.svc` and any
 external ingress name. Use your PKI or optional cert-manager. See the same guide
-for private TLS ingress, optional NetworkPolicies and OpenShift limits.
-
-To offer Kubernetes VM capacity, first install compatible KubeVirt and CDI and
-verify KVM on eligible nodes. Import a bootable image into an offline template
-PVC, matching the guest architecture and intended bootstrap mechanism. Then
-adapt `deploy/kubernetes/worker-kubevirt` with:
-
-- The released `images.kubevirt` image, or your own build of Docker's `kubevirt`
-  target with kubectl compatible with the cluster.
-- The actual guest namespace, architecture, template PVCs and storage class.
-- One deliberate pool capacity limit and persistent worker identity.
-- An enrollment-only Secret, namespace-scoped VM/clone/secret permissions and
-  your network policies. Guests must reach the configured preparation endpoint.
-
-Keep controller, worker state, base templates and guest disks persistent. The
-example's capacity and image paths are configuration inputs, not discovered
-hardware or installed images. Start with a small guest and verify actual boot,
-preparation, login and retained disk identity across stop/start before expanding.
+for private TLS ingress, optional NetworkPolicies and OpenShift limits. Existing clusters
+may delete the now-unused `canaveral-guests` namespace after reconciling any leftover KubeVirt resources.
 
 ## Add other machines
 

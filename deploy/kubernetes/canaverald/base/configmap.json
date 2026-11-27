@@ -1,0 +1,12 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "canaverald-config",
+    "namespace": "canaverald"
+  },
+  "data": {
+    "host.json": "{\n  \"deployment\": \"kubernetes\",\n  \"name\": \"kubernetes-cpu\",\n  \"provider\": \"native\",\n  \"templates\": [],\n  \"capacity\": {\n    \"cpu\": 1,\n    \"memoryMiB\": 1024,\n    \"diskGiB\": 2\n  },\n  \"shutdownGraceSeconds\": 120\n}\n",
+    "controller": "https://orchestrator.canaveral.svc:8765"
+  }
+}

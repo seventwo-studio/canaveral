@@ -50,9 +50,11 @@ export const LIVE_VIEWS_PER_MACHINE = 4, LIVE_VIEWS_PER_HOST = 16, LIVE_VIEWS_PE
 const ROWS_PER_MACHINE = 64, RETAIN_SECONDS = 300;
 /** The host enforces a lease deadline and its own assignment slightly before the controller
  * observes the same ending. A view is then first recorded as `disconnected` (its sockets
- * dropped) or, for a lease, by the stopping device or host the runner reported. Within this
- * window the controller's later finding replaces such a provisional reason: any cause replaces
- * `disconnected`, and the lease's or its key's own ending replaces a lease's device cause. */
+ * dropped) or, for a lease, by the stopping device or host the runner reported, or by its
+ * capture, which the runner stopped at its own deadline. Within this window the controller's
+ * later finding replaces such a provisional reason: any cause replaces `disconnected`, and the
+ * lease's or its key's own ending replaces a lease's device cause. A capture's ending is
+ * replaced only when the runner attributes it to this lease's fence, regardless of timing. */
 const REFINE_SECONDS = 3;
 const PROVISIONAL = ['device_stopped', 'host_unavailable'], LEASE_ENDED = ['lease_expired', 'lease_released', 'lease_failed', 'key_rotated', 'application_revoked'];
 const CAPTURE_REQUEST = JSON.stringify({ fps: LIVE_FPS, durationSeconds: LIVE_EPOCH_SECONDS, bitRate: LIVE_BIT_RATE });
@@ -164,10 +166,21 @@ export class MobileLiveViews implements ControlModule {
       : db.prepare("SELECT * FROM mobile_live_views WHERE state IN ('pending','attaching','ready')").all()) as unknown as Row[];
     for (const r of rows) { const reason = this.lapse(db, r); if (reason) this.end(db, r, reason); }
     if (capture) return;
-    for (const r of db.prepare(`SELECT * FROM mobile_live_views WHERE state='ended' AND ended>=? AND (reason='disconnected' OR lease IS NOT NULL AND reason IN (${PROVISIONAL.map(() => '?').join(',')}))`).all(this.store.clock() - REFINE_SECONDS, ...PROVISIONAL) as unknown as Row[]) {
+    for (const r of db.prepare(`SELECT w.* FROM mobile_live_views w WHERE state='ended' AND (
+      ended>=? AND (reason='disconnected' OR lease IS NOT NULL AND reason IN (${PROVISIONAL.map(() => '?').join(',')}))
+      OR reason='capture_ended' AND lease IS NOT NULL AND EXISTS (
+        SELECT 1 FROM mobile_video_sessions c WHERE c.id=w.capture AND c.lease=w.lease AND c.fence_revision IS NOT NULL
+      ))`).all(this.store.clock() - REFINE_SECONDS, ...PROVISIONAL) as unknown as Row[]) {
       const reason = this.authority(db, r);
-      if (typeof reason === 'string' && reason !== r.reason && (r.reason === 'disconnected' || LEASE_ENDED.includes(reason))) db.prepare('UPDATE mobile_live_views SET reason=? WHERE id=? AND reason=?').run(reason, r.id, r.reason);
+      if (typeof reason === 'string' && reason !== r.reason && (r.reason === 'disconnected' || LEASE_ENDED.includes(reason)) && (r.reason !== 'capture_ended' || this.fencedCapture(db, r, reason))) db.prepare('UPDATE mobile_live_views SET reason=? WHERE id=? AND reason=?').run(reason, r.id, r.reason);
     }
+  }
+  /** The receipt binds the fence to the lease revision that was running. Ending a lease
+   * advances that revision once. Expiry can also be observed before the state is updated. */
+  private fencedCapture(db: DatabaseSync, r: Row, reason: string): boolean {
+    if (!r.lease || !['lease_expired', 'lease_failed'].includes(reason)) return false;
+    const capture = this.capture(db, r.capture), lease = db.prepare('SELECT state,revision FROM leases WHERE id=?').get(r.lease);
+    return !!lease && capture?.lease === r.lease && capture.fence_revision === Number(lease.revision) - Number(lease.state !== 'ready');
   }
   /** Ends lapsed views, then the captures left without one, and settles proven cleanup. */
   private refresh(db: DatabaseSync): void { this.refreshViews(db); this.video.refresh(db); }
@@ -178,7 +191,7 @@ export class MobileLiveViews implements ControlModule {
       if (r.generation !== uuid(command.generation)) return fail(403);
       if (command.type === 'live-views.disconnect') {
         // Prefer the controller's own finding over the bare fact that a socket dropped.
-        if (LIVE.includes(r.state)) { const cause = this.authority(db, r); this.end(db, r, typeof cause === 'string' ? cause : 'disconnected'); this.video.refresh(db); }
+        if (LIVE.includes(r.state)) { this.end(db, r, this.lapse(db, r) ?? 'disconnected'); this.video.refresh(db); }
         return { disconnected: true };
       }
       const reason = LIVE.includes(r.state) ? this.lapse(db, r) : 'ended';
