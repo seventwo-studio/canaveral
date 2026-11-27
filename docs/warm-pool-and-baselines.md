@@ -196,14 +196,21 @@ with the placement rule the request's own admission uses:
   Only a domain that is [mapped to a host](infrastructure.md#host-and-runner-physical-budget)
   shares capacity with warm devices. A request larger than that budget takes nothing.
 
-The pool then gives up the fewest devices that make the request fit on one host:
-unresponsive ready devices first, then booting ones (newest first), then the oldest ready
-ones. It gives up nothing when capacity that is already being released is enough, or when
-a warm device of the request's own image and size will serve it: a ready one that is
-answering, or a booting one created less than 90 seconds ago. A host that a request is
-about to take capacity on is not refilled ahead of it. A request the pool cannot help
-changes nothing: it does not hold back refills, and it does not delay the requests behind
-it.
+The pool then picks one host and gives up the shortest run of devices, taken in eviction
+order, that makes the request fit there: unresponsive ready devices first, then booting
+ones (newest first), then the oldest ready ones. This is the shortest prefix of that order,
+not the smallest possible set. It gives up nothing when capacity that is already being
+released is enough, or when a warm device of the request's own image and size will serve
+it: a ready one that is answering, or a booting one created less than 90 seconds ago.
+Capacity being released counts every `retiring` device on the host, including one whose
+removal is blocked (see [clearing a paused image](#clearing-a-paused-image)). A blocked
+removal can therefore look like enough capacity: the pool then gives up nothing more and
+does not refill that host, and the request waits until the removal is proven. A host that
+a request is about to take capacity on is not refilled ahead of it.
+
+Each pass looks only at the first 64 waiting requests refused for capacity, in arrival
+order. A request the pool cannot help is skipped: it does not hold back refills, and
+it does not stop later requests in that window from being considered.
 
 The given-up device's capacity is free only after its proven removal. Direct
 `/v1/leases` acquisition does not wait and therefore reclaims nothing: it adopts a ready
@@ -223,7 +230,7 @@ stay visible in the pool state.
 A `ready` device that its host no longer reports running and checked, for example a hung
 emulator, is withheld at once: no lease adopts it, it does not count as a device that
 will serve a waiting request, and it is the first to be given up for one. Its
-`unreadySince` says since when. If it stays that way for 60 seconds it is given up and
+`unreadySince` says since when; it is `null` for every other device. If it stays that way for 60 seconds it is given up and
 replaced; it does not wait for its age. This is not counted as a failed boot.
 
 Until one device of an image has booted and passed its checks on a host, and again after
@@ -252,12 +259,28 @@ On the host, as the service account:
 1. Fix the cause first (the SDK, the system image or the disk). The pool tries again as
    soon as the removal is proven and the back-off has passed.
 2. Take `machineId` from the target's `paused` entry. The device's storage is
-   `<storage>/<machineId>/`. It holds `avd-create-started.json` and no
-   `avd-created.json`. No emulator was launched for it: there is no `launch.json`.
-3. Confirm that no `avdmanager` process for `cvm-<machineId>` is still running.
-4. Remove `<storage>/<machineId>/device.avd`, the registration
+   `<storage>/<machineId>/`.
+3. Check that this storage belongs to that blocked creation, and stop if any check fails.
+   A blocked removal can also mean the host found storage or a registration that is
+   foreign or does not match, and the host refused to touch it on purpose:
+   - `avd-create-started.json` exists and its `name` is `cvm-<machineId>`.
+   - There is no `avd-created.json`, and no `launch.json` or `endpoint.json`, so no
+     emulator was launched for it.
+   - If `<storage>/avds/cvm-<machineId>.ini` exists, its single `path=` line is exactly
+     `<storage>/<machineId>/device.avd`.
+   - `device.avd`, if present, is a directory owned by the service account and not a
+     symbolic link.
+4. Confirm that no `avdmanager` process for `cvm-<machineId>` is still running.
+5. Remove `<storage>/<machineId>/device.avd`, the registration
    `<storage>/avds/cvm-<machineId>.ini` if it exists, and
    `<storage>/<machineId>/avd-create-started.json`. Remove nothing else.
+
+On a mismatch, leave everything in place and treat the host's storage as needing
+investigation; do not remove files to clear the pause.
+
+The fixture for this procedure models an interrupted creation that leaves no `.ini`.
+Recovery after a real `avdmanager` interruption, including one that left a registration,
+has not been verified natively.
 
 The host then proves the removal, the reservation is released, and the pool resumes with
 one device of that image. A baseline copy that fails after the AVD was created does not
@@ -418,7 +441,8 @@ where the filesystem has one; otherwise each file is copied and its digest reche
 the same pass. The stored files' full digests are verified once per runner process and
 again whenever a file's identity changes.
 
-Each copied qcow2 overlay must resolve to its own copied base image. An overlay records
+A self-contained qcow2 image with no backing file is accepted as copied. Any backing path
+that a copied overlay records must resolve to the device's own copied base image. An overlay records
 its backing file by path, and a saved one can name the device it was captured from. The
 runner then points it at its own base with the SDK's `qemu-img rebase -u` and reads the
 recorded path back before booting. This fails closed, at both ends: a save is refused
@@ -430,7 +454,10 @@ device.
 The copy starts only after the device's AVD creation is confirmed, and it runs under its
 own journal in that device's storage. A copy that fails or is interrupted is never
 resumed and never booted. It is removed with the device through the usual stop proof and
-storage removal, so it strands no capacity and needs no operator.
+storage removal, and its capacity is released once ownership and removal are proven. That
+normally needs no operator. If the confirmed AVD's registration no longer matches the
+assignment, removal stays blocked and the reservation stays held, as for any other
+device whose ownership cannot be proven.
 
 The device then goes through the ordinary supervised launch and readiness checks. A lease
 writes only to its own copy, which is destroyed with it.
