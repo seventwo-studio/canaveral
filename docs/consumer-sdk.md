@@ -186,11 +186,14 @@ const end = await tunnel.closed; // { reason, code?, state?, endReason? }; never
   `tunnel_identity_limit`, `tunnel_host_limit`, `lease_ended`). A mapping the runner could
   not create rejects with `tunnel_mapping_failed`, and a local listener that cannot bind
   with `tunnel_listen_failed`.
-- When the runner ended the tunnel on its own evidence, `closed` carries `endReason`:
+- When the runner ended the tunnel on its own evidence, `closed` can carry `endReason`:
   `mapping_lost` (the device mapping disappeared, for example after an adb server
   restart) or `open_rate` (connections kept arriving far faster than the tunnel's open
-  rate). Connections above the rate of 16 per second, after a burst of 64, are refused
-  one by one without ending the tunnel.
+  rate). The field is optional: `closed` reads the controller's record once, and the
+  runner may not have posted its reason yet, so a tunnel that ended on lost mapping can
+  resolve without `endReason`. Poll `inspect(id)` for the persisted reason. Connections
+  above the rate of 16 per second, after a burst of 64, are refused one by one without
+  ending the tunnel.
 - A tunnel also ends when the lease's device stops being ready. The SDK does not
   reconnect. Once the device is ready again, open a new tunnel with a new UUID. The same
   device port answers `tunnel_port_busy` until the ended tunnel's `mappingRemoved` is

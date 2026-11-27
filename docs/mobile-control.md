@@ -702,8 +702,9 @@ guest a path to the host endpoint the mapping names. The gap is older than tunne
 mapping check closes it only on hosts that declare them. On every lease host, do not run
 other adb tooling against leased devices.
 
-A lease without an open tunnel therefore has no mapping, and a lease with open tunnels has
-exactly theirs.
+A lease's live tunnels therefore have exactly their own mappings. An ended tunnel whose
+removal is not yet proven can leave its mapping behind, inert, until the runner confirms
+the removal (see [lifetime and teardown](#lifetime-and-teardown)).
 
 ### Scoped control
 
@@ -1065,16 +1066,21 @@ runs after the rest and CI runs as a separate job; see `script/coordination_test
 
 - The broker checks a tunnel's authority on an interval, not for every relayed message:
   the lease key, application, lease, assignment and host state, at most about five times
-  a second per tunnel. It relays nothing unless a check succeeded within the last 250 ms,
-  and between two checks it forwards at most 2 MiB, 256 messages and 32 stream opens per
-  direction. A revocation can leave the last successful check's remaining interval
-  and budget in flight: up to 250 ms and 2 MiB per direction. Other session families
+  a second per tunnel. It relays nothing unless an affirmative reply arrived within the last 250 ms,
+  and between two replies it forwards at most 2 MiB, 256 messages and 32 stream opens per
+  direction. The window and budget start when the broker receives the reply, not when the
+  controller sampled authority. A revocation can therefore leave up to 250 ms and 2 MiB per
+  direction in flight after the last affirmative reply is received, including a reply
+  that was sampled before the revocation and arrived after it. Other session families
   check each message; a controller round trip for every tunnel
   message would let one lease starve the control worker that requests, heartbeats and
   all other sessions share. The check reads a snapshot and takes no write lock; only
   an end of authority writes. A busy or briefly unavailable controller is backpressure,
   not an end: relay stops when the interval runs out and resumes with the next successful
-  check. Only a definite refusal, or about ten seconds without an answer, ends the pair.
+  check. Only a definite refusal, or consecutive transient failures spanning about ten seconds,
+  ends the pair. A single check can itself wait up to 20 seconds for the control worker,
+  so a pair whose checks hang rather than fail can stay paused longer than ten seconds
+  before it ends; it relays nothing while paused.
 - The runner evaluates fresh controller contact, its lease guard and its own tunnel gate
   once per lease at most every 250 ms, and each relay polls that result every 250 ms. It
   is not evaluated per frame, because each evaluation samples the native clock through a
@@ -1098,9 +1104,11 @@ the mapping and unlinks its socket. `mappingRemoved` in the receipt is positive 
 
 Until then an ended tunnel keeps its host slot and its device port and direction
 (`tunnel_port_busy`). It does not count toward `limits.tunnelsPerLease`, which counts
-live tunnels only. A lease may have at most eight unproven removals at a time
-(`tunnel_residue_limit`) and is refused new tunnels at that point until the runner
-confirms some.
+live tunnels only. A lease with eight unproven removals is refused new tunnels (`tunnel_residue_limit`)
+until the runner confirms some. Eight is an admission threshold, not a cap: live tunnels
+that end later without proof add to the count, so a lease can hold more than eight. A
+device port is reusable only once its own removal is proven, and a new tunnel on any
+port can still be refused by the residue threshold or the host's limits.
 A mapping whose removal is unproven is inert: its socket is closed and unlinked, and the
 socket name is derived from the tunnel's UUID and never reused, so the device port leads
 nowhere. The runner keeps retrying for as long as it holds the lease's device. Every
