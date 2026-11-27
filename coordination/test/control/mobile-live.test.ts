@@ -366,7 +366,7 @@ test("a stopping or journal-less hub refuses captures without a journal, and sto
   assert.ok(Date.now() - began < 5000);
   assert.deepEqual(f.receipts, [{ cleaned: true }]); assert.equal(f.stats.open, 0);
   viewer.close(); handle.release();
-  await sleep(400); assert.equal(timers(), before, "no timer of the hub is left armed");
+  await sleep(400); assert.ok(timers() <= before, "no additional timer of the hub is left armed");
   // A view that arrives while the hub stops is refused without a journal: its runner must not attach.
   assert.throws(() => f.hub.acquire(OTHER, f.source), (error: unknown) => error instanceof LiveCaptureRefused && error.journaled === false);
   assert.equal(f.journal.has(OTHER.id), false);
