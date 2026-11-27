@@ -174,6 +174,15 @@ same request returns the same view. `watch` is `create` followed by `connect`;
 `inspect` and `close` read and end a view. A request may set `ttlSeconds` from 10
 to 120.
 
+Recording while watching the same device requires handover support negotiated
+on that recording's host connection. During a mixed-version rollout, a legacy
+recording prevents live viewing until it ends. A new controller can refuse
+admission with 409 `capability_unsupported`. With handover, new live attachments
+wait while the runner proves the prior capture stopped and the broker commits
+the recording start. If either step fails, the recording ends incomplete before
+any video arrives. Standalone recordings work across versions. See
+[recording and live-view handover](mobile-control.md#a-live-view-beside-a-recording).
+
 `stream.segments()` is a pull-driven async iterator of complete MP4 segments:
 
 - `kind: 'init'` is the initialization segment (`ftyp` and `moov`) that opens an

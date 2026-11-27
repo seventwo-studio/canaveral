@@ -68,6 +68,12 @@
       "$ref": "#/$defs/VideoAck"
     },
     {
+      "$ref": "#/$defs/VideoStart"
+    },
+    {
+      "$ref": "#/$defs/VideoStartCommitted"
+    },
+    {
       "$ref": "#/$defs/TunnelMapped"
     },
     {
@@ -1235,8 +1241,28 @@
     "videoConsumer": {
       "$ref": "#/$defs/VideoAck"
     },
+    "VideoStart": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "start" },
+        "liveStop": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "format": "uuid" },
+            "generation": { "type": "string", "format": "uuid" }
+          },
+          "required": ["id", "generation"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
     "videoHost": {
       "anyOf": [
+        {
+          "$ref": "#/$defs/VideoStart"
+        },
         {
           "$ref": "#/$defs/VideoMetadata"
         },
@@ -1247,6 +1273,17 @@
           "$ref": "#/$defs/WorkerError"
         }
       ]
+    },
+    "VideoStartCommitted": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "start-committed" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "videoBroker": {
+      "$ref": "#/$defs/VideoStartCommitted"
     },
     "TunnelMapped": {
       "type": "object",
@@ -1612,6 +1649,9 @@
       },
       "hostControl": {
         "$ref": "#/$defs/videoHost"
+      },
+      "brokerControl": {
+        "$ref": "#/$defs/videoBroker"
       },
       "binary": {
         "consumer": "forbidden",

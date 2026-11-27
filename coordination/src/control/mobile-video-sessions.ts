@@ -23,20 +23,28 @@ import { ABANDONED_VIDEO_SESSION, COUNTED_VIDEO_SESSION, HELD_VIDEO_SESSION, VID
 import { LIVE_HANDOVER_SECONDS } from '../mobile-live.ts';
 import { legacyMachineReady, leaseScopedMember, legacySessionLease, requireApplicationCapacity } from './leases.ts';
 export type VideoSessionCommand =
-  | { type: 'video-sessions.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
+  | { type: 'video-sessions.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string; videoHandoverProtocol?: number }
   | { type: 'video-sessions.authorized'; sessionId: string; generation: string; ready?: boolean }
+  | { type: 'video-sessions.start'; sessionId: string; generation: string; liveStop?: PriorLiveIdentity }
   | { type: 'video-sessions.disconnect'; sessionId: string; generation: string };
 type Row = { id: string; machine: string; host: string; binding: string; generation: string; credential: string; host_credential: string | null; request: string; state: string; created: number; deadline: number; host_attached: number; consumer_attached: number; cleaned: number; ack_received: number; fence_revision: number | null;
   /** Lease sessions only: the lease and member, and the runner's own encoder-exit receipt. */
   lease: string | null; member: string | null; host_cleaned: number;
   /** `record`: one bounded recording. `live`: the capture shared by a device's live views. */
-  kind: 'record' | 'live' };
+  kind: 'record' | 'live'; prior_live_id: string | null; prior_live_generation: string | null; handover_protocol: number | null };
+type PriorLiveIdentity = Pick<Row, 'id' | 'generation'>;
 export type VideoSessionRow = Row;
 const live = ['pending','attaching','ready'];
 const reservations = `SELECT COALESCE(SUM(1),0) AS cpu,COALESCE(SUM(256),0) AS memoryMiB,0 AS diskGiB FROM mobile_video_sessions v WHERE v.host=? AND ${COUNTED_VIDEO_SESSION}`;
 const fail = (status = 409): never => { throw new ServiceError('Mobile video session rejected.', status); };
 function exact(body: Record<string, unknown>, fields: string[]): void { if (Object.keys(body).length !== fields.length || fields.some(k => !Object.hasOwn(body, k))) fail(400); }
 function binding(m: Record<string, unknown>): string { return machineDigest([m.id,m.host,m.owner,m.template,m.request]); }
+function supportsHandover(offer: unknown): boolean {
+  try { return object(JSON.parse(String(offer))).videoHandoverProtocol === 1; } catch { return false; }
+}
+function requireHandover(supported: boolean): void {
+  if (!supported) throw new ServiceError('Both the controller and runner must support live capture handover.', 409, { code: 'capability_unsupported' });
+}
 function row(db: DatabaseSync, id: string): Row { return db.prepare('SELECT * FROM mobile_video_sessions WHERE id=?').get(uuid(id)) as unknown as Row ?? fail(404); }
 type Resolution = { session: string; decision: string; reason: string; decided_by: string; created: number };
 function resolution(db: DatabaseSync, id: string): Resolution | undefined { return db.prepare('SELECT * FROM mobile_video_session_resolutions WHERE session=?').get(id) as unknown as Resolution | undefined; }
@@ -71,13 +79,20 @@ export class MobileVideoSessions implements ControlModule {
       if (!columns.includes('kind')) db.exec("ALTER TABLE mobile_video_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'record'");
       if (!columns.includes('ack_received')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN ack_received INTEGER NOT NULL DEFAULT 0');
       if (!columns.includes('fence_revision')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN fence_revision INTEGER');
+      if (!columns.includes('prior_live_id')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN prior_live_id TEXT');
+      if (!columns.includes('prior_live_generation')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN prior_live_generation TEXT');
+      if (!columns.includes('handover_protocol')) db.exec('ALTER TABLE mobile_video_sessions ADD COLUMN handover_protocol INTEGER');
       initializeVideoResolutions(db); });
     registerMachineHooks(store, {
       additionalReservationsSql: { id: 'mobile-video-v1', query: reservations },
       additionalReservations: (db, host) => { const r = db.prepare(reservations).get(host)!; return { cpu: Number(r.cpu), memoryMiB: Number(r.memoryMiB) }; },
       heartbeatResponse: (db, host) => {
         this.refresh(db);
-        return { videoSessions: (db.prepare(`SELECT * FROM mobile_video_sessions v WHERE v.host=? AND v.kind='record' AND ${HELD_VIDEO_SESSION} ORDER BY created,id LIMIT 4`).all(host) as unknown as Row[]).map(r => ({ ...view(r), hostId: r.host })) };
+        const sessions = db.prepare(`SELECT v.*, prior.cleaned AS prior_live_cleaned FROM mobile_video_sessions v
+          LEFT JOIN mobile_video_sessions prior ON prior.id=v.prior_live_id AND prior.generation=v.prior_live_generation AND prior.machine=v.machine AND prior.kind='live'
+          WHERE v.host=? AND v.kind='record' AND ${HELD_VIDEO_SESSION} ORDER BY v.created,v.id LIMIT 4`).all(host) as unknown as (Row & { prior_live_cleaned: number | null })[];
+        return { videoSessions: sessions.map(r => ({ ...view(r), hostId: r.host,
+          ...(r.prior_live_id ? { priorLiveCapture: { id: r.prior_live_id, generation: r.prior_live_generation, cleaned: r.prior_live_cleaned === 1 } } : {}) })) };
       },
     });
   }
@@ -136,18 +151,32 @@ export class MobileVideoSessions implements ControlModule {
       if (r.kind === 'live') return command.type === 'video-sessions.authorized' ? { authorized: false } : fail(409);
       if (command.type === 'video-sessions.disconnect') { this.disconnect(db, r); return { disconnected: true }; }
       if (command.type === 'video-sessions.authorized') return { authorized: live.includes(r.state) && this.current(db, r) && (!command.ready || r.state === 'ready') };
+      if (command.type === 'video-sessions.start') {
+        if (r.state !== 'ready' || !this.current(db, r) || r.handover_protocol !== 1) return { committed: false };
+        const stop = command.liveStop && { id: uuid(command.liveStop.id), generation: uuid(command.liveStop.generation) };
+        // An unattached capture cannot have dispatched. Every attached capture with no final
+        // receipt needs proof for its own identity, even if it arrived after recording admission.
+        const unproven = db.prepare("SELECT id,generation FROM mobile_video_sessions WHERE machine=? AND kind='live' AND cleaned=0 AND host_attached=1").all(r.machine);
+        return { committed: unproven.every(c => c.id === stop?.id && c.generation === stop?.generation) };
+      }
       if (!live.includes(r.state) || !this.current(db, r)) return fail(410);
+      let handover = false;
       if (command.side === 'host') {
         if (uuid(command.ownerId) !== r.host) return fail(403);
         this.machines.authenticateHost(r.host, command.token);
         if (r.host_attached) return fail(409);
-        db.prepare("UPDATE mobile_video_sessions SET host_attached=1,host_credential=?,state=? WHERE id=?").run(machineDigest(command.token), r.consumer_attached ? 'ready' : 'attaching', r.id);
+        if (command.videoHandoverProtocol !== undefined && command.videoHandoverProtocol !== 1) {
+          throw new ServiceError('Unsupported video handover protocol.', 400, { code: 'capability_unsupported' });
+        }
+        handover = command.videoHandoverProtocol === 1;
+        if (!handover && db.prepare("SELECT 1 FROM mobile_video_sessions WHERE machine=? AND kind='live' AND cleaned=0").get(r.machine)) requireHandover(false);
+        db.prepare("UPDATE mobile_video_sessions SET host_attached=1,host_credential=?,state=?,handover_protocol=? WHERE id=?").run(machineDigest(command.token), r.consumer_attached ? 'ready' : 'attaching', handover ? 1 : null, r.id);
       } else {
         const owner = r.lease ?? r.machine, digest = r.lease ? leaseDigest(command.token) : tokenHash(command.token);
         if (uuid(command.ownerId) !== owner || digest !== r.credential || r.consumer_attached) return fail(403);
         db.prepare('UPDATE mobile_video_sessions SET consumer_attached=1,state=? WHERE id=?').run(r.host_attached ? 'ready' : 'attaching', r.id);
       }
-      return view(row(db, r.id));
+      return { ...view(row(db, r.id)), ...(handover ? { videoHandoverProtocol: 1 } : {}) };
     });
   }
   handle(req: import('./contracts.ts').ControlRequest) {
@@ -230,14 +259,16 @@ export class MobileVideoSessions implements ControlModule {
    * Beside an ended live capture of the device whose cleanup is not proven, no recording starts;
    * the refusal says whether waiting can help, as it does for a view.
    *
-   * Returns the seconds to add to the recording's deadline: the bounded wait for the stop proof
-   * of this device's live capture, which the recording's own duration must not pay for. */
-  private admit(db: DatabaseSync, m: Record<string, unknown>, application?: string): number {
+   * Returns the live capture that the recording must obtain stop proof for, even if the
+   * capture ends before the recording attaches. */
+  private admit(db: DatabaseSync, m: Record<string, unknown>, application?: string): PriorLiveIdentity | undefined {
     const machine = String(m.id), host = String(m.host);
     if (db.prepare("SELECT 1 FROM mobile_video_sessions WHERE machine=? AND kind='record' AND cleaned=0").get(machine)) fail(409);
-    const own = db.prepare(`SELECT v.state,v.deadline,${ABANDONED_VIDEO_SESSION} AS abandoned FROM mobile_video_sessions v WHERE v.machine=? AND v.kind='live' AND v.cleaned=0`).all(machine);
+    const own = db.prepare(`SELECT v.id,v.generation,v.state,v.deadline,${ABANDONED_VIDEO_SESSION} AS abandoned FROM mobile_video_sessions v WHERE v.machine=? AND v.kind='live' AND v.cleaned=0`).all(machine);
     this.requireProvenCleanup(own.filter(r => !live.includes(String(r.state))), 'A prior live capture of this device is not proven clean.');
-    if (!own.some(r => live.includes(String(r.state)))) {
+    const prior = own.find(r => live.includes(String(r.state)));
+    if (prior) requireHandover(supportsHandover(m.host_offer));
+    if (!prior) {
       const available = this.machines.remainingCapacity(db, host);
       const short = (freed: number): number => this.slots(db, host) - freed >= 4 ? 429
         : available.cpu + freed * VIDEO_SESSION_RESERVATION.cpu < VIDEO_SESSION_RESERVATION.cpu || available.memoryMiB + freed * VIDEO_SESSION_RESERVATION.memoryMiB < VIDEO_SESSION_RESERVATION.memoryMiB ? 409 : 0;
@@ -249,7 +280,15 @@ export class MobileVideoSessions implements ControlModule {
       }
       if (application) requireApplicationCapacity(db, application, VIDEO_SESSION_RESERVATION);
     }
-    return own.length ? LIVE_HANDOVER_SECONDS : 0;
+    return prior ? { id: String(prior.id), generation: String(prior.generation) } : undefined;
+  }
+  /** Before the recording's host connects, the offer can provisionally admit a view.
+   * A legacy socket cannot attach beside that view. After attachment only the mode
+   * bound to the recording generation can authorize sharing. */
+  requireLiveHandover(db: DatabaseSync, machine: string): void {
+    const recording = db.prepare(`SELECT v.host_attached,v.handover_protocol,h.offer FROM mobile_video_sessions v
+      JOIN hosts h ON h.id=v.host WHERE v.machine=? AND v.kind='record' AND v.cleaned=0 AND v.state IN ('pending','attaching','ready')`).get(machine);
+    if (recording) requireHandover(recording.host_attached ? recording.handover_protocol === 1 : supportsHandover(recording.offer));
   }
   /** The live capture of one device: created with its first view, in that view's transaction.
    * It takes one of the host's four slots and the reservation of a recording, unless a recording
@@ -273,10 +312,11 @@ export class MobileVideoSessions implements ControlModule {
       VALUES (?,?,?,?,?,?,NULL,?,'pending',?,?,0,0,0,?,?,0,'live')`).run(id, String(m.id), String(m.host), binding(m), randomUUID(), lease?.credential ?? '', request, now, now + lifetimeSeconds + 60, lease?.id ?? null, lease?.member ?? null);
     return row(db, id);
   }
-  private insert(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, request: string, lease: string | null, member: string | null, handoverSeconds: number): void {
+  private insert(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, request: string, lease: string | null, member: string | null, prior: PriorLiveIdentity | undefined): void {
     const now = this.store.clock(), durationSeconds = Number(object(JSON.parse(request)).durationSeconds);
-    db.prepare(`INSERT INTO mobile_video_sessions (id,machine,host,binding,generation,credential,host_credential,request,state,created,deadline,host_attached,consumer_attached,cleaned,lease,member,host_cleaned)
-      VALUES (?,?,?,?,?,?,NULL,?,'pending',?,?,0,0,0,?,?,0)`).run(id, String(m.id), String(m.host), binding(m), randomUUID(), credential, request, now, now + durationSeconds + 60 + handoverSeconds, lease, member);
+    const deadline = now + durationSeconds + 60 + (prior ? LIVE_HANDOVER_SECONDS : 0);
+    db.prepare(`INSERT INTO mobile_video_sessions (id,machine,host,binding,generation,credential,host_credential,request,state,created,deadline,host_attached,consumer_attached,cleaned,lease,member,host_cleaned,prior_live_id,prior_live_generation)
+      VALUES (?,?,?,?,?,?,NULL,?,'pending',?,?,0,0,0,?,?,0,?,?)`).run(id, String(m.id), String(m.host), binding(m), randomUUID(), credential, request, now, deadline, lease, member, prior?.id ?? null, prior?.generation ?? null);
   }
   /** Lease-key recording of the lease's own member. Only the lease's current key reaches it; a
    * session ends with the lease (expiry, release, fence, failure) or a key rotation. Reading and

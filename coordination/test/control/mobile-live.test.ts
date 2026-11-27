@@ -305,6 +305,7 @@ test("a recording stops the live run first, feeds the viewers its own stream, an
   const tap = await f.hub.beginRecording(JOB.machineId);
   assert.equal(tap.proven, true); assert.ok(tap.waitedMs < 2000);
   assert.equal(f.stats.open, 0, "the live run was stopped before the recording starts");
+  tap.allowViewers();
   const recording = Buffer.concat([initSegment(), fragment(0, true, Buffer.from("rec-0")), fragment(1, false, Buffer.from("rec-1")), fragment(2, true, Buffer.from("rec-2"))]);
   for (let offset = 0; offset < recording.length; offset += 11) tap.push(recording.subarray(offset, offset + 11));
   const epoch = (item: LiveViewItem) => (item as { epoch: number }).epoch;
@@ -357,16 +358,40 @@ test("recording hand-over reports an unproven live stop within the wait bound", 
   taken.end(true); watching.close(); held.release();
   await receipt(unprovable);
   assert.deepEqual(unprovable.receipts, [{ hostCleaned: true }]);
-  // Afterwards, and with no live capture at all, a recording starts without any wait.
-  for (const hub of [unprovable.hub, hubFixture().hub]) { const next = await hub.beginRecording(JOB.machineId); assert.deepEqual([next.proven, next.waitedMs < 100], [true, true]); next.end(true); }
+  // A vanished capture's host-only receipt does not satisfy the recording admitted beside it.
+  const prior = { id: JOB.id, generation: JOB.generation, cleaned: false };
+  const refused = await unprovable.hub.beginRecording(JOB.machineId, prior);
+  assert.equal(refused.proven, false); refused.end(true);
+  // Positive controller proof also covers a capture that never reached this runner.
+  const idle = hubFixture().hub;
+  const confirmed = await idle.beginRecording(JOB.machineId, { ...prior, cleaned: true });
+  assert.equal(confirmed.proven, true); confirmed.end(true);
+  const alone = await idle.beginRecording(JOB.machineId);
+  assert.equal(alone.proven, true); alone.end(true);
   // A second recording of one device is not the hub's to refuse; it is simply not fed to viewers.
   const f = hubFixture(), one = await f.hub.beginRecording(JOB.machineId), two = await f.hub.beginRecording(JOB.machineId);
   two.push(initSegment()); two.end(true); one.end(true);
 });
 
+test("an absent live capture requires a positive journal for the same machine and generation", async () => {
+  const f = hubFixture(), handle = f.hub.acquire(JOB, f.source), viewer = handle.subscribe(() => true);
+  await take(viewer, 3); viewer.close(); handle.release();
+  await receipt(f);
+  for (const [machineId, id, generation, expected] of [
+    [JOB.machineId, JOB.id, JOB.generation, true],
+    [JOB.machineId, JOB.id, OTHER.generation, false],
+    [OTHER.machineId, JOB.id, JOB.generation, false],
+    [JOB.machineId, OTHER.id, JOB.generation, false],
+  ] as const) {
+    const tap = await f.hub.beginRecording(machineId, { id, generation, cleaned: false });
+    assert.equal(tap.proven, expected); tap.end(true);
+  }
+});
+
 test("a viewer that cannot keep up is skipped ahead to a key frame instead of holding the capture back", async () => {
   const f = hubFixture();
   const tap = await f.hub.beginRecording(JOB.machineId);
+  tap.allowViewers();
   tap.push(initSegment());
   const handle = f.hub.acquire(JOB, f.source);
   const slow = handle.subscribe(() => true), fast = handle.subscribe(() => true);
@@ -421,4 +446,22 @@ test("a stopping or journal-less hub refuses captures without a journal, and sto
   const ending = hubFixture({ stop: "hangs" }), first = ending.hub.acquire(JOB, ending.source), watching = first.subscribe(() => true);
   await take(watching, 2); watching.close(); first.release();
   assert.throws(() => ending.hub.acquire(JOB, ending.source), (error: unknown) => error instanceof LiveCaptureRefused && error.journaled === true);
+});
+
+test("the recording pause blocks a new capture from attaching after the proof snapshot", async () => {
+  const f = hubFixture();
+  const tap = await f.hub.beginRecording(JOB.machineId);
+  let handle: ReturnType<LiveCaptureHub["acquire"]> | undefined;
+  try {
+    assert.equal(tap.liveStop, undefined);
+    assert.throws(() => { handle = f.hub.acquire(JOB, f.source); }, { journaled: false });
+    assert.equal(f.journal.has(JOB.id), false);
+    tap.allowViewers();
+    handle = f.hub.acquire(JOB, f.source);
+    assert.equal(f.journal.get(JOB.id)?.state, "attaching");
+  } finally {
+    handle?.release();
+    tap.end(true);
+    await f.hub.close();
+  }
 });

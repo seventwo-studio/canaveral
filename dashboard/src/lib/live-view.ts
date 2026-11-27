@@ -122,7 +122,7 @@ const endings: Record<string, Omit<LiveEnding, "reason">> = {
   },
   capture_cleanup_unproven: {
     message:
-      "An earlier capture of this device was never confirmed stopped. Its screen cannot be captured until the device is stopped or an administrator resolves that.",
+      "Cleanup of an earlier capture of this device is unproven. Its screen stays unavailable until cleanup is confirmed.",
     again: "no",
   },
   live_view_limit: {

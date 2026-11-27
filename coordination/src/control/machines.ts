@@ -101,6 +101,10 @@ export function validateOffer(value: unknown): Json {
   const provider = hostProvider(input.provider);
   const result: Json = { name: text(input.name, "host name"), capacity: machineResources(input.capacity), provider };
   if ("leaseProtocol" in input) { if (input.leaseProtocol !== 1) failure("Unsupported lease execution protocol."); result.leaseProtocol = 1; }
+  if ("videoHandoverProtocol" in input) {
+    if (input.videoHandoverProtocol !== 1) failure("Unsupported video handover protocol.");
+    result.videoHandoverProtocol = 1;
+  }
   if (!Array.isArray(input.templates) || input.templates.length > 100) failure("Offer at most 100 installed templates.");
   result.templates = (input.templates as unknown[]).map(validateTemplate);
   if (new Set(result.templates.map((t: Json) => pythonJson([t.id, t.revision, t.arch]))).size !== result.templates.length) failure("Template ID/revision/architecture combinations must be unique on a host.");

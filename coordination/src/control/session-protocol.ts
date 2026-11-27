@@ -68,6 +68,10 @@ export function validateRelayMessage(capability: RelayCapability, side: SessionS
   encodeControl(value);
   if (capability === 'video') {
     if (side === 'consumer') { const v = exact(value, ['type']); if (v.type !== 'ack') throw new ServiceError('Video consumers may only acknowledge completion.', 400); }
+    else if (value.type === 'start') {
+      const v = exact(value, ['type'], ['liveStop']);
+      if ('liveStop' in v) { const stop = exact(v.liveStop, ['id', 'generation']); identifier(stop.id); identifier(stop.generation); }
+    }
     else if (value.type === 'video') {
       const v = exact(value, ['type','mediaType','codec','fps']);
       if (v.mediaType !== 'video/mp4' || v.codec !== 'avc1' || v.fps !== 30) throw new ServiceError('Invalid video metadata.', 400);

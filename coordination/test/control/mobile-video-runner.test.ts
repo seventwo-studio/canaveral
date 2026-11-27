@@ -1,7 +1,9 @@
 import test from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CliClient } from '../../src/account-cli.ts';
@@ -12,14 +14,16 @@ import { MobileProvider } from '../../src/providers/mobile.ts';
 import type { Authorized, DeviceRequest, NativePipe, RecordValue } from '../../src/providers/mobile.ts';
 import { MobileVideoClient } from '../../src/video-sdk.ts';
 import { object, ServiceError } from '../../src/errors.ts';
-import { readRecord } from '../../src/runtime-process.ts';
+import { SessionConnection } from '../../src/control/sessions.ts';
+import { LiveCaptureHub } from '../../src/live-capture.ts';
+import { readRecord, saveRecord } from '../../src/runtime-process.ts';
 
 function box(type: string, body = Buffer.alloc(0)): Buffer { const header = Buffer.alloc(8); header.writeUInt32BE(8 + body.length); header.write(type, 4); return Buffer.concat([header, body]); }
 // Container envelopes prove transport/accounting only; these are not decodable video frames.
 const mp4 = Buffer.concat([box('ftyp', Buffer.from('isom0000')), box('moov'), box('moof'), box('mdat', Buffer.from('fixture encoded video'))]);
 
 /** Real controller, broker, HostRunner and SDK; no installed mobile or encoder executable runs. */
-test('runner streams owned video through the real broker without blocking input or replaying capture', { timeout: 30000 }, async t => {
+async function fixture(t: TestContext) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mobile-video-runner-'))), admin = randomBytes(32).toString('base64url'), enrollment = randomBytes(32).toString('base64url');
   const adminFile = join(root, 'admin.token'), enrollmentFile = join(root, 'enrollment.token');
   writeFileSync(adminFile, admin, { mode: 0o600 }); writeFileSync(enrollmentFile, enrollment, { mode: 0o600 });
@@ -27,6 +31,7 @@ test('runner streams owned video through the real broker without blocking input 
     controllerId: randomUUID(), listen: { host: '127.0.0.1', port: 0 } });
   let runner: HostRunner | undefined, release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
+  const opened = Promise.withResolvers<void>();
   t.after(async () => { release(); await runner?.close(); await controller.close(); rmSync(root, { recursive: true, force: true }); });
   const url = `http://127.0.0.1:${controller.address.port}`, client = new CliClient(url, admin), videoApi = new MobileVideoClient({ baseUrl: url, credential: admin, allowLoopbackHttp: true });
   const image: RecordValue = { id: 'android-video-fixture', revision: '1', os: 'android', arch: 'arm64', mode: 'device', minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 },
@@ -43,7 +48,7 @@ test('runner streams owned video through the real broker without blocking input 
       assert.equal(request.action, 'tap'); taps++; return { output: 'tap dispatched' };
     }
     async openVideo(_machine: RecordValue, _image: RecordValue, _folder: string, options: { fps: number; durationSeconds: number; bitRate: number }, check: Authorized): Promise<NativePipe> {
-      assert.deepEqual(options, { fps: 30, durationSeconds: 1, bitRate: 4_000_000 }); assert.ok(await check()); captures++;
+      assert.deepEqual(options, { fps: 30, durationSeconds: 1, bitRate: 4_000_000 }); assert.ok(await check()); captures++; opened.resolve();
       let read = false, closed = false;
       return { async read() { await gate; if (read) return Buffer.alloc(0); read = true; return raw; }, async wait() { return 0; },
         async write() { throw new Error('No video source input'); }, async end() { throw new Error('No source EOF injection'); },
@@ -71,26 +76,38 @@ test('runner streams owned video through the real broker without blocking input 
   }
   await runner.poll(); await runner.step(); await eventually(() => runner!.reports.get(machineId)?.state === 'running'); await runner.poll();
   const reservedCpu = async () => Number(object(((await client.request('GET', '/v1/hosts')).hosts as RecordValue[]).find(host => host.id === hostId)!.reserved).cpu);
-  const initialCpu = await reservedCpu(), request = { id: randomUUID(), fps: 30, durationSeconds: 1, bitRate: 4_000_000 }, session = await videoApi.create(machineId, request);
+  const request = { fps: 30, durationSeconds: 1, bitRate: 4_000_000 };
+  return { url, admin, config, client, videoApi, machineId, request, eventually, reservedCpu, encoderInput, release, raw, opened: opened.promise,
+    get runner() { return runner!; }, get captures() { return captures; }, get taps() { return taps; },
+    get sourceClosed() { return sourceClosed; }, get encoderClosed() { return encoderClosed; },
+    async restart(afterClose?: () => void) { await runner!.close(); afterClose?.(); runner = makeRunner(); await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step(); },
+  };
+}
+
+test('runner streams owned video through the real broker without blocking input or replaying capture', { timeout: 30000 }, async t => {
+  const f = await fixture(t), { client, videoApi, machineId, config, eventually, reservedCpu, release, encoderInput, raw } = f;
+  let runner = f.runner;
+  const request = { ...f.request, id: randomUUID() }, initialCpu = await reservedCpu(), session = await videoApi.create(machineId, request);
   assert.equal(await reservedCpu(), initialCpu + 1);
   const connecting = videoApi.connect(session, { timeoutMs: 5000 });
   await runner.poll(); await runner.step(); const video = await connecting;
-  assert.equal(captures, 1);
+  await eventually(() => f.captures === 1);
+  assert.equal(readRecord(join(config.stateDir, 'work', 'video', `${session.id}.json`)).state, 'started');
   const received: Buffer[] = [], recording = video.record({ write(bytes) { const count = Math.min(5, bytes.length); received.push(Buffer.from(bytes.subarray(0, count))); return count; } });
   const operationId = randomUUID();
   await client.request('POST', `/v1/machines/${machineId}/operations`, { id: operationId, action: 'tap', arguments: { x: 12, y: 34 } });
   await runner.poll(); await runner.step(); await eventually(() => runner!.deviceReports.get(operationId)?.state === 'succeeded');
-  assert.equal(taps, 1, 'a paused capture must leave discrete input available'); assert.equal(sourceClosed, 0);
+  assert.equal(f.taps, 1, 'a paused capture must leave discrete input available'); assert.equal(f.sourceClosed, 0);
   release();
   const finish = await recording;
   assert.deepEqual(Buffer.concat(received), mp4); assert.deepEqual(Buffer.concat(encoderInput), raw);
   assert.deepEqual(finish, { type: 'finish', bytes: mp4.length, sha256: createHash('sha256').update(mp4).digest('hex'), cleaned: true });
   assert.equal((await videoApi.inspect(machineId, session.id)).ackReceived, true);
-  assert.equal(sourceClosed, 1); assert.equal(encoderClosed, 1); assert.equal(await reservedCpu(), initialCpu);
+  assert.equal(f.sourceClosed, 1); assert.equal(f.encoderClosed, 1); assert.equal(await reservedCpu(), initialCpu);
   const replay = await videoApi.create(machineId, request); assert.equal(replay.id, session.id); assert.equal(replay.generation, session.generation); assert.equal(replay.state, 'finished');
-  await runner.poll(); await runner.step(); assert.equal(captures, 1);
-  await runner.close(); runner = makeRunner(); await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step();
-  assert.equal(captures, 1, 'persisted session identity cannot replay native capture after runner restart');
+  await runner.poll(); await runner.step(); assert.equal(f.captures, 1);
+  await f.restart(); runner = f.runner;
+  assert.equal(f.captures, 1, 'persisted session identity cannot replay native capture after runner restart');
 
   const dropped = await videoApi.create(machineId, { ...request, id: randomUUID() });
   const next = videoApi.connect(dropped, { timeoutMs: 5000 });
@@ -126,3 +143,240 @@ test('runner streams owned video through the real broker without blocking input 
   assert.equal((await videoApi.inspect(machineId, legacy.id)).ackReceived, undefined);
   assert.equal(await reservedCpu(), initialCpu);
 });
+
+test('a heartbeat that delivers a recording and live view invalidates the cached negative result', { timeout: 15000 }, async t => {
+  const f = await fixture(t), runner = f.runner;
+  const pending = () => (runner as unknown as { recordingPending(id: string): boolean }).recordingPending(f.machineId);
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const send = runner.transport.request.bind(runner.transport), viewId = randomUUID();
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    const response = await send(...args);
+    if (args[1].endsWith('/heartbeat')) {
+      assert.ok((response.videoSessions as RecordValue[]).some(job => job.id === recording.id));
+      assert.equal(pending(), false);
+      // Deliver both assignments in the same heartbeat, while the negative result is cached.
+      return { ...response, liveViews: [{ id: viewId, machineId: f.machineId }] };
+    }
+    return response;
+  });
+  await runner.poll();
+  assert.equal(pending(), true);
+});
+
+test('a broker close before recording commitment prevents dispatch while the runner still sees an open socket', { timeout: 15000 }, async t => {
+  const f = await fixture(t), runner = f.runner;
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const stop = Promise.withResolvers<void>(), waiting = Promise.withResolvers<void>();
+  const brokerClosed = Promise.withResolvers<void>(), deliverClose = Promise.withResolvers<void>(), startSent = Promise.withResolvers<void>();
+  const proxy = createServer({ allowHalfOpen: true }, downstream => {
+    const upstream = createConnection({ host: '127.0.0.1', port: Number(new URL(f.url).port), allowHalfOpen: true });
+    downstream.pipe(upstream); upstream.pipe(downstream, { end: false });
+    upstream.once('end', () => { brokerClosed.resolve(); void deliverClose.promise.then(() => downstream.end()); });
+    upstream.on('error', () => {});
+    downstream.on('error', () => {});
+    downstream.once('close', () => upstream.destroy());
+  });
+  await new Promise<void>((resolve, reject) => { proxy.once('error', reject); proxy.listen(0, '127.0.0.1', resolve); });
+  const address = proxy.address();
+  assert.ok(address && typeof address !== 'string');
+  t.after(() => { deliverClose.resolve(); return new Promise<void>(resolve => proxy.close(() => resolve())); });
+  const begin = LiveCaptureHub.prototype.beginRecording;
+  t.mock.method(LiveCaptureHub.prototype, 'beginRecording', async function (this: LiveCaptureHub, ...args: Parameters<typeof begin>) {
+    const tap = await begin.apply(this, args);
+    waiting.resolve();
+    await stop.promise;
+    return tap;
+  });
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  let host: SessionConnection | undefined;
+  t.mock.method(SessionConnection, 'connect', async (_origin: string, path: string, token: string, options: Parameters<typeof connect>[3]) => {
+    assert.ok(path.startsWith('/v1/hosts/'));
+    host = await connect(`http://127.0.0.1:${address.port}`, path, token, options);
+    const send = host.sendControl.bind(host);
+    t.mock.method(host, 'sendControl', async (value: RecordValue) => {
+      try { await send(value); } finally { if (value.type === 'start') startSent.resolve(); }
+    });
+    return host;
+  });
+  const consumer = await connect(f.url, `/v1/machines/${f.machineId}/video-sessions/${recording.id}/${recording.generation}`, f.admin);
+  try {
+    await runner.poll(); await runner.step();
+    assert.equal((await consumer.receive(5) as RecordValue).type, 'ready');
+    await waiting.promise;
+    consumer.close();
+    await brokerClosed.promise;
+    assert.equal(host?.open, true);
+    assert.equal(host?.authorized(), true);
+    stop.resolve();
+    await Promise.race([startSent.promise, f.opened]);
+    deliverClose.resolve();
+    await f.eventually(async () => (await f.videoApi.inspect(f.machineId, recording.id)).cleaned === true);
+    assert.equal(f.captures, 0);
+  } finally { consumer.close(); stop.resolve(); deliverClose.resolve(); host?.close(); }
+});
+
+test('a broker close after committing a recording stops the started source and proves cleanup', { timeout: 15000 }, async t => {
+  const f = await fixture(t), recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const connecting = f.videoApi.connect(recording, { timeoutMs: 5000 });
+  await f.runner.poll(); await f.runner.step();
+  const consumer = await connecting;
+  try {
+    await f.opened;
+    assert.equal(f.sourceClosed, 0);
+    consumer.close();
+    await f.eventually(async () => (await f.videoApi.inspect(f.machineId, recording.id)).cleaned === true);
+    assert.equal(f.sourceClosed, 1);
+    assert.equal(f.encoderClosed, 1);
+  } finally { consumer.close(); }
+});
+
+test('a new runner refuses to record beside a live capture when an older controller does not negotiate', { timeout: 15000 }, async t => {
+  const f = await fixture(t), runner = f.runner;
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  t.mock.method(SessionConnection, 'connect', async (origin: string, path: string, token: string, options: Parameters<typeof connect>[3]) => {
+    const { videoHandoverProtocol: _, ...legacy } = options ?? {};
+    return connect(origin, path, token, legacy);
+  });
+  const send = runner.transport.request.bind(runner.transport);
+  let liveCaptures: RecordValue[] = [{ id: randomUUID(), generation: randomUUID(), machineId: f.machineId, state: 'disconnected' }];
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    const [method, path, body, ...rest] = args;
+    if (!path.endsWith('/heartbeat')) return send(...args);
+    const offer = { ...object(body.offer) };
+    delete offer.videoHandoverProtocol;
+    const response = await send(method, path, { ...body, offer }, ...rest);
+    const videoSessions = (response.videoSessions as RecordValue[]).map(job => {
+      const legacy = { ...job };
+      delete legacy.videoHandoverProtocol;
+      delete legacy.priorLiveCapture;
+      return legacy;
+    });
+    return { ...response, videoSessions, liveCaptures };
+  });
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const connecting = f.videoApi.connect(recording, { timeoutMs: 5000 });
+  await runner.poll(); await runner.step();
+  f.release();
+  await assert.rejects(async () => (await connecting).record({ write: bytes => bytes.length }), { code: 'session_incomplete' });
+  await f.eventually(async () => (await f.videoApi.inspect(f.machineId, recording.id)).cleaned === true);
+  assert.equal(f.captures, 0);
+
+  liveCaptures = [];
+  const solo = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const standalone = f.videoApi.connect(solo, { timeoutMs: 5000 });
+  await runner.poll(); await runner.step();
+  const finish = await (await standalone).record({ write: bytes => bytes.length });
+  assert.equal(finish.cleaned, true);
+  assert.equal(f.captures, 1);
+});
+
+test('a new runner refuses a late live view beside a legacy recording', { timeout: 15000 }, async t => {
+  const f = await fixture(t), runner = f.runner;
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const connection = f.videoApi.connect(recording, { timeoutMs: 5000 });
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  let liveAttachments = 0;
+  t.mock.method(SessionConnection, 'connect', async (origin: string, path: string, token: string, options: Parameters<typeof connect>[3]) => {
+    if (path.includes('/live-views/')) { liveAttachments++; throw new Error('Fixture live view has no broker peer.'); }
+    // A legacy controller ignores the new runner's offer on the recording socket.
+    const { videoHandoverProtocol: _, ...legacy } = options ?? {};
+    return connect(origin, path, token, legacy);
+  });
+  const request = runner.transport.request.bind(runner.transport);
+  const view = { id: randomUUID(), generation: randomUUID(), captureId: randomUUID(), captureGeneration: randomUUID(), machineId: f.machineId, state: 'pending' };
+  let deliverView = false;
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof request>) => {
+    const response = await request(...args);
+    if (!args[1].endsWith('/heartbeat')) return response;
+    // Legacy heartbeat responses have no version on the assignment either.
+    const videoSessions = (response.videoSessions as RecordValue[]).map(({ videoHandoverProtocol: _, ...job }) => job);
+    return { ...response, videoSessions, ...(deliverView ? { liveViews: [view] } : {}) };
+  });
+  await runner.poll(); await runner.step();
+  const consumer = await connection;
+  try {
+    await f.opened;
+    deliverView = true;
+    await runner.poll(); await runner.step();
+    assert.equal(liveAttachments, 0, 'the runner cannot attach a late live peer during a legacy recording');
+  } finally { consumer.close(); }
+});
+
+test('a runner refuses an unknown handover reply before opening the source', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  const consumer = await connect(f.url, `/v1/machines/${f.machineId}/video-sessions/${recording.id}/${recording.generation}`, f.admin);
+  t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
+    const host = await connect(...args);
+    Object.defineProperty(host, 'videoHandoverProtocol', { value: '2' });
+    return host;
+  });
+  const receipt = Promise.withResolvers<void>(), send = f.runner.transport.request.bind(f.runner.transport);
+  t.mock.method(f.runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    const result = await send(...args);
+    if (args[1].endsWith(`/video-sessions/${recording.id}/finish`)) receipt.resolve();
+    return result;
+  });
+  try {
+    await f.runner.poll(); await f.runner.step();
+    await Promise.race([receipt.promise, f.opened]);
+    assert.equal(f.captures, 0);
+    assert.equal((await f.videoApi.inspect(f.machineId, recording.id)).cleaned, true);
+  } finally { consumer.close(); }
+});
+
+for (const stage of ['waiting for live stop proof', 'waiting for start commitment'] as const) {
+  test(`restart proves a recording never dispatched when it crashed ${stage}`, { timeout: 15000 }, async t => {
+    const f = await fixture(t), runner = f.runner;
+    const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+    const path = join(f.config.stateDir, 'work', 'video', `${recording.id}.json`);
+    const connect = SessionConnection.connect.bind(SessionConnection);
+    const consumer = await connect(f.url, `/v1/machines/${f.machineId}/video-sessions/${recording.id}/${recording.generation}`, f.admin);
+    const waiting = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    let host: SessionConnection | undefined;
+    t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
+      host = await connect(...args);
+      if (stage === 'waiting for start commitment') {
+        const receive = host.receive.bind(host);
+        t.mock.method(host, 'receive', async (seconds: number) => {
+          if (seconds === 10) { waiting.resolve(); await release.promise; }
+          return receive(seconds);
+        });
+      }
+      return host;
+    });
+    if (stage === 'waiting for live stop proof') {
+      const begin = LiveCaptureHub.prototype.beginRecording;
+      t.mock.method(LiveCaptureHub.prototype, 'beginRecording', async function (this: LiveCaptureHub, ...args: Parameters<typeof begin>) {
+        const tap = await begin.apply(this, args);
+        waiting.resolve();
+        await release.promise;
+        return tap;
+      });
+    }
+    const send = runner.transport.request.bind(runner.transport);
+    t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+      if (args[1].endsWith(`/video-sessions/${recording.id}/finish`)) throw new Error('Crash loses the old process and its cleanup request.');
+      return send(...args);
+    });
+    try {
+      await runner.poll(); await runner.step();
+      assert.equal((await consumer.receive(5) as RecordValue).type, 'ready');
+      await waiting.promise;
+      assert.equal(f.captures, 0);
+      const crashJournal = readRecord(path);
+      host?.close();
+      release.resolve();
+      // Tear down the fixture process without retaining any write after the crash point.
+      // The restarted worker gets only the durable record present at that point.
+      await f.restart(() => saveRecord(path, crashJournal));
+      const active = (f.runner as unknown as { active: Map<string, { promise: Promise<void> }> }).active;
+      await active.get(`video:${recording.id}`)?.promise;
+
+      assert.equal((await f.videoApi.inspect(f.machineId, recording.id)).cleaned, true);
+      assert.equal(f.captures, 0);
+      assert.equal((await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() })).state, 'pending');
+    } finally { consumer.close(); host?.close(); release.resolve(); }
+  });
+}

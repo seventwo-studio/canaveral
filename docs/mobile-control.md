@@ -1311,8 +1311,9 @@ A leased device's screen is visible to its lease holder only. The lease route
 refuses the application key, the operator, account credentials and another lease's
 key with 401, as every lease session does. The machine route refuses a leased
 machine with 409, so no operator or owner view of a leased device exists. On the
-machine route another account receives 404, a token without `machines:access` 403,
-and a view is bound to the credential that created it: another credential of the
+machine route an unowned device returns 404, as does another account's device for
+a non-administrator. A token without `machines:access` receives 403.
+A view is bound to the credential that created it: another credential of the
 same owner cannot read or close it. iOS simulator leases do not exist yet; their
 live view arrives with them.
 
@@ -1422,8 +1423,15 @@ A device never runs two native captures at once; the regime the
 a recording of one device therefore coexist as follows.
 
 - The "one per machine" rule keeps its meaning for each kind: one recording, and
-  one live capture. A live capture that is still running does not refuse a
-  recording. Both share one host slot and reservation on the same device. A recording
+  one live capture. They can share a host slot and reservation on the same device
+  when both the runner and controller support handover proof. The runner advertises
+  `videoHandoverProtocol: 1` for admission and negotiates version 1 during the
+  authenticated recording WebSocket upgrade. The result belongs to that recording
+  generation, so later heartbeats cannot change it. A standalone recording works
+  across versions. While a legacy recording is attached, a new controller refuses
+  live views with 409 `capability_unsupported` and a new runner declines live
+  attachments. A legacy recording cannot start beside an existing live capture.
+  An explicit unknown version ends the attempt before native dispatch. A recording
   short of host capacity can end the oldest eligible live capture on another device.
   That capture keeps its reservation until its own cleanup is proven.
 - **A recording takes the device.** Before a recording opens its native source,
@@ -1434,12 +1442,27 @@ a recording of one device therefore coexist as follows.
   seconds, and the delay for a live epoch has no native measurement. The runner
   waits at most 15 seconds for the proof, and counts that time separately from
   the requested recording duration.
-  If the stop cannot be proven, the recording captures nothing and ends with
-  `session_incomplete`; its session is cleaned because it started no capture.
+  The recording retains the ID and generation of the live capture present at
+  admission. If that capture ends before the recording attaches, the runner
+  still requires its cleanup proof. Before dispatch, the runner requests a start
+  commitment from the broker. The controller checks every live capture on the
+  device, including one admitted after the recording. An attached live capture
+  needs either a final cleanup receipt or positive stop proof for its ID and
+  generation. The runner pauses new live attachments before taking the proof
+  snapshot and can attach them after commitment. If the pair closes before
+  commitment, the recording cannot open a source. A later close cancels the
+  committed recording and uses the normal
+  stop and cleanup proof. If the live stop cannot be proven, the recording
+  captures nothing and ends incomplete. Its session is cleaned because it started
+  no capture, and the unproven capture keeps its reservation. If the runner dies
+  before dispatch, it can report positive cleanup after restart from its
+  pre-dispatch journal. A journal already marked `started` still requires
+  positive proof of cleanup.
 - **Viewers follow the recording.** While it runs, the runner also feeds the
   recording's own stream to the device's viewers, as a new epoch. A viewer who joins
-  during a recording joins that stream. The recording receives exactly the bytes it
-  would have received alone, and its digest, receipt and cleanup are unchanged;
+  during a recording with committed handover joins that stream. The recording
+  receives exactly the bytes it would have received alone, and its digest,
+  receipt and cleanup are unchanged;
   viewers see the recording's bit rate for its duration. A stream the runner cannot
   segment ends the copy for the viewers, never the recording.
 - **Afterwards.** When the recording ends with positive cleanup, the live capture
@@ -1461,6 +1484,9 @@ a recording of one device therefore coexist as follows.
 
   A recording beside another recording of the device that is running or not proven
   clean keeps its earlier answer, a plain 409.
+
+The handover negotiation, start commitment and broker-close races are covered by
+portable fixtures. Native handover and cancellation timing still need acceptance.
 
 ### Endings
 
