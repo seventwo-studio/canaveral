@@ -16,7 +16,7 @@ import { MobileVideoClient } from '../../src/video-sdk.ts';
 import { object, ServiceError } from '../../src/errors.ts';
 import { SessionConnection } from '../../src/control/sessions.ts';
 import { LiveCaptureHub } from '../../src/live-capture.ts';
-import { readRecord } from '../../src/runtime-process.ts';
+import { readRecord, saveRecord } from '../../src/runtime-process.ts';
 
 function box(type: string, body = Buffer.alloc(0)): Buffer { const header = Buffer.alloc(8); header.writeUInt32BE(8 + body.length); header.write(type, 4); return Buffer.concat([header, body]); }
 // Container envelopes prove transport/accounting only; these are not decodable video frames.
@@ -80,7 +80,7 @@ async function fixture(t: TestContext) {
   return { url, admin, config, client, videoApi, machineId, request, eventually, reservedCpu, encoderInput, release, raw, opened: opened.promise,
     get runner() { return runner!; }, get captures() { return captures; }, get taps() { return taps; },
     get sourceClosed() { return sourceClosed; }, get encoderClosed() { return encoderClosed; },
-    async restart() { await runner!.close(); runner = makeRunner(); await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step(); },
+    async restart(afterClose?: () => void) { await runner!.close(); afterClose?.(); runner = makeRunner(); await runner.initializeProviders(); await runner.connect(); await runner.poll(); await runner.step(); },
   };
 }
 
@@ -92,6 +92,7 @@ test('runner streams owned video through the real broker without blocking input 
   const connecting = videoApi.connect(session, { timeoutMs: 5000 });
   await runner.poll(); await runner.step(); const video = await connecting;
   await eventually(() => f.captures === 1);
+  assert.equal(readRecord(join(config.stateDir, 'work', 'video', `${session.id}.json`)).state, 'started');
   const received: Buffer[] = [], recording = video.record({ write(bytes) { const count = Math.min(5, bytes.length); received.push(Buffer.from(bytes.subarray(0, count))); return count; } });
   const operationId = randomUUID();
   await client.request('POST', `/v1/machines/${machineId}/operations`, { id: operationId, action: 'tap', arguments: { x: 12, y: 34 } });
@@ -229,8 +230,13 @@ test('a broker close after committing a recording stops the started source and p
   } finally { consumer.close(); }
 });
 
-test('a new runner refuses to record beside a live capture when an older controller supplies no handover flag', { timeout: 15000 }, async t => {
+test('a new runner refuses to record beside a live capture when an older controller does not negotiate', { timeout: 15000 }, async t => {
   const f = await fixture(t), runner = f.runner;
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  t.mock.method(SessionConnection, 'connect', async (origin: string, path: string, token: string, options: Parameters<typeof connect>[3]) => {
+    const { videoHandoverProtocol: _, ...legacy } = options ?? {};
+    return connect(origin, path, token, legacy);
+  });
   const send = runner.transport.request.bind(runner.transport);
   let liveCaptures: RecordValue[] = [{ id: randomUUID(), generation: randomUUID(), machineId: f.machineId, state: 'disconnected' }];
   t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
@@ -263,3 +269,114 @@ test('a new runner refuses to record beside a live capture when an older control
   assert.equal(finish.cleaned, true);
   assert.equal(f.captures, 1);
 });
+
+test('a new runner refuses a late live view beside a legacy recording', { timeout: 15000 }, async t => {
+  const f = await fixture(t), runner = f.runner;
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const connection = f.videoApi.connect(recording, { timeoutMs: 5000 });
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  let liveAttachments = 0;
+  t.mock.method(SessionConnection, 'connect', async (origin: string, path: string, token: string, options: Parameters<typeof connect>[3]) => {
+    if (path.includes('/live-views/')) { liveAttachments++; throw new Error('Fixture live view has no broker peer.'); }
+    // A legacy controller ignores the new runner's offer on the recording socket.
+    const { videoHandoverProtocol: _, ...legacy } = options ?? {};
+    return connect(origin, path, token, legacy);
+  });
+  const request = runner.transport.request.bind(runner.transport);
+  const view = { id: randomUUID(), generation: randomUUID(), captureId: randomUUID(), captureGeneration: randomUUID(), machineId: f.machineId, state: 'pending' };
+  let deliverView = false;
+  t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof request>) => {
+    const response = await request(...args);
+    if (!args[1].endsWith('/heartbeat')) return response;
+    // Legacy heartbeat responses have no version on the assignment either.
+    const videoSessions = (response.videoSessions as RecordValue[]).map(({ videoHandoverProtocol: _, ...job }) => job);
+    return { ...response, videoSessions, ...(deliverView ? { liveViews: [view] } : {}) };
+  });
+  await runner.poll(); await runner.step();
+  const consumer = await connection;
+  try {
+    await f.opened;
+    deliverView = true;
+    await runner.poll(); await runner.step();
+    assert.equal(liveAttachments, 0, 'the runner cannot attach a late live peer during a legacy recording');
+  } finally { consumer.close(); }
+});
+
+test('a runner refuses an unknown handover reply before opening the source', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  const consumer = await connect(f.url, `/v1/machines/${f.machineId}/video-sessions/${recording.id}/${recording.generation}`, f.admin);
+  t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
+    const host = await connect(...args);
+    Object.defineProperty(host, 'videoHandoverProtocol', { value: '2' });
+    return host;
+  });
+  const receipt = Promise.withResolvers<void>(), send = f.runner.transport.request.bind(f.runner.transport);
+  t.mock.method(f.runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+    const result = await send(...args);
+    if (args[1].endsWith(`/video-sessions/${recording.id}/finish`)) receipt.resolve();
+    return result;
+  });
+  try {
+    await f.runner.poll(); await f.runner.step();
+    await Promise.race([receipt.promise, f.opened]);
+    assert.equal(f.captures, 0);
+    assert.equal((await f.videoApi.inspect(f.machineId, recording.id)).cleaned, true);
+  } finally { consumer.close(); }
+});
+
+for (const stage of ['waiting for live stop proof', 'waiting for start commitment'] as const) {
+  test(`restart proves a recording never dispatched when it crashed ${stage}`, { timeout: 15000 }, async t => {
+    const f = await fixture(t), runner = f.runner;
+    const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+    const path = join(f.config.stateDir, 'work', 'video', `${recording.id}.json`);
+    const connect = SessionConnection.connect.bind(SessionConnection);
+    const consumer = await connect(f.url, `/v1/machines/${f.machineId}/video-sessions/${recording.id}/${recording.generation}`, f.admin);
+    const waiting = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    let host: SessionConnection | undefined;
+    t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
+      host = await connect(...args);
+      if (stage === 'waiting for start commitment') {
+        const receive = host.receive.bind(host);
+        t.mock.method(host, 'receive', async (seconds: number) => {
+          if (seconds === 10) { waiting.resolve(); await release.promise; }
+          return receive(seconds);
+        });
+      }
+      return host;
+    });
+    if (stage === 'waiting for live stop proof') {
+      const begin = LiveCaptureHub.prototype.beginRecording;
+      t.mock.method(LiveCaptureHub.prototype, 'beginRecording', async function (this: LiveCaptureHub, ...args: Parameters<typeof begin>) {
+        const tap = await begin.apply(this, args);
+        waiting.resolve();
+        await release.promise;
+        return tap;
+      });
+    }
+    const send = runner.transport.request.bind(runner.transport);
+    t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
+      if (args[1].endsWith(`/video-sessions/${recording.id}/finish`)) throw new Error('Crash loses the old process and its cleanup request.');
+      return send(...args);
+    });
+    try {
+      await runner.poll(); await runner.step();
+      assert.equal((await consumer.receive(5) as RecordValue).type, 'ready');
+      await waiting.promise;
+      assert.equal(f.captures, 0);
+      const crashJournal = readRecord(path);
+      host?.close();
+      release.resolve();
+      // Tear down the fixture process without retaining any write after the crash point.
+      // The restarted worker gets only the durable record present at that point.
+      await f.restart(() => saveRecord(path, crashJournal));
+      const active = (f.runner as unknown as { active: Map<string, { promise: Promise<void> }> }).active;
+      await active.get(`video:${recording.id}`)?.promise;
+
+      assert.equal((await f.videoApi.inspect(f.machineId, recording.id)).cleaned, true);
+      assert.equal(f.captures, 0);
+      assert.equal((await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() })).state, 'pending');
+    } finally { consumer.close(); host?.close(); release.resolve(); }
+  });
+}

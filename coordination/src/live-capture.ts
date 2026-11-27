@@ -72,6 +72,7 @@ export interface RecordingTap {
   waitedMs: number; proven: boolean;
   /** Identity of the paused capture or the prior capture whose stop was proven. */
   liveStop?: Pick<LiveCaptureJob, 'id' | 'generation'>;
+  allowViewers(): void;
   push(data: Uint8Array): void; end(cleaned: boolean): void;
 }
 /** Thrown by `acquire`. `journaled` tells whether this runner holds a journal for the capture:
@@ -188,7 +189,7 @@ class Capture {
   /** Resolves once no native epoch of this capture is running. */
   async settled(): Promise<void> { while (this.running) await this.running; }
   private wanted(): boolean {
-    return !this.closing && !this.ended && !this.halted && !!this.source && !this.hub.recording(this.job.machineId) && this.source.recordingQueued?.() !== true && [...this.subscribers].some(s => !s.closed && s.live());
+    return !this.closing && !this.ended && !this.halted && !!this.source && !this.hub.recordingPaused(this.job.machineId) && this.source.recordingQueued?.() !== true && [...this.subscribers].some(s => !s.closed && s.live());
   }
   private attach(feed: Feed): void {
     this.detach(); this.feed = feed; this.epoch++;
@@ -211,7 +212,7 @@ class Capture {
   }
   unsubscribe(s: Subscription): void {
     if (this.subscribers.delete(s) && !this.subscribers.size && this.running && !this.ended &&
-        !this.hub.recording(this.job.machineId) && this.source?.recordingQueued?.() !== true) {
+        !this.hub.recordingPaused(this.job.machineId) && this.source?.recordingQueued?.() !== true) {
       this.lastViewerFence = this.source?.leaseFence?.();
     }
     this.poke();
@@ -248,7 +249,7 @@ class Capture {
       if (this.wanted()) return true;
       // Preemption or a departed viewer can stop an epoch independently of a later fence.
       const stop = this.lastViewerFence ?? (!this.closing && !this.ended && this.subscribers.size &&
-        !this.hub.recording(this.job.machineId) && source.recordingQueued?.() !== true ? source.leaseFence?.() : undefined);
+        !this.hub.recordingPaused(this.job.machineId) && source.recordingQueued?.() !== true ? source.leaseFence?.() : undefined);
       if (stop) throw new CaptureFenced(stop);
       return false;
     };
@@ -317,10 +318,12 @@ class Capture {
 
 export class LiveCaptureHub {
   private readonly captures = new Map<string, Capture>();
-  private readonly recordings = new Map<string, Feed>();
+  private readonly recordings = new Map<string, { feed?: Feed }>();
   private closed = false;
   constructor(readonly options: LiveHubOptions) {}
-  recording(machineId: string): Feed | undefined { return this.recordings.get(machineId); }
+  recording(machineId: string): Feed | undefined { return this.recordings.get(machineId)?.feed; }
+  recordingPaused(machineId: string): boolean { return this.recordings.has(machineId); }
+  acceptsViews(machineId: string): boolean { return !this.recordingPaused(machineId) || this.recording(machineId) !== undefined; }
   journal(job: LiveCaptureJob, state: Record<string, unknown>): void { this.options.save(job.id, { generation: job.generation, machineId: job.machineId, ...state }); }
   forget(capture: Capture): void { if (this.captures.get(capture.job.machineId) === capture) this.captures.delete(capture.job.machineId); }
   /** True while this process holds the capture; its saved journal then describes live work. */
@@ -332,6 +335,7 @@ export class LiveCaptureHub {
     const journaled = () => { try { return this.options.load(job.id) !== undefined; } catch { return false; } };
     // A stopping runner takes no new capture, and never attaches for one it has not journaled.
     if (this.closed) throw new LiveCaptureRefused('This runner is stopping.', false);
+    if (!this.acceptsViews(job.machineId)) throw new LiveCaptureRefused('The recording is not sharing its capture.', false);
     let capture = this.captures.get(job.machineId);
     if (capture) {
       if (capture.job.id !== job.id || capture.job.generation !== job.generation || capture.closing) throw new LiveCaptureRefused('The device\'s live capture is ending.', journaled());
@@ -349,10 +353,12 @@ export class LiveCaptureHub {
   /** Pause live epochs and wait for stop proof before native recording dispatch. The capture
    * bound at admission can leave the hub while the recording is still waiting for its viewer. */
   async beginRecording(machineId: string, prior?: PriorLiveCapture): Promise<RecordingTap> {
-    const began = performance.now(), capture = this.captures.get(machineId);
-    // The controller admits one recording per device; a second would simply not be fed to viewers.
-    const feed = this.recordings.has(machineId) ? undefined : new Feed();
-    if (feed) this.recordings.set(machineId, feed);
+    const began = performance.now();
+    // Install the pause before taking the proof snapshot. No new capture may attach
+    // until this recording proves its start or ends. Existing handles are in the snapshot.
+    const recording: { feed?: Feed } | undefined = this.recordings.has(machineId) ? undefined : {};
+    if (recording) this.recordings.set(machineId, recording);
+    const capture = this.captures.get(machineId);
     let proven = true;
     if (capture) {
       capture.poke();
@@ -371,14 +377,19 @@ export class LiveCaptureHub {
     return {
       waitedMs: performance.now() - began, proven,
       ...(proven && stopped ? { liveStop: { id: stopped.id, generation: stopped.generation } } : {}),
+      allowViewers: () => {
+        if (!proven || ended || !recording || recording.feed) return;
+        recording.feed = new Feed();
+        this.captures.get(machineId)?.poke();
+      },
       // A stream the segmenter refuses ends the tee for the viewers, never the recording.
-      push: data => { if (!ended && feed) try { feed.push(data); } catch { /* viewers simply receive no more of this stream */ } },
+      push: data => { if (!ended) try { recording?.feed?.push(data); } catch { /* viewers simply receive no more of this stream */ } },
       end: cleaned => {
         if (ended) return; ended = true;
-        if (!feed) return;
-        if (this.recordings.get(machineId) === feed) this.recordings.delete(machineId);
+        if (!recording) return;
+        this.recordings.delete(machineId);
         const current = this.captures.get(machineId);
-        current?.detach(feed);
+        if (recording.feed) current?.detach(recording.feed);
         // A recording whose stop is unproven leaves the device without a provable capture state.
         if (!cleaned) current?.finish('capture_unavailable');
         current?.poke();

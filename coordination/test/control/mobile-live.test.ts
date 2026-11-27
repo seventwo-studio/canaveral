@@ -305,6 +305,7 @@ test("a recording stops the live run first, feeds the viewers its own stream, an
   const tap = await f.hub.beginRecording(JOB.machineId);
   assert.equal(tap.proven, true); assert.ok(tap.waitedMs < 2000);
   assert.equal(f.stats.open, 0, "the live run was stopped before the recording starts");
+  tap.allowViewers();
   const recording = Buffer.concat([initSegment(), fragment(0, true, Buffer.from("rec-0")), fragment(1, false, Buffer.from("rec-1")), fragment(2, true, Buffer.from("rec-2"))]);
   for (let offset = 0; offset < recording.length; offset += 11) tap.push(recording.subarray(offset, offset + 11));
   const epoch = (item: LiveViewItem) => (item as { epoch: number }).epoch;
@@ -390,6 +391,7 @@ test("an absent live capture requires a positive journal for the same machine an
 test("a viewer that cannot keep up is skipped ahead to a key frame instead of holding the capture back", async () => {
   const f = hubFixture();
   const tap = await f.hub.beginRecording(JOB.machineId);
+  tap.allowViewers();
   tap.push(initSegment());
   const handle = f.hub.acquire(JOB, f.source);
   const slow = handle.subscribe(() => true), fast = handle.subscribe(() => true);
@@ -444,4 +446,22 @@ test("a stopping or journal-less hub refuses captures without a journal, and sto
   const ending = hubFixture({ stop: "hangs" }), first = ending.hub.acquire(JOB, ending.source), watching = first.subscribe(() => true);
   await take(watching, 2); watching.close(); first.release();
   assert.throws(() => ending.hub.acquire(JOB, ending.source), (error: unknown) => error instanceof LiveCaptureRefused && error.journaled === true);
+});
+
+test("the recording pause blocks a new capture from attaching after the proof snapshot", async () => {
+  const f = hubFixture();
+  const tap = await f.hub.beginRecording(JOB.machineId);
+  let handle: ReturnType<LiveCaptureHub["acquire"]> | undefined;
+  try {
+    assert.equal(tap.liveStop, undefined);
+    assert.throws(() => { handle = f.hub.acquire(JOB, f.source); }, { journaled: false });
+    assert.equal(f.journal.has(JOB.id), false);
+    tap.allowViewers();
+    handle = f.hub.acquire(JOB, f.source);
+    assert.equal(f.journal.get(JOB.id)?.state, "attaching");
+  } finally {
+    handle?.release();
+    tap.end(true);
+    await f.hub.close();
+  }
 });

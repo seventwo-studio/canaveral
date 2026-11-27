@@ -213,6 +213,7 @@ export class MobileLiveViews implements ControlModule {
         if (uuid(command.ownerId) !== r.host) return fail(403);
         this.machines.authenticateHost(r.host, command.token);
         if (r.host_attached) return fail(409);
+        this.video.requireLiveHandover(db, r.machine);
         db.prepare('UPDATE mobile_live_views SET host_attached=1,state=? WHERE id=?').run(r.consumer_attached ? 'ready' : 'attaching', r.id);
         if (r.consumer_attached) this.started(db, r);
         // The runner starts native capture only after a view's host peer was accepted here, so a
@@ -221,6 +222,7 @@ export class MobileLiveViews implements ControlModule {
       } else {
         const owner = r.lease ?? r.machine, digest = r.lease ? leaseDigest(command.token) : tokenHash(command.token);
         if (uuid(command.ownerId) !== owner || digest !== r.credential || r.consumer_attached) return fail(403);
+        this.video.requireLiveHandover(db, r.machine);
         db.prepare('UPDATE mobile_live_views SET consumer_attached=1,state=? WHERE id=?').run(r.host_attached ? 'ready' : 'attaching', r.id);
         if (r.host_attached) this.started(db, r);
       }
@@ -242,6 +244,7 @@ export class MobileLiveViews implements ControlModule {
    * prevent it: the runner feeds the views from the recording's stream until it ends. */
   private admit(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, ttl: number, lease: { id: string; consumer: string; credential: string; member: string } | null): Row {
     requireHostAdmission(db, String(m.host));
+    this.video.requireLiveHandover(db, String(m.id));
     this.limits(db, m, credential);
     const running = db.prepare("SELECT * FROM mobile_video_sessions WHERE machine=? AND kind='live' AND state IN ('pending','attaching','ready')").get(String(m.id)) as unknown as VideoSessionRow | undefined;
     const capture = running ?? this.video.admitLiveCapture(db, m, CAPTURE_REQUEST, LIVE_VIEW_SECONDS, lease);

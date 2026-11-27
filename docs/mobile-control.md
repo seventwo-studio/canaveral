@@ -1425,11 +1425,13 @@ a recording of one device therefore coexist as follows.
 - The "one per machine" rule keeps its meaning for each kind: one recording, and
   one live capture. They can share a host slot and reservation on the same device
   when both the runner and controller support handover proof. The runner advertises
-  `videoHandoverProtocol: 1` and the controller confirms it on the recording
-  assignment. With an older runner, the controller refuses the second capture
-  with 409 `capability_unsupported`. A new runner refuses to start a recording
-  alongside a live capture if its controller did not confirm support. A standalone
-  recording works across versions. A recording
+  `videoHandoverProtocol: 1` for admission and negotiates version 1 during the
+  authenticated recording WebSocket upgrade. The result belongs to that recording
+  generation, so later heartbeats cannot change it. A standalone recording works
+  across versions. While a legacy recording is attached, a new controller refuses
+  live views with 409 `capability_unsupported` and a new runner declines live
+  attachments. A legacy recording cannot start beside an existing live capture.
+  An explicit unknown version ends the attempt before native dispatch. A recording
   short of host capacity can end the oldest eligible live capture on another device.
   That capture keeps its reservation until its own cleanup is proven.
 - **A recording takes the device.** Before a recording opens its native source,
@@ -1446,15 +1448,21 @@ a recording of one device therefore coexist as follows.
   commitment from the broker. The controller checks every live capture on the
   device, including one admitted after the recording. An attached live capture
   needs either a final cleanup receipt or positive stop proof for its ID and
-  generation. If the pair closes before commitment, the recording cannot open
-  a source. A later close cancels the committed recording and uses the normal
+  generation. The runner pauses new live attachments before taking the proof
+  snapshot and can attach them after commitment. If the pair closes before
+  commitment, the recording cannot open a source. A later close cancels the
+  committed recording and uses the normal
   stop and cleanup proof. If the live stop cannot be proven, the recording
   captures nothing and ends incomplete. Its session is cleaned because it started
-  no capture, and the unproven capture keeps its reservation.
+  no capture, and the unproven capture keeps its reservation. If the runner dies
+  before dispatch, it can report positive cleanup after restart from its
+  pre-dispatch journal. A journal already marked `started` still requires
+  positive proof of cleanup.
 - **Viewers follow the recording.** While it runs, the runner also feeds the
   recording's own stream to the device's viewers, as a new epoch. A viewer who joins
-  during a recording joins that stream. The recording receives exactly the bytes it
-  would have received alone, and its digest, receipt and cleanup are unchanged;
+  during a recording with committed handover joins that stream. The recording
+  receives exactly the bytes it would have received alone, and its digest,
+  receipt and cleanup are unchanged;
   viewers see the recording's bit rate for its duration. A stream the runner cannot
   segment ends the copy for the viewers, never the recording.
 - **Afterwards.** When the recording ends with positive cleanup, the live capture

@@ -295,6 +295,7 @@ export interface SessionCommandClient { request(command: SessionCommand | VideoS
 export type SessionFamily = 'video' | 'display' | 'live' | 'tunnel';
 /** Route segment and command prefix of each family, and who may attach its consumer side. */
 const FAMILIES = { video: { segment: 'video-sessions', owners: 'hosts|machines|leases' }, display: { segment: 'display-sessions', owners: 'hosts|machines' }, live: { segment: 'live-views', owners: 'hosts|machines|leases' }, tunnel: { segment: 'tunnels', owners: 'hosts|leases' } } as const;
+const VIDEO_HANDOVER_HEADER = 'x-canaveral-video-handover-protocol';
 interface Pair {
   view: { id: string; generation: string; capability: RelayCapability; direction?: string; videoHandoverProtocol?: number }; peers: Partial<Record<SessionSide, SocketPeer>>; started: Promise<void>; start(): void; closed: boolean;
   /** Negotiated on host attachment. A start is committed at most once per pair. */
@@ -446,6 +447,12 @@ function upgradeRequest(req: IncomingMessage, family?: SessionFamily): { key: st
   if (typeof key !== "string" || !/^[A-Za-z0-9+/]{22}==$/.test(key) || Buffer.from(key, "base64").toString("base64") !== key || !authorization?.startsWith("Bearer ")) throw new ServiceError("Invalid session WebSocket credentials or key.", 400);
   const side: SessionSide = p[2] === "hosts" ? "host" : "consumer";
   const command: AttachCommand = { type: family ? `${FAMILIES[family].segment}.attach` : 'sessions.attach', sessionId: identifier(p[5]), generation: identifier(p[6]), side, ownerId: identifier(p[3]), token: authorization.slice(7) };
+  if (h[VIDEO_HANDOVER_HEADER] !== undefined) {
+    if (command.type !== 'video-sessions.attach' || side !== 'host' || h[VIDEO_HANDOVER_HEADER] !== '1') {
+      throw new ServiceError('Unsupported video handover protocol.', 400, { code: 'capability_unsupported' });
+    }
+    command.videoHandoverProtocol = 1;
+  }
   const controller = h["x-canaveral-controller-id"], generation = h["x-canaveral-runner-generation"], incarnation = h["x-canaveral-incarnation-id"];
   if (side === "host" && [controller, generation, incarnation].some(x => x !== undefined)) {
     if (command.type !== 'sessions.attach') throw new ServiceError('Owner session host binding headers are unsupported.', 400);
@@ -553,12 +560,14 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
           pair = { view, peers: {}, started, start, closed: false, ...(family === 'tunnel' ? { gate: { checked: 0, ready: false, used: unusedBudget() } } : {}) }; pairs.set(identity, pair);
         }
         if (pair.closed || pair.peers[command.side]) throw new ServiceError("Session peer cannot be replaced.", 409);
-        if (view.capability === 'video' && command.side === 'host' && view.videoHandoverProtocol === 1) pair.videoStart = 'required';
+        const handover = view.capability === 'video' && command.side === 'host' && view.videoHandoverProtocol === 1;
+        if (handover) pair.videoStart = 'required';
         peer = new SocketPeer(socket, true, heartbeat); pair.peers[command.side] = peer;
         const currentPair = pair;
         socket.once("close", () => disconnect(currentPair));
         const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
-        await peer.write(Buffer.from("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\nSec-WebSocket-Protocol: " + SESSION_PROTOCOL + "\r\n\r\n"));
+        const handoverHeader = handover ? `\r\n${VIDEO_HANDOVER_HEADER}: 1` : '';
+        await peer.write(Buffer.from("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\nSec-WebSocket-Protocol: " + SESSION_PROTOCOL + handoverHeader + "\r\n\r\n"));
         upgraded = true;
         if (head.length) socket.unshift(head);
         // Each handle may reach this while the other handshake is in flight. The second stored
@@ -639,7 +648,7 @@ export class SessionConnection implements SessionChannel {
   private failure: ServiceError | undefined;
   private readonly timer: NodeJS.Timeout;
   private reading = false;
-  private constructor(private readonly peer: SocketPeer, readonly authorized: () => boolean, readonly sessionId: string) {
+  private constructor(private readonly peer: SocketPeer, readonly authorized: () => boolean, readonly sessionId: string, readonly videoHandoverProtocol: string | undefined) {
     this.timer = setInterval(() => { if (!this.allowed()) this.close(); }, 250); this.timer.unref();
     this.readAhead();
   }
@@ -659,17 +668,18 @@ export class SessionConnection implements SessionChannel {
   /** False once the controller ends the pair (for example on revocation) or authority lapses. */
   get open(): boolean { return !this.failure && this.allowed(); }
   private check(): void { if (this.failure) throw this.failure; if (!this.allowed()) throw new ServiceError("Session authorization or connection ended.", 410, { code: "session_disconnected", retryable: false }); }
-  static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"]; heartbeat?: SessionHeartbeat } = {}): Promise<SessionConnection> {
+  static async connect(origin: string, path: string, token: string, options: { authorized?: () => boolean; binding?: Binding; ca?: ConnectionOptions["ca"]; heartbeat?: SessionHeartbeat; videoHandoverProtocol?: 1 } = {}): Promise<SessionConnection> {
     let url: URL; try { url = new URL(origin); } catch { throw new ServiceError("Invalid session origin.", 400); }
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || !/^\/v1\/(?:(hosts|leases)\/[0-9a-f-]+\/(?:sessions|tunnels)|(hosts|machines)\/[0-9a-f-]+\/(?:video-sessions|display-sessions|live-views)|leases\/[0-9a-f-]+\/(?:video-sessions|live-views))\/[0-9a-f-]+\/[0-9a-f-]+$/.test(path)) throw new ServiceError("Invalid session origin or attachment path.", 400);
     secret(token);
     const allowed = options.authorized ?? (() => true), heartbeat = heartbeatOption(options.heartbeat);
     if (!allowed()) throw new ServiceError("Session authorization ended.", 410);
     const key = randomBytes(16).toString("base64"), expected = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
-    const socket = await new Promise<Duplex>((resolve, reject) => {
+    const { socket, videoHandoverProtocol } = await new Promise<{ socket: Duplex; videoHandoverProtocol: string | undefined }>((resolve, reject) => {
       const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, { method: "GET", path, agent: false, timeout: 20_000,
         ...(options.ca === undefined ? {} : { ca: options.ca }), rejectUnauthorized: true,
         headers: { Authorization: "Bearer " + token, Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": key, "Sec-WebSocket-Protocol": SESSION_PROTOCOL,
+          ...(options.videoHandoverProtocol === undefined ? {} : { [VIDEO_HANDOVER_HEADER]: String(options.videoHandoverProtocol) }),
           ...(options.binding ? { "x-canaveral-controller-id": options.binding.controllerId, "x-canaveral-runner-generation": String(options.binding.generation), "x-canaveral-incarnation-id": options.binding.incarnationId } : {}) } });
       const timer = setTimeout(() => req.destroy(new Error("deadline")), 20_000);
       req.once("upgrade", (response, stream, head) => {
@@ -677,13 +687,15 @@ export class SessionConnection implements SessionChannel {
         if (response.statusCode !== 101 || response.headers["sec-websocket-accept"] !== expected || response.headers["sec-websocket-protocol"] !== SESSION_PROTOCOL || response.headers["sec-websocket-extensions"] !== undefined || head.length > MAX_BINARY_BYTES + 14 || !allowed()) {
           stream.destroy(); reject(new ServiceError("Session upgrade was not accepted.", 409)); return;
         }
-        stream.pause(); if (head.length) stream.unshift(head); resolve(stream);
+        const offered = response.headers[VIDEO_HANDOVER_HEADER];
+        stream.pause(); if (head.length) stream.unshift(head);
+        resolve({ socket: stream, videoHandoverProtocol: Array.isArray(offered) ? offered.join(',') : offered });
       });
       req.once("response", response => { clearTimeout(timer); response.destroy(); reject(new ServiceError("Session upgrade rejected.", response.statusCode ?? 503)); });
       req.once("error", () => { clearTimeout(timer); reject(new ServiceError("Session connection failed; no input is automatically replayed.", 503, { retryable: false })); });
       req.end();
     });
-    return new SessionConnection(new SocketPeer(socket, false, heartbeat), allowed, path.split("/")[5]!);
+    return new SessionConnection(new SocketPeer(socket, false, heartbeat), allowed, path.split("/")[5]!, videoHandoverProtocol);
   }
   async sendControl(value: Record<string, unknown>): Promise<void> { this.check(); await this.peer.send(Buffer.from(encodeControl(value))); this.check(); }
   async sendBytes(value: Uint8Array): Promise<void> {
