@@ -2364,14 +2364,15 @@ mod tests {
         install_helper(&mut c, &script);
         (tmp, c)
     }
-    /// The clock is sampled when a fixture is built; tests complete well within tolerance.
+    /// The fixture returns a fixed clock sample taken when this script is built.
+    fn fixture_helper_script() -> String {
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\n*) exit 1 ;;\nesac\n",
+            clock_json()
+        )
+    }
     fn fixture() -> (tempfile::TempDir, Config) {
-        fixture_with(|_| {
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\nlease-clock) printf '%s' '{}' ;;\ninspect) printf '%s' '{{\"locked\":false}}' ;;\n*) exit 1 ;;\nesac\n",
-                clock_json()
-            )
-        })
+        fixture_with(|_| fixture_helper_script())
     }
     #[test]
     fn update_status_requires_private_lock_and_exact_terminal_cleanup_without_native_commands() {
