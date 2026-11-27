@@ -357,11 +357,34 @@ test("recording hand-over reports an unproven live stop within the wait bound", 
   taken.end(true); watching.close(); held.release();
   await receipt(unprovable);
   assert.deepEqual(unprovable.receipts, [{ hostCleaned: true }]);
-  // Afterwards, and with no live capture at all, a recording starts without any wait.
-  for (const hub of [unprovable.hub, hubFixture().hub]) { const next = await hub.beginRecording(JOB.machineId); assert.deepEqual([next.proven, next.waitedMs < 100], [true, true]); next.end(true); }
+  // A vanished capture's host-only receipt does not satisfy the recording admitted beside it.
+  const prior = { id: JOB.id, generation: JOB.generation, cleaned: false };
+  const refused = await unprovable.hub.beginRecording(JOB.machineId, prior);
+  assert.equal(refused.proven, false); refused.end(true);
+  // Positive controller proof also covers a capture that never reached this runner.
+  const idle = hubFixture().hub;
+  const confirmed = await idle.beginRecording(JOB.machineId, { ...prior, cleaned: true });
+  assert.equal(confirmed.proven, true); confirmed.end(true);
+  const alone = await idle.beginRecording(JOB.machineId);
+  assert.equal(alone.proven, true); alone.end(true);
   // A second recording of one device is not the hub's to refuse; it is simply not fed to viewers.
   const f = hubFixture(), one = await f.hub.beginRecording(JOB.machineId), two = await f.hub.beginRecording(JOB.machineId);
   two.push(initSegment()); two.end(true); one.end(true);
+});
+
+test("an absent live capture requires a positive journal for the same machine and generation", async () => {
+  const f = hubFixture(), handle = f.hub.acquire(JOB, f.source), viewer = handle.subscribe(() => true);
+  await take(viewer, 3); viewer.close(); handle.release();
+  await receipt(f);
+  for (const [machineId, id, generation, expected] of [
+    [JOB.machineId, JOB.id, JOB.generation, true],
+    [JOB.machineId, JOB.id, OTHER.generation, false],
+    [OTHER.machineId, JOB.id, JOB.generation, false],
+    [JOB.machineId, OTHER.id, JOB.generation, false],
+  ] as const) {
+    const tap = await f.hub.beginRecording(machineId, { id, generation, cleaned: false });
+    assert.equal(tap.proven, expected); tap.end(true);
+  }
 });
 
 test("a viewer that cannot keep up is skipped ahead to a key frame instead of holding the capture back", async () => {

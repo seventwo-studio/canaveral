@@ -141,7 +141,7 @@ export class MobileLiveViews implements ControlModule {
         if (!(principal.kind === 'operator' || principal.user?.role === 'admin' && principal.scopes.includes('admin') || principal.scopes.includes('machines:access'))) return 'access_revoked';
         const found = db.prepare('SELECT m.*,h.enabled,h.seen,h.credential AS hostCredential FROM machines m JOIN hosts h ON h.id=m.host WHERE m.id=?').get(r.machine);
         if (!found) return 'device_stopped';
-        if (!owns(principal, found.owner) || this.leased(db, r.machine)) return 'access_revoked';
+        if (found.owner == null || !owns(principal, found.owner) || this.leased(db, r.machine)) return 'access_revoked';
         m = found;
         if (m.desired !== 'running' || m.observed !== 'running') return 'device_stopped';
         if (m.enabled !== 1 || now - Number(m.seen) >= 30) return 'host_unavailable';
@@ -292,6 +292,7 @@ export class MobileLiveViews implements ControlModule {
     // A leased device is visible to its lease holder only, through the lease route.
     if (this.leased(db, String(m.id))) return fail(409);
     requireNotPooled(db, String(m.id));
+    if (m.owner == null) return fail(404);
     if (!['android', 'ios'].includes(String(object(JSON.parse(String(m.template))).os))) return fail(409, 'capability_unsupported');
     if (m.enabled !== 1 || m.desired !== 'running' || m.observed !== 'running' || this.store.clock() - Number(m.seen) >= 30) return fail(409);
     return { status: 201, body: view(this.admit(db, id, m, hash, ttl, null)) };

@@ -1620,22 +1620,29 @@ export class HostRunner {
       // A recording has priority over a live view of its device. A running live epoch is stopped
       // and this recording waits a bounded time for proof of that stop. The recording's duration and
       // time limit start only below, when its capture does.
-      tap = await this.liveHub.beginRecording(String(machine.id));
+      // The controller may have confirmed the bound capture's cleanup while the viewer
+      // was attaching. Use the latest assignment for this recording when available.
+      const current = this.queues.video!.find(j => j.id === job.id && j.generation === job.generation && j.machineId === machine.id) ?? job;
+      const prior = current.priorLiveCapture === undefined ? undefined : object(current.priorLiveCapture);
+      tap = await this.liveHub.beginRecording(String(machine.id), prior && {
+        id: identifier(prior.id), generation: identifier(prior.generation), cleaned: prior.cleaned === true,
+      });
       if (!tap.proven) throw new ServiceError('The prior live capture did not prove it stopped before recording.', 409, { code: 'capture_cleanup_pending' });
       // Nothing of this recording was dispatched yet: authorization that ended during the wait
       // leaves it clean.
-      if (context.signal.aborted || !context.authorized()) throw new ServiceError('Video authorization ended before capture.', 410);
-      captureStarted = true;
       const recording = channel, viewers = tap;
+      const live = () => !context.signal.aborted && recording.open;
+      if (!live()) throw new ServiceError('Video authorization ended before capture.', 410);
+      captureStarted = true;
       // The recording receives exactly its own bytes; live viewers are fed a copy of them.
       const tee = { receive: (seconds?: number) => recording.receive(seconds), sendControl: (value: RecordValue) => recording.sendControl(value), close: () => recording.close(),
         sendBytes: async (data: Uint8Array) => { viewers.push(data); await recording.sendBytes(data); } };
-      const source = await runtime.openVideo(machine, image, folder, options, () => !context.signal.aborted && context.authorized(), () => this.machineAuthorized(String(machine.id)) && sameAssignment());
-      await serveMobileVideo(tee, source, argv => runtime.pipe!(argv), encoder, options, () => !context.signal.aborted && context.authorized(), (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
+      const source = await runtime.openVideo(machine, image, folder, options, live, () => this.machineAuthorized(String(machine.id)) && sameAssignment());
+      await serveMobileVideo(tee, source, argv => runtime.pipe!(argv), encoder, options, live, (positive, parts) => { cleaned = positive; hostCleaned = parts.encoder; });
       ackReceived = true;
       cleaned = true;
-    } catch {
-      if (!captureStarted) cleaned = true;
+    } catch (error) {
+      if (!captureStarted || captureNotRunning(error)) cleaned = true;
       try { await channel?.sendControl({ type: 'error', code: 'session_incomplete', message: 'Native video capture did not complete.', outcome: 'unknown' }); } catch { /* A disconnected viewer receives no completion proof. */ }
     } finally {
       channel?.close();

@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
+import { SessionConnection } from "../../src/control/sessions.ts";
 import { LeaseClient } from "../../src/sdk.ts";
 import { LeaseLiveClient, MobileVideoClient } from "../../src/video-sdk.ts";
 import type { LiveStream } from "../../src/video-sdk.ts";
 import { LIVE_BIT_RATE } from "../../src/mobile-live.ts";
 import { acquire, alive, cleaned, harness, operate, skip, supervised, until } from "./android-fixture.ts";
-import type { Harness } from "./android-fixture.ts";
+import type { Harness, HarnessOptions } from "./android-fixture.ts";
 import { collect, ordered, schemaValid, stoppedWithin } from "./live-fixture.ts";
 import { consumerApiSchema } from "../../src/contracts.ts";
 
@@ -62,13 +63,17 @@ test("a lease key watches its own emulator live: ordered segments, one shared ca
   assert.deepEqual([capture.leaseId, capture.state, capture.cleaned], [a.id, "ready", false]);
   // The application key, the operator and another lease's key reach none of it.
   const b = await acquire(h, app, 300);
+  const unclaimed = await live.create({ id: randomUUID(), member: "primary" });
   for (const token of [app, h.admin, b.key]) {
     assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "primary" }, token)).status, 401);
     assert.equal((await h.api("GET", `/v1/leases/${a.id}/live-views/${first.id}`, undefined, token)).status, 401);
     assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views/${first.id}/close`, {}, token)).status, 401);
-    // Nor can they attach to the existing view's stream.
-    await assert.rejects(new LeaseLiveClient({ baseUrl: h.url, leaseId: a.id, leaseKey: token, allowLoopbackHttp: true }).connect(view, { timeoutMs: 5000 }));
+    // The view has no consumer yet, so duplicate attachment cannot explain a refusal.
+    await assert.rejects(new LeaseLiveClient({ baseUrl: h.url, leaseId: a.id, leaseKey: token, allowLoopbackHttp: true }).connect(unclaimed, { timeoutMs: 5000 }));
   }
+  const claimed = await live.connect(unclaimed, { timeoutMs: 5000 });
+  claimed.close();
+  await until(async () => (await live.inspect(unclaimed.id)).state === "ended", "the unclaimed view closed by its rightful viewer");
   assert.equal((await h.api("GET", `/v1/leases/${b.id}/live-views/${first.id}`, undefined, b.key)).status, 404);
   // No operator or owner view of a leased device exists: the machine route refuses it.
   assert.equal((await h.api("POST", `/v1/machines/${a.machineId}/live-views`, { id: randomUUID() }, h.admin)).status, 409);
@@ -357,6 +362,80 @@ test("a recording takes the device's one native capture and feeds the live viewe
   late.stream.close(); await late.got.done;
   await until(async () => (await h.reserved()).cpu === 2, "every capture released");
   assert.equal(h.media.encodersOpen, 0);
+});
+
+test("a recording awaiting its viewer refuses dispatch after its live capture reports only host cleanup", { skip, timeout: 45000 }, async t => {
+  const h = await harness(t, 1, {
+    extra: { cpu: 2, memoryMiB: 512 }, encoder: "fragments", recorderProbe: "uncertain",
+    allowRecorderEof: run => run !== 1,
+  });
+  const app = await h.application(), a = await acquire(h, app, 300), lease = client(h, a);
+  const viewer = await watching(h, a), capture = viewer.stream.view.captureId;
+  await until(() => media(viewer.got).length > 0, "the live recorder to start");
+  const provider = h.provider(), opens = t.mock.method(provider, "openVideo");
+  const recording = await lease.video.create({ id: randomUUID(), member: "primary", durationSeconds: 3, ...VIDEO });
+  viewer.stream.close(); await viewer.got.done;
+  await until(async () => (await lease.video.inspect(capture)).hostCleaned === true, "the live capture's host-only receipt");
+  assert.equal((await lease.video.inspect(capture)).cleaned, false);
+  assert.equal(h.media.recorders.get(`cvm-${a.machineId}`)!.running, true);
+  try {
+    await assert.rejects(async () => (await lease.video.connect(recording, { timeoutMs: 8000 })).record(sink()), { code: "session_incomplete" });
+    await until(async () => (await lease.video.inspect(recording.id)).cleaned === true, "the refused recording's cleanup");
+    assert.equal(opens.mock.callCount(), 0, "the runner never dispatched the recording");
+    assert.equal((await lease.video.inspect(capture)).cleaned, false);
+    assert.deepEqual(await h.reserved(), WITH_CAPTURE, "the prior capture still holds its reservation");
+  } finally {
+    assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, a.key)).status, 200);
+    await cleaned(h, app, a.id);
+    await until(() => h.media.started.get(`cvm-${a.machineId}`)!.every(recorder => !recorder.running), "the emulator's recorders to exit");
+  }
+});
+
+test("key rotation while the runner waits for live stop proof prevents recording dispatch", { skip, timeout: 45000 }, async t => {
+  const options: HarnessOptions = { extra: { cpu: 2, memoryMiB: 512 }, encoder: "fragments" };
+  const h = await harness(t, 1, options), app = await h.application(), a = await acquire(h, app, 300);
+  const viewer = await watching(h, a);
+  await until(() => media(viewer.got).length > 0, "the live recorder to start");
+
+  const stop = Promise.withResolvers<void>();
+  let probing = false;
+  options.beforeRecorderProbe = async () => { probing = true; await stop.promise; };
+  const runner = h.runner(), poll = runner.poll.bind(runner);
+  let holdPoll = false, inFlight: Promise<void> | undefined;
+  t.mock.method(runner, "poll", async () => {
+    if (!holdPoll) {
+      inFlight = poll();
+      try { await inFlight; } finally { inFlight = undefined; }
+    }
+  });
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  let host: SessionConnection | undefined;
+  t.mock.method(SessionConnection, "connect", async (...args: Parameters<typeof connect>) => {
+    const channel = await connect(...args);
+    if (args[1].startsWith("/v1/hosts/") && args[1].includes("/video-sessions/")) host = channel;
+    return channel;
+  });
+  const opens = t.mock.method(h.provider(), "openVideo");
+  const recording = await client(h, a).video.create({ id: randomUUID(), member: "primary", durationSeconds: 3, ...VIDEO });
+  const consumer = await SessionConnection.connect(h.url, `/v1/leases/${a.id}/video-sessions/${recording.id}/${recording.generation}`, a.key);
+  let key: string;
+  try {
+    assert.equal((await consumer.receive(5) as { type: string }).type, "ready");
+    await until(() => probing, "the live recorder's stop probe");
+    holdPoll = true;
+    await inFlight;
+    const rotated = await h.api("POST", `/v1/leases/${a.id}/credential`, {}, app);
+    assert.equal(rotated.status, 200);
+    key = rotated.body.credential as string;
+    await until(() => host?.open === false, "broker closure before the runner refreshes its assignment");
+    assert.equal(host?.authorized(), true, "the runner's cached assignment still permits capture");
+    stop.resolve();
+    await until(async () => (await client(h, { id: a.id, key }).video.inspect(recording.id)).cleaned === true, "the undispatched recording's receipt");
+    assert.equal(opens.mock.callCount(), 0, "the broker's closed socket prevents native dispatch");
+  } finally {
+    consumer.close(); stop.resolve(); holdPoll = false;
+    viewer.stream.close(); await viewer.got.done;
+  }
 });
 
 test("a long view continues across capture runs, and the live capture counts against the application's limits", { skip, timeout: 120000 }, async t => {

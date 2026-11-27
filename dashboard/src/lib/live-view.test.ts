@@ -311,7 +311,12 @@ test("refusals when opening are explained and attach nothing", async () => {
     [
       409,
       "capture_cleanup_unproven",
-      { reason: "capture_cleanup_unproven", again: "no" },
+      {
+        reason: "capture_cleanup_unproven",
+        again: "no",
+        message:
+          "Cleanup of an earlier capture of this device is unproven. Its screen stays unavailable until cleanup is confirmed.",
+      },
     ],
     [429, "live_view_limit", { reason: "live_view_limit", state: "Full" }],
     [429, "limit_exceeded", { reason: "limit_exceeded", state: "Full" }],

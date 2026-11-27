@@ -40,6 +40,7 @@ function fixture(t: TestContext, devices = 1) {
   const call = (method: string, path: string, body: Record<string, unknown> = {}, token = ownerToken) => { const response = views.handle(req(method, path, body, token)); assert.ok(response); return object(response.body) as unknown as View; };
   const base = (machine = ids[0]!) => `/v1/machines/${machine}/live-views`;
   return { ids, host, hostToken, ownerToken, secondToken, adminToken, operator: options.adminToken, heartbeat, call, req, base,
+    report: (machine: string, state: string) => { states.set(machine, state); heartbeat(); },
     get machines() { return machines; }, get video() { return video; },
     create: (body: Record<string, unknown> = {}, token = ownerToken, machine = ids[0]!) => call("POST", base(machine), { id: randomUUID(), ...body }, token),
     read: (view: View, token = ownerToken) => call("GET", `${base(view.machineId)}/${view.id}`, {}, token),
@@ -85,6 +86,14 @@ test("a view's lifetime runs from readiness, only a ready view renews, and an un
   f.video.handle(f.req("POST", `/v1/hosts/${f.host}/video-sessions/${view.captureId}/finish`, { generation, cleaned: true }, f.hostToken));
   assert.deepEqual([f.capture(view).state, f.capture(view).cleaned], ["finished", true]);
   assert.deepEqual(f.reserved(), before);
+});
+
+test("account administrators and the operator cannot admit a live view of an operator-created machine", t => {
+  const f = fixture(t), request = f.req("POST", "/v1/machines", {}, f.operator);
+  const machine = String(f.machines.create({ id: randomUUID(), name: "unowned", templateId: phone.id, resources: {} }, request).id);
+  f.report(machine, "running");
+  for (const token of [f.adminToken, f.operator]) assert.throws(() => f.create({}, token, machine), refused(404));
+  assert.equal(f.reserved().cpu, 2, "the unowned device holds no capture reservation");
 });
 
 test("a view that never attaches times out, and a capture whose host never attached frees its reservation at once", t => {
@@ -186,14 +195,18 @@ test("a recording in progress does not refuse a live view, a running live captur
   f.video.handle(f.req("POST", `/v1/hosts/${f.host}/video-sessions/${recording.id}/finish`, { generation: recording.generation, cleaned: true }, f.hostToken));
   const again = f.create();
   // A running live capture does not refuse a recording of the same device.
-  assert.equal(record().state, "pending");
+  const handover = record();
+  assert.equal(handover.state, "pending");
   // The broker of recordings never serves a live capture, and a live capture has no peers of its own.
   const capture = f.capture(again);
+  const prior = () => (f.heartbeat().videoSessions as { id: string; priorLiveCapture?: unknown }[]).find(r => r.id === handover.id)?.priorLiveCapture;
+  assert.deepEqual(prior(), { id: again.captureId, generation: capture.generation, cleaned: false });
   assert.throws(() => f.video.command({ type: "video-sessions.attach", sessionId: again.captureId, generation: String(capture.generation), side: "host", ownerId: f.host, token: f.hostToken }), refused(409));
   assert.deepEqual(f.video.command({ type: "video-sessions.authorized", sessionId: again.captureId, generation: String(capture.generation) }), { authorized: false });
   // Closing the capture as a video session ends its views.
   f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions/${again.captureId}/close`, {}));
   assert.deepEqual([f.read(again).state, f.read(again).endReason], ["ended", "capture_ended"]);
+  assert.deepEqual(prior(), { id: again.captureId, generation: capture.generation, cleaned: true }, "the binding survives the capture's end without a host attachment");
 });
 
 test("beside a live capture that ended without cleanup proof, a view and a recording are told alike whether waiting helps", t => {

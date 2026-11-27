@@ -1311,8 +1311,9 @@ A leased device's screen is visible to its lease holder only. The lease route
 refuses the application key, the operator, account credentials and another lease's
 key with 401, as every lease session does. The machine route refuses a leased
 machine with 409, so no operator or owner view of a leased device exists. On the
-machine route another account receives 404, a token without `machines:access` 403,
-and a view is bound to the credential that created it: another credential of the
+machine route an unowned device returns 404, as does another account's device for
+a non-administrator. A token without `machines:access` receives 403.
+A view is bound to the credential that created it: another credential of the
 same owner cannot read or close it. iOS simulator leases do not exist yet; their
 live view arrives with them.
 
@@ -1434,8 +1435,11 @@ a recording of one device therefore coexist as follows.
   seconds, and the delay for a live epoch has no native measurement. The runner
   waits at most 15 seconds for the proof, and counts that time separately from
   the requested recording duration.
-  If the stop cannot be proven, the recording captures nothing and ends with
-  `session_incomplete`; its session is cleaned because it started no capture.
+  The recording retains the ID and generation of the live capture present at
+  admission. If that capture ends before the recording attaches, the runner
+  still requires its cleanup proof. If the stop cannot be proven, the recording
+  captures nothing and ends with `session_incomplete`. Its session is cleaned
+  because it started no capture, and the prior capture keeps its reservation.
 - **Viewers follow the recording.** While it runs, the runner also feeds the
   recording's own stream to the device's viewers, as a new epoch. A viewer who joins
   during a recording joins that stream. The recording receives exactly the bytes it

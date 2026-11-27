@@ -432,7 +432,8 @@ A lease key can watch its own Android emulator live through
 `/v1/leases/{id}/live-views`. A live view is a broker session of its own family: it
 shares the device's one native capture with the lease's other viewers, has a
 bounded lifetime that only an attached viewer renews, and ends with the lease,
-its key or its device within about a second. Its capture holds a recording's
+its key or its device. Loopback fixtures measured those endings within about a
+second. Its capture holds a recording's
 reservation against the host and the application until the recording path's
 cleanup proof. Renewing a view never renews the lease. The application key, the
 operator and another lease's key are refused, and no administrative route shows a

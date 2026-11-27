@@ -28,6 +28,7 @@ import type { NativePipe } from './providers/mobile.ts';
 import type { SessionChannel } from './control/session-protocol.ts';
 
 export interface LiveCaptureJob { id: string; generation: string; machineId: string }
+export type PriorLiveCapture = Pick<LiveCaptureJob, 'id' | 'generation'> & { cleaned: boolean };
 export interface LiveCaptureSource {
   /** Absolute path of the operator-configured encoder. */
   encoder: string;
@@ -341,11 +342,9 @@ export class LiveCaptureHub {
     let released = false;
     return { subscribe: live => held.subscribe(live), release: () => { if (!released) { released = true; held.release(); } } };
   }
-  /** Called by a recording before it opens its native source. It never refuses and never changes
-   * what the recording receives. The device's live epoch, if one runs, is stopped; the recording
-   * waits a bounded time for proof before starting. The returned tap feeds the recording's stream
-   * to viewers. */
-  async beginRecording(machineId: string): Promise<RecordingTap> {
+  /** Pause live epochs and wait for stop proof before native recording dispatch. The capture
+   * bound at admission can leave the hub while the recording is still waiting for its viewer. */
+  async beginRecording(machineId: string, prior?: PriorLiveCapture): Promise<RecordingTap> {
     const began = performance.now(), capture = this.captures.get(machineId);
     // The controller admits one recording per device; a second would simply not be fed to viewers.
     const feed = this.recordings.has(machineId) ? undefined : new Feed();
@@ -354,6 +353,14 @@ export class LiveCaptureHub {
     if (capture) {
       capture.poke();
       proven = await within(capture.settled().then(() => !capture.unknown), this.options.handoverMs ?? LIVE_HANDOVER_SECONDS * 1000, false);
+    }
+    const heldPrior = prior && capture?.job.id === prior.id && capture.job.generation === prior.generation;
+    if (proven && prior && !heldPrior && !prior.cleaned) {
+      // A vanished capture is safe only with positive proof for that exact capture generation.
+      try {
+        const saved = this.options.load(prior.id);
+        proven = saved?.machineId === machineId && saved.generation === prior.generation && saved.state === 'finished' && saved.cleaned === true;
+      } catch { proven = false; }
     }
     let ended = false;
     return {
