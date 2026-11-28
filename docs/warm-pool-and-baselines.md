@@ -105,11 +105,15 @@ authorization.
 
 The hold has one fixed deadline: the device's maximum age, counted from its creation and
 capped by the host's own `maxAgeSeconds`. The host publishes it once, as an absolute
-deadline on the boot's continuous clock. Nothing renews it. With the runner or the
-controller gone, the supervisor alone stops the device at that deadline, writes its stop
-receipt and exits. A renewing keep-alive was considered and left out: it would stop the
-pool on every controller restart, and it would be a second deadline mechanism to prove.
-The cost is that a warm device can outlive a lost runner by up to its maximum age.
+deadline on the boot's continuous clock. Nothing renews it, and the supervisor would not
+accept a renewal: whatever is published for a warm hold after its launch, the supervisor
+only ever takes an earlier deadline or a fence from it, never a later deadline. The one
+owner change of an [adoption](#adoption) ends the hold instead; the lease's own deadline
+applies from then on. With the runner or the controller gone, the supervisor alone stops
+the device at that deadline, writes its stop receipt and exits. A renewing keep-alive was
+considered and left out: it would stop the pool on every controller restart, and it would
+be a second deadline mechanism to prove. The cost is that a warm device can outlive a
+lost runner by up to its maximum age.
 
 A warm device is ready only after the same checks as a leased device, by its own
 warm-phase report: booted, package manager answering, owned serial, a user build
@@ -181,11 +185,32 @@ Admission always runs before the pool refills, and the pool never refills in a h
 heartbeat. A waiting [request](requests.md) that was refused for capacity takes precedence
 over warm devices:
 
-The pool gives up only the devices needed on one eligible host, starting with unresponsive
-devices, then booting ones, then the oldest ready devices. It holds back refills when
-pending removals can serve the request. A ready or recently booting pool device of the
-same image and size can serve the request directly. For Linux leases and model jobs, the
-pool checks eligible runner domains with a physical mapping to a host.
+The pool gives devices up only where that would admit the request. It predicts admission
+with the placement rule the request's own admission uses:
+
+- **A device lease** is placed by the image's minimum and memory step, lease eligibility,
+  a usable baseline, the host's unreserved capacity and the application's own limits. A
+  request below the image's minimum, off its memory step or beyond its application's
+  limits has no placement whatever the pool gives up, so it takes nothing.
+- **A Linux lease or a model job** is placed on the budget of an eligible runner domain.
+  Only a domain that is [mapped to a host](infrastructure.md#host-and-runner-physical-budget)
+  shares capacity with warm devices. A request larger than that budget takes nothing.
+
+The pool then picks one host and gives up the shortest run of devices, taken in eviction
+order, that makes the request fit there: unresponsive ready devices first, then booting
+ones (newest first), then the oldest ready ones. This is the shortest prefix of that order,
+not the smallest possible set. It gives up nothing when capacity that is already being
+released is enough, or when a warm device of the request's own image and size will serve
+it: a ready one that is answering, or a booting one created less than 90 seconds ago.
+Capacity being released counts every `retiring` device on the host, including one whose
+removal is blocked (see [clearing a paused image](#clearing-a-paused-image)). A blocked
+removal can therefore look like enough capacity: the pool then gives up nothing more and
+does not refill that host, and the request waits until the removal is proven. A host that
+a request is about to take capacity on is not refilled ahead of it.
+
+Each pass looks only at the first 64 waiting requests refused for capacity, in arrival
+order. A request the pool cannot help is skipped: it does not hold back refills, and
+it does not stop later requests in that window from being considered.
 
 The given-up device's capacity is free only after its proven removal. Direct
 `/v1/leases` acquisition does not wait and therefore reclaims nothing: it adopts a ready
@@ -200,12 +225,66 @@ never returns to the pool.
 A failed boot (an error, a stop or the 300-second timeout while `booting`) is counted per
 host and lease image. The next attempt waits 15 seconds, then 30, 60 and so on, to at most
 10 minutes. A device that becomes ready resets the count. The last error and its time
-stay visible in the pool state. A device that stops passing readiness checks is withheld
-immediately and retired after 60 seconds if it stays unready.
+stay visible in the pool state.
 
-An unproven removal pauses new boots for that image on that host and retains the
-reservation. The target reports `paused.reason: "removal_unproven"` with the machine ID.
-A missing, stale or incompatible baseline also pauses the target.
+A `ready` device that its host no longer reports running and checked, for example a hung
+emulator, is withheld at once: no lease adopts it, it does not count as a device that
+will serve a waiting request, and it is the first to be given up for one. Its
+`unreadySince` says since when; it is `null` for every other device. If it stays that way for 60 seconds it is given up and
+replaced; it does not wait for its age. This is not counted as a failed boot.
+
+Until one device of an image has booted and passed its checks on a host, and again after
+any failed boot, the pool creates that image's devices there one at a time. A broken
+image or SDK then costs one slot, not the whole target. The target reports this as
+`proven`.
+
+While a given-up device of an image is not proven removed, the pool creates no device of
+that image on that host. It keeps the reservation and reports the target as
+`paused: {reason: "removal_unproven", machineId, since, givenUpFor, removal}`, where
+`removal` is the state of that machine's deletion receipt. Most removals prove
+themselves and the pause ends on its own. A target whose baseline the host does not
+usably store reports `paused: {reason: "baseline_unavailable"}`.
+
+### Clearing a paused image
+
+One removal needs an operator. When `avdmanager` fails or is interrupted while it
+creates a device, the outcome is unconfirmed: the tool may have left a partial AVD and
+may still be writing. The host reports the device as failed ("AVD creation did not
+complete and its outcome is unconfirmed"). It never retries that creation and never
+removes that storage on its own, which is the same rule as for every other device. The
+target then stays paused with `removal: "blocked"`, and one slot stays reserved.
+
+On the host, as the service account:
+
+1. Fix the cause first (the SDK, the system image or the disk). The pool tries again as
+   soon as the removal is proven and the back-off has passed.
+2. Take `machineId` from the target's `paused` entry. The device's storage is
+   `<storage>/<machineId>/`.
+3. Check that this storage belongs to that blocked creation, and stop if any check fails.
+   A blocked removal can also mean the host found storage or a registration that is
+   foreign or does not match, and the host refused to touch it on purpose:
+   - `avd-create-started.json` exists and its `name` is `cvm-<machineId>`.
+   - There is no `avd-created.json`, and no `launch.json` or `endpoint.json`, so no
+     emulator was launched for it.
+   - If `<storage>/avds/cvm-<machineId>.ini` exists, its single `path=` line is exactly
+     `<storage>/<machineId>/device.avd`.
+   - `device.avd`, if present, is a directory owned by the service account and not a
+     symbolic link.
+4. Confirm that no `avdmanager` process for `cvm-<machineId>` is still running.
+5. Remove `<storage>/<machineId>/device.avd`, the registration
+   `<storage>/avds/cvm-<machineId>.ini` if it exists, and
+   `<storage>/<machineId>/avd-create-started.json`. Remove nothing else.
+
+On a mismatch, leave everything in place and treat the host's storage as needing
+investigation; do not remove files to clear the pause.
+
+The fixture for this procedure models an interrupted creation that leaves no `.ini`.
+Recovery after a real `avdmanager` interruption, including one that left a registration,
+has not been verified natively.
+
+The host then proves the removal, the reservation is released, and the pool resumes with
+one device of that image. A baseline copy that fails after the AVD was created does not
+need this: it happens inside the device's own confirmed AVD and is removed with it.
 
 ### Restart and loss
 
@@ -238,8 +317,9 @@ All routes need administrator authority.
 
 A host's state holds `enabled`, `limits` (the host's own bounds), `headroom`, `targets`
 and `devices`. Each target reports `count`, `maxAgeSeconds`, `ready`, `booting`,
-`retiring`, `failed` (consecutive failed boots), `nextAttemptAt`, `lastError` and
-`lastErrorAt`. Each device reports its machine, image, state, reason and times.
+`retiring`, `failed` (consecutive failed boots), `proven`, `paused`, `nextAttemptAt`,
+`lastError` and `lastErrorAt`. Each device reports its machine, image, state, reason
+and times, and `unreadySince` while it is `ready` but not answering.
 
 ```sh
 canaveral warm-pool
@@ -330,10 +410,13 @@ longer installed. A stale baseline, a missing one, another digest than the templ
 or another device definition or data size is refused in two places:
 
 - The controller places a baseline-backed image only on a host whose last inventory lists
-  exactly that baseline, made from the template's own device definition, and not stale.
-  Otherwise the host is not eligible: a direct lease gets 503 and a request waits.
-- The host refuses before it creates anything, so a refusal leaves no partial device. The
-  lease or warm boot fails with the reason.
+  exactly that baseline, made from the template's own device definition, saved with the
+  data-partition size the device would get, and not stale. Otherwise the host is not
+  eligible: a direct lease gets 503 and a request waits.
+- The host checks the same, and the stored files' digests, before it creates anything.
+  Such a refusal leaves no device behind, and the lease or warm boot fails with the
+  reason. A failure later, inside the copy, does leave a partial copy: see
+  [devices from a baseline](#devices-from-a-baseline).
 
 `GET /v1/baselines` shows each baseline's image binding, whether its host still stores it
 (`present`) and its `stale` state with a reason.
@@ -356,11 +439,28 @@ Every device of that image, cold or warm, is a fresh AVD from `avdmanager` that 
 its own copy of the baseline's files before first boot. The copy is a copy-on-write clone
 where the filesystem has one; otherwise each file is copied and its digest rechecked in
 the same pass. The stored files' full digests are verified once per runner process and
-again whenever a file's identity changes. Each copied qcow2 overlay must resolve to its own copied base image. The runner uses
-`qemu-img rebase -u` when the overlay records the source device's path and reads the
-backing path again before booting. Unsupported overlays, missing tools and failed
-verification stop the clone. Partial copies are journaled for device cleanup. The device then goes through the ordinary supervised launch and
-readiness checks. A lease writes only to its own copy, which is destroyed with it.
+again whenever a file's identity changes.
+
+A self-contained qcow2 image with no backing file is accepted as copied. Any backing path
+that a copied overlay records must resolve to the device's own copied base image. An overlay records
+its backing file by path, and a saved one can name the device it was captured from. The
+runner then points it at its own base with the SDK's `qemu-img rebase -u` and reads the
+recorded path back before booting. This fails closed, at both ends: a save is refused
+when the host has no `qemu-img` for an overlay that would need it, or when an overlay is
+backed by a file outside the device's own captured images; a clone that needs a rebase is
+refused when the tool is missing, fails, or leaves a path that still points outside the
+device.
+
+The copy starts only after the device's AVD creation is confirmed, and it runs under its
+own journal in that device's storage. A copy that fails or is interrupted is never
+resumed and never booted. It is removed with the device through the usual stop proof and
+storage removal, and its capacity is released once ownership and removal are proven. That
+normally needs no operator. If the confirmed AVD's registration no longer matches the
+assignment, removal stays blocked and the reservation stays held, as for any other
+device whose ownership cannot be proven.
+
+The device then goes through the ordinary supervised launch and readiness checks. A lease
+writes only to its own copy, which is destroyed with it.
 
 ### Removing
 
@@ -418,6 +518,30 @@ processes. They cover:
   referenced one; a lease and a warm device starting from the baseline without changing
   it; and the isolation probe and the debuggable check fencing warm and baseline-backed
   devices.
+
+Three more fixture files cover what the pool and the baseline store do when something
+goes wrong:
+
+- [android-warm-recovery.test.ts](../coordination/test/control/android-warm-recovery.test.ts):
+  an AVD creation that never completes (one slot, the pause and its reason, no second
+  attempt, and the pool resuming after the operator recovery above); a hung ready device
+  (a waiting request takes its capacity, and it is recycled at 60 seconds); and a runner
+  lost between publishing the adoption and rebinding its own records.
+- [android-warm-contention.test.ts](../coordination/test/control/android-warm-contention.test.ts):
+  device requests below the minimum, off the memory step and beyond the application's
+  limit that give up nothing and do not stop refills; and a `linux-lease` request on a
+  mapped host, admitted by its own module, that takes exactly one warm device, beside one
+  that never fits.
+- [android-baseline-safety.test.ts](../coordination/test/control/android-baseline-safety.test.ts):
+  the overlay rule at save and at clone (no tool, a failing tool, a tool that changes
+  nothing); a copy that fails after it started, for a lease and for a warm device; the
+  controller's data-size refusal; the owner rule with the recorded principal; and every
+  route refused for an application key, a lease key, the host's own credential, an
+  ordinary account's session and its personal token.
+
+The overlay rule is covered only at the level of the backing path that a qcow2 header
+records, which the stand-in emulator writes and reads. The supervisor's rule that a hold
+is never extended has its own Rust unit tests.
 
 ## Limits and open native questions
 
